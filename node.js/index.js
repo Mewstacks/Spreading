@@ -5,8 +5,10 @@ const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto'); // Módulo nativo do Node — usado para comparação segura da API Key
+const path = require('path');
 
 const app = express();
+const authPath = path.join(process.cwd(), '.wwebjs_auth');
 
 // 1. SEGURANÇA: Oculta headers do Express
 app.use(helmet());
@@ -48,6 +50,7 @@ const apiKeyAuth = (req, res, next) => {
 let isConnected = false;
 let ultimoQR = null;
 let gruposCache = [];
+let gruposCarregados = false; // NOVA FLAG DE CONTROLE
 
 // ─────────────────────────────────────────────────────────────
 // 4. FALLBACK: Evolution API
@@ -98,7 +101,9 @@ const enviarMidiaEvolution = async (numero, base64, mimetype, nomeArquivo, legen
 };
 
 const client = new Client({
-    authStrategy: new LocalAuth(),
+    authStrategy: new LocalAuth({
+        dataPath: authPath
+    }),
     puppeteer: {
         args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
@@ -110,19 +115,24 @@ client.on('qr', (qr) => {
     qrcode.generate(qr, { small: true });
 });
 
-client.on('ready', () => {
+client.on('ready', async () => {
     isConnected = true;
     ultimoQR = null;
     console.log('✅ WhatsApp conectado! API protegida e pronta para uso.');
-    // Pré-carrega grupos no cache assim que conecta
-    client.getChats().then(chats => {
+    
+    // O backend faz a busca uma única vez
+    console.log('⏳ Iniciando sincronização de chats (pode demorar no primeiro login)...');
+    try {
+        const chats = await client.getChats();
         gruposCache = chats
             .filter(c => c.isGroup)
             .map(c => ({ id: c.id._serialized, nome: c.name }));
-        console.log(`📋 ${gruposCache.length} grupos carregados no cache.`);
-    }).catch(err => {
-        console.error('Aviso: não foi possível pré-carregar grupos:', err.message);
-    });
+            
+        gruposCarregados = true; // Avisa que o cache está pronto
+        console.log(`📋 Sincronização concluída! ${gruposCache.length} grupos carregados.`);
+    } catch (err) {
+        console.error('❌ Erro ao pré-carregar grupos:', err.message);
+    }
 });
 
 client.on('disconnected', (reason) => {
@@ -140,23 +150,13 @@ app.get('/api/grupos', apiKeyAuth, async (req, res) => {
     if (!isConnected) {
         return res.status(503).json({ erro: 'WhatsApp não está conectado.' });
     }
-    // Serve do cache se disponível
-    if (gruposCache.length > 0) {
+    
+    // Verifica a flag, não o tamanho do array (suporta contas com 0 grupos)
+    if (gruposCarregados) {
         return res.json({ grupos: gruposCache });
-    }
-    // Cache ainda vazio (conectou há pouco) — tenta buscar com timeout
-    try {
-        const chats = await Promise.race([
-            client.getChats(),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 30000))
-        ]);
-        gruposCache = chats
-            .filter(c => c.isGroup)
-            .map(c => ({ id: c.id._serialized, nome: c.name }));
-        res.json({ grupos: gruposCache });
-    } catch (erro) {
-        console.error('Erro ao listar grupos:', erro);
-        res.status(503).json({ erro: 'Grupos ainda carregando, tente novamente em alguns segundos.' });
+    } else {
+        // Se ainda não carregou, apenas avisa o Python para esperar, sem encavalar requisições
+        return res.status(503).json({ erro: 'Sincronizando chats com o celular, tente novamente em alguns segundos.' });
     }
 });
 
