@@ -129,6 +129,23 @@ app.get('/api/status', (req, res) => {
     res.json({ conectado: isConnected });
 });
 
+// Rota para listar grupos (Protegida — expõe nomes e IDs dos grupos)
+app.get('/api/grupos', apiKeyAuth, async (req, res) => {
+    if (!isConnected) {
+        return res.status(503).json({ erro: 'WhatsApp não está conectado.' });
+    }
+    try {
+        const chats = await client.getChats();
+        const grupos = chats
+            .filter(c => c.isGroup)
+            .map(c => ({ id: c.id._serialized, nome: c.name }));
+        res.json({ grupos });
+    } catch (erro) {
+        console.error('Erro ao listar grupos:', erro);
+        res.status(500).json({ erro: 'Erro interno ao listar grupos.' });
+    }
+});
+
 // Rota de QR Code (Aberta — o QR por si só não compromete a segurança, é só um código de pareamento)
 app.get('/api/qrcode', (req, res) => {
     if (isConnected) {
@@ -142,14 +159,21 @@ app.get('/api/qrcode', (req, res) => {
 
 // Rota 1: Enviar texto (Protegida pelo middleware apiKeyAuth)
 app.post('/api/enviar/texto', apiKeyAuth, async (req, res) => {
-    const { numero, mensagem } = req.body;
-    if (!numero || !mensagem) return res.status(400).json({ erro: 'Número e mensagem são obrigatórios.' });
+    const { numero, grupoid, mensagem } = req.body;
+    if ((!numero && !grupoid) || !mensagem) return res.status(400).json({ erro: 'numero (ou grupoid) e mensagem são obrigatórios.' });
 
-    // SEGURANÇA: Valida que o número contém apenas dígitos.
-    // Sem isso, qualquer string poderia ser injetada em `${numero}@c.us`,
-    // causando comportamento inesperado na biblioteca do WhatsApp.
-    if (!/^\d+$/.test(numero)) {
-        return res.status(400).json({ erro: 'Número inválido. Use apenas dígitos.' });
+    let chatId;
+    if (grupoid) {
+        // SEGURANÇA: Valida formato do ID de grupo.
+        if (!/^\d+@g\.us$/.test(grupoid)) {
+            return res.status(400).json({ erro: 'grupoid inválido. Formato esperado: 120363XXXXXX@g.us' });
+        }
+        chatId = grupoid;
+    } else {
+        if (!/^\d+$/.test(numero)) {
+            return res.status(400).json({ erro: 'Número inválido. Use apenas dígitos.' });
+        }
+        chatId = `${numero}@c.us`;
     }
 
     // SEGURANÇA: Limita o tamanho da mensagem a 4096 caracteres.
@@ -161,13 +185,10 @@ app.post('/api/enviar/texto', apiKeyAuth, async (req, res) => {
     // Caminho primário: WhatsApp Web conectado
     if (isConnected) {
         try {
-            const chatId = `${numero}@c.us`;
             await client.sendMessage(chatId, mensagem);
             return res.status(200).json({ sucesso: true, mensagem: 'Texto enviado.' });
         } catch (erro) {
             console.error('Erro ao enviar texto via WhatsApp Web:', erro);
-            // SEGURANÇA: Nunca retorne erro.message ao cliente.
-            // Isso expõe caminhos internos, versões de libs e detalhes do sistema.
             return res.status(500).json({ sucesso: false, erro: 'Erro interno ao enviar texto.' });
         }
     }
@@ -207,12 +228,20 @@ const MIMETYPES_PERMITIDOS = new Set([
 
 // Rota 2: Enviar Mídia (Protegida pelo middleware apiKeyAuth)
 app.post('/api/enviar/midia', apiKeyAuth, async (req, res) => {
-    const { numero, base64, mimetype, nomeArquivo, legenda } = req.body;
-    if (!numero || !base64 || !mimetype) return res.status(400).json({ erro: 'Dados incompletos.' });
+    const { numero, grupoid, base64, mimetype, nomeArquivo, legenda } = req.body;
+    if ((!numero && !grupoid) || !base64 || !mimetype) return res.status(400).json({ erro: 'Dados incompletos.' });
 
-    // SEGURANÇA: Valida que o número contém apenas dígitos (mesma razão da rota de texto).
-    if (!/^\d+$/.test(numero)) {
-        return res.status(400).json({ erro: 'Número inválido. Use apenas dígitos.' });
+    let chatId;
+    if (grupoid) {
+        if (!/^\d+@g\.us$/.test(grupoid)) {
+            return res.status(400).json({ erro: 'grupoid inválido. Formato esperado: 120363XXXXXX@g.us' });
+        }
+        chatId = grupoid;
+    } else {
+        if (!/^\d+$/.test(numero)) {
+            return res.status(400).json({ erro: 'Número inválido. Use apenas dígitos.' });
+        }
+        chatId = `${numero}@c.us`;
     }
 
     // SEGURANÇA: Rejeita tipos de arquivo não autorizados.
@@ -224,13 +253,11 @@ app.post('/api/enviar/midia', apiKeyAuth, async (req, res) => {
     // Caminho primário: WhatsApp Web conectado
     if (isConnected) {
         try {
-            const chatId = `${numero}@c.us`;
             const midia = new MessageMedia(mimetype, base64, nomeArquivo);
             await client.sendMessage(chatId, midia, { caption: legenda || '' });
             return res.status(200).json({ sucesso: true, mensagem: 'Mídia enviada.' });
         } catch (erro) {
             console.error('Erro ao enviar mídia via WhatsApp Web:', erro);
-            // SEGURANÇA: Retorna mensagem genérica, não o erro interno.
             return res.status(500).json({ sucesso: false, erro: 'Erro interno ao enviar mídia.' });
         }
     }
