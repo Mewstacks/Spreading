@@ -1,0 +1,37 @@
+services:
+
+  # --- Seu servidor Node.js ---
+  whatsapp-api:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file: .env
+    environment:
+      # Sobrescreve EVOLUTION_API_URL do .env para usar o nome do serviço interno do Docker.
+      # Dentro da rede Docker, os containers se comunicam pelo nome do serviço, não por localhost.
+      - EVOLUTION_API_URL=http://evolution-api:8080
+    volumes:
+      # Persiste a sessão do WhatsApp Web fora do container.
+      # Sem isso, você teria que escanear o QR Code toda vez que reiniciar.
+      - whatsapp_auth:/app/.wwebjs_auth
+    depends_on:
+      - evolution-api
+    restart: unless-stopped
+
+  # --- Evolution API (fallback) ---
+  evolution-api:
+    image: atendai/evolution-api:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - AUTHENTICATION_TYPE=apikey
+      # Reutiliza a mesma EVOLUTION_API_KEY do seu .env
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
+    volumes:
+      # Persiste as instâncias/sessões da Evolution fora do container
+      - evolution_data:/evolution/instances
+    restart: unless-stopped
+
+volumes:
+  whatsapp_auth:
+  evolution_data:

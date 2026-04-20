@@ -1,0 +1,40 @@
+COMO FUNCIONA
+=============
+
+Servidor Node.js que envia mensagens e mídias pelo WhatsApp via HTTP.
+
+SEGURANÇA
+---------
+- Toda requisição precisa do header: x-api-key = [valor do API_KEY no .env]
+- Helmet esconde informações do servidor nas respostas
+- Rate limit: máximo 30 requisições por minuto por IP
+- Número só aceita dígitos, sem injeção possível
+- Tipos de arquivo são verificados numa lista fixa
+- Erros internos nunca são mostrados para quem faz a requisição
+
+ROTAS
+-----
+GET  /api/status           → Verifica se o WhatsApp está conectado (sem autenticação)
+POST /api/enviar/texto     → Envia texto. Body: { numero, mensagem }
+POST /api/enviar/midia     → Envia imagem/vídeo/etc. Body: { numero, base64, mimetype, nomeArquivo, legenda }
+
+FALLBACK
+--------
+Se o WhatsApp Web cair, o sistema tenta enviar automaticamente pela Evolution API.
+A resposta virá com "via: evolution" e um aviso para reconectar o WhatsApp Web.
+Para reconectar: reiniciar o servidor e escanear o QR Code novamente.
+
+VARIÁVEIS DO .env
+-----------------
+API_KEY             → Senha para usar a API (você define)
+PORT                → Porta do servidor (padrão: 3000)
+EVOLUTION_API_URL   → Endereço da Evolution API
+EVOLUTION_API_KEY   → Senha da Evolution API (você define)
+EVOLUTION_INSTANCE  → Nome da instância criada na Evolution
+
+DOCKER
+------
+Comando para subir tudo: docker-compose up -d
+- whatsapp-api   → seu servidor Node na porta 3000
+- evolution-api  → servidor Evolution na porta 8080
+As sessões são salvas em volumes, não precisa escanear QR a cada reinício.

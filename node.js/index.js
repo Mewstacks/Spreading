@@ -47,6 +47,54 @@ const apiKeyAuth = (req, res, next) => {
 
 let isConnected = false;
 
+// ─────────────────────────────────────────────────────────────
+// 4. FALLBACK: Evolution API
+// Usada automaticamente quando o WhatsApp Web não está conectado.
+// Configure as três variáveis abaixo no seu .env.
+// ─────────────────────────────────────────────────────────────
+const EVOLUTION_URL      = process.env.EVOLUTION_API_URL;      // ex: http://localhost:8080
+const EVOLUTION_KEY      = process.env.EVOLUTION_API_KEY;      // API key da Evolution
+const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE;     // nome da instância criada na Evolution
+
+// Verifica se as variáveis da Evolution estão configuradas no .env.
+// Se não estiverem, o fallback simplesmente não será usado.
+const evolutionConfigurada = () => EVOLUTION_URL && EVOLUTION_KEY && EVOLUTION_INSTANCE;
+
+// Helper: envia texto via Evolution API
+const enviarTextoEvolution = async (numero, mensagem) => {
+    const resposta = await fetch(`${EVOLUTION_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'apikey': EVOLUTION_KEY },
+        body: JSON.stringify({ number: numero, text: mensagem })
+    });
+    if (!resposta.ok) throw new Error(`Evolution API retornou status ${resposta.status}`);
+    return resposta.json();
+};
+
+// Helper: envia mídia via Evolution API
+// A Evolution exige que o campo 'mediatype' seja 'image', 'video', 'audio' ou 'document'.
+const enviarMidiaEvolution = async (numero, base64, mimetype, nomeArquivo, legenda) => {
+    const mediatype = mimetype.startsWith('image/') ? 'image'
+        : mimetype.startsWith('video/') ? 'video'
+        : mimetype.startsWith('audio/') ? 'audio'
+        : 'document';
+
+    const resposta = await fetch(`${EVOLUTION_URL}/message/sendMedia/${EVOLUTION_INSTANCE}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'apikey': EVOLUTION_KEY },
+        body: JSON.stringify({
+            number: numero,
+            mediatype,
+            mimetype,
+            caption: legenda || '',
+            media: base64,
+            fileName: nomeArquivo || 'arquivo'
+        })
+    });
+    if (!resposta.ok) throw new Error(`Evolution API retornou status ${resposta.status}`);
+    return resposta.json();
+};
+
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
@@ -76,8 +124,6 @@ app.get('/api/status', (req, res) => {
 
 // Rota 1: Enviar texto (Protegida pelo middleware apiKeyAuth)
 app.post('/api/enviar/texto', apiKeyAuth, async (req, res) => {
-    if (!isConnected) return res.status(503).json({ erro: 'WhatsApp não está conectado.' });
-
     const { numero, mensagem } = req.body;
     if (!numero || !mensagem) return res.status(400).json({ erro: 'Número e mensagem são obrigatórios.' });
 
@@ -94,15 +140,38 @@ app.post('/api/enviar/texto', apiKeyAuth, async (req, res) => {
         return res.status(400).json({ erro: 'Mensagem muito longa. Máximo de 4096 caracteres.' });
     }
 
+    // Caminho primário: WhatsApp Web conectado
+    if (isConnected) {
+        try {
+            const chatId = `${numero}@c.us`;
+            await client.sendMessage(chatId, mensagem);
+            return res.status(200).json({ sucesso: true, mensagem: 'Texto enviado.' });
+        } catch (erro) {
+            console.error('Erro ao enviar texto via WhatsApp Web:', erro);
+            // SEGURANÇA: Nunca retorne erro.message ao cliente.
+            // Isso expõe caminhos internos, versões de libs e detalhes do sistema.
+            return res.status(500).json({ sucesso: false, erro: 'Erro interno ao enviar texto.' });
+        }
+    }
+
+    // Caminho de fallback: WhatsApp Web desconectado — tenta via Evolution API
+    if (!evolutionConfigurada()) {
+        // Evolution não está configurada no .env, nada mais a tentar
+        return res.status(503).json({ erro: 'WhatsApp Web desconectado e Evolution API não configurada.' });
+    }
+
     try {
-        const chatId = `${numero}@c.us`;
-        await client.sendMessage(chatId, mensagem);
-        res.status(200).json({ sucesso: true, mensagem: 'Texto enviado.' });
+        await enviarTextoEvolution(numero, mensagem);
+        return res.status(200).json({
+            sucesso: true,
+            via: 'evolution',
+            mensagem: 'Texto enviado via Evolution API (fallback).',
+            // Lembrete incluído na resposta para quem consome a API saber que o primário está fora
+            aviso: 'WhatsApp Web está desconectado. Reconecte reiniciando o servidor e lendo o QR Code.'
+        });
     } catch (erro) {
-        console.error('Erro ao enviar texto:', erro);
-        // SEGURANÇA: Nunca retorne erro.message ao cliente.
-        // Isso expõe caminhos internos, versões de libs e detalhes do sistema.
-        res.status(500).json({ sucesso: false, erro: 'Erro interno ao enviar texto.' });
+        console.error('Erro ao enviar texto via Evolution API (fallback):', erro);
+        return res.status(500).json({ sucesso: false, erro: 'Erro interno ao enviar texto (fallback também falhou).' });
     }
 });
 
@@ -120,8 +189,6 @@ const MIMETYPES_PERMITIDOS = new Set([
 
 // Rota 2: Enviar Mídia (Protegida pelo middleware apiKeyAuth)
 app.post('/api/enviar/midia', apiKeyAuth, async (req, res) => {
-    if (!isConnected) return res.status(503).json({ erro: 'WhatsApp não está conectado.' });
-
     const { numero, base64, mimetype, nomeArquivo, legenda } = req.body;
     if (!numero || !base64 || !mimetype) return res.status(400).json({ erro: 'Dados incompletos.' });
 
@@ -136,22 +203,40 @@ app.post('/api/enviar/midia', apiKeyAuth, async (req, res) => {
         return res.status(400).json({ erro: 'Tipo de arquivo não permitido.' });
     }
 
+    // Caminho primário: WhatsApp Web conectado
+    if (isConnected) {
+        try {
+            const chatId = `${numero}@c.us`;
+            const midia = new MessageMedia(mimetype, base64, nomeArquivo);
+            await client.sendMessage(chatId, midia, { caption: legenda || '' });
+            return res.status(200).json({ sucesso: true, mensagem: 'Mídia enviada.' });
+        } catch (erro) {
+            console.error('Erro ao enviar mídia via WhatsApp Web:', erro);
+            // SEGURANÇA: Retorna mensagem genérica, não o erro interno.
+            return res.status(500).json({ sucesso: false, erro: 'Erro interno ao enviar mídia.' });
+        }
+    }
+
+    // Caminho de fallback: WhatsApp Web desconectado — tenta via Evolution API
+    if (!evolutionConfigurada()) {
+        return res.status(503).json({ erro: 'WhatsApp Web desconectado e Evolution API não configurada.' });
+    }
+
     try {
-        const chatId = `${numero}@c.us`;
-        const midia = new MessageMedia(mimetype, base64, nomeArquivo);
-        await client.sendMessage(chatId, midia, { caption: legenda || '' });
-        
-        res.status(200).json({ sucesso: true, mensagem: 'Mídia enviada.' });
+        await enviarMidiaEvolution(numero, base64, mimetype, nomeArquivo, legenda);
+        return res.status(200).json({
+            sucesso: true,
+            via: 'evolution',
+            mensagem: 'Mídia enviada via Evolution API (fallback).',
+            aviso: 'WhatsApp Web está desconectado. Reconecte reiniciando o servidor e lendo o QR Code.'
+        });
     } catch (erro) {
-        console.error('Erro ao enviar mídia:', erro);
-        // SEGURANÇA: Retorna mensagem genérica, não o erro interno.
-        res.status(500).json({ sucesso: false, erro: 'Erro interno ao enviar mídia.' });
+        console.error('Erro ao enviar mídia via Evolution API (fallback):', erro);
+        return res.status(500).json({ sucesso: false, erro: 'Erro interno ao enviar mídia (fallback também falhou).' });
     }
 });
 
 client.initialize();
-// SEGURANÇA/BOAS PRÁTICAS: Porta lida do .env para não expor configuração no código.
-// Adicione PORT=3000 no seu .env (ou outro valor). Fallback para 3000 se não definido.
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 Servidor rodando na porta ${PORT}`);
