@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 import qrcode
 from dotenv import load_dotenv
@@ -44,10 +45,19 @@ def get_qr(save_path: str = "qr.png"):
 
 
 def list_groups():
-    """List all WhatsApp groups the account is in."""
-    r = requests.get(f"{BASE_URL}/api/grupos", headers=HEADERS, timeout=15)
-    r.raise_for_status()
-    return r.json().get("grupos", [])
+    """List all WhatsApp groups. Retries if server is still loading."""
+    while True:
+        try:
+            r = requests.get(f"{BASE_URL}/api/grupos", headers=HEADERS, timeout=40)
+            if r.status_code == 503:
+                print("⏳ Grupos ainda carregando no servidor, aguardando 5s...")
+                time.sleep(5)
+                continue
+            r.raise_for_status()
+            return r.json().get("grupos", [])
+        except requests.exceptions.ReadTimeout:
+            print("⏳ Servidor demorou para responder, tentando novamente...")
+            time.sleep(3)
 
 
 def send_text(numero: str = "", mensagem: str = "", grupoid: str = ""):
@@ -80,31 +90,58 @@ def send_media(numero: str = "", base64: str = "", mimetype: str = "",
     return r.json()
 
 
-# ── Quick test ────────────────────────────────────────────────
 if __name__ == "__main__":
-    # 1. Check connection
-    print("Status:", status())
+    # Wait until WhatsApp is connected
+    print("Verificando conexão com WhatsApp...")
+    qr_shown = False
+    while True:
+        try:
+            s = status()
+            if s.get("conectado"):
+                print("✅ WhatsApp conectado!")
+                break
+            if not qr_shown:
+                print("⏳ Escaneie o QR Code para conectar.")
+                get_qr()
+                qr_shown = True
+            else:
+                print("⏳ Aguardando conexão...")
+            time.sleep(5)
+        except Exception as e:
+            print(f"Erro ao verificar status: {e}. Tentando novamente em 5s...")
+            time.sleep(5)
 
-    # 2. Get QR if not connected (opens qr.png)
-    # get_qr()
+    # Fetch and display groups
+    print("\nBuscando grupos...")
+    groups = list_groups()
+    if not groups:
+        print("Nenhum grupo encontrado.")
+        raise SystemExit(0)
 
-    # 3. List groups
-    # groups = list_groups()
-    # for g in groups:
-    #     print(g["id"], "-", g["nome"])
+    print(f"\n{'#':<4} {'Nome'}")
+    print("-" * 50)
+    for i, g in enumerate(groups):
+        print(f"{i:<4} {g['nome']}")
 
-    # 4. Send text to a contact
-    # print(send_text(numero="5511999999999", mensagem="Oi!"))
+    # Let user pick
+    print()
+    while True:
+        try:
+            choice = int(input(f"Selecione o número do grupo (0-{len(groups)-1}): "))
+            if 0 <= choice < len(groups):
+                break
+            print(f"Digite um número entre 0 e {len(groups)-1}.")
+        except ValueError:
+            print("Entrada inválida. Digite um número.")
 
-    # 5. Send text to a group (paste the id from list_groups)
-    # print(send_text(grupoid="120363XXXXXX@g.us", mensagem="Oi grupo!"))
+    selected = groups[choice]
+    print(f"\nGrupo selecionado: {selected['nome']} ({selected['id']})")
 
-    # 6. Send an image to a contact
-    # import base64 as b64
-    # with open("image.png", "rb") as f:
-    #     data = b64.b64encode(f.read()).decode()
-    # print(send_media(numero="5511999999999", base64=data, mimetype="image/png", legenda="test"))
+    # Send test message
+    msg = input("Mensagem de teste (Enter para usar padrão): ").strip()
+    if not msg:
+        msg = "🤖 Teste via API Python"
 
-    # 7. Send an image to a group
-    # print(send_media(grupoid="120363XXXXXX@g.us", base64=data, mimetype="image/png", legenda="test"))
+    result = send_text(grupoid=selected["id"], mensagem=msg)
+    print("Resultado:", result)
 

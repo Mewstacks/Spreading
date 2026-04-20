@@ -47,6 +47,7 @@ const apiKeyAuth = (req, res, next) => {
 
 let isConnected = false;
 let ultimoQR = null;
+let gruposCache = [];
 
 // ─────────────────────────────────────────────────────────────
 // 4. FALLBACK: Evolution API
@@ -111,8 +112,17 @@ client.on('qr', (qr) => {
 
 client.on('ready', () => {
     isConnected = true;
-    ultimoQR = null; // limpa QR após conexão
+    ultimoQR = null;
     console.log('✅ WhatsApp conectado! API protegida e pronta para uso.');
+    // Pré-carrega grupos no cache assim que conecta
+    client.getChats().then(chats => {
+        gruposCache = chats
+            .filter(c => c.isGroup)
+            .map(c => ({ id: c.id._serialized, nome: c.name }));
+        console.log(`📋 ${gruposCache.length} grupos carregados no cache.`);
+    }).catch(err => {
+        console.error('Aviso: não foi possível pré-carregar grupos:', err.message);
+    });
 });
 
 client.on('disconnected', (reason) => {
@@ -130,15 +140,23 @@ app.get('/api/grupos', apiKeyAuth, async (req, res) => {
     if (!isConnected) {
         return res.status(503).json({ erro: 'WhatsApp não está conectado.' });
     }
+    // Serve do cache se disponível
+    if (gruposCache.length > 0) {
+        return res.json({ grupos: gruposCache });
+    }
+    // Cache ainda vazio (conectou há pouco) — tenta buscar com timeout
     try {
-        const chats = await client.getChats();
-        const grupos = chats
+        const chats = await Promise.race([
+            client.getChats(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 30000))
+        ]);
+        gruposCache = chats
             .filter(c => c.isGroup)
             .map(c => ({ id: c.id._serialized, nome: c.name }));
-        res.json({ grupos });
+        res.json({ grupos: gruposCache });
     } catch (erro) {
         console.error('Erro ao listar grupos:', erro);
-        res.status(500).json({ erro: 'Erro interno ao listar grupos.' });
+        res.status(503).json({ erro: 'Grupos ainda carregando, tente novamente em alguns segundos.' });
     }
 });
 
