@@ -46,6 +46,7 @@ const apiKeyAuth = (req, res, next) => {
 };
 
 let isConnected = false;
+let ultimoQR = null;
 
 // ─────────────────────────────────────────────────────────────
 // 4. FALLBACK: Evolution API
@@ -103,12 +104,18 @@ const client = new Client({
 });
 
 client.on('qr', (qr) => {
+    ultimoQR = qr;
     console.log('Sessão não encontrada ou expirada. Leia o QR Code:');
     qrcode.generate(qr, { small: true });
 });
 
 client.on('ready', () => {
+    ultimoQR = null; // limpa QR após conexão
+});
+
+client.on('ready', () => {
     isConnected = true;
+    ultimoQR = null;
     console.log('✅ WhatsApp conectado! API protegida e pronta para uso.');
 });
 
@@ -120,6 +127,17 @@ client.on('disconnected', (reason) => {
 // Rota de status (Aberta, sem autenticação, apenas para monitoramento)
 app.get('/api/status', (req, res) => {
     res.json({ conectado: isConnected });
+});
+
+// Rota de QR Code (Aberta — o QR por si só não compromete a segurança, é só um código de pareamento)
+app.get('/api/qrcode', (req, res) => {
+    if (isConnected) {
+        return res.json({ conectado: true, qr: null, mensagem: 'WhatsApp já está conectado.' });
+    }
+    if (!ultimoQR) {
+        return res.status(503).json({ conectado: false, qr: null, mensagem: 'QR Code ainda não gerado. Aguarde alguns segundos e tente novamente.' });
+    }
+    res.json({ conectado: false, qr: ultimoQR });
 });
 
 // Rota 1: Enviar texto (Protegida pelo middleware apiKeyAuth)
