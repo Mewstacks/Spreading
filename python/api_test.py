@@ -2,12 +2,8 @@ import os
 import requests
 import qrcode
 
-# ── Config ────────────────────────────────────────────────────
-# Set these as env vars or just hardcode for quick testing:
-#   RAILWAY_URL  = https://your-app.up.railway.app
-#   API_KEY      = sk_live_...
-BASE_URL = os.environ.get("RAILWAY_URL", "https://spreading-production.up.railway.app")
-API_KEY  = os.environ.get("API_KEY",  "sk_live_YIP2j2fe5yUWU1k9Uff2xjpt391nocGu")
+BASE_URL = os.environ.get("RAILWAY_URL")
+API_KEY  = os.environ.get("API_KEY")
 
 HEADERS = {
     "x-api-key": API_KEY,
