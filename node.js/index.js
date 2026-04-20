@@ -110,12 +110,8 @@ client.on('qr', (qr) => {
 });
 
 client.on('ready', () => {
-    ultimoQR = null; // limpa QR após conexão
-});
-
-client.on('ready', () => {
     isConnected = true;
-    ultimoQR = null;
+    ultimoQR = null; // limpa QR após conexão
     console.log('✅ WhatsApp conectado! API protegida e pronta para uso.');
 });
 
@@ -165,7 +161,8 @@ app.post('/api/enviar/texto', apiKeyAuth, async (req, res) => {
     let chatId;
     if (grupoid) {
         // SEGURANÇA: Valida formato do ID de grupo.
-        if (!/^\d+@g\.us$/.test(grupoid)) {
+        // IDs de grupo podem conter hífens (ex: 120363XXXX-XXXX@g.us), por isso [\d-]+
+        if (!/^[\d-]+@g\.us$/.test(grupoid)) {
             return res.status(400).json({ erro: 'grupoid inválido. Formato esperado: 120363XXXXXX@g.us' });
         }
         chatId = grupoid;
@@ -200,12 +197,12 @@ app.post('/api/enviar/texto', apiKeyAuth, async (req, res) => {
     }
 
     try {
-        await enviarTextoEvolution(numero, mensagem);
+        // Passa chatId (não numero) — chatId pode ser grupo (XXXX@g.us) ou contato (XXXX@c.us)
+        await enviarTextoEvolution(chatId, mensagem);
         return res.status(200).json({
             sucesso: true,
             via: 'evolution',
             mensagem: 'Texto enviado via Evolution API (fallback).',
-            // Lembrete incluído na resposta para quem consome a API saber que o primário está fora
             aviso: 'WhatsApp Web está desconectado. Reconecte reiniciando o servidor e lendo o QR Code.'
         });
     } catch (erro) {
@@ -233,7 +230,8 @@ app.post('/api/enviar/midia', apiKeyAuth, async (req, res) => {
 
     let chatId;
     if (grupoid) {
-        if (!/^\d+@g\.us$/.test(grupoid)) {
+        // IDs de grupo podem conter hífens (ex: 120363XXXX-XXXX@g.us), por isso [\d-]+
+        if (!/^[\d-]+@g\.us$/.test(grupoid)) {
             return res.status(400).json({ erro: 'grupoid inválido. Formato esperado: 120363XXXXXX@g.us' });
         }
         chatId = grupoid;
@@ -268,7 +266,8 @@ app.post('/api/enviar/midia', apiKeyAuth, async (req, res) => {
     }
 
     try {
-        await enviarMidiaEvolution(numero, base64, mimetype, nomeArquivo, legenda);
+        // Passa chatId (não numero) — chatId pode ser grupo (XXXX@g.us) ou contato (XXXX@c.us)
+        await enviarMidiaEvolution(chatId, base64, mimetype, nomeArquivo, legenda);
         return res.status(200).json({
             sucesso: true,
             via: 'evolution',
