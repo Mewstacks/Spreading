@@ -100,16 +100,25 @@ const enviarMidiaEvolution = async (numero, base64, mimetype, nomeArquivo, legen
     return resposta.json();
 };
 
-// Quando o Railway reinicia o container, o volume persistente guarda um arquivo
-// 'SingletonLock' que o Chromium usa para evitar duas instâncias simultâneas.
+// Quando o Railway reinicia o container, o volume persistente guarda arquivos
+// 'SingletonLock' e 'SingletonCookie' que o Chromium usa para evitar duas instâncias.
 // Como o processo anterior foi morto pelo Railway, o lock fica órfão e impede o start.
-// Removemos o lock ANTES de inicializar o cliente para evitar o crash loop.
-const lockFile = path.join(authPath, 'session', 'SingletonLock');
+// Percorremos TODA a pasta de auth recursivamente e deletamos qualquer lock encontrado,
+// independente de onde o Chromium decidiu colocar (o path varia conforme a versão).
 const fs = require('fs');
-if (fs.existsSync(lockFile)) {
-    fs.unlinkSync(lockFile);
-    console.log('🔓 Lock file do Chromium removido (reinício detectado).');
-}
+const removerLocksChromium = (dir) => {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+            removerLocksChromium(fullPath); // desce nos subdiretórios
+        } else if (entry.name === 'SingletonLock' || entry.name === 'SingletonCookie') {
+            fs.unlinkSync(fullPath);
+            console.log(`🔓 Lock removido: ${fullPath}`);
+        }
+    }
+};
+removerLocksChromium(authPath);
 
 const client = new Client({
     authStrategy: new LocalAuth({
