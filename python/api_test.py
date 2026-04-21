@@ -91,7 +91,7 @@ def send_media(numero: str = "", base64: str = "", mimetype: str = "",
 
 
 if __name__ == "__main__":
-    # Wait until WhatsApp is connected
+    # 1. Aguarda WhatsApp conectar
     print("Verificando conexão com WhatsApp...")
     qr_shown = False
     while True:
@@ -111,19 +111,20 @@ if __name__ == "__main__":
             print(f"Erro ao verificar status: {e}. Tentando novamente em 5s...")
             time.sleep(5)
 
-    # Fetch and display groups
-    print("\nBuscando grupos...")
+    # 2. Aguarda grupos sincronizarem no servidor (pode demorar no primeiro login)
+    print("\nAguardando sincronização de grupos no servidor...")
     groups = list_groups()
     if not groups:
         print("Nenhum grupo encontrado.")
         raise SystemExit(0)
 
+    # 3. Exibe lista de grupos
     print(f"\n{'#':<4} {'Nome'}")
     print("-" * 50)
     for i, g in enumerate(groups):
         print(f"{i:<4} {g['nome']}")
 
-    # Let user pick
+    # 4. Usuário escolhe o grupo
     print()
     while True:
         try:
@@ -137,7 +138,7 @@ if __name__ == "__main__":
     selected = groups[choice]
     print(f"\nGrupo selecionado: {selected['nome']} ({selected['id']})")
 
-    # Send test message
+    # 5. Envia mensagem de teste
     msg = input("Mensagem de teste (Enter para usar padrão): ").strip()
     if not msg:
         msg = "🤖 Teste via API Python"
