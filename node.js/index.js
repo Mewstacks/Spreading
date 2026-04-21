@@ -100,12 +100,31 @@ const enviarMidiaEvolution = async (numero, base64, mimetype, nomeArquivo, legen
     return resposta.json();
 };
 
+// Quando o Railway reinicia o container, o volume persistente guarda um arquivo
+// 'SingletonLock' que o Chromium usa para evitar duas instâncias simultâneas.
+// Como o processo anterior foi morto pelo Railway, o lock fica órfão e impede o start.
+// Removemos o lock ANTES de inicializar o cliente para evitar o crash loop.
+const lockFile = path.join(authPath, 'session', 'SingletonLock');
+const fs = require('fs');
+if (fs.existsSync(lockFile)) {
+    fs.unlinkSync(lockFile);
+    console.log('🔓 Lock file do Chromium removido (reinício detectado).');
+}
+
 const client = new Client({
     authStrategy: new LocalAuth({
         dataPath: authPath
     }),
     puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            // Necessário em Docker/Railway: o /dev/shm padrão é muito pequeno (64mb).
+            // Sem isso o Chromium crasha silenciosamente ao renderizar páginas.
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--no-first-run',
+        ]
     }
 });
 
