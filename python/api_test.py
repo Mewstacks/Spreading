@@ -1,3 +1,5 @@
+import base64
+import mimetypes
 import os
 import time
 import requests
@@ -138,11 +140,39 @@ if __name__ == "__main__":
     selected = groups[choice]
     print(f"\nGrupo selecionado: {selected['nome']} ({selected['id']})")
 
-    # 5. Envia mensagem de teste
-    msg = input("Mensagem de teste (Enter para usar padrão): ").strip()
-    if not msg:
-        msg = "🤖 Teste via API Python"
+    # 5. Escolha: texto ou imagem
+    tipo = input("\nEnviar (1) Texto ou (2) Imagem? [1]: ").strip()
 
-    result = send_text(grupoid=selected["id"], mensagem=msg)
-    print("Resultado:", result)
+    if tipo == "2":
+        while True:
+            caminho = input("Caminho da imagem: ").strip().strip('"')
+            if os.path.isfile(caminho):
+                break
+            print("Arquivo não encontrado. Tente novamente.")
+
+        legenda = input("Legenda (opcional, Enter para pular): ").strip()
+
+        mimetype, _ = mimetypes.guess_type(caminho)
+        if not mimetype:
+            mimetype = "image/jpeg"
+
+        with open(caminho, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+
+        nome_arquivo = os.path.basename(caminho)
+        result = send_media(
+            grupoid=selected["id"],
+            base64=b64,
+            mimetype=mimetype,
+            nome_arquivo=nome_arquivo,
+            legenda=legenda,
+        )
+        print("Resultado:", result)
+    else:
+        msg = input("Mensagem de texto (Enter para usar padrão): ").strip()
+        if not msg:
+            msg = "🤖 Teste via API Python"
+
+        result = send_text(grupoid=selected["id"], mensagem=msg)
+        print("Resultado:", result)
 

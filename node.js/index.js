@@ -47,6 +47,57 @@ const apiKeyAuth = (req, res, next) => {
     next();
 };
 
+const MIMETYPES_PERMITIDOS = new Set([
+    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+    'video/mp4', 'video/3gpp',
+    'audio/mpeg', 'audio/ogg', 'audio/opus',
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+]);
+
+const executarEnvioInteligente = async (chatId, tipo, dados, opcoes = {}) => {
+    // Tenta Local primeiro
+    if (isConnected) {
+        try {
+            if (tipo === 'texto') {
+                await client.sendMessage(chatId, dados);
+            } else {
+                const midia = new MessageMedia(opcoes.mimetype, dados, opcoes.nomeArquivo);
+                await client.sendMessage(chatId, midia, { caption: opcoes.legenda });
+            }
+            return { sucesso: true, via: 'local', tipo: tipo };
+        } catch (erro) {
+            console.error('Falha local, tentando Evolution...', erro.message);
+        }
+    }
+
+    // Fallback para Evolution
+    if (evolutionConfigurada()) {
+        try {
+            if (tipo === 'texto') {
+                await enviarTextoEvolution(chatId, dados);
+            } else {
+                await enviarMidiaEvolution(chatId, dados, opcoes.mimetype, opcoes.nomeArquivo, opcoes.legenda);
+            }
+            return { 
+                sucesso: true, 
+                via: 'evolution', 
+                tipo: tipo,
+                aviso: !isConnected ? 'WhatsApp Web desconectado. Reconecte o QR Code.' : 'Erro técnico no envio local.'
+            };
+        } catch (erro) {
+            return { sucesso: false, erro: 'Ambos os serviços falharam.' };
+        }
+    }
+
+    return { sucesso: false, erro: 'Sem conexão disponível.' };
+};
+
+
+
+
+
 let isConnected = false;
 let ultimoQR = null;
 let gruposCache = [];
@@ -128,8 +179,6 @@ const client = new Client({
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            // Necessário em Docker/Railway: o /dev/shm padrão é muito pequeno (64mb).
-            // Sem isso o Chromium crasha silenciosamente ao renderizar páginas.
             '--disable-dev-shm-usage',
             '--disable-gpu',
             '--no-first-run',
@@ -188,7 +237,6 @@ app.get('/api/grupos', apiKeyAuth, async (req, res) => {
     }
 });
 
-// Rota de QR Code (Aberta — o QR por si só não compromete a segurança, é só um código de pareamento)
 app.get('/api/qrcode', (req, res) => {
     if (isConnected) {
         return res.json({ conectado: true, qr: null, mensagem: 'WhatsApp já está conectado.' });
@@ -200,134 +248,49 @@ app.get('/api/qrcode', (req, res) => {
 });
 
 // Rota 1: Enviar texto (Protegida pelo middleware apiKeyAuth)
-app.post('/api/enviar/texto', apiKeyAuth, async (req, res) => {
-    const { numero, grupoid, mensagem } = req.body;
-    if ((!numero && !grupoid) || !mensagem) return res.status(400).json({ erro: 'numero (ou grupoid) e mensagem são obrigatórios.' });
+// Rota Única: Detecta automaticamente se é Texto ou Mídia
+app.post('/api/enviar', apiKeyAuth, async (req, res) => {
+    const { numero, grupoid, mensagem, base64, mimetype, nomeArquivo, legenda } = req.body;
 
-    let chatId;
-    if (grupoid) {
-        // SEGURANÇA: Valida formato do ID de grupo.
-        // IDs de grupo podem conter hífens (ex: 120363XXXX-XXXX@g.us), por isso [\d-]+
-        if (!/^[\d-]+@g\.us$/.test(grupoid)) {
-            return res.status(400).json({ erro: 'grupoid inválido. Formato esperado: 120363XXXXXX@g.us' });
+    // 1. Validação básica de destino
+    if (!numero && !grupoid) {
+        return res.status(400).json({ erro: 'Você precisa informar um numero ou grupoid.' });
+    }
+
+    const chatId = grupoid || `${numero}@c.us`;
+
+    // 2. Lógica de Decisão: Tem imagem (base64)?
+    if (base64 && mimetype) {
+        // É um envio de mídia
+        if (!MIMETYPES_PERMITIDOS.has(mimetype)) {
+            return res.status(400).json({ erro: 'Tipo de arquivo não permitido.' });
         }
-        chatId = grupoid;
-    } else {
-        if (!/^\d+$/.test(numero)) {
-            return res.status(400).json({ erro: 'Número inválido. Use apenas dígitos.' });
-        }
-        chatId = `${numero}@c.us`;
-    }
 
-    // SEGURANÇA: Limita o tamanho da mensagem a 4096 caracteres.
-    // Sem limite, alguém poderia enviar payloads gigantes e sobrecarregar o processo.
-    if (mensagem.length > 4096) {
-        return res.status(400).json({ erro: 'Mensagem muito longa. Máximo de 4096 caracteres.' });
-    }
-
-    // Caminho primário: WhatsApp Web conectado
-    if (isConnected) {
-        try {
-            await client.sendMessage(chatId, mensagem);
-            return res.status(200).json({ sucesso: true, mensagem: 'Texto enviado.' });
-        } catch (erro) {
-            console.error('Erro ao enviar texto via WhatsApp Web:', erro);
-            return res.status(500).json({ sucesso: false, erro: 'Erro interno ao enviar texto.' });
-        }
-    }
-
-    // Caminho de fallback: WhatsApp Web desconectado — tenta via Evolution API
-    if (!evolutionConfigurada()) {
-        // Evolution não está configurada no .env, nada mais a tentar
-        return res.status(503).json({ erro: 'WhatsApp Web desconectado e Evolution API não configurada.' });
-    }
-
-    try {
-        // Passa chatId (não numero) — chatId pode ser grupo (XXXX@g.us) ou contato (XXXX@c.us)
-        await enviarTextoEvolution(chatId, mensagem);
-        return res.status(200).json({
-            sucesso: true,
-            via: 'evolution',
-            mensagem: 'Texto enviado via Evolution API (fallback).',
-            aviso: 'WhatsApp Web está desconectado. Reconecte reiniciando o servidor e lendo o QR Code.'
+        console.log(`[AUTO] Detectada Mídia para ${chatId}`);
+        const resultado = await executarEnvioInteligente(chatId, 'midia', base64, {
+            mimetype,
+            nomeArquivo: nomeArquivo || 'arquivo',
+            legenda: legenda || mensagem // Usa a legenda ou a mensagem como legenda da foto
         });
-    } catch (erro) {
-        console.error('Erro ao enviar texto via Evolution API (fallback):', erro);
-        return res.status(500).json({ sucesso: false, erro: 'Erro interno ao enviar texto (fallback também falhou).' });
-    }
-});
 
-// SEGURANÇA: Lista explícita de MIMEtypes permitidos.
-// Sem isso, qualquer tipo de arquivo poderia ser enviado (executáveis, scripts, etc.).
-// Inclui imagens de alta qualidade (PNG, JPEG, WEBP, TIFF), vídeos, áudios e PDFs.
-const MIMETYPES_PERMITIDOS = new Set([
-    'image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/tiff', 'image/bmp',
-    'video/mp4', 'video/3gpp', 'video/avi', 'video/quicktime',
-    'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/aac',
-    'application/pdf',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-]);
+        return res.status(resultado.sucesso ? 200 : 503).json(resultado);
+    } 
+    
+    // 3. Se não tem base64, verifica se tem texto
+    if (mensagem) {
+        console.log(`[AUTO] Detectado Texto para ${chatId}`);
+        if (mensagem.length > 4096) return res.status(400).json({ erro: 'Mensagem muito longa.' });
 
-// Rota 2: Enviar Mídia (Protegida pelo middleware apiKeyAuth)
-app.post('/api/enviar/midia', apiKeyAuth, async (req, res) => {
-    const { numero, grupoid, base64, mimetype, nomeArquivo, legenda } = req.body;
-    if ((!numero && !grupoid) || !base64 || !mimetype) return res.status(400).json({ erro: 'Dados incompletos.' });
-
-    let chatId;
-    if (grupoid) {
-        // IDs de grupo podem conter hífens (ex: 120363XXXX-XXXX@g.us), por isso [\d-]+
-        if (!/^[\d-]+@g\.us$/.test(grupoid)) {
-            return res.status(400).json({ erro: 'grupoid inválido. Formato esperado: 120363XXXXXX@g.us' });
-        }
-        chatId = grupoid;
-    } else {
-        if (!/^\d+$/.test(numero)) {
-            return res.status(400).json({ erro: 'Número inválido. Use apenas dígitos.' });
-        }
-        chatId = `${numero}@c.us`;
+        const resultado = await executarEnvioInteligente(chatId, 'texto', mensagem);
+        return res.status(resultado.sucesso ? 200 : 503).json(resultado);
     }
 
-    // SEGURANÇA: Rejeita tipos de arquivo não autorizados.
-    // Impede que alguém tente enviar um executável ou tipo malicioso disfarçado.
-    if (!MIMETYPES_PERMITIDOS.has(mimetype)) {
-        return res.status(400).json({ erro: 'Tipo de arquivo não permitido.' });
-    }
-
-    // Caminho primário: WhatsApp Web conectado
-    if (isConnected) {
-        try {
-            const midia = new MessageMedia(mimetype, base64, nomeArquivo);
-            await client.sendMessage(chatId, midia, { caption: legenda || '' });
-            return res.status(200).json({ sucesso: true, mensagem: 'Mídia enviada.' });
-        } catch (erro) {
-            console.error('Erro ao enviar mídia via WhatsApp Web:', erro);
-            return res.status(500).json({ sucesso: false, erro: 'Erro interno ao enviar mídia.' });
-        }
-    }
-
-    // Caminho de fallback: WhatsApp Web desconectado — tenta via Evolution API
-    if (!evolutionConfigurada()) {
-        return res.status(503).json({ erro: 'WhatsApp Web desconectado e Evolution API não configurada.' });
-    }
-
-    try {
-        // Passa chatId (não numero) — chatId pode ser grupo (XXXX@g.us) ou contato (XXXX@c.us)
-        await enviarMidiaEvolution(chatId, base64, mimetype, nomeArquivo, legenda);
-        return res.status(200).json({
-            sucesso: true,
-            via: 'evolution',
-            mensagem: 'Mídia enviada via Evolution API (fallback).',
-            aviso: 'WhatsApp Web está desconectado. Reconecte reiniciando o servidor e lendo o QR Code.'
-        });
-    } catch (erro) {
-        console.error('Erro ao enviar mídia via Evolution API (fallback):', erro);
-        return res.status(500).json({ sucesso: false, erro: 'Erro interno ao enviar mídia (fallback também falhou).' });
-    }
+    // 4. Se não tem nenhum dos dois
+    return res.status(400).json({ erro: 'Corpo da requisição vazio. Envie "mensagem" ou "base64".' });
 });
 
 client.initialize();
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Servidor rodando na porta ${PORT}`);
+    console.log(`Servidor rodando na porta ${PORT}`);
 });
