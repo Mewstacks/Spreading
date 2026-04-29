@@ -69,7 +69,7 @@ def send_text(numero: str = "", mensagem: str = "", grupoid: str = ""):
         payload["grupoid"] = grupoid
     else:
         payload["numero"] = numero
-    r = requests.post(f"{BASE_URL}/api/enviar/texto", json=payload, headers=HEADERS, timeout=30)
+    r = requests.post(f"{BASE_URL}/api/enviar", json=payload, headers=HEADERS, timeout=30)
     r.raise_for_status()
     return r.json()
 
@@ -87,7 +87,7 @@ def send_media(numero: str = "", base64: str = "", mimetype: str = "",
         payload["grupoid"] = grupoid
     else:
         payload["numero"] = numero
-    r = requests.post(f"{BASE_URL}/api/enviar/midia", json=payload, headers=HEADERS, timeout=60)
+    r = requests.post(f"{BASE_URL}/api/enviar", json=payload, headers=HEADERS, timeout=60)
     r.raise_for_status()
     return r.json()
 
@@ -140,17 +140,34 @@ if __name__ == "__main__":
     selected = groups[choice]
     print(f"\nGrupo selecionado: {selected['nome']} ({selected['id']})")
 
-    # 5. Escolha: texto ou imagem
-    tipo = input("\nEnviar (1) Texto ou (2) Imagem? [1]: ").strip()
+    # 5. Escolha do tipo de envio
+    print("\nO que deseja enviar?")
+    print("  1 - Texto")
+    print("  2 - Imagem")
+    print("  3 - Imagem com legenda")
+    while True:
+        tipo = input("Escolha [1/2/3]: ").strip()
+        if tipo in ("1", "2", "3"):
+            break
+        print("Digite 1, 2 ou 3.")
 
-    if tipo == "2":
+    if tipo == "1":
+        msg = input("Mensagem de texto (Enter para usar padrão): ").strip()
+        if not msg:
+            msg = "🤖 Teste via API Python"
+        result = send_text(grupoid=selected["id"], mensagem=msg)
+        print("Resultado:", result)
+
+    elif tipo in ("2", "3"):
         while True:
             caminho = input("Caminho da imagem: ").strip().strip('"')
             if os.path.isfile(caminho):
                 break
             print("Arquivo não encontrado. Tente novamente.")
 
-        legenda = input("Legenda (opcional, Enter para pular): ").strip()
+        legenda = ""
+        if tipo == "3":
+            legenda = input("Legenda: ").strip()
 
         mimetype, _ = mimetypes.guess_type(caminho)
         if not mimetype:
@@ -168,11 +185,6 @@ if __name__ == "__main__":
             legenda=legenda,
         )
         print("Resultado:", result)
-    else:
-        msg = input("Mensagem de texto (Enter para usar padrão): ").strip()
-        if not msg:
-            msg = "🤖 Teste via API Python"
 
         result = send_text(grupoid=selected["id"], mensagem=msg)
         print("Resultado:", result)
-

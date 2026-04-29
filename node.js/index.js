@@ -237,6 +237,27 @@ app.get('/api/grupos', apiKeyAuth, async (req, res) => {
     }
 });
 
+// Rota para forçar o refresh da lista de grupos
+app.post('/api/grupos/refresh', apiKeyAuth, async (req, res) => {
+    if (!isConnected) {
+        return res.status(503).json({ erro: 'WhatsApp não está conectado.' });
+    }
+
+    try {
+        gruposCarregados = false;
+        const chats = await client.getChats();
+        gruposCache = chats
+            .filter(c => c.isGroup)
+            .map(c => ({ id: c.id._serialized, nome: c.name }));
+        gruposCarregados = true;
+        console.log(`🔄 Refresh manual: ${gruposCache.length} grupos atualizados.`);
+        return res.json({ sucesso: true, total: gruposCache.length, grupos: gruposCache });
+    } catch (err) {
+        console.error('❌ Erro no refresh de grupos:', err.message);
+        return res.status(500).json({ erro: 'Falha ao atualizar a lista de grupos.' });
+    }
+});
+
 app.get('/api/qrcode', (req, res) => {
     if (isConnected) {
         return res.json({ conectado: true, qr: null, mensagem: 'WhatsApp já está conectado.' });
