@@ -1,4 +1,4 @@
-from scrapper import run_scrapper
+from scrapper_mercadolivre.playwright import run_scrapper
 
 tipo = input("Digite o tipo de produto que deseja buscar: ")
 run_scrapper(tipo)

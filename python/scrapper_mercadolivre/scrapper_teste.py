@@ -148,10 +148,8 @@ if __name__ == "__main__":
     dados_extraidos = analisar_cupons_e_produtos()
     
     print("\n" + "="*50)
-    print("RESUMO DA EXTRACAO")
     print(f"Total de cupons processados com sucesso: {len(dados_extraidos)}")
     
-    # Exemplo de como usar os dados extraidos
     if dados_extraidos:
         with open("cupons_consolidados.json", "w", encoding="utf-8") as f:
             json.dump(dados_extraidos, f, ensure_ascii=False, indent=4)

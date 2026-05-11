@@ -1,6 +1,5 @@
 import os
 import inspect
-import time
 from contextlib import contextmanager
 from playwright.sync_api import sync_playwright
 
@@ -22,9 +21,7 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=False, **conte
             context = browser.new_context(storage_state=auth_path, **context_kwargs) if os.path.exists(auth_path) else browser.new_context(**context_kwargs)
             page = context.new_page()
             page.goto("https://myaccount.mercadolivre.com.br/my_purchases/list#menu-user")
-            time.sleep(5)
             page.wait_for_load_state("networkidle")
-            print(page.url)
             if "login" in page.url:
                 precisa_logar = True
             else:
