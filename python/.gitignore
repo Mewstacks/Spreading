@@ -1,0 +1,9 @@
+# Sessões e credenciais
+*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.env
