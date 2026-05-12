@@ -25,7 +25,7 @@ def mapear_cupons(n=1):
                 page.wait_for_selector("#__NORDIC_RENDERING_CTX__", state="attached", timeout=15000)
             except Exception:
                 print("Fim das paginas alcancado ou tag nao encontrada.")
-                break 
+                break
             
             texto_script = page.locator("#__NORDIC_RENDERING_CTX__").text_content()
             
@@ -52,7 +52,6 @@ def mapear_cupons(n=1):
                 cap_amount = cupom.get("capAmount")
                 fractional_amount = cupom.get("fractionalAmount")
                 
-                # Extrai o título de forma segura (lidando com strings ou dicionários)
                 titulo_bruto = cupom.get("title", "Sem titulo")
                 titulo_final = titulo_bruto.get("text") if isinstance(titulo_bruto, dict) else titulo_bruto
                 subtitulo = cupom.get("initialSubtitle", {}).get("text", "")
@@ -65,7 +64,6 @@ def mapear_cupons(n=1):
                 tipo_acao = acao.get("type")
                 link_final = None
 
-                # TIPO AÇÃO: LINK (Muitas vezes já vem com a URL pronta)
                 if tipo_acao == "link" and acao.get("value"):
                     link_valor = acao.get("value")
                     if link_valor.startswith("http"):
@@ -73,7 +71,6 @@ def mapear_cupons(n=1):
                     else:
                         link_final = f"https://www.mercadolivre.com.br{link_valor}"
 
-                # TIPO AÇÃO: BUTTON (É aqui que a magia dos containers acontece)
                 elif tipo_acao == "button" or not link_final:
                     
                     container_singular = segmentacoes.get("container", {})
@@ -89,32 +86,28 @@ def mapear_cupons(n=1):
                         slug = str(container_lista[0].get("id"))
                     
                     created_by = track_info.get("created_by", "")
-                    
-                    # Identifica se é um cupom de Vendedor/Loja
                     is_seller = (created_by == "seller" and subtitulo.startswith("Em produtos de "))
                     
                     if is_seller:
                         nome_loja = subtitulo.replace("Em produtos de ", "").strip()
-                        # Formata o nome para caso precisemos usar a URL raiz da loja
                         nome_loja_formatado = nome_loja.lower().replace(" oficial", "").replace(" ", "-")
                         
                         if slug:
-                            # SE TEM CONTAINER (Ex: Luunaticos): NÃO usamos a raiz da loja. 
-                            # O ML resolve o container direto, assim evitamos erros como Zebrands vs Luuna.
                             slug_formatado = slug.strip().replace(" ", "-")
                             link_final = f"https://lista.mercadolivre.com.br/_Container_{slug_formatado}"
                         else:
-                            # SE NÃO TEM CONTAINER (Ex: Arno): Aqui sim usamos a URL na raiz da loja.
                             link_final = f"https://lista.mercadolivre.com.br/loja/{nome_loja_formatado}/"
                             
                     elif slug:
-                        # Cupons normais do ML (Ex: Intel, Copa, Pet Shop)
                         slug_formatado = slug.strip().replace(" ", "-").lower()
                         link_final = f"https://lista.mercadolivre.com.br/_Container_{slug_formatado}"
                     
                     elif segmentacoes.get("store_ids"):
-                        loja_id = segmentacoes["store_ids"][0]
-                        link_final = f"https://lista.mercadolivre.com.br/_CustId_{loja_id}"
+                        loja_id = str(segmentacoes["store_ids"][0])
+                        if loja_id == "-1":
+                            link_final = "https://www.mercadolivre.com.br/l/lojas-oficiais#origin=coupons"
+                        else:
+                            link_final = f"https://lista.mercadolivre.com.br/_CustId_{loja_id}"
                         
                     elif segmentacoes.get("categories"):
                         cat_id = segmentacoes["categories"][0].get("id")
@@ -123,10 +116,14 @@ def mapear_cupons(n=1):
                     else:
                         link_final = f"https://lista.mercadolivre.com.br/_Container_{camp_id}"
 
-                    # Sempre adicionamos a campanha para atribuir o desconto
                     if link_final and "coupon_campaign_id" not in link_final:
-                        conector = "&" if "?" in link_final else "?"
-                        link_final += f"{conector}coupon_campaign_id={camp_id}"
+                        if "#" in link_final:
+                            partes = link_final.split("#")
+                            conector = "&" if "?" in partes[0] else "?"
+                            link_final = f"{partes[0]}{conector}coupon_campaign_id={camp_id}#{partes[1]}"
+                        else:
+                            conector = "&" if "?" in link_final else "?"
+                            link_final += f"{conector}coupon_campaign_id={camp_id}"
                         
 
                 if link_final:
@@ -164,5 +161,175 @@ def mapear_cupons(n=1):
         with open(caminho_salvar, "w", encoding="utf-8") as f:
             json.dump(todos_os_cupons_limpos, f, ensure_ascii=False, indent=4)
 
+
+def listar_itens_por_cupom(cupom, page, max_paginas=5):
+    link = cupom.get("link_produtos")
+
+    if not link or link == "URL_NAO_MAPEADA":
+        return None
+
+    print(f"\n[+] Acessando cupom: {cupom['title']}")
+    produtos_raspados = []
+    
+    try:
+        page.goto(link)
+    except Exception as e:
+        print(f"Erro ao carregar a página do cupom: {e}")
+        return None
+
+    pagina_atual = 1
+    
+    while pagina_atual <= max_paginas:
+        try:
+            page.wait_for_selector(".ui-search-layout", timeout=15000)
+            page.wait_for_timeout(2000)
+        except Exception:
+            print(f"    Página {pagina_atual} sem produtos encontrados ou demorou demais.")
+            break
+
+        categorias_por_id = {}
+        try:
+            tag = page.locator("#__NORDIC_RENDERING_CTX__")
+            if tag.count() > 0:
+                texto = tag.text_content()
+                json_puro = texto.split('_n.ctx.r=')[1].split(';_n.ctx.r.assets')[0]
+                dados = json.loads(json_puro)
+                lista_json = dados.get("appProps", {}).get("pageProps", {}).get("results", [])
+                for item in lista_json:
+                    item_id = item.get("id")
+                    polycard = item.get("polycard", {})
+                    metadata = polycard.get("metadata", {})
+                    meta_id = metadata.get("id")
+                    domain_id = metadata.get("domain_id", "")
+                    if domain_id:
+                        categoria_limpa = domain_id.replace("MLB-", "")
+                        if item_id:
+                            categorias_por_id[item_id] = categoria_limpa
+                        if meta_id:
+                            categorias_por_id[meta_id] = categoria_limpa
+        except Exception:
+            pass
+
+        cards_produtos = page.locator(".ui-search-layout__item").all()
+        print(f"    Página {pagina_atual}: Encontrados {len(cards_produtos)} produtos.")
+
+        for card in cards_produtos:
+            try:
+                loc_nome = card.locator(".ui-search-item__title, .poly-component__title").first
+                nome = loc_nome.inner_text(timeout=2000)
+
+                loc_link = card.locator("a.ui-search-link, h2 a, h3 a").first
+                link_prod = loc_link.get_attribute("href", timeout=2000)
+
+                categoria = "Desconhecido"
+                if link_prod:
+                    match_wid = re.search(r'[?&]wid=(MLB\d+)', link_prod)
+                    if match_wid:
+                        prod_id = match_wid.group(1)
+                        categoria = categorias_por_id.get(prod_id, "Desconhecido")
+
+                bloco_preco_atual_frac = card.locator(".ui-search-price__second-line .andes-money-amount__fraction, .poly-price__current .andes-money-amount__fraction")
+                if bloco_preco_atual_frac.count() == 0:
+                    continue
+
+                frac_atual = bloco_preco_atual_frac.first.inner_text(timeout=2000).replace('.', '')
+                bloco_preco_atual_cents = card.locator(".poly-price__current .andes-money-amount__cents, .ui-search-price__second-line .andes-money-amount__cents")
+                cents_atual = bloco_preco_atual_cents.first.inner_text(timeout=2000) if bloco_preco_atual_cents.count() > 0 else "0"
+                preco_atual_float = float(f"{frac_atual}.{cents_atual.zfill(2)}")
+
+                bloco_preco_antigo = card.locator("s.andes-money-amount--previous .andes-money-amount__fraction")
+                if bloco_preco_antigo.count() > 0:
+                    frac_antigo = bloco_preco_antigo.first.inner_text(timeout=2000).replace('.', '')
+                    bloco_antigo_cents = card.locator("s.andes-money-amount--previous .andes-money-amount__cents")
+                    cents_antigo = bloco_antigo_cents.first.inner_text(timeout=2000) if bloco_antigo_cents.count() > 0 else "0"
+                    preco_antigo_float = float(f"{frac_antigo}.{cents_antigo.zfill(2)}")
+                else:
+                    preco_antigo_float = preco_atual_float
+
+                desconto = cupom.get("desconto")
+                preco_com_cupom = preco_atual_float
+                
+                if desconto:
+                    valor_desc = desconto.get("valor", 0)
+                    if desconto.get("tipo") == "porcentagem":
+                        preco_com_cupom = preco_atual_float * (1 - (valor_desc / 100))
+                    elif desconto.get("tipo") == "fixo":
+                        preco_com_cupom = preco_atual_float - valor_desc
+                        if preco_com_cupom < 0:
+                            preco_com_cupom = 0
+
+                produtos_raspados.append({
+                    "nome_produto": nome,
+                    "categoria": categoria,
+                    "link_produto": link_prod,
+                    "preco_original_sem_desconto": f"{preco_antigo_float:.2f}",
+                    "preco_vitrine_atual": f"{preco_atual_float:.2f}",
+                    "preco_final_com_cupom": f"{preco_com_cupom:.2f}"
+                })
+
+            except Exception as e:
+                print(f"Erro isolado num produto: {e}")
+        
+        seletores_prox = [
+            ".andes-pagination__button--next:not(.andes-pagination__button--disabled) a",
+            "a[title='Seguinte']",
+            "li.andes-pagination__button--next a",
+        ]
+        navegou = False
+        for seletor in seletores_prox:
+            botao = page.locator(seletor)
+            try:
+                if botao.count() > 0 and botao.first.is_visible(timeout=2000):
+                    href = botao.first.get_attribute("href")
+                    if href:
+                        page.goto(href)
+                    else:
+                        botao.first.click()
+                        page.wait_for_load_state("domcontentloaded")
+                    pagina_atual += 1
+                    navegou = True
+                    break
+            except Exception:
+                continue
+
+        if not navegou:
+            break
+
+    cupom_atualizado = cupom.copy()
+    cupom_atualizado["produtos_aplicaveis"] = produtos_raspados
+    return cupom_atualizado
+
+
+def main():
+    json_path = os.path.join(caminho_atual, "cupons_mapeados.json")
+    if not os.path.exists(json_path):
+        print("Arquivo de cupons mapeados nao encontrado. Rode a funcao mapear_cupons() primeiro.")
+        return
+
+    with open(json_path, "r", encoding="utf-8") as f:
+        cupons = json.load(f)
+
+    caminho_auth = os.path.join(caminho_atual, "auth.json")
+    cupons_com_produtos = []
+    
+    caminho_salvar = os.path.join(caminho_atual, "cupons_com_produtos_detalhados.json")
+
+    print("Iniciando raspagem de produtos...")
+
+    with iniciar_browser(auth_path=caminho_auth, headless=False) as (page, context):
+        for cupom in cupons:
+            resultado = listar_itens_por_cupom(cupom, page)
+            
+            if resultado:
+                cupons_com_produtos.append(resultado)
+                try:
+                    with open(caminho_salvar, "w", encoding="utf-8") as f:
+                        json.dump(cupons_com_produtos, f, ensure_ascii=False, indent=4)
+                    print(f"Checkpoint salvo! {len(cupons_com_produtos)} cupons processados no JSON até agora.")
+                except Exception as e:
+                    print(f"Erro ao tentar salvar o arquivo JSON: {e}")
+
+    print(f"\nFinalizado com sucesso! Todos os dados estão seguros em {caminho_salvar}")
+
 if __name__ == "__main__":
-    mapear_cupons(1)
+    main()
