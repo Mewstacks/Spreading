@@ -10,7 +10,7 @@ class BrowserError(Exception):
 @contextmanager
 def iniciar_browser(precisa_logar=False, auth_path=None, headless=False, **context_kwargs):
     nav = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    context_kwargs["user_agent"] = nav
+    context_kwargs.setdefault("user_agent", nav)
     if auth_path is None:
         caller_dir = os.path.dirname(os.path.abspath(inspect.stack()[1].filename))
         auth_path = os.path.join(caller_dir, "auth.json")
