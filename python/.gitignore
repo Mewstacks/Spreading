@@ -1,6 +1,9 @@
 # Sessões e credenciais
 *.json
 
+# Imagens geradas
+*.png
+
 # Python
 __pycache__/
 *.py[cod]
