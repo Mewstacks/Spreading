@@ -1,5 +1,6 @@
-# Sessões e credenciais
-*.json
+# Credenciais e sessões
+auth.json
+*.session
 
 # Imagens geradas
 *.png
@@ -8,5 +9,41 @@
 __pycache__/
 *.py[cod]
 *.pyo
+*.pyd
+.Python
+
+# Ambientes virtuais
 venv/
+.venv/
+env/
+
+# Variáveis de ambiente
 .env
+.env.*
+!.env.example
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+django/staticfiles/
+django/mediafiles/
+django/media/
+
+# Migrações geradas (opcional — remova se quiser versionar)
+# */migrations/
+
+# Playwright
+playwright/.auth/
+test-results/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,207 @@
+[
+    {
+        "titulo_cupom": "R$ 250 OFF em Apple",
+        "regras": {
+            "campaign_id": "13013739",
+            "code": "",
+            "title": "R$ 250 OFF em Apple",
+            "min_amount": 2000,
+            "cap_amount": 250,
+            "currency": "BRL",
+            "status_id": "ACTIVE",
+            "expiration_date": "2026-07-01T02:59:00Z",
+            "scarcity_flag": true,
+            "created_by": "meli",
+            "given_discount": 250,
+            "discount_type": "FIXED",
+            "discount_value": 250,
+            "segmentations": {
+                "categories": [],
+                "collectors": [
+                    "480263032"
+                ],
+                "containers": [
+                    {
+                        "id": "MLB1440229",
+                        "name": "1p 250off apple"
+                    }
+                ],
+                "container": {
+                    "id": "1596742",
+                    "name": "13013739"
+                },
+                "store_ids": []
+            },
+            "installments": false,
+            "payment_methods": false
+        },
+        "link_aplicacao": "https://lista.mercadolivre.com.br/_Container_13013739",
+        "produtos_amostra": [
+            {
+                "nome": "Apple iPhone 15 (128 GB) - Preto - Distribuidor Autorizado",
+                "preco_original": 4298.0,
+                "preco_final": 4048.0,
+                "desconto_aplicado": 250.0
+            },
+            {
+                "nome": "Apple iPhone 15 (256 GB) - Azul - Distribuidor Autorizado",
+                "preco_original": 4898.0,
+                "preco_final": 4648.0,
+                "desconto_aplicado": 250.0
+            },
+            {
+                "nome": "Apple iPhone 15 (128 GB) - Azul - Distribuidor Autorizado",
+                "preco_original": 4499.0,
+                "preco_final": 4249.0,
+                "desconto_aplicado": 250.0
+            },
+            {
+                "nome": "Apple iPhone 15 (256 GB) - Preto - Distribuidor Autorizado",
+                "preco_original": 4999.0,
+                "preco_final": 4749.0,
+                "desconto_aplicado": 250.0
+            },
+            {
+                "nome": "iPhone 17 512 GB - Lavanda - Distribuidor Autorizado",
+                "preco_original": 7181.0,
+                "preco_final": 6931.0,
+                "desconto_aplicado": 250.0
+            }
+        ]
+    },
+    {
+        "titulo_cupom": "25% OFF em Itens para Casa",
+        "regras": {
+            "campaign_id": "13630446",
+            "code": "",
+            "title": "25% OFF em Itens para Casa",
+            "min_amount": 25,
+            "cap_amount": 20,
+            "currency": "BRL",
+            "status_id": "ACTIVE",
+            "expiration_date": "2026-07-01T02:59:00Z",
+            "scarcity_flag": false,
+            "created_by": "meli",
+            "given_discount": 20,
+            "discount_type": "PERCENT",
+            "discount_value": 25,
+            "segmentations": {
+                "categories": [],
+                "collectors": [
+                    "768826009",
+                    "480263032"
+                ],
+                "containers": [
+                    {
+                        "id": "MLB1567306",
+                        "name": "CUPOM20REAIS1P"
+                    }
+                ],
+                "container": {
+                    "id": "1623891",
+                    "name": "13630446 304065003"
+                },
+                "store_ids": []
+            },
+            "installments": false,
+            "payment_methods": false
+        },
+        "link_aplicacao": "https://lista.mercadolivre.com.br/_Container_13630446-304065003?coupon_campaign_id=13630446",
+        "produtos_amostra": [
+            {
+                "nome": "Mercusys MC510 Câmera Segurança Wifi 2K 360° Externo por TP-Link",
+                "preco_original": 218.4,
+                "preco_final": 198.4,
+                "desconto_aplicado": 20.0
+            },
+            {
+                "nome": "Jogo De Toalha Banho 4 peças 100 Algodão 400 gr/m Loft Camesa",
+                "preco_original": 87.92,
+                "preco_final": 67.92,
+                "desconto_aplicado": 20.0
+            },
+            {
+                "nome": "Porteiro Residencial Ipr 8010 Preto/Branco Intelbras",
+                "preco_original": 181.9,
+                "preco_final": 161.9,
+                "desconto_aplicado": 20.0
+            },
+            {
+                "nome": "Fechadura Elétrica De Sobrepor Fx 500 Intelbras",
+                "preco_original": 152.1,
+                "preco_final": 132.1,
+                "desconto_aplicado": 20.0
+            },
+            {
+                "nome": "Interruptor Touch Inteligente 2 Teclas Eiw 1002 Intelbras Branco",
+                "preco_original": 106.2,
+                "preco_final": 86.2,
+                "desconto_aplicado": 20.0
+            }
+        ]
+    },
+    {
+        "titulo_cupom": "15% OFF BEBE",
+        "regras": {
+            "campaign_id": "13630310",
+            "code": "",
+            "title": "15% OFF BEBE",
+            "min_amount": 119,
+            "cap_amount": 20,
+            "currency": "BRL",
+            "status_id": "ACTIVE",
+            "expiration_date": "2026-06-01T02:59:00Z",
+            "scarcity_flag": false,
+            "created_by": "meli",
+            "given_discount": 20,
+            "discount_type": "PERCENT",
+            "discount_value": 15,
+            "segmentations": {
+                "categories": [],
+                "collectors": [],
+                "containers": [
+                    {
+                        "id": "MLB1623799",
+                        "name": "BabyMid"
+                    }
+                ],
+                "store_ids": []
+            },
+            "installments": false,
+            "payment_methods": false
+        },
+        "link_aplicacao": "https://lista.mercadolivre.com.br/_Container_BabyMid?coupon_campaign_id=13630310",
+        "produtos_amostra": [
+            {
+                "nome": "Banheira Bebê Dobrável Com Suporte Termômetro E Almofada Cor Cinza",
+                "preco_original": 293.41,
+                "preco_final": 273.41,
+                "desconto_aplicado": 20.0
+            },
+            {
+                "nome": "Baby Trend XHRTWL180 chiqueirinho infantil com bordas laterais protegida",
+                "preco_original": 205.37,
+                "preco_final": 185.37,
+                "desconto_aplicado": 20.0
+            },
+            {
+                "nome": "Andador Infantil Musical Disquinho Andajar Brinquedo com freio Até 12 Kg Safari ll Rosa Tutti Baby",
+                "preco_original": 183.08,
+                "preco_final": 163.08,
+                "desconto_aplicado": 20.0
+            },
+            {
+                "nome": "Babá Eletrônica Câmera Visão Noturna S/fio Zoom Cor Branco Mais Vendida",
+                "preco_original": 224.2,
+                "preco_final": 204.2,
+                "desconto_aplicado": 20.0
+            },
+            {
+                "nome": "Andador Infantil Musical para Bebê Maxi Baby La Bamba Cor Rosa",
+                "preco_original": 261.81,
+                "preco_final": 241.81,
+                "desconto_aplicado": 20.0
+            }
+        ]
+    }
+]
