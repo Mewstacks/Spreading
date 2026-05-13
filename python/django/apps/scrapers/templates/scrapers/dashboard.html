@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Scraper MercadoLivre</title>
+  <style>
+    body { font-family: monospace; background: #0d1117; color: #c9d1d9; margin: 2rem; }
+    h1 { color: #58a6ff; }
+    #run-btn {
+      padding: .6rem 1.4rem; font-size: 1rem; cursor: pointer;
+      background: #238636; color: #fff; border: none; border-radius: 6px;
+    }
+    #run-btn:disabled { background: #3d444d; cursor: not-allowed; }
+    #log {
+      margin-top: 1.5rem; background: #161b22; border: 1px solid #30363d;
+      border-radius: 6px; padding: 1rem; height: 65vh; overflow-y: auto;
+      white-space: pre-wrap; font-size: .85rem; line-height: 1.6;
+    }
+    .line-err  { color: #f85149; }
+    .line-done { color: #3fb950; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Scraper MercadoLivre</h1>
+  <button id="run-btn" onclick="startScraper()">▶ Iniciar scraping</button>
+
+  <div id="log"></div>
+
+  <script>
+    let es;
+
+    function startScraper() {
+      const btn = document.getElementById('run-btn');
+      const log = document.getElementById('log');
+
+      btn.disabled = true;
+      log.innerHTML = '';
+
+      es = new EventSource('/scrapers/run/');
+
+      es.onmessage = function (e) {
+        if (e.data === '__DONE__') {
+          appendLine('--- Finalizado ---', 'line-done');
+          es.close();
+          btn.disabled = false;
+          return;
+        }
+
+        const cls = e.data.startsWith('[ERRO]') ? 'line-err' : '';
+        appendLine(e.data, cls);
+      };
+
+      es.onerror = function () {
+        appendLine('[ERRO] Conexão perdida.', 'line-err');
+        es.close();
+        btn.disabled = false;
+      };
+    }
+
+    function appendLine(text, cls) {
+      const log = document.getElementById('log');
+      const span = document.createElement('span');
+      if (cls) span.className = cls;
+      span.textContent = text + '\n';
+      log.appendChild(span);
+      log.scrollTop = log.scrollHeight;
+    }
+  </script>
+</body>
+</html>
