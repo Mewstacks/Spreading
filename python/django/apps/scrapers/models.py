@@ -15,4 +15,4 @@ class Produto(models.Model):
     preco_com_cupom = models.FloatField()
     link_produto = models.URLField()
     categoria = models.CharField(max_length=100, null=True, blank=True) # Lembra do domain_id?
- #
+    macro_categoria = models.CharField(max_length=100, null=True, blank=True, db_index=True)

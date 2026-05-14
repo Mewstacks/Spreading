@@ -29,15 +29,22 @@
   <p class="sub">Itens com maior desconto absoluto · <a href="{% url 'scraper-dashboard' %}">← Voltar ao scraper</a></p>
 
   <form method="get" style="margin-bottom:1.5rem;display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;">
-    <label for="categoria" style="color:#8b949e;font-size:.9rem;">Filtrar por categoria:</label>
+    <label for="macro" style="color:#8b949e;font-size:.9rem;">Macro-categoria:</label>
+    <select id="macro" name="macro" onchange="this.form.submit()" style="background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:.4rem .75rem;font-size:.9rem;cursor:pointer;">
+      <option value="">— Todas —</option>
+      {% for mc in macro_categorias %}
+        <option value="{{ mc }}" {% if mc == macro_selecionada %}selected{% endif %}>{{ mc }}</option>
+      {% endfor %}
+    </select>
+    <label for="categoria" style="color:#8b949e;font-size:.9rem;">Sub-categoria:</label>
     <select id="categoria" name="categoria" onchange="this.form.submit()" style="background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:.4rem .75rem;font-size:.9rem;cursor:pointer;">
       <option value="">— Todas —</option>
       {% for cat in categorias %}
         <option value="{{ cat }}" {% if cat == categoria_selecionada %}selected{% endif %}>{{ cat }}</option>
       {% endfor %}
     </select>
-    {% if categoria_selecionada %}
-      <a href="{% url 'scraper-top' %}" style="color:#8b949e;font-size:.85rem;text-decoration:none;">✕ Limpar filtro</a>
+    {% if macro_selecionada or categoria_selecionada %}
+      <a href="{% url 'scraper-top' %}" style="color:#8b949e;font-size:.85rem;text-decoration:none;">✕ Limpar filtros</a>
     {% endif %}
   </form>
 
@@ -59,7 +66,7 @@
         <td class="nome">
           <a href="{{ p.link_produto }}" target="_blank" rel="noopener">{{ p.nome }}</a>
           {% if p.categoria and p.categoria != "DESCONHECIDO" %}
-            <div class="categoria">{{ p.categoria }}</div>
+            <div class="categoria">{% if p.macro_categoria %}{{ p.macro_categoria }} · {% endif %}{{ p.categoria }}</div>
           {% endif %}
         </td>
         <td><span class="preco-original">R$ {{ p.preco_sem_desconto|floatformat:2 }}</span></td>

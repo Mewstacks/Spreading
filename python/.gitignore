@@ -1,5 +1,5 @@
 # Credenciais e sessões
-auth.json
+*.json
 *.session
 
 # Imagens geradas

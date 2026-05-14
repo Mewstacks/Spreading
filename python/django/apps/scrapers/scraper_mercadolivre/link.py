@@ -3,7 +3,7 @@ import os
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 caminho_raiz = os.path.dirname(caminho_atual)
 sys.path.append(caminho_raiz)
-from django.scrapers.auxiliar import iniciar_browser, BrowserError
+from apps.scrapers.auxiliar import iniciar_browser, BrowserError
 
 
 class LoginError(Exception):

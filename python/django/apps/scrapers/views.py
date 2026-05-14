@@ -39,18 +39,29 @@ def dashboard(request):
 
 def top_promocoes(request):
     categoria = request.GET.get("categoria", "").strip()
-    categorias = (
+    macro = request.GET.get("macro", "").strip()
+    macro_categorias = (
+        Produto.objects
+        .exclude(macro_categoria__isnull=True)
+        .exclude(macro_categoria="")
+        .values_list("macro_categoria", flat=True)
+        .distinct()
+        .order_by("macro_categoria")
+    )
+    categorias_qs = (
         Produto.objects
         .exclude(categoria__isnull=True)
         .exclude(categoria="DESCONHECIDO")
         .exclude(categoria="")
-        .values_list("categoria", flat=True)
-        .distinct()
-        .order_by("categoria")
     )
+    if macro:
+        categorias_qs = categorias_qs.filter(macro_categoria=macro)
+    categorias = categorias_qs.values_list("categoria", flat=True).distinct().order_by("categoria")
     qs = Produto.objects.annotate(
         economia=ExpressionWrapper(F("preco_sem_desconto") - F("preco_com_cupom"), output_field=FloatField())
     )
+    if macro:
+        qs = qs.filter(macro_categoria=macro)
     if categoria:
         qs = qs.filter(categoria=categoria)
     produtos = qs.order_by("-economia")[:10]
@@ -58,6 +69,8 @@ def top_promocoes(request):
         "produtos": produtos,
         "categorias": categorias,
         "categoria_selecionada": categoria,
+        "macro_categorias": macro_categorias,
+        "macro_selecionada": macro,
     })
 
 
