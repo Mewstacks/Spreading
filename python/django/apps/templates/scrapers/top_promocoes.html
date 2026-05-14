@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Top 10 Promoções</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0d1117; color: #c9d1d9; padding: 2rem; }
+    h1 { color: #58a6ff; margin-bottom: .4rem; }
+    .sub { color: #8b949e; font-size: .9rem; margin-bottom: 2rem; }
+    .sub a { color: #58a6ff; text-decoration: none; }
+    table { width: 100%; border-collapse: collapse; }
+    thead th { background: #161b22; color: #8b949e; font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; padding: .75rem 1rem; text-align: left; border-bottom: 1px solid #30363d; }
+    tbody tr { border-bottom: 1px solid #21262d; transition: background .15s; }
+    tbody tr:hover { background: #161b22; }
+    td { padding: .85rem 1rem; vertical-align: middle; }
+    .rank { color: #8b949e; font-weight: 700; width: 2rem; }
+    .nome a { color: #c9d1d9; text-decoration: none; font-weight: 500; }
+    .nome a:hover { color: #58a6ff; }
+    .categoria { color: #8b949e; font-size: .8rem; margin-top: .2rem; }
+    .preco-original { color: #8b949e; text-decoration: line-through; font-size: .85rem; }
+    .preco-final { color: #3fb950; font-weight: 700; font-size: 1.05rem; }
+    .economia { background: #1f3a29; color: #3fb950; padding: .25rem .6rem; border-radius: 4px; font-size: .85rem; font-weight: 600; white-space: nowrap; }
+    .empty { text-align: center; padding: 4rem; color: #8b949e; }
+  </style>
+</head>
+<body>
+  <h1>🔥 Top 10 Promoções</h1>
+  <p class="sub">Itens com maior desconto absoluto · <a href="{% url 'scraper-dashboard' %}">← Voltar ao scraper</a></p>
+
+  <form method="get" style="margin-bottom:1.5rem;display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;">
+    <label for="categoria" style="color:#8b949e;font-size:.9rem;">Filtrar por categoria:</label>
+    <select id="categoria" name="categoria" onchange="this.form.submit()" style="background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:.4rem .75rem;font-size:.9rem;cursor:pointer;">
+      <option value="">— Todas —</option>
+      {% for cat in categorias %}
+        <option value="{{ cat }}" {% if cat == categoria_selecionada %}selected{% endif %}>{{ cat }}</option>
+      {% endfor %}
+    </select>
+    {% if categoria_selecionada %}
+      <a href="{% url 'scraper-top' %}" style="color:#8b949e;font-size:.85rem;text-decoration:none;">✕ Limpar filtro</a>
+    {% endif %}
+  </form>
+
+  {% if produtos %}
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Produto</th>
+        <th>Preço original</th>
+        <th>Preço com cupom</th>
+        <th>Economia</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in produtos %}
+      <tr>
+        <td class="rank">{{ forloop.counter }}</td>
+        <td class="nome">
+          <a href="{{ p.link_produto }}" target="_blank" rel="noopener">{{ p.nome }}</a>
+          {% if p.categoria and p.categoria != "DESCONHECIDO" %}
+            <div class="categoria">{{ p.categoria }}</div>
+          {% endif %}
+        </td>
+        <td><span class="preco-original">R$ {{ p.preco_sem_desconto|floatformat:2 }}</span></td>
+        <td><span class="preco-final">R$ {{ p.preco_com_cupom|floatformat:2 }}</span></td>
+        <td><span class="economia">- R$ {{ p.economia|floatformat:2 }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Nenhum produto encontrado. Rode o scraper primeiro.</p>
+  {% endif %}
+</body>
+</html>

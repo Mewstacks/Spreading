@@ -193,6 +193,9 @@ def mapear_cupons(n=1):
         removidos, _ = Cupom.objects.exclude(campanha_id__in=ids_ativos).delete()
         if removidos:
             print(f"{removidos} cupom(ns) inativo(s) removido(s) do banco.")
+        prods_removidos, _ = Produto.objects.exclude(campanha_id__in=ids_ativos).delete()
+        if prods_removidos:
+            print(f"{prods_removidos} produto(s) de cupons inativos removido(s) do banco.")
         print(f"DB: {len(todos_os_cupons_limpos)} cupons salvos/atualizados.")
 
 
@@ -413,33 +416,43 @@ def main():
         print("Nenhum cupom encontrado no banco. Deu merda")
         return
 
-    cupons = []
-    for c in cupons_qs[:3]:
+    # Cupons que já têm produtos scraped — podem ser pulados
+    ja_feitos = set(
+        Produto.objects.values_list("campanha_id", flat=True).distinct()
+    )
+
+    cupons_pendentes = []
+    pulados = 0
+    for c in cupons_qs:
+        if c["campanha_id"] in ja_feitos:
+            pulados += 1
+            continue
         desconto = None
         if c["tipo_desconto"] and c["valor_desconto"]:
             desconto = {"tipo": c["tipo_desconto"], "valor": c["valor_desconto"]}
-        cupom_dict = {
+        cupons_pendentes.append({
             "campaignId": c["campanha_id"],
             "title": c["titulo"],
             "desconto": desconto,
             "link_produtos": c["link_original"],
-        }
-        cupons.append(cupom_dict)
+        })
+
+    print(f"{pulados} cupons já processados anteriormente — pulando.")
+    print(f"{len(cupons_pendentes)} cupons pendentes para raspar produtos...")
+
+    if not cupons_pendentes:
+        print("Nada a fazer. Todos os cupons já têm produtos.")
+        return
 
     caminho_auth = os.path.join(caminho_atual, "auth.json")
 
-    cupons_com_produtos = []
-    print(f"Iniciando raspagem de produtos ({len(cupons)} pendentes)...")
-
     with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
-        for cupom in cupons:
+        for cupom in cupons_pendentes:
             resultado = listar_itens_por_cupom(cupom, page)
             if resultado:
-                cupons_com_produtos.append(resultado)
+                _sincronizar_produtos_no_banco([resultado])
 
-    print("Sincronizando produtos para o banco de dados...")
-    processados = _sincronizar_produtos_no_banco(cupons_com_produtos)
-    print(f"\nFinalizado! {processados} cupons com produtos salvos no banco.")
+    print(f"\nFinalizado! {len(cupons_pendentes)} cupons processados.")
 
 if __name__ == "__main__":
     main()
