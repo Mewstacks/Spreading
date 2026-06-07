@@ -32,6 +32,16 @@ services:
       - evolution_data:/evolution/instances
     restart: unless-stopped
 
+  # --- Redis (broker do Celery) ---
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
 volumes:
   whatsapp_auth:
   evolution_data:
+  redis_data:

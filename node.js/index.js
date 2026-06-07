@@ -176,6 +176,8 @@ const client = new Client({
         dataPath: authPath
     }),
     puppeteer: {
+        // getChats() em contas grandes estoura o timeout padrão do protocolo.
+        protocolTimeout: 300000,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
