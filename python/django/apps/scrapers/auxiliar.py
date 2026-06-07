@@ -35,13 +35,12 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=False, **conte
                 browser = p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
                 context = browser.new_context(storage_state=auth_path, **context_kwargs) if os.path.exists(auth_path) else browser.new_context(**context_kwargs)
                 page = context.new_page()
-                page.goto("https://www.mercadolivre.com.br/login")
+                page.goto("https://www.mercadolivre.com/jms/mlb/lgz/msl/login/")
                 page.wait_for_load_state("networkidle")
                 if os.path.exists(auth_path):
                     os.remove(auth_path)
                 print("LOGIN_REQUIRED")
-                # Aguarda o usuário logar detectando a saída da página de login
-                page.wait_for_url(lambda url: "/login" not in url, timeout=180000)
+                page.wait_for_url("https://www.mercadolivre.com.br/", timeout=180000)
                 context.storage_state(path=auth_path)
                 browser.close()
                 print("Login salvo com sucesso!")

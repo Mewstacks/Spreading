@@ -21,32 +21,139 @@
     .preco-original { color: #8b949e; text-decoration: line-through; font-size: .85rem; }
     .preco-final { color: #3fb950; font-weight: 700; font-size: 1.05rem; }
     .economia { background: #1f3a29; color: #3fb950; padding: .25rem .6rem; border-radius: 4px; font-size: .85rem; font-weight: 600; white-space: nowrap; }
-    .empty { text-align: center; padding: 4rem; color: #8b949e; }
+    .cupom-titulo a { color: #c9d1d9; text-decoration: none; font-size: .85rem; }
+    .cupom-titulo a:hover { color: #58a6ff; }
+    .cupom-desconto { color: #8b949e; font-size: .78rem; margin-top: .15rem; }
+    .dd { position: relative; display: inline-block; }
+    .dd-btn { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: .4rem .85rem; font-size: .9rem; cursor: pointer; white-space: nowrap; }
+    .dd-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+    .dd-btn.active { border-color: #58a6ff; color: #58a6ff; }
+    .dd-panel { display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 100; background: #161b22; border: 1px solid #30363d; border-radius: 6px; min-width: 240px; max-height: 320px; overflow-y: auto; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+    .dd-panel.open { display: block; }
+    .dd-header { padding: .35rem .75rem; color: #8b949e; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid #21262d; }
+    .dd-item { display: flex; align-items: center; gap: .45rem; padding: .4rem .75rem; cursor: pointer; font-size: .85rem; color: #c9d1d9; user-select: none; }
+    .dd-item:hover { background: #21262d; }
+    .dd-item input { accent-color: #58a6ff; cursor: pointer; flex-shrink: 0; }
   </style>
 </head>
 <body>
   <h1>🔥 Top 10 Promoções</h1>
   <p class="sub">Itens com maior desconto absoluto · <a href="{% url 'scraper-dashboard' %}">← Voltar ao scraper</a></p>
 
-  <form method="get" style="margin-bottom:1.5rem;display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;">
-    <label for="macro" style="color:#8b949e;font-size:.9rem;">Macro-categoria:</label>
-    <select id="macro" name="macro" onchange="this.form.submit()" style="background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:.4rem .75rem;font-size:.9rem;cursor:pointer;">
-      <option value="">— Todas —</option>
-      {% for mc in macro_categorias %}
-        <option value="{{ mc }}" {% if mc == macro_selecionada %}selected{% endif %}>{{ mc }}</option>
-      {% endfor %}
-    </select>
-    <label for="categoria" style="color:#8b949e;font-size:.9rem;">Sub-categoria:</label>
-    <select id="categoria" name="categoria" onchange="this.form.submit()" style="background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:.4rem .75rem;font-size:.9rem;cursor:pointer;">
-      <option value="">— Todas —</option>
-      {% for cat in categorias %}
-        <option value="{{ cat }}" {% if cat == categoria_selecionada %}selected{% endif %}>{{ cat }}</option>
-      {% endfor %}
-    </select>
-    {% if macro_selecionada or categoria_selecionada %}
-      <a href="{% url 'scraper-top' %}" style="color:#8b949e;font-size:.85rem;text-decoration:none;">✕ Limpar filtros</a>
+  {{ categorias_por_macro|json_script:"cats-data" }}
+  {{ categorias_selecionadas|json_script:"sel-cats-data" }}
+
+  <form method="get" id="filtro-form" style="margin-bottom:1.5rem;display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;">
+
+    <!-- Dropdown macro -->
+    <div class="dd" id="dd-macro">
+      <button type="button" class="dd-btn{% if macros_selecionados %} active{% endif %}" onclick="toggleDD('dd-macro')">
+        Macro-categoria{% if macros_selecionados %} ({{ macros_selecionados|length }}){% endif %} ▾
+      </button>
+      <div class="dd-panel" id="panel-macro">
+        {% for mc in macro_categorias %}
+        <label class="dd-item">
+          <input type="checkbox" name="macro" value="{{ mc }}"
+                 {% if mc in macros_selecionados %}checked{% endif %}
+                 onchange="onMacroChange(this)">
+          {{ mc }}
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+
+    <!-- Dropdown nicho (preenchido via JS) -->
+    <div class="dd" id="dd-cat" style="{% if not macros_selecionados %}display:none{% endif %}">
+      <button type="button" class="dd-btn{% if categorias_selecionadas %} active{% endif %}" onclick="toggleDD('dd-cat')">
+        Nicho{% if categorias_selecionadas %} ({{ categorias_selecionadas|length }}){% endif %} ▾
+      </button>
+      <div class="dd-panel" id="panel-cat"></div>
+    </div>
+
+    <button type="submit" style="background:#238636;color:#fff;border:1px solid #2ea043;border-radius:6px;padding:.4rem 1.1rem;font-size:.9rem;cursor:pointer;">Filtrar</button>
+    {% if macros_selecionados or categorias_selecionadas %}
+    <a href="{% url 'scraper-top' %}" style="color:#8b949e;font-size:.85rem;text-decoration:none;">✕ Limpar</a>
     {% endif %}
   </form>
+
+  <script>
+  (function () {
+    var CATS = JSON.parse(document.getElementById('cats-data').textContent);
+    var SEL_CATS = JSON.parse(document.getElementById('sel-cats-data').textContent);
+
+    function toggleDD(id) {
+      document.querySelectorAll('.dd-panel').forEach(function (p) {
+        if (p.id !== 'panel-' + id.replace('dd-', '')) p.classList.remove('open');
+      });
+      document.getElementById('panel-' + id.replace('dd-', '')).classList.toggle('open');
+    }
+    window.toggleDD = toggleDD;
+
+    document.addEventListener('click', function (e) {
+      if (!e.target.closest('.dd')) {
+        document.querySelectorAll('.dd-panel').forEach(function (p) { p.classList.remove('open'); });
+      }
+    });
+
+    function selectedMacros() {
+      return Array.from(document.querySelectorAll('input[name="macro"]:checked')).map(function (i) { return i.value; });
+    }
+
+    function rebuildCatPanel() {
+      var macros = selectedMacros();
+      var ddCat = document.getElementById('dd-cat');
+      var panel = document.getElementById('panel-cat');
+      var btn = ddCat.querySelector('.dd-btn');
+
+      if (macros.length === 0) {
+        ddCat.style.display = 'none';
+        panel.innerHTML = '';
+        return;
+      }
+      ddCat.style.display = '';
+      panel.innerHTML = '';
+
+      macros.forEach(function (macro) {
+        var cats = CATS[macro] || [];
+        if (!cats.length) return;
+        var hdr = document.createElement('div');
+        hdr.className = 'dd-header';
+        hdr.textContent = macro;
+        panel.appendChild(hdr);
+        cats.forEach(function (cat) {
+          var lbl = document.createElement('label');
+          lbl.className = 'dd-item';
+          var cb = document.createElement('input');
+          cb.type = 'checkbox'; cb.name = 'categoria'; cb.value = cat;
+          cb.style.accentColor = '#3fb950';
+          if (SEL_CATS.indexOf(cat) !== -1) cb.checked = true;
+          cb.addEventListener('change', updateCatBtn);
+          lbl.appendChild(cb);
+          lbl.appendChild(document.createTextNode(' ' + cat));
+          panel.appendChild(lbl);
+        });
+      });
+      updateCatBtn();
+    }
+
+    function updateCatBtn() {
+      var n = document.querySelectorAll('#panel-cat input:checked').length;
+      var btn = document.querySelector('#dd-cat .dd-btn');
+      btn.textContent = 'Nicho' + (n ? ' (' + n + ')' : '') + ' ▾';
+      btn.classList.toggle('active', n > 0);
+    }
+
+    window.onMacroChange = function (cb) {
+      var n = document.querySelectorAll('input[name="macro"]:checked').length;
+      var btn = document.querySelector('#dd-macro .dd-btn');
+      btn.textContent = 'Macro-categoria' + (n ? ' (' + n + ')' : '') + ' ▾';
+      btn.classList.toggle('active', n > 0);
+      rebuildCatPanel();
+    };
+
+    rebuildCatPanel();
+  }());
+  </script>
 
   {% if produtos %}
   <table>
@@ -54,6 +161,7 @@
       <tr>
         <th>#</th>
         <th>Produto</th>
+        <th>Cupom</th>
         <th>Preço original</th>
         <th>Preço com cupom</th>
         <th>Economia</th>
@@ -69,6 +177,19 @@
             <div class="categoria">{% if p.macro_categoria %}{{ p.macro_categoria }} · {% endif %}{{ p.categoria }}</div>
           {% endif %}
         </td>
+        <td class="cupom-titulo">
+          {% if p.cupom %}
+            <a href="{{ p.cupom.link_original }}" target="_blank" rel="noopener">{{ p.cupom.titulo }}</a>
+            <div class="cupom-desconto">
+              {% if p.cupom.tipo_desconto == 'fixo' %}
+                - R$ {{ p.cupom.valor_desconto|floatformat:2 }}
+              {% else %}
+                - {{ p.cupom.valor_desconto|floatformat:0 }}%
+              {% endif %}
+            </div>
+          {% else %}
+            <span style="color:#484f58">—</span>
+          {% endif %}
         <td><span class="preco-original">R$ {{ p.preco_sem_desconto|floatformat:2 }}</span></td>
         <td><span class="preco-final">R$ {{ p.preco_com_cupom|floatformat:2 }}</span></td>
         <td><span class="economia">- R$ {{ p.economia|floatformat:2 }}</span></td>

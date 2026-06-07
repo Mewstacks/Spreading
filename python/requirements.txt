@@ -1,3 +1,5 @@
 requests==2.32.3
 qrcode[pil]==8.1
 python-dotenv==1.1.0
+celery==5.4.0
+redis==5.2.1

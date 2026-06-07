@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spreading — Painel</title>
+  <style>
+    body { font-family: monospace; background: #0d1117; color: #c9d1d9; margin: 0; padding: 2rem; }
+    h1 { color: #58a6ff; }
+    p.sub { color: #8b949e; margin-top: -.4rem; }
+    .grid {
+      margin-top: 2rem; display: grid; gap: 1rem;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    }
+    a.card {
+      display: block; text-decoration: none; color: #c9d1d9;
+      background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+      padding: 1.2rem; transition: border-color .15s, transform .1s;
+    }
+    a.card:hover { border-color: #58a6ff; transform: translateY(-2px); }
+    a.card .icon { font-size: 1.6rem; }
+    a.card .title { display: block; margin-top: .5rem; font-size: 1.05rem; color: #58a6ff; }
+    a.card .desc { display: block; margin-top: .3rem; font-size: .8rem; color: #8b949e; }
+  </style>
+</head>
+<body>
+  <h1>🛒 Spreading</h1>
+  <p class="sub">Painel de scraping + ofertas Mercado Livre → WhatsApp</p>
+
+  <div class="grid">
+    <a class="card" href="/scrapers/">
+      <span class="icon">▶</span>
+      <span class="title">Scraper</span>
+      <span class="desc">Iniciar raspagem + login ML, com log e barra de progresso ao vivo.</span>
+    </a>
+
+    <a class="card" href="/scrapers/top/">
+      <span class="icon">🔥</span>
+      <span class="title">Top Promoções</span>
+      <span class="desc">Maiores descontos por macro-categoria e categoria.</span>
+    </a>
+
+    <a class="card" href="/scrapers/config/">
+      <span class="icon">⚙</span>
+      <span class="title">Configurações de Envio</span>
+      <span class="desc">Nicho → grupo → intervalo. Disparo automático + "Enviar agora".</span>
+    </a>
+
+    <a class="card" href="/scrapers/whatsapp/">
+      <span class="icon">📱</span>
+      <span class="title">Conexão WhatsApp</span>
+      <span class="desc">Status da sessão + QR Code para parear o aparelho.</span>
+    </a>
+
+    <a class="card" href="/admin/">
+      <span class="icon">⚙</span>
+      <span class="title">Admin</span>
+      <span class="desc">Cupons, Produtos e Histórico de Envio no Django Admin.</span>
+    </a>
+  </div>
+</body>
+</html>

@@ -10,10 +10,16 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import os
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# .env vive na raiz do projeto (Spreading/), um nível acima de django/
+load_dotenv(BASE_DIR.parent / ".env")
 
 
 # Quick-start development settings - unsuitable for production
@@ -116,3 +122,22 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+
+# ─────────────────────────────────────────────────────────────
+# WhatsApp sender (serviço Node em node.js/index.js)
+# ─────────────────────────────────────────────────────────────
+WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:3000")
+# Reutiliza a API_KEY do .env (mesma chave do serviço Node).
+WHATSAPP_API_KEY = os.getenv("WHATSAPP_API_KEY") or os.getenv("API_KEY", "")
+# Grupo de destino padrão (id no formato 12345@g.us). Pegue via GET /api/grupos.
+WHATSAPP_GRUPO_ID = os.getenv("WHATSAPP_GRUPO_ID", "")
+
+
+# ─────────────────────────────────────────────────────────────
+# Celery + Beat
+# ─────────────────────────────────────────────────────────────
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_TRACK_STARTED = True

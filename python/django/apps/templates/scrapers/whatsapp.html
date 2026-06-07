@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WhatsApp — Conexão</title>
+  <style>
+    body { font-family: monospace; background: #0d1117; color: #c9d1d9; margin: 2rem; text-align: center; }
+    h1 { color: #58a6ff; }
+    a { color: #58a6ff; }
+    #status { font-size: 1.1rem; margin: 1rem 0; }
+    .on  { color: #3fb950; font-weight: bold; }
+    .off { color: #f85149; font-weight: bold; }
+    #qr-box { margin: 1.5rem auto; background: #fff; padding: 1rem; border-radius: 8px;
+      display: inline-block; min-width: 280px; min-height: 280px; }
+    #qr-box img { width: 280px; height: 280px; display: block; }
+    .hint { color: #8b949e; font-size: .85rem; max-width: 460px; margin: 1rem auto; }
+  </style>
+</head>
+<body>
+  <h1>📱 Conexão WhatsApp</h1>
+  <p><a href="/">← início</a> &nbsp;|&nbsp; <a href="/scrapers/config/">configurações</a></p>
+
+  <div id="status">Verificando…</div>
+  <div id="qr-area" style="display:none;">
+    <div id="qr-box"><img id="qr-img" alt="QR Code"></div>
+    <p class="hint">Abra o WhatsApp → <b>Aparelhos conectados</b> → <b>Conectar aparelho</b> e escaneie. O QR atualiza sozinho.</p>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const qrArea = document.getElementById('qr-area');
+    const qrImg = document.getElementById('qr-img');
+
+    function refreshQr() {
+      // cache-bust para forçar novo QR
+      qrImg.src = '/scrapers/whatsapp/qr.png?t=' + Date.now();
+    }
+
+    async function poll() {
+      try {
+        const r = await fetch('/scrapers/whatsapp/status/');
+        const s = await r.json();
+        if (s.conectado) {
+          statusEl.innerHTML = '<span class="on">✅ Conectado</span>';
+          qrArea.style.display = 'none';
+        } else {
+          statusEl.innerHTML = '<span class="off">❌ Desconectado</span> — escaneie o QR abaixo';
+          qrArea.style.display = 'block';
+          refreshQr();
+        }
+      } catch (e) {
+        statusEl.innerHTML = '<span class="off">⚠ Serviço Node offline (porta 3000)</span>';
+        qrArea.style.display = 'none';
+      }
+    }
+
+    poll();
+    setInterval(poll, 5000);   // re-verifica status + atualiza QR a cada 5s
+  </script>
+</body>
+</html>

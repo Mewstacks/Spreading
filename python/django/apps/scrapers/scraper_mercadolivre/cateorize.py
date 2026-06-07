@@ -1,13 +1,3 @@
-import os
-import sys
-import django
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "core.settings")
-django.setup()
-
-from apps.scrapers.models import Produto
-
 macro_dict = {"Automotivo": ["VEHICLE", "MOTORCYCLE", "BICYCLE", "AUTOMOTIVE", "COMBUSTION", "CYCLING", "GPS", "BEARING", "CARS", "ENGINE", "MOTOR", "PEDAL", "TRUCK", "AMBULANCE", "BICYCLES", "CAR", "DRIVING", "GREASE", "MOTORCYCLES", "MOTORCYCLIST", "PARKING", "RADIAL", "REVERSE", "SPARK", "SUSPENSION", "TIRE", "TRANSPORT", "TRUCKS", "WAGONS", "WHEEL"],
 "Náutica, Praia e Surf": ["NAUTICAL", "SURFBOARD", "BEACH", "SUN", "BODYBOARDS", "KAYAKS", "OUTBOARD", "PADDLE", "SUNBATHING", "SURFBOARDS", "WETSUITS"],
 "Casa, Móveis e Decoração": ["DECORATIVE", "HOME", "TABLE", "FURNITURE", "BED", "CANDLE", "DINING", "FOLDING", "CARPET", "CURTAIN", "HOUSEHOLD", "INDOOR", "LAMP", "MIRROR", "SLEEPING", "STORAGE", "AMBIENT", "BEDDING", "BEDROOM", "BEDS", "BLANKETS", "BOOKCASES", "BOOKENDS", "CABINETS", "CANDELABRAS", "CANDLES", "CHAIR", "CLOCKS", "COASTERS", "COMFORTERS", "COMFORTER", "CORK", "CUSHIONS", "CUSHION", "DESIGN", "DESK", "DRAWERS", "ENTRYWAY", "FRAME", "HAMMOCKS", "HANGING", "HEADBOARDS", "HOUSE", "LIVING", "LOCKERS", "MAILBOXES", "MATTRESSES", "MATTRESS", "MIRRORS", "MOULDINGS", "NIGHTSTANDS", "PICTURE", "PILLOWS", "PLACEMATS", "POSTERS", "POUFS", "QUILTS", "SHADE", "SHELVES", "SIDEBOARDS", "SOFAS", "SOFA", "STOOLS", "TABLECLOTHS", "TOWEL", "UNDERPLATES", "WALLPAPER", "WARDROBES"],
@@ -56,22 +46,42 @@ for macro, prefixos in macro_dict.items():
     for p in prefixos:
         prefixo_para_macro[p] = macro
 
-# Popula macro_categoria em todos os produtos
-produtos_qs = Produto.objects.exclude(categoria__isnull=True).exclude(categoria="").exclude(categoria="DESCONHECIDO")
-atualizados = 0
-em_lote = []
-for produto in produtos_qs.iterator(chunk_size=500):
-    prefixo = produto.categoria.split("_")[0]
-    macro = prefixo_para_macro.get(prefixo)
-    if produto.macro_categoria != macro:
-        produto.macro_categoria = macro
-        em_lote.append(produto)
-    if len(em_lote) >= 500:
+
+def popular_macro_categorias():
+    """
+    Popula Produto.macro_categoria a partir de Produto.categoria (domain_id) usando
+    o mapa de palavras-chave macro_dict. Reutilizável: chamada no fim do scrape e
+    como ação avulsa. Exige Django configurado.
+    """
+    from apps.scrapers.models import Produto
+
+    produtos_qs = (
+        Produto.objects
+        .exclude(categoria__isnull=True).exclude(categoria="").exclude(categoria="DESCONHECIDO")
+    )
+    atualizados = 0
+    em_lote = []
+    for produto in produtos_qs.iterator(chunk_size=500):
+        prefixo = produto.categoria.split("_")[0]
+        macro = prefixo_para_macro.get(prefixo)
+        if produto.macro_categoria != macro:
+            produto.macro_categoria = macro
+            em_lote.append(produto)
+        if len(em_lote) >= 500:
+            Produto.objects.bulk_update(em_lote, ["macro_categoria"])
+            atualizados += len(em_lote)
+            em_lote = []
+    if em_lote:
         Produto.objects.bulk_update(em_lote, ["macro_categoria"])
         atualizados += len(em_lote)
-        em_lote = []
-if em_lote:
-    Produto.objects.bulk_update(em_lote, ["macro_categoria"])
-    atualizados += len(em_lote)
 
-print(f"\nMacro-categorias populadas: {atualizados} produtos atualizados.")
+    print(f"Macro-categorias populadas: {atualizados} produtos atualizados.")
+    return atualizados
+
+
+if __name__ == "__main__":
+    import os
+    import django
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "core.settings")
+    django.setup()
+    popular_macro_categorias()

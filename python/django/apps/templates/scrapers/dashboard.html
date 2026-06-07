@@ -18,17 +18,101 @@
     }
     .line-err  { color: #f85149; }
     .line-done { color: #3fb950; font-weight: bold; }
+    #progress-wrap { margin-top: 1.2rem; display: none; }
+    #progress-text { font-size: .85rem; margin-bottom: .35rem; color: #58a6ff; }
+    #progress-bar-bg {
+      background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+      height: 1.1rem; overflow: hidden;
+    }
+    #progress-bar {
+      background: #238636; height: 100%; width: 0%;
+      transition: width .25s ease;
+    }
   </style>
 </head>
 <body>
   <h1>Scraper MercadoLivre</h1>
-  <button id="run-btn" onclick="startScraper()">▶ Iniciar scraping</button>
+  <button id="ofertas-btn" onclick="startOfertas()" style="padding:.6rem 1.4rem;font-size:1rem;cursor:pointer;background:#238636;color:#fff;border:none;border-radius:6px;">🏷️ Raspar Ofertas</button>
+  <button id="links-btn" onclick="startLinks()" style="margin-left:.75rem;padding:.6rem 1.4rem;font-size:1rem;cursor:pointer;background:#8957e5;color:#fff;border:none;border-radius:6px;">🔗 Gerar Links</button>
+  <input id="links-limite" type="number" value="50" min="1" style="margin-left:.5rem;width:5rem;padding:.5rem;background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;" title="Quantos links gerar nesta rodada">
   <button id="auth-btn" onclick="startAuth()" style="margin-left:.75rem;padding:.6rem 1.4rem;font-size:1rem;cursor:pointer;background:#1f6feb;color:#fff;border:none;border-radius:6px;">🔑 Login ML</button>
+  <br>
+  <small style="color:#6e7681;">Legado (cupons — não usado no envio): </small>
+  <button id="run-btn" onclick="startScraper()" style="padding:.3rem .8rem;font-size:.8rem;cursor:pointer;background:#30363d;color:#8b949e;border:none;border-radius:6px;">▶ Raspar cupons</button>
+  <br><br>
+  <a href="/scrapers/config/" style="color:#8b949e;">⚙ configurações</a>
+  <a href="/" style="margin-left:.75rem;color:#8b949e;">← início</a>
+
+  <div id="progress-wrap">
+    <div id="progress-text">Progresso</div>
+    <div id="progress-bar-bg"><div id="progress-bar"></div></div>
+  </div>
 
   <div id="log"></div>
 
   <script>
     let es;
+
+    function updateProgress(data) {
+      // data ex: "[PROGRESSO] Cupom 12/87 (13%)"
+      const m = data.match(/\((\d+)%\)/);
+      if (!m) return;
+      const wrap = document.getElementById('progress-wrap');
+      wrap.style.display = 'block';
+      document.getElementById('progress-bar').style.width = m[1] + '%';
+      document.getElementById('progress-text').textContent =
+        data.replace('[PROGRESSO] ', '');
+    }
+
+    function startOfertas() {
+      const btn = document.getElementById('ofertas-btn');
+      const log = document.getElementById('log');
+      btn.disabled = true; log.innerHTML = '';
+      es = new EventSource('/scrapers/ofertas/?paginas=10');
+      es.onmessage = function (e) {
+        if (e.data === '__DONE__') {
+          appendLine('--- Finalizado ---', 'line-done');
+          document.getElementById('progress-bar').style.width = '100%';
+          es.close(); btn.disabled = false; return;
+        }
+        if (e.data.startsWith('[PROGRESSO]')) { updateProgress(e.data); return; }
+        appendLine(e.data, e.data.startsWith('[ERRO]') ? 'line-err' : '');
+      };
+      es.onerror = function () { appendLine('[ERRO] Conexão perdida.', 'line-err'); es.close(); btn.disabled = false; };
+    }
+
+    function startLinks() {
+      const btn = document.getElementById('links-btn');
+      const log = document.getElementById('log');
+      const limite = document.getElementById('links-limite').value || 50;
+
+      btn.disabled = true;
+      log.innerHTML = '';
+
+      es = new EventSource('/scrapers/gerar-links/?limite=' + limite);
+
+      es.onmessage = function (e) {
+        if (e.data === '__DONE__') {
+          appendLine('--- Finalizado ---', 'line-done');
+          document.getElementById('progress-bar').style.width = '100%';
+          es.close();
+          btn.disabled = false;
+          return;
+        }
+        if (e.data.startsWith('[PROGRESSO]')) {
+          updateProgress(e.data);
+          return;
+        }
+        const cls = e.data.startsWith('[ERRO]') ? 'line-err' : '';
+        appendLine(e.data, cls);
+      };
+
+      es.onerror = function () {
+        appendLine('[ERRO] Conexão perdida.', 'line-err');
+        es.close();
+        btn.disabled = false;
+      };
+    }
 
     function startScraper() {
       const btn = document.getElementById('run-btn');
@@ -42,8 +126,14 @@
       es.onmessage = function (e) {
         if (e.data === '__DONE__') {
           appendLine('--- Finalizado ---', 'line-done');
+          document.getElementById('progress-bar').style.width = '100%';
           es.close();
           btn.disabled = false;
+          return;
+        }
+
+        if (e.data.startsWith('[PROGRESSO]')) {
+          updateProgress(e.data);
           return;
         }
 

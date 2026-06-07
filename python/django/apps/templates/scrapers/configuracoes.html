@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Configurações de Envio</title>
+  <style>
+    body { font-family: monospace; background: #0d1117; color: #c9d1d9; margin: 2rem; }
+    h1 { color: #58a6ff; }
+    a { color: #58a6ff; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    th, td { border: 1px solid #30363d; padding: .5rem; text-align: left; font-size: .85rem; }
+    th { color: #58a6ff; }
+    .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.2rem; margin-top: 1.5rem; }
+    label { display: block; margin-top: .6rem; font-size: .8rem; color: #8b949e; }
+    input, select { width: 100%; box-sizing: border-box; padding: .5rem; margin-top: .2rem;
+      background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; }
+    .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: .8rem; }
+    button { padding: .55rem 1.2rem; font-size: .9rem; cursor: pointer; border: none;
+      border-radius: 6px; color: #fff; margin-top: 1rem; }
+    .btn-save { background: #238636; }
+    .btn-del  { background: #da3633; }
+    .btn-send { background: #8957e5; }
+    .warn { color: #d29922; }
+    #log { margin-top: 1rem; background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+      padding: 1rem; max-height: 30vh; overflow-y: auto; white-space: pre-wrap; font-size: .8rem; }
+    .line-err { color: #f85149; } .line-done { color: #3fb950; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>⚙ Configurações de Envio</h1>
+  <a href="/">← início</a> &nbsp;|&nbsp; <a href="/scrapers/">scraper</a> &nbsp;|&nbsp;
+  <a href="/scrapers/whatsapp/">📱 WhatsApp</a> &nbsp;|&nbsp;
+  <button id="refresh-grupos" class="btn-send" style="margin-top:0" onclick="atualizarGrupos()">🔄 Atualizar grupos</button>
+  <span id="refresh-msg" style="font-size:.8rem;color:#8b949e;"></span>
+
+  {% if grupos_erro %}
+    <p class="warn">⚠ Não consegui listar grupos do WhatsApp ({{ grupos_erro }}). →
+      <a href="/scrapers/whatsapp/">Conectar WhatsApp (QR)</a>. Você ainda pode digitar o grupo_id manualmente.</p>
+  {% endif %}
+
+  <table>
+    <tr><th>Nicho</th><th>Grupo</th><th>Intervalo</th><th>Min %</th><th>Cooldown</th><th>Ativo</th><th>Último envio</th><th>Ações</th></tr>
+    {% for c in configs %}
+    <tr>
+      <td>{{ c.macro_categoria }}</td>
+      <td>{{ c.grupo_nome|default:c.grupo_id }}</td>
+      <td>{{ c.intervalo_minutos }}min</td>
+      <td>{{ c.min_desconto_percent }}</td>
+      <td>{{ c.horas_cooldown }}h</td>
+      <td>{% if c.ativo %}✅{% else %}❌{% endif %}</td>
+      <td>{{ c.ultimo_envio|default:"—" }}</td>
+      <td>
+        <button class="btn-send" onclick="enviarAgora({{ c.id }})">▶ Enviar agora</button>
+        <form method="post" style="display:inline">{% csrf_token %}
+          <input type="hidden" name="acao" value="delete"><input type="hidden" name="id" value="{{ c.id }}">
+          <button class="btn-del" onclick="return confirm('Remover?')">🗑</button>
+        </form>
+      </td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="8">Nenhuma configuração ainda.</td></tr>
+    {% endfor %}
+  </table>
+
+  <div class="card">
+    <h2 style="color:#58a6ff;font-size:1.1rem;">➕ Nova configuração</h2>
+    <form method="post">{% csrf_token %}
+      <div class="row">
+        <div>
+          <label>Nicho (macro-categoria)</label>
+          <select name="macro_categoria">
+            <option value="">(qualquer / ofertas)</option>
+            {% for m in macros %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>Grupo WhatsApp</label>
+          {% if grupos %}
+          <select name="grupo_id" onchange="document.getElementsByName('grupo_nome')[0].value = this.options[this.selectedIndex].text" required>
+            <option value="">— escolha —</option>
+            {% for g in grupos %}<option value="{{ g.id }}">{{ g.nome }}</option>{% endfor %}
+          </select>
+          {% else %}
+          <input name="grupo_id" placeholder="12345@g.us" required>
+          {% endif %}
+          <input type="hidden" name="grupo_nome">
+        </div>
+        <div><label>Intervalo (min)</label><input name="intervalo_minutos" type="number" value="60" min="1"></div>
+        <div><label>Desconto mín (%)</label><input name="min_desconto_percent" type="number" value="15" min="0" step="0.5"></div>
+        <div><label>Cooldown (h)</label><input name="horas_cooldown" type="number" value="24" min="0"></div>
+        <div><label>Ativo</label><input name="ativo" type="checkbox" checked style="width:auto"></div>
+      </div>
+      <button class="btn-save" type="submit">Salvar</button>
+    </form>
+  </div>
+
+  <div id="log"></div>
+
+  <script>
+    async function atualizarGrupos() {
+      const btn = document.getElementById('refresh-grupos');
+      const msg = document.getElementById('refresh-msg');
+      btn.disabled = true; msg.textContent = ' sincronizando…';
+      try {
+        const r = await fetch('/scrapers/whatsapp/refresh-grupos/');
+        const d = await r.json();
+        if (d.sucesso) {
+          msg.textContent = ' ' + d.total + ' grupos. Recarregando…';
+          setTimeout(() => location.reload(), 800);
+        } else {
+          msg.textContent = ' erro: ' + (d.erro || 'falhou') + ' (talvez ainda sincronizando — tente de novo em alguns segundos)';
+          btn.disabled = false;
+        }
+      } catch (e) {
+        msg.textContent = ' erro de conexão com o serviço Node';
+        btn.disabled = false;
+      }
+    }
+
+    function enviarAgora(id) {
+      const log = document.getElementById('log');
+      log.innerHTML = '';
+      const es = new EventSource('/scrapers/enviar-agora/?config=' + id);
+      es.onmessage = function (e) {
+        if (e.data === '__DONE__') { append('--- Finalizado ---', 'line-done'); es.close(); return; }
+        append(e.data, e.data.startsWith('[ERRO]') ? 'line-err' : '');
+      };
+      es.onerror = function () { append('[ERRO] Conexão perdida.', 'line-err'); es.close(); };
+    }
+    function append(text, cls) {
+      const log = document.getElementById('log');
+      const span = document.createElement('span');
+      if (cls) span.className = cls;
+      span.textContent = text + '\n';
+      log.appendChild(span); log.scrollTop = log.scrollHeight;
+    }
+  </script>
+</body>
+</html>

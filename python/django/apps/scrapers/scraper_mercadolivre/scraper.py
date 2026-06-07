@@ -76,18 +76,22 @@ def mapear_cupons(n=1):
                 track_info = tracking_dict.get(camp_id, {})
                 segmentacoes = track_info.get("segmentations", {})
 
+                # Padrões de URL que NÃO são páginas de listagem/oferta
+                _URLS_INVALIDAS = ("/social/", "/perfil/", "/usuario/", "/noindex/")
+
                 acao = cupom.get("action", {})
                 tipo_acao = acao.get("type")
                 link_final = None
 
                 if tipo_acao == "link" and acao.get("value"):
                     link_valor = acao.get("value")
-                    if link_valor.startswith("http"):
-                        link_final = link_valor
-                    else:
-                        link_final = f"https://www.mercadolivre.com.br{link_valor}"
+                    candidato = link_valor if link_valor.startswith("http") else f"https://www.mercadolivre.com.br{link_valor}"
+                    # Só aceita se for uma página de listagem — perfis sociais não têm promoções
+                    if not any(p in candidato for p in _URLS_INVALIDAS):
+                        link_final = candidato
+                    # Se inválido, cai no elif abaixo para tentar reconstruir pelo container
 
-                elif tipo_acao == "button" or not link_final:
+                if tipo_acao == "button" or not link_final:
                     
                     container_singular = segmentacoes.get("container", {})
                     container_lista = segmentacoes.get("containers", [])
@@ -96,10 +100,12 @@ def mapear_cupons(n=1):
                     
                     if container_singular and container_singular.get("name"):
                         slug = str(container_singular.get("name"))
-                    elif container_lista and container_lista[0].get("name"):
-                        slug = str(container_lista[0].get("name"))
-                    elif container_lista and container_lista[0].get("id"):
-                        slug = str(container_lista[0].get("id"))
+                    elif container_lista:
+                        c0 = container_lista[0]
+                        if isinstance(c0, dict):
+                            slug = str(c0.get("name") or c0.get("id") or "")
+                        else:
+                            slug = str(c0)
                     
                     created_by = track_info.get("created_by", "")
                     is_seller = (created_by == "seller" and subtitulo.startswith("Em produtos de "))
@@ -107,12 +113,9 @@ def mapear_cupons(n=1):
                     if is_seller:
                         nome_loja = subtitulo.replace("Em produtos de ", "").strip()
                         nome_loja_formatado = nome_loja.lower().replace(" oficial", "").replace(" ", "-")
-                        
-                        if slug:
-                            slug_formatado = slug.strip().replace(" ", "-")
-                            link_final = f"https://lista.mercadolivre.com.br/_Container_{slug_formatado}"
-                        else:
-                            link_final = f"https://lista.mercadolivre.com.br/loja/{nome_loja_formatado}/"
+                        # Para cupons de vendedor, _Container_{seller_internal_id} redireciona
+                        # para /social/ no ML — usa sempre a URL da loja, que é estável.
+                        link_final = f"https://lista.mercadolivre.com.br/loja/{nome_loja_formatado}/"
                             
                     elif slug:
                         slug_formatado = slug.strip().replace(" ", "-").lower()
@@ -126,21 +129,12 @@ def mapear_cupons(n=1):
                             link_final = f"https://lista.mercadolivre.com.br/_CustId_{loja_id}"
                         
                     elif segmentacoes.get("categories"):
-                        cat_id = segmentacoes["categories"][0].get("id")
+                        cat0 = segmentacoes["categories"][0]
+                        cat_id = cat0.get("id") if isinstance(cat0, dict) else cat0
                         link_final = f"https://lista.mercadolivre.com.br/{cat_id}"
                         
                     else:
                         link_final = f"https://lista.mercadolivre.com.br/_Container_{camp_id}"
-
-                    if link_final and "coupon_campaign_id" not in link_final:
-                        if "#" in link_final:
-                            partes = link_final.split("#")
-                            conector = "&" if "?" in partes[0] else "?"
-                            link_final = f"{partes[0]}{conector}coupon_campaign_id={camp_id}#{partes[1]}"
-                        else:
-                            conector = "&" if "?" in link_final else "?"
-                            link_final += f"{conector}coupon_campaign_id={camp_id}"
-                        
 
                 if link_final:
                     link_final = link_final.replace("\u002F", "/").replace("\\/", "/")
@@ -160,11 +154,24 @@ def mapear_cupons(n=1):
                             "tipo": "fixo"
                         }
 
+                codigo = cupom.get("code") or cupom.get("inputCode") or ""
+
+                # Extrai valor mínimo de compra (ex: Compra mínima R$399 → 399.0)
+                valor_minimo = 0.0
+                frac_minimo = (cupom.get("amount") or {}).get("accessibility", {}).get("minAmount", {}).get("fractionalAmount", "")
+                if frac_minimo:
+                    try:
+                        valor_minimo = float(str(frac_minimo).replace(",", "."))
+                    except ValueError:
+                        pass
+
                 cupom_limpo = {
                     "campaignId": camp_id,
                     "title": titulo_completo.replace("  ", " ").strip(),
                     "desconto": desconto,
-                    "link_produtos": link_final
+                    "link_produtos": link_final,
+                    "codigo": codigo,
+                    "valor_minimo": valor_minimo,
                 }
                 
                 todos_os_cupons_limpos.append(cupom_limpo)
@@ -179,7 +186,9 @@ def mapear_cupons(n=1):
                 titulo=c["title"],
                 tipo_desconto=(c.get("desconto") or {}).get("tipo", ""),
                 valor_desconto=(c.get("desconto") or {}).get("valor", 0.0),
+                valor_minimo=c.get("valor_minimo") or 0.0,
                 link_original=c.get("link_produtos") or "",
+                codigo=c.get("codigo") or "",
             )
             for c in todos_os_cupons_limpos
         ]
@@ -187,7 +196,7 @@ def mapear_cupons(n=1):
             cupons_db,
             update_conflicts=True,
             unique_fields=["campanha_id"],
-            update_fields=["titulo", "tipo_desconto", "valor_desconto", "link_original"],
+            update_fields=["titulo", "tipo_desconto", "valor_desconto", "valor_minimo", "link_original", "codigo"],
         )
         ids_ativos = {c["campaignId"] for c in todos_os_cupons_limpos}
         removidos, _ = Cupom.objects.exclude(campanha_id__in=ids_ativos).delete()
@@ -332,15 +341,27 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
 
                 desconto = cupom.get("desconto")
                 preco_com_cupom = preco_atual_float
-                
+
                 if desconto:
                     valor_desc = desconto.get("valor", 0)
                     if desconto.get("tipo") == "porcentagem":
                         preco_com_cupom = preco_atual_float * (1 - (valor_desc / 100))
                     elif desconto.get("tipo") == "fixo":
+                        # Desconto fixo maior que o preço = dado inválido, ignora o produto
+                        if valor_desc >= preco_atual_float:
+                            continue
                         preco_com_cupom = preco_atual_float - valor_desc
-                        if preco_com_cupom < 0:
-                            preco_com_cupom = 0
+
+                # Sanidade: preço final tem que ser positivo e desconto < 90%
+                if preco_com_cupom <= 0 or preco_com_cupom >= preco_atual_float:
+                    continue
+                if preco_atual_float > 0 and ((preco_atual_float - preco_com_cupom) / preco_atual_float) >= 0.90:
+                    continue
+
+                # Descarta produto que não atinge o valor mínimo de compra do cupom
+                valor_minimo_cupom = cupom.get("valor_minimo") or 0
+                if valor_minimo_cupom > 0 and preco_atual_float < valor_minimo_cupom:
+                    continue
 
                 produtos_raspados.append({
                     "nome_produto": nome,
@@ -410,7 +431,7 @@ def _sincronizar_produtos_no_banco(cupons_com_produtos):
 def main():
     mapear_cupons()
     cupons_qs = Cupom.objects.all().values(
-        "campanha_id", "titulo", "tipo_desconto", "valor_desconto", "link_original"
+        "campanha_id", "titulo", "tipo_desconto", "valor_desconto", "valor_minimo", "link_original"
     )
     if not cupons_qs.exists():
         print("Nenhum cupom encontrado no banco. Deu merda")
@@ -435,6 +456,7 @@ def main():
             "title": c["titulo"],
             "desconto": desconto,
             "link_produtos": c["link_original"],
+            "valor_minimo": c.get("valor_minimo") or 0.0,
         })
 
     print(f"{pulados} cupons já processados anteriormente — pulando.")
@@ -446,11 +468,39 @@ def main():
 
     caminho_auth = os.path.join(caminho_atual, "auth.json")
 
+    resultados_pendentes = []
+    total = len(cupons_pendentes)
     with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
-        for cupom in cupons_pendentes:
+        for i, cupom in enumerate(cupons_pendentes, 1):
+            print(f"[PROGRESSO] Cupom {i}/{total} ({i*100//total}%)")
             resultado = listar_itens_por_cupom(cupom, page)
             if resultado:
-                _sincronizar_produtos_no_banco([resultado])
+                resultados_pendentes.append(resultado)
+
+    # Sincroniza com o banco FORA do contexto Playwright para evitar
+    # SynchronousOnlyOperation (Playwright tem event loop interno que
+    # conflita com Django ORM síncrono)
+    if resultados_pendentes:
+        _sincronizar_produtos_no_banco(resultados_pendentes)
+
+    # Classifica produtos em macro-categorias (necessário para seleção por nicho)
+    try:
+        from apps.scrapers.scraper_mercadolivre.cateorize import popular_macro_categorias
+        popular_macro_categorias()
+    except Exception as e:
+        print(f"[main] Falha ao popular macro-categorias: {e}")
+
+    # Pré-gera links de afiliado em lote (1 sessão Playwright) para os produtos novos.
+    # Assim o envio depois é instantâneo e não depende do browser na hora crítica.
+    try:
+        from apps.scrapers.scraper_mercadolivre.link import gerar_links_em_lote
+        novos = Produto.objects.filter(
+            campanha_id__in=[c["campaignId"] for c in cupons_pendentes],
+            link_afiliado="",
+        )
+        gerar_links_em_lote(list(novos))
+    except Exception as e:
+        print(f"[main] Falha ao pré-gerar links de afiliado: {e}")
 
     print(f"\nFinalizado! {len(cupons_pendentes)} cupons processados.")
 
