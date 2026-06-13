@@ -1,62 +1,102 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>WhatsApp — Conexão</title>
-  <style>
-    body { font-family: monospace; background: #0d1117; color: #c9d1d9; margin: 2rem; text-align: center; }
-    h1 { color: #58a6ff; }
-    a { color: #58a6ff; }
-    #status { font-size: 1.1rem; margin: 1rem 0; }
-    .on  { color: #3fb950; font-weight: bold; }
-    .off { color: #f85149; font-weight: bold; }
-    #qr-box { margin: 1.5rem auto; background: #fff; padding: 1rem; border-radius: 8px;
-      display: inline-block; min-width: 280px; min-height: 280px; }
-    #qr-box img { width: 280px; height: 280px; display: block; }
-    .hint { color: #8b949e; font-size: .85rem; max-width: 460px; margin: 1rem auto; }
-  </style>
-</head>
-<body>
-  <h1>📱 Conexão WhatsApp</h1>
-  <p><a href="/">← início</a> &nbsp;|&nbsp; <a href="/scrapers/config/">configurações</a></p>
+{% extends "base.html" %}
+{% block title %}WhatsApp — Conexão{% endblock %}
 
-  <div id="status">Verificando…</div>
-  <div id="qr-area" style="display:none;">
-    <div id="qr-box"><img id="qr-img" alt="QR Code"></div>
-    <p class="hint">Abra o WhatsApp → <b>Aparelhos conectados</b> → <b>Conectar aparelho</b> e escaneie. O QR atualiza sozinho.</p>
+{% block head_extra %}
+<style>
+  .conn { max-width: 460px; margin: 0 auto; text-align: center; }
+  #qr-box { margin: 1.5rem auto; background: #fff; padding: 1rem; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center; width: 280px; height: 280px; }
+  #qr-box img { width: 248px; height: 248px; display: block; }
+  #qr-box.empty-box { background: var(--surface); border: 1px dashed var(--border); color: var(--muted); font-size: .85rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="conn">
+  <div class="page-head" style="text-align:center;">
+    <h1 style="justify-content:center;">📱 Conexão WhatsApp</h1>
   </div>
 
-  <script>
-    const statusEl = document.getElementById('status');
-    const qrArea = document.getElementById('qr-area');
-    const qrImg = document.getElementById('qr-img');
+  <div id="status"><span class="badge badge-muted">verificando…</span></div>
 
-    function refreshQr() {
-      // cache-bust para forçar novo QR
-      qrImg.src = '/scrapers/whatsapp/qr.png?t=' + Date.now();
-    }
+  <div id="prog-area" style="display:none; margin:1rem auto; max-width:340px;">
+    <div class="progress-bg"><div id="prog-bar" class="progress-bar" style="width:0%;"></div></div>
+    <p id="prog-msg" class="muted" style="font-size:.82rem; margin-top:.4rem;"></p>
+  </div>
 
-    async function poll() {
-      try {
-        const r = await fetch('/scrapers/whatsapp/status/');
-        const s = await r.json();
-        if (s.conectado) {
-          statusEl.innerHTML = '<span class="on">✅ Conectado</span>';
-          qrArea.style.display = 'none';
-        } else {
-          statusEl.innerHTML = '<span class="off">❌ Desconectado</span> — escaneie o QR abaixo';
-          qrArea.style.display = 'block';
-          refreshQr();
-        }
-      } catch (e) {
-        statusEl.innerHTML = '<span class="off">⚠ Serviço Node offline (porta 3000)</span>';
-        qrArea.style.display = 'none';
+  <div id="qr-area" style="display:none;">
+    <div id="qr-box"><img id="qr-img" alt="QR Code"></div>
+    <p class="muted" style="font-size:.85rem;">Abra o WhatsApp → <b>Aparelhos conectados</b> → <b>Conectar aparelho</b> e escaneie. O QR atualiza sozinho.</p>
+  </div>
+
+  <div id="offline-area" style="display:none;">
+    <div id="qr-box" class="empty-box">Serviço Node (porta 3000) offline</div>
+    <p class="muted" style="font-size:.85rem;">Suba o serviço <span class="mono">node.js</span> e recarregue. Sem ele o WhatsApp não conecta.</p>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const statusEl = document.getElementById('status');
+  const qrArea = document.getElementById('qr-area');
+  const offlineArea = document.getElementById('offline-area');
+  const qrImg = document.getElementById('qr-img');
+  const progArea = document.getElementById('prog-area');
+  const progBar = document.getElementById('prog-bar');
+  const progMsg = document.getElementById('prog-msg');
+
+  // fase do Node -> {badge, classe, mostra QR, mostra barra}
+  const FASES = {
+    iniciando:     { txt: '⏳ Iniciando serviço…',     cls: 'badge-muted',  qr: false, bar: true  },
+    qr:            { txt: '📷 Aguardando leitura',      cls: 'badge-yellow', qr: true,  bar: false },
+    carregando:    { txt: '⏳ Carregando WhatsApp Web', cls: 'badge-yellow', qr: false, bar: true  },
+    autenticado:   { txt: '🔑 Autenticado',             cls: 'badge-yellow', qr: false, bar: true  },
+    sincronizando: { txt: '🔄 Sincronizando grupos',    cls: 'badge-yellow', qr: false, bar: true  },
+    conectado:     { txt: '✅ Conectado',               cls: 'badge-green',  qr: false, bar: false },
+    falha_auth:    { txt: '❌ Falha de autenticação',   cls: 'badge-red',    qr: true,  bar: false },
+    desconectado:  { txt: '❌ Desconectado',            cls: 'badge-red',    qr: true,  bar: false },
+  };
+
+  // QR vem como 204 (sem corpo) quando ainda não gerou -> img dispara onerror.
+  qrImg.onerror = function () { qrImg.removeAttribute('src'); qrImg.alt = 'gerando QR… aguarde'; };
+  function refreshQr() { qrImg.src = '/scrapers/whatsapp/qr.png?t=' + Date.now(); }
+
+  function showOffline() {
+    statusEl.innerHTML = '<span class="badge badge-yellow">⚠ Serviço offline</span>';
+    qrArea.style.display = 'none';
+    offlineArea.style.display = 'block';
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch('/scrapers/whatsapp/status/');
+      const s = await r.json();
+      // status() devolve `erro` quando o serviço Node está fora do ar (não conseguiu conectar).
+      if (s.erro) { showOffline(); return; }
+      offlineArea.style.display = 'none';
+
+      // Fallback p/ Node antigo sem 'fase' (só conectado bool).
+      const fase = s.fase || (s.conectado ? 'conectado' : 'desconectado');
+      const f = FASES[fase] || FASES.desconectado;
+
+      statusEl.innerHTML = '<span class="badge ' + f.cls + '">' + f.txt + '</span>';
+
+      // QR
+      if (f.qr) { qrArea.style.display = 'block'; refreshQr(); }
+      else { qrArea.style.display = 'none'; }
+
+      // Barra de progresso (carregando/sincronizando/etc)
+      if (f.bar) {
+        progArea.style.display = 'block';
+        progBar.style.width = (s.progresso || 0) + '%';
+        progMsg.textContent = s.mensagem || '';
+      } else {
+        progArea.style.display = 'none';
       }
-    }
-
-    poll();
-    setInterval(poll, 5000);   // re-verifica status + atualiza QR a cada 5s
-  </script>
-</body>
-</html>
+    } catch (e) { showOffline(); }
+  }
+  poll();
+  setInterval(poll, 3000);
+</script>
+{% endblock %}

@@ -103,6 +103,12 @@ let ultimoQR = null;
 let gruposCache = [];
 let gruposCarregados = false; // NOVA FLAG DE CONTROLE
 
+// Estado de conexão em tempo real (para o painel mostrar progresso).
+// fase: iniciando | qr | carregando | autenticado | sincronizando | conectado | falha_auth | desconectado
+let fase = 'iniciando';
+let progresso = 0;   // 0-100, vindo do loading_screen do WhatsApp Web
+let faseMsg = 'Iniciando serviço…';
+
 // ─────────────────────────────────────────────────────────────
 // 4. FALLBACK: Evolution API
 // Usada automaticamente quando o WhatsApp Web não está conectado.
@@ -190,15 +196,43 @@ const client = new Client({
 
 client.on('qr', (qr) => {
     ultimoQR = qr;
+    fase = 'qr';
+    progresso = 0;
+    faseMsg = 'Aguardando leitura do QR Code…';
     console.log('Sessão não encontrada ou expirada. Leia o QR Code:');
     qrcode.generate(qr, { small: true });
+});
+
+// Disparado depois que o QR é lido, enquanto o WhatsApp Web carrega (0-100%).
+client.on('loading_screen', (percent, message) => {
+    fase = 'carregando';
+    progresso = parseInt(percent, 10) || 0;
+    faseMsg = message || 'Carregando WhatsApp Web…';
+    console.log(`⏳ Carregando: ${progresso}% — ${faseMsg}`);
+});
+
+// Credenciais aceitas (QR lido com sucesso), antes do 'ready'.
+client.on('authenticated', () => {
+    ultimoQR = null;
+    fase = 'autenticado';
+    faseMsg = 'Autenticado — preparando sessão…';
+    console.log('🔑 Autenticado.');
+});
+
+client.on('auth_failure', (msg) => {
+    fase = 'falha_auth';
+    faseMsg = 'Falha na autenticação — gere um novo QR.';
+    console.error('❌ Falha de autenticação:', msg);
 });
 
 client.on('ready', async () => {
     isConnected = true;
     ultimoQR = null;
+    fase = 'sincronizando';
+    progresso = 100;
+    faseMsg = 'Sincronizando grupos…';
     console.log('✅ WhatsApp conectado! API protegida e pronta para uso.');
-    
+
     // O backend faz a busca uma única vez
     console.log('⏳ Iniciando sincronização de chats (pode demorar no primeiro login)...');
     try {
@@ -206,22 +240,36 @@ client.on('ready', async () => {
         gruposCache = chats
             .filter(c => c.isGroup)
             .map(c => ({ id: c.id._serialized, nome: c.name }));
-            
+
         gruposCarregados = true; // Avisa que o cache está pronto
+        fase = 'conectado';
+        faseMsg = `Conectado — ${gruposCache.length} grupos.`;
         console.log(`📋 Sincronização concluída! ${gruposCache.length} grupos carregados.`);
     } catch (err) {
+        fase = 'conectado';
+        faseMsg = 'Conectado (falha ao listar grupos).';
         console.error('❌ Erro ao pré-carregar grupos:', err.message);
     }
 });
 
 client.on('disconnected', (reason) => {
     isConnected = false;
+    gruposCarregados = false;
+    fase = 'desconectado';
+    progresso = 0;
+    faseMsg = 'Desconectado — escaneie o QR para reconectar.';
     console.log('❌ WhatsApp foi desconectado. Motivo:', reason);
 });
 
 // Rota de status (Aberta, sem autenticação, apenas para monitoramento)
 app.get('/api/status', (req, res) => {
-    res.json({ conectado: isConnected });
+    res.json({
+        conectado: isConnected,
+        fase,
+        progresso,
+        mensagem: faseMsg,
+        grupos: gruposCarregados ? gruposCache.length : 0,
+    });
 });
 
 // Rota para listar grupos (Protegida — expõe nomes e IDs dos grupos)
