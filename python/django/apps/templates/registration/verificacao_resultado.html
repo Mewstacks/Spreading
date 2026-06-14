@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Verificação de e-mail — Spreading{% endblock %}
+
+{% block head_extra %}
+<style>
+  .auth-wrap { max-width: 30rem; margin: 2rem auto; text-align: center; }
+  .auth-wrap .ic { width: 3.4rem; height: 3.4rem; margin: 0 auto 1rem; border-radius: 14px;
+    color: #fff; display: flex; align-items: center; justify-content: center; }
+  .auth-wrap .ic.ok { background: var(--green); }
+  .auth-wrap .ic.bad { background: var(--red); }
+  .auth-wrap .ic .lucide { width: 1.7rem; height: 1.7rem; }
+  .auth-wrap h1 { font-size: 1.4rem; margin: 0 0 .4rem; font-weight: 700; }
+  .auth-wrap p { color: var(--muted); font-size: .92rem; margin: 0 0 1.4rem; line-height: 1.5; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="auth-wrap">
+  {% if ok %}
+    <div class="ic ok"><i data-lucide="check"></i></div>
+    <h1>E-mail confirmado!</h1>
+    <p>Tudo certo. Seu acesso está liberado.</p>
+    <a href="{% url 'home' %}" class="btn btn-green"><i data-lucide="home"></i> Ir para o painel</a>
+  {% else %}
+    <div class="ic bad"><i data-lucide="x"></i></div>
+    <h1>Link inválido ou expirado</h1>
+    <p>Este link de verificação não é mais válido. Entre e peça um novo e-mail.</p>
+    <a href="{% url 'login' %}" class="btn btn-green"><i data-lucide="log-in"></i> Entrar</a>
+  {% endif %}
+</div>
+{% endblock %}
+{% block scripts %}<script>renderIcons();</script>{% endblock %}

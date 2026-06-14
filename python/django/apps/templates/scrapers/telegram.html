@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Telegram — Conexão{% endblock %}
+
+{% block content %}
+<div style="max-width:560px;margin:0 auto;">
+  <div class="page-head" style="text-align:center;">
+    <h1 style="justify-content:center;"><i data-lucide="send"></i> Conexão Telegram</h1>
+    <p class="sub">Bot API — sem QR, sem app aberto. Só precisa do token e o bot como admin do canal.</p>
+  </div>
+
+  <div class="card" style="text-align:center;">
+    <div id="tg-status"><span class="badge badge-muted">verificando…</span></div>
+    <div id="tg-detail" class="muted" style="font-size:.85rem;margin-top:.6rem;"></div>
+  </div>
+
+  <div class="card" style="margin-top:1.2rem;">
+    <h2 style="margin:0 0 .8rem;font-size:1rem;color:var(--accent);display:flex;align-items:center;gap:.5rem;justify-content:center;"><i data-lucide="list-checks"></i> Checklist de configuração</h2>
+    <ol style="margin:0;padding-left:1.2rem;line-height:1.9;font-size:.9rem;">
+      <li>Crie um bot com o <a class="link" href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> → comando <span class="mono">/newbot</span>.</li>
+      <li>Copie o token e ponha no <span class="mono">.env</span>: <span class="mono">TELEGRAM_BOT_TOKEN=123:ABC...</span></li>
+      <li>Adicione o bot como <b>administrador</b> do canal/grupo de destino.</li>
+      <li>Em <a class="link" href="/scrapers/config/">Envios</a>, crie uma config com canal <b>telegram</b> e destino <span class="mono">@seucanal</span> (ou id <span class="mono">-100…</span>).</li>
+    </ol>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  async function poll() {
+    const st = document.getElementById('tg-status');
+    const dt = document.getElementById('tg-detail');
+    try {
+      const r = await fetch('/scrapers/telegram/status/');
+      const s = await r.json();
+      if (!s.token) {
+        st.innerHTML = '<span class="badge badge-yellow"><i data-lucide="alert-triangle"></i> Sem token</span>';
+        dt.textContent = 'Defina TELEGRAM_BOT_TOKEN no .env e recarregue.';
+      } else if (s.ok) {
+        st.innerHTML = '<span class="badge badge-green"><i data-lucide="check-circle-2"></i> Bot conectado</span>';
+        // username/nome vêm do getMe (externo) — escapa via textContent p/ evitar XSS.
+        const b = document.createElement('b');
+        b.textContent = '@' + (s.username || '?');
+        dt.textContent = '';
+        dt.append('Bot ', b, ' (' + (s.nome || '') + ') pronto para enviar.');
+      } else {
+        st.innerHTML = '<span class="badge badge-red"><i data-lucide="x-circle"></i> Token inválido</span>';
+        dt.textContent = s.erro || 'getMe falhou. Verifique o token.';
+      }
+    } catch (e) {
+      st.innerHTML = '<span class="badge badge-red"><i data-lucide="x-circle"></i> Erro</span>';
+      dt.textContent = 'Não foi possível checar o bot.';
+    }
+    renderIcons();
+  }
+  poll();
+</script>
+{% endblock %}

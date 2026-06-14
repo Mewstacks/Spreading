@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Criar conta — Spreading{% endblock %}
+
+{% block head_extra %}
+<style>
+  .auth-wrap { max-width: 26rem; margin: 2rem auto; }
+  .auth-head { text-align: center; margin-bottom: 1.4rem; }
+  .auth-head h1 { font-size: 1.5rem; margin: 0 0 .3rem; font-weight: 700; letter-spacing: -.02em; }
+  .auth-head p { color: var(--muted); font-size: .9rem; margin: 0; }
+  .auth-field { margin-bottom: 1rem; }
+  .auth-field label { font-size: .8rem; }
+  .auth-foot { margin-top: 1.2rem; text-align: center; font-size: .85rem; color: var(--muted); }
+  .auth-foot a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  .field-err { color: var(--red); font-size: .78rem; margin-top: .3rem; }
+  .field-help { color: var(--muted-2); font-size: .74rem; margin-top: .3rem; line-height: 1.4; }
+  .btn-block { width: 100%; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="auth-wrap">
+  <div class="auth-head">
+    <h1>Criar conta</h1>
+    <p>Comece a divulgar ofertas com seu link de afiliado.</p>
+  </div>
+
+  <div class="card">
+    {% if form.non_field_errors %}
+      <div class="alert alert-warn"><i data-lucide="alert-triangle"></i>{{ form.non_field_errors|join:" " }}</div>
+    {% endif %}
+
+    <form method="post" novalidate>
+      {% csrf_token %}
+      {% for field in form %}
+      <div class="auth-field">
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {% if field.help_text %}<div class="field-help">{{ field.help_text|safe }}</div>{% endif %}
+        {% for e in field.errors %}<div class="field-err">{{ e }}</div>{% endfor %}
+      </div>
+      {% endfor %}
+      <button type="submit" class="btn btn-green btn-block"><i data-lucide="user-plus"></i> Criar conta</button>
+    </form>
+  </div>
+
+  <div class="auth-foot">
+    Já tem conta? <a href="{% url 'login' %}">Entrar</a>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script>renderIcons();</script>{% endblock %}

@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Entrar — Spreading{% endblock %}
+
+{% block head_extra %}
+<style>
+  .auth-wrap { max-width: 26rem; margin: 2rem auto; }
+  .auth-head { text-align: center; margin-bottom: 1.4rem; }
+  .auth-head h1 { font-size: 1.5rem; margin: 0 0 .3rem; font-weight: 700; letter-spacing: -.02em; }
+  .auth-head p { color: var(--muted); font-size: .9rem; margin: 0; }
+  .auth-field { margin-bottom: 1rem; }
+  .auth-field label { font-size: .8rem; }
+  .auth-foot { margin-top: 1.2rem; text-align: center; font-size: .85rem; color: var(--muted); }
+  .auth-foot a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  .field-err { color: var(--red); font-size: .78rem; margin-top: .3rem; }
+  .btn-block { width: 100%; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="auth-wrap">
+  <div class="auth-head">
+    <h1>Entrar</h1>
+    <p>Acesse seu painel Spreading.</p>
+  </div>
+
+  <div class="card">
+    {% if messages %}
+      {% for m in messages %}<div class="alert alert-warn"><i data-lucide="alert-triangle"></i>{{ m }}</div>{% endfor %}
+    {% endif %}
+    {% if form.non_field_errors %}
+      <div class="alert alert-warn"><i data-lucide="alert-triangle"></i>Usuário ou senha inválidos.</div>
+    {% endif %}
+
+    <form method="post" novalidate>
+      {% csrf_token %}
+      <div class="auth-field">
+        <label for="{{ form.username.id_for_label }}">Usuário</label>
+        <input type="text" name="username" id="{{ form.username.id_for_label }}"
+               autocomplete="username" autofocus required value="{{ form.username.value|default:'' }}">
+      </div>
+      <div class="auth-field">
+        <label for="{{ form.password.id_for_label }}">Senha</label>
+        <input type="password" name="password" id="{{ form.password.id_for_label }}"
+               autocomplete="current-password" required>
+      </div>
+      <input type="hidden" name="next" value="{{ next }}">
+      <button type="submit" class="btn btn-blue btn-block"><i data-lucide="log-in"></i> Entrar</button>
+    </form>
+
+    <div class="auth-foot">
+      <a href="{% url 'password_reset' %}">Esqueci a senha</a>
+    </div>
+  </div>
+
+  <div class="auth-foot">
+    Sem conta? <a href="{% url 'signup' %}">Criar conta</a>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script>renderIcons();</script>{% endblock %}

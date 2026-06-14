@@ -4,15 +4,15 @@ roda via management command / função direta, com retry/backoff para a UI flaky
 do Mercado Livre.
 """
 from celery import shared_task
-from django.core.management import call_command
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=300)
 def task_scrape(self):
-    """Pipeline diário: raspa as melhores OFERTAS do ML (de/por). Cupons saíram da rotina."""
-    from apps.scrapers.scraper_mercadolivre.ofertas_scraper import mapear_ofertas
+    """Pipeline diário: raspa todas as lojas registradas (mesma lógica do loop automacao).
+    Fonte única em management/commands/automacao.py p/ não divergir."""
+    from apps.scrapers.management.commands.automacao import _rodar_scrape
     try:
-        mapear_ofertas(max_paginas=25)
+        _rodar_scrape()
     except Exception as exc:
         raise self.retry(exc=exc)
 

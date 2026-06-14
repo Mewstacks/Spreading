@@ -1,0 +1,11 @@
+Bem-vindo ao Spreading, {{ user.get_username }}!
+
+Aqui você divulga ofertas de Mercado Livre e Amazon nos seus grupos com seu link
+de afiliado — e recebe a comissão.
+
+Próximos passos:
+1. Confirme seu e-mail (link enviado em outro e-mail).
+2. Conecte seu WhatsApp e/ou Telegram.
+3. Conecte sua conta de afiliado (ML / Amazon) e configure suas regras de envio.
+
+— Spreading

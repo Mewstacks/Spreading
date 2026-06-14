@@ -1,140 +1,344 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Configurações de Envio</title>
-  <style>
-    body { font-family: monospace; background: #0d1117; color: #c9d1d9; margin: 2rem; }
-    h1 { color: #58a6ff; }
-    a { color: #58a6ff; }
-    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-    th, td { border: 1px solid #30363d; padding: .5rem; text-align: left; font-size: .85rem; }
-    th { color: #58a6ff; }
-    .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.2rem; margin-top: 1.5rem; }
-    label { display: block; margin-top: .6rem; font-size: .8rem; color: #8b949e; }
-    input, select { width: 100%; box-sizing: border-box; padding: .5rem; margin-top: .2rem;
-      background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; }
-    .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: .8rem; }
-    button { padding: .55rem 1.2rem; font-size: .9rem; cursor: pointer; border: none;
-      border-radius: 6px; color: #fff; margin-top: 1rem; }
-    .btn-save { background: #238636; }
-    .btn-del  { background: #da3633; }
-    .btn-send { background: #8957e5; }
-    .warn { color: #d29922; }
-    #log { margin-top: 1rem; background: #161b22; border: 1px solid #30363d; border-radius: 6px;
-      padding: 1rem; max-height: 30vh; overflow-y: auto; white-space: pre-wrap; font-size: .8rem; }
-    .line-err { color: #f85149; } .line-done { color: #3fb950; font-weight: bold; }
-  </style>
-</head>
-<body>
-  <h1>⚙ Configurações de Envio</h1>
-  <a href="/">← início</a> &nbsp;|&nbsp; <a href="/scrapers/">scraper</a> &nbsp;|&nbsp;
-  <a href="/scrapers/whatsapp/">📱 WhatsApp</a> &nbsp;|&nbsp;
-  <button id="refresh-grupos" class="btn-send" style="margin-top:0" onclick="atualizarGrupos()">🔄 Atualizar grupos</button>
-  <span id="refresh-msg" style="font-size:.8rem;color:#8b949e;"></span>
+{% extends "base.html" %}
+{% block title %}Configurações de Envio{% endblock %}
 
-  {% if grupos_erro %}
-    <p class="warn">⚠ Não consegui listar grupos do WhatsApp ({{ grupos_erro }}). →
-      <a href="/scrapers/whatsapp/">Conectar WhatsApp (QR)</a>. Você ainda pode digitar o grupo_id manualmente.</p>
-  {% endif %}
+{% block head_extra %}
+<style>
+  /* Multiselect estilizado (sub-nichos) */
+  .ms { position: relative; }
+  .ms-box { padding: .55rem .65rem; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; font-size: .9rem; }
+  .ms-box .cap { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ms-box .arrow { color: var(--muted); margin-left: .5rem; }
+  .ms-panel { display: none; position: absolute; z-index: 20; left: 0; right: 0; margin-top: 2px;
+    max-height: 260px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; box-shadow: var(--shadow-lg); }
+  .ms.open .ms-panel { display: block; }
+  .ms-group { padding: .4rem .6rem; font-size: .72rem; color: var(--accent); text-transform: uppercase;
+    letter-spacing: .03em; background: var(--surface-2); position: sticky; top: 0; }
+  .ms-opt { display: flex; align-items: center; gap: .5rem; padding: .35rem .7rem; margin: 0;
+    font-size: .85rem; color: var(--text); cursor: pointer; }
+  .ms-opt:hover { background: var(--surface-2); }
+  .ms-opt input { width: auto; margin: 0; }
+  .auto-card { display: flex; align-items: center; gap: 1rem; }
+  .auto-main { display: flex; align-items: center; gap: 1rem; flex: 1; min-width: 0; }
+  .auto-icon { width: 2.8rem; height: 2.8rem; display: flex; align-items: center;
+    justify-content: center; color: #fff; background: var(--brand-grad); border-radius: 12px; flex: none; }
+  .auto-icon .lucide { width: 1.5rem; height: 1.5rem; }
+  .auto-title { font-weight: 600; font-size: 1rem; display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+  @media (max-width: 859px) {
+    .card-head { flex-wrap: wrap; }
+    #refresh-grupos { margin-left: 0 !important; }
 
-  <table>
-    <tr><th>Nicho</th><th>Grupo</th><th>Intervalo</th><th>Min %</th><th>Cooldown</th><th>Ativo</th><th>Último envio</th><th>Ações</th></tr>
-    {% for c in configs %}
-    <tr>
-      <td>{{ c.macro_categoria }}</td>
-      <td>{{ c.grupo_nome|default:c.grupo_id }}</td>
-      <td>{{ c.intervalo_minutos }}min</td>
-      <td>{{ c.min_desconto_percent }}</td>
-      <td>{{ c.horas_cooldown }}h</td>
-      <td>{% if c.ativo %}✅{% else %}❌{% endif %}</td>
-      <td>{{ c.ultimo_envio|default:"—" }}</td>
-      <td>
-        <button class="btn-send" onclick="enviarAgora({{ c.id }})">▶ Enviar agora</button>
-        <form method="post" style="display:inline">{% csrf_token %}
-          <input type="hidden" name="acao" value="delete"><input type="hidden" name="id" value="{{ c.id }}">
-          <button class="btn-del" onclick="return confirm('Remover?')">🗑</button>
-        </form>
-      </td>
-    </tr>
-    {% empty %}
-    <tr><td colspan="8">Nenhuma configuração ainda.</td></tr>
-    {% endfor %}
-  </table>
+    /* Tabela de regras -> cards empilhados (sem scroll horizontal) */
+    .cfg-table thead { display: none; }
+    .cfg-table, .cfg-table tbody, .cfg-table tr, .cfg-table td { display: block; width: 100%; }
+    .cfg-table tr { border: 1px solid var(--border); border-radius: 12px;
+      padding: .2rem .9rem; margin: .9rem 0; background: var(--surface); }
+    .cfg-table td { display: flex; align-items: center;
+      gap: 1rem; text-align: right; overflow-wrap: anywhere;
+      padding: .6rem 0; border: 0; border-bottom: 1px solid var(--border-soft); }
+    .cfg-table td:last-child { border-bottom: 0; }
+    .cfg-table td::before { content: attr(data-label); color: var(--muted);
+      font-size: .72rem; text-transform: uppercase; letter-spacing: .04em;
+      font-weight: 600; text-align: left; flex: none; margin-right: auto; }
+    .cfg-table td.col-actions, .cfg-table .row-actions { justify-content: flex-end; }
+    .cfg-table td.empty { justify-content: center; text-align: center; }
+    .cfg-table td.empty::before { content: ''; }
+  }
+</style>
+{% endblock %}
 
-  <div class="card">
-    <h2 style="color:#58a6ff;font-size:1.1rem;">➕ Nova configuração</h2>
-    <form method="post">{% csrf_token %}
-      <div class="row">
-        <div>
-          <label>Nicho (macro-categoria)</label>
-          <select name="macro_categoria">
-            <option value="">(qualquer / ofertas)</option>
-            {% for m in macros %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
-          </select>
-        </div>
-        <div>
-          <label>Grupo WhatsApp</label>
-          {% if grupos %}
-          <select name="grupo_id" onchange="document.getElementsByName('grupo_nome')[0].value = this.options[this.selectedIndex].text" required>
-            <option value="">— escolha —</option>
-            {% for g in grupos %}<option value="{{ g.id }}">{{ g.nome }}</option>{% endfor %}
-          </select>
-          {% else %}
-          <input name="grupo_id" placeholder="12345@g.us" required>
-          {% endif %}
-          <input type="hidden" name="grupo_nome">
-        </div>
-        <div><label>Intervalo (min)</label><input name="intervalo_minutos" type="number" value="60" min="1"></div>
-        <div><label>Desconto mín (%)</label><input name="min_desconto_percent" type="number" value="15" min="0" step="0.5"></div>
-        <div><label>Cooldown (h)</label><input name="horas_cooldown" type="number" value="24" min="0"></div>
-        <div><label>Ativo</label><input name="ativo" type="checkbox" checked style="width:auto"></div>
-      </div>
-      <button class="btn-save" type="submit">Salvar</button>
-    </form>
+{% block content %}
+<div class="page-head">
+  <h1><i data-lucide="settings-2"></i> Configurações de Envio</h1>
+  <p class="sub">Uma regra por linha: nicho → canal → grupo → intervalo.</p>
+</div>
+
+<!-- Envio automático (independente da raspagem; usa as regras abaixo) -->
+<div class="card auto-card">
+  <div class="auto-main">
+    <div class="auto-icon"><i data-lucide="send"></i></div>
+    <div>
+      <div class="auto-title">Envio automático <span id="auto-status"><span class="badge badge-muted"><span class="dot"></span>verificando…</span></span></div>
+      <div class="muted" style="font-size:.82rem;">Aplica as regras abaixo no horário e intervalo de cada uma. Começa na hora.</div>
+    </div>
   </div>
+  <label class="switch" title="Ligar/desligar envio automático">
+    <input type="checkbox" id="auto-toggle" onchange="toggleAuto(this)">
+    <span class="track"></span>
+  </label>
+</div>
 
-  <div id="log"></div>
+<div id="wa-offline" class="alert alert-warn" style="display:none;">
+  <i data-lucide="alert-triangle"></i>
+  <div>
+    <b>Serviço WhatsApp offline.</b> Não foi possível listar os grupos (serviço Node na porta 3000 fora do ar).
+    <a href="/scrapers/whatsapp/">Conectar WhatsApp (QR)</a> — ou digite o <span class="mono">grupo_id</span> manualmente abaixo.
+    Configs de Telegram não dependem disso.
+  </div>
+</div>
 
-  <script>
-    async function atualizarGrupos() {
-      const btn = document.getElementById('refresh-grupos');
-      const msg = document.getElementById('refresh-msg');
-      btn.disabled = true; msg.textContent = ' sincronizando…';
-      try {
-        const r = await fetch('/scrapers/whatsapp/refresh-grupos/');
-        const d = await r.json();
-        if (d.sucesso) {
-          msg.textContent = ' ' + d.total + ' grupos. Recarregando…';
-          setTimeout(() => location.reload(), 800);
-        } else {
-          msg.textContent = ' erro: ' + (d.erro || 'falhou') + ' (talvez ainda sincronizando — tente de novo em alguns segundos)';
-          btn.disabled = false;
-        }
-      } catch (e) {
-        msg.textContent = ' erro de conexão com o serviço Node';
+<div class="card" style="padding:0;overflow:hidden;">
+  <div class="card-head" style="padding:1.1rem 1.4rem;margin:0;">
+    <h2><i data-lucide="list-checks"></i> Regras de envio</h2>
+    <span class="count">{{ configs|length }} regra{{ configs|length|pluralize }}</span>
+    <button id="refresh-grupos" class="btn btn-ghost btn-sm" style="margin-left:.8rem;" onclick="atualizarGrupos()"><i data-lucide="refresh-cw"></i> Sincronizar grupos</button>
+    <span id="refresh-msg" class="muted" style="font-size:.8rem;"></span>
+  </div>
+  <div class="table-wrap" style="border:0;border-radius:0;box-shadow:none;">
+    <table class="cfg-table">
+      <thead>
+        <tr><th>Nicho</th><th class="cell-grow">Sub-nicho</th><th>Canal</th><th>Loja</th><th>Destino</th><th>Janela</th><th>Intervalo</th>
+          <th>Mín %</th><th>Status</th><th>Último envio</th><th style="text-align:right;">Ações</th></tr>
+      </thead>
+      <tbody>
+      {% for c in configs %}
+        <tr>
+          <td data-label="Nicho"><b>{{ c.macro_categoria|default:"Qualquer" }}</b></td>
+          <td data-label="Sub-nicho" class="muted cell-grow">{{ c.termo_busca|default:"—" }}</td>
+          <td data-label="Canal">{% if c.canal == "telegram" %}<span class="badge badge-accent"><i data-lucide="send"></i> Telegram</span>{% else %}<span class="badge badge-green"><i data-lucide="message-circle"></i> WhatsApp</span>{% endif %}</td>
+          <td data-label="Loja">{{ c.marketplace|default:"todas" }}</td>
+          <td data-label="Destino" class="mono" style="font-size:.8rem;">{{ c.grupo_nome|default:c.grupo_id }}</td>
+          <td data-label="Janela" class="mono" style="font-size:.8rem;">{{ c.janela_inicio }}h–{{ c.janela_fim }}h</td>
+          <td data-label="Intervalo">{{ c.intervalo_minutos }}min <span class="muted" style="font-size:.72rem;">±10</span></td>
+          <td data-label="Mín %">{{ c.min_desconto_percent }}%</td>
+          <td data-label="Status">{% if c.ativo %}<span class="badge badge-green"><span class="dot"></span>ativo</span>{% else %}<span class="badge badge-muted">pausado</span>{% endif %}</td>
+          <td data-label="Último envio" class="muted" style="font-size:.8rem;">{{ c.ultimo_envio|default:"—" }}</td>
+          <td data-label="Ações" class="col-actions">
+            <div class="row-actions">
+              <button class="icon-btn go" title="Enviar agora" onclick="enviarAgora({{ c.id }})"><i data-lucide="play"></i></button>
+              {% if c.termo_busca %}<button class="icon-btn warn" title="Atualizar itens do sub-nicho" onclick="atualizarItens({{ c.id }})"><i data-lucide="search"></i></button>{% endif %}
+              <form method="post" style="display:inline">{% csrf_token %}
+                <input type="hidden" name="acao" value="delete"><input type="hidden" name="id" value="{{ c.id }}">
+                <button class="icon-btn danger" title="Remover" onclick="return confirm('Remover esta configuração?')"><i data-lucide="trash-2"></i></button>
+              </form>
+            </div>
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="11" class="empty">Nenhuma regra ainda. Crie a primeira abaixo. ↓</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card" style="margin-top:1.1rem;">
+  <div class="card-head"><h2><i data-lucide="plus-circle"></i> Nova regra</h2></div>
+  <form method="post">{% csrf_token %}
+    <div class="form-grid">
+      <div>
+        <label>Nicho (macro-categoria)</label>
+        <select name="macro_categoria" id="sel-macro" onchange="msFilter()">
+          <option value="">(qualquer / ofertas)</option>
+          {% for m in macros %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Sub-nichos (opcional — um ou vários)</label>
+        <div class="ms" id="ms-sub">
+          <div class="ms-box" onclick="document.getElementById('ms-sub').classList.toggle('open')">
+            <span class="cap" id="ms-cap">Todos do nicho</span><span class="arrow">▾</span>
+          </div>
+          <div class="ms-panel">
+            {% for grp in subnichos %}
+            <div class="ms-grp-block" data-macro="{{ grp.macro }}">
+              <div class="ms-group">{{ grp.macro }}</div>
+              {% for it in grp.itens %}
+              <label class="ms-opt"><input type="checkbox" name="termo_busca" value="{{ it.termos }}" onchange="msUpdate()"> {{ it.label }}</label>
+              {% endfor %}
+            </div>
+            {% endfor %}
+            <div class="ms-empty" id="ms-empty" style="display:none;padding:.6rem .7rem;color:var(--muted);font-size:.8rem;">Sem sub-nichos para este nicho.</div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <label>Canal de envio</label>
+        <select name="canal" id="sel-canal" onchange="toggleCanal()">
+          {% for ch in canais %}<option value="{{ ch }}">{{ ch }}</option>{% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Loja (marketplace)</label>
+        <select name="marketplace">
+          <option value="">(todas — escolhe a melhor entre ML + Amazon)</option>
+          {% for mk in marketplaces %}<option value="{{ mk }}">{{ mk }}</option>{% endfor %}
+        </select>
+      </div>
+      <div id="dest-whatsapp">
+        <label>Grupo WhatsApp <span id="grupos-msg" class="muted" style="font-size:.72rem;font-weight:400;"></span></label>
+        <div id="grupo-field">
+          <input name="grupo_id" placeholder="12345@g.us">
+        </div>
+        <input type="hidden" name="grupo_nome">
+      </div>
+      <div id="dest-telegram" style="display:none">
+        <label>Telegram (chat/channel id ou @canal)</label>
+        <input name="telegram_chat_id" placeholder="@meucanal ou -1001234567890">
+      </div>
+      <div>
+        <label>Janela de envio (hora)</label>
+        <div style="display:flex;align-items:center;gap:.5rem;">
+          <input name="janela_inicio" type="number" value="8" min="0" max="23" style="flex:1;">
+          <span class="muted">até</span>
+          <input name="janela_fim" type="number" value="20" min="0" max="23" style="flex:1;">
+        </div>
+        <span class="muted" style="font-size:.72rem;">só envia neste horário (ex: 8 às 20)</span>
+      </div>
+      <div>
+        <label>Intervalo (min)</label>
+        <input name="intervalo_minutos" type="number" value="60" min="1">
+        <span class="muted" style="font-size:.72rem;">+ random ±1-10min (anti-robô)</span>
+      </div>
+      <div><label>Desconto mín (%)</label><input name="min_desconto_percent" type="number" value="15" min="0" step="0.5"></div>
+      <div><label>Ativo</label><div class="field-check" style="height:2.4rem;"><input name="ativo" type="checkbox" checked> <span class="muted" style="font-size:.85rem;">enviar automaticamente</span></div></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-green" type="submit"><i data-lucide="save"></i> Salvar regra</button>
+    </div>
+  </form>
+</div>
+
+<div id="log" class="log"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // --- Envio automático (tipo=envio, independente da raspagem) ---
+  function getCookie(nome) {
+    const m = document.cookie.match('(^|;)\\s*' + nome + '\\s*=\\s*([^;]+)');
+    return m ? decodeURIComponent(m.pop()) : '';
+  }
+  let autoBusy = false;
+  function paintAuto(rodando) {
+    document.getElementById('auto-toggle').checked = rodando;
+    document.getElementById('auto-status').innerHTML = rodando
+      ? '<span class="badge badge-green"><span class="dot"></span>ligado</span>'
+      : '<span class="badge badge-muted">desligado</span>';
+  }
+  async function autoStatus() {
+    if (autoBusy) return;
+    try {
+      const r = await fetch('/scrapers/automacao/?tipo=envio');
+      const d = await r.json();
+      paintAuto(d.rodando);
+    } catch (e) {}
+    renderIcons();
+  }
+  async function toggleAuto(el) {
+    autoBusy = true;
+    const acao = el.checked ? 'start' : 'stop';
+    el.disabled = true;
+    try {
+      await fetch('/scrapers/automacao/', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded', 'X-CSRFToken': getCookie('csrftoken')}, body:'tipo=envio&acao=' + acao});
+    } catch (e) {}
+    setTimeout(async () => { autoBusy = false; await autoStatus(); el.disabled = false; }, 1400);
+  }
+  autoStatus(); setInterval(autoStatus, 10000);
+
+  function msUpdate() {
+    const sel = [...document.querySelectorAll('#ms-sub input:checked')].map(i => i.parentElement.textContent.trim());
+    document.getElementById('ms-cap').textContent =
+      sel.length ? (sel.length + ' selecionado' + (sel.length > 1 ? 's' : '') + ': ' + sel.join(', ')) : 'Todos do nicho';
+  }
+  function msFilter() {
+    const macro = document.getElementById('sel-macro').value;
+    let visiveis = 0;
+    document.querySelectorAll('#ms-sub .ms-grp-block').forEach(block => {
+      const bate = !macro || block.dataset.macro === macro;
+      block.style.display = bate ? '' : 'none';
+      if (bate) visiveis++;
+      if (!bate) block.querySelectorAll('input:checked').forEach(i => i.checked = false);
+    });
+    document.getElementById('ms-empty').style.display = visiveis ? 'none' : 'block';
+    msUpdate();
+  }
+  function toggleCanal() {
+    const tg = document.getElementById('sel-canal').value === 'telegram';
+    document.getElementById('dest-telegram').style.display = tg ? '' : 'none';
+    document.getElementById('dest-whatsapp').style.display = tg ? 'none' : '';
+  }
+  document.addEventListener('DOMContentLoaded', () => { msFilter(); toggleCanal(); loadGrupos(); });
+
+  // Grupos carregados via AJAX (não travam o render da página).
+  async function loadGrupos() {
+    const msg = document.getElementById('grupos-msg');
+    const field = document.getElementById('grupo-field');
+    const offline = document.getElementById('wa-offline');
+    msg.textContent = '(carregando…)';
+    try {
+      const r = await fetch('/scrapers/whatsapp/grupos/');
+      const d = await r.json();
+      const grupos = d.grupos || [];
+      if (d.erro || !grupos.length) {
+        msg.textContent = d.erro ? '(serviço offline — digite o id)' : '(nenhum grupo — sincronize ou digite o id)';
+        if (d.erro) offline.style.display = 'flex';
+        return;
+      }
+      offline.style.display = 'none';
+      msg.textContent = '(' + grupos.length + ' grupos)';
+      const sel = document.createElement('select');
+      sel.name = 'grupo_id';
+      // new Option() seta value/text via propriedades (escapadas) — nunca via innerHTML.
+      // Nomes de grupo são dados externos (WhatsApp) e não podem virar HTML. Evita XSS.
+      sel.add(new Option('— escolha —', ''));
+      grupos.forEach(g => sel.add(new Option(g.nome, g.id)));
+      sel.onchange = function () {
+        document.getElementsByName('grupo_nome')[0].value = this.options[this.selectedIndex].text;
+      };
+      field.innerHTML = '';
+      field.appendChild(sel);
+    } catch (e) {
+      msg.textContent = '(serviço offline — digite o id)';
+      offline.style.display = 'flex';
+    }
+  }
+  document.addEventListener('click', e => {
+    const ms = document.getElementById('ms-sub');
+    if (ms && !ms.contains(e.target)) ms.classList.remove('open');
+  });
+
+  async function atualizarGrupos() {
+    const btn = document.getElementById('refresh-grupos');
+    const msg = document.getElementById('refresh-msg');
+    btn.disabled = true; msg.textContent = ' sincronizando…';
+    try {
+      const r = await fetch('/scrapers/whatsapp/refresh-grupos/');
+      const d = await r.json();
+      if (d.sucesso) {
+        msg.textContent = ' ' + d.total + ' grupos sincronizados.';
+        await loadGrupos();
+        btn.disabled = false;
+      } else {
+        msg.textContent = ' erro: ' + (d.erro || 'falhou') + ' (talvez ainda sincronizando — tente de novo em alguns segundos)';
         btn.disabled = false;
       }
+    } catch (e) {
+      msg.textContent = ' serviço WhatsApp (Node) offline';
+      btn.disabled = false;
     }
+  }
 
-    function enviarAgora(id) {
-      const log = document.getElementById('log');
-      log.innerHTML = '';
-      const es = new EventSource('/scrapers/enviar-agora/?config=' + id);
-      es.onmessage = function (e) {
-        if (e.data === '__DONE__') { append('--- Finalizado ---', 'line-done'); es.close(); return; }
-        append(e.data, e.data.startsWith('[ERRO]') ? 'line-err' : '');
-      };
-      es.onerror = function () { append('[ERRO] Conexão perdida.', 'line-err'); es.close(); };
-    }
-    function append(text, cls) {
-      const log = document.getElementById('log');
-      const span = document.createElement('span');
-      if (cls) span.className = cls;
-      span.textContent = text + '\n';
-      log.appendChild(span); log.scrollTop = log.scrollHeight;
-    }
-  </script>
-</body>
-</html>
+  function streamLog(url, preMsg) {
+    const log = document.getElementById('log');
+    log.innerHTML = '';
+    if (preMsg) append(preMsg, '');
+    const es = new EventSource(url);
+    es.onmessage = function (e) {
+      if (e.data === '__DONE__') { append('--- Finalizado ---', 'line-done'); es.close(); return; }
+      append(e.data, e.data.startsWith('[ERRO]') ? 'line-err' : '');
+    };
+    es.onerror = function () { append('[ERRO] Conexão perdida.', 'line-err'); es.close(); };
+  }
+  function enviarAgora(id) { streamLog('/scrapers/enviar-agora/?config=' + id, null); }
+  function atualizarItens(id) { streamLog('/scrapers/buscar-termo/?config=' + id, 'Buscando itens do sub-nicho no ML...'); }
+  function append(text, cls) {
+    const log = document.getElementById('log');
+    const span = document.createElement('span');
+    if (cls) span.className = cls;
+    span.textContent = text + '\n';
+    log.appendChild(span); log.scrollTop = log.scrollHeight;
+  }
+</script>
+{% endblock %}

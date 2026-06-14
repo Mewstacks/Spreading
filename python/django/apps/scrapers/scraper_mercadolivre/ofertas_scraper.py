@@ -47,6 +47,116 @@ def classificar_oferta_por_nome(nome: str):
     return None
 
 
+# Catálogo de SUB-NICHOS: macro -> [(rótulo, termos separados por vírgula)].
+# O 'value' do option é a própria string de termos (vai pro termo_busca).
+SUBNICHOS = {
+    "Celulares, Telefonia e Wearables": [
+        ("Smartphones", "celular, smartphone, iphone, galaxy, moto g, xiaomi, redmi"),
+        ("Smartwatch", "smartwatch, smart watch, relogio inteligente"),
+        ("Fones bluetooth", "fone bluetooth, earbuds, tws, airpods"),
+        ("Capas e películas", "capinha, capa de celular, pelicula"),
+    ],
+    "Eletrônicos e Informática": [
+        ("Notebooks", "notebook, laptop"),
+        ("Monitores", "monitor"),
+        ("Teclado/Mouse/Headset", "teclado, mouse, headset"),
+        ("Armazenamento (SSD/HD)", "ssd, hd externo, pen drive, pendrive, cartao de memoria"),
+        ("Componentes PC", "placa de video, placa mae, processador, memoria ram, fonte atx, gabinete"),
+        ("Tablets", "tablet, ipad"),
+        ("Roteador/Rede", "roteador, repetidor, mesh"),
+    ],
+    "Áudio, Vídeo e Fotografia": [
+        ("Smart TVs", "smart tv, televisor, tv 4k, tv led"),
+        ("Caixas de som/Soundbar", "caixa de som, soundbar, jbl"),
+        ("Câmeras", "camera, câmera, gopro, action cam"),
+        ("Drones", "drone"),
+        ("Projetores", "projetor"),
+        ("Alexa/Echo", "echo dot, alexa"),
+    ],
+    "Eletrodomésticos": [
+        ("Robô aspirador", "aspirador robo, robô aspirador, robot vacuum, robo aspirador"),
+        ("Aspirador de pó", "aspirador de po, aspirador vertical"),
+        ("Air fryer", "air fryer, fritadeira eletrica, fritadeira sem oleo"),
+        ("Geladeira", "geladeira, refrigerador, frigobar"),
+        ("Fogão/Cooktop", "fogao, cooktop, forno eletrico"),
+        ("Micro-ondas", "microondas, micro-ondas"),
+        ("Lava-roupas", "lava roupas, lavadora, maquina de lavar"),
+        ("Ar-condicionado", "ar condicionado, climatizador"),
+        ("Ventilador", "ventilador"),
+        ("Liquidificador/Mixer", "liquidificador, batedeira, mixer"),
+        ("Cafeteira", "cafeteira, nespresso, dolce gusto"),
+    ],
+    "Cozinha, Mesa e Bar": [
+        ("Panelas", "panela, frigideira, jogo de panelas"),
+        ("Garrafa térmica", "garrafa termica, stanley"),
+    ],
+    "Casa, Móveis e Decoração": [
+        ("Colchões", "colchao, colchão"),
+        ("Sofá", "sofa, sofá"),
+        ("Cama/Guarda-roupa", "cama, guarda roupa, guarda-roupa, beliche"),
+        ("Cadeira escritório/gamer", "cadeira de escritorio, cadeira gamer"),
+        ("Cama, mesa e banho", "lencol, lençol, edredom, toalha, jogo de cama"),
+    ],
+    "Beleza e Cuidados Pessoais": [
+        ("Perfumes", "perfume"),
+        ("Secador/Chapinha", "secador de cabelo, chapinha, prancha"),
+        ("Barbeador/Aparador", "barbeador, aparador, maquina de cortar cabelo"),
+        ("Maquiagem", "maquiagem, batom, base, paleta"),
+    ],
+    "Moda, Calçados e Acessórios": [
+        ("Tênis", "tenis, tênis"),
+        ("Relógios", "relogio, relógio"),
+        ("Óculos", "oculos, óculos"),
+        ("Mochilas/Bolsas", "mochila, bolsa, carteira"),
+    ],
+    "Esportes e Fitness": [
+        ("Suplementos", "whey, creatina, suplemento"),
+        ("Bicicletas", "bicicleta, bike"),
+        ("Musculação", "halter, anilha, barra fixa, kettlebell"),
+        ("Esteira/Elíptico", "esteira, eliptico"),
+    ],
+    "Games, Brinquedos e Hobbies": [
+        ("Consoles", "playstation, ps5, ps4, xbox, nintendo switch"),
+        ("Controles", "controle, joystick, dualsense"),
+        ("Lego/Blocos", "lego, blocos de montar"),
+    ],
+    "Ferramentas e Manutenção": [
+        ("Furadeira/Parafusadeira", "furadeira, parafusadeira"),
+        ("Kit ferramentas", "kit ferramentas, jogo de ferramentas"),
+        ("Serra/Lixadeira", "serra, esmerilhadeira, lixadeira"),
+    ],
+    "Automotivo": [
+        ("Pneus", "pneu"),
+        ("Som automotivo", "som automotivo, multimidia, central multimidia"),
+        ("Acessórios carro", "tapete carro, capa banco, suporte celular carro"),
+        ("Capacete/Moto", "capacete, moto"),
+    ],
+    "Pets e Animais": [
+        ("Ração", "racao, ração"),
+        ("Acessórios pet", "coleira, comedouro, arranhador, casinha"),
+    ],
+    "Bebês e Maternidade": [
+        ("Fraldas", "fralda"),
+        ("Carrinho de bebê", "carrinho de bebe, carrinho de bebê"),
+        ("Cadeirinha auto", "cadeira para auto, bebe conforto"),
+    ],
+    "Alimentos e Bebidas": [
+        ("Café", "cafe, café"),
+        ("Bebidas", "whisky, vinho, cerveja, gin, energetico"),
+        ("Chocolate", "chocolate, achocolatado"),
+    ],
+    "Saúde, Ortopedia e Equipamentos Médicos": [
+        ("Massageador", "massageador"),
+        ("Medidor pressão/Termômetro", "medidor de pressao, oximetro, termometro"),
+        ("Vitaminas", "vitamina, colageno, colágeno, omega"),
+    ],
+    "Papelaria, Escritório e Escola": [
+        ("Mochila escolar", "mochila escolar"),
+        ("Material escolar", "caderno, caneta, estojo, lapis"),
+    ],
+}
+
+
 def _preco_float(texto_frac, texto_cents="0"):
     frac = (texto_frac or "0").replace(".", "").strip()
     cents = (texto_cents or "0").strip() or "0"
@@ -56,11 +166,91 @@ def _preco_float(texto_frac, texto_cents="0"):
         return 0.0
 
 
-def mapear_ofertas(max_paginas=25):
-    """
-    Raspa N páginas de /ofertas e regrava os Produtos de origem='oferta'.
-    Retorna quantidade de ofertas salvas.
-    """
+def _coletar_cards(page):
+    """Extrai todos os cards com desconto (de/por) da página atual. Lista de dicts."""
+    out = []
+    cards = page.locator(".poly-card")
+    total = cards.count()
+    for i in range(total):
+        card = cards.nth(i)
+        try:
+            nome = card.locator(".poly-component__title").first.inner_text(timeout=2000).strip()
+            link = card.locator("a.poly-component__title, a[href*='/MLB'], a[href*='mercadolivre']").first.get_attribute("href", timeout=2000)
+            if not link or not nome:
+                continue
+
+            por = _preco_float(
+                card.locator(".poly-price__current .andes-money-amount__fraction").first.inner_text(timeout=2000),
+                (card.locator(".poly-price__current .andes-money-amount__cents").first.inner_text(timeout=500)
+                 if card.locator(".poly-price__current .andes-money-amount__cents").count() else "0"),
+            )
+            de_loc = card.locator("s.andes-money-amount--previous .andes-money-amount__fraction")
+            if de_loc.count() == 0:
+                continue  # sem desconto visível
+            de = _preco_float(
+                de_loc.first.inner_text(timeout=2000),
+                (card.locator("s.andes-money-amount--previous .andes-money-amount__cents").first.inner_text(timeout=500)
+                 if card.locator("s.andes-money-amount--previous .andes-money-amount__cents").count() else "0"),
+            )
+            if de <= 0 or por <= 0 or por >= de:
+                continue
+
+            imagem = ""
+            try:
+                img = card.locator("img").first
+                imagem = (img.get_attribute("data-src", timeout=500)
+                          or img.get_attribute("src", timeout=500) or "")
+                if imagem.startswith("data:"):
+                    imagem = img.get_attribute("data-src", timeout=500) or ""
+            except Exception:
+                pass
+
+            full = False
+            try:
+                full = card.locator("svg[aria-label*='Full' i], img[alt*='Full' i]").count() > 0
+            except Exception:
+                pass
+
+            out.append({
+                "nome": nome[:255],
+                "link_produto": link.split("#")[0],
+                "preco_sem_desconto": de,
+                "preco_com_cupom": por,
+                "imagem_url": imagem[:1000],
+                "frete_full": full,
+            })
+        except Exception as e:
+            print(f"  Erro num card: {e}")
+    return out
+
+
+def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):
+    """Cria Produtos a partir dos dicts coletados. Dedup por link nesta leva."""
+    vistos = set()
+    novos = []
+    for o in coletados:
+        if o["link_produto"] in vistos:
+            continue
+        vistos.add(o["link_produto"])
+        novos.append(Produto(
+            campanha_id="",
+            origem=origem,
+            codigo_checkout=codigo_checkout,
+            nome=o["nome"],
+            preco_sem_desconto=o["preco_sem_desconto"],
+            preco_com_cupom=o["preco_com_cupom"],
+            link_produto=o["link_produto"],
+            categoria="DESCONHECIDO",
+            macro_categoria=macro_fixa or classificar_oferta_por_nome(o["nome"]),
+            imagem_url=o["imagem_url"],
+            frete_full=o["frete_full"],
+        ))
+    Produto.objects.bulk_create(novos, batch_size=500)
+    return len(novos)
+
+
+def mapear_ofertas(max_paginas=40):
+    """Raspa N páginas de /ofertas e regrava os Produtos de origem='oferta'."""
     print("Iniciando raspagem de OFERTAS (de/por)...")
     coletados = []
     caminho_auth = os.path.join(caminho_atual, "auth.json")
@@ -78,85 +268,68 @@ def mapear_ofertas(max_paginas=25):
             except Exception as e:
                 print(f"  Erro ao carregar página {n}: {e}")
                 continue
-
-            cards = page.locator(".poly-card")
-            total = cards.count()
-            if total == 0:
+            cards = _coletar_cards(page)
+            if not cards:
                 print(f"  Página {n} sem ofertas — parando.")
                 break
+            coletados.extend(cards)
 
-            for i in range(total):
-                card = cards.nth(i)
-                try:
-                    nome = card.locator(".poly-component__title").first.inner_text(timeout=2000).strip()
-                    link = card.locator("a.poly-component__title, a[href*='/MLB'], a[href*='mercadolivre']").first.get_attribute("href", timeout=2000)
-                    if not link or not nome:
-                        continue
-
-                    # "por" (preço atual)
-                    por = _preco_float(
-                        card.locator(".poly-price__current .andes-money-amount__fraction").first.inner_text(timeout=2000),
-                        (card.locator(".poly-price__current .andes-money-amount__cents").first.inner_text(timeout=500)
-                         if card.locator(".poly-price__current .andes-money-amount__cents").count() else "0"),
-                    )
-                    # "de" (preço riscado)
-                    de_loc = card.locator("s.andes-money-amount--previous .andes-money-amount__fraction")
-                    if de_loc.count() == 0:
-                        continue  # sem desconto visível -> ignora
-                    de = _preco_float(
-                        de_loc.first.inner_text(timeout=2000),
-                        (card.locator("s.andes-money-amount--previous .andes-money-amount__cents").first.inner_text(timeout=500)
-                         if card.locator("s.andes-money-amount--previous .andes-money-amount__cents").count() else "0"),
-                    )
-                    if de <= 0 or por <= 0 or por >= de:
-                        continue
-
-                    # Imagem do produto (src ou data-src do lazy-load)
-                    imagem = ""
-                    try:
-                        img = card.locator("img").first
-                        imagem = (img.get_attribute("data-src", timeout=500)
-                                  or img.get_attribute("src", timeout=500) or "")
-                        if imagem.startswith("data:"):  # placeholder base64 do lazy-load
-                            imagem = img.get_attribute("data-src", timeout=500) or ""
-                    except Exception:
-                        pass
-
-                    # Selo Full (logo verde do ML Full): img/svg com alt/aria "Full"
-                    full = False
-                    try:
-                        full = card.locator("svg[aria-label*='Full' i], img[alt*='Full' i]").count() > 0
-                    except Exception:
-                        pass
-
-                    coletados.append({
-                        "nome": nome[:255],
-                        "link_produto": link.split("#")[0],
-                        "preco_sem_desconto": de,
-                        "preco_com_cupom": por,
-                        "imagem_url": imagem[:1000],
-                        "frete_full": full,
-                    })
-                except Exception as e:
-                    print(f"  Erro num card: {e}")
-
-    # Regrava ofertas (refresh total da origem='oferta')
     Produto.objects.filter(origem="oferta").delete()
-    novos = [
-        Produto(
-            campanha_id="",
-            origem="oferta",
-            nome=o["nome"],
-            preco_sem_desconto=o["preco_sem_desconto"],
-            preco_com_cupom=o["preco_com_cupom"],
-            link_produto=o["link_produto"],
-            categoria="DESCONHECIDO",
-            macro_categoria=classificar_oferta_por_nome(o["nome"]),
-            imagem_url=o["imagem_url"],
-            frete_full=o["frete_full"],
-        )
-        for o in coletados
-    ]
-    Produto.objects.bulk_create(novos, batch_size=500)
-    print(f"OFERTAS: {len(novos)} salvas.")
-    return len(novos)
+    n = _salvar(coletados, origem="oferta")
+    print(f"OFERTAS: {n} salvas.")
+    return n
+
+
+def _slug_busca(termo):
+    """Converte 'robô aspirador' -> 'robo-aspirador' para a URL de busca do ML."""
+    import unicodedata
+    t = unicodedata.normalize("NFKD", termo).encode("ascii", "ignore").decode().lower().strip()
+    return re.sub(r"[^a-z0-9]+", "-", t).strip("-")
+
+
+def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None):
+    """
+    Para cada termo (lista separada por vírgula) raspa a BUSCA do ML com filtro de
+    desconto e salva como origem='busca'. Atualiza só os itens 'busca' que casam com
+    estes termos (não mexe no feed nem nos cupons-código).
+    """
+    termos = [t.strip() for t in (termo_busca or "").split(",") if t.strip()]
+    if not termos:
+        return 0
+    caminho_auth = os.path.join(caminho_atual, "auth.json")
+    coletados = []
+
+    with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
+        for termo in termos:
+            slug = _slug_busca(termo)
+            if not slug:
+                continue
+            for p in range(max_paginas):
+                desde = p * 50 + 1
+                url = f"https://lista.mercadolivre.com.br/{slug}_Discount_{int(min_desconto)}-100"
+                if desde > 1:
+                    url += f"_Desde_{desde}"
+                print(f"[PROGRESSO] Busca '{termo}' pág {p+1}/{max_paginas}")
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    print(f"  Erro busca '{termo}': {e}")
+                    break
+                cards = _coletar_cards(page)
+                if not cards:
+                    break
+                coletados.extend(cards)
+
+    # Refresh escopado: remove itens 'busca' que casam com algum termo, recria
+    from django.db.models import Q
+    cond = Q()
+    for t in termos:
+        cond |= Q(nome__icontains=t)
+    Produto.objects.filter(origem="busca").filter(cond).delete()
+    n = _salvar(coletados, origem="busca", macro_fixa=macro)
+    print(f"BUSCA '{termo_busca}': {n} salvas.")
+    return n

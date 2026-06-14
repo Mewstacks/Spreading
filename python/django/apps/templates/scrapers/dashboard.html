@@ -1,191 +1,183 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8">
-  <title>Scraper MercadoLivre</title>
-  <style>
-    body { font-family: monospace; background: #0d1117; color: #c9d1d9; margin: 2rem; }
-    h1 { color: #58a6ff; }
-    #run-btn {
-      padding: .6rem 1.4rem; font-size: 1rem; cursor: pointer;
-      background: #238636; color: #fff; border: none; border-radius: 6px;
-    }
-    #run-btn:disabled { background: #3d444d; cursor: not-allowed; }
-    #log {
-      margin-top: 1.5rem; background: #161b22; border: 1px solid #30363d;
-      border-radius: 6px; padding: 1rem; height: 65vh; overflow-y: auto;
-      white-space: pre-wrap; font-size: .85rem; line-height: 1.6;
-    }
-    .line-err  { color: #f85149; }
-    .line-done { color: #3fb950; font-weight: bold; }
-    #progress-wrap { margin-top: 1.2rem; display: none; }
-    #progress-text { font-size: .85rem; margin-bottom: .35rem; color: #58a6ff; }
-    #progress-bar-bg {
-      background: #161b22; border: 1px solid #30363d; border-radius: 6px;
-      height: 1.1rem; overflow: hidden;
-    }
-    #progress-bar {
-      background: #238636; height: 100%; width: 0%;
-      transition: width .25s ease;
-    }
-  </style>
-</head>
-<body>
-  <h1>Scraper MercadoLivre</h1>
-  <button id="ofertas-btn" onclick="startOfertas()" style="padding:.6rem 1.4rem;font-size:1rem;cursor:pointer;background:#238636;color:#fff;border:none;border-radius:6px;">🏷️ Raspar Ofertas</button>
-  <button id="links-btn" onclick="startLinks()" style="margin-left:.75rem;padding:.6rem 1.4rem;font-size:1rem;cursor:pointer;background:#8957e5;color:#fff;border:none;border-radius:6px;">🔗 Gerar Links</button>
-  <input id="links-limite" type="number" value="50" min="1" style="margin-left:.5rem;width:5rem;padding:.5rem;background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;" title="Quantos links gerar nesta rodada">
-  <button id="auth-btn" onclick="startAuth()" style="margin-left:.75rem;padding:.6rem 1.4rem;font-size:1rem;cursor:pointer;background:#1f6feb;color:#fff;border:none;border-radius:6px;">🔑 Login ML</button>
-  <br>
-  <small style="color:#6e7681;">Legado (cupons — não usado no envio): </small>
-  <button id="run-btn" onclick="startScraper()" style="padding:.3rem .8rem;font-size:.8rem;cursor:pointer;background:#30363d;color:#8b949e;border:none;border-radius:6px;">▶ Raspar cupons</button>
-  <br><br>
-  <a href="/scrapers/config/" style="color:#8b949e;">⚙ configurações</a>
-  <a href="/" style="margin-left:.75rem;color:#8b949e;">← início</a>
+{% extends "base.html" %}
+{% block title %}Scraper — Mercado Livre{% endblock %}
 
-  <div id="progress-wrap">
-    <div id="progress-text">Progresso</div>
-    <div id="progress-bar-bg"><div id="progress-bar"></div></div>
+{% block head_extra %}
+<style>
+  .auto-card { display: flex; align-items: center; gap: 1rem; }
+  .auto-main { display: flex; align-items: center; gap: 1rem; flex: 1; min-width: 0; }
+  .auto-icon { width: 2.8rem; height: 2.8rem; display: flex; align-items: center;
+    justify-content: center; color: #fff; background: var(--brand-grad); border-radius: 12px; flex: none; }
+  .auto-icon .lucide { width: 1.5rem; height: 1.5rem; }
+  .auto-title { font-weight: 600; font-size: 1rem; display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+  .auto-detail { margin-top: .6rem; display: flex; flex-direction: column; gap: .3rem; font-size: .82rem; }
+  .auto-detail .row { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
+  .auto-detail .k { color: var(--muted); min-width: 7.5rem; }
+  .auto-detail .v { color: var(--text); font-weight: 500; }
+  .auto-detail .err { color: var(--red); font-size: .78rem; word-break: break-word; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1><i data-lucide="radar"></i> Scraper</h1>
+  <p class="sub">Ofertas e cupons do Mercado Livre. Links de afiliado gerados na hora.</p>
+</div>
+
+<!-- Raspagem automática 24/7 (só raspa — envios são controlados na tela Envios) -->
+<div class="card auto-card">
+  <div class="auto-main">
+    <div class="auto-icon"><i data-lucide="radar"></i></div>
+    <div style="min-width:0;flex:1;">
+      <div class="auto-title">Raspagem automática <span id="auto-status"><span class="badge badge-muted"><span class="dot"></span>verificando…</span></span></div>
+      <div class="muted" style="font-size:.82rem;">Raspa a cada 3h, 24/7. Envios ficam em <a class="link" href="/scrapers/config/">Envios</a>.</div>
+      <div id="auto-detail" class="auto-detail" style="display:none;"></div>
+    </div>
   </div>
+  <label class="switch" title="Ligar/desligar raspagem automática">
+    <input type="checkbox" id="auto-toggle" onchange="toggleAuto(this)">
+    <span class="track"></span>
+  </label>
+</div>
 
-  <div id="log"></div>
+<div class="card">
+  <div style="display:flex;gap:.6rem;flex-wrap:wrap;align-items:center;">
+    <button id="ofertas-btn" class="btn btn-green" onclick="startOfertas()"><i data-lucide="tag"></i> Raspar Ofertas</button>
+    <button id="cupons-btn" class="btn btn-yellow" onclick="startCuponsCodigo()"><i data-lucide="ticket"></i> Raspar Cupons-Código</button>
+    <button id="auth-btn" class="btn btn-blue" onclick="startAuth()"><i data-lucide="key-round"></i> Login ML</button>
+  </div>
+</div>
 
-  <script>
-    let es;
+<div id="progress-wrap" class="progress-wrap">
+  <div id="progress-text" class="progress-text">Progresso</div>
+  <div class="progress-bg"><div id="progress-bar" class="progress-bar"></div></div>
+</div>
 
-    function updateProgress(data) {
-      // data ex: "[PROGRESSO] Cupom 12/87 (13%)"
-      const m = data.match(/\((\d+)%\)/);
-      if (!m) return;
-      const wrap = document.getElementById('progress-wrap');
-      wrap.style.display = 'block';
-      document.getElementById('progress-bar').style.width = m[1] + '%';
-      document.getElementById('progress-text').textContent =
-        data.replace('[PROGRESSO] ', '');
+<div id="log" class="log"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // --- Raspagem automática 24/7 (tipo=scrape, independente do envio) ---
+  function getCookie(nome) {
+    const m = document.cookie.match('(^|;)\\s*' + nome + '\\s*=\\s*([^;]+)');
+    return m ? decodeURIComponent(m.pop()) : '';
+  }
+  let autoBusy = false;
+
+  function humanDelta(ms) {
+    const s = Math.round(Math.abs(ms) / 1000);
+    if (s < 60) return s + 's';
+    const m = Math.round(s / 60);
+    if (m < 60) return m + 'min';
+    const h = Math.floor(m / 60), rm = m % 60;
+    return h + 'h' + (rm ? ' ' + rm + 'min' : '');
+  }
+  function rel(iso, future) {
+    if (!iso) return '—';
+    const t = new Date(iso).getTime(), now = Date.now();
+    if (future) { const d = t - now; return d <= 0 ? 'a qualquer momento' : 'em ' + humanDelta(d); }
+    return 'há ' + humanDelta(now - t);
+  }
+  function faseChip(e) {
+    if (e.fase === 'raspando') {
+      let txt = 'raspando agora';
+      if (e.loja_atual) txt += ': ' + e.loja_atual;
+      if (e.lojas_total) txt += ' (' + (e.loja_idx || 1) + '/' + e.lojas_total + ')';
+      return '<span class="badge badge-green"><span class="dot"></span>' + txt + '</span>';
     }
+    if (e.fase === 'processando') return '<span class="badge badge-green"><span class="dot"></span>processando</span>';
+    if (e.fase === 'iniciando') return '<span class="badge badge-yellow"><span class="dot"></span>iniciando…</span>';
+    return '<span class="badge badge-muted">aguardando próximo ciclo</span>';
+  }
+  function paintAuto(d) {
+    const rodando = !!d.rodando, e = d.estado || {};
+    document.getElementById('auto-toggle').checked = rodando;
+    document.getElementById('auto-status').innerHTML = rodando
+      ? '<span class="badge badge-green"><span class="dot"></span>ligada</span>'
+      : '<span class="badge badge-muted">desligada</span>';
 
-    function startOfertas() {
-      const btn = document.getElementById('ofertas-btn');
-      const log = document.getElementById('log');
-      btn.disabled = true; log.innerHTML = '';
-      es = new EventSource('/scrapers/ofertas/?paginas=10');
-      es.onmessage = function (e) {
-        if (e.data === '__DONE__') {
-          appendLine('--- Finalizado ---', 'line-done');
-          document.getElementById('progress-bar').style.width = '100%';
-          es.close(); btn.disabled = false; return;
-        }
-        if (e.data.startsWith('[PROGRESSO]')) { updateProgress(e.data); return; }
-        appendLine(e.data, e.data.startsWith('[ERRO]') ? 'line-err' : '');
-      };
-      es.onerror = function () { appendLine('[ERRO] Conexão perdida.', 'line-err'); es.close(); btn.disabled = false; };
-    }
+    const det = document.getElementById('auto-detail');
+    if (!rodando) { det.style.display = 'none'; det.innerHTML = ''; return; }
+    let html = '<div class="row"><span class="v">' + faseChip(e) + '</span></div>';
+    html += '<div class="row"><span class="k">Última raspagem</span><span class="v">' + rel(e.ultimo_ciclo_fim, false) + '</span></div>';
+    html += '<div class="row"><span class="k">Próxima</span><span class="v">' + rel(e.proximo_ciclo, true) + '</span></div>';
+    html += '<div class="row"><span class="k">Ciclos concluídos</span><span class="v">' + (e.ciclos || 0) + '</span></div>';
+    if (e.ultima_msg) html += '<div class="row"><span class="k">Status</span><span class="v">' + e.ultima_msg + '</span></div>';
+    if (e.erro) html += '<div class="err">⚠ ' + e.erro + '</div>';
+    det.style.display = 'flex';
+    det.innerHTML = html;
+  }
+  async function autoStatus() {
+    if (autoBusy) return;
+    try {
+      const r = await fetch('/scrapers/automacao/?tipo=scrape');
+      const d = await r.json();
+      paintAuto(d);
+    } catch (e) {}
+    renderIcons();
+  }
+  async function toggleAuto(el) {
+    autoBusy = true;
+    const acao = el.checked ? 'start' : 'stop';
+    el.disabled = true;
+    try {
+      await fetch('/scrapers/automacao/', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded', 'X-CSRFToken': getCookie('csrftoken')}, body:'tipo=scrape&acao=' + acao});
+    } catch (e) {}
+    setTimeout(async () => { autoBusy = false; await autoStatus(); el.disabled = false; }, 1400);
+  }
+  autoStatus(); setInterval(autoStatus, 10000);
 
-    function startLinks() {
-      const btn = document.getElementById('links-btn');
-      const log = document.getElementById('log');
-      const limite = document.getElementById('links-limite').value || 50;
+  let es;
 
-      btn.disabled = true;
-      log.innerHTML = '';
+  function updateProgress(data) {
+    const m = data.match(/\((\d+)%\)/);
+    if (!m) return;
+    document.getElementById('progress-wrap').style.display = 'block';
+    document.getElementById('progress-bar').style.width = m[1] + '%';
+    document.getElementById('progress-text').textContent = data.replace('[PROGRESSO] ', '');
+  }
 
-      es = new EventSource('/scrapers/gerar-links/?limite=' + limite);
+  function runStream(url, btnId) {
+    const btn = document.getElementById(btnId);
+    const log = document.getElementById('log');
+    btn.disabled = true; log.innerHTML = '';
+    es = new EventSource(url);
+    es.onmessage = function (e) {
+      if (e.data === '__DONE__') {
+        appendLine('--- Finalizado ---', 'line-done');
+        document.getElementById('progress-bar').style.width = '100%';
+        es.close(); btn.disabled = false; return;
+      }
+      if (e.data.startsWith('[PROGRESSO]')) { updateProgress(e.data); return; }
+      appendLine(e.data, e.data.startsWith('[ERRO]') ? 'line-err' : '');
+    };
+    es.onerror = function () { appendLine('[ERRO] Conexão perdida.', 'line-err'); es.close(); btn.disabled = false; };
+  }
 
-      es.onmessage = function (e) {
-        if (e.data === '__DONE__') {
-          appendLine('--- Finalizado ---', 'line-done');
-          document.getElementById('progress-bar').style.width = '100%';
-          es.close();
-          btn.disabled = false;
-          return;
-        }
-        if (e.data.startsWith('[PROGRESSO]')) {
-          updateProgress(e.data);
-          return;
-        }
-        const cls = e.data.startsWith('[ERRO]') ? 'line-err' : '';
-        appendLine(e.data, cls);
-      };
+  function startOfertas() { runStream('/scrapers/ofertas/?paginas=40', 'ofertas-btn'); }
+  function startCuponsCodigo() { runStream('/scrapers/cupons-codigo/', 'cupons-btn'); }
 
-      es.onerror = function () {
-        appendLine('[ERRO] Conexão perdida.', 'line-err');
-        es.close();
-        btn.disabled = false;
-      };
-    }
+  function startAuth() {
+    const btn = document.getElementById('auth-btn');
+    const log = document.getElementById('log');
+    btn.disabled = true; log.innerHTML = '';
+    appendLine('Abrindo navegador para login...', '');
+    const esa = new EventSource('/scrapers/auth/');
+    esa.onmessage = function(e) {
+      if (e.data === '__DONE__') { appendLine('✔ Sessão salva!', 'line-done'); esa.close(); btn.disabled = false; return; }
+      if (e.data === 'LOGIN_REQUIRED') { appendLine('🔐 Navegador aberto — faça login e aguarde...', ''); return; }
+      if (e.data === 'Sessão validada') { appendLine('✔ Sessão já válida.', 'line-done'); return; }
+      appendLine(e.data, e.data.startsWith('[ERRO]') ? 'line-err' : '');
+    };
+    esa.onerror = function() { appendLine('[ERRO] Conexão perdida.', 'line-err'); esa.close(); btn.disabled = false; };
+  }
 
-    function startScraper() {
-      const btn = document.getElementById('run-btn');
-      const log = document.getElementById('log');
-
-      btn.disabled = true;
-      log.innerHTML = '';
-
-      es = new EventSource('/scrapers/run/');
-
-      es.onmessage = function (e) {
-        if (e.data === '__DONE__') {
-          appendLine('--- Finalizado ---', 'line-done');
-          document.getElementById('progress-bar').style.width = '100%';
-          es.close();
-          btn.disabled = false;
-          return;
-        }
-
-        if (e.data.startsWith('[PROGRESSO]')) {
-          updateProgress(e.data);
-          return;
-        }
-
-        const cls = e.data.startsWith('[ERRO]') ? 'line-err' : '';
-        appendLine(e.data, cls);
-      };
-
-      es.onerror = function () {
-        appendLine('[ERRO] Conexão perdida.', 'line-err');
-        es.close();
-        btn.disabled = false;
-      };
-    }
-
-    function startAuth() {
-      const btn = document.getElementById('auth-btn');
-      const log = document.getElementById('log');
-      btn.disabled = true;
-      log.innerHTML = '';
-      appendLine('Abrindo navegador para login...', '');
-
-      const es = new EventSource('/scrapers/auth/');
-      es.onmessage = function(e) {
-        if (e.data === '__DONE__') {
-          appendLine('✔ Sessão salva!', 'line-done');
-          es.close(); btn.disabled = false; return;
-        }
-        if (e.data === 'LOGIN_REQUIRED') {
-          appendLine('🔐 Navegador aberto — faça login e aguarde...', '');
-          return;
-        }
-        if (e.data === 'Sessão validada') {
-          appendLine('✔ Sessão já válida.', 'line-done');
-          return;
-        }
-        const cls = e.data.startsWith('[ERRO]') ? 'line-err' : '';
-        appendLine(e.data, cls);
-      };
-      es.onerror = function() {
-        appendLine('[ERRO] Conexão perdida.', 'line-err');
-        es.close(); btn.disabled = false;
-      };
-    }
-
-    function appendLine(text, cls) {
-      const log = document.getElementById('log');
-      const span = document.createElement('span');
-      if (cls) span.className = cls;
-      span.textContent = text + '\n';
-      log.appendChild(span);
-      log.scrollTop = log.scrollHeight;
-    }
-  </script>
-</body>
-</html>
+  function appendLine(text, cls) {
+    const log = document.getElementById('log');
+    const span = document.createElement('span');
+    if (cls) span.className = cls;
+    span.textContent = text + '\n';
+    log.appendChild(span); log.scrollTop = log.scrollHeight;
+  }
+</script>
+{% endblock %}

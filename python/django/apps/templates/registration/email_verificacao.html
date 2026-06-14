@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><body style="margin:0;background:#0a0c10;font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#e8eef5;">
+  <div style="max-width:480px;margin:0 auto;padding:32px 24px;">
+    <div style="font-size:20px;font-weight:700;margin-bottom:24px;">🛒 Spreading</div>
+    <h1 style="font-size:22px;margin:0 0 12px;">Confirme seu e-mail</h1>
+    <p style="color:#8b949e;font-size:15px;line-height:1.6;margin:0 0 24px;">
+      Olá <b style="color:#e8eef5;">{{ user.get_username }}</b>, confirme seu e-mail para liberar o painel.
+    </p>
+    <a href="{{ url }}" style="display:inline-block;background:#238636;color:#fff;text-decoration:none;
+       padding:13px 24px;border-radius:9px;font-weight:600;font-size:15px;">Confirmar e-mail</a>
+    <p style="color:#6b7280;font-size:13px;line-height:1.6;margin:24px 0 0;">
+      O link expira em 3 dias. Se você não criou esta conta, ignore este e-mail.<br>
+      Se o botão não funcionar, copie: <br><span style="color:#818cf8;word-break:break-all;">{{ url }}</span>
+    </p>
+  </div>
+</body></html>

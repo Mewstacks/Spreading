@@ -26,18 +26,32 @@ load_dotenv(BASE_DIR.parent / ".env")
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-3wo5t6tr#ezey!2$o00)w=4&c_a^o=@1elr9%w4lkd+wj0a#o+'
+# Vem do .env em produção. Fallback inseguro só serve para DEBUG/dev local.
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY") or "django-insecure-dev-only-CHANGE-ME-in-.env"
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv("DJANGO_DEBUG", "1") == "1"
 
-ALLOWED_HOSTS = []
+if not DEBUG and SECRET_KEY.startswith("django-insecure"):
+    raise RuntimeError("Defina DJANGO_SECRET_KEY no .env antes de rodar com DEBUG=0.")
+
+# Hosts liberados (CSV no .env). Em dev cai no localhost.
+# Aceita qualquer subdominio de tunnel do cloudflare (muda a cada restart).
+ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", ".trycloudflare.com").split(",") if h.strip()]
+if DEBUG and not ALLOWED_HOSTS:
+    ALLOWED_HOSTS = ["localhost", "127.0.0.1", ".trycloudflare.com"]
+elif DEBUG:
+    ALLOWED_HOSTS += ["localhost", "127.0.0.1"]
+
+# Origens confiáveis para CSRF (precisa de esquema: https://app.seudominio.com).
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in os.getenv("DJANGO_CSRF_TRUSTED_ORIGINS", "https://*.trycloudflare.com").split(",") if o.strip()]
 
 
 # Application definition
 
 INSTALLED_APPS = [
     'apps.scrapers',
+    'apps.accounts',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -54,7 +68,21 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'core.middleware.SecurityHeadersMiddleware',
+    # Tranca usuário logado mas com e-mail não verificado (multi-tenant SaaS).
+    'apps.accounts.middleware.EmailVerificadoMiddleware',
 ]
+
+# CSP em modo report-only começa desligado. Para testar sem quebrar nada:
+# DJANGO_CSP_REPORT_ONLY=1 no .env -> navegador só reporta, não bloqueia.
+CSP_REPORT_ONLY = os.getenv("DJANGO_CSP_REPORT_ONLY", "0") == "1"
+
+# Tranca TODO o site por padrão (inclusive em DEBUG). Views públicas marcam
+# @login_not_required (login/signup/reset/verificação). Anônimo cai no login.
+MIDDLEWARE.insert(
+    MIDDLEWARE.index('django.contrib.auth.middleware.AuthenticationMiddleware') + 1,
+    'django.contrib.auth.middleware.LoginRequiredMiddleware',
+)
 
 ROOT_URLCONF = 'core.urls'
 
@@ -96,6 +124,7 @@ AUTH_PASSWORD_VALIDATORS = [
     },
     {
         'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        'OPTIONS': {'min_length': 10},
     },
     {
         'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
@@ -109,9 +138,9 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
 
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = 'pt-br'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'America/Sao_Paulo'
 
 USE_I18N = True
 
@@ -135,9 +164,133 @@ WHATSAPP_GRUPO_ID = os.getenv("WHATSAPP_GRUPO_ID", "")
 
 
 # ─────────────────────────────────────────────────────────────
+# Telegram sender (Bot API). Crie um bot no @BotFather e pegue o token.
+# O bot precisa ser admin do canal/grupo de destino.
+# ─────────────────────────────────────────────────────────────
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+
+
+# ─────────────────────────────────────────────────────────────
+# Afiliado — tag/ID que DEVE aparecer no link final (verificação A3).
+# Sem ela, o link não gera comissão. Pegue inspecionando um link real do
+# Link Builder (param matt_word/matt_tool/tracking_id na URL de destino).
+# ─────────────────────────────────────────────────────────────
+AFILIADO_TAG = os.getenv("AFILIADO_TAG", "")
+# Recusar envio quando o link não carrega a tag? (1=recusa, 0=envia c/ aviso)
+AFILIADO_EXIGIR = os.getenv("AFILIADO_EXIGIR", "1") == "1"
+
+
+# ─────────────────────────────────────────────────────────────
+# Amazon — Associates (BR) + Creators API (sucessor da PA-API 5.0, desligada
+# em 2026-05-15). Auth OAuth2: Credential ID/Secret -> token bearer (~1h).
+# Pegue as credenciais em Associates Central > Tools > Creators API.
+# AMAZON_PARTNER_TAG: sua tag de afiliado (ex 'meusite-20') — vai no ?tag= do link.
+# ─────────────────────────────────────────────────────────────
+AMAZON_PARTNER_TAG = os.getenv("AMAZON_PARTNER_TAG", "")
+AMAZON_CREATOR_CREDENTIAL_ID = os.getenv("AMAZON_CREATOR_CREDENTIAL_ID", "")
+AMAZON_CREATOR_CREDENTIAL_SECRET = os.getenv("AMAZON_CREATOR_CREDENTIAL_SECRET", "")
+# Host do endpoint da Creators API (sem https://). Confirmar na doc autenticada.
+AMAZON_CREATORS_HOST = os.getenv("AMAZON_CREATORS_HOST", "")
+# Host do marketplace BR usado para montar o link canônico /dp/{ASIN}.
+AMAZON_MARKETPLACE = os.getenv("AMAZON_MARKETPLACE", "www.amazon.com.br")
+# Desconto mínimo (%) para um item entrar no feed de ofertas Amazon.
+AMAZON_MIN_SAVINGS_PCT = float(os.getenv("AMAZON_MIN_SAVINGS_PCT", "15"))
+# Palavras-chave de categorias amplas que alimentam o "feed" de ofertas Amazon
+# (a Creators API não expõe um feed de ofertas; varremos buscas com min savings).
+AMAZON_FEED_KEYWORDS = [
+    k.strip() for k in os.getenv(
+        "AMAZON_FEED_KEYWORDS",
+        "echo dot,fone bluetooth,smart tv,notebook,air fryer,smartwatch,"
+        "aspirador robo,monitor,ssd,cafeteira,perfume,tenis",
+    ).split(",") if k.strip()
+]
+
+
+# ─────────────────────────────────────────────────────────────
+# LLM local (Ollama) — descrições engraçadas das ofertas
+# ─────────────────────────────────────────────────────────────
+LLM_ATIVO = os.getenv("LLM_ATIVO", "1") == "1"
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
+
+
+# ─────────────────────────────────────────────────────────────
 # Celery + Beat
 # ─────────────────────────────────────────────────────────────
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
+
+
+# ─────────────────────────────────────────────────────────────
+# Autenticação — rotas de redirect
+# ─────────────────────────────────────────────────────────────
+LOGIN_URL = "login"
+LOGIN_REDIRECT_URL = "home"
+LOGOUT_REDIRECT_URL = "login"
+
+# PBKDF2 (default do Django, ~1M iterações) é seguro. Se argon2-cffi estiver
+# instalado, usa Argon2 (mais resistente a GPU). Só prepende se importável —
+# evita quebrar login/signup quando a lib não está instalada.
+PASSWORD_HASHERS = [
+    "django.contrib.auth.hashers.PBKDF2PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher",
+]
+try:
+    import argon2  # noqa: F401
+    PASSWORD_HASHERS.insert(0, "django.contrib.auth.hashers.Argon2PasswordHasher")
+except ImportError:
+    pass
+
+
+# ─────────────────────────────────────────────────────────────
+# Cookies de sessão / CSRF
+# ─────────────────────────────────────────────────────────────
+SESSION_COOKIE_HTTPONLY = True          # JS não lê o cookie de sessão
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
+SESSION_EXPIRE_AT_BROWSER_CLOSE = False
+SESSION_COOKIE_AGE = 60 * 60 * 24 * 14  # 14 dias
+SESSION_SAVE_EVERY_REQUEST = True       # renova expiração a cada request (sliding)
+
+
+# ─────────────────────────────────────────────────────────────
+# Hardening — ligado só fora do DEBUG (produção atrás de HTTPS)
+# ─────────────────────────────────────────────────────────────
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = "same-origin"
+X_FRAME_OPTIONS = "DENY"
+
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    # Atrás de proxy/load balancer que termina TLS:
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365  # 1 ano
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+
+
+# E-mail — em dev imprime no console; em prod (ou EMAIL_FORCE_SMTP=1) usa SMTP.
+# Titan (HostGator): EMAIL_HOST=smtp.titan.email, EMAIL_PORT=465, EMAIL_USE_SSL=1
+# (alternativa: porta 587 com EMAIL_USE_TLS=1). SSL e TLS são mutuamente exclusivos.
+EMAIL_FORCE_SMTP = os.getenv("EMAIL_FORCE_SMTP", "0") == "1"
+if DEBUG and not EMAIL_FORCE_SMTP:
+    EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+else:
+    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.titan.email")
+    EMAIL_PORT = int(os.getenv("EMAIL_PORT", "465"))
+    EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+    EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+    EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "1") == "1"
+    # TLS só quando SSL desligado (porta 587). Django proíbe os dois juntos.
+    EMAIL_USE_TLS = (not EMAIL_USE_SSL) and os.getenv("EMAIL_USE_TLS", "0") == "1"
+    DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER or "no-reply@spreading.app")
+
+# Cooldown (horas) entre alertas repetidos de conexão caída p/ não floodar e-mail.
+ALERTA_CONEXAO_COOLDOWN_H = int(os.getenv("ALERTA_CONEXAO_COOLDOWN_H", "6"))
+# Dias sem atualizar o auth.json do ML antes de considerar a sessão "stale" (caída).
+ML_AUTH_STALE_DIAS = int(os.getenv("ML_AUTH_STALE_DIAS", "7"))

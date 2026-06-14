@@ -29,28 +29,35 @@ def _headers() -> dict:
     return {"x-api-key": settings.WHATSAPP_API_KEY, "Content-Type": "application/json"}
 
 
-def status() -> dict:
+def _params(session=None) -> dict:
+    """Query da sessão (multi-tenant). Node multi-cliente usa ?session=<clientId>.
+    None = sessão única/global (compat). Node antigo ignora o param."""
+    return {"session": session} if session else None
+
+
+def status(session=None) -> dict:
     """Retorna {conectado: bool}. Rota aberta (sem api-key)."""
     try:
-        r = requests.get(f"{_base_url()}/api/status", timeout=5)
+        r = requests.get(f"{_base_url()}/api/status", params=_params(session), timeout=5)
         return r.json()
     except Exception as e:
         return {"conectado": False, "erro": str(e)}
 
 
-def qrcode() -> dict:
+def qrcode(session=None) -> dict:
     """Retorna {conectado, qr?} do serviço Node. Rota aberta (sem api-key)."""
     try:
-        r = requests.get(f"{_base_url()}/api/qrcode", timeout=8)
+        r = requests.get(f"{_base_url()}/api/qrcode", params=_params(session), timeout=8)
         return r.json()
     except Exception as e:
         return {"conectado": False, "qr": None, "erro": str(e)}
 
 
-def listar_grupos() -> dict:
+def listar_grupos(session=None) -> dict:
     """Lista grupos do WhatsApp conectado. Usado pelo dashboard para escolher destino."""
     try:
-        r = requests.get(f"{_base_url()}/api/grupos", headers=_headers(), timeout=15)
+        r = requests.get(f"{_base_url()}/api/grupos", headers=_headers(),
+                         params=_params(session), timeout=15)
         return r.json()
     except Exception as e:
         return {"erro": str(e)}
@@ -66,7 +73,8 @@ def refresh_grupos() -> dict:
 
 
 def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
-                  mimetype: str = "image/jpeg", legenda: str = None) -> dict:
+                  mimetype: str = "image/jpeg", legenda: str = None,
+                  session=None) -> dict:
     """
     Envia uma oferta para um grupo (ou número) via serviço Node.
 
@@ -83,6 +91,8 @@ def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
         return {"sucesso": False, "erro": "Nenhum grupoid informado e WHATSAPP_GRUPO_ID vazio."}
 
     payload = {"grupoid": destino}
+    if session:
+        payload["session"] = session   # Node multi-cliente roteia pela sessão do usuário
     if imagem_base64:
         payload.update({
             "base64": imagem_base64,

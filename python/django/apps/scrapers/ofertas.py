@@ -5,63 +5,83 @@ from django.utils import timezone
 from django.db.models import F, FloatField, ExpressionWrapper
 from apps.scrapers.models import Produto, Cupom, HistoricoEnvio
 
-def validar_oferta_ativa(produto):
+def esta_vivo(produto):
     """
-    Tenta acessar a página do produto pelo Requests rapidamente para verificar 
-    se ele não foi pausado, esgotou ou saiu do ar.
-    Retorna True se estiver ativo, False se estiver inválido.
+    Estado da oferta no ML, em TRÊS valores (A1 — seleção não destrutiva):
+      True  -> página 200 e sem texto de "pausado/esgotado".
+      False -> CONFIRMADO morto (HTTP 404/410 ou texto de pausa/inexistente).
+      None  -> DESCONHECIDO (timeout, erro de conexão, status estranho). NÃO apagar:
+               uma instabilidade de rede não pode apagar um produto bom do banco.
+    Só o chamador apaga, e somente quando recebe False.
     """
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
+    termos_inativos = [
+        "Anúncio pausado",
+        "Este anúncio foi pausado",
+        "Estoque indisponível",
+        "Este item não está mais",
+        "Página não encontrada",
+    ]
     try:
         r = requests.get(produto.link_produto, headers=headers, timeout=5)
-        # Se deu página quebrada/redirecionamento bizarro
+        if r.status_code in (404, 410):
+            return False                      # confirmado: não existe mais
         if r.status_code != 200:
-            return False
-            
-        texto_html = r.text
-        # Termos comuns que o ML exibe quando a oferta esgota ou pausa:
-        termos_inativos = [
-            "Anúncio pausado",
-            "Este anúncio foi pausado",
-            "Estoque indisponível",
-            "Este item não está mais",
-            "Página não encontrada"
-        ]
-        
+            return None                       # 5xx/redirect estranho -> incerto, mantém
         for termo in termos_inativos:
-            if termo in texto_html:
-                return False
-                
+            if termo in r.text:
+                return False                  # confirmado: pausado/esgotado
         return True
     except Exception:
-        # Em caso de timeout/erro de conexão, assumimos falso para não arriscar
-        return False
+        return None                           # timeout/conexão -> incerto, mantém
 
-def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas=None, limite_envio=1, horas_cooldown=24, min_desconto_percent=15.0):
+def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas=None, limite_envio=1, horas_cooldown=24, min_desconto_percent=15.0, termo=None, marketplace=None, usuario=None):
     """
     Seleciona produtos da base usando a lógica de 'Roleta Viciada' (Weighted Random Choice).
     Leva em conta: O Desconto percentual, desconto absoluto, preço e novidade do cupom.
     Evita reenviar itens enviados há menos de `horas_cooldown`.
+    `termo`: sub-nicho opcional — string com termos separados por vírgula; mantém só
+    produtos cujo nome casa com ALGUM termo (ex: "aspirador robo, robot vacuum").
     """
-    
-    # 1. Filtro inicial - só OFERTAS (desconto já no preço, verificável).
-    # Itens origem='cupom' não entram: cupons de resgate não aplicam via link.
-    qs = Produto.objects.filter(origem="oferta")
+    from django.db.models import Q
+    from apps.scrapers.marketplaces.registry import get_marketplace
 
+    # 1. Filtro inicial - tudo menos os cupons de RESGATE legados (origem='cupom'),
+    # que não aplicam via link. Entram: 'oferta' (feed), 'busca' (termo), 'cupom_codigo'.
+    qs = Produto.objects.exclude(origem="cupom")
+
+    # Multi-tenant: pool COMPARTILHADO (owner=None, ex: ML) + itens PRIVADOS do usuário
+    # (owner=usuario, ex: Amazon raspada com a conta dele). Sem usuario -> só o compartilhado.
+    if usuario is not None:
+        qs = qs.filter(Q(owner__isnull=True) | Q(owner=usuario))
+    else:
+        qs = qs.filter(owner__isnull=True)
+
+    if marketplace:
+        qs = qs.filter(marketplace=marketplace)
     if macros_selecionadas:
         qs = qs.filter(macro_categoria__in=macros_selecionadas)
     if categorias_selecionadas:
         qs = qs.filter(categoria__in=categorias_selecionadas)
 
-    # 2. Excluir da lista quem tá na "Geladeira" (Cooldown)
-    tempo_limite = timezone.now() - timedelta(hours=horas_cooldown)
-    itens_recentes_ids = HistoricoEnvio.objects.filter(
-        data_envio__gte=tempo_limite
-    ).values_list('produto_id', flat=True)
-    
-    qs = qs.exclude(id__in=itens_recentes_ids)
+    # Sub-nicho: filtra pelo nome (OR entre os termos)
+    if termo:
+        termos = [t.strip() for t in termo.split(",") if t.strip()]
+        if termos:
+            cond = Q()
+            for t in termos:
+                cond |= Q(nome__icontains=t)
+            qs = qs.filter(cond)
+
+    # 2. NUNCA repetir oferta: exclui produto já enviado alguma vez POR ESTE usuário.
+    # (horas_cooldown ignorado de propósito — dedup é permanente, não janela.)
+    # usuario=None (chamadas legadas) -> dedup global, como antes.
+    hist = HistoricoEnvio.objects.all()
+    if usuario is not None:
+        hist = hist.filter(usuario=usuario)
+    qs = qs.exclude(id__in=hist.values_list('produto_id', flat=True))
 
     # 3. Calcula economia e desconto (%) - Mantém apenas os válidos (> 10% e < 90%)
     # Desconto >= 90% indica dado corrompido (ex: cupom fixo maior que o preço do produto)
@@ -112,14 +132,20 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
     while len(vencedores) < limite_envio and opcoes_sorteio and tentativas < max_tentativas:
         tentativas += 1
         escolhido = random.choices(population=opcoes_sorteio, weights=pesos_sorteio, k=1)[0]
-        
-        # Checa em milissegundos se o anúncio ainda tá vivo no ML
-        if validar_oferta_ativa(escolhido):
+
+        # Checa o estado do anúncio (tri-state, A1) pela loja do produto:
+        # ML faz GET na PDP; Amazon usa getItems. Agnóstico de marketplace.
+        estado = get_marketplace(getattr(escolhido, "marketplace", "mercadolivre")).is_alive(escolhido)
+        if estado is True:
             vencedores.append(escolhido)
+        elif estado is False:
+            # CONFIRMADO morto (404/pausado): aí sim pode limpar o banco.
+            print(f"⚠️ Oferta morta confirmada: '{escolhido.nome}' (apagando do DB).")
+            escolhido.delete()
         else:
-            print(f"⚠️ Oferta morta: '{escolhido.nome}' (apagando do DB e sorteando outro...)")
-            escolhido.delete() # Limpa nosso banco na hora!
-            
+            # None = incerto (timeout/erro). NÃO apaga; só pula nesta rodada.
+            print(f"… estado incerto de '{escolhido.nome}' (mantém no DB, pula).")
+
         # Retira o escolhido da lista de sorteio atual
         idx = opcoes_sorteio.index(escolhido)
         opcoes_sorteio.pop(idx)
@@ -131,67 +157,105 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
     return vencedores
 
 
-def montar_mensagem_whatsapp(produto_isca, link_afiliado: str, cupom_pai) -> str:
+def _frase_marketing(produto):
+    """Frase de marketing: usa o cache (frase_llm); só chama o Ollama ao vivo como
+    último recurso, com timeout curto (10s, não os 120s antigos que travavam o envio),
+    e GRAVA no cache p/ o próximo envio ser instantâneo."""
+    cache = getattr(produto, "frase_llm", "") or ""
+    if cache:
+        return cache
+    from apps.scrapers.llm import gerar_descricao
+    frase = gerar_descricao(produto.nome, timeout=10)
+    if frase and hasattr(produto, "save") and getattr(produto, "pk", None):
+        try:
+            produto.frase_llm = frase
+            produto.save(update_fields=["frase_llm"])
+        except Exception:
+            pass
+    return frase
+
+
+def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None) -> str:
     """
-    Monta o texto para o WhatsApp/Telegram no novo formato:
-    - SEM código de cupom (tokens longos não são códigos legíveis)
-    - COM instruções de como clicar em 'Aplicar Cupom' na landing page
-    - Link aponta para a URL do Container (já afiliado)
+    Monta o texto da oferta usando o `Markup` do canal (WhatsApp *neg*, Telegram <b>).
+    Conteúdo dinâmico passa por markup.escape p/ não quebrar HTML do Telegram.
     """
-    economia_rs = produto_isca.preco_sem_desconto - produto_isca.preco_com_cupom
-    desconto_percent = (economia_rs / produto_isca.preco_sem_desconto) * 100 if produto_isca.preco_sem_desconto else 0
+    from apps.scrapers.senders.base import WhatsAppMarkup
+    m = markup or WhatsAppMarkup()
+    esc = m.escape
+
+    economia_rs = produto.preco_sem_desconto - produto.preco_com_cupom
+    desconto_percent = (economia_rs / produto.preco_sem_desconto) * 100 if produto.preco_sem_desconto else 0
 
     linhas = [
-        f"🚨 *OFERTA DETECTADA* 🚨",
-        f"📱 {produto_isca.nome.strip()}",
-        "",
-        f"❌ De: ~R$ {produto_isca.preco_sem_desconto:.2f}~",
-        f"✅ *Por: R$ {produto_isca.preco_com_cupom:.2f}* ({desconto_percent:.0f}% OFF)",
+        m.bold("🚨 OFERTAS DA RUDI 🚨"),
+        f"📱 {esc(produto.nome.strip())}",
     ]
 
-    if cupom_pai is not None:
-        # Cupom de resgate: o desconto entra ao ativar o cupom / no checkout
-        linhas += [
-            f"_(Cupom: {cupom_pai.titulo})_",
-            "",
-            "⚠️ *ATIVE O CUPOM:* abra o link, toque em *Ativar cupom* e o desconto entra no checkout.",
-        ]
-    else:
-        # Oferta direta: desconto já no preço
-        linhas += ["", "✅ Desconto já aplicado no preço."]
-
-    if getattr(produto_isca, "frete_full", False):
-        linhas.append("🚚 *Full* — frete grátis e entrega rápida")
-
-    # Cupons de CÓDIGO ativos aplicáveis (digitar no checkout)
-    codigos = _codigos_aplicaveis(produto_isca.preco_com_cupom)
-    if codigos:
-        linhas += ["", "🏷️ *Cupons p/ usar no checkout:*"]
-        linhas += [f"• `{c}`" for c in codigos]
+    frase = _frase_marketing(produto)
+    if frase:
+        linhas += ["", m.italic(esc(frase))]
 
     linhas += [
         "",
-        "🛒 *Compre aqui:*",
-        f"👉 {link_afiliado}",
+        f"❌ De: {m.strike(f'R$ {produto.preco_sem_desconto:.2f}')}",
+        f"✅ {m.bold(f'Por: R$ {produto.preco_com_cupom:.2f}')} ({desconto_percent:.0f}% OFF)",
+    ]
+
+    # REGRA: cupons NÃO acumulam no ML. Cada item anuncia no máximo UM cupom.
+    # Prioridade: cupom do link (cupom_pai) > código do próprio item (codigo_checkout)
+    # > melhor código genérico VÁLIDO para este item. Nunca os três juntos.
+    cod_item = getattr(produto, "codigo_checkout", "")
+    if cupom_pai is not None:
+        linhas += [
+            m.italic(f"(Cupom: {esc(cupom_pai.titulo)})"),
+            "",
+            f"⚠️ {m.bold('ATIVE O CUPOM:')} abra o link, toque em {m.bold('Ativar cupom')} e o desconto entra no checkout.",
+        ]
+    elif cod_item:
+        linhas += ["", f"🎟️ Use o cupom {m.bold(esc(cod_item))} no checkout"]
+    else:
+        codigo = _melhor_codigo(produto)
+        if codigo:
+            linhas += ["", f"🎟️ Use o cupom {m.code(esc(codigo))} no checkout"]
+        else:
+            linhas += ["", "✅ Desconto já aplicado no preço."]
+
+    if getattr(produto, "frete_full", False):
+        linhas.append(f"🚚 {m.bold('Full')} — frete grátis e entrega rápida")
+
+    linhas += [
         "",
-        "#publicidade",
+        m.bold("🛒 Compre aqui:"),
+        f"👉 {esc(link_afiliado)}",
     ]
     return "\n".join(linhas)
 
 
-def _codigos_aplicaveis(preco):
-    """Lista de strings 'CODIGO — descrição' dos CupomCodigo ativos cujo mínimo cabe no preço."""
+# Back-compat: chamadas antigas continuam funcionando (markup WhatsApp default).
+def montar_mensagem_whatsapp(produto, link_afiliado: str, cupom_pai) -> str:
+    return montar_mensagem(produto, link_afiliado, cupom_pai)
+
+
+def _melhor_codigo(produto):
+    """
+    Devolve o ÚNICO melhor código de checkout VÁLIDO para este item (ou None).
+
+    Cupons não acumulam: escolhemos um só. Filtra por categoria/mínimo/validade
+    via CupomCodigo.aplica_em e prioriza o de maior desconto percentual estimado.
+    """
     from apps.scrapers.models import CupomCodigo
-    hoje = timezone.now().date()
-    out = []
-    for c in CupomCodigo.objects.filter(ativo=True):
-        if c.validade and c.validade < hoje:
-            continue
-        if c.valor_minimo and preco < c.valor_minimo:
-            continue
-        desc = f" — {c.descricao}" if c.descricao else ""
-        out.append(f"{c.codigo}{desc}")
-    return out
+    candidatos = [c for c in CupomCodigo.objects.filter(ativo=True) if c.aplica_em(produto)]
+    if not candidatos:
+        return None
+
+    def desconto_est(c):
+        if c.tipo_desconto == "porcentagem":
+            return produto.preco_com_cupom * (c.valor_desconto / 100.0)
+        return c.valor_desconto
+
+    melhor = max(candidatos, key=desconto_est)
+    return f"{melhor.codigo} — {melhor.descricao}" if melhor.descricao else melhor.codigo
 
 
 def _baixar_imagem_b64(url):
@@ -218,29 +282,44 @@ def _baixar_imagem_b64(url):
         return "", ""
 
 
-def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False):
+def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False, canal="whatsapp", usuario=None):
     """
-    Núcleo de envio reutilizável (comando manual + tasks Celery):
-      garante link afiliado -> (opcional) verifica no browser -> monta msg -> envia.
-    Grava HistoricoEnvio SOMENTE em envio bem-sucedido.
+    Núcleo de envio reutilizável e AGNÓSTICO de loja/canal:
+      resolve marketplace (link afiliado + verificação) e sender (transporte) via registry.
+      garante link -> checa tag afiliado (A3) -> (opcional) verifica destino -> monta msg
+      no markup do canal -> envia. Grava HistoricoEnvio SOMENTE em envio bem-sucedido.
 
     Retorna dict: {sucesso, motivo?, link?, mensagem?, verificacao?, via?}
     """
-    from apps.scrapers.scraper_mercadolivre.link import (
-        gerar_link_afiliado_para_produto, verificar_link_afiliado,
-    )
-    from apps.scrapers import whatsapp_client
+    from django.conf import settings
+    from apps.scrapers.marketplaces.registry import get_marketplace
+    from apps.scrapers.senders.registry import get_sender
 
-    info = gerar_link_afiliado_para_produto(produto)
+    mp = get_marketplace(getattr(produto, "marketplace", "mercadolivre"))
+    sender = get_sender(canal)
+
+    info = mp.build_affiliate_link(produto, usuario=usuario)
     if not info:
         return {"sucesso": False, "motivo": "falha ao gerar link de afiliado"}
     link = info["link_afiliado"]
 
+    # A3 — sem tag de afiliado o clique não gera comissão. Recusa (ou avisa).
+    afiliado_ok = info.get("afiliado_ok")
+    if afiliado_ok is None:
+        afiliado_ok = mp.verify_affiliate_tag(link, usuario=usuario)
+    if not afiliado_ok:
+        if getattr(settings, "AFILIADO_EXIGIR", True):
+            return {"sucesso": False, "motivo": "link sem tag de afiliado (A3) — não enviado",
+                    "link": link}
+        print(f"⚠️ AVISO: link sem tag de afiliado, enviando assim mesmo: {link}")
+
     verificacao = None
     if verificar:
-        # Ofertas (de/por) já têm desconto confirmado na raspagem; cupom precisa confirmar na página.
-        eh_oferta = getattr(produto, "origem", "cupom") == "oferta"
-        verificacao = verificar_link_afiliado(link, nome_esperado=produto.nome, confiar_desconto=eh_oferta)
+        # 'oferta'/'busca' têm de/por confirmado na raspagem; 'cupom_codigo' precisa
+        # confirmar o desconto/badge na PDP (confiar_desconto=False).
+        origem = getattr(produto, "origem", "cupom")
+        confiar = origem in ("oferta", "busca")
+        verificacao = mp.verify_link(link, nome_esperado=produto.nome, confiar_desconto=confiar)
         if not verificacao.get("ok"):
             return {"sucesso": False, "motivo": "link reprovado na verificação",
                     "link": link, "verificacao": verificacao}
@@ -249,22 +328,24 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False):
     cupom = None
     if produto.campanha_id:
         cupom = Cupom.objects.filter(campanha_id=produto.campanha_id).first()
-    mensagem = montar_mensagem_whatsapp(produto, link, cupom)
+    mensagem = montar_mensagem(produto, link, cupom, markup=sender.markup)
 
     if dry_run:
         return {"sucesso": True, "dry_run": True, "link": link,
                 "mensagem": mensagem, "verificacao": verificacao}
 
-    # Tenta enviar com imagem (mídia); cai p/ texto se baixar falhar
-    imagem_b64, img_mime = _baixar_imagem_b64(getattr(produto, "imagem_url", ""))
-    if imagem_b64:
-        resultado = whatsapp_client.enviar_oferta(
-            grupo_id, mensagem, imagem_base64=imagem_b64,
-            mimetype=img_mime or "image/jpeg", legenda=mensagem)
+    # Imagem conforme o canal: Telegram aceita URL direto; WhatsApp precisa de base64.
+    if sender.prefers_image == "url":
+        resultado = sender.enviar_oferta(grupo_id, mensagem,
+                                         imagem_url=getattr(produto, "imagem_url", "") or None,
+                                         legenda=mensagem)
     else:
-        resultado = whatsapp_client.enviar_oferta(grupo_id, mensagem)
+        imagem_b64, img_mime = _baixar_imagem_b64(getattr(produto, "imagem_url", ""))
+        resultado = sender.enviar_oferta(grupo_id, mensagem, imagem_b64=imagem_b64 or None,
+                                         mimetype=img_mime or "image/jpeg", legenda=mensagem)
+
     if resultado.get("sucesso"):
-        HistoricoEnvio.objects.create(produto=produto)  # só após sucesso
+        HistoricoEnvio.objects.create(produto=produto, usuario=usuario)  # só após sucesso
         return {"sucesso": True, "link": link, "mensagem": mensagem,
                 "via": resultado.get("via"), "verificacao": verificacao}
     return {"sucesso": False, "motivo": resultado.get("erro") or "falha no envio",
@@ -272,7 +353,8 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False):
 
 
 def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
-                        horas_cooldown=24, max_tentativas=8, verificar=True, dry_run=False):
+                        horas_cooldown=24, max_tentativas=8, verificar=True, dry_run=False,
+                        termo=None, canal="whatsapp", marketplace=None, usuario=None):
     """
     Seleciona um POOL de candidatos do nicho e tenta enviar um por um até o primeiro
     que passa na verificação. Devolve o resultado do envio bem-sucedido, ou o último
@@ -283,14 +365,17 @@ def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
         limite_envio=max_tentativas,
         horas_cooldown=horas_cooldown,
         min_desconto_percent=min_desconto_percent,
+        termo=termo,
+        marketplace=marketplace,
+        usuario=usuario,
     )
     if not pool:
         return {"sucesso": False, "motivo": "sem item elegível"}
 
     ultimo = None
     for prod in pool:
-        print(f"Tentando: {prod.nome[:60]} (origem={getattr(prod,'origem','cupom')})")
-        r = enviar_oferta_de_produto(prod, grupo_id, verificar=verificar, dry_run=dry_run)
+        print(f"Tentando: {prod.nome[:60]} (origem={getattr(prod,'origem','cupom')}, mkt={getattr(prod,'marketplace','?')})")
+        r = enviar_oferta_de_produto(prod, grupo_id, verificar=verificar, dry_run=dry_run, canal=canal, usuario=usuario)
         if r.get("sucesso"):
             return r
         print(f"  reprovado: {r.get('motivo')}")
@@ -309,8 +394,11 @@ def processar_configs_de_envio():
     agora = timezone.now()
     resultados = []
     for cfg in ConfiguracaoEnvio.objects.filter(ativo=True):
-        vencido = (cfg.ultimo_envio is None or
-                   agora - cfg.ultimo_envio >= timedelta(minutes=cfg.intervalo_minutos))
+        # 1. Respeita a janela de horário (ex: 8h-20h). Fora dela, nunca envia.
+        if not cfg.dentro_da_janela(agora):
+            continue
+        # 2. Vencido = sem agendamento ainda OU passou do proximo_envio (intervalo + jitter).
+        vencido = cfg.proximo_envio is None or agora >= cfg.proximo_envio
         if not vencido:
             continue
 
@@ -320,9 +408,16 @@ def processar_configs_de_envio():
             min_desconto_percent=cfg.min_desconto_percent,
             horas_cooldown=cfg.horas_cooldown,
             verificar=True,
+            termo=cfg.termo_busca,
+            canal=getattr(cfg, "canal", "whatsapp"),
+            marketplace=getattr(cfg, "marketplace", "") or None,
+            usuario=cfg.owner,
         )
+        # Reagenda sempre (sucesso ou não) p/ não ficar martelando o mesmo tick;
+        # jitter ±1-10min deixa o ritmo humano. ultimo_envio só em sucesso (display).
+        cfg.agendar_proximo(agora)
         if r.get("sucesso"):
             cfg.ultimo_envio = agora
-            cfg.save(update_fields=["ultimo_envio"])
+        cfg.save(update_fields=["proximo_envio", "ultimo_envio"])
         resultados.append({"config": cfg.id, **r})
     return resultados

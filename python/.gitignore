@@ -4,7 +4,7 @@
 
 # Imagens geradas
 *.png
-
+*.yml
 # Python
 __pycache__/
 *.py[cod]

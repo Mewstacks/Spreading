@@ -1,0 +1,9 @@
+Olá {{ user.get_username }},
+
+Confirme seu e-mail para liberar o acesso ao Spreading:
+
+{{ url }}
+
+O link expira em 3 dias. Se você não criou esta conta, ignore este e-mail.
+
+— Spreading

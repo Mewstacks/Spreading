@@ -1,0 +1,9 @@
+{% if caiu %}Atenção, {{ user.get_username }}:
+
+Seu {{ servico }} caiu — os envios automáticos estão parados até reconectar.
+
+Reconecte no painel do Spreading.{% else %}Boa notícia, {{ user.get_username }}:
+
+Seu {{ servico }} reconectou. Os envios automáticos voltaram ao normal.{% endif %}
+
+— Spreading

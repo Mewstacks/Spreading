@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Confirme seu e-mail — Spreading{% endblock %}
+
+{% block head_extra %}
+<style>
+  .auth-wrap { max-width: 30rem; margin: 2rem auto; }
+  .auth-head { text-align: center; margin-bottom: 1.4rem; }
+  .auth-head .ic { width: 3.4rem; height: 3.4rem; margin: 0 auto 1rem; border-radius: 14px;
+    background: var(--brand-grad); color: #fff; display: flex; align-items: center; justify-content: center; }
+  .auth-head .ic .lucide { width: 1.7rem; height: 1.7rem; }
+  .auth-head h1 { font-size: 1.4rem; margin: 0 0 .4rem; font-weight: 700; }
+  .auth-head p { color: var(--muted); font-size: .92rem; margin: 0; line-height: 1.5; }
+  .auth-foot { margin-top: 1.2rem; text-align: center; font-size: .85rem; color: var(--muted); }
+  .auth-foot a, .auth-foot button.linklike { color: var(--accent); background: none; border: 0;
+    cursor: pointer; font-weight: 600; font-size: .85rem; font-family: var(--sans); padding: 0; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="auth-wrap">
+  <div class="auth-head">
+    <div class="ic"><i data-lucide="mail-check"></i></div>
+    <h1>Confirme seu e-mail</h1>
+    <p>Enviamos um link de confirmação{% if email %} para <b>{{ email }}</b>{% endif %}.
+       Abra seu e-mail e clique no link para liberar o painel.</p>
+  </div>
+  <div class="card" style="text-align:center;">
+    <p class="muted" style="font-size:.88rem;margin:0 0 1rem;">Não recebeu? Verifique o spam ou reenvie.</p>
+    <form method="post" action="{% url 'reenviar-verificacao' %}">{% csrf_token %}
+      <button type="submit" class="btn btn-green"><i data-lucide="send"></i> Reenviar e-mail</button>
+    </form>
+  </div>
+  <div class="auth-foot">
+    <form method="post" action="{% url 'logout' %}" style="display:inline;">{% csrf_token %}
+      <button type="submit" class="linklike">Sair</button>
+    </form>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script>renderIcons();</script>{% endblock %}
