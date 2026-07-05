@@ -40,10 +40,22 @@ class Amazon(Marketplace):
             az.mapear_cupons_codigo(usuario=usuario)
             for t in termos:
                 az.buscar_por_termo(t, usuario=usuario)
+            self._marcar_elegibilidade(usuario, True, "")
         except AmazonNotEligible as e:
             print(f"[amazon] user {usuario.id} não elegível (sem 10 vendas/30d?): {e} — pulando.")
+            self._marcar_elegibilidade(usuario, False,
+                                       "Conta sem elegibilidade na Creators API (10 vendas/30 dias).")
         except AmazonConfigError as e:
             print(f"[amazon] user {usuario.id} config ausente: {e} — pulando.")
+            self._marcar_elegibilidade(usuario, None, f"Configuração Amazon incompleta: {e}")
+
+    @staticmethod
+    def _marcar_elegibilidade(usuario, elegivel, msg):
+        """Persiste o resultado da raspagem Amazon no Perfil (exibido no painel)."""
+        from apps.accounts.models import Perfil
+        Perfil.objects.filter(user=usuario).update(
+            amazon_elegivel=elegivel, amazon_ultimo_erro=msg[:255]
+        )
 
     def build_affiliate_link(self, produto, usuario=None):
         from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_para_produto

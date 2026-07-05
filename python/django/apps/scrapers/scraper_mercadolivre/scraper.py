@@ -5,13 +5,14 @@ import time
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
 from apps.scrapers.models import Cupom, Produto
+from apps.scrapers.session_paths import ml_session_dir
 
 def mapear_cupons(n=1):
     todos_os_cupons_limpos = []
     MAX_RETRIES = 3
     RETRY_WAIT = 5  # segundos entre tentativas
 
-    caminho_auth = os.path.join(caminho_atual, "auth.json")
+    caminho_auth = os.path.join(ml_session_dir(), "auth.json")
     print("Iniciando raspagem e limpeza de cupons...")
     
     with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
@@ -466,7 +467,7 @@ def main():
         print("Nada a fazer. Todos os cupons já têm produtos.")
         return
 
-    caminho_auth = os.path.join(caminho_atual, "auth.json")
+    caminho_auth = os.path.join(ml_session_dir(), "auth.json")
 
     resultados_pendentes = []
     total = len(cupons_pendentes)

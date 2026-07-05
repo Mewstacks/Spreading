@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Superadmin — Infra Fly{% endblock %}
+
+{% block content %}
+<div style="margin-bottom:1rem;">
+  <a href="{% url 'superadmin-usuarios' %}" class="btn btn-sm btn-ghost"><i data-lucide="arrow-left"></i> Voltar</a>
+  <a href="?force=1" class="btn btn-sm btn-ghost"><i data-lucide="refresh-cw"></i> Atualizar</a>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2><i data-lucide="server"></i> Máquinas Fly (compartilhadas)</h2>
+  </div>
+
+  <div class="stat-grid" style="margin-bottom:1rem;">
+    <div class="stat"><div class="n">US$ {{ fly.custo_mensal }}</div><div class="l">Custo/mês (estimado)</div></div>
+    <div class="stat"><div class="n">{{ wa_ativas }}</div><div class="l">Sessões WhatsApp ativas (~cap 3-4)</div></div>
+  </div>
+
+  {% if not fly.disponivel %}
+    <div class="msg msg-info">{{ fly.motivo }}</div>
+  {% else %}
+    {% for app in fly.apps %}
+    <div style="margin-bottom:1.1rem;">
+      <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem;">
+        <strong>{{ app.app }}</strong>
+        {% if app.ok %}<span class="dot on"></span>{% else %}<span class="dot off"></span>{% endif %}
+      </div>
+      {% if app.erro %}<div class="msg msg-error">{{ app.erro }}</div>{% endif %}
+      {% if app.maquinas %}
+      <div class="tbl-wrap">
+        <table class="grid">
+          <thead><tr><th>Máquina</th><th>Estado</th><th>Região</th><th>CPU</th><th>RAM</th></tr></thead>
+          <tbody>
+            {% for m in app.maquinas %}
+            <tr>
+              <td>{{ m.nome|default:m.id }}</td>
+              <td><span class="dot {% if m.estado == 'started' %}on{% else %}off{% endif %}"></span> {{ m.estado }}</td>
+              <td>{{ m.regiao }}</td>
+              <td>{{ m.cpus|default:"?" }}× {{ m.cpu_kind }}</td>
+              <td>{{ m.memoria_mb|default:"?" }} MB</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  {% endif %}
+  <p style="color:var(--muted);font-size:.78rem;">Infra é uma máquina por serviço (não por usuário). Uso por usuário fica na lista de <a href="{% url 'superadmin-usuarios' %}">usuários</a>.</p>
+</div>
+{% endblock %}

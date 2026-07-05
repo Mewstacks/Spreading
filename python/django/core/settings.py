@@ -62,6 +62,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -71,6 +72,8 @@ MIDDLEWARE = [
     'core.middleware.SecurityHeadersMiddleware',
     # Tranca usuário logado mas com e-mail não verificado (multi-tenant SaaS).
     'apps.accounts.middleware.EmailVerificadoMiddleware',
+    # Barra conta suspensa pelo superadmin.
+    'apps.accounts.middleware.ContaBloqueadaMiddleware',
 ]
 
 # CSP em modo report-only começa desligado. Para testar sem quebrar nada:
@@ -106,13 +109,40 @@ WSGI_APPLICATION = 'core.wsgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
+#
+# Produção (Fly.io): defina DATABASE_URL (postgres://...). Dev local cai no SQLite.
+import dj_database_url  # noqa: E402
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+_DATABASE_URL = os.getenv("DATABASE_URL", "")
+if _DATABASE_URL:
+    # ssl_require=False: o Postgres interno do Fly (.flycast/.internal) NÃO usa TLS;
+    # forçar sslmode=require quebraria a conexão. Provedores externos (Supabase) já
+    # trazem sslmode na própria URL. Sobrescreva com DB_SSL_REQUIRE=1 se precisar.
+    DATABASES = {
+        "default": dj_database_url.parse(
+            _DATABASE_URL, conn_max_age=600,
+            ssl_require=os.getenv("DB_SSL_REQUIRE", "0") == "1",
+        )
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
+
+# Cache. O throttle de login (apps.accounts.views) guarda o contador de tentativas
+# aqui. Em produção há vários processos (gunicorn 2 workers + honcho): LocMemCache
+# é POR processo e não compartilha o contador → brute-force mais fraco. Com Postgres
+# usa cache no banco (compartilhado). Rode `createcachetable` uma vez (release_command).
+if _DATABASE_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.db.DatabaseCache",
+            "LOCATION": "django_cache",
+        }
+    }
 
 
 # Password validation
@@ -151,6 +181,18 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+# collectstatic destino em produção (servido pelo WhiteNoise).
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+# Manifest+compressão só em produção. Em DEBUG usa o storage simples (senão o
+# {% static %} exigiria manifesto/collectstatic e quebraria o dev).
+_staticfiles_backend = (
+    "django.contrib.staticfiles.storage.StaticFilesStorage" if DEBUG
+    else "whitenoise.storage.CompressedManifestStaticFilesStorage"
+)
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": _staticfiles_backend},
+}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -204,6 +246,17 @@ AMAZON_FEED_KEYWORDS = [
         "aspirador robo,monitor,ssd,cafeteira,perfume,tenis",
     ).split(",") if k.strip()
 ]
+
+
+# ─────────────────────────────────────────────────────────────
+# Monitor de canais curados (Telethon / userbot MTProto) — Track B4.
+# Uma CONTA de usuário do Telegram entra nos canais-fonte e lê as mensagens (bots
+# não leem canais que não administram). Gere a StringSession uma vez e guarde como
+# Fly secret. api_id/api_hash em https://my.telegram.org.
+# ─────────────────────────────────────────────────────────────
+TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "0") or "0")
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
+TELEGRAM_SESSION = os.getenv("TELEGRAM_SESSION", "")  # StringSession do userbot
 
 
 # ─────────────────────────────────────────────────────────────
@@ -294,3 +347,75 @@ else:
 ALERTA_CONEXAO_COOLDOWN_H = int(os.getenv("ALERTA_CONEXAO_COOLDOWN_H", "6"))
 # Dias sem atualizar o auth.json do ML antes de considerar a sessão "stale" (caída).
 ML_AUTH_STALE_DIAS = int(os.getenv("ML_AUTH_STALE_DIAS", "7"))
+
+# ─────────────────────────────────────────────────────────────
+# Sessões do ML (auth.json / auth_{id}.json). Em produção (Fly.io) aponte para
+# um volume persistente (ex: /data/ml_sessions). Vazio = pasta do módulo (dev).
+# ─────────────────────────────────────────────────────────────
+ML_SESSION_DIR = os.getenv("ML_SESSION_DIR", "")
+
+# Login do ML com navegador VISÍVEL (auth_stream). Só funciona onde há tela: dev.
+# No servidor (Fly, headless) fica desligado → o admin conecta o ML enviando um
+# storage_state gerado localmente (connect_ml.py → tela "Enviar sessão ML").
+ML_HEADFUL_LOGIN = os.getenv("ML_HEADFUL_LOGIN", "1" if DEBUG else "0") == "1"
+
+# Chave Fernet p/ criptografar segredos por usuário em repouso (Track A4).
+# Gere com: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+SECRETS_FERNET_KEY = os.getenv("SECRETS_FERNET_KEY", "")
+
+# ─────────────────────────────────────────────────────────────
+# Cotas por usuário (default global; Perfil pode sobrescrever por usuário).
+# Protegem a máquina compartilhada — um usuário não estoura o recurso comum.
+# 0/vazio no Perfil = usa estes defaults.
+# ─────────────────────────────────────────────────────────────
+QUOTA_MAX_CONFIGS = int(os.getenv("QUOTA_MAX_CONFIGS", "20"))
+QUOTA_MAX_ENVIOS_DIA = int(os.getenv("QUOTA_MAX_ENVIOS_DIA", "300"))
+QUOTA_MAX_WA_SESSIONS = int(os.getenv("QUOTA_MAX_WA_SESSIONS", "1"))
+
+# ─────────────────────────────────────────────────────────────
+# Painel de infra do superadmin — métricas Fly (somente leitura).
+# FLY_API_TOKEN vazio = painel mostra "indisponível" (dev). Gere com `fly auth token`.
+# ─────────────────────────────────────────────────────────────
+FLY_API_TOKEN = os.getenv("FLY_API_TOKEN", "")
+FLY_API_HOST = os.getenv("FLY_API_HOST", "https://api.machines.dev")
+FLY_APPS = [a.strip() for a in os.getenv(
+    "FLY_APPS", "spreading-web,spreading-wa").split(",") if a.strip()]
+# Custo mensal aproximado do conjunto compartilhado (USD) — estático, do DEPLOY.md.
+FLY_CUSTO_MENSAL_USD = os.getenv("FLY_CUSTO_MENSAL_USD", "15-30")
+
+# ─────────────────────────────────────────────────────────────
+# Observabilidade: logging estruturado no console (capturado pelo honcho/Fly) +
+# Sentry opcional. Os loops (scrape/envio/senders) engolem exceções com try/except;
+# logar no logger 'apps' garante que apareçam nos logs (e no Sentry, se configurado).
+# ─────────────────────────────────────────────────────────────
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {"format": "{levelname} {asctime} {name} {message}", "style": "{"},
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "formatter": "verbose"},
+    },
+    "root": {"handlers": ["console"], "level": "INFO"},
+    "loggers": {
+        "apps": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "django.request": {"handlers": ["console"], "level": "ERROR", "propagate": False},
+    },
+}
+
+SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+if SENTRY_DSN:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.django import DjangoIntegration
+
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            integrations=[DjangoIntegration()],
+            traces_sample_rate=float(os.getenv("SENTRY_TRACES_RATE", "0.0")),
+            send_default_pii=False,
+            environment=os.getenv("SENTRY_ENV", "prod" if not DEBUG else "dev"),
+        )
+    except Exception:  # sentry-sdk ausente ou DSN inválido — não derruba o boot
+        pass

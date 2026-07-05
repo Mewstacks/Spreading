@@ -44,6 +44,18 @@
     <button id="ofertas-btn" class="btn btn-green" onclick="startOfertas()"><i data-lucide="tag"></i> Raspar Ofertas</button>
     <button id="cupons-btn" class="btn btn-yellow" onclick="startCuponsCodigo()"><i data-lucide="ticket"></i> Raspar Cupons-Código</button>
     <button id="auth-btn" class="btn btn-blue" onclick="startAuth()"><i data-lucide="key-round"></i> Login ML</button>
+    <button class="btn" onclick="document.getElementById('ml-upload').style.display = document.getElementById('ml-upload').style.display==='none'?'block':'none';"><i data-lucide="upload"></i> Enviar sessão ML</button>
+  </div>
+  <!-- Conectar ML no servidor (sem tela): cole o auth.json gerado por connect_ml.py -->
+  <div id="ml-upload" style="display:none;margin-top:.8rem;">
+    <div class="muted" style="font-size:.8rem;margin-bottom:.5rem;">
+      No seu PC: <code>python connect_ml.py</code> → logue no ML → cole abaixo o conteúdo de <code>auth.json</code>.
+    </div>
+    <textarea id="ml-json" rows="3" placeholder='{"cookies":[...],"origins":[...]}' style="width:100%;box-sizing:border-box;font-family:monospace;font-size:.78rem;padding:.5rem;border-radius:8px;"></textarea>
+    <div style="display:flex;gap:.6rem;align-items:center;margin-top:.5rem;flex-wrap:wrap;">
+      <button class="btn btn-blue" onclick="enviarSessaoML()"><i data-lucide="upload"></i> Enviar sessão</button>
+      <span id="ml-upload-msg" class="muted" style="font-size:.8rem;"></span>
+    </div>
   </div>
 </div>
 
@@ -61,6 +73,22 @@
   function getCookie(nome) {
     const m = document.cookie.match('(^|;)\\s*' + nome + '\\s*=\\s*([^;]+)');
     return m ? decodeURIComponent(m.pop()) : '';
+  }
+
+  // Envia o storage_state do ML (gerado localmente por connect_ml.py) p/ o servidor.
+  function enviarSessaoML() {
+    const j = document.getElementById('ml-json').value.trim();
+    const msg = document.getElementById('ml-upload-msg');
+    if (!j) { msg.textContent = 'Cole o JSON da sessão.'; return; }
+    msg.textContent = 'Validando sessão no ML…';
+    fetch('/scrapers/ml/upload/', {
+      method: 'POST',
+      headers: { 'X-CSRFToken': getCookie('csrftoken'), 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'sessao_json=' + encodeURIComponent(j)
+    })
+      .then(r => r.json())
+      .then(d => { msg.textContent = d.ok ? '✅ ' + d.msg : '❌ ' + d.erro; if (d.ok) document.getElementById('ml-json').value = ''; })
+      .catch(e => { msg.textContent = '❌ ' + e; });
   }
   let autoBusy = false;
 
@@ -89,6 +117,12 @@
     if (e.fase === 'iniciando') return '<span class="badge badge-yellow"><span class="dot"></span>iniciando…</span>';
     return '<span class="badge badge-muted">aguardando próximo ciclo</span>';
   }
+  function esc(s) {
+    // Escapa strings do servidor antes de irem p/ innerHTML (defesa DOM-XSS:
+    // ultima_msg/erro podem carregar nome de produto raspado com HTML malicioso).
+    const d = document.createElement('div'); d.textContent = String(s == null ? '' : s);
+    return d.innerHTML;
+  }
   function paintAuto(d) {
     const rodando = !!d.rodando, e = d.estado || {};
     document.getElementById('auto-toggle').checked = rodando;
@@ -102,8 +136,8 @@
     html += '<div class="row"><span class="k">Última raspagem</span><span class="v">' + rel(e.ultimo_ciclo_fim, false) + '</span></div>';
     html += '<div class="row"><span class="k">Próxima</span><span class="v">' + rel(e.proximo_ciclo, true) + '</span></div>';
     html += '<div class="row"><span class="k">Ciclos concluídos</span><span class="v">' + (e.ciclos || 0) + '</span></div>';
-    if (e.ultima_msg) html += '<div class="row"><span class="k">Status</span><span class="v">' + e.ultima_msg + '</span></div>';
-    if (e.erro) html += '<div class="err">⚠ ' + e.erro + '</div>';
+    if (e.ultima_msg) html += '<div class="row"><span class="k">Status</span><span class="v">' + esc(e.ultima_msg) + '</span></div>';
+    if (e.erro) html += '<div class="err">⚠ ' + esc(e.erro) + '</div>';
     det.style.display = 'flex';
     det.innerHTML = html;
   }

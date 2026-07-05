@@ -25,7 +25,8 @@ class TelegramSender(Sender):
         return f"https://api.telegram.org/bot{token}/{metodo}"
 
     def enviar_oferta(self, destino, mensagem, *, imagem_url=None, imagem_b64=None,
-                      mimetype="image/jpeg", legenda=None):
+                      mimetype="image/jpeg", legenda=None, session=None):
+        # session ignorado: o Bot API do Telegram não tem multi-sessão por usuário.
         if not destino:
             return {"sucesso": False, "erro": "destino (chat_id) vazio."}
         if not getattr(settings, "TELEGRAM_BOT_TOKEN", ""):

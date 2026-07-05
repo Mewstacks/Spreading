@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Superadmin — Usuários{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-head">
+    <h2><i data-lucide="users"></i> Usuários</h2>
+    <span class="count">{{ total_users }}</span>
+    <a href="{% url 'superadmin-infra' %}" class="btn btn-sm btn-ghost" style="margin-left:.6rem;">
+      <i data-lucide="server"></i> Infra Fly
+    </a>
+  </div>
+
+  <div class="stat-grid" style="margin-bottom:1.1rem;">
+    <div class="stat">
+      <div class="n">{% if worker_scrape %}<span class="dot on"></span>{% else %}<span class="dot off"></span>{% endif %} {% if scrape_ligado %}ON{% else %}OFF{% endif %}</div>
+      <div class="l">Worker scrape (global)</div>
+    </div>
+    <div class="stat">
+      <div class="n">{% if worker_envio %}<span class="dot on"></span>{% else %}<span class="dot off"></span>{% endif %} {% if envio_ligado %}ON{% else %}OFF{% endif %}</div>
+      <div class="l">Worker envio (global)</div>
+    </div>
+  </div>
+
+  <div class="tbl-wrap">
+    <table class="grid">
+      <thead>
+        <tr>
+          <th>Usuário</th><th>Status</th><th>WA</th><th>ML</th><th>Amazon</th>
+          <th>Configs</th><th>Envios 7d</th><th>Total</th><th>Última ativ.</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in linhas %}
+        <tr>
+          <td>
+            {{ r.user.get_username }}
+            {% if r.user.is_superuser %}<span class="count">admin</span>{% endif %}
+            <div style="color:var(--muted);font-size:.75rem;">{{ r.user.email }}</div>
+          </td>
+          <td>
+            {% if r.bloqueado %}<span style="color:var(--red);">suspenso</span>
+            {% elif not r.verificado %}<span style="color:var(--yellow);">não verif.</span>
+            {% else %}<span style="color:var(--green);">ativo</span>{% endif %}
+          </td>
+          <td><span class="dot {% if r.wa_estado %}on{% elif r.wa_estado is False %}off{% endif %}"></span></td>
+          <td><span class="dot {% if r.ml_estado %}on{% elif r.ml_estado is False %}off{% endif %}"></span></td>
+          <td>
+            {% if r.amazon_elegivel %}<span class="dot on"></span>
+            {% elif r.amazon_elegivel is False %}<span class="dot off"></span>
+            {% else %}<span class="dot"></span>{% endif %}
+          </td>
+          <td>{{ r.configs_ativas }}</td>
+          <td>{{ r.envios_7d }}</td>
+          <td>{{ r.envios_total }}</td>
+          <td style="color:var(--muted);font-size:.78rem;">{{ r.ultima_atividade|date:"d/m H:i"|default:"—" }}</td>
+          <td>
+            <a href="{% url 'superadmin-usuario' r.user.id %}" class="icon-btn go" title="Detalhe">
+              <i data-lucide="arrow-right"></i>
+            </a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

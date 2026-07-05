@@ -27,11 +27,19 @@
 </div>
 
 <div class="grid grid-cards">
+  <a class="card home-card" href="{% url 'scraper-comecar' %}">
+    <div class="home-ico ico-green"><i data-lucide="rocket"></i></div>
+    <h3>Começar</h3>
+    <p>Checklist de configuração: tags, conexões, primeira regra e ligar o envio.</p>
+  </a>
+
+  {% if request.user.is_staff %}
   <a class="card home-card" href="/scrapers/">
     <div class="home-ico ico-blue"><i data-lucide="radar"></i></div>
     <h3>Scraper</h3>
     <p>Raspar ofertas, cupons e gerar links de afiliado. Log + progresso ao vivo.</p>
   </a>
+  {% endif %}
 
   <a class="card home-card" href="/scrapers/top/">
     <div class="home-ico ico-flame"><i data-lucide="flame"></i></div>
@@ -57,10 +65,12 @@
     <p>Status do bot + checklist de configuração (token, admin do canal).</p>
   </a>
 
+  {% if request.user.is_staff %}
   <a class="card home-card" href="/admin/">
     <div class="home-ico ico-slate"><i data-lucide="wrench"></i></div>
     <h3>Admin</h3>
     <p>Cupons, Produtos e Histórico de Envio no Django Admin.</p>
   </a>
+  {% endif %}
 </div>
 {% endblock %}

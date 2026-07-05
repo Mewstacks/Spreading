@@ -47,5 +47,7 @@ class Sender(ABC):
     @abstractmethod
     def enviar_oferta(self, destino: str, mensagem: str, *, imagem_url: str = None,
                       imagem_b64: str = None, mimetype: str = "image/jpeg",
-                      legenda: str = None) -> dict:
+                      legenda: str = None, session: str = None) -> dict:
+        # `session`: roteia p/ a conexão do dono (WhatsApp multi-tenant). Canais
+        # sem multi-sessão (Telegram) ignoram.
         ...

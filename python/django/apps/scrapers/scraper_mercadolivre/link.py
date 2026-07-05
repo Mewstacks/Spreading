@@ -5,15 +5,16 @@ caminho_atual = os.path.dirname(os.path.abspath(__file__))
 caminho_django = os.path.dirname(os.path.dirname(os.path.dirname(caminho_atual)))
 sys.path.append(caminho_django)
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
+from apps.scrapers.session_paths import ml_session_dir
 
 
 def _auth_path(usuario=None) -> str:
     """auth.json do ML. Por usuário (auth_{id}.json) se existir; senão o global."""
     if usuario is not None and getattr(usuario, "id", None):
-        p = os.path.join(caminho_atual, f"auth_{usuario.id}.json")
+        p = os.path.join(ml_session_dir(), f"auth_{usuario.id}.json")
         if os.path.exists(p):
             return p
-    return os.path.join(caminho_atual, "auth.json")
+    return os.path.join(ml_session_dir(), "auth.json")
 
 
 class LoginError(Exception):
@@ -83,7 +84,7 @@ def link_tem_tag_afiliado(link_curto: str, usuario=None) -> bool:
 
 def afiliate_link_builder(link_base, auth_path=None):
     with iniciar_browser(
-        auth_path=auth_path or os.path.join(caminho_atual, "auth.json"),
+        auth_path=auth_path or os.path.join(ml_session_dir(), "auth.json"),
         headless=True,
         permissions=['clipboard-read', 'clipboard-write'],
     ) as (page, context):
@@ -195,7 +196,7 @@ def gerar_links_em_lote(produtos):
     gerados = 0
     falhas = 0
     with iniciar_browser(
-        auth_path=os.path.join(caminho_atual, "auth.json"),
+        auth_path=os.path.join(ml_session_dir(), "auth.json"),
         headless=True,
         permissions=['clipboard-read', 'clipboard-write'],
     ) as (page, context):
@@ -270,7 +271,7 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
         return relatorio
 
     with iniciar_browser(
-        auth_path=os.path.join(caminho_atual, "auth.json"),
+        auth_path=os.path.join(ml_session_dir(), "auth.json"),
         headless=True,
     ) as (page, context):
         try:

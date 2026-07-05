@@ -1,0 +1,32 @@
+# Fly.io — serviço WhatsApp (whatsapp-web.js + Chromium). Só rede privada.
+# Secret: fly secrets set API_KEY=<mesma-chave-do-WHATSAPP_API_KEY-do-web>
+app = "spreading-wa"
+primary_region = "gru"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+
+# Sessão do WhatsApp (LocalAuth) persiste no volume — sobrevive a restart/deploy.
+# IMPORTANTE: volume Fly prende a UMA máquina. Rode `fly scale count 1` para garantir
+# uma única máquina — senão as sessões se dividem entre volumes diferentes.
+[[mounts]]
+  source = "wa_data"
+  destination = "/app/.wwebjs_auth"
+
+# Sem [http_service] público: o Django alcança via spreading-wa.internal:3000
+# (rede privada Fly). O painel expõe QR/status pelo próprio Django.
+[[services]]
+  internal_port = 3000
+  protocol = "tcp"
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+# Cada WhatsApp conectado = 1 Chromium (~350MB). Dimensione a memória pela
+# quantidade de instâncias simultâneas: 2gb ~ 3-4 sessões. Suba se OOM.
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"

@@ -15,6 +15,7 @@ para o chamador pular a Amazon daquele usuário sem derrubar o resto.
 OBS: o schema exato (endpoints/campos) está atrás da doc autenticada da Amazon. O
 parsing de resposta fica isolado em ofertas_scraper._mapear_item; aqui só transporte.
 """
+import base64
 import threading
 import time
 from dataclasses import dataclass
@@ -56,6 +57,31 @@ _token_cache: dict = {}
 _token_lock = threading.Lock()
 _ultima_chamada = {"t": 0.0}  # throttle simples ≤1 TPS (por processo)
 
+# Host ÚNICO de dados da Creators API (região vai no header x-marketplace, não no host).
+DATA_HOST = "creatorsapi.amazon"
+
+# Token (OAuth2 client_credentials) é por REGIÃO, não por host de dados.
+# v3.x (Login with Amazon) -> /auth/o2/token; v2.x (Cognito) seria outro endpoint.
+_AUTH_HOST_NA = "api.amazon.com"
+_AUTH_HOST_EU = "api.amazon.co.uk"
+_AUTH_HOST_FE = "api.amazon.co.jp"
+
+# marketplace -> host de auth da região. BR cai em NA (api.amazon.com).
+_REGIAO_NA = {"www.amazon.com", "www.amazon.com.br", "www.amazon.com.mx", "www.amazon.ca"}
+_REGIAO_FE = {"www.amazon.co.jp", "www.amazon.com.au", "www.amazon.sg"}
+
+# Escopo OAuth difere por versão de credencial: v3.x usa "::", v2.x usa "/".
+_SCOPE_V3 = "creatorsapi::default"
+
+
+def _auth_host(creds: Credenciais) -> str:
+    mkt = (creds.marketplace or "").lower()
+    if mkt in _REGIAO_NA:
+        return _AUTH_HOST_NA
+    if mkt in _REGIAO_FE:
+        return _AUTH_HOST_FE
+    return _AUTH_HOST_EU  # demais (uk/de/fr/it/es/...) caem em EU
+
 
 def _cfg(nome):
     return (getattr(settings, nome, "") or "")
@@ -66,7 +92,7 @@ def creds_globais() -> Credenciais:
     return Credenciais(
         credential_id=_cfg("AMAZON_CREATOR_CREDENTIAL_ID"),
         credential_secret=_cfg("AMAZON_CREATOR_CREDENTIAL_SECRET"),
-        host=_cfg("AMAZON_CREATORS_HOST"),
+        host=_cfg("AMAZON_CREATORS_HOST") or DATA_HOST,
         partner_tag=_cfg("AMAZON_PARTNER_TAG"),
         marketplace=_cfg("AMAZON_MARKETPLACE") or "www.amazon.com.br",
     )
@@ -122,13 +148,17 @@ def _obter_token(creds: Credenciais) -> str:
             return cache["token"]
 
         _exigir(creds)
+        # v3.x (Login with Amazon): form-urlencoded + HTTP Basic(id:secret), scope "::".
+        basic = base64.b64encode(
+            f"{creds.credential_id}:{creds.credential_secret}".encode()
+        ).decode()
         try:
             r = requests.post(
-                f"https://{creds.host}/auth/token",
-                json={
-                    "grantType": "client_credentials",
-                    "clientId": creds.credential_id,
-                    "clientSecret": creds.credential_secret,
+                f"https://{_auth_host(creds)}/auth/o2/token",
+                data={"grant_type": "client_credentials", "scope": _SCOPE_V3},
+                headers={
+                    "Authorization": f"Basic {basic}",
+                    "Content-Type": "application/x-www-form-urlencoded",
                 },
                 timeout=15,
             )
@@ -155,16 +185,18 @@ def _post(operacao: str, payload: dict, creds: Credenciais) -> dict:
     body = dict(payload)
     body.setdefault("partnerTag", creds.partner_tag)
     body.setdefault("partnerType", "Associates")
-    body.setdefault("marketplace", creds.marketplace)
+    # marketplace NÃO vai no body: vai no header x-marketplace.
 
+    host = creds.host or DATA_HOST  # host de dados é fixo; creds.host só p/ override/dev.
     _throttle()
     try:
         r = requests.post(
-            f"https://{creds.host}/paapi5/{operacao}",
+            f"https://{host}/catalog/v1/{operacao}",
             json=body,
             headers={
                 "Authorization": f"Bearer {_obter_token(creds)}",
                 "Content-Type": "application/json",
+                "x-marketplace": creds.marketplace,
             },
             timeout=20,
         )
@@ -181,14 +213,16 @@ def _post(operacao: str, payload: dict, creds: Credenciais) -> dict:
     return r.json()
 
 
-# Resources pedidos em cada chamada (preço/savings/imagem/título/Prime/promoções).
+# Resources pedidos em cada chamada (preço/desconto/imagem/título/loja/categoria).
+# NOMES VÁLIDOS conforme enum do catalog/v1 (savingBasis/promotions/isPrimeEligible
+# NÃO existem mais; desconto/promoção vêm de price + dealDetails).
 _RESOURCES = [
     "itemInfo.title",
     "images.primary.large",
     "offersV2.listings.price",
-    "offersV2.listings.savingBasis",
-    "offersV2.listings.deliveryInfo.isPrimeEligible",
-    "offersV2.listings.promotions",
+    "offersV2.listings.dealDetails",
+    "offersV2.listings.availability",
+    "offersV2.listings.merchantInfo",
     "browseNodeInfo.browseNodes",
 ]
 

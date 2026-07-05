@@ -78,6 +78,30 @@ htmlcov/
 .pyright/
 
 # ========================
+# Databases / runtime data
+# ========================
+*.sqlite3
+*.db
+pentest_findings.db
+
+# Django automação (flag/estado/log dos loops em background)
+.automacao/
+*.pid
+
+# collectstatic (gerado no build; servido pelo WhiteNoise)
+staticfiles/
+
+# Mercado Livre / Playwright sessions (contêm credenciais — nunca versionar)
+auth.json
+auth_*.json
+.playwright-mcp/
+
+# Screenshots de validação Playwright
+page-*.png
+*-mobile.png
+*-desktop.png
+
+# ========================
 # OS
 # ========================
 .DS_Store

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Começar — Configuração da conta{% endblock %}
+
+{% block head_extra %}
+<style>
+  .step { display: flex; align-items: flex-start; gap: .9rem; padding: 1rem 0; border-bottom: 1px solid var(--border); }
+  .step:last-child { border-bottom: 0; }
+  .step-ico { flex: none; width: 2rem; height: 2rem; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); }
+  .step-ico.done { background: var(--green-bg); border-color: var(--green); color: var(--green); }
+  .step-ico .lucide { width: 1.1rem; height: 1.1rem; }
+  .step-body { flex: 1; min-width: 0; }
+  .step-body h3 { margin: 0 0 .2rem; font-size: .95rem; }
+  .step-body p { margin: 0 0 .5rem; font-size: .84rem; color: var(--muted); }
+  .step.done .step-body h3 { color: var(--muted); text-decoration: line-through; }
+  .progress { height: .5rem; border-radius: 999px; background: var(--surface-2); overflow: hidden; margin: .6rem 0 1.2rem; }
+  .progress > span { display: block; height: 100%; background: var(--green); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1><i data-lucide="rocket"></i> Começar</h1>
+  <p class="sub">Siga os passos para deixar sua conta operacional. {{ feitos }} de {{ total }} concluídos.</p>
+</div>
+
+<div class="card">
+  <div class="progress"><span style="width: {% widthratio feitos total 100 %}%;"></span></div>
+
+  {% if completo %}
+  <div class="msg msg-success" style="margin-bottom:1rem;">Tudo pronto! Suas ofertas já podem sair automaticamente. 🎉</div>
+  {% endif %}
+
+  {% for p in passos %}
+  <div class="step {% if p.feito %}done{% endif %}">
+    <div class="step-ico {% if p.feito %}done{% endif %}">
+      {% if p.feito %}<i data-lucide="check"></i>{% else %}<i data-lucide="circle"></i>{% endif %}
+    </div>
+    <div class="step-body">
+      <h3>{{ p.titulo }}</h3>
+      <p>{{ p.desc }}</p>
+      {% if not p.feito %}
+      <a href="{% url p.url %}" class="btn btn-sm btn-blue">{{ p.cta }} <i data-lucide="arrow-right"></i></a>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

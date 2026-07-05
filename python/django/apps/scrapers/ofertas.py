@@ -4,6 +4,7 @@ from datetime import timedelta
 from django.utils import timezone
 from django.db.models import F, FloatField, ExpressionWrapper
 from apps.scrapers.models import Produto, Cupom, HistoricoEnvio
+from apps.scrapers.precos import stats as _stats_preco
 
 def esta_vivo(produto):
     """
@@ -14,9 +15,8 @@ def esta_vivo(produto):
                uma instabilidade de rede não pode apagar um produto bom do banco.
     Só o chamador apaga, e somente quando recebe False.
     """
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
+    from apps.scrapers.auxiliar import ua_aleatorio
+    headers = {'User-Agent': ua_aleatorio()}
     termos_inativos = [
         "Anúncio pausado",
         "Este anúncio foi pausado",
@@ -117,7 +117,18 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
         # BÔNUS URGÊNCIA: Cupom novo (criado nas últimas 12h) recebe Boost de 50%
         if cupom and cupom.data_criacao >= timezone.now() - timedelta(hours=12):
             score *= 1.5
-            
+
+        # B1 — HISTÓRICO DE PREÇOS: o "de/por" do ML é frequentemente inflado.
+        # Com histórico suficiente (>=3 pontos/30d), comparamos com o próprio preço
+        # típico do item: preço "de sempre" -> desconto fictício, NÃO anuncia;
+        # perto da mínima de 30 dias -> queda REAL, ganha boost forte.
+        h = _stats_preco(prod, dias=30)
+        if h and h["n"] >= 3:
+            if prod.preco_com_cupom >= h["mediana"] * 0.98:
+                continue  # não é oferta de verdade vs. o histórico do item
+            if prod.preco_com_cupom <= h["minimo"] * 1.02:
+                score *= 1.6  # perto da mínima histórica — oferta genuína
+
         opcoes_sorteio.append(prod)
         pesos_sorteio.append(score)
 
@@ -215,7 +226,10 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None) -> str:
     elif cod_item:
         linhas += ["", f"🎟️ Use o cupom {m.bold(esc(cod_item))} no checkout"]
     else:
-        codigo = _melhor_codigo(produto)
+        # Códigos genéricos (CupomCodigo) são de checkout do ML — NÃO valem na Amazon
+        # (lá cupom é de clipar, sem código). Só aplica p/ ML/legado.
+        mkt = getattr(produto, "marketplace", "mercadolivre")
+        codigo = _melhor_codigo(produto) if mkt in ("mercadolivre", "") else None
         if codigo:
             linhas += ["", f"🎟️ Use o cupom {m.code(esc(codigo))} no checkout"]
         else:
@@ -334,15 +348,22 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False, c
         return {"sucesso": True, "dry_run": True, "link": link,
                 "mensagem": mensagem, "verificacao": verificacao}
 
+    # Sessão WhatsApp do DONO (multi-tenant): envia pela conexão dele, não pela default.
+    wa_session = None
+    if usuario is not None:
+        perfil = getattr(usuario, "perfil", None)
+        wa_session = perfil.sessao_whatsapp() if perfil else (str(getattr(usuario, "id", "")) or None)
+
     # Imagem conforme o canal: Telegram aceita URL direto; WhatsApp precisa de base64.
     if sender.prefers_image == "url":
         resultado = sender.enviar_oferta(grupo_id, mensagem,
                                          imagem_url=getattr(produto, "imagem_url", "") or None,
-                                         legenda=mensagem)
+                                         legenda=mensagem, session=wa_session)
     else:
         imagem_b64, img_mime = _baixar_imagem_b64(getattr(produto, "imagem_url", ""))
         resultado = sender.enviar_oferta(grupo_id, mensagem, imagem_b64=imagem_b64 or None,
-                                         mimetype=img_mime or "image/jpeg", legenda=mensagem)
+                                         mimetype=img_mime or "image/jpeg", legenda=mensagem,
+                                         session=wa_session)
 
     if resultado.get("sucesso"):
         HistoricoEnvio.objects.create(produto=produto, usuario=usuario)  # só após sucesso
@@ -389,11 +410,32 @@ def processar_configs_de_envio():
     intervalo), seleciona 1 item do nicho e envia. Chamado pelo tick do Celery.
     Retorna lista de resultados por config.
     """
-    from apps.scrapers.models import ConfiguracaoEnvio
+    from apps.scrapers.models import ConfiguracaoEnvio, HistoricoEnvio
 
     agora = timezone.now()
+    hoje = timezone.localtime(agora).date()
     resultados = []
-    for cfg in ConfiguracaoEnvio.objects.filter(ativo=True):
+    # Cache por-owner dentro do tick: quantos envios já saíram hoje (cota diária).
+    _envios_hoje: dict = {}
+
+    def _cota_estourada(owner) -> bool:
+        """True se o dono está suspenso ou já bateu a cota diária de envios.
+        owner=None (pool legado/compartilhado) não tem dono → sem cota/bloqueio."""
+        if owner is None:
+            return False
+        perfil = getattr(owner, "perfil", None)
+        if perfil and perfil.bloqueado:
+            return True
+        if owner.id not in _envios_hoje:
+            _envios_hoje[owner.id] = HistoricoEnvio.objects.filter(
+                usuario=owner, data_envio__date=hoje).count()
+        limite = perfil.cota_max_envios_dia() if perfil else 0
+        return bool(limite) and _envios_hoje[owner.id] >= limite
+
+    for cfg in ConfiguracaoEnvio.objects.filter(ativo=True).select_related("owner__perfil"):
+        # 0. Dono suspenso ou cota diária estourada → nunca envia.
+        if _cota_estourada(cfg.owner):
+            continue
         # 1. Respeita a janela de horário (ex: 8h-20h). Fora dela, nunca envia.
         if not cfg.dentro_da_janela(agora):
             continue
@@ -418,6 +460,8 @@ def processar_configs_de_envio():
         cfg.agendar_proximo(agora)
         if r.get("sucesso"):
             cfg.ultimo_envio = agora
+            if cfg.owner_id is not None:
+                _envios_hoje[cfg.owner_id] = _envios_hoje.get(cfg.owner_id, 0) + 1
         cfg.save(update_fields=["proximo_envio", "ultimo_envio"])
         resultados.append({"config": cfg.id, **r})
     return resultados

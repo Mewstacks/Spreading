@@ -16,12 +16,21 @@ import re
 from apps.scrapers.auxiliar import iniciar_browser
 from apps.scrapers.models import Produto, CupomCodigo
 from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _coletar_cards, _salvar
+from apps.scrapers.session_paths import ml_session_dir
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 
-# Palavras maiúsculas comuns que NÃO são código de cupom
+# Marca dos códigos criados por ESTE scraper (vs. curados à mão). Só desativamos/
+# reativamos os automáticos; cupons curados manualmente ficam intocados.
+_DESC_AUTO = "cupom ML (checkout)"
+
+# Palavras maiúsculas comuns que NÃO são código de cupom (reduz falso-positivo do
+# regex sobre texto livre da página).
 _NAO_CODIGO = {"OFERTA", "OFERTAS", "VENDIDO", "VENDIDOS", "BREVE", "FRETE", "GRATIS",
-               "FULL", "NOVO", "PIX", "OFF", "ATE", "MELI"}
+               "FULL", "NOVO", "PIX", "OFF", "ATE", "MELI", "SUPER", "MEGA", "TOP",
+               "ANDROID", "IPHONE", "SAMSUNG", "MOTOROLA", "XIAOMI", "LG", "SONY",
+               "PS4", "PS5", "USB", "HD", "SSD", "GB", "TB", "TV", "LED", "LCD",
+               "R$", "COMPRE", "LEVE", "GANHE", "ECONOMIZE"}
 
 
 def _extrair_codigos(texto):
@@ -33,7 +42,7 @@ def _extrair_codigos(texto):
 def mapear_cupons_codigo():
     """Raspa /ofertas/cupons: produtos -> origem='cupom_codigo'; códigos -> CupomCodigo."""
     print("Iniciando raspagem de CUPONS DE CÓDIGO (/ofertas/cupons)...")
-    caminho_auth = os.path.join(caminho_atual, "auth.json")
+    caminho_auth = os.path.join(ml_session_dir(), "auth.json")
     coletados, codigos = [], set()
 
     with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
@@ -60,14 +69,35 @@ def mapear_cupons_codigo():
             except Exception:
                 pass
 
-    Produto.objects.filter(origem="cupom_codigo").delete()
-    n_prod = _salvar(coletados, origem="cupom_codigo")
+    # Guarda anti-wipe: se a raspagem não trouxe NADA (ML bloqueou/caiu), não apaga
+    # os produtos nem desativa códigos válidos — evita zerar tudo por falha de rede.
+    if not coletados and not codigos:
+        print("CUPONS-CÓDIGO: raspagem vazia (bloqueio/erro) — nada alterado.")
+        return 0
 
-    n_cod = 0
+    # Produtos do cupom-código são efêmeros (recriados a cada raspagem, como as outras
+    # lanes). Só troca se veio conteúdo novo (o guard acima já barra o caso 100% vazio).
+    n_prod = 0
+    if coletados:
+        Produto.objects.filter(origem="cupom_codigo").delete()
+        n_prod = _salvar(coletados, origem="cupom_codigo")
+
+    # Códigos: upsert + REATIVA os vistos agora; DESATIVA os automáticos que sumiram
+    # (antes só criava e nunca marcava stale → códigos mortos ficavam na lista global).
+    n_novos = 0
     for cod in codigos:
-        _, criado = CupomCodigo.objects.get_or_create(
-            codigo=cod, defaults={"descricao": "cupom ML (checkout)", "ativo": True})
-        n_cod += 1 if criado else 0
+        _, criado = CupomCodigo.objects.update_or_create(
+            codigo=cod, defaults={"ativo": True})
+        # descricao só na criação (não sobrescreve edição manual)
+        if criado:
+            CupomCodigo.objects.filter(codigo=cod).update(descricao=_DESC_AUTO)
+            n_novos += 1
 
-    print(f"CUPONS-CÓDIGO: {n_prod} produtos, {len(codigos)} códigos ({n_cod} novos): {sorted(codigos)}")
+    stale = (CupomCodigo.objects
+             .filter(descricao=_DESC_AUTO, ativo=True)
+             .exclude(codigo__in=codigos))
+    n_stale = stale.update(ativo=False)
+
+    print(f"CUPONS-CÓDIGO: {n_prod} produtos, {len(codigos)} códigos "
+          f"({n_novos} novos, {n_stale} desativados): {sorted(codigos)}")
     return n_prod

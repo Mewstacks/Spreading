@@ -176,6 +176,38 @@
     .btn-ghost:hover { background: var(--surface-3); border-color: var(--muted-2); filter: none; }
     .btn-sm { padding: .42rem .8rem; font-size: .8rem; }
 
+    /* mensagens (django.contrib.messages) */
+    .msgs { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.1rem; }
+    .msg { padding: .7rem 1rem; border-radius: var(--radius-sm); border: 1px solid var(--border);
+      background: var(--surface-2); font-size: .88rem; }
+    .msg-success { border-color: var(--green); background: var(--green-bg); }
+    .msg-error { border-color: var(--red); background: var(--red-bg); }
+    .msg-info { border-color: var(--accent); }
+
+    /* barra de impersonação */
+    .impersonate-bar { display: flex; align-items: center; justify-content: center; flex-wrap: wrap;
+      gap: .8rem; padding: .55rem 1rem; background: var(--yellow-bg); border-bottom: 1px solid var(--yellow);
+      font-size: .85rem; color: var(--text); }
+    .impersonate-bar .lucide { width: 1.05em; height: 1.05em; vertical-align: -.15em; }
+
+    /* status dot p/ conexões (superadmin) */
+    .dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 50%; background: var(--muted-2); }
+    .dot.on { background: var(--green); }
+    .dot.off { background: var(--red); }
+
+    /* tabela responsiva do superadmin */
+    .tbl-wrap { overflow-x: auto; }
+    table.grid { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    table.grid th, table.grid td { padding: .55rem .6rem; text-align: left; border-bottom: 1px solid var(--border);
+      white-space: nowrap; }
+    table.grid th { color: var(--muted); font-weight: 600; }
+    table.grid tr:hover td { background: var(--surface-2); }
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: .8rem; }
+    .stat { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: .8rem .9rem; }
+    .stat .n { font-size: 1.35rem; font-weight: 700; letter-spacing: -.02em; }
+    .stat .l { font-size: .75rem; color: var(--muted); }
+
     /* compact icon button for table rows */
     .icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 2.1rem; height: 2.1rem;
       padding: 0; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted);
@@ -292,11 +324,12 @@
         {% with u=request.resolver_match.url_name %}
         {% if request.user.is_authenticated %}
         <a href="/" class="{% if u == 'home' %}active{% endif %}"><i data-lucide="home"></i> Início</a>
-        <a href="/scrapers/" class="{% if u == 'scraper-dashboard' %}active{% endif %}"><i data-lucide="radar"></i> Scraper</a>
+        {% if request.user.is_staff %}<a href="/scrapers/" class="{% if u == 'scraper-dashboard' %}active{% endif %}"><i data-lucide="radar"></i> Scraper</a>{% endif %}
         <a href="/scrapers/top/" class="{% if u == 'scraper-top' %}active{% endif %}"><i data-lucide="flame"></i> Promoções</a>
         <a href="/scrapers/config/" class="{% if u == 'scraper-configuracoes' %}active{% endif %}"><i data-lucide="settings-2"></i> Envios</a>
         <a href="/scrapers/whatsapp/" class="{% if u == 'scraper-whatsapp' %}active{% endif %}"><i data-lucide="message-circle"></i> WhatsApp</a>
         <a href="/scrapers/telegram/" class="{% if u == 'scraper-telegram' %}active{% endif %}"><i data-lucide="send"></i> Telegram</a>
+        {% if request.user.is_superuser %}<a href="{% url 'superadmin-usuarios' %}" class="{% if u == 'superadmin-usuarios' or u == 'superadmin-usuario' or u == 'superadmin-infra' %}active{% endif %}"><i data-lucide="users"></i> Usuários</a>{% endif %}
         {% if request.user.is_staff %}<a href="/admin/"><i data-lucide="shield"></i> Admin</a>{% endif %}
         <a href="{% url 'password_change' %}" class="nav-user"><i data-lucide="user"></i> {{ request.user.get_username }}</a>
         <form method="post" action="{% url 'logout' %}" style="margin:0;" onclick="event.stopPropagation();">
@@ -314,7 +347,23 @@
       </nav>
     </div>
   </header>
+  {% if request.session.impersonator_id %}
+  <div class="impersonate-bar">
+    <span><i data-lucide="venetian-mask"></i> Você está impersonando <strong>{{ request.user.get_username }}</strong>.</span>
+    <form method="post" action="{% url 'superadmin-parar-impersonar' %}" style="margin:0;">
+      {% csrf_token %}
+      <button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="log-out"></i> Encerrar</button>
+    </form>
+  </div>
+  {% endif %}
   <main class="wrap">
+    {% if messages %}
+    <div class="msgs">
+      {% for m in messages %}
+      <div class="msg msg-{{ m.tags }}">{{ m }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
     {% block content %}{% endblock %}
   </main>
 

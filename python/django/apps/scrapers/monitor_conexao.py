@@ -14,16 +14,9 @@ from django.utils import timezone
 
 
 def ml_auth_path(user=None) -> str:
-    """Caminho do auth.json do ML. Por-usuário na Fase 3; global por enquanto."""
-    base = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "scraper_mercadolivre",
-    )
-    if user is not None and getattr(user, "id", None):
-        p = os.path.join(base, f"auth_{user.id}.json")
-        if os.path.exists(p):
-            return p
-    return os.path.join(base, "auth.json")
+    """Caminho do auth.json do ML. Delega ao resolvedor único (honra ML_SESSION_DIR)."""
+    from apps.scrapers.session_paths import ml_auth_path as _resolver
+    return _resolver(user)
 
 
 def ml_conectado(user=None) -> bool:

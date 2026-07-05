@@ -10,8 +10,9 @@ preco_com_cupom = "por" (mantemos o nome do campo p/ reaproveitar a seleção/en
 import os
 import re
 
-from apps.scrapers.auxiliar import iniciar_browser
+from apps.scrapers.auxiliar import iniciar_browser, pausa_humana
 from apps.scrapers.models import Produto
+from apps.scrapers.session_paths import ml_session_dir
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 
@@ -246,14 +247,44 @@ def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):
             frete_full=o["frete_full"],
         ))
     Produto.objects.bulk_create(novos, batch_size=500)
+    # Histórico de preços (B1): 1 observação por item p/ detectar queda real depois.
+    from apps.scrapers.precos import registrar_varios
+    registrar_varios(novos)
     return len(novos)
 
 
-def mapear_ofertas(max_paginas=40):
-    """Raspa N páginas de /ofertas e regrava os Produtos de origem='oferta'."""
-    print("Iniciando raspagem de OFERTAS (de/por)...")
+def _upsert_ofertas(coletados):
+    """Insere/atualiza ofertas por link SEM apagar o feed (usado pela LANE RÁPIDA/flash,
+    B3, que roda com poucas páginas e não pode zerar o feed completo da lane lenta)."""
+    from apps.scrapers.precos import registrar
+    vistos, n = set(), 0
+    for o in coletados:
+        if o["link_produto"] in vistos:
+            continue
+        vistos.add(o["link_produto"])
+        Produto.objects.update_or_create(
+            origem="oferta", link_produto=o["link_produto"], owner=None,
+            defaults={
+                "nome": o["nome"],
+                "preco_sem_desconto": o["preco_sem_desconto"],
+                "preco_com_cupom": o["preco_com_cupom"],
+                "categoria": "DESCONHECIDO",
+                "macro_categoria": classificar_oferta_por_nome(o["nome"]),
+                "imagem_url": o["imagem_url"],
+                "frete_full": o["frete_full"],
+            },
+        )
+        registrar("mercadolivre", "", o["link_produto"], o["preco_com_cupom"])
+        n += 1
+    return n
+
+
+def mapear_ofertas(max_paginas=40, substituir=True):
+    """Raspa N páginas de /ofertas. substituir=True (lane LENTA): regrava todo o feed.
+    substituir=False (lane RÁPIDA/flash, B3): upsert por link, sem zerar o feed."""
+    print(f"Iniciando raspagem de OFERTAS (de/por, {'full' if substituir else 'flash'})...")
     coletados = []
-    caminho_auth = os.path.join(caminho_atual, "auth.json")
+    caminho_auth = os.path.join(ml_session_dir(), "auth.json")
 
     with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
         for n in range(1, max_paginas + 1):
@@ -273,9 +304,13 @@ def mapear_ofertas(max_paginas=40):
                 print(f"  Página {n} sem ofertas — parando.")
                 break
             coletados.extend(cards)
+            pausa_humana()  # ritmo humano entre páginas (anti-bloqueio)
 
-    Produto.objects.filter(origem="oferta").delete()
-    n = _salvar(coletados, origem="oferta")
+    if substituir:
+        Produto.objects.filter(origem="oferta").delete()
+        n = _salvar(coletados, origem="oferta")
+    else:
+        n = _upsert_ofertas(coletados)
     print(f"OFERTAS: {n} salvas.")
     return n
 
@@ -296,7 +331,7 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None):
     termos = [t.strip() for t in (termo_busca or "").split(",") if t.strip()]
     if not termos:
         return 0
-    caminho_auth = os.path.join(caminho_atual, "auth.json")
+    caminho_auth = os.path.join(ml_session_dir(), "auth.json")
     coletados = []
 
     with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
@@ -323,6 +358,7 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None):
                 if not cards:
                     break
                 coletados.extend(cards)
+                pausa_humana()  # ritmo humano entre páginas (anti-bloqueio)
 
     # Refresh escopado: remove itens 'busca' que casam com algum termo, recria
     from django.db.models import Q

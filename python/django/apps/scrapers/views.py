@@ -3,15 +3,47 @@ import os
 import queue
 import threading
 from contextlib import redirect_stdout
+from functools import wraps
 
 from django.conf import settings
-from django.db.models import F, ExpressionWrapper, FloatField
+from django.contrib import messages
+from django.core.exceptions import PermissionDenied
+from django.db.models import F, ExpressionWrapper, FloatField, Q
 from django.http import StreamingHttpResponse, HttpResponse, JsonResponse
 from django.shortcuts import render, redirect
 from django.views.decorators.http import require_GET
 
 from apps.scrapers.models import Cupom, Produto, ConfiguracaoEnvio
 from apps.scrapers.scraper_mercadolivre.scraper import main as scrapper_main
+
+
+def staff_required(view):
+    """Restringe a view a administradores (is_staff).
+
+    A raspagem (e o login/sessão de ML compartilhada) é controlada só pelo admin;
+    usuários comuns usam Promoções, Envios e Conexões. 403 em vez de redirect p/
+    proteger também as chamadas diretas aos endpoints SSE (não só esconder no menu).
+    """
+    @wraps(view)
+    def _wrapped(request, *args, **kwargs):
+        if not request.user.is_staff:
+            raise PermissionDenied("Apenas administradores controlam a raspagem.")
+        return view(request, *args, **kwargs)
+    return _wrapped
+
+
+def superadmin_required(view):
+    """Restringe a view ao superadmin (is_superuser).
+
+    Workspace do superadmin: lista de usuários, uso/máquinas, cotas, suspensão e
+    impersonação. 403 (não redirect) p/ proteger chamadas diretas aos endpoints.
+    """
+    @wraps(view)
+    def _wrapped(request, *args, **kwargs):
+        if not request.user.is_superuser:
+            raise PermissionDenied("Apenas o superadmin acessa este painel.")
+        return view(request, *args, **kwargs)
+    return _wrapped
 
 
 class _QueueWriter:
@@ -34,15 +66,59 @@ class _QueueWriter:
             self._buf = ""
 
 
+@staff_required
 def dashboard(request):
     return render(request, "scrapers/dashboard.html")
+
+
+def comecar(request):
+    """Checklist de onboarding self-serve: cada passo lê o estado real e mostra ✓/todo.
+
+    Objetivo: um usuário novo consegue ficar operacional sozinho (tags → conexão →
+    regra → ligar envio) sem depender do suporte."""
+    from apps.scrapers import automacao_state as st
+    perfil = getattr(request.user, "perfil", None)
+    tem_tag = bool(perfil and (perfil.afiliado_tag_ml or perfil.afiliado_tag_amazon))
+    wa_ok = bool(perfil and perfil.wa_estado)
+    loja_ok = bool(perfil and (perfil.ml_estado or perfil.amazon_conectado()))
+    tem_config = ConfiguracaoEnvio.objects.filter(owner=request.user).exists()
+    envio_ligado = st.is_enabled("envio")
+
+    passos = [
+        {"titulo": "Definir tag de afiliado", "feito": tem_tag,
+         "desc": "Sua tag ML e/ou Amazon — é ela que garante sua comissão.",
+         "url": "password_change", "cta": "Configurar conta"},
+        {"titulo": "Conectar WhatsApp", "feito": wa_ok,
+         "desc": "Pareie seu aparelho pelo QR Code para disparar as ofertas.",
+         "url": "scraper-whatsapp", "cta": "Conectar WhatsApp"},
+        {"titulo": "Conectar loja (ML / Amazon)", "feito": loja_ok,
+         "desc": "Sessão do Mercado Livre ou credenciais da Amazon Creators.",
+         "url": "scraper-whatsapp", "cta": "Ver conexões"},
+        {"titulo": "Criar primeira regra de envio", "feito": tem_config,
+         "desc": "Escolha nicho → grupo → intervalo na tela de Envios.",
+         "url": "scraper-configuracoes", "cta": "Criar regra"},
+        {"titulo": "Ligar o envio automático", "feito": envio_ligado,
+         "desc": "Ative a automação para as ofertas saírem sozinhas.",
+         "url": "scraper-configuracoes", "cta": "Ir para Envios"},
+    ]
+    feitos = sum(1 for p in passos if p["feito"])
+    return render(request, "scrapers/comecar.html", {
+        "passos": passos, "feitos": feitos, "total": len(passos),
+        "completo": feitos == len(passos),
+    })
+
+
+def _wa_session(request):
+    """Sessão WhatsApp DESTE usuário (multi-tenant). Cada um pareia a própria conta."""
+    perfil = getattr(request.user, "perfil", None)
+    return perfil.sessao_whatsapp() if perfil else str(request.user.id)
 
 
 def whatsapp_painel(request):
     """Tela de conexão do WhatsApp: status + QR Code para parear pelo navegador."""
     from apps.scrapers import whatsapp_client
     return render(request, "scrapers/whatsapp.html", {
-        "status": whatsapp_client.status(),
+        "status": whatsapp_client.status(_wa_session(request)),
     })
 
 
@@ -50,21 +126,21 @@ def whatsapp_painel(request):
 def whatsapp_status_json(request):
     """JSON de status para polling do front."""
     from apps.scrapers import whatsapp_client
-    return JsonResponse(whatsapp_client.status())
+    return JsonResponse(whatsapp_client.status(_wa_session(request)))
 
 
 @require_GET
 def whatsapp_refresh_grupos(request):
     """Força re-sincronização da lista de grupos no Node e devolve o resultado."""
     from apps.scrapers import whatsapp_client
-    return JsonResponse(whatsapp_client.refresh_grupos())
+    return JsonResponse(whatsapp_client.refresh_grupos(_wa_session(request)))
 
 
 @require_GET
 def whatsapp_grupos_json(request):
     """Lista grupos (GET leve) para o front carregar via AJAX sem travar o render."""
     from apps.scrapers import whatsapp_client
-    return JsonResponse(whatsapp_client.listar_grupos())
+    return JsonResponse(whatsapp_client.listar_grupos(_wa_session(request)))
 
 
 @require_GET
@@ -74,7 +150,7 @@ def whatsapp_qr_png(request):
     from io import BytesIO
     from apps.scrapers import whatsapp_client
 
-    info = whatsapp_client.qrcode()
+    info = whatsapp_client.qrcode(_wa_session(request))
     qr = info.get("qr")
     if not qr:
         # 204 = sem QR (já conectado ou ainda gerando)
@@ -141,6 +217,15 @@ def configuracoes(request):
                 # update() não dispara validação, mas o filtro por owner garante posse.
                 ConfiguracaoEnvio.objects.filter(id=cfg_id, owner=request.user).update(**campos)
             else:
+                # Cota de regras por usuário (protege a máquina compartilhada).
+                perfil = getattr(request.user, "perfil", None)
+                limite = perfil.cota_max_configs() if perfil else 0
+                atuais = ConfiguracaoEnvio.objects.filter(owner=request.user).count()
+                if limite and atuais >= limite:
+                    messages.error(
+                        request,
+                        f"Limite de {limite} regras atingido. Remova uma ou peça mais ao suporte.")
+                    return redirect("scraper-configuracoes")
                 ConfiguracaoEnvio.objects.create(owner=request.user, **campos)
         return redirect("scraper-configuracoes")
 
@@ -253,7 +338,10 @@ def enviar_produto_stream(request):
         if not grupo_id:
             print("[ERRO] Nenhum destino informado (grupo/chat).")
             return
-        prod = Produto.objects.filter(id=prod_id).first()
+        # Isolamento multi-tenant: só o pool compartilhado (owner=None, ex: ML) ou
+        # itens privados DESTE usuário (Amazon dele). Impede enviar item de outro dono.
+        prod = Produto.objects.filter(
+            Q(owner__isnull=True) | Q(owner_id=uid), id=prod_id).first()
         if not prod:
             print("[ERRO] Produto não encontrado.")
             return
@@ -398,6 +486,7 @@ def top_promocoes(request):
     })
 
 
+@staff_required
 @require_GET
 def run_scraper_stream(request):
     """SSE endpoint — streams every print() from the scraper to the browser."""
@@ -437,6 +526,7 @@ def run_scraper_stream(request):
     return response
 
 
+@staff_required
 @require_GET
 def scrape_ofertas_stream(request):
     """SSE endpoint — raspa as ofertas (de/por) do ML e já pré-gera os links de afiliado."""
@@ -538,6 +628,10 @@ def automacao_control(request):
     if tipo not in st.JOBS:
         tipo = "scrape"
 
+    # Loop de raspagem (scrape) é controle de admin; envio é do usuário comum.
+    if tipo == "scrape" and not request.user.is_staff:
+        raise PermissionDenied("Apenas administradores controlam a raspagem.")
+
     if request.method != "POST":
         rodando = st.is_running(tipo)
         estado = st.read_state(tipo) if rodando else {}
@@ -548,32 +642,18 @@ def automacao_control(request):
         st.parar(tipo)
         return JsonResponse({"rodando": False, "tipo": tipo, "msg": "Parado."})
 
-    # start
+    # start — liga o flag; garante que exista um worker. Em prod (honcho) o worker
+    # já roda (heartbeat fresco) e o spawn é no-op; em dev (runserver) sobe um
+    # subprocess destacado cross-platform. O loop trabalha no próximo ciclo.
     if st.is_running(tipo):
-        return JsonResponse({"rodando": True, "tipo": tipo, "msg": "Já estava rodando."})
-
-    base_dir = settings.BASE_DIR  # .../django
-    manage = os.path.join(base_dir, "manage.py")
-    log = open(st.logfile(tipo), "a", encoding="utf-8")
-    # Usa pythonw.exe (sem console) quando existir; cai no python.exe normal se não.
-    py = sys.executable
-    pyw = os.path.join(os.path.dirname(py), "pythonw.exe")
-    if os.path.exists(pyw):
-        py = pyw
-    # CREATE_NO_WINDOW(0x08000000): roda sem janela de terminal |
-    # CREATE_NEW_PROCESS_GROUP(0x200): grupo próprio, sobrevive ao request.
-    # (DETACHED_PROCESS é mutuamente exclusivo com CREATE_NO_WINDOW — não usar junto.)
-    flags = 0x08000000 | 0x00000200
-    args = [py, manage, "automacao", "--modo", tipo]
-    args += ["--scrape-horas", "3"] if tipo == "scrape" else ["--tick", "5"]
-    p = subprocess.Popen(
-        args, cwd=base_dir, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
-        creationflags=flags,
-    )
-    st.save_pid(tipo, p.pid)
-    return JsonResponse({"rodando": True, "tipo": tipo, "msg": f"Iniciado (pid {p.pid})."})
+        st.spawn_worker(tipo)  # religa o worker se tiver morrido (dev)
+        return JsonResponse({"rodando": True, "tipo": tipo, "msg": "Já estava ligado."})
+    st.iniciar(tipo)
+    st.spawn_worker(tipo)
+    return JsonResponse({"rodando": True, "tipo": tipo, "msg": "Ligado."})
 
 
+@staff_required
 @require_GET
 def scrape_cupons_codigo_stream(request):
     """SSE — raspa /ofertas/cupons (produtos + códigos de checkout)."""
@@ -602,6 +682,7 @@ def buscar_termo_stream(request):
     return _sse_runner(_job)
 
 
+@staff_required
 @require_GET
 def gerar_links_stream(request):
     """SSE endpoint — gera links de afiliado em lote para produtos sem link."""
@@ -659,16 +740,75 @@ def gerar_links_stream(request):
     return response
 
 
+@staff_required
+def ml_upload_sessao(request):
+    """Instala um storage_state do ML gerado localmente (connect_ml.py) como a sessão
+    do admin. Caminho headless-friendly p/ conectar o ML no servidor (sem tela p/ o
+    login visível). Valida com um probe headless ANTES de salvar."""
+    import json
+    from apps.scrapers.session_paths import ml_session_dir
+    from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada
+
+    if request.method != "POST":
+        return JsonResponse({"ok": False, "erro": "POST apenas."}, status=405)
+
+    raw = (request.POST.get("sessao_json") or "").strip()
+    if not raw and request.FILES.get("sessao_file"):
+        raw = request.FILES["sessao_file"].read().decode("utf-8", "ignore").strip()
+    if not raw:
+        return JsonResponse({"ok": False, "erro": "Cole o JSON da sessão ou envie o arquivo."}, status=400)
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return JsonResponse({"ok": False, "erro": "JSON inválido."}, status=400)
+    if not isinstance(data, dict) or "cookies" not in data:
+        return JsonResponse({"ok": False, "erro": "Não parece um storage_state do Playwright (faltou 'cookies')."}, status=400)
+
+    d = ml_session_dir()
+    final = os.path.join(d, f"auth_{request.user.id}.json")
+    tmp = final + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+
+    # Probe headless: a sessão está realmente logada? (permitir_login=False remove o
+    # arquivo se expirada, então em falha o tmp já some.)
+    os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+    asyncio.set_event_loop(asyncio.new_event_loop())
+    try:
+        with iniciar_browser(auth_path=tmp, headless=True, permitir_login=False) as (page, ctx):
+            pass
+    except (SessaoExpirada, BrowserError) as exc:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return JsonResponse({"ok": False, "erro": f"Sessão não está logada no ML: {exc}"}, status=400)
+
+    os.replace(tmp, final)
+    return JsonResponse({"ok": True, "msg": "Sessão ML conectada."})
+
+
+@staff_required
 @require_GET
 def auth_stream(request):
     """SSE endpoint — abre browser visível para login no ML e salva auth.json."""
     from apps.scrapers.auxiliar import iniciar_browser, BrowserError
 
+    # Servidor sem tela (Fly): login visível não roda. Orienta o upload de sessão.
+    if not getattr(settings, "ML_HEADFUL_LOGIN", False):
+        def _sem_tela():
+            yield "data: [ERRO] Login visível do ML indisponível neste servidor (sem tela).\n\n"
+            yield "data: Rode connect_ml.py no seu PC, logue, e use 'Enviar sessão ML' abaixo.\n\n"
+            yield "data: __DONE__\n\n"
+        resp = StreamingHttpResponse(_sem_tela(), content_type="text/event-stream")
+        resp["Cache-Control"] = "no-cache"
+        resp["X-Accel-Buffering"] = "no"
+        return resp
+
     # Sessão de ML por usuário (auth_{id}.json) — cada um conecta a própria conta.
-    auth_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "scraper_mercadolivre", f"auth_{request.user.id}.json"
-    )
+    # ml_session_dir() honra ML_SESSION_DIR (volume persistente no Fly).
+    from apps.scrapers.session_paths import ml_session_dir
+    auth_path = os.path.join(ml_session_dir(), f"auth_{request.user.id}.json")
 
     def _event_stream():
         q: queue.Queue = queue.Queue()
@@ -679,7 +819,9 @@ def auth_stream(request):
             asyncio.set_event_loop(asyncio.new_event_loop())
             try:
                 with redirect_stdout(writer):
-                    with iniciar_browser(auth_path=auth_path, headless=True) as (page, context):
+                    # permitir_login=True: há humano p/ escanear/logar no ML.
+                    with iniciar_browser(auth_path=auth_path, headless=True,
+                                         permitir_login=True) as (page, context):
                         pass  # só valida/salva a sessão
             except BrowserError as exc:
                 msg = str(exc)

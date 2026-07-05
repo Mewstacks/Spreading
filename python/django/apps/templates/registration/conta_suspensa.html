@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Conta suspensa{% endblock %}
+
+{% block content %}
+<div class="card" style="max-width:480px;margin:2rem auto;text-align:center;">
+  <div style="color:var(--red);margin-bottom:.8rem;"><i data-lucide="ban" style="width:2.2rem;height:2.2rem;"></i></div>
+  <h2 style="margin:0 0 .6rem;">Conta suspensa</h2>
+  <p style="color:var(--muted);">Sua conta foi suspensa por um administrador.</p>
+  {% if motivo %}<div class="msg msg-error" style="text-align:left;">Motivo: {{ motivo }}</div>{% endif %}
+  <p style="color:var(--muted);font-size:.85rem;margin-top:1rem;">Fale com o suporte para reativar.</p>
+  <form method="post" action="{% url 'logout' %}" style="margin-top:1rem;">
+    {% csrf_token %}
+    <button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="log-out"></i> Sair</button>
+  </form>
+</div>
+{% endblock %}

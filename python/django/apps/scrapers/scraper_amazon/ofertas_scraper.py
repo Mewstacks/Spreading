@@ -60,25 +60,31 @@ def _mapear_item(item: dict) -> dict | None:
     if isinstance(listing, list):
         listing = listing[0] if listing else {}
 
-    preco_atual = _num(_primeiro(listing, ("price", "money", "amount"),
-                                 ("price", "amount")))
-    preco_de = _num(_primeiro(listing, ("savingBasis", "money", "amount"),
-                              ("savingBasis", "amount")))
+    # Creators API catalog/v1: preço atual e "De:" (savingBasis) vivem DENTRO de price.
+    #   price.money.amount            -> preço atual
+    #   price.savingBasis.money.amount-> preço "De:" (lista/anterior)
+    #   price.savings.percentage      -> % de desconto
+    preco_atual = _num(_primeiro(listing, ("price", "money", "amount")))
+    preco_de = _num(_primeiro(listing, ("price", "savingBasis", "money", "amount")))
     if preco_atual <= 0:
         return None
     if preco_de <= preco_atual:
-        preco_de = preco_atual  # sem desconto de/por; pode ainda ter promoção
+        preco_de = preco_atual  # sem desconto de/por; pode ainda ter promoção (dealDetails)
 
-    promocoes = _primeiro(listing, ("promotions",)) or []
-    tem_promocao = bool(promocoes)
+    # Promoção/cupom de clipar agora vem em dealDetails (null quando não há).
+    deal = _primeiro(listing, ("dealDetails",))
+    tem_promocao = bool(deal)
     rotulo_promo = ""
-    if isinstance(promocoes, list) and promocoes:
-        rotulo_promo = (promocoes[0].get("displayName")
-                        or promocoes[0].get("type") or "Cupom")[:60]
+    if isinstance(deal, dict):
+        rotulo_promo = (deal.get("displayName") or deal.get("title")
+                        or deal.get("badge") or deal.get("type") or "Promoção")[:60]
 
-    prime = bool(_primeiro(listing, ("deliveryInfo", "isPrimeEligible")))
+    # Prime/deliveryInfo não existe mais no catalog/v1. Aproxima "vendido pela Amazon"
+    # (merchantInfo.name) como selo de confiança no lugar do antigo frete_full/Prime.
+    merchant = _primeiro(listing, ("merchantInfo", "name")) or ""
+    prime = "amazon" in merchant.lower()
     imagem = _primeiro(item, ("images", "primary", "large", "url")) or ""
-    link = (item.get("detailPageUrl")
+    link = (item.get("detailPageURL") or item.get("detailPageUrl")
             or f"https://{settings.AMAZON_MARKETPLACE}/dp/{asin}")
 
     return {
@@ -114,6 +120,9 @@ def _upsert_produto(m: dict, origem: str, macro=None, owner=None) -> bool:
             "codigo_checkout": "",  # Amazon: cupom é de clipar, não tem código
         },
     )
+    # Histórico de preços (B1): observação por asin p/ medir queda real depois.
+    from apps.scrapers.precos import registrar
+    registrar("amazon", m["asin"], m["link_produto"], m["preco_com_cupom"])
     return True
 
 

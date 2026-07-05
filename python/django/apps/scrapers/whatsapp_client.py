@@ -29,6 +29,12 @@ def _headers() -> dict:
     return {"x-api-key": settings.WHATSAPP_API_KEY, "Content-Type": "application/json"}
 
 
+def _headers_opt() -> dict:
+    """api-key quando configurada. status/qrcode agora exigem chave (rota fechada)."""
+    key = settings.WHATSAPP_API_KEY
+    return {"x-api-key": key} if key else {}
+
+
 def _params(session=None) -> dict:
     """Query da sessão (multi-tenant). Node multi-cliente usa ?session=<clientId>.
     None = sessão única/global (compat). Node antigo ignora o param."""
@@ -36,18 +42,20 @@ def _params(session=None) -> dict:
 
 
 def status(session=None) -> dict:
-    """Retorna {conectado: bool}. Rota aberta (sem api-key)."""
+    """Retorna {conectado: bool}. Exige api-key (rota fechada)."""
     try:
-        r = requests.get(f"{_base_url()}/api/status", params=_params(session), timeout=5)
+        r = requests.get(f"{_base_url()}/api/status", headers=_headers_opt(),
+                         params=_params(session), timeout=5)
         return r.json()
     except Exception as e:
         return {"conectado": False, "erro": str(e)}
 
 
 def qrcode(session=None) -> dict:
-    """Retorna {conectado, qr?} do serviço Node. Rota aberta (sem api-key)."""
+    """Retorna {conectado, qr?} do serviço Node. Exige api-key (rota fechada)."""
     try:
-        r = requests.get(f"{_base_url()}/api/qrcode", params=_params(session), timeout=8)
+        r = requests.get(f"{_base_url()}/api/qrcode", headers=_headers_opt(),
+                         params=_params(session), timeout=8)
         return r.json()
     except Exception as e:
         return {"conectado": False, "qr": None, "erro": str(e)}
@@ -63,10 +71,11 @@ def listar_grupos(session=None) -> dict:
         return {"erro": str(e)}
 
 
-def refresh_grupos() -> dict:
+def refresh_grupos(session=None) -> dict:
     """Força o Node a re-sincronizar a lista de grupos. POST /api/grupos/refresh."""
     try:
-        r = requests.post(f"{_base_url()}/api/grupos/refresh", headers=_headers(), timeout=30)
+        r = requests.post(f"{_base_url()}/api/grupos/refresh", headers=_headers(),
+                          params=_params(session), timeout=30)
         return r.json()
     except Exception as e:
         return {"sucesso": False, "erro": str(e)}

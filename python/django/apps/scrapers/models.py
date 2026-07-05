@@ -47,6 +47,20 @@ class Produto(models.Model):
     # Frase de marketing gerada por LLM, cacheada na raspagem (evita bloquear o envio).
     frase_llm = models.CharField(max_length=255, blank=True, default="")
 
+class PrecoHistorico(models.Model):
+    """Uma observação de preço por raspagem — base p/ detectar QUEDA REAL e derrubar
+    'de/por' inflado (o preço "de" do ML costuma ser fictício). Chave por identidade
+    do produto (asin na Amazon; URL normalizada no ML), não pelo id do Produto (que
+    é recriado a cada raspagem)."""
+    marketplace = models.CharField(max_length=20, db_index=True)
+    chave = models.CharField(max_length=300, db_index=True)
+    preco = models.FloatField()
+    data = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["marketplace", "chave", "data"])]
+
+
 class HistoricoEnvio(models.Model):
     produto = models.ForeignKey(Produto, on_delete=models.CASCADE)
     # Dono do envio (multi-tenant): dedup "nunca repetir" passa a ser POR usuário.
@@ -111,6 +125,40 @@ class CupomCodigo(models.Model):
 
     def __str__(self):
         return f"{self.codigo} ({self.valor_desconto}{'%' if self.tipo_desconto=='porcentagem' else ' R$'})"
+
+
+class CanalMonitorado(models.Model):
+    """Fonte curada (canal público de ofertas no Telegram) que o worker lê e
+    RE-DIVULGA trocando os links pela tag de afiliado do dono (B4). É como
+    BlueBot/Pro Afiliados operam: alto volume, baixa manutenção.
+
+    Cuidado (ético/ToS): re-divulgar deals curados de terceiros é área cinzenta.
+    Opt-in por usuário; trocar tag de afiliado é padrão no nicho."""
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                              related_name="canais_monitorados")
+    # Canal-fonte no Telegram: @username público ou id numérico (-100...).
+    handle = models.CharField(max_length=120)
+    # Destino da re-divulgação (grupo do próprio usuário).
+    destino_canal = models.CharField(max_length=20, default="whatsapp")  # whatsapp | telegram
+    destino_grupo_id = models.CharField(max_length=100)
+    ativo = models.BooleanField(default=True)
+    # Último id de mensagem já processado (evita reprocessar no restart do worker).
+    ultimo_id = models.BigIntegerField(default=0)
+
+    def __str__(self):
+        return f"{self.handle} → {self.destino_grupo_id} ({self.destino_canal})"
+
+
+class EnvioCanal(models.Model):
+    """Dedup do fluxo de canais curados: não re-divulga a MESMA oferta 2x por usuário.
+    Chave = hash da URL-fonte do produto (HistoricoEnvio exige Produto; aqui não há)."""
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                              related_name="envios_canal")
+    chave = models.CharField(max_length=64, db_index=True)  # sha1 da url-fonte
+    data = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        unique_together = ("owner", "chave")
 
 
 class ConfiguracaoEnvio(models.Model):
