@@ -87,16 +87,19 @@ def _abrir_sessao_remota():
 
     bb = Browserbase(api_key=settings.BROWSERBASE_API_KEY)
 
-    pais = getattr(settings, "BROWSERBASE_PROXY_COUNTRY", "BR") or "BR"
-    # Proxy residencial no país do usuário reduz o bloqueio anti-bot do ML no login.
-    proxies = [{"type": "browserbase", "geolocation": {"country": pais}}]
-
-    sessao = bb.sessions.create(
+    kwargs = dict(
         project_id=settings.BROWSERBASE_PROJECT_ID,
         keep_alive=True,
-        proxies=proxies,
         api_timeout=SESSION_TIMEOUT_S,  # duração da sessão remota (não é o HTTP timeout)
     )
+    # Proxy residencial no país do usuário reduz o bloqueio anti-bot do ML no login,
+    # MAS é recurso de plano PAGO do Browserbase (o free plan responde 402). Só liga
+    # com BROWSERBASE_USE_PROXY=1; sem ele o login roda no plano grátis (IP do datacenter).
+    if getattr(settings, "BROWSERBASE_USE_PROXY", False):
+        pais = getattr(settings, "BROWSERBASE_PROXY_COUNTRY", "BR") or "BR"
+        kwargs["proxies"] = [{"type": "browserbase", "geolocation": {"country": pais}}]
+
+    sessao = bb.sessions.create(**kwargs)
     live = bb.sessions.debug(sessao.id)
     live_view_url = getattr(live, "debugger_fullscreen_url", None) or getattr(
         live, "debuggerFullscreenUrl", None

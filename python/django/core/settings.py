@@ -408,7 +408,10 @@ os.makedirs(ML_AUTH_DIR, exist_ok=True)
 # ─────────────────────────────────────────────────────────────
 BROWSERBASE_API_KEY = os.getenv("BROWSERBASE_API_KEY", "")
 BROWSERBASE_PROJECT_ID = os.getenv("BROWSERBASE_PROJECT_ID", "")
-# País do proxy residencial (reduz bloqueio anti-bot do ML no login).
+# Proxy residencial reduz bloqueio anti-bot do ML no login, mas é recurso de plano
+# PAGO do Browserbase (free plan → 402). Fica OFF por padrão p/ funcionar no grátis.
+BROWSERBASE_USE_PROXY = os.getenv("BROWSERBASE_USE_PROXY", "0") == "1"
+# País do proxy residencial (só usado se BROWSERBASE_USE_PROXY=1).
 BROWSERBASE_PROXY_COUNTRY = os.getenv("BROWSERBASE_PROXY_COUNTRY", "BR")
 
 # Chave Fernet p/ criptografar segredos por usuário em repouso (Track A4).
