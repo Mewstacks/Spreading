@@ -91,6 +91,9 @@ def _abrir_sessao_remota():
         project_id=settings.BROWSERBASE_PROJECT_ID,
         keep_alive=True,
         api_timeout=SESSION_TIMEOUT_S,  # duração da sessão remota (não é o HTTP timeout)
+        # Viewport desktop: o login do ML renderiza confortável e o live view (iframe)
+        # não fica minúsculo. O front escala o iframe pra caber na tela.
+        browser_settings={"viewport": {"width": 1280, "height": 800}, "block_ads": True},
     )
     # Proxy residencial no país do usuário reduz o bloqueio anti-bot do ML no login,
     # MAS é recurso de plano PAGO do Browserbase (o free plan responde 402). Só liga
@@ -158,6 +161,7 @@ def _worker(user_id: int):
 
             deadline = time.time() + LOGIN_DEADLINE_S
             logado = False
+            last_beat = time.time()
             while time.time() < deadline:
                 estado = cache.get(_cache_key(user_id)) or {}
                 if estado.get("cancelar"):
@@ -171,6 +175,12 @@ def _worker(user_id: int):
                 if _url_logada(url_atual) or estado.get("salvar_agora"):
                     logado = True
                     break
+                # Heartbeat: reescreve o estado (renova TTL + atualizado_em) sem recriar
+                # a sessão. Mantém a MESMA live_view_url, então o iframe não recarrega.
+                if time.time() - last_beat > 8:
+                    _set_estado(user_id, fase="aguardando_login",
+                                live_view_url=live_view_url, session_id=session_id)
+                    last_beat = time.time()
                 time.sleep(POLL_INTERVAL_S)
 
             if logado:

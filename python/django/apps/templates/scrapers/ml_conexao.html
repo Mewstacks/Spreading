@@ -17,11 +17,15 @@
   #prog-area { margin:1.2rem auto .2rem; max-width:420px; }
   #prog-msg  { font-size:.84rem; margin-top:.5rem; min-height:1.1em; }
 
-  /* Live view: iframe responsivo, mantém proporção e nunca estoura a tela */
-  #live-area { margin:1.3rem auto 0; }
-  #live-frame-wrap { position:relative; width:100%; max-width:900px; margin:0 auto;
-    aspect-ratio: 16 / 10; border-radius:12px; overflow:hidden;
-    border:1px solid var(--border); background:var(--surface-2); }
+  /* Live view: quebra o limite de 640px do .conn e ocupa a largura da tela.
+     Viewport remoto é 1280x800 (ratio 16/10); casamos a proporção e limitamos
+     a altura pra caber na tela em telas baixas. */
+  #live-area { width: min(1120px, 94vw); margin:1.3rem 0 0; margin-left:50%;
+    transform: translateX(-50%); }
+  #live-frame-wrap { position:relative; width:100%; margin:0 auto;
+    aspect-ratio: 1280 / 800; max-height: 80vh; border-radius:12px; overflow:hidden;
+    border:1px solid var(--border); background:var(--surface-2);
+    box-shadow: 0 8px 30px rgba(0,0,0,.18); }
   #live-frame { position:absolute; inset:0; width:100%; height:100%; border:0; }
 
   .actions { display:flex; gap:.6rem; flex-wrap:wrap; justify-content:center; margin-top:1.1rem; }
@@ -133,13 +137,18 @@
     if (fase === 'erro' && s.erro) { errBox.textContent = s.erro; mostra(errBox, true); }
     else mostra(errBox, false);
 
-    // Live view
+    // Live view. Só (re)atribui o src quando a URL muda — reatribuir recarrega o
+    // iframe e o usuário perde o login pela metade. Em fases de transição breve
+    // (iniciando/salvando) mantemos o iframe montado p/ não piscar.
+    const conectando = (fase === 'iniciando' || fase === 'aguardando_login' || fase === 'salvando');
     if (fase === 'aguardando_login' && s.live_view_url) {
       if (s.live_view_url !== ultimoLiveUrl) { liveFrame.src = s.live_view_url; ultimoLiveUrl = s.live_view_url; }
       mostra(liveArea, true);
+    } else if (conectando && ultimoLiveUrl) {
+      mostra(liveArea, true);              // segura o iframe atual, sem recarregar
     } else {
       mostra(liveArea, false);
-      if (fase !== 'salvando') { ultimoLiveUrl = ''; liveFrame.removeAttribute('src'); }
+      ultimoLiveUrl = ''; liveFrame.removeAttribute('src');
     }
 
     // Botão inicial aparece em idle/erro
