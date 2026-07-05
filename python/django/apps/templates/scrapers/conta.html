@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Configurar conta{% endblock %}
+
+{% block head_extra %}
+<style>
+  .fld { display: flex; flex-direction: column; gap: .3rem; margin-bottom: 1rem; }
+  .fld label { font-size: .82rem; color: var(--muted); font-weight: 600; }
+  .fld input { padding: .55rem .7rem; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; font-size: .9rem; }
+  .fld small { color: var(--muted); font-size: .74rem; }
+  .status-pill { display: inline-flex; align-items: center; gap: .4rem; font-size: .82rem;
+    padding: .3rem .6rem; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1><i data-lucide="user-cog"></i> Configurar conta</h1>
+  <p class="sub">Suas tags de comissão e conexão com as lojas. Cada usuário usa a própria conta.</p>
+</div>
+
+<form method="post" action="{% url 'scraper-conta' %}">
+  {% csrf_token %}
+  <div class="card">
+    <div class="card-head"><h2><i data-lucide="tag"></i> Tags de afiliado</h2></div>
+    <div class="fld">
+      <label>Tag Mercado Livre</label>
+      <input name="afiliado_tag_ml" value="{{ perfil.afiliado_tag_ml }}" placeholder="ex: SUATAG">
+      <small>É ela que garante sua comissão nos links do ML. Vazio = usa a tag global.</small>
+    </div>
+    <div class="fld">
+      <label>Tag Amazon (Associates)</label>
+      <input name="afiliado_tag_amazon" value="{{ perfil.afiliado_tag_amazon }}" placeholder="ex: suatag-20">
+      <small>Sua store id / associate tag da Amazon.</small>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2><i data-lucide="package"></i> Amazon Creators API</h2>
+      {% if amazon_conectado %}<span class="status-pill"><span class="dot on"></span> conectado</span>
+      {% else %}<span class="status-pill"><span class="dot off"></span> não conectado</span>{% endif %}
+    </div>
+    <div class="fld">
+      <label>Credential ID</label>
+      <input name="amazon_credential_id" value="{{ perfil.amazon_credential_id }}" placeholder="AKIA...">
+    </div>
+    <div class="fld">
+      <label>Credential Secret</label>
+      <input name="amazon_credential_secret" type="password"
+             placeholder="{% if tem_secret %}•••••••• (deixe em branco p/ manter){% else %}cole o secret{% endif %}">
+      <small>Criptografado em repouso. Em branco = mantém o atual.</small>
+    </div>
+    <div class="fld">
+      <label>Host (opcional)</label>
+      <input name="amazon_creators_host" value="{{ perfil.amazon_creators_host }}" placeholder="deixe vazio p/ padrão">
+    </div>
+  </div>
+
+  <button class="btn btn-blue" type="submit"><i data-lucide="save"></i> Salvar</button>
+</form>
+
+<div class="card">
+  <div class="card-head">
+    <h2><i data-lucide="log-in"></i> Sessão do Mercado Livre</h2>
+    {% if ml_sessao_ok %}<span class="status-pill"><span class="dot on"></span> login salvo</span>
+    {% else %}<span class="status-pill"><span class="dot off"></span> sem login</span>{% endif %}
+  </div>
+  <p style="font-size:.85rem;color:var(--muted);line-height:1.6;">
+    O servidor é headless, então o login do ML é feito no seu PC e salvo no robô:
+  </p>
+  <ol style="font-size:.85rem;color:var(--muted);line-height:1.7;padding-left:1.2rem;">
+    <li>No seu computador, rode <code>python connect_ml.py</code> (abre o navegador).</li>
+    <li>Faça login na sua conta do Mercado Livre e feche quando pedir.</li>
+    <li>Copie o conteúdo do <code>auth.json</code> gerado e cole abaixo.</li>
+  </ol>
+  <textarea id="ml-json" rows="3" placeholder='{"cookies":[...],"origins":[...]}'
+    style="width:100%;box-sizing:border-box;font-family:monospace;font-size:.78rem;padding:.5rem;border-radius:8px;background:var(--bg);color:var(--text);border:1px solid var(--border);"></textarea>
+  <div style="display:flex;gap:.6rem;align-items:center;margin-top:.6rem;flex-wrap:wrap;">
+    <button class="btn btn-sm btn-blue" onclick="enviarSessaoML()"><i data-lucide="upload"></i> Enviar sessão</button>
+    <span id="ml-upload-msg" style="font-size:.82rem;color:var(--muted);"></span>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function getCookie(nome) {
+    const m = document.cookie.match('(^|;)\\s*' + nome + '\\s*=\\s*([^;]+)');
+    return m ? decodeURIComponent(m.pop()) : '';
+  }
+  function enviarSessaoML() {
+    const j = document.getElementById('ml-json').value.trim();
+    const msg = document.getElementById('ml-upload-msg');
+    if (!j) { msg.textContent = 'Cole o JSON da sessão.'; return; }
+    msg.textContent = 'Validando sessão no ML…';
+    fetch('/scrapers/ml/upload/', {
+      method: 'POST',
+      headers: { 'X-CSRFToken': getCookie('csrftoken'), 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'sessao_json=' + encodeURIComponent(j)
+    })
+      .then(r => r.json())
+      .then(d => { msg.textContent = d.ok ? '✅ ' + d.msg + ' Recarregue a página.' : '❌ ' + d.erro;
+                   if (d.ok) document.getElementById('ml-json').value = ''; })
+      .catch(e => { msg.textContent = '❌ ' + e; });
+  }
+</script>
+{% endblock %}

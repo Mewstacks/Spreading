@@ -14,6 +14,7 @@ urlpatterns = [
 
     path("", views.dashboard, name="scraper-dashboard"),
     path("comecar/", views.comecar, name="scraper-comecar"),
+    path("conta/", views.configurar_conta, name="scraper-conta"),
     path("run/", views.run_scraper_stream, name="scraper-run"),
     path("gerar-links/", views.gerar_links_stream, name="scraper-gerar-links"),
     path("ofertas/", views.scrape_ofertas_stream, name="scraper-ofertas-run"),

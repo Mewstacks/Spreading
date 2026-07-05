@@ -87,13 +87,13 @@ def comecar(request):
     passos = [
         {"titulo": "Definir tag de afiliado", "feito": tem_tag,
          "desc": "Sua tag ML e/ou Amazon — é ela que garante sua comissão.",
-         "url": "password_change", "cta": "Configurar conta"},
+         "url": "scraper-conta", "cta": "Configurar conta"},
         {"titulo": "Conectar WhatsApp", "feito": wa_ok,
          "desc": "Pareie seu aparelho pelo QR Code para disparar as ofertas.",
          "url": "scraper-whatsapp", "cta": "Conectar WhatsApp"},
-        {"titulo": "Conectar loja (ML / Amazon)", "feito": loja_ok,
-         "desc": "Sessão do Mercado Livre ou credenciais da Amazon Creators.",
-         "url": "scraper-whatsapp", "cta": "Ver conexões"},
+        {"titulo": "Conectar loja (login no ML / Amazon)", "feito": loja_ok,
+         "desc": "Faça login no Mercado Livre e salve a sessão no robô (ou conecte a Amazon Creators).",
+         "url": "scraper-conta", "cta": "Conectar loja"},
         {"titulo": "Criar primeira regra de envio", "feito": tem_config,
          "desc": "Escolha nicho → grupo → intervalo na tela de Envios.",
          "url": "scraper-configuracoes", "cta": "Criar regra"},
@@ -105,6 +105,43 @@ def comecar(request):
     return render(request, "scrapers/comecar.html", {
         "passos": passos, "feitos": feitos, "total": len(passos),
         "completo": feitos == len(passos),
+    })
+
+
+def _tem_sessao_ml(user) -> bool:
+    """True se o usuário já subiu a própria sessão do ML (auth_{id}.json)."""
+    from apps.scrapers.session_paths import ml_session_dir
+    return os.path.exists(os.path.join(ml_session_dir(), f"auth_{user.id}.json"))
+
+
+def configurar_conta(request):
+    """Conta do afiliado: tags de comissão (ML/Amazon), credenciais Amazon Creators
+    e sessão do Mercado Livre. Cada usuário configura a PRÓPRIA conta (multi-tenant).
+
+    A tag é o que garante a comissão do usuário; a sessão ML é o "login salvo no robô"
+    (storage_state gerado no PC via connect_ml.py e colado aqui — servidor é headless)."""
+    perfil = getattr(request.user, "perfil", None)
+    if perfil and request.method == "POST":
+        perfil.afiliado_tag_ml = (request.POST.get("afiliado_tag_ml") or "").strip()
+        perfil.afiliado_tag_amazon = (request.POST.get("afiliado_tag_amazon") or "").strip()
+        perfil.amazon_credential_id = (request.POST.get("amazon_credential_id") or "").strip()
+        perfil.amazon_creators_host = (request.POST.get("amazon_creators_host") or "").strip()
+        # Secret só sobrescreve se o campo veio preenchido (em branco mantém o atual).
+        novo_secret = (request.POST.get("amazon_credential_secret") or "").strip()
+        campos = ["afiliado_tag_ml", "afiliado_tag_amazon", "amazon_credential_id",
+                  "amazon_creators_host"]
+        if novo_secret:
+            perfil.amazon_credential_secret = novo_secret
+            campos.append("amazon_credential_secret")
+        perfil.save(update_fields=campos)
+        messages.success(request, "Conta atualizada.")
+        return redirect("scraper-conta")
+
+    return render(request, "scrapers/conta.html", {
+        "perfil": perfil,
+        "tem_secret": bool(perfil and perfil.amazon_credential_secret),
+        "ml_sessao_ok": _tem_sessao_ml(request.user),
+        "amazon_conectado": bool(perfil and perfil.amazon_conectado()),
     })
 
 
@@ -740,11 +777,11 @@ def gerar_links_stream(request):
     return response
 
 
-@staff_required
 def ml_upload_sessao(request):
     """Instala um storage_state do ML gerado localmente (connect_ml.py) como a sessão
-    do admin. Caminho headless-friendly p/ conectar o ML no servidor (sem tela p/ o
-    login visível). Valida com um probe headless ANTES de salvar."""
+    DESTE usuário (auth_{id}.json). Caminho headless-friendly p/ conectar o ML no
+    servidor (sem tela p/ login visível). Valida com um probe headless ANTES de salvar.
+    Por-usuário (multi-tenant): cada um sobe a própria conta, sem gate de admin."""
     import json
     from apps.scrapers.session_paths import ml_session_dir
     from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada
