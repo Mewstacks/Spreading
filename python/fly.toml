@@ -1,5 +1,6 @@
 # Fly.io — app Django (web + workers). Região São Paulo (gru).
 # Secrets (NÃO versionar): fly secrets set DJANGO_SECRET_KEY=... DATABASE_URL=... \
+#   BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... (login web do Mercado Livre) \
 #   WHATSAPP_API_KEY=... SECRETS_FERNET_KEY=... AMAZON_* EMAIL_* TELEGRAM_API_ID=...
 app = "spreading-web"
 primary_region = "gru"
@@ -11,7 +12,7 @@ primary_region = "gru"
   DJANGO_DEBUG = "0"
   DJANGO_ALLOWED_HOSTS = "spreading-web.fly.dev"
   DJANGO_CSRF_TRUSTED_ORIGINS = "https://spreading-web.fly.dev"
-  ML_SESSION_DIR = "/data/ml_sessions"
+  ML_AUTH_DIR = "/data/ml_sessions"
   # Serviço do WhatsApp na rede privada do Fly (.internal).
   WHATSAPP_API_URL = "http://spreading-wa.internal:3000"
 

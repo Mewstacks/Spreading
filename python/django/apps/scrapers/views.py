@@ -11,7 +11,7 @@ from django.core.exceptions import PermissionDenied
 from django.db.models import F, ExpressionWrapper, FloatField, Q
 from django.http import StreamingHttpResponse, HttpResponse, JsonResponse
 from django.shortcuts import render, redirect
-from django.views.decorators.http import require_GET
+from django.views.decorators.http import require_GET, require_POST
 
 from apps.scrapers.models import Cupom, Produto, ConfiguracaoEnvio
 from apps.scrapers.scraper_mercadolivre.scraper import main as scrapper_main
@@ -68,7 +68,42 @@ class _QueueWriter:
 
 @staff_required
 def dashboard(request):
-    return render(request, "scrapers/dashboard.html")
+    """Painel + checklist de primeiros passos (onboarding orientado a conexões)."""
+    from apps.scrapers.monitor_conexao import ml_conectado, wa_conectado
+    from apps.scrapers.afiliado import tag_ml
+
+    user = request.user
+    perfil = getattr(user, "perfil", None)
+
+    ml_ok = ml_conectado(user)
+    tag_ok = bool(tag_ml(user))
+    wa_ok = wa_conectado()
+    tg_ok = bool(perfil and perfil.telegram_conectado())
+    canal_ok = wa_ok or tg_ok
+    regra_ok = ConfiguracaoEnvio.objects.filter(owner=user).exists()
+
+    # Uma etapa = {título, feito, CTA}. Ordem = caminho até o "aha" (enviar 1 oferta).
+    passos = [
+        {"key": "ml", "titulo": "Conectar sua conta do Mercado Livre", "feito": ml_ok,
+         "desc": "Login seguro na própria página — gera seus links de afiliado.",
+         "cta": "Conectar", "url": "/scrapers/ml/", "icon": "shopping-bag"},
+        {"key": "tag", "titulo": "Definir sua tag de afiliado", "feito": tag_ok,
+         "desc": "Sua comissão. Sem ela, o clique não te paga.",
+         "cta": "Definir", "url": "/scrapers/config/#afiliado", "icon": "badge-dollar-sign"},
+        {"key": "canal", "titulo": "Conectar um canal de envio", "feito": canal_ok,
+         "desc": "WhatsApp (QR) ou Telegram (bot) — por onde as ofertas saem.",
+         "cta": "Conectar", "url": "/scrapers/whatsapp/", "icon": "message-circle"},
+        {"key": "regra", "titulo": "Criar uma regra de envio", "feito": regra_ok,
+         "desc": "Nicho → canal → intervalo. Depois é só ligar o automático.",
+         "cta": "Criar regra", "url": "/scrapers/config/", "icon": "list-checks"},
+    ]
+    feitos = sum(1 for p in passos if p["feito"])
+    return render(request, "scrapers/dashboard.html", {
+        "passos": passos,
+        "passos_feitos": feitos,
+        "passos_total": len(passos),
+        "onboarding_completo": feitos == len(passos),
+    })
 
 
 def comecar(request):
@@ -119,7 +154,7 @@ def configurar_conta(request):
     e sessão do Mercado Livre. Cada usuário configura a PRÓPRIA conta (multi-tenant).
 
     A tag é o que garante a comissão do usuário; a sessão ML é o "login salvo no robô"
-    (storage_state gerado no PC via connect_ml.py e colado aqui — servidor é headless)."""
+    (conectada pela web em Conexão Mercado Livre — browser remoto com live view)."""
     perfil = getattr(request.user, "perfil", None)
     if perfil and request.method == "POST":
         perfil.afiliado_tag_ml = (request.POST.get("afiliado_tag_ml") or "").strip()
@@ -180,6 +215,46 @@ def whatsapp_grupos_json(request):
     return JsonResponse(whatsapp_client.listar_grupos(_wa_session(request)))
 
 
+# --- Conexão web do Mercado Livre (login via browser remoto, sem script local) ---
+
+def ml_conexao_painel(request):
+    """Tela de conexão do ML: o usuário loga no ML dentro de um live view embutido."""
+    from apps.scrapers import ml_conexao
+    return render(request, "scrapers/ml_conexao.html", {
+        "status": ml_conexao.status(request.user.id),
+    })
+
+
+@require_GET
+def ml_conexao_status_json(request):
+    """JSON de status para polling do front (fase, live_view_url, auth_valido)."""
+    from apps.scrapers import ml_conexao
+    return JsonResponse(ml_conexao.status(request.user.id))
+
+
+@require_POST
+def ml_conexao_start(request):
+    """Abre (ou reaproveita) a sessão remota de login do ML e devolve o estado."""
+    from apps.scrapers import ml_conexao
+    return JsonResponse(ml_conexao.criar_sessao(request.user))
+
+
+@require_POST
+def ml_conexao_salvar(request):
+    """'Já entrei' — força a captura da sessão sem esperar o auto-detect."""
+    from apps.scrapers import ml_conexao
+    ml_conexao.salvar_agora(request.user.id)
+    return JsonResponse(ml_conexao.status(request.user.id))
+
+
+@require_POST
+def ml_conexao_cancelar(request):
+    """Cancela a sessão de login em andamento."""
+    from apps.scrapers import ml_conexao
+    ml_conexao.cancelar(request.user.id)
+    return JsonResponse({"ok": True})
+
+
 @require_GET
 def whatsapp_qr_png(request):
     """Renderiza o QR do WhatsApp como PNG (vindo do serviço Node)."""
@@ -198,27 +273,56 @@ def whatsapp_qr_png(request):
 
 
 def telegram_painel(request):
-    """Tela de conexão do Telegram: status do bot + checklist de setup."""
+    """Tela de conexão do Telegram: o usuário cola o token do próprio bot (via web)."""
     return render(request, "scrapers/telegram.html")
 
 
-@require_GET
-def telegram_status_json(request):
-    """Verifica o bot via getMe. Sem chamadas de browser — só HTTP."""
+def _telegram_getme(token: str) -> dict:
+    """Valida um token via getMe (só HTTP, sem browser). Não levanta."""
     import requests as _rq
-    token = getattr(settings, "TELEGRAM_BOT_TOKEN", "")
     if not token:
-        return JsonResponse({"token": False, "ok": False})
+        return {"token": False, "ok": False}
     try:
         r = _rq.get(f"https://api.telegram.org/bot{token}/getMe", timeout=8)
         d = r.json()
         if d.get("ok"):
             info = d.get("result", {})
-            return JsonResponse({"token": True, "ok": True,
-                                 "username": info.get("username"), "nome": info.get("first_name")})
-        return JsonResponse({"token": True, "ok": False, "erro": d.get("description") or "getMe falhou"})
+            return {"token": True, "ok": True,
+                    "username": info.get("username"), "nome": info.get("first_name")}
+        return {"token": True, "ok": False, "erro": d.get("description") or "getMe falhou"}
     except Exception as e:
-        return JsonResponse({"token": True, "ok": False, "erro": str(e)})
+        return {"token": True, "ok": False, "erro": str(e)}
+
+
+@require_GET
+def telegram_status_json(request):
+    """Status do bot do usuário (token no Perfil; fallback global) via getMe."""
+    from apps.scrapers.senders.telegram import resolver_token
+    return JsonResponse(_telegram_getme(resolver_token(request.user)))
+
+
+@require_POST
+def telegram_conectar(request):
+    """Salva o token do bot do usuário no Perfil — depois de validar via getMe."""
+    token = (request.POST.get("token") or "").strip()
+    if not token:
+        return JsonResponse({"ok": False, "erro": "Cole o token do seu bot."}, status=400)
+    res = _telegram_getme(token)
+    if not res.get("ok"):
+        return JsonResponse({"ok": False, "erro": res.get("erro") or "Token inválido."}, status=400)
+    perfil = request.user.perfil
+    perfil.telegram_bot_token = token
+    perfil.save(update_fields=["telegram_bot_token"])
+    return JsonResponse({"ok": True, **res})
+
+
+@require_POST
+def telegram_desconectar(request):
+    """Remove o token do bot do usuário."""
+    perfil = request.user.perfil
+    perfil.telegram_bot_token = ""
+    perfil.save(update_fields=["telegram_bot_token"])
+    return JsonResponse({"ok": True})
 
 
 def configuracoes(request):
@@ -229,6 +333,21 @@ def configuracoes(request):
             # Só apaga regra do próprio usuário (isolamento multi-tenant).
             ConfiguracaoEnvio.objects.filter(
                 id=request.POST.get("id"), owner=request.user).delete()
+        elif acao == "perfil":
+            # Identidade de afiliado + credenciais Amazon por-usuário (via web, não .env).
+            perfil = request.user.perfil
+            perfil.afiliado_tag_ml = (request.POST.get("afiliado_tag_ml") or "").strip()
+            perfil.afiliado_tag_amazon = (request.POST.get("afiliado_tag_amazon") or "").strip()
+            perfil.amazon_credential_id = (request.POST.get("amazon_credential_id") or "").strip()
+            perfil.amazon_creators_host = (request.POST.get("amazon_creators_host") or "").strip()
+            # Secret só sobrescreve se o usuário digitou algo (campo vem mascarado/vazio).
+            novo_secret = (request.POST.get("amazon_credential_secret") or "").strip()
+            campos = ["afiliado_tag_ml", "afiliado_tag_amazon",
+                      "amazon_credential_id", "amazon_creators_host"]
+            if novo_secret:
+                perfil.amazon_credential_secret = novo_secret
+                campos.append("amazon_credential_secret")
+            perfil.save(update_fields=campos)
         else:
             cfg_id = request.POST.get("id")
             # Sub-nichos: multi-select -> junta as strings de termos (OR no filtro)
@@ -287,6 +406,7 @@ def configuracoes(request):
         "subnichos": subnichos,
         "marketplaces": list(MARKETPLACES.keys()),
         "canais": list(SENDERS.keys()),
+        "perfil": request.user.perfil,
     })
 
 
@@ -755,117 +875,6 @@ def gerar_links_stream(request):
                             get_marketplace(slug).prefetch_links(grupo)
                     sobra = Produto.objects.filter(link_afiliado="").count()
                     print(f"Sobraram {sobra} produto(s) sem link.")
-            except Exception as exc:
-                q.put(f"[ERRO] {exc}")
-            finally:
-                writer.flush()
-                q.put(None)
-
-        thread = threading.Thread(target=_run, daemon=True)
-        thread.start()
-
-        while True:
-            line = q.get()
-            if line is None:
-                yield "data: __DONE__\n\n"
-                break
-            yield f"data: {line}\n\n"
-
-    response = StreamingHttpResponse(_event_stream(), content_type="text/event-stream")
-    response["Cache-Control"] = "no-cache"
-    response["X-Accel-Buffering"] = "no"
-    return response
-
-
-def ml_upload_sessao(request):
-    """Instala um storage_state do ML gerado localmente (connect_ml.py) como a sessão
-    DESTE usuário (auth_{id}.json). Caminho headless-friendly p/ conectar o ML no
-    servidor (sem tela p/ login visível). Valida com um probe headless ANTES de salvar.
-    Por-usuário (multi-tenant): cada um sobe a própria conta, sem gate de admin."""
-    import json
-    from apps.scrapers.session_paths import ml_session_dir
-    from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada
-
-    if request.method != "POST":
-        return JsonResponse({"ok": False, "erro": "POST apenas."}, status=405)
-
-    raw = (request.POST.get("sessao_json") or "").strip()
-    if not raw and request.FILES.get("sessao_file"):
-        raw = request.FILES["sessao_file"].read().decode("utf-8", "ignore").strip()
-    if not raw:
-        return JsonResponse({"ok": False, "erro": "Cole o JSON da sessão ou envie o arquivo."}, status=400)
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return JsonResponse({"ok": False, "erro": "JSON inválido."}, status=400)
-    if not isinstance(data, dict) or "cookies" not in data:
-        return JsonResponse({"ok": False, "erro": "Não parece um storage_state do Playwright (faltou 'cookies')."}, status=400)
-
-    d = ml_session_dir()
-    final = os.path.join(d, f"auth_{request.user.id}.json")
-    tmp = final + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh)
-
-    # Probe headless: a sessão está realmente logada? (permitir_login=False remove o
-    # arquivo se expirada, então em falha o tmp já some.)
-    os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-    asyncio.set_event_loop(asyncio.new_event_loop())
-    try:
-        with iniciar_browser(auth_path=tmp, headless=True, permitir_login=False) as (page, ctx):
-            pass
-    except (SessaoExpirada, BrowserError) as exc:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        return JsonResponse({"ok": False, "erro": f"Sessão não está logada no ML: {exc}"}, status=400)
-
-    os.replace(tmp, final)
-    return JsonResponse({"ok": True, "msg": "Sessão ML conectada."})
-
-
-@staff_required
-@require_GET
-def auth_stream(request):
-    """SSE endpoint — abre browser visível para login no ML e salva auth.json."""
-    from apps.scrapers.auxiliar import iniciar_browser, BrowserError
-
-    # Servidor sem tela (Fly): login visível não roda. Orienta o upload de sessão.
-    if not getattr(settings, "ML_HEADFUL_LOGIN", False):
-        def _sem_tela():
-            yield "data: [ERRO] Login visível do ML indisponível neste servidor (sem tela).\n\n"
-            yield "data: Rode connect_ml.py no seu PC, logue, e use 'Enviar sessão ML' abaixo.\n\n"
-            yield "data: __DONE__\n\n"
-        resp = StreamingHttpResponse(_sem_tela(), content_type="text/event-stream")
-        resp["Cache-Control"] = "no-cache"
-        resp["X-Accel-Buffering"] = "no"
-        return resp
-
-    # Sessão de ML por usuário (auth_{id}.json) — cada um conecta a própria conta.
-    # ml_session_dir() honra ML_SESSION_DIR (volume persistente no Fly).
-    from apps.scrapers.session_paths import ml_session_dir
-    auth_path = os.path.join(ml_session_dir(), f"auth_{request.user.id}.json")
-
-    def _event_stream():
-        q: queue.Queue = queue.Queue()
-        writer = _QueueWriter(q)
-
-        def _run():
-            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            try:
-                with redirect_stdout(writer):
-                    # permitir_login=True: há humano p/ escanear/logar no ML.
-                    with iniciar_browser(auth_path=auth_path, headless=True,
-                                         permitir_login=True) as (page, context):
-                        pass  # só valida/salva a sessão
-            except BrowserError as exc:
-                msg = str(exc)
-                if "LOGIN_REQUIRED" in msg or "login" in msg.lower():
-                    q.put("LOGIN_REQUIRED")
-                else:
-                    q.put(f"[ERRO] {exc}")
             except Exception as exc:
                 q.put(f"[ERRO] {exc}")
             finally:

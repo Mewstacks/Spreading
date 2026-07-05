@@ -36,15 +36,22 @@ if not DEBUG and SECRET_KEY.startswith("django-insecure"):
     raise RuntimeError("Defina DJANGO_SECRET_KEY no .env antes de rodar com DEBUG=0.")
 
 # Hosts liberados (CSV no .env). Em dev cai no localhost.
-# Aceita qualquer subdominio de tunnel do cloudflare (muda a cada restart).
-ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", ".trycloudflare.com").split(",") if h.strip()]
+# Default cobre Fly.io (.fly.dev) e túnel do cloudflare (.trycloudflare.com).
+ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", ".fly.dev,.trycloudflare.com").split(",") if h.strip()]
 if DEBUG and not ALLOWED_HOSTS:
-    ALLOWED_HOSTS = ["localhost", "127.0.0.1", ".trycloudflare.com"]
+    ALLOWED_HOSTS = ["localhost", "127.0.0.1", ".fly.dev", ".trycloudflare.com"]
 elif DEBUG:
     ALLOWED_HOSTS += ["localhost", "127.0.0.1"]
+# Fly injeta o hostname do app; libera automaticamente sem precisar configurar.
+_fly_app = os.getenv("FLY_APP_NAME", "")
+if _fly_app:
+    ALLOWED_HOSTS.append(f"{_fly_app}.fly.dev")
 
 # Origens confiáveis para CSRF (precisa de esquema: https://app.seudominio.com).
-CSRF_TRUSTED_ORIGINS = [o.strip() for o in os.getenv("DJANGO_CSRF_TRUSTED_ORIGINS", "https://*.trycloudflare.com").split(",") if o.strip()]
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in os.getenv(
+    "DJANGO_CSRF_TRUSTED_ORIGINS", "https://*.fly.dev,https://*.trycloudflare.com").split(",") if o.strip()]
+if _fly_app:
+    CSRF_TRUSTED_ORIGINS.append(f"https://{_fly_app}.fly.dev")
 
 
 # Application definition
@@ -62,6 +69,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # WhiteNoise serve os static (admin/etc) direto do processo, sem CDN/nginx.
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -115,6 +123,7 @@ import dj_database_url  # noqa: E402
 
 _DATABASE_URL = os.getenv("DATABASE_URL", "")
 if _DATABASE_URL:
+    import dj_database_url
     # ssl_require=False: o Postgres interno do Fly (.flycast/.internal) NÃO usa TLS;
     # forçar sslmode=require quebraria a conexão. Provedores externos (Supabase) já
     # trazem sslmode na própria URL. Sobrescreva com DB_SSL_REQUIRE=1 se precisar.
@@ -125,10 +134,13 @@ if _DATABASE_URL:
         )
     }
 else:
+    # Sem DATABASE_URL cai no SQLite. Em prod (Fly) fica no volume /data (se montado)
+    # para sobreviver a deploys; em dev fica ao lado do projeto.
+    _sqlite_dir = Path("/data") if Path("/data").is_dir() else BASE_DIR
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
+            'NAME': _sqlite_dir / 'db.sqlite3',
         }
     }
 
@@ -181,7 +193,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
-# collectstatic destino em produção (servido pelo WhiteNoise).
+# collectstatic destino em produção (servido pelo WhiteNoise com hash + gzip).
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 # Manifest+compressão só em produção. Em DEBUG usa o storage simples (senão o
 # {% static %} exigiria manifesto/collectstatic e quebraria o dev).
@@ -206,8 +218,9 @@ WHATSAPP_GRUPO_ID = os.getenv("WHATSAPP_GRUPO_ID", "")
 
 
 # ─────────────────────────────────────────────────────────────
-# Telegram sender (Bot API). Crie um bot no @BotFather e pegue o token.
-# O bot precisa ser admin do canal/grupo de destino.
+# Telegram sender (Bot API). Cada usuário conecta o próprio bot pela web
+# (Conexão Telegram -> token salvo no Perfil). Este valor é só o FALLBACK global
+# usado quando o usuário não tem token próprio (single-tenant/compat).
 # ─────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
@@ -268,12 +281,42 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
 
 
 # ─────────────────────────────────────────────────────────────
-# Celery + Beat
+# Redis (Celery broker/backend + cache). Em prod: um REDIS_URL só (ex: Upstash
+# no Fly). CELERY_BROKER_URL/RESULT_BACKEND ainda sobrescrevem se você quiser
+# separar. Em dev sem Redis, cai em localhost (Celery) e cache local (abaixo).
 # ─────────────────────────────────────────────────────────────
-CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
-CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+REDIS_URL = os.getenv("REDIS_URL", "")
+_redis_default = REDIS_URL or "redis://localhost:6379/0"
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", _redis_default)
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", _redis_default)
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
+
+
+# ─────────────────────────────────────────────────────────────
+# Cache — compartilhado entre workers do gunicorn.
+# A conexão web do ML guarda o estado (fase, live_view_url) no cache: a thread
+# que segura o browser remoto vive em UM worker, mas o polling do front pode cair
+# em outro. Com o cache local (por processo) isso não enxergaria o estado, então
+# usamos o mesmo Redis do Celery em prod. Em dev sem Redis, cai no cache local.
+# ─────────────────────────────────────────────────────────────
+_REDIS_CACHE_URL = os.getenv("REDIS_CACHE_URL") or os.getenv("REDIS_URL") or (
+    CELERY_BROKER_URL if os.getenv("USE_REDIS_CACHE", "0") == "1" else ""
+)
+if _REDIS_CACHE_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": _REDIS_CACHE_URL,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "spreading-local",
+        }
+    }
 
 
 # ─────────────────────────────────────────────────────────────
@@ -349,15 +392,24 @@ ALERTA_CONEXAO_COOLDOWN_H = int(os.getenv("ALERTA_CONEXAO_COOLDOWN_H", "6"))
 ML_AUTH_STALE_DIAS = int(os.getenv("ML_AUTH_STALE_DIAS", "7"))
 
 # ─────────────────────────────────────────────────────────────
-# Sessões do ML (auth.json / auth_{id}.json). Em produção (Fly.io) aponte para
-# um volume persistente (ex: /data/ml_sessions). Vazio = pasta do módulo (dev).
+# Sessões do ML (auth.json / auth_{id}.json). Precisa ser PERSISTENTE: no Fly o
+# filesystem da imagem é efêmero (some a cada deploy). Default: volume /data se
+# existir (produção), senão a pasta do scraper (dev). Override: ML_AUTH_DIR.
 # ─────────────────────────────────────────────────────────────
-ML_SESSION_DIR = os.getenv("ML_SESSION_DIR", "")
+_ml_auth_default = "/data/ml_sessions" if Path("/data").is_dir() else str(
+    BASE_DIR / "apps" / "scrapers" / "scraper_mercadolivre")
+ML_AUTH_DIR = os.getenv("ML_AUTH_DIR", _ml_auth_default)
+os.makedirs(ML_AUTH_DIR, exist_ok=True)
 
-# Login do ML com navegador VISÍVEL (auth_stream). Só funciona onde há tela: dev.
-# No servidor (Fly, headless) fica desligado → o admin conecta o ML enviando um
-# storage_state gerado localmente (connect_ml.py → tela "Enviar sessão ML").
-ML_HEADFUL_LOGIN = os.getenv("ML_HEADFUL_LOGIN", "1" if DEBUG else "0") == "1"
+# ─────────────────────────────────────────────────────────────
+# Browser hospedado (Browserbase) p/ login web do Mercado Livre. O servidor é
+# headless; o login roda num Chromium remoto transmitido pro navegador do usuário
+# (live view). Sem essas chaves, a tela /scrapers/ml/ avisa o usuário.
+# ─────────────────────────────────────────────────────────────
+BROWSERBASE_API_KEY = os.getenv("BROWSERBASE_API_KEY", "")
+BROWSERBASE_PROJECT_ID = os.getenv("BROWSERBASE_PROJECT_ID", "")
+# País do proxy residencial (reduz bloqueio anti-bot do ML no login).
+BROWSERBASE_PROXY_COUNTRY = os.getenv("BROWSERBASE_PROXY_COUNTRY", "BR")
 
 # Chave Fernet p/ criptografar segredos por usuário em repouso (Track A4).
 # Gere com: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"

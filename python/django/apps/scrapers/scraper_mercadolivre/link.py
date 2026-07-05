@@ -5,16 +5,25 @@ caminho_atual = os.path.dirname(os.path.abspath(__file__))
 caminho_django = os.path.dirname(os.path.dirname(os.path.dirname(caminho_atual)))
 sys.path.append(caminho_django)
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
-from apps.scrapers.session_paths import ml_session_dir
+
+
+def _auth_dir() -> str:
+    """Dir persistente das sessões do ML (ML_AUTH_DIR). Fallback: pasta do scraper."""
+    try:
+        from django.conf import settings
+        return settings.ML_AUTH_DIR
+    except Exception:
+        return caminho_atual
 
 
 def _auth_path(usuario=None) -> str:
     """auth.json do ML. Por usuário (auth_{id}.json) se existir; senão o global."""
+    base = _auth_dir()
     if usuario is not None and getattr(usuario, "id", None):
-        p = os.path.join(ml_session_dir(), f"auth_{usuario.id}.json")
+        p = os.path.join(base, f"auth_{usuario.id}.json")
         if os.path.exists(p):
             return p
-    return os.path.join(ml_session_dir(), "auth.json")
+    return os.path.join(base, "auth.json")
 
 
 class LoginError(Exception):
@@ -22,7 +31,7 @@ class LoginError(Exception):
     pass
 
 class AuthError(Exception):
-    """Exceção personalizada para erros de autenticação, quando o ML bloqueia essa merda."""
+    """Exceção personalizada para erros de autenticação (ML bloqueou a sessão)."""
     pass
 
 
@@ -84,19 +93,20 @@ def link_tem_tag_afiliado(link_curto: str, usuario=None) -> bool:
 
 def afiliate_link_builder(link_base, auth_path=None):
     with iniciar_browser(
-        auth_path=auth_path or os.path.join(ml_session_dir(), "auth.json"),
+        auth_path=auth_path or os.path.join(_auth_dir(), "auth.json"),
         headless=True,
         permissions=['clipboard-read', 'clipboard-write'],
     ) as (page, context):
         try:
             page.goto("https://www.mercadolivre.com.br/afiliados/linkbuilder#hub")
-        except:
-            raise AuthError("Não foi possível acessar o Link Builder. Verifique sua conexão e se a sessão está ativa, ou tente com o headless=False seu macaco.")
-        
+        except Exception:
+            raise AuthError("Não foi possível acessar o Link Builder do Mercado Livre. "
+                            "Reconecte sua conta em Conexão Mercado Livre e tente de novo.")
+
         login_field = page.get_by_test_id("user_id")
         if login_field.is_visible(timeout=10000):
-            raise LoginError("Faça login e rode a função novamente para gerar o link de afiliado, seu bosta.")
-        print("ta logado nessa porra")
+            raise LoginError("Sua sessão do Mercado Livre expirou. "
+                             "Reconecte em Conexão Mercado Livre para gerar os links de afiliado.")
         
         try:
             page.get_by_role("textbox", name="Insira 1 ou mais URLs").fill(link_base)
@@ -196,7 +206,7 @@ def gerar_links_em_lote(produtos):
     gerados = 0
     falhas = 0
     with iniciar_browser(
-        auth_path=os.path.join(ml_session_dir(), "auth.json"),
+        auth_path=os.path.join(_auth_dir(), "auth.json"),
         headless=True,
         permissions=['clipboard-read', 'clipboard-write'],
     ) as (page, context):
@@ -271,7 +281,7 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
         return relatorio
 
     with iniciar_browser(
-        auth_path=os.path.join(ml_session_dir(), "auth.json"),
+        auth_path=os.path.join(_auth_dir(), "auth.json"),
         headless=True,
     ) as (page, context):
         try:

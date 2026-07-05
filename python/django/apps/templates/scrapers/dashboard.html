@@ -14,6 +14,32 @@
   .auto-detail .k { color: var(--muted); min-width: 7.5rem; }
   .auto-detail .v { color: var(--text); font-weight: 500; }
   .auto-detail .err { color: var(--red); font-size: .78rem; word-break: break-word; }
+
+  /* ── Onboarding / checklist de conexões ── */
+  .ob-head { display:flex; align-items:center; gap:.7rem; margin-bottom:1rem; flex-wrap:wrap; }
+  .ob-head h2 { margin:0; font-size:1.05rem; display:flex; align-items:center; gap:.5rem; }
+  .ob-prog { margin-left:auto; display:flex; align-items:center; gap:.6rem; font-size:.82rem; color:var(--muted); }
+  .ob-bar { width:120px; height:7px; border-radius:99px; background:var(--surface-3); overflow:hidden; }
+  .ob-bar > span { display:block; height:100%; background:var(--brand-grad); transition:width .4s ease; }
+  .ob-list { display:flex; flex-direction:column; gap:.55rem; }
+  .ob-step { display:flex; align-items:center; gap:.9rem; padding:.8rem .9rem; border-radius:12px;
+    border:1px solid var(--border); background:var(--surface-2); }
+  .ob-step.done { border-color:color-mix(in srgb,var(--green) 30%,transparent); background:var(--green-bg); }
+  .ob-ball { width:34px; height:34px; border-radius:50%; flex:none; display:flex; align-items:center;
+    justify-content:center; background:var(--surface-3); color:var(--muted); }
+  .ob-step.done .ob-ball { background:var(--green); color:#fff; }
+  .ob-step:not(.done) .ob-ball { color:var(--accent); }
+  .ob-txt { min-width:0; flex:1; }
+  .ob-txt .t { font-weight:600; font-size:.92rem; display:flex; align-items:center; gap:.4rem; }
+  .ob-txt .d { color:var(--muted); font-size:.8rem; margin-top:.1rem; }
+  .ob-step .btn { flex:none; min-height:40px; }
+  .ob-step.done .done-chip { flex:none; color:var(--green); font-size:.82rem; font-weight:600;
+    display:inline-flex; align-items:center; gap:.3rem; }
+  .ob-done-strip { display:flex; align-items:center; gap:.7rem; color:var(--green); font-weight:600; }
+  @media (max-width:600px) {
+    .ob-step { flex-wrap:wrap; }
+    .ob-step .btn, .ob-step .done-chip { margin-left:auto; }
+  }
 </style>
 {% endblock %}
 
@@ -22,6 +48,39 @@
   <h1><i data-lucide="radar"></i> Scraper</h1>
   <p class="sub">Ofertas e cupons do Mercado Livre. Links de afiliado gerados na hora.</p>
 </div>
+
+<!-- Primeiros passos: checklist de conexões (some quando tudo está pronto) -->
+{% if not onboarding_completo %}
+<div class="card">
+  <div class="ob-head">
+    <h2><i data-lucide="rocket"></i> Primeiros passos</h2>
+    <div class="ob-prog">
+      <span>{{ passos_feitos }}/{{ passos_total }}</span>
+      <div class="ob-bar"><span style="width:{% widthratio passos_feitos passos_total 100 %}%;"></span></div>
+    </div>
+  </div>
+  <div class="ob-list">
+    {% for p in passos %}
+    <div class="ob-step {% if p.feito %}done{% endif %}">
+      <div class="ob-ball"><i data-lucide="{% if p.feito %}check{% else %}{{ p.icon }}{% endif %}"></i></div>
+      <div class="ob-txt">
+        <div class="t">{{ p.titulo }}</div>
+        <div class="d">{{ p.desc }}</div>
+      </div>
+      {% if p.feito %}
+        <span class="done-chip"><i data-lucide="check-circle-2"></i> pronto</span>
+      {% else %}
+        <a href="{{ p.url }}" class="btn btn-blue">{{ p.cta }} <i data-lucide="arrow-right"></i></a>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% else %}
+<div class="card">
+  <div class="ob-done-strip"><i data-lucide="party-popper"></i> Tudo conectado — seu robô está pronto para divulgar e comissionar.</div>
+</div>
+{% endif %}
 
 <!-- Raspagem automática 24/7 (só raspa — envios são controlados na tela Envios) -->
 <div class="card auto-card">
@@ -43,19 +102,7 @@
   <div style="display:flex;gap:.6rem;flex-wrap:wrap;align-items:center;">
     <button id="ofertas-btn" class="btn btn-green" onclick="startOfertas()"><i data-lucide="tag"></i> Raspar Ofertas</button>
     <button id="cupons-btn" class="btn btn-yellow" onclick="startCuponsCodigo()"><i data-lucide="ticket"></i> Raspar Cupons-Código</button>
-    <button id="auth-btn" class="btn btn-blue" onclick="startAuth()"><i data-lucide="key-round"></i> Login ML</button>
-    <button class="btn" onclick="document.getElementById('ml-upload').style.display = document.getElementById('ml-upload').style.display==='none'?'block':'none';"><i data-lucide="upload"></i> Enviar sessão ML</button>
-  </div>
-  <!-- Conectar ML no servidor (sem tela): cole o auth.json gerado por connect_ml.py -->
-  <div id="ml-upload" style="display:none;margin-top:.8rem;">
-    <div class="muted" style="font-size:.8rem;margin-bottom:.5rem;">
-      No seu PC: <code>python connect_ml.py</code> → logue no ML → cole abaixo o conteúdo de <code>auth.json</code>.
-    </div>
-    <textarea id="ml-json" rows="3" placeholder='{"cookies":[...],"origins":[...]}' style="width:100%;box-sizing:border-box;font-family:monospace;font-size:.78rem;padding:.5rem;border-radius:8px;"></textarea>
-    <div style="display:flex;gap:.6rem;align-items:center;margin-top:.5rem;flex-wrap:wrap;">
-      <button class="btn btn-blue" onclick="enviarSessaoML()"><i data-lucide="upload"></i> Enviar sessão</button>
-      <span id="ml-upload-msg" class="muted" style="font-size:.8rem;"></span>
-    </div>
+    <a href="{% url 'scraper-ml-conexao' %}" class="btn btn-blue"><i data-lucide="key-round"></i> Conectar Mercado Livre</a>
   </div>
 </div>
 
@@ -75,21 +122,8 @@
     return m ? decodeURIComponent(m.pop()) : '';
   }
 
-  // Envia o storage_state do ML (gerado localmente por connect_ml.py) p/ o servidor.
-  function enviarSessaoML() {
-    const j = document.getElementById('ml-json').value.trim();
-    const msg = document.getElementById('ml-upload-msg');
-    if (!j) { msg.textContent = 'Cole o JSON da sessão.'; return; }
-    msg.textContent = 'Validando sessão no ML…';
-    fetch('/scrapers/ml/upload/', {
-      method: 'POST',
-      headers: { 'X-CSRFToken': getCookie('csrftoken'), 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'sessao_json=' + encodeURIComponent(j)
-    })
-      .then(r => r.json())
-      .then(d => { msg.textContent = d.ok ? '✅ ' + d.msg : '❌ ' + d.erro; if (d.ok) document.getElementById('ml-json').value = ''; })
-      .catch(e => { msg.textContent = '❌ ' + e; });
-  }
+  // Conexão do ML agora é web-native (browser remoto com live view) na tela
+  // Conexão Mercado Livre (/scrapers/ml/). Sem script local nem upload de auth.json.
   let autoBusy = false;
 
   function humanDelta(ms) {
@@ -190,21 +224,6 @@
 
   function startOfertas() { runStream('/scrapers/ofertas/?paginas=40', 'ofertas-btn'); }
   function startCuponsCodigo() { runStream('/scrapers/cupons-codigo/', 'cupons-btn'); }
-
-  function startAuth() {
-    const btn = document.getElementById('auth-btn');
-    const log = document.getElementById('log');
-    btn.disabled = true; log.innerHTML = '';
-    appendLine('Abrindo navegador para login...', '');
-    const esa = new EventSource('/scrapers/auth/');
-    esa.onmessage = function(e) {
-      if (e.data === '__DONE__') { appendLine('✔ Sessão salva!', 'line-done'); esa.close(); btn.disabled = false; return; }
-      if (e.data === 'LOGIN_REQUIRED') { appendLine('🔐 Navegador aberto — faça login e aguarde...', ''); return; }
-      if (e.data === 'Sessão validada') { appendLine('✔ Sessão já válida.', 'line-done'); return; }
-      appendLine(e.data, e.data.startsWith('[ERRO]') ? 'line-err' : '');
-    };
-    esa.onerror = function() { appendLine('[ERRO] Conexão perdida.', 'line-err'); esa.close(); btn.disabled = false; };
-  }
 
   function appendLine(text, cls) {
     const log = document.getElementById('log');

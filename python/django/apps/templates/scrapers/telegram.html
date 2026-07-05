@@ -5,7 +5,7 @@
 <div style="max-width:560px;margin:0 auto;">
   <div class="page-head" style="text-align:center;">
     <h1 style="justify-content:center;"><i data-lucide="send"></i> Conexão Telegram</h1>
-    <p class="sub">Bot API — sem QR, sem app aberto. Só precisa do token e o bot como admin do canal.</p>
+    <p class="sub">Bot API — sem QR, sem app aberto. Cole o token do seu bot aqui; a gente valida e salva na sua conta.</p>
   </div>
 
   <div class="card" style="text-align:center;">
@@ -14,19 +14,51 @@
   </div>
 
   <div class="card" style="margin-top:1.2rem;">
-    <h2 style="margin:0 0 .8rem;font-size:1rem;color:var(--accent);display:flex;align-items:center;gap:.5rem;justify-content:center;"><i data-lucide="list-checks"></i> Checklist de configuração</h2>
-    <ol style="margin:0;padding-left:1.2rem;line-height:1.9;font-size:.9rem;">
+    <h2 style="margin:0 0 .8rem;font-size:1rem;color:var(--accent);display:flex;align-items:center;gap:.5rem;justify-content:center;"><i data-lucide="key-round"></i> Conectar seu bot</h2>
+    <ol style="margin:0 0 1rem;padding-left:1.2rem;line-height:1.9;font-size:.9rem;">
       <li>Crie um bot com o <a class="link" href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> → comando <span class="mono">/newbot</span>.</li>
-      <li>Copie o token e ponha no <span class="mono">.env</span>: <span class="mono">TELEGRAM_BOT_TOKEN=123:ABC...</span></li>
+      <li>Copie o token que ele te dá (algo como <span class="mono">123456:ABC-Def…</span>) e cole abaixo.</li>
       <li>Adicione o bot como <b>administrador</b> do canal/grupo de destino.</li>
-      <li>Em <a class="link" href="/scrapers/config/">Envios</a>, crie uma config com canal <b>telegram</b> e destino <span class="mono">@seucanal</span> (ou id <span class="mono">-100…</span>).</li>
     </ol>
+
+    <div style="display:flex;flex-direction:column;gap:.6rem;">
+      <input id="tg-token" type="password" autocomplete="off" placeholder="Cole o token do bot aqui"
+             style="width:100%;min-height:44px;padding:.6rem .8rem;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);font-family:var(--mono,monospace);">
+      <div id="tg-form-err" class="muted" style="font-size:.82rem;color:var(--red);min-height:1em;"></div>
+      <div style="display:flex;gap:.6rem;flex-wrap:wrap;">
+        <button id="tg-salvar" class="btn btn-blue" style="min-height:44px;"><i data-lucide="plug"></i> Conectar</button>
+        <button id="tg-remover" class="btn btn-ghost" style="min-height:44px;display:none;"><i data-lucide="unplug"></i> Desconectar</button>
+      </div>
+    </div>
+
+    <p class="muted" style="font-size:.82rem;margin-top:.9rem;">
+      Depois de conectar, vá em <a class="link" href="/scrapers/config/">Envios</a> e crie uma regra com canal
+      <b>telegram</b> e destino <span class="mono">@seucanal</span> (ou id <span class="mono">-100…</span>).
+    </p>
   </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+  const tokenInput = document.getElementById('tg-token');
+  const salvarBtn  = document.getElementById('tg-salvar');
+  const removerBtn = document.getElementById('tg-remover');
+  const formErr    = document.getElementById('tg-form-err');
+
+  function getCookie(nome) {
+    const m = document.cookie.match('(^|;)\\s*' + nome + '\\s*=\\s*([^;]+)');
+    return m ? decodeURIComponent(m.pop()) : '';
+  }
+  async function post(url, body) {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'X-CSRFToken': getCookie('csrftoken'), 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body || '',
+    });
+    return { ok: r.ok, data: await r.json().catch(function () { return {}; }) };
+  }
+
   async function poll() {
     const st = document.getElementById('tg-status');
     const dt = document.getElementById('tg-detail');
@@ -34,8 +66,9 @@
       const r = await fetch('/scrapers/telegram/status/');
       const s = await r.json();
       if (!s.token) {
-        st.innerHTML = '<span class="badge badge-yellow"><i data-lucide="alert-triangle"></i> Sem token</span>';
-        dt.textContent = 'Defina TELEGRAM_BOT_TOKEN no .env e recarregue.';
+        st.innerHTML = '<span class="badge badge-yellow"><i data-lucide="alert-triangle"></i> Não conectado</span>';
+        dt.textContent = 'Cole o token do seu bot abaixo para conectar.';
+        removerBtn.style.display = 'none';
       } else if (s.ok) {
         st.innerHTML = '<span class="badge badge-green"><i data-lucide="check-circle-2"></i> Bot conectado</span>';
         // username/nome vêm do getMe (externo) — escapa via textContent p/ evitar XSS.
@@ -43,16 +76,37 @@
         b.textContent = '@' + (s.username || '?');
         dt.textContent = '';
         dt.append('Bot ', b, ' (' + (s.nome || '') + ') pronto para enviar.');
+        removerBtn.style.display = 'inline-flex';
       } else {
         st.innerHTML = '<span class="badge badge-red"><i data-lucide="x-circle"></i> Token inválido</span>';
         dt.textContent = s.erro || 'getMe falhou. Verifique o token.';
+        removerBtn.style.display = 'inline-flex';
       }
     } catch (e) {
       st.innerHTML = '<span class="badge badge-red"><i data-lucide="x-circle"></i> Erro</span>';
       dt.textContent = 'Não foi possível checar o bot.';
     }
-    renderIcons();
+    if (window.renderIcons) renderIcons(); else if (window.lucide) lucide.createIcons();
   }
+
+  salvarBtn.onclick = async function () {
+    formErr.textContent = '';
+    const token = tokenInput.value.trim();
+    if (!token) { formErr.textContent = 'Cole o token do seu bot.'; return; }
+    salvarBtn.disabled = true;
+    const { ok, data } = await post('/scrapers/telegram/conectar/', 'token=' + encodeURIComponent(token));
+    salvarBtn.disabled = false;
+    if (ok && data.ok) { tokenInput.value = ''; poll(); }
+    else formErr.textContent = data.erro || 'Não foi possível conectar. Confira o token.';
+  };
+
+  removerBtn.onclick = async function () {
+    removerBtn.disabled = true;
+    await post('/scrapers/telegram/desconectar/');
+    removerBtn.disabled = false;
+    poll();
+  };
+
   poll();
 </script>
 {% endblock %}

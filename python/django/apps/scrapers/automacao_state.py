@@ -23,7 +23,7 @@ from django.conf import settings
 HEARTBEAT_STALE = 90
 
 # Em produção o volume monta em /data; guarda o estado lá p/ sobreviver a deploy.
-_DIR = os.path.join(getattr(settings, "ML_SESSION_DIR", "") or settings.BASE_DIR, ".automacao")
+_DIR = os.path.join(getattr(settings, "ML_AUTH_DIR", "") or settings.BASE_DIR, ".automacao")
 os.makedirs(_DIR, exist_ok=True)
 
 JOBS = ("scrape", "envio")

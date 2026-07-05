@@ -9,7 +9,7 @@ class WhatsAppSender(Sender):
     markup = WhatsAppMarkup()
 
     def enviar_oferta(self, destino, mensagem, *, imagem_url=None, imagem_b64=None,
-                      mimetype="image/jpeg", legenda=None, session=None):
+                      mimetype="image/jpeg", legenda=None, usuario=None, session=None):
         if imagem_b64:
             return whatsapp_client.enviar_oferta(
                 destino, mensagem, imagem_base64=imagem_b64,

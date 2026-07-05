@@ -14,7 +14,7 @@ from django.utils import timezone
 
 
 def ml_auth_path(user=None) -> str:
-    """Caminho do auth.json do ML. Delega ao resolvedor único (honra ML_SESSION_DIR)."""
+    """Caminho do auth.json do ML. Delega ao resolvedor único (honra ML_AUTH_DIR)."""
     from apps.scrapers.session_paths import ml_auth_path as _resolver
     return _resolver(user)
 

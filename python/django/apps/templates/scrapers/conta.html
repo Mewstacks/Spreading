@@ -67,42 +67,14 @@
     {% else %}<span class="status-pill"><span class="dot off"></span> sem login</span>{% endif %}
   </div>
   <p style="font-size:.85rem;color:var(--muted);line-height:1.6;">
-    O servidor é headless, então o login do ML é feito no seu PC e salvo no robô:
+    Você loga no Mercado Livre dentro do próprio app — abrimos o site do ML numa
+    janela remota e você entra ali (no celular ou no PC). A sessão é salva sozinha,
+    sem rodar script nem colar arquivo nenhum.
   </p>
-  <ol style="font-size:.85rem;color:var(--muted);line-height:1.7;padding-left:1.2rem;">
-    <li>No seu computador, rode <code>python connect_ml.py</code> (abre o navegador).</li>
-    <li>Faça login na sua conta do Mercado Livre e feche quando pedir.</li>
-    <li>Copie o conteúdo do <code>auth.json</code> gerado e cole abaixo.</li>
-  </ol>
-  <textarea id="ml-json" rows="3" placeholder='{"cookies":[...],"origins":[...]}'
-    style="width:100%;box-sizing:border-box;font-family:monospace;font-size:.78rem;padding:.5rem;border-radius:8px;background:var(--bg);color:var(--text);border:1px solid var(--border);"></textarea>
-  <div style="display:flex;gap:.6rem;align-items:center;margin-top:.6rem;flex-wrap:wrap;">
-    <button class="btn btn-sm btn-blue" onclick="enviarSessaoML()"><i data-lucide="upload"></i> Enviar sessão</button>
-    <span id="ml-upload-msg" style="font-size:.82rem;color:var(--muted);"></span>
+  <div style="margin-top:.6rem;">
+    <a class="btn btn-blue" href="{% url 'scraper-ml-conexao' %}">
+      <i data-lucide="log-in"></i> Conectar Mercado Livre
+    </a>
   </div>
 </div>
-{% endblock %}
-
-{% block scripts %}
-<script>
-  function getCookie(nome) {
-    const m = document.cookie.match('(^|;)\\s*' + nome + '\\s*=\\s*([^;]+)');
-    return m ? decodeURIComponent(m.pop()) : '';
-  }
-  function enviarSessaoML() {
-    const j = document.getElementById('ml-json').value.trim();
-    const msg = document.getElementById('ml-upload-msg');
-    if (!j) { msg.textContent = 'Cole o JSON da sessão.'; return; }
-    msg.textContent = 'Validando sessão no ML…';
-    fetch('/scrapers/ml/upload/', {
-      method: 'POST',
-      headers: { 'X-CSRFToken': getCookie('csrftoken'), 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'sessao_json=' + encodeURIComponent(j)
-    })
-      .then(r => r.json())
-      .then(d => { msg.textContent = d.ok ? '✅ ' + d.msg + ' Recarregue a página.' : '❌ ' + d.erro;
-                   if (d.ok) document.getElementById('ml-json').value = ''; })
-      .catch(e => { msg.textContent = '❌ ' + e; });
-  }
-</script>
 {% endblock %}

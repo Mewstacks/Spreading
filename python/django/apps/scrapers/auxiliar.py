@@ -36,10 +36,10 @@ class SessaoExpirada(BrowserError):
 
 
 @contextmanager
-def iniciar_browser(precisa_logar=False, auth_path=None, headless=False,
-                    permitir_login=False, **context_kwargs):
-    """`permitir_login`: True só quando há HUMANO (view auth_stream) p/ escanear/logar.
-    Nos workers de raspagem (headless) fica False: sessão morta -> SessaoExpirada."""
+def iniciar_browser(precisa_logar=False, auth_path=None, headless=True, **context_kwargs):
+    """Servidor é headless: o login do ML é sempre pela web (Conexão Mercado Livre,
+    browser remoto com live view). Aqui só validamos/usamos a sessão já salva; se
+    ela caiu, sinalizamos SessaoExpirada p/ o monitor reportar 'desconectado'."""
     context_kwargs.setdefault("user_agent", ua_aleatorio())
     if auth_path is None:
         caller_dir = os.path.dirname(os.path.abspath(inspect.stack()[1].filename))
@@ -58,36 +58,23 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=False,
             raise BrowserError(f"Erro ao iniciar o navegador para checar a sessão: {e}")
 
         if deslogado:
-            if not permitir_login:
-                # Worker sem humano: apaga a sessão morta (monitor passa a reportar
-                # 'desconectado' e dispara e-mail) e aborta a raspagem desta fonte.
-                if os.path.exists(auth_path):
-                    try:
-                        os.remove(auth_path)
-                    except OSError:
-                        pass
-                raise SessaoExpirada("Sessão ML expirada — reconecte pela tela Conexões.")
-            precisa_logar = True
+            # Sessão morta: apaga o arquivo (o monitor passa a reportar 'desconectado'
+            # e dispara o alerta) e aborta esta fonte. O usuário reconecta pela web.
+            if os.path.exists(auth_path):
+                try:
+                    os.remove(auth_path)
+                except OSError:
+                    pass
+            raise SessaoExpirada("Sessão ML expirada — reconecte em Conexão Mercado Livre.")
         else:
             print("Sessão validada")
-    if precisa_logar:    
-        with sync_playwright() as p:
-            try:
-                browser = p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
-                context = browser.new_context(storage_state=auth_path, **context_kwargs) if os.path.exists(auth_path) else browser.new_context(**context_kwargs)
-                page = context.new_page()
-                page.goto("https://www.mercadolivre.com/jms/mlb/lgz/msl/login/")
-                page.wait_for_load_state("networkidle")
-                if os.path.exists(auth_path):
-                    os.remove(auth_path)
-                print("LOGIN_REQUIRED")
-                page.wait_for_url("https://www.mercadolivre.com.br/", timeout=180000)
-                context.storage_state(path=auth_path)
-                browser.close()
-                print("Login salvo com sucesso!")
-
-            except Exception as e:
-                raise BrowserError(f"Erro durante o processo de login: {e}")
+    if precisa_logar:
+        # O login é feito pela web (Conexão Mercado Livre, browser remoto com live
+        # view) — NUNCA abrindo um browser visível no servidor headless.
+        raise BrowserError(
+            "LOGIN_REQUIRED: sessão do Mercado Livre expirou. "
+            "Reconecte em Conexão Mercado Livre para continuar."
+        )
 
     with sync_playwright() as p:
         try:

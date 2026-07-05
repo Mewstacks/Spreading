@@ -1,8 +1,9 @@
 """Caminho único das sessões do Mercado Livre (auth.json / auth_{id}.json).
 
 Centraliza a resolução do diretório p/ que produção (Fly.io) grave num VOLUME
-persistente via settings.ML_SESSION_DIR, sem espalhar `os.path.join(caminho_atual,
-"auth.json")` por vários módulos. Dev cai na pasta do scraper_mercadolivre.
+persistente via settings.ML_AUTH_DIR, sem espalhar `os.path.join(caminho_atual,
+"auth.json")` por vários módulos. É o MESMO diretório onde a conexão web
+(ml_conexao.py / Browserbase) grava o storage_state — tudo lê do mesmo lugar.
 """
 import os
 
@@ -16,7 +17,7 @@ _DEFAULT_DIR = os.path.join(
 
 def ml_session_dir() -> str:
     """Diretório das sessões do ML. Cria se não existir (volume novo no Fly)."""
-    d = getattr(settings, "ML_SESSION_DIR", "") or _DEFAULT_DIR
+    d = getattr(settings, "ML_AUTH_DIR", "") or _DEFAULT_DIR
     os.makedirs(d, exist_ok=True)
     return d
 
