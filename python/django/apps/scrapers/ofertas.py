@@ -338,11 +338,12 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False, c
     if sender.prefers_image == "url":
         resultado = sender.enviar_oferta(grupo_id, mensagem,
                                          imagem_url=getattr(produto, "imagem_url", "") or None,
-                                         legenda=mensagem)
+                                         legenda=mensagem, usuario=usuario)
     else:
         imagem_b64, img_mime = _baixar_imagem_b64(getattr(produto, "imagem_url", ""))
         resultado = sender.enviar_oferta(grupo_id, mensagem, imagem_b64=imagem_b64 or None,
-                                         mimetype=img_mime or "image/jpeg", legenda=mensagem)
+                                         mimetype=img_mime or "image/jpeg", legenda=mensagem,
+                                         usuario=usuario)
 
     if resultado.get("sucesso"):
         HistoricoEnvio.objects.create(produto=produto, usuario=usuario)  # só após sucesso

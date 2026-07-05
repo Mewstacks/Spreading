@@ -15,11 +15,21 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
+from django.contrib.auth.decorators import login_not_required
+from django.http import HttpResponse
 from django.urls import path, include
 from django.views.generic import TemplateView
 
+
+@login_not_required
+def healthz(request):
+    """Health check público para o Fly.io (não exige login nem banco)."""
+    return HttpResponse("ok", content_type="text/plain")
+
+
 urlpatterns = [
     path('', TemplateView.as_view(template_name='home.html'), name='home'),
+    path('healthz', healthz, name='healthz'),
     path('admin/', admin.site.urls),
     path('accounts/', include('apps.accounts.urls')),
     path('scrapers/', include('apps.scrapers.urls')),

@@ -35,6 +35,15 @@ class Perfil(models.Model):
         return bool(self.amazon_credential_id and self.amazon_credential_secret
                     and self.amazon_creators_host and self.afiliado_tag_amazon)
 
+    # ── Telegram por usuário (cada um conecta o próprio bot do @BotFather) ──
+    # Vazio = cai no fallback global de settings (TELEGRAM_BOT_TOKEN). Texto puro
+    # como as credenciais Amazon acima; criptografar quando virar multi-host.
+    telegram_bot_token = models.CharField(max_length=120, blank=True, default="")
+
+    def telegram_conectado(self) -> bool:
+        """True se o usuário tem um bot do Telegram próprio configurado."""
+        return bool(self.telegram_bot_token)
+
     # ── WhatsApp por usuário ──
     # Identificador da sessão (clientId) no serviço Node multi-cliente. Default = user.id.
     wa_session = models.CharField(max_length=64, blank=True, default="")

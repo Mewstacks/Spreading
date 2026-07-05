@@ -25,6 +25,9 @@
     justify-content: center; color: #fff; background: var(--brand-grad); border-radius: 12px; flex: none; }
   .auto-icon .lucide { width: 1.5rem; height: 1.5rem; }
   .auto-title { font-weight: 600; font-size: 1rem; display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+  @media (min-width: 860px) {
+    .afil-grid { grid-template-columns: 1fr 1fr !important; }
+  }
   @media (max-width: 859px) {
     .card-head { flex-wrap: wrap; }
     #refresh-grupos { margin-left: 0 !important; }
@@ -52,6 +55,58 @@
 <div class="page-head">
   <h1><i data-lucide="settings-2"></i> Configurações de Envio</h1>
   <p class="sub">Uma regra por linha: nicho → canal → grupo → intervalo.</p>
+</div>
+
+<!-- Identidade de afiliado + Amazon (por-usuário; cada um recebe a própria comissão) -->
+<div class="card" id="afiliado">
+  <div class="card-head" style="margin:0 0 .9rem;">
+    <h2><i data-lucide="badge-dollar-sign"></i> Afiliado &amp; Amazon</h2>
+    <span class="muted" style="font-size:.82rem;">Sua comissão. Nada de editar arquivo — salva aqui.</span>
+  </div>
+  <form method="post" style="display:grid;gap:1rem;grid-template-columns:1fr;">
+    {% csrf_token %}
+    <input type="hidden" name="acao" value="perfil">
+
+    <div style="display:grid;gap:1rem;grid-template-columns:1fr;" class="afil-grid">
+      <label style="display:block;">
+        <span class="muted" style="font-size:.8rem;">Tag de afiliado — Mercado Livre</span>
+        <input type="text" name="afiliado_tag_ml" value="{{ perfil.afiliado_tag_ml }}"
+               placeholder="ex: SUATAGML" style="width:100%;min-height:44px;margin-top:.3rem;">
+      </label>
+      <label style="display:block;">
+        <span class="muted" style="font-size:.8rem;">Tag de afiliado — Amazon (Associados)</span>
+        <input type="text" name="afiliado_tag_amazon" value="{{ perfil.afiliado_tag_amazon }}"
+               placeholder="ex: suatag-20" style="width:100%;min-height:44px;margin-top:.3rem;">
+      </label>
+    </div>
+
+    <details>
+      <summary class="muted" style="cursor:pointer;font-size:.85rem;">Credenciais Amazon Creators API (opcional — para gerar links via API)</summary>
+      <div style="display:grid;gap:1rem;grid-template-columns:1fr;margin-top:.8rem;" class="afil-grid">
+        <label style="display:block;">
+          <span class="muted" style="font-size:.8rem;">Credential ID</span>
+          <input type="text" name="amazon_credential_id" value="{{ perfil.amazon_credential_id }}"
+                 autocomplete="off" style="width:100%;min-height:44px;margin-top:.3rem;">
+        </label>
+        <label style="display:block;">
+          <span class="muted" style="font-size:.8rem;">Creators Host</span>
+          <input type="text" name="amazon_creators_host" value="{{ perfil.amazon_creators_host }}"
+                 placeholder="ex: creators.amazon.com.br" autocomplete="off"
+                 style="width:100%;min-height:44px;margin-top:.3rem;">
+        </label>
+        <label style="display:block;">
+          <span class="muted" style="font-size:.8rem;">Credential Secret {% if perfil.amazon_credential_secret %}<b>(já salvo — deixe em branco para manter)</b>{% endif %}</span>
+          <input type="password" name="amazon_credential_secret" value="" autocomplete="new-password"
+                 placeholder="{% if perfil.amazon_credential_secret %}••••••••{% else %}cole o secret{% endif %}"
+                 style="width:100%;min-height:44px;margin-top:.3rem;">
+        </label>
+      </div>
+    </details>
+
+    <div>
+      <button type="submit" class="btn btn-blue" style="min-height:44px;"><i data-lucide="save"></i> Salvar</button>
+    </div>
+  </form>
 </div>
 
 <!-- Envio automático (independente da raspagem; usa as regras abaixo) -->

@@ -47,5 +47,6 @@ class Sender(ABC):
     @abstractmethod
     def enviar_oferta(self, destino: str, mensagem: str, *, imagem_url: str = None,
                       imagem_b64: str = None, mimetype: str = "image/jpeg",
-                      legenda: str = None) -> dict:
+                      legenda: str = None, usuario=None) -> dict:
+        # `usuario` permite credenciais por-usuário (ex: token do bot do Telegram).
         ...

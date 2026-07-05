@@ -14,11 +14,8 @@ from django.utils import timezone
 
 
 def ml_auth_path(user=None) -> str:
-    """Caminho do auth.json do ML. Por-usuário na Fase 3; global por enquanto."""
-    base = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "scraper_mercadolivre",
-    )
+    """Caminho do auth.json do ML (dir persistente ML_AUTH_DIR). Por-usuário; senão global."""
+    base = settings.ML_AUTH_DIR
     if user is not None and getattr(user, "id", None):
         p = os.path.join(base, f"auth_{user.id}.json")
         if os.path.exists(p):

@@ -295,6 +295,7 @@
         <a href="/scrapers/" class="{% if u == 'scraper-dashboard' %}active{% endif %}"><i data-lucide="radar"></i> Scraper</a>
         <a href="/scrapers/top/" class="{% if u == 'scraper-top' %}active{% endif %}"><i data-lucide="flame"></i> Promoções</a>
         <a href="/scrapers/config/" class="{% if u == 'scraper-configuracoes' %}active{% endif %}"><i data-lucide="settings-2"></i> Envios</a>
+        <a href="/scrapers/ml/" class="{% if u == 'scraper-ml-conexao' %}active{% endif %}"><i data-lucide="shopping-bag"></i> Mercado Livre</a>
         <a href="/scrapers/whatsapp/" class="{% if u == 'scraper-whatsapp' %}active{% endif %}"><i data-lucide="message-circle"></i> WhatsApp</a>
         <a href="/scrapers/telegram/" class="{% if u == 'scraper-telegram' %}active{% endif %}"><i data-lucide="send"></i> Telegram</a>
         {% if request.user.is_staff %}<a href="/admin/"><i data-lucide="shield"></i> Admin</a>{% endif %}

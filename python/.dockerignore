@@ -1,0 +1,16 @@
+# Não empacotar lixo no build da imagem
+**/__pycache__/
+**/*.pyc
+django/db.sqlite3
+django/staticfiles/
+django/**/auth_*.json
+django/**/auth.json
+.env
+*.env
+CLAUDE.md
+falta.txt
+debug_cupom.json
+cupons_consolidados.json
+.git/
+.venv/
+venv/

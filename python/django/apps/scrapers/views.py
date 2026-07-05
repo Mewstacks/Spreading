@@ -8,7 +8,7 @@ from django.conf import settings
 from django.db.models import F, ExpressionWrapper, FloatField
 from django.http import StreamingHttpResponse, HttpResponse, JsonResponse
 from django.shortcuts import render, redirect
-from django.views.decorators.http import require_GET
+from django.views.decorators.http import require_GET, require_POST
 
 from apps.scrapers.models import Cupom, Produto, ConfiguracaoEnvio
 from apps.scrapers.scraper_mercadolivre.scraper import main as scrapper_main
@@ -35,7 +35,42 @@ class _QueueWriter:
 
 
 def dashboard(request):
-    return render(request, "scrapers/dashboard.html")
+    """Painel + checklist de primeiros passos (onboarding orientado a conexões)."""
+    from apps.scrapers.monitor_conexao import ml_conectado, wa_conectado
+    from apps.scrapers.afiliado import tag_ml
+
+    user = request.user
+    perfil = getattr(user, "perfil", None)
+
+    ml_ok = ml_conectado(user)
+    tag_ok = bool(tag_ml(user))
+    wa_ok = wa_conectado()
+    tg_ok = bool(perfil and perfil.telegram_conectado())
+    canal_ok = wa_ok or tg_ok
+    regra_ok = ConfiguracaoEnvio.objects.filter(owner=user).exists()
+
+    # Uma etapa = {título, feito, CTA}. Ordem = caminho até o "aha" (enviar 1 oferta).
+    passos = [
+        {"key": "ml", "titulo": "Conectar sua conta do Mercado Livre", "feito": ml_ok,
+         "desc": "Login seguro na própria página — gera seus links de afiliado.",
+         "cta": "Conectar", "url": "/scrapers/ml/", "icon": "shopping-bag"},
+        {"key": "tag", "titulo": "Definir sua tag de afiliado", "feito": tag_ok,
+         "desc": "Sua comissão. Sem ela, o clique não te paga.",
+         "cta": "Definir", "url": "/scrapers/config/#afiliado", "icon": "badge-dollar-sign"},
+        {"key": "canal", "titulo": "Conectar um canal de envio", "feito": canal_ok,
+         "desc": "WhatsApp (QR) ou Telegram (bot) — por onde as ofertas saem.",
+         "cta": "Conectar", "url": "/scrapers/whatsapp/", "icon": "message-circle"},
+        {"key": "regra", "titulo": "Criar uma regra de envio", "feito": regra_ok,
+         "desc": "Nicho → canal → intervalo. Depois é só ligar o automático.",
+         "cta": "Criar regra", "url": "/scrapers/config/", "icon": "list-checks"},
+    ]
+    feitos = sum(1 for p in passos if p["feito"])
+    return render(request, "scrapers/dashboard.html", {
+        "passos": passos,
+        "passos_feitos": feitos,
+        "passos_total": len(passos),
+        "onboarding_completo": feitos == len(passos),
+    })
 
 
 def whatsapp_painel(request):
@@ -67,6 +102,46 @@ def whatsapp_grupos_json(request):
     return JsonResponse(whatsapp_client.listar_grupos())
 
 
+# --- Conexão web do Mercado Livre (login via browser remoto, sem script local) ---
+
+def ml_conexao_painel(request):
+    """Tela de conexão do ML: o usuário loga no ML dentro de um live view embutido."""
+    from apps.scrapers import ml_conexao
+    return render(request, "scrapers/ml_conexao.html", {
+        "status": ml_conexao.status(request.user.id),
+    })
+
+
+@require_GET
+def ml_conexao_status_json(request):
+    """JSON de status para polling do front (fase, live_view_url, auth_valido)."""
+    from apps.scrapers import ml_conexao
+    return JsonResponse(ml_conexao.status(request.user.id))
+
+
+@require_POST
+def ml_conexao_start(request):
+    """Abre (ou reaproveita) a sessão remota de login do ML e devolve o estado."""
+    from apps.scrapers import ml_conexao
+    return JsonResponse(ml_conexao.criar_sessao(request.user))
+
+
+@require_POST
+def ml_conexao_salvar(request):
+    """'Já entrei' — força a captura da sessão sem esperar o auto-detect."""
+    from apps.scrapers import ml_conexao
+    ml_conexao.salvar_agora(request.user.id)
+    return JsonResponse(ml_conexao.status(request.user.id))
+
+
+@require_POST
+def ml_conexao_cancelar(request):
+    """Cancela a sessão de login em andamento."""
+    from apps.scrapers import ml_conexao
+    ml_conexao.cancelar(request.user.id)
+    return JsonResponse({"ok": True})
+
+
 @require_GET
 def whatsapp_qr_png(request):
     """Renderiza o QR do WhatsApp como PNG (vindo do serviço Node)."""
@@ -85,27 +160,56 @@ def whatsapp_qr_png(request):
 
 
 def telegram_painel(request):
-    """Tela de conexão do Telegram: status do bot + checklist de setup."""
+    """Tela de conexão do Telegram: o usuário cola o token do próprio bot (via web)."""
     return render(request, "scrapers/telegram.html")
 
 
-@require_GET
-def telegram_status_json(request):
-    """Verifica o bot via getMe. Sem chamadas de browser — só HTTP."""
+def _telegram_getme(token: str) -> dict:
+    """Valida um token via getMe (só HTTP, sem browser). Não levanta."""
     import requests as _rq
-    token = getattr(settings, "TELEGRAM_BOT_TOKEN", "")
     if not token:
-        return JsonResponse({"token": False, "ok": False})
+        return {"token": False, "ok": False}
     try:
         r = _rq.get(f"https://api.telegram.org/bot{token}/getMe", timeout=8)
         d = r.json()
         if d.get("ok"):
             info = d.get("result", {})
-            return JsonResponse({"token": True, "ok": True,
-                                 "username": info.get("username"), "nome": info.get("first_name")})
-        return JsonResponse({"token": True, "ok": False, "erro": d.get("description") or "getMe falhou"})
+            return {"token": True, "ok": True,
+                    "username": info.get("username"), "nome": info.get("first_name")}
+        return {"token": True, "ok": False, "erro": d.get("description") or "getMe falhou"}
     except Exception as e:
-        return JsonResponse({"token": True, "ok": False, "erro": str(e)})
+        return {"token": True, "ok": False, "erro": str(e)}
+
+
+@require_GET
+def telegram_status_json(request):
+    """Status do bot do usuário (token no Perfil; fallback global) via getMe."""
+    from apps.scrapers.senders.telegram import resolver_token
+    return JsonResponse(_telegram_getme(resolver_token(request.user)))
+
+
+@require_POST
+def telegram_conectar(request):
+    """Salva o token do bot do usuário no Perfil — depois de validar via getMe."""
+    token = (request.POST.get("token") or "").strip()
+    if not token:
+        return JsonResponse({"ok": False, "erro": "Cole o token do seu bot."}, status=400)
+    res = _telegram_getme(token)
+    if not res.get("ok"):
+        return JsonResponse({"ok": False, "erro": res.get("erro") or "Token inválido."}, status=400)
+    perfil = request.user.perfil
+    perfil.telegram_bot_token = token
+    perfil.save(update_fields=["telegram_bot_token"])
+    return JsonResponse({"ok": True, **res})
+
+
+@require_POST
+def telegram_desconectar(request):
+    """Remove o token do bot do usuário."""
+    perfil = request.user.perfil
+    perfil.telegram_bot_token = ""
+    perfil.save(update_fields=["telegram_bot_token"])
+    return JsonResponse({"ok": True})
 
 
 def configuracoes(request):
@@ -116,6 +220,21 @@ def configuracoes(request):
             # Só apaga regra do próprio usuário (isolamento multi-tenant).
             ConfiguracaoEnvio.objects.filter(
                 id=request.POST.get("id"), owner=request.user).delete()
+        elif acao == "perfil":
+            # Identidade de afiliado + credenciais Amazon por-usuário (via web, não .env).
+            perfil = request.user.perfil
+            perfil.afiliado_tag_ml = (request.POST.get("afiliado_tag_ml") or "").strip()
+            perfil.afiliado_tag_amazon = (request.POST.get("afiliado_tag_amazon") or "").strip()
+            perfil.amazon_credential_id = (request.POST.get("amazon_credential_id") or "").strip()
+            perfil.amazon_creators_host = (request.POST.get("amazon_creators_host") or "").strip()
+            # Secret só sobrescreve se o usuário digitou algo (campo vem mascarado/vazio).
+            novo_secret = (request.POST.get("amazon_credential_secret") or "").strip()
+            campos = ["afiliado_tag_ml", "afiliado_tag_amazon",
+                      "amazon_credential_id", "amazon_creators_host"]
+            if novo_secret:
+                perfil.amazon_credential_secret = novo_secret
+                campos.append("amazon_credential_secret")
+            perfil.save(update_fields=campos)
         else:
             cfg_id = request.POST.get("id")
             # Sub-nichos: multi-select -> junta as strings de termos (OR no filtro)
@@ -165,6 +284,7 @@ def configuracoes(request):
         "subnichos": subnichos,
         "marketplaces": list(MARKETPLACES.keys()),
         "canais": list(SENDERS.keys()),
+        "perfil": request.user.perfil,
     })
 
 
@@ -637,56 +757,6 @@ def gerar_links_stream(request):
                             get_marketplace(slug).prefetch_links(grupo)
                     sobra = Produto.objects.filter(link_afiliado="").count()
                     print(f"Sobraram {sobra} produto(s) sem link.")
-            except Exception as exc:
-                q.put(f"[ERRO] {exc}")
-            finally:
-                writer.flush()
-                q.put(None)
-
-        thread = threading.Thread(target=_run, daemon=True)
-        thread.start()
-
-        while True:
-            line = q.get()
-            if line is None:
-                yield "data: __DONE__\n\n"
-                break
-            yield f"data: {line}\n\n"
-
-    response = StreamingHttpResponse(_event_stream(), content_type="text/event-stream")
-    response["Cache-Control"] = "no-cache"
-    response["X-Accel-Buffering"] = "no"
-    return response
-
-
-@require_GET
-def auth_stream(request):
-    """SSE endpoint — abre browser visível para login no ML e salva auth.json."""
-    from apps.scrapers.auxiliar import iniciar_browser, BrowserError
-
-    # Sessão de ML por usuário (auth_{id}.json) — cada um conecta a própria conta.
-    auth_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "scraper_mercadolivre", f"auth_{request.user.id}.json"
-    )
-
-    def _event_stream():
-        q: queue.Queue = queue.Queue()
-        writer = _QueueWriter(q)
-
-        def _run():
-            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            try:
-                with redirect_stdout(writer):
-                    with iniciar_browser(auth_path=auth_path, headless=True) as (page, context):
-                        pass  # só valida/salva a sessão
-            except BrowserError as exc:
-                msg = str(exc)
-                if "LOGIN_REQUIRED" in msg or "login" in msg.lower():
-                    q.put("LOGIN_REQUIRED")
-                else:
-                    q.put(f"[ERRO] {exc}")
             except Exception as exc:
                 q.put(f"[ERRO] {exc}")
             finally:

@@ -12,6 +12,8 @@ from django.conf import settings
 #  - ícones lucide vêm de unpkg.com
 #  - imagens de oferta vêm de CDNs externos (mercadolivre etc) -> https:
 #  - QR codes podem ser data: URIs
+#  - o live view do login do ML é um iframe do Browserbase -> frame-src externo
+_BROWSERBASE_FRAME_SRC = "https://browserbase.com https://*.browserbase.com"
 _DEFAULT_CSP = (
     "default-src 'self'; "
     "script-src 'self' 'unsafe-inline' https://unpkg.com; "
@@ -19,6 +21,7 @@ _DEFAULT_CSP = (
     "img-src 'self' data: https:; "
     "font-src 'self' data:; "
     "connect-src 'self'; "
+    f"frame-src 'self' {_BROWSERBASE_FRAME_SRC}; "
     "base-uri 'self'; "
     "form-action 'self'; "
     "frame-ancestors 'none'"

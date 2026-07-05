@@ -1,0 +1,27 @@
+# Fly.io — ponte de WhatsApp (whatsapp-web.js). Opcional; só se for usar WhatsApp.
+# Rode `fly deploy` a partir desta pasta (node.js/). A sessão do WhatsApp é
+# persistida no volume (senão você reescaneia o QR a cada deploy).
+app = "spreading-whatsapp"
+primary_region = "gru"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false      # precisa ficar de pé mantendo a sessão do WhatsApp
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"                  # chromium do whatsapp-web.js
+
+# Sessão do WhatsApp (LocalAuth grava em .wwebjs_auth) — precisa persistir.
+[mounts]
+  source = "wwebjs_auth"
+  destination = "/app/.wwebjs_auth"

@@ -31,6 +31,11 @@ django/staticfiles/
 django/mediafiles/
 django/media/
 
+# Sessões do Mercado Livre (nunca versionar — são credenciais de login)
+**/auth.json
+**/auth_*.json
+django/**/ml_sessions/
+
 # Migrações geradas (opcional — remova se quiser versionar)
 # */migrations/
 

@@ -9,4 +9,11 @@ python-dotenv==1.2.2
 celery==5.4.0
 redis==5.2.1
 playwright==1.59.0
+browserbase>=1.2,<2
 argon2-cffi==23.1.0
+
+# --- Deploy (Fly.io / qualquer host) ---
+gunicorn==23.0.0            # WSGI server de produção
+whitenoise==6.9.0           # serve os static (admin/etc) sem CDN/nginx
+dj-database-url==2.3.0      # DATABASE_URL -> config do Postgres (fallback sqlite)
+psycopg[binary]==3.2.9      # driver Postgres

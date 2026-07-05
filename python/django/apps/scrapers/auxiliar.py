@@ -8,7 +8,7 @@ class BrowserError(Exception):
     pass
 
 @contextmanager
-def iniciar_browser(precisa_logar=False, auth_path=None, headless=False, **context_kwargs):
+def iniciar_browser(precisa_logar=False, auth_path=None, headless=True, **context_kwargs):
     nav = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     context_kwargs.setdefault("user_agent", nav)
     if auth_path is None:
@@ -29,24 +29,14 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=False, **conte
             browser.close()
         except Exception as e:
             raise BrowserError(f"Erro ao iniciar o navegador para checar a sessão: {e}")
-    if precisa_logar:    
-        with sync_playwright() as p:
-            try:
-                browser = p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
-                context = browser.new_context(storage_state=auth_path, **context_kwargs) if os.path.exists(auth_path) else browser.new_context(**context_kwargs)
-                page = context.new_page()
-                page.goto("https://www.mercadolivre.com/jms/mlb/lgz/msl/login/")
-                page.wait_for_load_state("networkidle")
-                if os.path.exists(auth_path):
-                    os.remove(auth_path)
-                print("LOGIN_REQUIRED")
-                page.wait_for_url("https://www.mercadolivre.com.br/", timeout=180000)
-                context.storage_state(path=auth_path)
-                browser.close()
-                print("Login salvo com sucesso!")
-
-            except Exception as e:
-                raise BrowserError(f"Erro durante o processo de login: {e}")
+    if precisa_logar:
+        # Sessão do ML caiu/expirou. O login é feito pela web (Conexão Mercado Livre,
+        # browser remoto com live view) — NUNCA abrindo um browser visível no servidor
+        # headless. Sinaliza pro chamador que o usuário precisa reconectar.
+        raise BrowserError(
+            "LOGIN_REQUIRED: sessão do Mercado Livre expirou. "
+            "Reconecte em Conexão Mercado Livre para continuar."
+        )
 
     with sync_playwright() as p:
         try:

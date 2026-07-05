@@ -1,0 +1,51 @@
+# Fly.io — app Django (Spreading). Rode `fly deploy` a partir desta pasta (python/).
+# Deploy default: só o processo web + SQLite no volume (sobe sem Postgres/Redis).
+# Para ligar a automação 24/7, veja DEPLOY.md (Postgres + Redis + worker/beat).
+app = "spreading"
+primary_region = "gru"   # São Paulo
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  DJANGO_DEBUG = "0"
+  # Hostname liberado automaticamente via FLY_APP_NAME (ver settings.py).
+  # Defina os segredos com `fly secrets set` (ver DEPLOY.md):
+  #   DJANGO_SECRET_KEY, BROWSERBASE_API_KEY, BROWSERBASE_PROJECT_ID,
+  #   e (opcional) DATABASE_URL, REDIS_URL, EMAIL_*, WHATSAPP_API_URL...
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["web"]
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "3s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  # Playwright/chromium precisa de RAM; 1GB é o mínimo confortável.
+  size = "shared-cpu-1x"
+  memory = "1gb"
+  processes = ["web"]
+
+# SQLite persistente (fallback sem Postgres). Ao migrar pra Postgres, pode remover.
+[mounts]
+  source = "spreading_data"
+  destination = "/data"
+  processes = ["web"]
+
+# ─────────────────────────────────────────────────────────────
+# Automação 24/7 (opt-in). Requer DATABASE_URL (Postgres) + REDIS_URL.
+# Descomente, faça `fly deploy` e `fly scale count worker=1 beat=1`.
+# ─────────────────────────────────────────────────────────────
+# [processes]
+#   web = "gunicorn core.wsgi:application --bind 0.0.0.0:8080 --workers 2 --threads 4 --timeout 120 --access-logfile -"
+#   worker = "celery -A core worker -l info --concurrency 2"
+#   beat = "celery -A core beat -l info"

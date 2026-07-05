@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}Mercado Livre — Conexão{% endblock %}
+
+{% block head_extra %}
+<style>
+  .conn { max-width: 640px; margin: 0 auto; text-align: center; }
+
+  .conn-pill { display:inline-flex; align-items:center; gap:.55rem; padding:.55rem 1.1rem;
+    border-radius:999px; font-weight:600; font-size:.95rem; border:1px solid var(--border);
+    background:var(--surface-2); color:var(--muted); transition:all .25s ease; }
+  .conn-pill .dot { width:10px; height:10px; border-radius:50%; background:currentColor; flex:none; }
+  .conn-pill.is-on  { background:var(--green-bg); color:var(--green); border-color:color-mix(in srgb,var(--green) 35%,transparent); }
+  .conn-pill.is-mid { background:var(--yellow-bg); color:var(--yellow); border-color:color-mix(in srgb,var(--yellow) 35%,transparent); }
+  .conn-pill.is-off { background:var(--red-bg); color:var(--red); border-color:color-mix(in srgb,var(--red) 35%,transparent); }
+  .conn-pill.is-on .dot { animation:pulse 2s ease-in-out infinite; }
+
+  #prog-area { margin:1.2rem auto .2rem; max-width:420px; }
+  #prog-msg  { font-size:.84rem; margin-top:.5rem; min-height:1.1em; }
+
+  /* Live view: iframe responsivo, mantém proporção e nunca estoura a tela */
+  #live-area { margin:1.3rem auto 0; }
+  #live-frame-wrap { position:relative; width:100%; max-width:900px; margin:0 auto;
+    aspect-ratio: 16 / 10; border-radius:12px; overflow:hidden;
+    border:1px solid var(--border); background:var(--surface-2); }
+  #live-frame { position:absolute; inset:0; width:100%; height:100%; border:0; }
+
+  .actions { display:flex; gap:.6rem; flex-wrap:wrap; justify-content:center; margin-top:1.1rem; }
+  .actions .btn { min-height:44px; }
+
+  .hint { font-size:.85rem; color:var(--muted); max-width:560px; margin:.9rem auto 0; }
+  .err-box { margin:1.2rem auto; max-width:520px; padding:.8rem 1rem; border-radius:10px;
+    background:var(--red-bg); color:var(--red); border:1px solid color-mix(in srgb,var(--red) 35%,transparent);
+    font-size:.9rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="conn">
+  <div class="page-head" style="text-align:center;">
+    <h1 style="justify-content:center;"><i data-lucide="shopping-bag"></i> Conexão Mercado Livre</h1>
+    <p class="sub">Faça login na sua conta do Mercado Livre aqui mesmo — sem instalar nada, sem colar arquivo. O login abre nesta página e a sessão fica salva no robô.</p>
+  </div>
+
+  <div id="conn-pill" class="conn-pill"><span class="dot"></span><span id="pill-txt">verificando…</span></div>
+
+  <div id="err-box" class="err-box" style="display:none;"></div>
+
+  <div id="prog-area" style="display:none;">
+    <div class="progress-bg"><div id="prog-bar" class="progress-bar" style="width:0%;"></div></div>
+    <p id="prog-msg" class="muted"></p>
+  </div>
+
+  <!-- Estado inicial / desconectado: botão pra iniciar -->
+  <div id="start-area" style="display:none;">
+    <div class="actions">
+      <button id="start-btn" class="btn btn-blue"><i data-lucide="log-in"></i> Conectar Mercado Livre</button>
+    </div>
+    <p class="hint">Vamos abrir uma janela segura do Mercado Livre aqui dentro. Você entra com seu e-mail e senha (e 2FA, se tiver) normalmente.</p>
+  </div>
+
+  <!-- Live view: usuário loga dentro do iframe -->
+  <div id="live-area" style="display:none;">
+    <div id="live-frame-wrap"><iframe id="live-frame" allow="clipboard-read; clipboard-write" sandbox="allow-forms allow-scripts allow-same-origin allow-popups"></iframe></div>
+    <p class="hint">Entre na sua conta acima. Assim que o login terminar, a sessão é salva automaticamente. Se já entrou e não avançou, clique em <b>Já entrei</b>.</p>
+    <div class="actions">
+      <button id="salvar-btn" class="btn btn-green"><i data-lucide="check"></i> Já entrei</button>
+      <button id="cancelar-btn" class="btn btn-ghost"><i data-lucide="x"></i> Cancelar</button>
+    </div>
+  </div>
+
+  <!-- Conectado -->
+  <div id="ok-area" style="display:none;">
+    <p class="hint" style="color:var(--green);"><i data-lucide="check-circle"></i> Sessão do Mercado Livre ativa. O robô já gera seus links de afiliado.</p>
+    <div class="actions">
+      <button id="reconectar-btn" class="btn btn-ghost"><i data-lucide="refresh-cw"></i> Reconectar</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const pill    = document.getElementById('conn-pill');
+  const pillTxt = document.getElementById('pill-txt');
+  const errBox  = document.getElementById('err-box');
+  const progArea= document.getElementById('prog-area');
+  const progBar = document.getElementById('prog-bar');
+  const progMsg = document.getElementById('prog-msg');
+  const startArea = document.getElementById('start-area');
+  const liveArea  = document.getElementById('live-area');
+  const okArea    = document.getElementById('ok-area');
+  const liveFrame = document.getElementById('live-frame');
+  const startBtn  = document.getElementById('start-btn');
+  const salvarBtn = document.getElementById('salvar-btn');
+  const cancelarBtn = document.getElementById('cancelar-btn');
+  const reconectarBtn = document.getElementById('reconectar-btn');
+
+  function getCookie(nome) {
+    const m = document.cookie.match('(^|;)\\s*' + nome + '\\s*=\\s*([^;]+)');
+    return m ? decodeURIComponent(m.pop()) : '';
+  }
+  async function post(url) {
+    const r = await fetch(url, { method: 'POST', headers: { 'X-CSRFToken': getCookie('csrftoken') } });
+    return r.json();
+  }
+
+  // fase -> aparência
+  const FASES = {
+    idle:              { txt:'Não conectado',            cls:'is-off', bar:false },
+    iniciando:         { txt:'Abrindo janela segura…',   cls:'is-mid', bar:true  },
+    aguardando_login:  { txt:'Aguardando seu login',     cls:'is-mid', bar:false },
+    salvando:          { txt:'Salvando sessão…',         cls:'is-mid', bar:true  },
+    conectado:         { txt:'Conectado',                cls:'is-on',  bar:false },
+    erro:              { txt:'Erro na conexão',          cls:'is-off', bar:false },
+  };
+
+  let ultimoLiveUrl = '';
+
+  function mostra(el, on) { el.style.display = on ? 'block' : 'none'; }
+
+  function pintar(s) {
+    // auth_valido cobre o caso de já estar conectado de antes (arquivo fresco).
+    let fase = s.fase || 'idle';
+    if (fase === 'idle' && s.auth_valido) fase = 'conectado';
+    const f = FASES[fase] || FASES.idle;
+
+    pill.className = 'conn-pill ' + f.cls;
+    pillTxt.textContent = f.txt;
+
+    if (f.bar) { mostra(progArea, true); progBar.style.width = '60%'; progMsg.textContent = f.txt; }
+    else mostra(progArea, false);
+
+    if (fase === 'erro' && s.erro) { errBox.textContent = s.erro; mostra(errBox, true); }
+    else mostra(errBox, false);
+
+    // Live view
+    if (fase === 'aguardando_login' && s.live_view_url) {
+      if (s.live_view_url !== ultimoLiveUrl) { liveFrame.src = s.live_view_url; ultimoLiveUrl = s.live_view_url; }
+      mostra(liveArea, true);
+    } else {
+      mostra(liveArea, false);
+      if (fase !== 'salvando') { ultimoLiveUrl = ''; liveFrame.removeAttribute('src'); }
+    }
+
+    // Botão inicial aparece em idle/erro
+    mostra(startArea, fase === 'idle' || fase === 'erro');
+    mostra(okArea, fase === 'conectado');
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch('/scrapers/ml/status/');
+      pintar(await r.json());
+    } catch (e) { /* mantém último estado; próximo tick tenta de novo */ }
+  }
+
+  startBtn.onclick = reconectarBtn.onclick = async function () {
+    startBtn.disabled = true;
+    pintar(await post('/scrapers/ml/start/'));
+    startBtn.disabled = false;
+  };
+  salvarBtn.onclick = async function () {
+    salvarBtn.disabled = true;
+    await post('/scrapers/ml/salvar/');
+    setTimeout(function () { salvarBtn.disabled = false; }, 2000);
+  };
+  cancelarBtn.onclick = async function () {
+    await post('/scrapers/ml/cancelar/');
+    ultimoLiveUrl = ''; liveFrame.removeAttribute('src');
+    poll();
+  };
+
+  poll();
+  setInterval(poll, 2500);
+  if (window.lucide) lucide.createIcons();
+</script>
+{% endblock %}
