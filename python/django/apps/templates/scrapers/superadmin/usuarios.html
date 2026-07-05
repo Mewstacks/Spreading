@@ -2,6 +2,27 @@
 {% block title %}Superadmin — Usuários{% endblock %}
 
 {% block content %}
+<details class="card" style="margin-bottom:1.1rem;">
+  <summary style="cursor:pointer;font-weight:600;font-size:.95rem;display:flex;align-items:center;gap:.5rem;">
+    <i data-lucide="user-plus"></i> Criar usuário
+  </summary>
+  <form method="post" action="{% url 'superadmin-criar-usuario' %}" style="margin-top:1rem;display:flex;flex-direction:column;gap:.7rem;max-width:420px;">
+    {% csrf_token %}
+    <input name="username" placeholder="Usuário" required
+           style="padding:.55rem .7rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;font-size:.9rem;">
+    <input name="email" type="email" placeholder="E-mail (opcional)"
+           style="padding:.55rem .7rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;font-size:.9rem;">
+    <input name="senha" type="text" placeholder="Senha (mín. 8)" required minlength="8"
+           style="padding:.55rem .7rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;font-size:.9rem;">
+    <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;color:var(--muted);">
+      <input type="checkbox" name="verificado" checked> Pré-verificado (pula o e-mail de confirmação)
+    </label>
+    <button class="btn btn-sm btn-green" type="submit" style="align-self:flex-start;">
+      <i data-lucide="user-plus"></i> Criar
+    </button>
+  </form>
+</details>
+
 <div class="card">
   <div class="card-head">
     <h2><i data-lucide="users"></i> Usuários</h2>

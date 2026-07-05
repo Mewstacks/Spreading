@@ -78,6 +78,38 @@ def superadmin_usuarios(request):
 
 
 @superadmin_required
+@require_POST
+def superadmin_criar_usuario(request):
+    """Cria usuário direto pelo painel (sem depender de e-mail/SMTP).
+
+    Signup público exige e-mail de verificação; em prod o SMTP pode não estar
+    configurado, então o superadmin cria a conta já pronta (pré-verificada)."""
+    username = (request.POST.get("username") or "").strip()
+    email = (request.POST.get("email") or "").strip()
+    senha = request.POST.get("senha") or ""
+    verificado = bool(request.POST.get("verificado"))
+
+    if not username or not senha:
+        messages.error(request, "Usuário e senha são obrigatórios.")
+        return redirect("superadmin-usuarios")
+    if User.objects.filter(username__iexact=username).exists():
+        messages.error(request, f"Usuário '{username}' já existe.")
+        return redirect("superadmin-usuarios")
+    if len(senha) < 8:
+        messages.error(request, "Senha precisa de ao menos 8 caracteres.")
+        return redirect("superadmin-usuarios")
+
+    user = User.objects.create_user(username=username, email=email, password=senha)
+    # O signal post_save já cria o Perfil; marca verificado se pedido (pula o gate).
+    perfil = getattr(user, "perfil", None)
+    if perfil and verificado:
+        perfil.marcar_verificado()
+    messages.success(request, f"Usuário '{username}' criado"
+                     + (" (pré-verificado)." if verificado else "."))
+    return redirect("superadmin-usuario", user_id=user.id)
+
+
+@superadmin_required
 def superadmin_usuario_detalhe(request, user_id):
     user = get_object_or_404(User.objects.select_related("perfil"), pk=user_id)
     return render(request, "scrapers/superadmin/usuario_detalhe.html",
