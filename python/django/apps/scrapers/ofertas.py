@@ -312,12 +312,12 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False, c
     mp = get_marketplace(getattr(produto, "marketplace", "mercadolivre"))
     sender = get_sender(canal)
 
-    from apps.scrapers.auxiliar import BrowserError
+    from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
     from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
 
     try:
         info = mp.build_affiliate_link(produto, usuario=usuario)
-    except (LoginError, AuthError) as e:
+    except (LoginError, AuthError, SessaoExpirada) as e:
         # Sessão do ML caída: sem link de afiliado NENHUM produto sai. Motivo claro
         # + flag p/ a UI oferecer a reconexão e o chamador parar de retentar.
         return {"sucesso": False, "motivo": str(e), "precisa_login_ml": True}
