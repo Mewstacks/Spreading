@@ -312,9 +312,22 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False, c
     mp = get_marketplace(getattr(produto, "marketplace", "mercadolivre"))
     sender = get_sender(canal)
 
-    info = mp.build_affiliate_link(produto, usuario=usuario)
+    from apps.scrapers.auxiliar import BrowserError
+    from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
+
+    try:
+        info = mp.build_affiliate_link(produto, usuario=usuario)
+    except (LoginError, AuthError) as e:
+        # Sessão do ML caída: sem link de afiliado NENHUM produto sai. Motivo claro
+        # + flag p/ a UI oferecer a reconexão e o chamador parar de retentar.
+        return {"sucesso": False, "motivo": str(e), "precisa_login_ml": True}
+    except BrowserError as e:
+        texto = str(e)
+        return {"sucesso": False, "motivo": texto.replace("LOGIN_REQUIRED: ", ""),
+                "precisa_login_ml": "LOGIN_REQUIRED" in texto}
     if not info:
-        return {"sucesso": False, "motivo": "falha ao gerar link de afiliado"}
+        return {"sucesso": False, "motivo": "falha ao gerar link de afiliado "
+                "(URL não afiliável ou o Link Builder recusou — veja o log acima)"}
     link = info["link_afiliado"]
 
     # A3 — sem tag de afiliado o clique não gera comissão. Recusa (ou avisa).
@@ -401,6 +414,10 @@ def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
             return r
         print(f"  reprovado: {r.get('motivo')}")
         ultimo = r
+        if r.get("precisa_login_ml"):
+            # Sessão do ML caiu: os demais candidatos falhariam igual (cada tentativa
+            # abre um browser e leva ~30s). Aborta e devolve o motivo real.
+            return r
     return ultimo or {"sucesso": False, "motivo": "nenhum candidato passou"}
 
 

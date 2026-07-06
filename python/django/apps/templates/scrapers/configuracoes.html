@@ -382,6 +382,7 @@
     const es = new EventSource(url);
     es.onmessage = function (e) {
       if (e.data === '__DONE__') { append('--- Finalizado ---', 'line-done'); es.close(); return; }
+      if (e.data.indexOf('__ML_LOGIN__') !== -1) { appendLink('Reconectar Mercado Livre', '/scrapers/ml/'); return; }
       append(e.data, e.data.startsWith('[ERRO]') ? 'line-err' : '');
     };
     es.onerror = function () { append('[ERRO] Conexão perdida.', 'line-err'); es.close(); };
@@ -393,6 +394,16 @@
     const span = document.createElement('span');
     if (cls) span.className = cls;
     span.textContent = text + '\n';
+    log.appendChild(span); log.scrollTop = log.scrollHeight;
+  }
+  function appendLink(text, href) {
+    const log = document.getElementById('log');
+    const span = document.createElement('span');
+    span.className = 'line-err';
+    const a = document.createElement('a');
+    a.href = href; a.textContent = '→ ' + text;
+    a.style.cssText = 'color:inherit;font-weight:600;text-decoration:underline';
+    span.appendChild(a); span.appendChild(document.createTextNode('\n'));
     log.appendChild(span); log.scrollTop = log.scrollHeight;
   }
 </script>

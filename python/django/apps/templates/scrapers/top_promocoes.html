@@ -392,6 +392,7 @@ function dispararEnvio() {
     if (e.data === '__DONE__') { envEs.close(); envEs = null; return; }
     var ln = document.createElement('div');
     if (e.data.indexOf('__SENT__') !== -1) { ln.className = 'ok'; ln.textContent = e.data.replace('__SENT__ ', ''); setTimeout(function(){ location.reload(); }, 1200); }
+    else if (e.data.indexOf('__ML_LOGIN__') !== -1) { ln.className = 'err'; ln.innerHTML = '&rarr; <a href="/scrapers/ml/" style="color:inherit;font-weight:600;text-decoration:underline">Reconectar Mercado Livre</a>'; document.getElementById('env-go').disabled = false; }
     else if (e.data.startsWith('[ERRO]')) { ln.className = 'err'; ln.textContent = e.data; document.getElementById('env-go').disabled = false; }
     else ln.textContent = e.data;
     log.appendChild(ln); log.scrollTop = log.scrollHeight;

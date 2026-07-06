@@ -43,6 +43,45 @@ class UrlNaoPermitidaError(Exception):
     pass
 
 
+MSG_SESSAO_EXPIRADA = ("Sua sessão do Mercado Livre expirou. "
+                       "Reconecte em Conexão Mercado Livre para gerar os links de afiliado.")
+
+
+def _pagina_de_login(page) -> bool:
+    """True se o ML redirecionou para a tela de login (sessão caída/insuficiente)."""
+    url = (page.url or "").lower()
+    if any(t in url for t in ("/login", "/lgz/", "/registration", "loginhub")):
+        return True
+    try:
+        return page.get_by_test_id("user_id").is_visible()
+    except Exception:
+        return False
+
+
+def _abrir_link_builder(page):
+    """
+    Abre o Link Builder e falha CEDO com LoginError se a sessão caiu.
+
+    O portal de afiliados usa SSO próprio (jms/msl): mesmo com cookies válidos no
+    site principal, ele pode redirecionar pro login. O redirect leva alguns
+    segundos, então espera a navegação assentar ANTES de checar a URL — checar
+    só o campo de login imediatamente após o goto dá falso negativo e o erro
+    real só apareceria como timeout genérico no fill() seguinte.
+    """
+    try:
+        page.goto("https://www.mercadolivre.com.br/afiliados/linkbuilder#hub",
+                  wait_until="domcontentloaded", timeout=45000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
+    except Exception:
+        raise AuthError("Não foi possível acessar o Link Builder do Mercado Livre. "
+                        "Reconecte sua conta em Conexão Mercado Livre e tente de novo.")
+    if _pagina_de_login(page):
+        raise LoginError(MSG_SESSAO_EXPIRADA)
+
+
 def _validar_resultado_link(bruto):
     """
     O Link Builder escreve no clipboard tanto o link quanto mensagens de erro
@@ -97,17 +136,8 @@ def afiliate_link_builder(link_base, auth_path=None):
         headless=True,
         permissions=['clipboard-read', 'clipboard-write'],
     ) as (page, context):
-        try:
-            page.goto("https://www.mercadolivre.com.br/afiliados/linkbuilder#hub")
-        except Exception:
-            raise AuthError("Não foi possível acessar o Link Builder do Mercado Livre. "
-                            "Reconecte sua conta em Conexão Mercado Livre e tente de novo.")
+        _abrir_link_builder(page)
 
-        login_field = page.get_by_test_id("user_id")
-        if login_field.is_visible(timeout=10000):
-            raise LoginError("Sua sessão do Mercado Livre expirou. "
-                             "Reconecte em Conexão Mercado Livre para gerar os links de afiliado.")
-        
         try:
             page.get_by_role("textbox", name="Insira 1 ou mais URLs").fill(link_base)
             page.get_by_role("button", name="Gerar").click()
@@ -122,6 +152,10 @@ def afiliate_link_builder(link_base, auth_path=None):
             print("URL rejeitada pelo Programa de Afiliados (pagina nao afiliavel).")
             return None
         except Exception as e:
+            # O ML pode derrubar a sessão NO MEIO da interação: o fill/click estoura
+            # timeout enquanto a página redireciona pro login. Não engolir isso.
+            if _pagina_de_login(page):
+                raise LoginError(MSG_SESSAO_EXPIRADA)
             print(f"Erro ao gerar o link de afiliado: {e}")
             return None
 
@@ -210,13 +244,7 @@ def gerar_links_em_lote(produtos):
         headless=True,
         permissions=['clipboard-read', 'clipboard-write'],
     ) as (page, context):
-        try:
-            page.goto("https://www.mercadolivre.com.br/afiliados/linkbuilder#hub")
-        except Exception:
-            raise AuthError("Não foi possível acessar o Link Builder. Verifique conexão/sessão.")
-
-        if page.get_by_test_id("user_id").is_visible(timeout=10000):
-            raise LoginError("Sessão expirada. Faça login e rode novamente.")
+        _abrir_link_builder(page)
 
         total_lote = len(pendentes)
         print(f"[link-lote] Gerando links de afiliado para {total_lote} produtos...")
@@ -237,6 +265,8 @@ def gerar_links_em_lote(produtos):
                 prod.save(update_fields=["url_isca", "link_afiliado", "afiliado_ok"])
                 gerados += 1
             except Exception as e:
+                if _pagina_de_login(page):
+                    raise LoginError(MSG_SESSAO_EXPIRADA)
                 print(f"[link-lote] Falha em {prod.campanha_id or prod.link_produto[:40]}: {e}")
                 falhas += 1
 

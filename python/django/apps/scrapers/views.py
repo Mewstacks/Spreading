@@ -452,6 +452,8 @@ def enviar_agora_stream(request):
                         print(f"OK Enviado (via {r.get('via')}). Link: {r.get('link')}")
                     else:
                         print(f"[ERRO] {r.get('motivo')}")
+                        if r.get("precisa_login_ml"):
+                            print("__ML_LOGIN__")
             except Exception as exc:
                 q.put(f"[ERRO] {exc}")
             finally:
@@ -512,6 +514,8 @@ def enviar_produto_stream(request):
             print(f"__SENT__ OK Enviado (via {r.get('via')}). Link: {r.get('link')}")
         else:
             print(f"[ERRO] {r.get('motivo')}")
+            if r.get("precisa_login_ml"):
+                print("__ML_LOGIN__")  # a UI troca por um botão "Reconectar Mercado Livre"
 
     return _sse_runner(_job)
 
