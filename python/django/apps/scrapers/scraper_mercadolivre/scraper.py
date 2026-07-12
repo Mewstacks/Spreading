@@ -2,10 +2,15 @@ import os
 import json
 import re
 import time
+import logging
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
 from apps.scrapers.models import Cupom, Produto
+from apps.scrapers.progresso import emitir_progresso
 from apps.scrapers.session_paths import ml_session_dir
+from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 
 def mapear_cupons(n=1):
     todos_os_cupons_limpos = []
@@ -13,7 +18,7 @@ def mapear_cupons(n=1):
     RETRY_WAIT = 5  # segundos entre tentativas
 
     caminho_auth = os.path.join(ml_session_dir(), "auth.json")
-    print("Iniciando raspagem e limpeza de cupons...")
+    logger.info("Iniciando raspagem e limpeza de cupons")
     
     with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
         while True:
@@ -30,7 +35,7 @@ def mapear_cupons(n=1):
                 try:
                     page.wait_for_selector("#__NORDIC_RENDERING_CTX__", state="attached", timeout=15000)
                 except Exception:
-                    print(f"Tag nao encontrada na pagina {n}, tentativa {tentativa + 1}/{MAX_RETRIES}.")
+                    logger.debug("Tag nao encontrada na pagina %s, tentativa %s/%s", n, tentativa + 1, MAX_RETRIES)
                     tentativa += 1
                     time.sleep(RETRY_WAIT)
                     continue
@@ -41,14 +46,14 @@ def mapear_cupons(n=1):
                     json_puro = texto_script.split('_n.ctx.r=')[1].split(';_n.ctx.r.assets')[0]
                     dados = json.loads(json_puro)
                 except Exception as e:
-                    print(f"Erro ao ler JSON na pagina {n}, tentativa {tentativa + 1}/{MAX_RETRIES}: {e}")
+                    logger.debug("Erro ao ler JSON na pagina %s, tentativa %s/%s: %s", n, tentativa + 1, MAX_RETRIES, e)
                     tentativa += 1
                     time.sleep(RETRY_WAIT)
                     continue
 
                 lista_check = dados.get("appProps", {}).get("pageProps", {}).get("filteredCouponsData", {}).get("coupons", [])
                 if len(lista_check) == 0:
-                    print(f"Pagina {n} retornou vazia, tentativa {tentativa + 1}/{MAX_RETRIES}. Aguardando {RETRY_WAIT}s...")
+                    logger.debug("Pagina %s retornou vazia, tentativa %s/%s", n, tentativa + 1, MAX_RETRIES)
                     tentativa += 1
                     time.sleep(RETRY_WAIT)
                     continue
@@ -56,12 +61,12 @@ def mapear_cupons(n=1):
                 break  # sucesso
 
             if dados is None:
-                print(f"Pagina {n}: falhou apos {MAX_RETRIES} tentativas. Encerrando.")
+                logger.warning("Pagina %s falhou apos %s tentativas; encerrando", n, MAX_RETRIES)
                 break
 
             lista_da_pagina = dados.get("appProps", {}).get("pageProps", {}).get("filteredCouponsData", {}).get("coupons", [])
             if len(lista_da_pagina) == 0:
-                print(f"Pagina {n} retornou vazia apos {MAX_RETRIES} tentativas. Fim da busca!")
+                logger.info("Pagina %s retornou vazia apos %s tentativas; fim da busca", n, MAX_RETRIES)
                 break
                 
             tracking_list = dados.get("appProps", {}).get("pageProps", {}).get("filteredCouponsData", {}).get("tracking", {}).get("view", {}).get("eventData", {}).get("coupons_list", [])            
@@ -177,7 +182,7 @@ def mapear_cupons(n=1):
                 
                 todos_os_cupons_limpos.append(cupom_limpo)
 
-            print(f"Pagina {n} processada: {len(lista_da_pagina)} cupons limpos. (Total acumulado: {len(todos_os_cupons_limpos)})")
+            logger.debug("Pagina %s processada: %s cupons limpos; total=%s", n, len(lista_da_pagina), len(todos_os_cupons_limpos))
             n += 1
 
     if todos_os_cupons_limpos:
@@ -190,6 +195,9 @@ def mapear_cupons(n=1):
                 valor_minimo=c.get("valor_minimo") or 0.0,
                 link_original=c.get("link_produtos") or "",
                 codigo=c.get("codigo") or "",
+                fonte="mercadolivre-cupom",
+                ultima_verificacao=timezone.now(),
+                estado="ativo",
             )
             for c in todos_os_cupons_limpos
         ]
@@ -197,16 +205,31 @@ def mapear_cupons(n=1):
             cupons_db,
             update_conflicts=True,
             unique_fields=["campanha_id"],
-            update_fields=["titulo", "tipo_desconto", "valor_desconto", "valor_minimo", "link_original", "codigo"],
+            update_fields=[
+                "titulo", "tipo_desconto", "valor_desconto", "valor_minimo",
+                "link_original", "codigo", "fonte", "ultima_verificacao", "estado",
+            ],
         )
         ids_ativos = {c["campaignId"] for c in todos_os_cupons_limpos}
-        removidos, _ = Cupom.objects.exclude(campanha_id__in=ids_ativos).delete()
-        if removidos:
-            print(f"{removidos} cupom(ns) inativo(s) removido(s) do banco.")
-        prods_removidos, _ = Produto.objects.exclude(campanha_id__in=ids_ativos).delete()
-        if prods_removidos:
-            print(f"{prods_removidos} produto(s) de cupons inativos removido(s) do banco.")
-        print(f"DB: {len(todos_os_cupons_limpos)} cupons salvos/atualizados.")
+        expirados = Cupom.objects.exclude(campanha_id__in=ids_ativos).update(
+            estado="expirado", ultima_verificacao=timezone.now())
+        if expirados:
+            logger.info("%s cupom(ns) marcado(s) como expirado(s)", expirados)
+        # Limpa apenas a lane de cupons do pool compartilhado do ML. Um exclude()
+        # global aqui apagava também ofertas, buscas e produtos privados da Amazon.
+        prods_expirados = (
+            Produto.objects
+            .filter(marketplace="mercadolivre", owner__isnull=True, origem="cupom")
+            .exclude(campanha_id__in=ids_ativos)
+            .update(
+                estado="expirado",
+                falha_verificacao="Cupom não observado na última sincronização",
+                ultima_verificacao=timezone.now(),
+            )
+        )
+        if prods_expirados:
+            logger.info("%s produto(s) de cupons marcados como expirados", prods_expirados)
+        logger.info("%s cupons salvos/atualizados", len(todos_os_cupons_limpos))
 
 
 def listar_itens_por_cupom(cupom, page, max_paginas=5):
@@ -215,13 +238,13 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
     if not link or link == "URL_NAO_MAPEADA":
         return None
 
-    print(f"\n[+] Acessando cupom: {cupom['title']}")
+    logger.debug("Acessando cupom: %s", cupom.get("title"))
     produtos_raspados = []
     
     try:
         page.goto(link)
     except Exception as e:
-        print(f"Erro ao carregar a página do cupom: {e}")
+        logger.warning("Erro ao carregar a pagina do cupom: %s", e)
         return None
 
     pagina_atual = 1
@@ -231,7 +254,7 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
             page.wait_for_selector(".ui-search-layout", timeout=15000)
             page.wait_for_timeout(2000)
         except Exception:
-            print(f"Página {pagina_atual} sem produtos encontrados ou demorou demais.")
+            logger.debug("Pagina %s sem produtos encontrados ou demorou demais", pagina_atual)
             break
 
         categorias_por_id = {}
@@ -274,12 +297,12 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
                     if iid in _item_id_para_cat:
                         categorias_por_id[pid] = _item_id_para_cat[iid]
 
-                print(f"[DEBUG] Dicionário de categorias criado com {len(categorias_por_id)} itens.")
+                logger.debug("Dicionario de categorias criado com %s itens", len(categorias_por_id))
         except Exception:
             pass
 
         cards_produtos = page.locator(".ui-search-layout__item").all()
-        print(f"Página {pagina_atual}: Encontrados {len(cards_produtos)} produtos.")
+        logger.debug("Pagina %s: encontrados %s produtos", pagina_atual, len(cards_produtos))
 
         for card in cards_produtos:
             try:
@@ -374,7 +397,7 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
                 })
 
             except Exception as e:
-                print(f"Erro isolado num produto: {e}")
+                logger.debug("Erro isolado num produto: %s", e)
         
         seletores_prox = [
             ".andes-pagination__button--next:not(.andes-pagination__button--disabled) a",
@@ -403,7 +426,7 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
 
     cupom_atualizado = cupom.copy()
     cupom_atualizado["produtos_aplicaveis"] = produtos_raspados
-    print(f"{len(produtos_raspados)} produtos coletados para o cupom {cupom.get('campaignId', '')}.")
+    logger.debug("%s produtos coletados para o cupom %s", len(produtos_raspados), cupom.get("campaignId", ""))
     return cupom_atualizado
 
 
@@ -411,17 +434,33 @@ def _sincronizar_produtos_no_banco(cupons_com_produtos):
     processados = 0
     for entrada in cupons_com_produtos:
         camp_id = entrada.get("campaignId", "")
-        Produto.objects.filter(campanha_id=camp_id).delete()
+        Produto.objects.filter(
+            marketplace="mercadolivre",
+            owner__isnull=True,
+            origem="cupom",
+            campanha_id=camp_id,
+        ).update(
+            estado="stale",
+            falha_verificacao="Substituído por nova sincronização do cupom",
+            ultima_verificacao=timezone.now(),
+        )
         produtos = entrada.get("produtos_aplicaveis", [])
         if produtos:
             Produto.objects.bulk_create([
                 Produto(
                     campanha_id=camp_id,
+                    fonte="mercadolivre-cupom",
                     nome=p["nome_produto"][:255],
                     preco_sem_desconto=float(p["preco_vitrine_atual"]),
                     preco_com_cupom=float(p["preco_final_com_cupom"]),
+                    preco_fonte=float(p["preco_vitrine_atual"]),
+                    preco_efetivo=float(p["preco_final_com_cupom"]),
                     link_produto=p.get("link_produto") or "",
                     categoria=p.get("categoria", "DESCONHECIDO"),
+                    marketplace="mercadolivre",
+                    origem="cupom",
+                    estado="ativo",
+                    ultima_verificacao=timezone.now(),
                 )
                 for p in produtos
             ])
@@ -435,7 +474,7 @@ def main():
         "campanha_id", "titulo", "tipo_desconto", "valor_desconto", "valor_minimo", "link_original"
     )
     if not cupons_qs.exists():
-        print("Nenhum cupom encontrado no banco. Deu merda")
+        logger.warning("Nenhum cupom encontrado no banco")
         return
 
     # Cupons que já têm produtos scraped — podem ser pulados
@@ -460,11 +499,11 @@ def main():
             "valor_minimo": c.get("valor_minimo") or 0.0,
         })
 
-    print(f"{pulados} cupons já processados anteriormente — pulando.")
-    print(f"{len(cupons_pendentes)} cupons pendentes para raspar produtos...")
+    logger.info("%s cupons ja processados anteriormente; pulando", pulados)
+    logger.info("%s cupons pendentes para raspar produtos", len(cupons_pendentes))
 
     if not cupons_pendentes:
-        print("Nada a fazer. Todos os cupons já têm produtos.")
+        logger.info("Nada a fazer; todos os cupons ja tem produtos")
         return
 
     caminho_auth = os.path.join(ml_session_dir(), "auth.json")
@@ -473,7 +512,7 @@ def main():
     total = len(cupons_pendentes)
     with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
         for i, cupom in enumerate(cupons_pendentes, 1):
-            print(f"[PROGRESSO] Cupom {i}/{total} ({i*100//total}%)")
+            emitir_progresso(f"[PROGRESSO] Cupom {i}/{total} ({i*100//total}%)")
             resultado = listar_itens_por_cupom(cupom, page)
             if resultado:
                 resultados_pendentes.append(resultado)
@@ -489,7 +528,7 @@ def main():
         from apps.scrapers.scraper_mercadolivre.cateorize import popular_macro_categorias
         popular_macro_categorias()
     except Exception as e:
-        print(f"[main] Falha ao popular macro-categorias: {e}")
+        logger.warning("Falha ao popular macro-categorias: %s", e)
 
     # Pré-gera links de afiliado em lote (1 sessão Playwright) para os produtos novos.
     # Assim o envio depois é instantâneo e não depende do browser na hora crítica.
@@ -501,9 +540,9 @@ def main():
         )
         gerar_links_em_lote(list(novos))
     except Exception as e:
-        print(f"[main] Falha ao pré-gerar links de afiliado: {e}")
+        logger.warning("Falha ao pre-gerar links de afiliado: %s", e)
 
-    print(f"\nFinalizado! {len(cupons_pendentes)} cupons processados.")
+    logger.info("%s cupons processados", len(cupons_pendentes))
 
 if __name__ == "__main__":
     main()

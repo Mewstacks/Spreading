@@ -33,7 +33,7 @@ def _rodar_scrape():
     # depois não precisa editar este loop — basta registrar a loja no registry.
     for i, (slug, mp) in enumerate(lojas):
         msg = f"[{timezone.now():%H:%M}] SCRAPE: {slug}..."
-        print(msg)
+        logger.info(msg)
         st.write_state(
             "scrape", fase="raspando", loja_atual=slug,
             loja_idx=i + 1, lojas_total=len(lojas), ultima_msg=msg,
@@ -41,24 +41,24 @@ def _rodar_scrape():
         try:
             mp.scrape_all(termos=termos)
         except Exception as e:
-            print(f"  scrape '{slug}' falhou: {e}")
+            logger.warning("Scrape '%s' falhou: %s", slug, e)
             st.write_state("scrape", erro=f"{slug}: {e}"[:300])
-    print(f"[{timezone.now():%H:%M}] SCRAPE concluído.")
+    logger.info("[%s] SCRAPE concluido", timezone.now().strftime("%H:%M"))
 
 
 def _rodar_scrape_rapido(paginas=8):
     """LANE RÁPIDA/flash (B3): só o feed /ofertas do ML, poucas páginas, em UPSERT
     (não zera o feed da lane lenta). Pega deals-relâmpago entre as raspagens completas."""
     from apps.scrapers.scraper_mercadolivre.ofertas_scraper import mapear_ofertas
-    print(f"[{timezone.now():%H:%M}] SCRAPE-FLASH: feed ML ({paginas} pág)...")
+    logger.info("[%s] SCRAPE-FLASH: feed ML (%s paginas)", timezone.now().strftime("%H:%M"), paginas)
     mapear_ofertas(max_paginas=paginas, substituir=False)
 
 
 class Command(BaseCommand):
-    help = "Loop de automação: scrape (full) / scrape_rapido (flash) / envio."
+    help = "Loop de automação: scrape (full) / scrape_rapido (flash) / envio / relatorios."
 
     def add_arguments(self, parser):
-        parser.add_argument("--modo", choices=("scrape", "scrape_rapido", "envio"),
+        parser.add_argument("--modo", choices=("scrape", "scrape_rapido", "envio", "relatorios"),
                             required=True,
                             help="scrape = raspagem completa; scrape_rapido = feed flash; "
                                  "envio = envio pelas regras.")
@@ -70,14 +70,16 @@ class Command(BaseCommand):
             self._loop_scrape(opts)
         elif opts["modo"] == "scrape_rapido":
             self._loop_scrape_rapido(opts)
-        else:
+        elif opts["modo"] == "envio":
             self._loop_envio(opts)
+        else:
+            self._loop_relatorios(opts)
 
     def _loop_scrape_rapido(self, opts):
         # Lane flash: gate no MESMO flag "scrape" (se a raspagem está ligada, roda).
         tick = max(1, opts["tick"])
         POLL = 15
-        print(f"SCRAPE-FLASH worker no ar — feed a cada {tick}min quando ligado.")
+        logger.info("SCRAPE-FLASH worker no ar; feed a cada %smin quando ligado", tick)
         proximo = timezone.now()
         while True:
             # Heartbeat: marca o worker vivo (evita spawn duplicado em dev; worker_alive).
@@ -103,7 +105,7 @@ class Command(BaseCommand):
         # ligado (tela Scraper); senão fica ocioso, checando a cada POLL segundos.
         scrape_seg = max(0.1, opts["scrape_horas"]) * 3600
         POLL = 15
-        print(f"SCRAPE worker no ar — raspa a cada {opts['scrape_horas']}h quando ligado.")
+        logger.info("SCRAPE worker no ar; raspa a cada %sh quando ligado", opts["scrape_horas"])
         ciclos = 0
         proximo = timezone.now()  # vencido: raspa assim que ligarem
         while True:
@@ -139,7 +141,7 @@ class Command(BaseCommand):
 
         tick = max(1, opts["tick"])
         POLL = 15
-        print(f"ENVIO worker no ar — processa regras a cada {tick}min quando ligado.")
+        logger.info("ENVIO worker no ar; processa regras a cada %smin quando ligado", tick)
         ticks = 0
         proximo = timezone.now()  # vencido: processa assim que ligarem
         while True:
@@ -161,9 +163,9 @@ class Command(BaseCommand):
                     from apps.scrapers.monitor_conexao import verificar_e_notificar
                     verificar_e_notificar()
                 except Exception as e:
-                    print(f"  monitor conexao falhou: {e}")
+                    logger.warning("Monitor de conexao falhou: %s", e)
                 ticks += 1
-                print(f"[{agora:%H:%M}] tick: {len(res)} config(s) vencida(s), {enviados} enviada(s).")
+                logger.info("[%s] tick: %s config(s) vencida(s), %s enviada(s)", agora.strftime("%H:%M"), len(res), enviados)
                 st.write_state(
                     "envio", fase="aguardando", ticks=ticks,
                     ultimo_ciclo_fim=timezone.now().isoformat(),
@@ -180,3 +182,44 @@ class Command(BaseCommand):
                     erro=tb[-300:],
                 )
             proximo = timezone.now() + timedelta(minutes=tick)
+
+    def _loop_relatorios(self, opts):
+        from apps.scrapers.relatorios import sync_due_reports
+
+        tick = max(30, opts["tick"])
+        POLL = 15
+        logger.info("RELATORIOS worker no ar; sincroniza a cada %smin quando ligado", tick)
+        ciclos = 0
+        proximo = timezone.now()
+        while True:
+            if not st.is_enabled("relatorios"):
+                st.write_state("relatorios", fase="desligado",
+                               ultima_msg="Desligado — ligue quando quiser sync automático.")
+                time.sleep(POLL)
+                continue
+            if timezone.now() < proximo:
+                time.sleep(POLL)
+                continue
+            agora = timezone.now()
+            try:
+                st.write_state("relatorios", fase="sincronizando", erro="")
+                resultados = sync_due_reports()
+                ok = sum(1 for s in resultados if s.status == "ok")
+                acao = sum(1 for s in resultados if s.status == "acao")
+                erros = sum(1 for s in resultados if s.status == "erro")
+                ciclos += 1
+                proximo = timezone.now() + timedelta(minutes=tick)
+                st.write_state(
+                    "relatorios", fase="aguardando", ciclos=ciclos,
+                    ultimo_ciclo_fim=timezone.now().isoformat(),
+                    proximo_ciclo=proximo.isoformat(), ok=ok, acao=acao,
+                    erro_count=erros,
+                    ultima_msg=f"{ok} ok, {acao} ação, {erros} erro às {agora:%H:%M}.",
+                    erro="",
+                )
+            except Exception:
+                tb = traceback.format_exc()
+                logger.exception("Erro no sync de relatórios")
+                proximo = timezone.now() + timedelta(minutes=tick)
+                st.write_state("relatorios", fase="aguardando",
+                               proximo_ciclo=proximo.isoformat(), erro=tb[-300:])

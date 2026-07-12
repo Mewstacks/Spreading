@@ -8,11 +8,14 @@ com dedup por URL-fonte (EnvioCanal).
 Requer settings.TELEGRAM_API_ID/API_HASH/SESSION. Sem eles, o worker fica ocioso.
 Rode:  python manage.py monitorar_canais --tick 60
 """
+import logging
 import time
 import traceback
 
 from django.conf import settings
 from django.core.management.base import BaseCommand
+
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -25,8 +28,7 @@ class Command(BaseCommand):
     def handle(self, *args, **opts):
         if not (settings.TELEGRAM_API_ID and settings.TELEGRAM_API_HASH
                 and settings.TELEGRAM_SESSION):
-            print("[canais] Telegram userbot não configurado (TELEGRAM_API_*/SESSION). "
-                  "Worker ocioso.")
+            logger.info("Telegram userbot nao configurado; worker ocioso")
             # Fica vivo mas ocioso (honcho reinicia se sair); evita crash-loop.
             while True:
                 time.sleep(300)
@@ -36,7 +38,7 @@ class Command(BaseCommand):
         from telethon.sessions import StringSession
 
         tick = max(10, opts["tick"])
-        print(f"[canais] worker no ar — varre a cada {tick}s.")
+        logger.info("Worker de canais no ar; varre a cada %ss", tick)
         client = TelegramClient(
             StringSession(settings.TELEGRAM_SESSION),
             settings.TELEGRAM_API_ID, settings.TELEGRAM_API_HASH,
@@ -47,7 +49,7 @@ class Command(BaseCommand):
                 try:
                     self._varrer(client)
                 except Exception:
-                    print("[canais] erro na varredura:\n" + traceback.format_exc())
+                    logger.error("Erro na varredura de canais:\n%s", traceback.format_exc())
                 time.sleep(tick)
         finally:
             client.disconnect()
@@ -61,7 +63,7 @@ class Command(BaseCommand):
             try:
                 self._processar_canal(client, canal, EnvioCanal, reescrever_mensagem, get_sender)
             except Exception as e:
-                print(f"[canais] {canal.handle}: {e}")
+                logger.warning("Falha no canal %s: %s", canal.handle, e)
 
     def _processar_canal(self, client, canal, EnvioCanal, reescrever_mensagem, get_sender):
         sender = get_sender(canal.destino_canal)
@@ -89,9 +91,9 @@ class Command(BaseCommand):
                     [EnvioCanal(owner=canal.owner, chave=c) for c in novas],
                     ignore_conflicts=True,
                 )
-                print(f"[canais] {canal.handle} -> {canal.destino_grupo_id}: divulgado.")
+                logger.info("Canal %s -> %s divulgado", canal.handle, canal.destino_grupo_id)
             else:
-                print(f"[canais] falha no envio: {resultado.get('erro')}")
+                logger.warning("Falha no envio de canal: %s", resultado.get("erro"))
         # Avança o cursor mesmo sem envio (não reprocessa msgs antigas no restart).
         if maior_id > canal.ultimo_id:
             canal.ultimo_id = maior_id

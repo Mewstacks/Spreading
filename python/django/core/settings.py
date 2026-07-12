@@ -30,7 +30,9 @@ load_dotenv(BASE_DIR.parent / ".env")
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY") or "django-insecure-dev-only-CHANGE-ME-in-.env"
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv("DJANGO_DEBUG", "1") == "1"
+# Default seguro: em produção (Fly injeta FLY_APP_NAME) começa DESLIGADO mesmo se
+# alguém esquecer de setar a var; em dev local (sem FLY_APP_NAME) começa ligado.
+DEBUG = os.getenv("DJANGO_DEBUG", "0" if os.getenv("FLY_APP_NAME") else "1") == "1"
 
 if not DEBUG and SECRET_KEY.startswith("django-insecure"):
     raise RuntimeError("Defina DJANGO_SECRET_KEY no .env antes de rodar com DEBUG=0.")
@@ -38,6 +40,16 @@ if not DEBUG and SECRET_KEY.startswith("django-insecure"):
 # Hosts liberados (CSV no .env). Em dev cai no localhost.
 # Default cobre Fly.io (.fly.dev) e túnel do cloudflare (.trycloudflare.com).
 ALLOWED_HOSTS = [h.strip() for h in os.getenv("DJANGO_ALLOWED_HOSTS", ".fly.dev,.trycloudflare.com").split(",") if h.strip()]
+PUBLIC_BASE_URL = os.getenv(
+    "PUBLIC_BASE_URL",
+    f"https://{os.getenv('FLY_APP_NAME', 'spreading-web')}.fly.dev",
+)
+BILLING_CHECKOUT_URL = os.getenv("BILLING_CHECKOUT_URL", "")
+BILLING_PORTAL_URL = os.getenv("BILLING_PORTAL_URL", "")
+ML_AFFILIATE_REPORT_URL = os.getenv(
+    "ML_AFFILIATE_REPORT_URL", "https://www.mercadolivre.com.br/afiliados")
+AMAZON_ASSOCIATES_REPORT_URL = os.getenv(
+    "AMAZON_ASSOCIATES_REPORT_URL", "https://associados.amazon.com.br/home/reports")
 if DEBUG and not ALLOWED_HOSTS:
     ALLOWED_HOSTS = ["localhost", "127.0.0.1", ".fly.dev", ".trycloudflare.com"]
 elif DEBUG:
@@ -94,6 +106,14 @@ MIDDLEWARE.insert(
     MIDDLEWARE.index('django.contrib.auth.middleware.AuthenticationMiddleware') + 1,
     'django.contrib.auth.middleware.LoginRequiredMiddleware',
 )
+
+# DEV: auto-login local (dispensa a tela de login). Roda ANTES do LoginRequired
+# para já entregar um request.user autenticado. Só em DEBUG; no-op em produção.
+if DEBUG and os.getenv("DEV_AUTOLOGIN", "1") != "0":
+    MIDDLEWARE.insert(
+        MIDDLEWARE.index('django.contrib.auth.middleware.LoginRequiredMiddleware'),
+        'core.middleware.DevAutoLoginMiddleware',
+    )
 
 ROOT_URLCONF = 'core.urls'
 

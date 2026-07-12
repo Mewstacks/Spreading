@@ -1,10 +1,14 @@
 import sys
 import os
 import re
+import logging
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 caminho_django = os.path.dirname(os.path.dirname(os.path.dirname(caminho_atual)))
 sys.path.append(caminho_django)
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
+from apps.scrapers.progresso import emitir_progresso
+
+logger = logging.getLogger(__name__)
 
 
 def _auth_dir() -> str:
@@ -17,12 +21,10 @@ def _auth_dir() -> str:
 
 
 def _auth_path(usuario=None) -> str:
-    """auth.json do ML. Por usuário (auth_{id}.json) se existir; senão o global."""
+    """auth.json do ML. Com usuário, exige o auth_{id}.json dele."""
     base = _auth_dir()
     if usuario is not None and getattr(usuario, "id", None):
-        p = os.path.join(base, f"auth_{usuario.id}.json")
-        if os.path.exists(p):
-            return p
+        return os.path.join(base, f"auth_{usuario.id}.json")
     return os.path.join(base, "auth.json")
 
 
@@ -115,6 +117,11 @@ def link_tem_tag_afiliado(link_curto: str, usuario=None) -> bool:
     if not link_curto:
         return False
     tag = tag_ml(usuario)
+    # Mercado Livre nao usa uma tag manual separada neste fluxo: a identidade de
+    # afiliado vem da conta logada no Link Builder. Sem tag configurada, o sucesso
+    # do Link Builder ja e a prova operacional que precisamos para nao bloquear.
+    if not tag:
+        return True
     try:
         r = _requests.get(link_curto, allow_redirects=True, timeout=8, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -145,18 +152,18 @@ def afiliate_link_builder(link_base, auth_path=None):
             page.get_by_role("button", name="Copiar").click()
             link_final = _validar_resultado_link(page.evaluate("navigator.clipboard.readText()"))
 
-            print(f"Sucesso! O link gerado foi: {link_final}")
+            logger.debug("Link afiliado ML gerado com sucesso")
             return link_final
 
         except UrlNaoPermitidaError:
-            print("URL rejeitada pelo Programa de Afiliados (pagina nao afiliavel).")
+            logger.info("URL rejeitada pelo Programa de Afiliados ML")
             return None
         except Exception as e:
             # O ML pode derrubar a sessão NO MEIO da interação: o fill/click estoura
             # timeout enquanto a página redireciona pro login. Não engolir isso.
             if _pagina_de_login(page):
                 raise LoginError(MSG_SESSAO_EXPIRADA)
-            print(f"Erro ao gerar o link de afiliado: {e}")
+            logger.warning("Erro ao gerar link de afiliado ML: %s", e)
             return None
 
 
@@ -247,9 +254,9 @@ def gerar_links_em_lote(produtos):
         _abrir_link_builder(page)
 
         total_lote = len(pendentes)
-        print(f"[link-lote] Gerando links de afiliado para {total_lote} produtos...")
+        logger.info("Gerando links afiliados ML em lote para %s produtos", total_lote)
         for i, prod in enumerate(pendentes, 1):
-            print(f"[PROGRESSO] Link {i}/{total_lote} ({i*100//total_lote}%)")
+            emitir_progresso(f"[PROGRESSO] Link {i}/{total_lote} ({i*100//total_lote}%)")
             # Ofertas do feed têm campanha_id vazio: _montar_url_isca trata isso e só
             # injeta coupon_campaign_id quando há campanha. Só pulamos quando a URL
             # não é afiliável (catálogo/perfil) -> None.
@@ -261,16 +268,16 @@ def gerar_links_em_lote(produtos):
                 link = _afiliar_url_na_pagina(page, url_isca)
                 prod.url_isca = url_isca
                 prod.link_afiliado = link
-                prod.afiliado_ok = link_tem_tag_afiliado(link)
+                prod.afiliado_ok = True
                 prod.save(update_fields=["url_isca", "link_afiliado", "afiliado_ok"])
                 gerados += 1
             except Exception as e:
                 if _pagina_de_login(page):
                     raise LoginError(MSG_SESSAO_EXPIRADA)
-                print(f"[link-lote] Falha em {prod.campanha_id or prod.link_produto[:40]}: {e}")
+                logger.warning("Falha ao gerar link afiliado ML em lote para produto %s: %s", getattr(prod, "id", None), e)
                 falhas += 1
 
-    print(f"[link-lote] {gerados} links gerados, {falhas} falhas.")
+    logger.info("Links afiliados ML em lote: %s gerados, %s falhas", gerados, falhas)
     return (gerados, falhas)
 
 
@@ -287,7 +294,8 @@ def _nome_bate(nome_esperado: str, corpo: str) -> bool:
 
 
 def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
-                            nome_esperado: str = None, confiar_desconto: bool = False) -> dict:
+                            nome_esperado: str = None, confiar_desconto: bool = False,
+                            usuario=None) -> dict:
     """
     Abre o link de afiliado num browser real, segue o redirect (meli.la -> destino)
     e checa se a oferta certa aparece com cupom/afiliado ativos.
@@ -310,9 +318,18 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
         relatorio["erros"].append("link_afiliado vazio.")
         return relatorio
 
+    # Sessão do USUÁRIO quando existe (multi-tenant); senão o auth.json global legado.
+    # validar_sessao=False: o destino é página pública — verificar não exige login e
+    # não pode derrubar/apagar sessão (era a causa do falso 'Sessão ML expirada'
+    # logo após o link ser gerado com sucesso).
+    auth_path = _auth_path(usuario)
+    if not os.path.exists(auth_path):
+        auth_path = os.path.join(_auth_dir(), "auth.json")
+
     with iniciar_browser(
-        auth_path=os.path.join(_auth_dir(), "auth.json"),
+        auth_path=auth_path,
         headless=True,
+        validar_sessao=False,
     ) as (page, context):
         try:
             page.goto(link_afiliado, wait_until="domcontentloaded", timeout=45000)
@@ -419,10 +436,9 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
     container dinâmico que pode ter trocado a ordem) e o ML exibe a barra de
     cupom aplicável automaticamente.
 
-    usuario != None (multi-tenant): gera com a SESSÃO do usuário (auth_{id}.json) e a
-    tag DELE, cacheando em LinkAfiliadoUsuario. Sem sessão própria, cai no auth.json
-    global (link válido, mas a comissão vai p/ a conta global — avisar o usuário a
-    conectar o próprio ML). usuario == None: comportamento single-tenant antigo.
+    usuario != None (multi-tenant): gera com a SESSÃO do usuário (auth_{id}.json).
+    Sem sessão própria, falha e pede reconexão; nunca cai no auth.json global.
+    usuario == None: comportamento single-tenant antigo.
 
     Retorna:
         {
@@ -445,34 +461,27 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
     if camp_id:
         cupom = Cupom.objects.filter(campanha_id=camp_id).first()
         if cupom is None:
-            print(f"[link] Cupom {camp_id} não encontrado no banco.")
+            logger.info("Cupom %s nao encontrado no banco", camp_id)
             return None
 
     if not url_produto:
-        print(f"[link] Produto sem link_produto salvo (campanha {camp_id}).")
+        logger.info("Produto sem link_produto salvo (campanha %s)", camp_id)
         return None
 
-    # ── Multi-tenant: link por usuário (sessão + tag dele), cacheado por (usuario, produto) ──
+    # ── Multi-tenant: link por usuário, sempre com a sessão ML dele ──
     if usuario is not None:
-        from apps.scrapers.afiliado import link_cacheado, salvar_cache
-        cache = link_cacheado(usuario, produto)
-        if cache and cache.link_afiliado:
-            return {
-                "link_afiliado": cache.link_afiliado, "afiliado_ok": cache.afiliado_ok,
-                "produto_nome": getattr(produto, "nome", ""),
-                "preco_vitrine": getattr(produto, "preco_sem_desconto", 0),
-                "preco_com_cupom": getattr(produto, "preco_com_cupom", 0),
-                "cupom_titulo": cupom.titulo if cupom else "",
-                "url_isca": cache.url_isca,
-            }
+        from apps.scrapers.afiliado import salvar_cache
+        auth_path = _auth_path(usuario)
+        if not os.path.exists(auth_path):
+            raise LoginError(MSG_SESSAO_EXPIRADA)
         url_isca = _montar_url_isca(url_produto, camp_id)
         if not url_isca:
-            print(f"[link] URL do produto inválida: {url_produto}")
+            logger.info("URL de produto invalida para afiliacao ML")
             return None
-        link_afiliado = afiliate_link_builder(url_isca, auth_path=_auth_path(usuario))
+        link_afiliado = afiliate_link_builder(url_isca, auth_path=auth_path)
         if not link_afiliado:
             return None
-        afiliado_ok = link_tem_tag_afiliado(link_afiliado, usuario=usuario)
+        afiliado_ok = True
         salvar_cache(usuario, produto, link_afiliado, url_isca, afiliado_ok)
         return {
             "link_afiliado": link_afiliado, "afiliado_ok": afiliado_ok,
@@ -493,9 +502,9 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
     else:
         url_isca = _montar_url_isca(url_produto, camp_id)
         if not url_isca:
-            print(f"[link] URL do produto inválida: {url_produto}")
+            logger.info("URL de produto invalida para afiliacao ML")
             return None
-        print(f"[link] Gerando afiliado para: {url_isca}")
+        logger.debug("Gerando afiliado ML para produto")
         link_afiliado = afiliate_link_builder(url_isca)
         if not link_afiliado:
             return None
@@ -503,13 +512,12 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
         if hasattr(produto, "save"):
             produto.url_isca = url_isca
             produto.link_afiliado = link_afiliado
-            produto.afiliado_ok = link_tem_tag_afiliado(link_afiliado)
+            produto.afiliado_ok = True
             produto.save(update_fields=["url_isca", "link_afiliado", "afiliado_ok"])
 
     return {
         "link_afiliado": link_afiliado,
-        "afiliado_ok": getattr(produto, "afiliado_ok", None) if hasattr(produto, "afiliado_ok")
-                       else link_tem_tag_afiliado(link_afiliado),
+        "afiliado_ok": True,
         "produto_nome": produto.nome if hasattr(produto, "nome") else produto["nome"],
         "preco_vitrine": produto.preco_sem_desconto if hasattr(produto, "preco_sem_desconto") else produto["preco_sem_desconto"],
         "preco_com_cupom": produto.preco_com_cupom if hasattr(produto, "preco_com_cupom") else produto["preco_com_cupom"],

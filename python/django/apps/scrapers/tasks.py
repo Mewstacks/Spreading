@@ -4,6 +4,9 @@ roda via management command / função direta, com retry/backoff para a UI flaky
 do Mercado Livre.
 """
 from celery import shared_task
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=300)
@@ -27,5 +30,5 @@ def task_tick_envios():
     from apps.scrapers.ofertas import processar_configs_de_envio
     resultados = processar_configs_de_envio()
     enviados = sum(1 for r in resultados if r.get("sucesso"))
-    print(f"[tick] {len(resultados)} config(s) vencida(s), {enviados} enviada(s).")
+    logger.info("Tick de envios: %s config(s) vencida(s), %s enviada(s)", len(resultados), enviados)
     return resultados

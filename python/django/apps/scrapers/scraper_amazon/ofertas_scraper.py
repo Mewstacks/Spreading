@@ -12,11 +12,15 @@ isso origem='cupom_codigo' aqui significa "tem promoção/cupom clicável" — o
 entra nos campos de preço + rótulo; codigo_checkout fica vazio (não há código).
 """
 from django.conf import settings
+import logging
 
 from apps.scrapers.models import Produto
+from apps.scrapers.progresso import emitir_progresso
 from apps.scrapers.scraper_amazon import creators_api
 # Reaproveita a classificação por nome (PT) já usada no ML.
 from apps.scrapers.scraper_mercadolivre.ofertas_scraper import classificar_oferta_por_nome
+
+logger = logging.getLogger(__name__)
 
 
 def _num(v):
@@ -112,6 +116,11 @@ def _upsert_produto(m: dict, origem: str, macro=None, owner=None) -> bool:
             "nome": m["nome"],
             "preco_sem_desconto": m["preco_sem_desconto"],
             "preco_com_cupom": m["preco_com_cupom"],
+            "preco_fonte": m["preco_sem_desconto"],
+            "preco_efetivo": m["preco_com_cupom"],
+            "fonte": "amazon-creators-api",
+            "estado": "ativo",
+            "falha_verificacao": "",
             "link_produto": m["link_produto"],
             "categoria": "DESCONHECIDO",
             "macro_categoria": macro or classificar_oferta_por_nome(m["nome"]),
@@ -148,10 +157,10 @@ def mapear_ofertas(usuario=None):
     creds = creators_api.creds_de_usuario(usuario)
     min_savings = int(getattr(settings, "AMAZON_MIN_SAVINGS_PCT", 15))
     keywords = getattr(settings, "AMAZON_FEED_KEYWORDS", []) or []
-    print(f"[amazon] Ofertas (user={getattr(usuario,'id',None)}): {len(keywords)} keywords, min {min_savings}% off")
+    logger.info("Amazon ofertas user=%s: %s keywords, min %s%% off", getattr(usuario, "id", None), len(keywords), min_savings)
     total = 0
     for i, kw in enumerate(keywords, 1):
-        print(f"[PROGRESSO] Amazon ofertas {i}/{len(keywords)}: {kw}")
+        emitir_progresso(f"[PROGRESSO] Amazon ofertas {i}/{len(keywords)}: {kw}")
         try:
             for m in _coletar(kw, min_savings, creds=creds):
                 # só feed: itens com desconto real de/por
@@ -161,8 +170,8 @@ def mapear_ofertas(usuario=None):
         except creators_api.AmazonNotEligible:
             raise
         except Exception as e:
-            print(f"  keyword '{kw}' falhou: {e}")
-    print(f"[amazon] OFERTAS: {total} upserts.")
+            logger.warning("Keyword Amazon '%s' falhou: %s", kw, e)
+    logger.info("Amazon ofertas: %s upserts", total)
     return total
 
 
@@ -179,8 +188,8 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=2, macro=None, us
         except creators_api.AmazonNotEligible:
             raise
         except Exception as e:
-            print(f"  busca amazon '{termo}' falhou: {e}")
-    print(f"[amazon] BUSCA '{termo_busca}': {total} upserts.")
+            logger.warning("Busca Amazon '%s' falhou: %s", termo, e)
+    logger.info("Amazon busca '%s': %s upserts", termo_busca, total)
     return total
 
 
@@ -203,6 +212,6 @@ def mapear_cupons_codigo(usuario=None):
         except creators_api.AmazonNotEligible:
             raise
         except Exception as e:
-            print(f"  cupom amazon '{kw}' falhou: {e}")
-    print(f"[amazon] CUPONS (promoções): {total} upserts.")
+            logger.warning("Cupom/promocao Amazon '%s' falhou: %s", kw, e)
+    logger.info("Amazon cupons/promocoes: %s upserts", total)
     return total

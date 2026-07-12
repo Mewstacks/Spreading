@@ -16,60 +16,74 @@
 {% block content %}
 <div class="page-head">
   <h1><i data-lucide="user-cog"></i> Configurar conta</h1>
-  <p class="sub">Suas tags de comissão e conexão com as lojas. Cada usuário usa a própria conta.</p>
+  <p class="sub">Tags de afiliado, conexões com as lojas e identidade das suas mensagens.</p>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2><i data-lucide="credit-card"></i> Plano</h2><span class="badge badge-accent">{{ perfil.plano|title }} · {{ perfil.assinatura_status }}</span></div>
+  <p class="muted" style="font-size:.82rem;">Os limites do seu plano são aplicados automaticamente.</p>
+  {% if billing_portal_url %}<a class="btn btn-ghost btn-sm" href="{{ billing_portal_url }}" target="_blank" rel="noopener">Gerenciar assinatura</a>
+  {% elif billing_checkout_url %}<a class="btn btn-blue btn-sm" href="{{ billing_checkout_url }}" target="_blank" rel="noopener">Escolher plano</a>{% endif %}
 </div>
 
 <form method="post" action="{% url 'scraper-conta' %}">
   {% csrf_token %}
   <div class="card">
-    <div class="card-head"><h2><i data-lucide="tag"></i> Tags de afiliado</h2></div>
-    <div class="fld">
-      <label>Tag Mercado Livre</label>
-      <input name="afiliado_tag_ml" value="{{ perfil.afiliado_tag_ml }}" placeholder="ex: SUATAG">
-      <small>É ela que garante sua comissão nos links do ML. Vazio = usa a tag global.</small>
+    <div class="card-head">
+      <h2><i data-lucide="tag"></i> Amazon</h2>
+      {% if amazon_conectado %}<span class="status-pill"><span class="dot on"></span> Conectada</span>
+      {% else %}<span class="status-pill"><span class="dot off"></span> Não conectada</span>{% endif %}
     </div>
+    <input type="hidden" name="afiliado_tag_ml" value="{{ perfil.afiliado_tag_ml }}">
     <div class="fld">
-      <label>Tag Amazon (Associates)</label>
-      <input name="afiliado_tag_amazon" value="{{ perfil.afiliado_tag_amazon }}" placeholder="ex: suatag-20">
-      <small>Sua store id / associate tag da Amazon.</small>
+      <label>Tag de afiliado da Amazon</label>
+      <input name="afiliado_tag_amazon" value="{{ perfil.afiliado_tag_amazon }}" placeholder="sualoja-20">
+      <small>Sua tag do programa Amazon Associados.</small>
     </div>
+    <details {% if perfil.amazon_credential_id %}open{% endif %}>
+      <summary class="muted" style="cursor:pointer;font-size:.85rem;margin-bottom:.8rem;">Credenciais da Amazon Creators API (opcional)</summary>
+      <div class="fld">
+        <label>Credential ID</label>
+        <input name="amazon_credential_id" value="{{ perfil.amazon_credential_id }}" placeholder="AKIA...">
+      </div>
+      <div class="fld">
+        <label>Credential Secret</label>
+        <input name="amazon_credential_secret" type="password" placeholder="••••••••">
+        <small>{% if tem_secret %}Já salvo. Preencha apenas para substituir.{% else %}Fornecido pela Amazon junto com o Credential ID.{% endif %} Armazenado criptografado.</small>
+      </div>
+      <div class="fld">
+        <label>Host (opcional)</label>
+        <input name="amazon_creators_host" value="{{ perfil.amazon_creators_host }}" placeholder="creators.amazon.com.br">
+        <small>Preencha apenas se a Amazon indicar um host diferente do padrão.</small>
+      </div>
+    </details>
   </div>
 
   <div class="card">
-    <div class="card-head">
-      <h2><i data-lucide="package"></i> Amazon Creators API</h2>
-      {% if amazon_conectado %}<span class="status-pill"><span class="dot on"></span> conectado</span>
-      {% else %}<span class="status-pill"><span class="dot off"></span> não conectado</span>{% endif %}
-    </div>
-    <div class="fld">
-      <label>Credential ID</label>
-      <input name="amazon_credential_id" value="{{ perfil.amazon_credential_id }}" placeholder="AKIA...">
-    </div>
-    <div class="fld">
-      <label>Credential Secret</label>
-      <input name="amazon_credential_secret" type="password"
-             placeholder="{% if tem_secret %}•••••••• (deixe em branco p/ manter){% else %}cole o secret{% endif %}">
-      <small>Criptografado em repouso. Em branco = mantém o atual.</small>
-    </div>
-    <div class="fld">
-      <label>Host (opcional)</label>
-      <input name="amazon_creators_host" value="{{ perfil.amazon_creators_host }}" placeholder="deixe vazio p/ padrão">
+    <div class="card-head"><h2><i data-lucide="palette"></i> Identidade padrão</h2></div>
+    <p class="muted" style="font-size:.82rem;">Usada quando um grupo não possui personalização própria.</p>
+    <div class="form-grid">
+      <div class="fld"><label>Nome da marca</label><input name="nome_marca" value="{{ perfil.nome_marca }}"></div>
+      <div class="fld"><label>Tom</label><select name="tom_marca"><option value="direto" {% if perfil.tom_marca == "direto" %}selected{% endif %}>Direto</option><option value="amigavel" {% if perfil.tom_marca == "amigavel" %}selected{% endif %}>Amigável</option><option value="premium" {% if perfil.tom_marca == "premium" %}selected{% endif %}>Premium</option></select></div>
+      <div class="fld"><label>Chamada para ação</label><input name="chamada_acao" value="{{ perfil.chamada_acao }}"></div>
+      <div class="fld"><label>Divulgação de afiliado</label><input name="divulgacao_afiliado" value="{{ perfil.divulgacao_afiliado }}"></div>
+      <div class="fld" style="grid-column:1/-1;"><label>Template A opcional</label><textarea name="template_a" rows="3" placeholder="{marca} — {nome} — {preco} — {desconto} — {link}">{{ perfil.template_a }}</textarea></div>
+      <div class="fld" style="grid-column:1/-1;"><label>Template B opcional</label><textarea name="template_b" rows="3">{{ perfil.template_b }}</textarea></div>
     </div>
   </div>
 
-  <button class="btn btn-blue" type="submit"><i data-lucide="save"></i> Salvar</button>
+  <button class="btn btn-blue" type="submit"><i data-lucide="save"></i> Salvar alterações</button>
 </form>
 
 <div class="card">
   <div class="card-head">
     <h2><i data-lucide="log-in"></i> Sessão do Mercado Livre</h2>
-    {% if ml_sessao_ok %}<span class="status-pill"><span class="dot on"></span> login salvo</span>
-    {% else %}<span class="status-pill"><span class="dot off"></span> sem login</span>{% endif %}
+    {% if ml_sessao_ok %}<span class="status-pill"><span class="dot on"></span> Conectado</span>
+    {% else %}<span class="status-pill"><span class="dot off"></span> Não conectado</span>{% endif %}
   </div>
   <p style="font-size:.85rem;color:var(--muted);line-height:1.6;">
-    Você loga no Mercado Livre dentro do próprio app — abrimos o site do ML numa
-    janela remota e você entra ali (no celular ou no PC). A sessão é salva sozinha,
-    sem rodar script nem colar arquivo nenhum.
+    Faça login no Mercado Livre sem sair do Spreading. A sessão fica salva
+    e é usada para gerar seus links de afiliado.
   </p>
   <div style="margin-top:.6rem;">
     <a class="btn btn-blue" href="{% url 'scraper-ml-conexao' %}">

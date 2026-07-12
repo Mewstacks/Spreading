@@ -19,6 +19,10 @@ from .forms import SignUpForm
 # Trava login após N tentativas falhas numa janela curta.
 LOGIN_MAX_TENTATIVAS = 8
 LOGIN_JANELA_SEG = 15 * 60
+# Contador SÓ por IP (independe do username): freia o "password spraying" — uma
+# senha testada contra muitos usuários a partir do mesmo IP. Teto mais alto que o
+# por-usuário p/ tolerar NAT/compartilhamento de IP legítimo.
+LOGIN_MAX_POR_IP = 30
 
 
 def _client_ip(request):
@@ -33,6 +37,16 @@ def _throttle_key(request):
     return f"login-fail:{ip}:{user}"
 
 
+def _throttle_key_ip(request):
+    return f"login-fail-ip:{_client_ip(request)}"
+
+
+def _login_bloqueado(request) -> bool:
+    """True se o par IP+usuário OU o IP sozinho estourou o limite de falhas."""
+    return (cache.get(_throttle_key(request), 0) >= LOGIN_MAX_TENTATIVAS
+            or cache.get(_throttle_key_ip(request), 0) >= LOGIN_MAX_POR_IP)
+
+
 @method_decorator(never_cache, name="dispatch")
 @method_decorator(login_not_required, name="dispatch")
 class ThrottledLoginView(LoginView):
@@ -40,20 +54,19 @@ class ThrottledLoginView(LoginView):
     redirect_authenticated_user = True
 
     def post(self, request, *args, **kwargs):
-        key = _throttle_key(request)
-        if cache.get(key, 0) >= LOGIN_MAX_TENTATIVAS:
+        if _login_bloqueado(request):
             from django.contrib import messages
             messages.error(request, "Muitas tentativas. Espere alguns minutos e tente de novo.")
             return self.render_to_response(self.get_context_data(form=self.get_form()))
         return super().post(request, *args, **kwargs)
 
     def form_valid(self, form):
-        cache.delete(_throttle_key(self.request))  # zera contador ao acertar
+        cache.delete(_throttle_key(self.request))  # zera contador do par ao acertar
         return super().form_valid(form)
 
     def form_invalid(self, form):
-        key = _throttle_key(self.request)
-        cache.set(key, cache.get(key, 0) + 1, LOGIN_JANELA_SEG)
+        for key in (_throttle_key(self.request), _throttle_key_ip(self.request)):
+            cache.set(key, cache.get(key, 0) + 1, LOGIN_JANELA_SEG)
         return super().form_invalid(form)
 
 

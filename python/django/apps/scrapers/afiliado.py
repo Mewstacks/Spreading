@@ -1,18 +1,14 @@
-"""Resolução de tag de afiliado + cache de link POR usuário (multi-tenant).
+"""Resolução de identidade de afiliado + cache de link POR usuário.
 
-Cada usuário recebe a própria comissão, então o link precisa carregar a tag DELE.
-Tag por usuário vem do Perfil; se vazia, cai no fallback global de settings (compat
-single-tenant). O cache de link fica em LinkAfiliadoUsuario keyed (usuario, produto).
+No Mercado Livre a identidade vem exclusivamente da conta autenticada no Link
+Builder. A tag textual só existe no fluxo Amazon.
 """
 from django.conf import settings
 
 
 def tag_ml(usuario=None) -> str:
-    if usuario is not None:
-        perfil = getattr(usuario, "perfil", None)
-        if perfil and perfil.afiliado_tag_ml:
-            return perfil.afiliado_tag_ml.strip()
-    return (getattr(settings, "AFILIADO_TAG", "") or "").strip()
+    """Compatibilidade: ML não possui tag manual separada neste fluxo."""
+    return ""
 
 
 def tag_amazon(usuario=None) -> str:

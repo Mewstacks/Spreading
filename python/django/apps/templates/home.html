@@ -1,76 +1,133 @@
 {% extends "base.html" %}
-{% block title %}Spreading — Painel{% endblock %}
-
+{% block title %}Operação — Spreading{% endblock %}
 {% block head_extra %}
 <style>
-  .home-card { display: flex; flex-direction: column; gap: .65rem; text-decoration: none; color: inherit;
-    transition: transform .14s ease, box-shadow .14s ease, border-color .14s ease; }
-  .home-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-lg); border-color: var(--accent); }
-  .home-ico { width: 3rem; height: 3rem; border-radius: 13px; display: flex; align-items: center;
-    justify-content: center; color: #fff; }
-  .home-ico .lucide { width: 1.5rem; height: 1.5rem; }
-  .home-card h3 { margin: 0; font-size: 1.02rem; font-weight: 600; color: var(--text); }
-  .home-card p { margin: 0; font-size: .85rem; color: var(--muted); line-height: 1.5; }
-  .ico-blue   { background: linear-gradient(135deg,#3b82f6,#6366f1); }
-  .ico-flame  { background: linear-gradient(135deg,#f97316,#ef4444); }
-  .ico-send   { background: linear-gradient(135deg,#8b5cf6,#d946ef); }
-  .ico-green  { background: linear-gradient(135deg,#22c55e,#16a34a); }
-  .ico-cyan   { background: linear-gradient(135deg,#06b6d4,#3b82f6); }
-  .ico-slate  { background: linear-gradient(135deg,#64748b,#475569); }
+  .hero-row { display:flex; align-items:flex-end; justify-content:space-between; gap:1rem; flex-wrap:wrap; }
+  .period { color:var(--muted); font-size:.82rem; }
+  .kpis { display:grid; grid-template-columns:repeat(4, minmax(150px,1fr)); gap:.8rem; margin:1.2rem 0; }
+  .kpi { padding:1rem 1.1rem; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); }
+  .kpi-label { color:var(--muted); font-size:.75rem; text-transform:uppercase; letter-spacing:.05em; }
+  .kpi-value { font-size:1.65rem; font-weight:750; margin-top:.2rem; letter-spacing:-.03em; }
+  .kpi-note { color:var(--muted); font-size:.75rem; margin-top:.15rem; }
+  .ops-grid { display:grid; grid-template-columns:minmax(0,1.55fr) minmax(280px,.8fr); gap:1rem; }
+  .health { display:flex; gap:.5rem; flex-wrap:wrap; }
+  .health-item { display:inline-flex; align-items:center; gap:.4rem; padding:.4rem .65rem; border:1px solid var(--border); border-radius:999px; font-size:.78rem; }
+  .alert-list { display:flex; flex-direction:column; gap:.55rem; }
+  .action-alert { display:flex; gap:.65rem; align-items:flex-start; padding:.75rem; background:var(--yellow-bg); color:var(--text); border-radius:9px; text-decoration:none; }
+  .action-alert strong { display:block; font-size:.84rem; }
+  .action-alert span { color:var(--muted); font-size:.76rem; }
+  .rank-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:.65rem; padding:.6rem 0; border-bottom:1px solid var(--border-soft); font-size:.82rem; }
+  .rank-row:last-child { border-bottom:0; }
+  .sync-list { display:flex; flex-direction:column; gap:.65rem; }
+  .sync-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.8rem; align-items:center; padding:.75rem; border:1px solid var(--border-soft); border-radius:10px; }
+  .sync-title { display:flex; align-items:center; gap:.45rem; font-weight:700; flex-wrap:wrap; }
+  .sync-meta { color:var(--muted); font-size:.76rem; margin-top:.16rem; }
+  @media(max-width:859px) {
+    .kpis { grid-template-columns:1fr 1fr; }
+    .ops-grid { grid-template-columns:1fr; }
+  }
+  @media(max-width:520px) {
+    .kpis { grid-template-columns:1fr; }
+    .sync-row { grid-template-columns:1fr; }
+    .sync-row form .btn { width:100%; justify-content:center; }
+  }
 </style>
 {% endblock %}
-
 {% block content %}
-<div class="page-head">
-  <h1><i data-lucide="shopping-bag"></i> Spreading</h1>
-  <p class="sub">Acha as melhores ofertas do Mercado Livre e dispara com seu link de afiliado para WhatsApp e Telegram.</p>
+<div class="hero-row">
+  <div class="page-head" style="margin:0;">
+    <h1><i data-lucide="gauge"></i> Sua operação</h1>
+    <p class="sub">O que foi publicado, o que gerou comissão e onde melhorar.</p>
+  </div>
+  <span class="period">Últimos 30 dias</span>
 </div>
 
-<div class="grid grid-cards">
-  <a class="card home-card" href="{% url 'scraper-comecar' %}">
-    <div class="home-ico ico-green"><i data-lucide="rocket"></i></div>
-    <h3>Começar</h3>
-    <p>Checklist de configuração: tags, conexões, primeira regra e ligar o envio.</p>
-  </a>
+<div class="kpis">
+  <div class="kpi"><div class="kpi-label">Comissão</div><div class="kpi-value">R$ {{ financeiro.comissao|default:0|floatformat:2 }}</div><div class="kpi-note">Importada das contas conectadas</div></div>
+  <div class="kpi"><div class="kpi-label">Pedidos</div><div class="kpi-value">{{ financeiro.pedidos|default:0 }}</div><div class="kpi-note">{{ financeiro.conversoes|default:0 }} conversões reportadas</div></div>
+  <div class="kpi"><div class="kpi-label">Cliques</div><div class="kpi-value">{{ resumo.cliques|default:0 }}</div><div class="kpi-note">{{ financeiro.cliques_mkt|default:0 }} confirmados nas lojas</div></div>
+  <div class="kpi"><div class="kpi-label">Comissão por publicação</div><div class="kpi-value">R$ {{ financeiro.comissao_por_post|default:0|floatformat:2 }}</div><div class="kpi-note">{{ resumo.enviados|default:0 }} publicações · {{ resumo.falhas|default:0 }} falhas</div></div>
+</div>
 
-  {% if request.user.is_staff %}
-  <a class="card home-card" href="/scrapers/">
-    <div class="home-ico ico-blue"><i data-lucide="radar"></i></div>
-    <h3>Scraper</h3>
-    <p>Raspar ofertas, cupons e gerar links de afiliado. Log + progresso ao vivo.</p>
-  </a>
-  {% endif %}
+<div class="ops-grid">
+  <div>
+    <div class="card">
+      <div class="card-head">
+        <h2><i data-lucide="activity"></i> Publicações recentes</h2>
+        <a class="btn btn-ghost btn-sm" href="{% url 'scraper-top' %}">Ver ofertas</a>
+      </div>
+      <div class="table-wrap" style="border:0;box-shadow:none;">
+        <table>
+          <thead><tr><th>Oferta</th><th>Destino</th><th>Status</th><th>Cliques</th></tr></thead>
+          <tbody>
+          {% for p in publicacoes %}
+            <tr>
+              <td class="cell-grow"><b>{{ p.produto.nome|default:"Oferta removida"|truncatechars:55 }}</b><div class="muted" style="font-size:.74rem;">{{ p.criada_em|date:"d/m H:i" }} · variante {{ p.variante }}</div></td>
+              <td>{{ p.destino_nome|default:p.destino_id|truncatechars:24 }}</td>
+              <td><span class="badge {% if p.status == 'enviado' %}badge-green{% elif p.status == 'falhou' %}badge-red{% else %}badge-muted{% endif %}">{{ p.get_status_display }}</span>{% if p.erro %}<div class="muted" title="{{ p.erro }}" style="font-size:.7rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;">{{ p.erro }}</div>{% endif %}</td>
+              <td>{{ p.cliques.count }}</td>
+            </tr>
+          {% empty %}<tr><td colspan="4" class="empty">Nenhuma publicação ainda. Envie uma oferta em <a class="link" href="{% url 'scraper-top' %}">Promoções</a> para começar a medir.</td></tr>{% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
 
-  <a class="card home-card" href="/scrapers/top/">
-    <div class="home-ico ico-flame"><i data-lucide="flame"></i></div>
-    <h3>Promoções</h3>
-    <p>Maiores descontos (%) por nicho, com foto e status do link de afiliado.</p>
-  </a>
+    <div class="card">
+      <div class="card-head"><h2><i data-lucide="refresh-cw"></i> Receita automática</h2></div>
+      <p class="muted" style="font-size:.82rem;margin-top:0;">Os relatórios de comissão são importados automaticamente das contas conectadas.</p>
+      <div class="sync-list">
+        {% for sync in syncs %}
+        <div class="sync-row">
+          <div>
+            <div class="sync-title">
+              <span class="dot {% if sync.status == 'ok' %}on{% elif sync.status == 'erro' or sync.status == 'acao' %}off{% endif %}"></span>
+              {% if sync.marketplace == "mercadolivre" %}Mercado Livre{% else %}{{ sync.marketplace|title }}{% endif %}
+              <span class="badge {% if sync.status == 'ok' %}badge-green{% elif sync.status == 'acao' %}badge-yellow{% elif sync.status == 'erro' %}badge-red{% else %}badge-muted{% endif %}">{{ sync.get_status_display|default:"Nunca sincronizado" }}</span>
+            </div>
+            <div class="sync-meta">
+              {% if sync.ultimo_sucesso %}Última sincronização: {{ sync.ultimo_sucesso|date:"d/m H:i" }}{% else %}Nenhuma sincronização concluída até agora{% endif %}
+              {% if sync.erro %}<br>{{ sync.erro|truncatechars:140 }}{% endif %}
+            </div>
+          </div>
+          <form method="post" action="{% url 'scraper-sincronizar-receitas' %}">
+            {% csrf_token %}
+            <input type="hidden" name="marketplace" value="{{ sync.marketplace }}">
+            <button class="btn btn-blue btn-sm" type="submit"><i data-lucide="refresh-cw"></i> Sincronizar</button>
+          </form>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
 
-  <a class="card home-card" href="/scrapers/config/">
-    <div class="home-ico ico-send"><i data-lucide="settings-2"></i></div>
-    <h3>Envios</h3>
-    <p>Nicho → canal → grupo → intervalo. Automação full-time + "Enviar agora".</p>
-  </a>
-
-  <a class="card home-card" href="/scrapers/whatsapp/">
-    <div class="home-ico ico-green"><i data-lucide="message-circle"></i></div>
-    <h3>Conexão WhatsApp</h3>
-    <p>Status da sessão + QR Code para parear o aparelho.</p>
-  </a>
-
-  <a class="card home-card" href="/scrapers/telegram/">
-    <div class="home-ico ico-cyan"><i data-lucide="send"></i></div>
-    <h3>Conexão Telegram</h3>
-    <p>Status do bot + checklist de configuração (token, admin do canal).</p>
-  </a>
-
-  {% if request.user.is_staff %}
-  <a class="card home-card" href="/admin/">
-    <div class="home-ico ico-slate"><i data-lucide="wrench"></i></div>
-    <h3>Admin</h3>
-    <p>Cupons, Produtos e Histórico de Envio no Django Admin.</p>
-  </a>
-  {% endif %}
+  <aside>
+    <div class="card">
+      <div class="card-head"><h2><i data-lucide="radio"></i> Conexões</h2></div>
+      <div class="health">
+        <span class="health-item"><span class="dot {% if ml_ok %}on{% else %}off{% endif %}"></span> Mercado Livre</span>
+        <span class="health-item"><span class="dot {% if wa_ok %}on{% else %}off{% endif %}"></span> WhatsApp</span>
+        <span class="health-item"><span class="dot {% if tg_ok %}on{% else %}off{% endif %}"></span> Telegram</span>
+      </div>
+    </div>
+    {% if alertas %}
+    <div class="card">
+      <div class="card-head"><h2><i data-lucide="bell"></i> Precisa de atenção</h2></div>
+      <div class="alert-list">{% for titulo, texto, rota in alertas %}
+        <a class="action-alert" href="{% url rota %}"><i data-lucide="arrow-right-circle"></i><div><strong>{{ titulo }}</strong><span>{{ texto }}</span></div></a>
+      {% endfor %}</div>
+    </div>
+    {% endif %}
+    <div class="card">
+      <div class="card-head"><h2><i data-lucide="trophy"></i> Categorias</h2></div>
+      {% for r in melhores_categorias %}<div class="rank-row"><span>{{ r.categoria|default:"Sem categoria" }}</span><span>{{ r.envios }} posts</span><b>{{ r.cliques }} cliques</b></div>
+      {% empty %}<p class="muted" style="font-size:.82rem;">Os rankings aparecem após os primeiros cliques e relatórios sincronizados.</p>{% endfor %}
+    </div>
+    <div class="card">
+      <div class="card-head"><h2><i data-lucide="users"></i> Destinos</h2></div>
+      {% for r in melhores_destinos %}<div class="rank-row"><span>{{ r.destino_nome|default:r.destino_id|truncatechars:22 }}</span><span>{{ r.envios }} posts</span><b>{{ r.cliques }} cliques</b></div>
+      {% empty %}<p class="muted" style="font-size:.82rem;">Cada grupo terá seu próprio histórico.</p>{% endfor %}
+    </div>
+  </aside>
 </div>
 {% endblock %}

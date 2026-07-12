@@ -23,10 +23,8 @@ def ml_session_dir() -> str:
 
 
 def ml_auth_path(user=None) -> str:
-    """auth_{id}.json do usuário se existir; senão o auth.json global."""
+    """auth_{id}.json do usuário. Sem usuário, usa o auth.json global legado."""
     d = ml_session_dir()
     if user is not None and getattr(user, "id", None):
-        p = os.path.join(d, f"auth_{user.id}.json")
-        if os.path.exists(p):
-            return p
+        return os.path.join(d, f"auth_{user.id}.json")
     return os.path.join(d, "auth.json")

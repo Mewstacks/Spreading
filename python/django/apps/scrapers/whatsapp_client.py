@@ -10,6 +10,8 @@ O Node expõe:
 Toda função retorna dicts simples; nunca levanta por falha de envio
 (o orquestrador decide o que fazer com sucesso=False).
 """
+import time
+
 import requests
 from django.conf import settings
 
@@ -41,44 +43,52 @@ def _params(session=None) -> dict:
     return {"session": session} if session else None
 
 
+def _request_json(method: str, path: str, *, headers=None, params=None, json=None,
+                  timeout=5, attempts=2) -> dict:
+    url = f"{_base_url()}{path}"
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            r = requests.request(method, url, headers=headers, params=params,
+                                 json=json, timeout=timeout)
+            return r.json()
+        except Exception as e:
+            last_error = e
+            if attempt + 1 < attempts:
+                time.sleep(0.35)
+    return {"erro": str(last_error)}
+
+
 def status(session=None) -> dict:
     """Retorna {conectado: bool}. Exige api-key (rota fechada)."""
-    try:
-        r = requests.get(f"{_base_url()}/api/status", headers=_headers_opt(),
+    data = _request_json("GET", "/api/status", headers=_headers_opt(),
                          params=_params(session), timeout=5)
-        return r.json()
-    except Exception as e:
-        return {"conectado": False, "erro": str(e)}
+    data.setdefault("conectado", False)
+    return data
 
 
 def qrcode(session=None) -> dict:
     """Retorna {conectado, qr?} do serviço Node. Exige api-key (rota fechada)."""
-    try:
-        r = requests.get(f"{_base_url()}/api/qrcode", headers=_headers_opt(),
+    data = _request_json("GET", "/api/qrcode", headers=_headers_opt(),
                          params=_params(session), timeout=8)
-        return r.json()
-    except Exception as e:
-        return {"conectado": False, "qr": None, "erro": str(e)}
+    data.setdefault("conectado", False)
+    data.setdefault("qr", None)
+    return data
 
 
 def listar_grupos(session=None) -> dict:
     """Lista grupos do WhatsApp conectado. Usado pelo dashboard para escolher destino."""
-    try:
-        r = requests.get(f"{_base_url()}/api/grupos", headers=_headers(),
+    return _request_json("GET", "/api/grupos", headers=_headers(),
                          params=_params(session), timeout=15)
-        return r.json()
-    except Exception as e:
-        return {"erro": str(e)}
 
 
 def refresh_grupos(session=None) -> dict:
     """Força o Node a re-sincronizar a lista de grupos. POST /api/grupos/refresh."""
-    try:
-        r = requests.post(f"{_base_url()}/api/grupos/refresh", headers=_headers(),
-                          params=_params(session), timeout=30)
-        return r.json()
-    except Exception as e:
-        return {"sucesso": False, "erro": str(e)}
+    data = _request_json("POST", "/api/grupos/refresh", headers=_headers(),
+                         params=_params(session), timeout=30)
+    if "erro" in data:
+        data.setdefault("sucesso", False)
+    return data
 
 
 def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,

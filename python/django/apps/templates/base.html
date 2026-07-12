@@ -266,7 +266,7 @@
     input, select, textarea { width: 100%; padding: .6rem .72rem; background: var(--bg); color: var(--text);
       border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: var(--sans); font-size: .9rem;
       transition: border-color .12s, box-shadow .12s; }
-    input::placeholder { color: var(--muted-2); }
+    input::placeholder, textarea::placeholder { color: var(--muted); opacity: .75; }
     input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent);
       box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
     select { cursor: pointer; }

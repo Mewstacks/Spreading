@@ -26,7 +26,7 @@ class Marketplace(ABC):
         """True se o link final carrega a tag de afiliado (do usuário, ou global) — A3."""
 
     def verify_link(self, link: str, nome_esperado: str = None,
-                    confiar_desconto: bool = False) -> dict:
+                    confiar_desconto: bool = False, usuario=None) -> dict:
         """
         Confere no destino que a oferta certa aparece, ativa, com desconto.
         Default: sem verificação de browser (ok=True) — lojas com API confiável

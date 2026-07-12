@@ -4,12 +4,16 @@ Usa o EMAIL_BACKEND configurado em settings (console em dev, Titan/SMTP em prod 
 com EMAIL_FORCE_SMTP=1). Cada função monta texto + HTML e nunca levanta: falha de
 e-mail não pode derrubar signup nem o watchdog.
 """
+import logging
+
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
 from django.urls import reverse
 
 from .tokens import gerar_token
+
+logger = logging.getLogger(__name__)
 
 
 def _enviar(assunto: str, destino: str, template_base: str, ctx: dict) -> bool:
@@ -35,7 +39,7 @@ def _enviar(assunto: str, destino: str, template_base: str, ctx: dict) -> bool:
         msg.send(fail_silently=False)
         return True
     except Exception as e:
-        print(f"[email] falha ao enviar '{assunto}' para {destino}: {e}")
+        logger.warning("Falha ao enviar e-mail '%s' para %s: %s", assunto, destino, e)
         return False
 
 

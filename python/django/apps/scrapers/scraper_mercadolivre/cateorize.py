@@ -1,3 +1,7 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
 macro_dict = {"Automotivo": ["VEHICLE", "MOTORCYCLE", "BICYCLE", "AUTOMOTIVE", "COMBUSTION", "CYCLING", "GPS", "BEARING", "CARS", "ENGINE", "MOTOR", "PEDAL", "TRUCK", "AMBULANCE", "BICYCLES", "CAR", "DRIVING", "GREASE", "MOTORCYCLES", "MOTORCYCLIST", "PARKING", "RADIAL", "REVERSE", "SPARK", "SUSPENSION", "TIRE", "TRANSPORT", "TRUCKS", "WAGONS", "WHEEL"],
 "Náutica, Praia e Surf": ["NAUTICAL", "SURFBOARD", "BEACH", "SUN", "BODYBOARDS", "KAYAKS", "OUTBOARD", "PADDLE", "SUNBATHING", "SURFBOARDS", "WETSUITS"],
 "Casa, Móveis e Decoração": ["DECORATIVE", "HOME", "TABLE", "FURNITURE", "BED", "CANDLE", "DINING", "FOLDING", "CARPET", "CURTAIN", "HOUSEHOLD", "INDOOR", "LAMP", "MIRROR", "SLEEPING", "STORAGE", "AMBIENT", "BEDDING", "BEDROOM", "BEDS", "BLANKETS", "BOOKCASES", "BOOKENDS", "CABINETS", "CANDELABRAS", "CANDLES", "CHAIR", "CLOCKS", "COASTERS", "COMFORTERS", "COMFORTER", "CORK", "CUSHIONS", "CUSHION", "DESIGN", "DESK", "DRAWERS", "ENTRYWAY", "FRAME", "HAMMOCKS", "HANGING", "HEADBOARDS", "HOUSE", "LIVING", "LOCKERS", "MAILBOXES", "MATTRESSES", "MATTRESS", "MIRRORS", "MOULDINGS", "NIGHTSTANDS", "PICTURE", "PILLOWS", "PLACEMATS", "POSTERS", "POUFS", "QUILTS", "SHADE", "SHELVES", "SIDEBOARDS", "SOFAS", "SOFA", "STOOLS", "TABLECLOTHS", "TOWEL", "UNDERPLATES", "WALLPAPER", "WARDROBES"],
@@ -75,7 +79,7 @@ def popular_macro_categorias():
         Produto.objects.bulk_update(em_lote, ["macro_categoria"])
         atualizados += len(em_lote)
 
-    print(f"Macro-categorias populadas: {atualizados} produtos atualizados.")
+    logger.info("Macro-categorias populadas: %s produtos atualizados", atualizados)
     return atualizados
 
 

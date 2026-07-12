@@ -3,6 +3,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
+import uuid
 
 class Cupom(models.Model):
     campanha_id = models.CharField(max_length=100, unique=True)
@@ -10,9 +11,13 @@ class Cupom(models.Model):
     tipo_desconto = models.CharField(max_length=20) # 'fixo' ou 'porcentagem'
     valor_desconto = models.FloatField()
     valor_minimo = models.FloatField(default=0.0)  # compra mínima para o cupom ser válido
-    link_original = models.URLField()
+    link_original = models.URLField(max_length=1000)
     codigo = models.CharField(max_length=512, blank=True, default="")
     data_criacao = models.DateTimeField(auto_now_add=True)
+    fonte = models.CharField(max_length=80, blank=True, default="")
+    validade = models.DateTimeField(null=True, blank=True)
+    ultima_verificacao = models.DateTimeField(null=True, blank=True, db_index=True)
+    estado = models.CharField(max_length=20, default="ativo", db_index=True)
 
 class Produto(models.Model):
     # Marketplace de origem ('mercadolivre' | 'amazon' | 'shopee'). Permite que a
@@ -31,7 +36,7 @@ class Produto(models.Model):
     nome = models.CharField(max_length=255)
     preco_sem_desconto = models.FloatField()
     preco_com_cupom = models.FloatField()
-    link_produto = models.URLField()
+    link_produto = models.URLField(max_length=1000)
     categoria = models.CharField(max_length=100, null=True, blank=True) # Lembra do domain_id?
     macro_categoria = models.CharField(max_length=100, null=True, blank=True, db_index=True)
     # Cache do link de afiliado pré-gerado (evita abrir Playwright na hora do envio)
@@ -46,6 +51,16 @@ class Produto(models.Model):
     afiliado_ok = models.BooleanField(default=False)
     # Frase de marketing gerada por LLM, cacheada na raspagem (evita bloquear o envio).
     frase_llm = models.CharField(max_length=255, blank=True, default="")
+    # Proveniência e confiança: a UI e o seletor nunca precisam adivinhar se o
+    # dado ainda é publicável.
+    fonte = models.CharField(max_length=80, blank=True, default="")
+    primeira_observacao = models.DateTimeField(auto_now_add=True, null=True)
+    ultima_observacao = models.DateTimeField(auto_now=True, null=True)
+    ultima_verificacao = models.DateTimeField(null=True, blank=True, db_index=True)
+    estado = models.CharField(max_length=20, default="ativo", db_index=True)
+    falha_verificacao = models.CharField(max_length=255, blank=True, default="")
+    preco_fonte = models.FloatField(null=True, blank=True)
+    preco_efetivo = models.FloatField(null=True, blank=True)
 
 class PrecoHistorico(models.Model):
     """Uma observação de preço por raspagem — base p/ detectar QUEDA REAL e derrubar
@@ -72,6 +87,123 @@ class HistoricoEnvio(models.Model):
 
     def __str__(self):
         return f"{self.produto.nome} enviado em {self.data_envio}"
+
+
+class Publicacao(models.Model):
+    """Registro imutável da decisão e do resultado de uma publicação."""
+    STATUS = [
+        ("pendente", "Pendente"), ("enviado", "Enviado"),
+        ("falhou", "Falhou"), ("ignorado", "Ignorado"),
+    ]
+    id_publico = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                related_name="publicacoes")
+    produto = models.ForeignKey(Produto, on_delete=models.SET_NULL, null=True,
+                                related_name="publicacoes")
+    configuracao = models.ForeignKey("ConfiguracaoEnvio", on_delete=models.SET_NULL,
+                                     null=True, blank=True, related_name="publicacoes")
+    canal = models.CharField(max_length=20)
+    destino_id = models.CharField(max_length=100)
+    destino_nome = models.CharField(max_length=255, blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS, default="pendente", db_index=True)
+    erro = models.CharField(max_length=500, blank=True, default="")
+    variante = models.CharField(max_length=1, default="A")
+    mensagem = models.TextField(blank=True, default="")
+    link_afiliado = models.URLField(max_length=1500, blank=True, default="")
+    link_rastreado = models.URLField(max_length=1500, blank=True, default="")
+    preco_original = models.FloatField(default=0)
+    preco_final = models.FloatField(default=0)
+    cupom = models.CharField(max_length=255, blank=True, default="")
+    categoria = models.CharField(max_length=100, blank=True, default="")
+    score = models.FloatField(default=0)
+    motivos_score = models.JSONField(default=list, blank=True)
+    criada_em = models.DateTimeField(auto_now_add=True, db_index=True)
+    enviada_em = models.DateTimeField(null=True, blank=True, db_index=True)
+
+
+class CliquePublicacao(models.Model):
+    """Clique sem IP, cookie ou identificador pessoal."""
+    publicacao = models.ForeignKey(Publicacao, on_delete=models.CASCADE, related_name="cliques")
+    clicado_em = models.DateTimeField(auto_now_add=True, db_index=True)
+
+
+class ReceitaAfiliado(models.Model):
+    """Linha normalizada de relatório sincronizado do marketplace."""
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                related_name="receitas_afiliado")
+    marketplace = models.CharField(max_length=20, db_index=True)
+    data = models.DateField(db_index=True)
+    etiqueta = models.CharField(max_length=120, blank=True, default="")
+    produto_nome = models.CharField(max_length=255, blank=True, default="")
+    cliques = models.PositiveIntegerField(default=0)
+    conversoes = models.PositiveIntegerField(default=0)
+    pedidos = models.PositiveIntegerField(default=0)
+    receita = models.FloatField(default=0)
+    comissao = models.FloatField(default=0)
+    periodo_inicio = models.DateField(null=True, blank=True)
+    periodo_fim = models.DateField(null=True, blank=True)
+    origem = models.CharField(max_length=20, default="auto")
+    granularidade = models.CharField(max_length=20, default="dia")
+    hash_origem = models.CharField(max_length=64, unique=True)
+    importada_em = models.DateTimeField(auto_now_add=True)
+
+
+class RelatorioSync(models.Model):
+    STATUS = [
+        ("nunca", "Nunca sincronizado"),
+        ("rodando", "Sincronizando"),
+        ("ok", "Sincronizado"),
+        ("erro", "Erro"),
+        ("acao", "Precisa de ação"),
+    ]
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                related_name="syncs_relatorio")
+    marketplace = models.CharField(max_length=20, db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS, default="nunca", db_index=True)
+    ultimo_inicio = models.DateTimeField(null=True, blank=True)
+    ultimo_fim = models.DateTimeField(null=True, blank=True)
+    ultimo_sucesso = models.DateTimeField(null=True, blank=True)
+    proxima_execucao = models.DateTimeField(null=True, blank=True, db_index=True)
+    erro = models.CharField(max_length=500, blank=True, default="")
+    registros_criados = models.PositiveIntegerField(default=0)
+    registros_atualizados = models.PositiveIntegerField(default=0)
+    atualizado_em = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("usuario", "marketplace")
+
+
+class EventoOperacional(models.Model):
+    """Log estruturado para depuração de pipelines e suporte."""
+    LEVELS = [
+        ("debug", "Debug"),
+        ("info", "Info"),
+        ("warning", "Warning"),
+        ("error", "Error"),
+    ]
+    PIPELINES = [
+        ("onboarding", "Onboarding"),
+        ("scraper", "Scraper"),
+        ("ranking", "Ranking"),
+        ("publicacao", "Publicação"),
+        ("whatsapp", "WhatsApp"),
+        ("telegram", "Telegram"),
+        ("relatorios", "Relatórios"),
+        ("redirect", "Redirect"),
+        ("sistema", "Sistema"),
+    ]
+    criado_em = models.DateTimeField(auto_now_add=True, db_index=True)
+    level = models.CharField(max_length=10, choices=LEVELS, default="info", db_index=True)
+    pipeline = models.CharField(max_length=30, choices=PIPELINES, db_index=True)
+    evento = models.CharField(max_length=80, db_index=True)
+    mensagem = models.CharField(max_length=500)
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                null=True, blank=True, related_name="eventos_operacionais")
+    contexto = models.JSONField(default=dict, blank=True)
+    erro = models.TextField(blank=True, default="")
+
+    class Meta:
+        indexes = [models.Index(fields=["pipeline", "level", "criado_em"])]
 
 
 class LinkAfiliadoUsuario(models.Model):
@@ -189,6 +321,18 @@ class ConfiguracaoEnvio(models.Model):
     ultimo_envio = models.DateTimeField(null=True, blank=True)
     # Próximo envio agendado com jitter já aplicado (anti-robótico). None = envia já.
     proximo_envio = models.DateTimeField(null=True, blank=True)
+    max_envios_dia = models.PositiveIntegerField(default=20)
+    falhas_consecutivas = models.PositiveIntegerField(default=0)
+    pausar_apos_falhas = models.PositiveIntegerField(default=5)
+    motivo_pausa = models.CharField(max_length=255, blank=True, default="")
+    variante_template = models.CharField(max_length=10, default="alternar")
+    nome_marca = models.CharField(max_length=80, blank=True, default="")
+    tom_marca = models.CharField(max_length=20, blank=True, default="")
+    nivel_emoji = models.PositiveSmallIntegerField(null=True, blank=True)
+    chamada_acao = models.CharField(max_length=120, blank=True, default="")
+    divulgacao_afiliado = models.CharField(max_length=180, blank=True, default="")
+    template_a = models.TextField(blank=True, default="")
+    template_b = models.TextField(blank=True, default="")
 
     def dentro_da_janela(self, agora) -> bool:
         """True se a hora local de `agora` está na janela de envio."""

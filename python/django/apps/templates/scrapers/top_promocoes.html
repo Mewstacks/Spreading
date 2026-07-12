@@ -26,10 +26,35 @@
   .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
   .seg a { padding: .5rem .85rem; font-size: .82rem; color: var(--muted); text-decoration: none; min-height: 40px; display: flex; align-items: center; }
   .seg a.on { background: var(--surface-2); color: var(--accent); font-weight: 600; }
+  .filter-card { margin-bottom: 1.25rem; padding: 1rem; background: var(--surface);
+    border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+  .filter-row { display: flex; align-items: center; gap: .65rem; flex-wrap: wrap; }
+  .filter-search { position: relative; flex: 1 1 300px; }
+  .filter-search .lucide { position: absolute; left: .75rem; top: 50%; transform: translateY(-50%);
+    color: var(--muted); pointer-events: none; }
+  .filter-search input { padding-left: 2.25rem; }
+  .min-discount { width: 175px; }
+  .filter-meta { display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+    margin-top: .75rem; padding-top: .75rem; border-top: 1px solid var(--border-soft); }
+  .result-count { color: var(--muted); font-size: .82rem; }
+  .deal-cell { min-width: 150px; }
+  .deal-prices { display: flex; align-items: baseline; gap: .5rem; }
+  .deal-saving { color: var(--muted); font-size: .76rem; margin-top: .18rem; }
+  .store-line { display: flex; align-items: center; gap: .45rem; margin-top: .35rem; }
+  .table-wrap table { min-width: 880px; }
+  .td-prod { width: 100%; white-space: normal; }
+  .td-prod .prod-name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .col-actions { position: sticky; right: 0; background: var(--surface); box-shadow: -10px 0 18px rgba(0,0,0,.12); }
+  thead .col-actions { background: var(--surface-2); z-index: 2; }
+  tbody tr:hover .col-actions { background: var(--surface-2); }
   @media (max-width: 859px) {
     #filtro-form { width: 100%; }
     #filtro-form .seg { margin-left: 0 !important; width: 100%; }
     #filtro-form .seg a { flex: 1; justify-content: center; }
+    .filter-search, .min-discount, .filter-row > .btn { width: 100%; flex-basis: 100%; }
+    .filter-meta { align-items: flex-start; flex-direction: column; }
+    .col-actions { position: static; box-shadow: none; }
+    .table-wrap table { min-width: 0; }
 
     /* Tabela vira cards empilhados — sem scroll horizontal no celular. */
     .table-wrap { border: none; background: transparent; box-shadow: none; overflow: visible; }
@@ -73,7 +98,7 @@
     td[data-label] .td-val { min-width: 0; text-align: right; overflow-wrap: anywhere; }
   }
 
-  /* Barra de busca (pesquisar bons itens nas duas lojas) */
+  /* Busca externa por novos itens nas duas lojas */
   .busca-bar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
   .busca-bar input[type="text"] { flex: 1; min-width: 180px; }
 
@@ -104,34 +129,38 @@
 {% block content %}
 <div class="page-head">
   <h1><i data-lucide="flame"></i> Top Promoções</h1>
-  <p class="sub">As melhores ofertas (ML + Amazon). Pesquise bons itens, ordene por % ou R$, e envie na hora.</p>
+  <p class="sub">As melhores ofertas do Mercado Livre e da Amazon. Filtre, compare e envie para seus grupos.</p>
 </div>
 
 {{ categorias_por_macro|json_script:"cats-data" }}
 {{ categorias_selecionadas|json_script:"sel-cats-data" }}
 
-<!-- Buscar bons itens nas duas lojas (ML + Amazon) -->
-<div class="busca-bar">
-  <input type="text" id="busca-termo" placeholder="Pesquisar item nas duas lojas (ex: air fryer, fone bluetooth)"
-         onkeydown="if(event.key==='Enter')buscarItens();">
-  <button class="btn btn-blue btn-sm" onclick="buscarItens()"><i data-lucide="search"></i> Pesquisar itens</button>
-</div>
-<div id="busca-log" class="modal-log" style="margin-bottom:1rem;"></div>
+<form method="get" id="filtro-form" class="filter-card">
+  <div class="filter-row">
+    <div class="filter-search">
+      <i data-lucide="search"></i>
+      <input type="search" name="q" value="{{ busca }}" placeholder="Buscar produto ou categoria"
+             aria-label="Buscar promoções">
+    </div>
 
-<!-- Filtro por loja -->
-<div style="margin-bottom:1rem;">
-  <span class="seg">
-    <a href="?{{ qs_base_sem_loja }}" class="{% if not loja_selecionada %}on{% endif %}">Todas</a>
-    {% for lj in lojas %}
-    <a href="?{{ qs_base_sem_loja }}loja={{ lj }}" class="{% if loja_selecionada == lj %}on{% endif %}">{{ lj }}</a>
-    {% endfor %}
-  </span>
-</div>
+    <select name="loja" aria-label="Loja" style="width:auto;min-width:145px;">
+      <option value="">Todas as lojas</option>
+      {% for lj in lojas %}<option value="{{ lj }}" {% if loja_selecionada == lj %}selected{% endif %}>{% if lj == "mercadolivre" %}Mercado Livre{% else %}{{ lj|title }}{% endif %}</option>{% endfor %}
+    </select>
 
-<form method="get" id="filtro-form" style="margin-bottom:1.4rem;display:flex;gap:.7rem;align-items:center;flex-wrap:wrap;">
+    <select name="min_desconto" class="min-discount" aria-label="Desconto mínimo">
+      <option value="">Qualquer desconto</option>
+      <option value="10" {% if min_desconto == 10 %}selected{% endif %}>10% ou mais</option>
+      <option value="20" {% if min_desconto == 20 %}selected{% endif %}>20% ou mais</option>
+      <option value="30" {% if min_desconto == 30 %}selected{% endif %}>30% ou mais</option>
+      <option value="40" {% if min_desconto == 40 %}selected{% endif %}>40% ou mais</option>
+      <option value="50" {% if min_desconto == 50 %}selected{% endif %}>50% ou mais</option>
+      <option value="60" {% if min_desconto == 60 %}selected{% endif %}>60% ou mais</option>
+    </select>
+
   <div class="dd" id="dd-macro">
     <button type="button" class="btn btn-ghost btn-sm{% if macros_selecionados %} on{% endif %}" onclick="toggleDD('dd-macro')">
-      Macro-categoria{% if macros_selecionados %} ({{ macros_selecionados|length }}){% endif %} ▾
+      Categoria{% if macros_selecionados %} ({{ macros_selecionados|length }}){% endif %} ▾
     </button>
     <div class="dd-panel" id="panel-macro">
       {% for mc in macro_categorias %}
@@ -145,29 +174,42 @@
 
   <div class="dd" id="dd-cat" style="{% if not macros_selecionados %}display:none{% endif %}">
     <button type="button" class="btn btn-ghost btn-sm" onclick="toggleDD('dd-cat')">
-      Nicho{% if categorias_selecionadas %} ({{ categorias_selecionadas|length }}){% endif %} ▾
+      Subcategoria{% if categorias_selecionadas %} ({{ categorias_selecionadas|length }}){% endif %} ▾
     </button>
     <div class="dd-panel" id="panel-cat"></div>
   </div>
 
   <input type="hidden" name="ordenar" id="ordenar-input" value="{{ ordenar }}">
   <button type="submit" class="btn btn-green btn-sm"><i data-lucide="filter"></i> Filtrar</button>
-  {% if macros_selecionados or categorias_selecionadas %}
-  <a href="{% url 'scraper-top' %}" class="muted" style="font-size:.85rem;text-decoration:none;display:inline-flex;align-items:center;gap:.25rem;"><i data-lucide="x"></i> Limpar</a>
+  {% if filtros_ativos %}
+  <a href="{% url 'scraper-top' %}?reset=1" class="btn btn-ghost btn-sm"><i data-lucide="x"></i> Limpar</a>
   {% endif %}
+  </div>
 
-  <span class="seg" style="margin-left:auto;">
+  <div class="filter-meta">
+    <span class="result-count"><strong>{{ produtos|length }}</strong> promoções · seus filtros ficam salvos</span>
+    <span class="seg">
     <a href="?{{ qs_base }}ordenar=percent" class="{% if ordenar != 'valor' %}on{% endif %}">% desconto</a>
     <a href="?{{ qs_base }}ordenar=valor" class="{% if ordenar == 'valor' %}on{% endif %}">R$ economizado</a>
-  </span>
+    </span>
+  </div>
 </form>
+
+<details style="margin-bottom:1rem;">
+  <summary class="muted" style="font-size:.84rem;cursor:pointer;">Não encontrou? Buscar novos produtos nas lojas</summary>
+  <div class="busca-bar" style="margin-top:.7rem;">
+    <input type="text" id="busca-termo" placeholder="Ex.: air fryer, fone bluetooth"
+           onkeydown="if(event.key==='Enter'){event.preventDefault();buscarItens();}">
+    <button type="button" class="btn btn-blue btn-sm" onclick="buscarItens()"><i data-lucide="radar"></i> Buscar nas lojas</button>
+  </div>
+  <div id="busca-log" class="modal-log"></div>
+</details>
 
 {% if produtos %}
 <div class="table-wrap">
   <table>
     <thead>
-      <tr><th>#</th><th>Produto</th><th>Loja</th><th>Afiliado</th><th>Cupom</th>
-        <th>De</th><th>Por</th><th>Desconto</th><th style="text-align:right;">Ação</th></tr>
+      <tr><th>#</th><th>Produto</th><th>Cupom</th><th>Oferta</th><th>Desconto</th><th class="col-actions" style="text-align:right;">Ação</th></tr>
     </thead>
     <tbody>
       {% for p in produtos %}
@@ -181,11 +223,15 @@
               {% if p.categoria and p.categoria != "DESCONHECIDO" %}
                 <div class="muted" style="font-size:.78rem;margin-top:.15rem;">{% if p.macro_categoria %}{{ p.macro_categoria }} · {% endif %}{{ p.categoria }}</div>
               {% endif %}
+              <div class="store-line">
+                <span class="badge badge-muted">{% if p.marketplace == "mercadolivre" %}Mercado Livre{% elif p.marketplace == "amazon" %}Amazon{% else %}{{ p.marketplace|title }}{% endif %}</span>
+                {% if p.afiliado_ok %}<span class="badge badge-green" title="Link de afiliado pronto"><i data-lucide="check"></i> afiliado</span>
+                {% else %}<span class="badge badge-yellow" title="Link de afiliado ainda não verificado"><i data-lucide="alert-triangle"></i> pendente</span>{% endif %}
+              </div>
+              <div class="muted" style="font-size:.74rem;margin-top:.3rem;"><i data-lucide="sparkles"></i> {{ p.motivos_score|join:" · " }}</div>
             </div>
           </div>
         </td>
-        <td data-label="Loja"><span class="badge badge-muted">{{ p.marketplace }}</span></td>
-        <td data-label="Afiliado">{% if p.afiliado_ok %}<span class="badge badge-green" title="Link carrega a tag de afiliado"><i data-lucide="check"></i> ok</span>{% else %}<span class="badge badge-yellow" title="Link sem tag de afiliado verificada"><i data-lucide="alert-triangle"></i> sem tag</span>{% endif %}</td>
         <td data-label="Cupom">
           <div class="td-val">
           {% if p.cupom %}
@@ -194,8 +240,10 @@
           {% else %}<span class="muted">—</span>{% endif %}
           </div>
         </td>
-        <td data-label="De"><span class="preco-original">R$ {{ p.preco_sem_desconto|floatformat:2 }}</span></td>
-        <td data-label="Por"><span class="preco-final">R$ {{ p.preco_com_cupom|floatformat:2 }}</span></td>
+        <td data-label="Oferta" class="deal-cell"><div class="td-val">
+          <div class="deal-prices"><span class="preco-final">R$ {{ p.preco_com_cupom|floatformat:2 }}</span></div>
+          <div class="deal-saving">de <span class="preco-original">R$ {{ p.preco_sem_desconto|floatformat:2 }}</span></div>
+        </div></td>
         <td data-label="Desconto">
           <div class="td-val">
           <span class="badge badge-green">-{{ p.percent|floatformat:0 }}%</span>
@@ -204,12 +252,8 @@
         </td>
         <td data-label="Ação" class="col-actions">
           <div class="td-val" style="display:flex;justify-content:flex-end;">
-          {% if p.ja_enviado %}
-            <span class="badge badge-muted" title="Já enviado — bloqueado p/ não repetir"><i data-lucide="check-check"></i> enviado</span>
-          {% else %}
             <button class="btn btn-green btn-sm"
                     onclick="abrirEnvio({{ p.id }}, '{{ p.nome|escapejs }}')"><i data-lucide="send"></i> Enviar</button>
-          {% endif %}
           </div>
         </td>
       </tr>
@@ -233,16 +277,18 @@
       <div>
         <label>Canal</label>
         <select id="env-canal" onchange="envToggleCanal()">
-          {% for ch in canais %}<option value="{{ ch }}">{{ ch }}</option>{% endfor %}
+          {% for ch in canais %}<option value="{{ ch }}">{% if ch == "whatsapp" %}WhatsApp{% elif ch == "telegram" %}Telegram{% else %}{{ ch|title }}{% endif %}</option>{% endfor %}
         </select>
       </div>
       <div id="env-wa">
-        <label>Grupo WhatsApp <span id="env-grupos-msg" class="muted" style="font-size:.72rem;font-weight:400;"></span></label>
+        <label>Grupo do WhatsApp <span id="env-grupos-msg" class="muted" style="font-size:.72rem;font-weight:400;"></span></label>
         <div id="env-grupo-field"><input id="env-grupo-input" placeholder="12345@g.us"></div>
+        <span class="muted" style="font-size:.74rem;">Escolha um grupo sincronizado ou digite o código do grupo (termina em @g.us).</span>
       </div>
       <div id="env-tg" style="display:none;">
-        <label>Telegram (chat/channel id ou @canal)</label>
-        <input id="env-tg-input" placeholder="@meucanal ou -1001234567890">
+        <label>Canal do Telegram</label>
+        <input id="env-tg-input" placeholder="@meucanal">
+        <span class="muted" style="font-size:.74rem;">Use @nomedocanal ou o ID numérico (começa com -100).</span>
       </div>
       <div class="modal-log" id="env-log"></div>
     </div>
@@ -301,12 +347,12 @@
   function updateCatBtn() {
     var n = document.querySelectorAll('#panel-cat input:checked').length;
     var btn = document.querySelector('#dd-cat button');
-    btn.textContent = 'Nicho' + (n ? ' (' + n + ')' : '') + ' ▾';
+    btn.textContent = 'Subcategoria' + (n ? ' (' + n + ')' : '') + ' ▾';
   }
   window.onMacroChange = function () {
     var n = document.querySelectorAll('input[name="macro"]:checked').length;
     var btn = document.querySelector('#dd-macro button');
-    btn.textContent = 'Macro-categoria' + (n ? ' (' + n + ')' : '') + ' ▾';
+    btn.textContent = 'Categoria' + (n ? ' (' + n + ')' : '') + ' ▾';
     rebuildCatPanel();
   };
   rebuildCatPanel();
@@ -316,7 +362,7 @@
 function buscarItens() {
   var termo = document.getElementById('busca-termo').value.trim();
   var log = document.getElementById('busca-log');
-  if (!termo) { log.innerHTML = '<span class="err">Digite um termo.</span>'; return; }
+  if (!termo) { log.innerHTML = '<span class="err">Digite o que você quer buscar.</span>'; return; }
   log.textContent = '';
   var es = new EventSource('/scrapers/buscar-promocoes/?termo=' + encodeURIComponent(termo));
   es.onmessage = function (e) {
@@ -326,7 +372,7 @@ function buscarItens() {
     ln.textContent = e.data;
     log.appendChild(ln); log.scrollTop = log.scrollHeight;
   };
-  es.onerror = function () { var l=document.createElement('div'); l.className='err'; l.textContent='[ERRO] Conexão perdida.'; log.appendChild(l); es.close(); };
+  es.onerror = function () { var l=document.createElement('div'); l.className='err'; l.textContent='A conexão foi perdida. Tente novamente.'; log.appendChild(l); es.close(); };
 }
 
 // ─── Popup de envio ───
@@ -364,7 +410,12 @@ async function loadEnvGrupos() {
     var r = await fetch('/scrapers/whatsapp/grupos/');
     var d = await r.json();
     var grupos = d.grupos || [];
-    if (d.erro || !grupos.length) { msg.textContent = d.erro ? '(serviço offline — digite o id)' : '(sem grupos — digite o id)'; return; }
+    if (d.sincronizando) {
+      msg.textContent = '(sincronizando grupos…)';
+      window.setTimeout(loadEnvGrupos, 3000);
+      return;
+    }
+    if (d.erro || !grupos.length) { msg.textContent = d.erro ? '(não foi possível carregar — digite o código)' : '(nenhum grupo sincronizado — digite o código)'; return; }
     msg.textContent = '(' + grupos.length + ' grupos)';
     var sel = document.createElement('select');
     sel.id = 'env-grupo-input';
@@ -372,7 +423,7 @@ async function loadEnvGrupos() {
     grupos.forEach(function (g) { sel.add(new Option(g.nome, g.id)); });
     field.innerHTML = ''; field.appendChild(sel);
     envGruposLoaded = true;
-  } catch (e) { msg.textContent = '(serviço offline — digite o id)'; }
+  } catch (e) { msg.textContent = '(não foi possível carregar — digite o código)'; }
 }
 function dispararEnvio() {
   var canal = document.getElementById('env-canal').value;
@@ -380,7 +431,7 @@ function dispararEnvio() {
   var grupo = (el && el.value || '').trim();
   var nome = (canal !== 'telegram' && el && el.tagName === 'SELECT') ? el.options[el.selectedIndex].text : grupo;
   var log = document.getElementById('env-log');
-  if (!grupo) { log.innerHTML = '<span class="err">Escolha/digite o destino.</span>'; return; }
+  if (!grupo) { log.innerHTML = '<span class="err">Escolha ou digite o grupo de destino.</span>'; return; }
   document.getElementById('env-go').disabled = true;
   log.textContent = '';
   var url = '/scrapers/enviar-produto/?produto=' + envProdId
@@ -397,7 +448,7 @@ function dispararEnvio() {
     else ln.textContent = e.data;
     log.appendChild(ln); log.scrollTop = log.scrollHeight;
   };
-  envEs.onerror = function () { var l=document.createElement('div'); l.className='err'; l.textContent='[ERRO] Conexão perdida.'; log.appendChild(l); document.getElementById('env-go').disabled = false; if(envEs){envEs.close();envEs=null;} };
+  envEs.onerror = function () { var l=document.createElement('div'); l.className='err'; l.textContent='A conexão foi perdida. Tente novamente.'; log.appendChild(l); document.getElementById('env-go').disabled = false; if(envEs){envEs.close();envEs=null;} };
 }
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape') fecharEnvio(); });
 </script>

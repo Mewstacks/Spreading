@@ -2,6 +2,7 @@ from django.contrib import admin
 
 from apps.scrapers.models import (
     Cupom, Produto, HistoricoEnvio, ConfiguracaoEnvio, CupomCodigo, LinkAfiliadoUsuario,
+    Publicacao, CliquePublicacao, ReceitaAfiliado, RelatorioSync, EventoOperacional,
 )
 
 
@@ -43,3 +44,39 @@ class LinkAfiliadoUsuarioAdmin(admin.ModelAdmin):
     list_display = ("usuario", "produto", "afiliado_ok", "criado_em")
     list_filter = ("usuario", "afiliado_ok")
     search_fields = ("produto__nome",)
+
+
+@admin.register(Publicacao)
+class PublicacaoAdmin(admin.ModelAdmin):
+    list_display = ("usuario", "produto", "destino_nome", "canal", "status", "variante", "criada_em")
+    list_filter = ("status", "canal", "variante", "usuario")
+    search_fields = ("produto__nome", "destino_nome", "erro")
+    readonly_fields = [field.name for field in Publicacao._meta.fields]
+
+
+@admin.register(CliquePublicacao)
+class CliquePublicacaoAdmin(admin.ModelAdmin):
+    list_display = ("publicacao", "clicado_em")
+    readonly_fields = ("publicacao", "clicado_em")
+
+
+@admin.register(ReceitaAfiliado)
+class ReceitaAfiliadoAdmin(admin.ModelAdmin):
+    list_display = ("usuario", "marketplace", "data", "etiqueta", "cliques", "pedidos", "comissao")
+    list_filter = ("marketplace", "usuario", "origem", "granularidade")
+
+
+@admin.register(RelatorioSync)
+class RelatorioSyncAdmin(admin.ModelAdmin):
+    list_display = ("usuario", "marketplace", "status", "ultimo_sucesso", "proxima_execucao")
+    list_filter = ("marketplace", "status")
+    search_fields = ("usuario__username", "erro")
+
+
+@admin.register(EventoOperacional)
+class EventoOperacionalAdmin(admin.ModelAdmin):
+    list_display = ("criado_em", "level", "pipeline", "evento", "usuario", "mensagem")
+    list_filter = ("level", "pipeline", "evento")
+    search_fields = ("mensagem", "erro", "usuario__username")
+    readonly_fields = [field.name for field in EventoOperacional._meta.fields]
+    date_hierarchy = "criado_em"

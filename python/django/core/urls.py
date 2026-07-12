@@ -16,19 +16,26 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.contrib.auth.decorators import login_not_required
+from django.db import connection
 from django.http import HttpResponse
 from django.urls import path, include
-from django.views.generic import TemplateView
+from apps.scrapers import views as scraper_views
 
 
 @login_not_required
 def healthz(request):
-    """Health check público para o Fly.io (não exige login nem banco)."""
+    """Readiness público: processo vivo e banco realmente utilizável."""
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+    except Exception:
+        return HttpResponse("database unavailable", status=503, content_type="text/plain")
     return HttpResponse("ok", content_type="text/plain")
 
 
 urlpatterns = [
-    path('', TemplateView.as_view(template_name='home.html'), name='home'),
+    path('', scraper_views.operations_dashboard, name='home'),
     path('healthz', healthz, name='healthz'),
     path('admin/', admin.site.urls),
     path('accounts/', include('apps.accounts.urls')),

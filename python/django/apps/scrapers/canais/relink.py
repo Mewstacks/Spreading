@@ -5,7 +5,10 @@ versão com a tag de afiliado do DONO — reaproveitando os geradores de link j�
 existentes (ML via Link Builder/Playwright; Amazon via string /dp/{ASIN}?tag=).
 """
 import hashlib
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 _ML_URL = re.compile(
     r"https?://[^\s]*(?:mercadolivre\.com|mercadolibre\.com|meli\.la)[^\s]*", re.I
@@ -30,7 +33,7 @@ def _asin_de_url(url):
 
 
 def hash_url(url):
-    return hashlib.sha1((url or "").strip().encode()).hexdigest()
+    return hashlib.sha256((url or "").strip().encode()).hexdigest()
 
 
 def gerar_link_afiliado(url, marketplace, usuario):
@@ -66,7 +69,7 @@ def reescrever_mensagem(texto, usuario):
         try:
             af = gerar_link_afiliado(url, mkt, usuario)
         except Exception as e:
-            print(f"[canais] falha ao gerar link p/ {url}: {e}")
+            logger.warning("Falha ao gerar link afiliado para URL de canal: %s", e)
             af = None
         if af:
             novo = novo.replace(url, af)

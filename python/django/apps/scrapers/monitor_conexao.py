@@ -31,7 +31,7 @@ def ml_conectado(user=None) -> bool:
 def wa_conectado(session=None) -> bool:
     from apps.scrapers import whatsapp_client
     try:
-        return bool(whatsapp_client.status().get("conectado"))
+        return bool(whatsapp_client.status(session).get("conectado"))
     except Exception:
         return False
 
@@ -47,14 +47,12 @@ def verificar_e_notificar() -> dict:
     enviados = 0
     checados = 0
 
-    wa_global = wa_conectado()  # Fase 3: por sessão de cada usuário.
-
     perfis = (Perfil.objects.select_related("user")
               .filter(user__is_active=True, email_verificado=True)
               .exclude(user__email=""))
     for perfil in perfis:
         checados += 1
-        wa = wa_global
+        wa = wa_conectado(perfil.sessao_whatsapp())
         ml = ml_conectado(perfil.user)
         enviados += _processar(perfil, "WhatsApp", "wa", wa, agora, cooldown,
                                enviar_alerta_conexao)

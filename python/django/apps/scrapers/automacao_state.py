@@ -26,7 +26,7 @@ HEARTBEAT_STALE = 90
 _DIR = os.path.join(getattr(settings, "ML_AUTH_DIR", "") or settings.BASE_DIR, ".automacao")
 os.makedirs(_DIR, exist_ok=True)
 
-JOBS = ("scrape", "envio")
+JOBS = ("scrape", "envio", "relatorios")
 
 
 def logfile(job: str) -> str:
@@ -118,8 +118,13 @@ def _spawn_one(job: str):
         return
     manage = os.path.join(settings.BASE_DIR, "manage.py")
     args = [sys.executable, manage, "automacao", "--modo", job]
-    # scrape = raspagem full (horas); scrape_rapido/envio = tick curto em minutos.
-    args += ["--scrape-horas", "3"] if job == "scrape" else ["--tick", "5"]
+    # scrape = raspagem full (horas); envio = tick curto; relatorios = poucas vezes/dia.
+    if job == "scrape":
+        args += ["--scrape-horas", "3"]
+    elif job == "relatorios":
+        args += ["--tick", "360"]
+    else:
+        args += ["--tick", "5"]
     log = open(logfile(job), "a", encoding="utf-8")
     kwargs = {"stdout": log, "stderr": log, "stdin": subprocess.DEVNULL,
               "cwd": settings.BASE_DIR}

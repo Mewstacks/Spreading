@@ -12,13 +12,16 @@ de categoria/site). Por isso o código fica na lista global, não por item.
 """
 import os
 import re
+import logging
 
 from apps.scrapers.auxiliar import iniciar_browser
 from apps.scrapers.models import Produto, CupomCodigo
+from apps.scrapers.progresso import emitir_progresso
 from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _coletar_cards, _salvar
 from apps.scrapers.session_paths import ml_session_dir
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
+logger = logging.getLogger(__name__)
 
 # Marca dos códigos criados por ESTE scraper (vs. curados à mão). Só desativamos/
 # reativamos os automáticos; cupons curados manualmente ficam intocados.
@@ -41,13 +44,13 @@ def _extrair_codigos(texto):
 
 def mapear_cupons_codigo():
     """Raspa /ofertas/cupons: produtos -> origem='cupom_codigo'; códigos -> CupomCodigo."""
-    print("Iniciando raspagem de CUPONS DE CÓDIGO (/ofertas/cupons)...")
+    logger.info("Iniciando raspagem de cupons de codigo ML")
     caminho_auth = os.path.join(ml_session_dir(), "auth.json")
     coletados, codigos = [], set()
 
     with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
         for n in range(1, 6):  # algumas páginas
-            print(f"[PROGRESSO] Cupons-código página {n}/5")
+            emitir_progresso(f"[PROGRESSO] Cupons-código página {n}/5")
             url = "https://www.mercadolivre.com.br/ofertas/cupons"
             if n > 1:
                 url += f"?page={n}"
@@ -58,7 +61,7 @@ def mapear_cupons_codigo():
                 except Exception:
                     pass
             except Exception as e:
-                print(f"  Erro página {n}: {e}")
+                logger.warning("Erro ao carregar pagina %s de cupons de codigo ML: %s", n, e)
                 break
             cards = _coletar_cards(page)
             if not cards:
@@ -72,14 +75,16 @@ def mapear_cupons_codigo():
     # Guarda anti-wipe: se a raspagem não trouxe NADA (ML bloqueou/caiu), não apaga
     # os produtos nem desativa códigos válidos — evita zerar tudo por falha de rede.
     if not coletados and not codigos:
-        print("CUPONS-CÓDIGO: raspagem vazia (bloqueio/erro) — nada alterado.")
+        logger.warning("Raspagem de cupons de codigo ML vazia; nada alterado")
         return 0
 
     # Produtos do cupom-código são efêmeros (recriados a cada raspagem, como as outras
     # lanes). Só troca se veio conteúdo novo (o guard acima já barra o caso 100% vazio).
     n_prod = 0
     if coletados:
-        Produto.objects.filter(origem="cupom_codigo").delete()
+        Produto.objects.filter(
+            marketplace="mercadolivre", owner__isnull=True, origem="cupom_codigo"
+        ).delete()
         n_prod = _salvar(coletados, origem="cupom_codigo")
 
     # Códigos: upsert + REATIVA os vistos agora; DESATIVA os automáticos que sumiram
@@ -98,6 +103,8 @@ def mapear_cupons_codigo():
              .exclude(codigo__in=codigos))
     n_stale = stale.update(ativo=False)
 
-    print(f"CUPONS-CÓDIGO: {n_prod} produtos, {len(codigos)} códigos "
-          f"({n_novos} novos, {n_stale} desativados): {sorted(codigos)}")
+    logger.info(
+        "Cupons de codigo ML: %s produtos, %s codigos (%s novos, %s desativados)",
+        n_prod, len(codigos), n_novos, n_stale,
+    )
     return n_prod

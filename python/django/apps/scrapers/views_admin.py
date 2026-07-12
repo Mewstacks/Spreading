@@ -18,7 +18,7 @@ from django.views.decorators.http import require_POST
 from apps.scrapers import automacao_state as st
 from apps.scrapers.fly_infra import snapshot as fly_snapshot
 from apps.scrapers.models import (
-    CanalMonitorado, ConfiguracaoEnvio, HistoricoEnvio,
+    CanalMonitorado, ConfiguracaoEnvio, EventoOperacional, HistoricoEnvio,
 )
 from apps.scrapers.views import superadmin_required
 
@@ -122,8 +122,9 @@ def superadmin_infra(request):
     snap = fly_snapshot(force=request.GET.get("force") == "1")
     # Sessões WhatsApp ativas ~ usuários com wa_estado True (cap da máquina: ~3-4/2GB).
     wa_ativas = User.objects.filter(perfil__wa_estado=True).count()
+    eventos = EventoOperacional.objects.select_related("usuario").order_by("-criado_em")[:30]
     return render(request, "scrapers/superadmin/infra.html",
-                  {"fly": snap, "wa_ativas": wa_ativas})
+                  {"fly": snap, "wa_ativas": wa_ativas, "eventos": eventos})
 
 
 @superadmin_required

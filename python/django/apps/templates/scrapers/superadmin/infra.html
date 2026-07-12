@@ -50,4 +50,30 @@
   {% endif %}
   <p style="color:var(--muted);font-size:.78rem;">Infra é uma máquina por serviço (não por usuário). Uso por usuário fica na lista de <a href="{% url 'superadmin-usuarios' %}">usuários</a>.</p>
 </div>
+
+<div class="card">
+  <div class="card-head">
+    <h2><i data-lucide="scroll-text"></i> Logs operacionais recentes</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="grid">
+      <thead><tr><th>Quando</th><th>Nível</th><th>Pipeline</th><th>Usuário</th><th>Evento</th><th>Mensagem</th></tr></thead>
+      <tbody>
+        {% for e in eventos %}
+        <tr>
+          <td>{{ e.criado_em|date:"d/m H:i:s" }}</td>
+          <td><span class="badge {% if e.level == 'error' %}badge-red{% elif e.level == 'warning' %}badge-yellow{% else %}badge-muted{% endif %}">{{ e.level }}</span></td>
+          <td>{{ e.pipeline }}</td>
+          <td>{{ e.usuario.get_username|default:"-" }}</td>
+          <td>{{ e.evento }}</td>
+          <td title="{{ e.erro }}">{{ e.mensagem|truncatechars:90 }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6" class="empty">Nenhum evento operacional registrado ainda.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p style="color:var(--muted);font-size:.78rem;">Eventos detalhados também ficam no Django Admin em “Evento operacional”.</p>
+</div>
 {% endblock %}

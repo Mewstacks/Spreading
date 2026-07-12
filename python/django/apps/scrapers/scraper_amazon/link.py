@@ -8,9 +8,12 @@ Amazon é só a URL canônica do produto com a tag do associado:
 Por isso build/prefetch são instantâneos e batcháveis. A verificação A3 confere
 apenas que a tag está presente na URL (sem rede).
 """
+import logging
 from urllib.parse import urlencode, urlparse, parse_qs
 
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _tag(usuario=None) -> str:
@@ -55,12 +58,12 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
     """
     tag = _tag(usuario)
     if not tag:
-        print("[amazon-link] tag de afiliado Amazon não configurada (Perfil/settings).")
+        logger.info("Tag de afiliado Amazon nao configurada")
         return None
 
     base = _url_canonica(produto)
     if not base:
-        print("[amazon-link] Produto sem ASIN/link_produto.")
+        logger.info("Produto Amazon sem ASIN/link_produto")
         return None
 
     sep = "&" if "?" in base else "?"
@@ -101,6 +104,6 @@ def gerar_links_em_lote(produtos):
             else:
                 falhas += 1
         except Exception as e:
-            print(f"[amazon-link] Falha ASIN {getattr(prod, 'asin', '?')}: {e}")
+            logger.warning("Falha ao gerar link Amazon para ASIN %s: %s", getattr(prod, "asin", "?"), e)
             falhas += 1
     return (gerados, falhas)

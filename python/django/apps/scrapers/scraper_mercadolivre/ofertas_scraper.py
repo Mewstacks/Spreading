@@ -9,12 +9,15 @@ preco_com_cupom = "por" (mantemos o nome do campo p/ reaproveitar a seleção/en
 """
 import os
 import re
+import logging
 
 from apps.scrapers.auxiliar import iniciar_browser, pausa_humana
 from apps.scrapers.models import Produto
+from apps.scrapers.progresso import emitir_progresso
 from apps.scrapers.session_paths import ml_session_dir
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
+logger = logging.getLogger(__name__)
 
 # Classificação de OFERTAS por palavra-chave no nome (PT), mapeando para os mesmos
 # nomes de macro de cateorize.py. Ordem importa: mais específico primeiro.
@@ -221,7 +224,7 @@ def _coletar_cards(page):
                 "frete_full": full,
             })
         except Exception as e:
-            print(f"  Erro num card: {e}")
+            logger.debug("Erro num card de oferta ML: %s", e)
     return out
 
 
@@ -236,10 +239,13 @@ def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):
         novos.append(Produto(
             campanha_id="",
             origem=origem,
+            fonte="mercadolivre-web",
             codigo_checkout=codigo_checkout,
             nome=o["nome"],
             preco_sem_desconto=o["preco_sem_desconto"],
             preco_com_cupom=o["preco_com_cupom"],
+            preco_fonte=o["preco_sem_desconto"],
+            preco_efetivo=o["preco_com_cupom"],
             link_produto=o["link_produto"],
             categoria="DESCONHECIDO",
             macro_categoria=macro_fixa or classificar_oferta_por_nome(o["nome"]),
@@ -268,6 +274,11 @@ def _upsert_ofertas(coletados):
                 "nome": o["nome"],
                 "preco_sem_desconto": o["preco_sem_desconto"],
                 "preco_com_cupom": o["preco_com_cupom"],
+                "preco_fonte": o["preco_sem_desconto"],
+                "preco_efetivo": o["preco_com_cupom"],
+                "fonte": "mercadolivre-web",
+                "estado": "ativo",
+                "falha_verificacao": "",
                 "categoria": "DESCONHECIDO",
                 "macro_categoria": classificar_oferta_por_nome(o["nome"]),
                 "imagem_url": o["imagem_url"],
@@ -282,13 +293,13 @@ def _upsert_ofertas(coletados):
 def mapear_ofertas(max_paginas=40, substituir=True):
     """Raspa N páginas de /ofertas. substituir=True (lane LENTA): regrava todo o feed.
     substituir=False (lane RÁPIDA/flash, B3): upsert por link, sem zerar o feed."""
-    print(f"Iniciando raspagem de OFERTAS (de/por, {'full' if substituir else 'flash'})...")
+    logger.info("Iniciando raspagem de ofertas ML (%s)", "full" if substituir else "flash")
     coletados = []
     caminho_auth = os.path.join(ml_session_dir(), "auth.json")
 
     with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
         for n in range(1, max_paginas + 1):
-            print(f"[PROGRESSO] Ofertas página {n}/{max_paginas} ({n*100//max_paginas}%)")
+            emitir_progresso(f"[PROGRESSO] Ofertas página {n}/{max_paginas} ({n*100//max_paginas}%)")
             try:
                 page.goto(f"https://www.mercadolivre.com.br/ofertas?page={n}",
                           wait_until="domcontentloaded", timeout=45000)
@@ -297,21 +308,26 @@ def mapear_ofertas(max_paginas=40, substituir=True):
                 except Exception:
                     pass
             except Exception as e:
-                print(f"  Erro ao carregar página {n}: {e}")
+                logger.warning("Erro ao carregar pagina de ofertas ML %s: %s", n, e)
                 continue
             cards = _coletar_cards(page)
             if not cards:
-                print(f"  Página {n} sem ofertas — parando.")
+                logger.info("Pagina %s sem ofertas; parando", n)
                 break
             coletados.extend(cards)
             pausa_humana()  # ritmo humano entre páginas (anti-bloqueio)
 
     if substituir:
-        Produto.objects.filter(origem="oferta").delete()
+        if not coletados:
+            logger.warning("Raspagem de ofertas ML vazia; feed existente preservado")
+            return 0
+        Produto.objects.filter(
+            marketplace="mercadolivre", owner__isnull=True, origem="oferta"
+        ).delete()
         n = _salvar(coletados, origem="oferta")
     else:
         n = _upsert_ofertas(coletados)
-    print(f"OFERTAS: {n} salvas.")
+    logger.info("Ofertas ML salvas/atualizadas: %s", n)
     return n
 
 
@@ -344,7 +360,7 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None):
                 url = f"https://lista.mercadolivre.com.br/{slug}_Discount_{int(min_desconto)}-100"
                 if desde > 1:
                     url += f"_Desde_{desde}"
-                print(f"[PROGRESSO] Busca '{termo}' pág {p+1}/{max_paginas}")
+                emitir_progresso(f"[PROGRESSO] Busca '{termo}' pág {p+1}/{max_paginas}")
                 try:
                     page.goto(url, wait_until="domcontentloaded", timeout=45000)
                     try:
@@ -352,7 +368,7 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None):
                     except Exception:
                         pass
                 except Exception as e:
-                    print(f"  Erro busca '{termo}': {e}")
+                    logger.warning("Erro na busca ML por termo '%s': %s", termo, e)
                     break
                 cards = _coletar_cards(page)
                 if not cards:
@@ -365,7 +381,9 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None):
     cond = Q()
     for t in termos:
         cond |= Q(nome__icontains=t)
-    Produto.objects.filter(origem="busca").filter(cond).delete()
+    Produto.objects.filter(
+        marketplace="mercadolivre", owner__isnull=True, origem="busca"
+    ).filter(cond).delete()
     n = _salvar(coletados, origem="busca", macro_fixa=macro)
-    print(f"BUSCA '{termo_busca}': {n} salvas.")
+    logger.info("Busca ML '%s': %s produtos salvos", termo_busca, n)
     return n

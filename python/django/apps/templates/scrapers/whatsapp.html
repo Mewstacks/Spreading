@@ -39,6 +39,10 @@
   #qr-box { margin:1.4rem auto; background:#fff; padding:1rem; border-radius:12px;
     display:flex; align-items:center; justify-content:center; width:280px; height:280px; }
   #qr-box img { width:248px; height:248px; display:block; }
+  /* sem src ainda: esconde o img quebrado e mostra estado de espera */
+  #qr-box img:not([src]) { display:none; }
+  #qr-box:has(img:not([src])) { background:var(--surface); border:1px dashed var(--border); }
+  #qr-box:has(img:not([src]))::after { content:'Gerando QR code…'; color:var(--muted); font-size:.85rem; }
   #qr-box.empty-box { background:var(--surface); border:1px dashed var(--border);
     color:var(--muted); font-size:.85rem; }
 
@@ -71,15 +75,15 @@
   </div>
 
   <div id="qr-area" style="display:none;">
-    <div id="qr-box"><img id="qr-img" alt="QR Code"></div>
+    <div id="qr-box"><img id="qr-img" alt="QR code para conectar o WhatsApp"></div>
     <p class="muted" style="font-size:.85rem;">Abra o WhatsApp → <b>Aparelhos conectados</b> → <b>Conectar aparelho</b> e escaneie. O QR atualiza sozinho.</p>
   </div>
 
   <div id="grupos-chip" class="grupos-chip" style="display:none;"><i data-lucide="folder"></i> <span id="grupos-n">0</span> grupos sincronizados</div>
 
   <div id="offline-area" style="display:none;">
-    <div id="qr-box-off" class="empty-box" style="margin:1.4rem auto; width:280px; height:140px; display:flex; align-items:center; justify-content:center; border-radius:12px;">Serviço Node offline</div>
-    <p class="muted" style="font-size:.85rem;">Suba o serviço <span class="mono">node.js</span> (Railway) e recarregue. Sem ele o WhatsApp não conecta.</p>
+    <div id="qr-box-off" class="empty-box" style="margin:1.4rem auto; width:280px; height:140px; display:flex; align-items:center; justify-content:center; border-radius:12px;">Serviço indisponível</div>
+    <p class="muted" style="font-size:.85rem;">O serviço de envio está fora do ar no momento. Recarregue a página em instantes; se o problema continuar, fale com o suporte.</p>
   </div>
 </div>
 {% endblock %}
@@ -109,16 +113,18 @@
     autenticado:   { txt:'Autenticado',                cls:'is-mid', qr:false, bar:true,  step:'autenticado' },
     sincronizando: { txt:'Sincronizando grupos…',      cls:'is-mid', qr:false, bar:true,  step:'sincronizando' },
     conectado:     { txt:'Conectado',                  cls:'is-on',  qr:false, bar:false, step:'conectado' },
+    reconectando:  { txt:'Reconectando WhatsApp…',      cls:'is-mid', qr:false, bar:true,  step:'qr' },
+    capacidade:    { txt:'Limite de conexões atingido',  cls:'is-off', qr:false, bar:false, step:'qr', err:true },
     falha_auth:    { txt:'Falha de autenticação',      cls:'is-off', qr:true,  bar:false, step:'qr', err:true },
     desconectado:  { txt:'Desconectado',               cls:'is-off', qr:true,  bar:false, step:'qr', err:true },
   };
 
-  qrImg.onerror = function () { qrImg.removeAttribute('src'); qrImg.alt = 'gerando QR… aguarde'; };
+  qrImg.onerror = function () { qrImg.removeAttribute('src'); qrImg.alt = 'Gerando QR code…'; };
   function refreshQr() { qrImg.src = '/scrapers/whatsapp/qr.png?t=' + Date.now(); }
 
   function showOffline() {
     pill.className = 'conn-pill is-off';
-    pillTxt.textContent = 'Serviço offline';
+    pillTxt.textContent = 'Serviço indisponível';
     stepsEl.style.display = 'none';
     qrArea.style.display = 'none';
     progArea.style.display = 'none';

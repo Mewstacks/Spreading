@@ -6,7 +6,11 @@ da Creators API (sucessor da PA-API). Se a conta não tiver elegibilidade (10 ve
 qualificadas/30 dias), a API devolve 403; aqui isso é capturado em scrape_all para
 NÃO derrubar o ML — só loga e pula o tick da Amazon.
 """
+import logging
+
 from apps.scrapers.marketplaces.base import Marketplace
+
+logger = logging.getLogger(__name__)
 
 
 class Amazon(Marketplace):
@@ -20,7 +24,7 @@ class Amazon(Marketplace):
         perfis = Perfil.objects.select_related("user").all()
         conectados = [p for p in perfis if p.amazon_conectado()]
         if not conectados:
-            print("[amazon] Nenhum usuário com conta Amazon conectada — pulando.")
+            logger.info("Nenhum usuario com conta Amazon conectada; pulando")
             return
         for perfil in conectados:
             self._scrape_usuario(perfil.user)
@@ -42,11 +46,11 @@ class Amazon(Marketplace):
                 az.buscar_por_termo(t, usuario=usuario)
             self._marcar_elegibilidade(usuario, True, "")
         except AmazonNotEligible as e:
-            print(f"[amazon] user {usuario.id} não elegível (sem 10 vendas/30d?): {e} — pulando.")
+            logger.info("Usuario %s nao elegivel para Amazon Creators API: %s", usuario.id, e)
             self._marcar_elegibilidade(usuario, False,
                                        "Conta sem elegibilidade na Creators API (10 vendas/30 dias).")
         except AmazonConfigError as e:
-            print(f"[amazon] user {usuario.id} config ausente: {e} — pulando.")
+            logger.info("Configuracao Amazon ausente para usuario %s: %s", usuario.id, e)
             self._marcar_elegibilidade(usuario, None, f"Configuração Amazon incompleta: {e}")
 
     @staticmethod
@@ -65,7 +69,7 @@ class Amazon(Marketplace):
         from apps.scrapers.scraper_amazon.link import link_tem_tag_afiliado
         return link_tem_tag_afiliado(link, usuario=usuario)
 
-    def verify_link(self, link, nome_esperado=None, confiar_desconto=False):
+    def verify_link(self, link, nome_esperado=None, confiar_desconto=False, usuario=None):
         # Dados vêm da API oficial; confiamos. (ok=True como o default da base.)
         return {"ok": True}
 
@@ -96,7 +100,7 @@ class Amazon(Marketplace):
             return buscar_por_termo(termo_busca, min_desconto=min_desconto,
                                     macro=macro, usuario=usuario)
         except (AmazonNotEligible, AmazonConfigError) as e:
-            print(f"[amazon] busca por termo pulada: {e}")
+            logger.info("Busca por termo Amazon pulada: %s", e)
             return 0
 
     def prefetch_links(self, produtos, usuario=None):
@@ -109,6 +113,6 @@ class Amazon(Marketplace):
                 else:
                     falhas += 1
             except Exception as e:
-                print(f"[amazon-link] falha ASIN {getattr(p,'asin','?')}: {e}")
+                logger.warning("Falha ao gerar link Amazon para ASIN %s: %s", getattr(p, "asin", "?"), e)
                 falhas += 1
         return (gerados, falhas)

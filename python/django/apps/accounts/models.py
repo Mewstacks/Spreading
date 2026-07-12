@@ -45,9 +45,10 @@ class Perfil(models.Model):
                     and self.afiliado_tag_amazon)
 
     # ── Telegram por usuário (cada um conecta o próprio bot do @BotFather) ──
-    # Vazio = cai no fallback global de settings (TELEGRAM_BOT_TOKEN). Texto puro
-    # como as credenciais Amazon acima; criptografar quando virar multi-host.
-    telegram_bot_token = models.CharField(max_length=120, blank=True, default="")
+    # Vazio = cai no fallback global de settings (TELEGRAM_BOT_TOKEN). Criptografado
+    # em repouso (Fernet), igual ao secret da Amazon. Coluna larga p/ o ciphertext;
+    # tokens legados em texto puro seguem legíveis (decrypt devolve o próprio valor).
+    telegram_bot_token = EncryptedCharField(max_length=512, blank=True, default="")
 
     def telegram_conectado(self) -> bool:
         """True se o usuário tem um bot do Telegram próprio configurado."""
@@ -74,6 +75,25 @@ class Perfil(models.Model):
     max_wa_sessions = models.PositiveIntegerField(default=0)
     max_configs = models.PositiveIntegerField(default=0)
     max_envios_dia = models.PositiveIntegerField(default=0)
+
+    # Identidade editorial usada em todas as mensagens.
+    nome_marca = models.CharField(max_length=80, default="Ofertas")
+    tom_marca = models.CharField(max_length=20, default="direto")
+    nivel_emoji = models.PositiveSmallIntegerField(default=2)
+    chamada_acao = models.CharField(max_length=120, default="Compre aqui")
+    divulgacao_afiliado = models.CharField(
+        max_length=180, default="Este conteúdo contém link de afiliado."
+    )
+    template_a = models.TextField(blank=True, default="")
+    template_b = models.TextField(blank=True, default="")
+
+    # Entitlements simples para os pilotos; IDs externos permitem plugar Checkout
+    # sem acoplar o acesso do produto ao provedor de cobrança.
+    plano = models.CharField(max_length=20, default="piloto")
+    assinatura_status = models.CharField(max_length=20, default="trial")
+    trial_termina_em = models.DateTimeField(null=True, blank=True)
+    billing_customer_id = models.CharField(max_length=120, blank=True, default="")
+    billing_subscription_id = models.CharField(max_length=120, blank=True, default="")
 
     # ── Cotas: leitura com fallback pro default global ──
     def cota_max_configs(self) -> int:

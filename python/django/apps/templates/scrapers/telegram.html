@@ -5,7 +5,7 @@
 <div style="max-width:560px;margin:0 auto;">
   <div class="page-head" style="text-align:center;">
     <h1 style="justify-content:center;"><i data-lucide="send"></i> Conexão Telegram</h1>
-    <p class="sub">Bot API — sem QR, sem app aberto. Cole o token do seu bot aqui; a gente valida e salva na sua conta.</p>
+    <p class="sub">Conecte um bot do Telegram para enviar suas ofertas. Sem QR code: basta o token do bot.</p>
   </div>
 
   <div class="card" style="text-align:center;">
@@ -21,8 +21,9 @@
       <li>Adicione o bot como <b>administrador</b> do canal/grupo de destino.</li>
     </ol>
 
-    <div style="display:flex;flex-direction:column;gap:.6rem;">
-      <input id="tg-token" type="password" autocomplete="off" placeholder="Cole o token do bot aqui"
+    <div style="display:flex;flex-direction:column;gap:.6rem;text-align:left;">
+      <label for="tg-token" style="margin-bottom:0;">Token do bot</label>
+      <input id="tg-token" type="password" autocomplete="off" placeholder="123456789:AAF..."
              style="width:100%;min-height:44px;padding:.6rem .8rem;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);font-family:var(--mono,monospace);">
       <div id="tg-form-err" class="muted" style="font-size:.82rem;color:var(--red);min-height:1em;"></div>
       <div style="display:flex;gap:.6rem;flex-wrap:wrap;">
@@ -32,8 +33,7 @@
     </div>
 
     <p class="muted" style="font-size:.82rem;margin-top:.9rem;">
-      Depois de conectar, vá em <a class="link" href="/scrapers/config/">Envios</a> e crie uma regra com canal
-      <b>telegram</b> e destino <span class="mono">@seucanal</span> (ou id <span class="mono">-100…</span>).
+      Depois de conectar, crie uma regra em <a class="link" href="/scrapers/config/">Envios</a> usando o canal Telegram.
     </p>
   </div>
 </div>
@@ -79,12 +79,12 @@
         removerBtn.style.display = 'inline-flex';
       } else {
         st.innerHTML = '<span class="badge badge-red"><i data-lucide="x-circle"></i> Token inválido</span>';
-        dt.textContent = s.erro || 'getMe falhou. Verifique o token.';
+        dt.textContent = s.erro || 'Não foi possível validar o token. Confira se copiou o token completo.';
         removerBtn.style.display = 'inline-flex';
       }
     } catch (e) {
       st.innerHTML = '<span class="badge badge-red"><i data-lucide="x-circle"></i> Erro</span>';
-      dt.textContent = 'Não foi possível checar o bot.';
+      dt.textContent = 'Não foi possível verificar a conexão. Tente novamente.';
     }
     if (window.renderIcons) renderIcons(); else if (window.lucide) lucide.createIcons();
   }

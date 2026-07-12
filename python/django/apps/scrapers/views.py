@@ -7,13 +7,19 @@ from functools import wraps
 
 from django.conf import settings
 from django.contrib import messages
+from django.contrib.auth.decorators import login_not_required
+from django.core import signing
 from django.core.exceptions import PermissionDenied
-from django.db.models import F, ExpressionWrapper, FloatField, Q
+from django.db.models import F, ExpressionWrapper, FloatField, Q, Count, Sum
 from django.http import StreamingHttpResponse, HttpResponse, JsonResponse
 from django.shortcuts import render, redirect
+from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
-from apps.scrapers.models import Cupom, Produto, ConfiguracaoEnvio
+from apps.scrapers.models import (
+    CliquePublicacao, ConfiguracaoEnvio, Cupom, Produto, Publicacao,
+    ReceitaAfiliado, RelatorioSync,
+)
 from apps.scrapers.scraper_mercadolivre.scraper import main as scrapper_main
 
 
@@ -46,6 +52,36 @@ def superadmin_required(view):
     return _wrapped
 
 
+def throttle_sse(max_por_min=10):
+    """Limita quantas vezes/min um usuário dispara um endpoint SSE pesado.
+
+    Cada stream sobe uma thread (Playwright/Browserbase/HTTP) na MÁQUINA COMPARTILHADA;
+    sem teto, um tenant satura CPU/RAM/Chromium dos demais. Ao estourar, devolve um
+    stream curto de erro (EventSource-friendly) em vez de rodar o job.
+    """
+    def deco(view):
+        @wraps(view)
+        def _wrapped(request, *args, **kwargs):
+            from django.core.cache import cache
+            from apps.scrapers.eventos import log_event
+            uid = getattr(request.user, "id", None) or "anon"
+            key = f"sse-throttle:{view.__name__}:{uid}"
+            if cache.get(key, 0) >= max_por_min:
+                log_event("sistema", "sse_throttled", "Endpoint pesado limitado.",
+                          level="warning", usuario=request.user,
+                          contexto={"view": view.__name__})
+                def _err():
+                    yield "data: [ERRO] Muitas execuções seguidas. Aguarde ~1 minuto.\n\n"
+                    yield "data: __DONE__\n\n"
+                resp = StreamingHttpResponse(_err(), content_type="text/event-stream")
+                resp["Cache-Control"] = "no-cache"
+                return resp
+            cache.set(key, cache.get(key, 0) + 1, 60)
+            return view(request, *args, **kwargs)
+        return _wrapped
+    return deco
+
+
 class _QueueWriter:
     """File-like object that feeds lines into a Queue for SSE streaming."""
 
@@ -66,18 +102,126 @@ class _QueueWriter:
             self._buf = ""
 
 
+def operations_dashboard(request):
+    """Centro operacional e de receita do afiliado."""
+    from datetime import timedelta
+    from apps.scrapers.monitor_conexao import ml_conectado, wa_conectado
+
+    desde = timezone.now() - timedelta(days=30)
+    pubs = Publicacao.objects.filter(usuario=request.user, criada_em__gte=desde)
+    receitas = ReceitaAfiliado.objects.filter(usuario=request.user, data__gte=desde.date())
+    resumo = pubs.aggregate(
+        enviados=Count("id", filter=Q(status="enviado"), distinct=True),
+        falhas=Count("id", filter=Q(status="falhou"), distinct=True),
+        pendentes=Count("id", filter=Q(status="pendente"), distinct=True),
+        cliques=Count("cliques"),
+    )
+    financeiro = receitas.aggregate(
+        pedidos=Sum("pedidos"), receita=Sum("receita"), comissao=Sum("comissao"),
+        cliques_mkt=Sum("cliques"), conversoes=Sum("conversoes"))
+    comissao = financeiro.get("comissao") or 0
+    posts = resumo.get("enviados") or 0
+    financeiro["comissao_por_post"] = comissao / posts if posts else 0
+    melhores_categorias = list(
+        pubs.filter(status="enviado").values("categoria")
+        .annotate(envios=Count("id", distinct=True), cliques=Count("cliques"))
+        .order_by("-cliques", "-envios")[:5]
+    )
+    melhores_destinos = list(
+        pubs.filter(status="enviado").values("destino_nome", "destino_id")
+        .annotate(envios=Count("id", distinct=True), cliques=Count("cliques"))
+        .order_by("-cliques", "-envios")[:5]
+    )
+    perfil = request.user.perfil
+    configs = ConfiguracaoEnvio.objects.filter(owner=request.user)
+    alertas = []
+    if not ml_conectado(request.user) and not perfil.amazon_conectado():
+        alertas.append(("Loja desconectada", "Conecte Mercado Livre ou Amazon para gerar links comissionados.", "scraper-conta"))
+    wa_ok = wa_conectado(perfil.sessao_whatsapp())
+    if not wa_ok and not perfil.telegram_conectado():
+        alertas.append(("Nenhum canal conectado", "Conecte WhatsApp ou Telegram antes de ativar envios.", "scraper-whatsapp"))
+    pausadas = configs.filter(ativo=False).exclude(motivo_pausa="").count()
+    if pausadas:
+        alertas.append((f"{pausadas} regra(s) pausada(s)", "Revise as falhas consecutivas e reative quando estiver pronto.", "scraper-configuracoes"))
+    if not configs.exists():
+        alertas.append(("Crie sua primeira automação", "Personalize um destino e faça um envio de teste.", "scraper-configuracoes"))
+    syncs = {
+        s.marketplace: s for s in RelatorioSync.objects.filter(usuario=request.user)
+    }
+    for marketplace in ("mercadolivre", "amazon"):
+        syncs.setdefault(marketplace, RelatorioSync(
+            usuario=request.user, marketplace=marketplace))
+    for sync in syncs.values():
+        if sync.status in {"erro", "acao"}:
+            alertas.append((
+                f"Relatório {sync.marketplace} precisa de atenção",
+                sync.erro or "Sincronização automática não concluiu.",
+                "home",
+            ))
+    return render(request, "home.html", {
+        "resumo": resumo, "financeiro": financeiro,
+        "melhores_categorias": melhores_categorias,
+        "melhores_destinos": melhores_destinos,
+        "publicacoes": pubs.select_related("produto", "configuracao").order_by("-criada_em")[:10],
+        "alertas": alertas, "configs": configs, "syncs": list(syncs.values()),
+        "ml_ok": ml_conectado(request.user), "wa_ok": wa_ok,
+        "tg_ok": perfil.telegram_conectado(),
+    })
+
+
+@login_not_required
+def redirect_rastreado(request, token):
+    """Registra somente o evento de clique e redireciona ao link afiliado."""
+    try:
+        payload = signing.loads(token, salt="click")
+        publicacao = Publicacao.objects.get(id_publico=payload["p"], status="enviado")
+    except (signing.BadSignature, KeyError, Publicacao.DoesNotExist):
+        return HttpResponse("Link inválido ou indisponível.", status=404)
+    destino = publicacao.link_afiliado or ""
+    # Defesa: só redireciona p/ http(s). Barra esquemas perigosos (javascript:, data:)
+    # caso um link corrompido chegue ao banco.
+    if not destino.startswith(("https://", "http://")):
+        return HttpResponse("Link inválido ou indisponível.", status=404)
+    CliquePublicacao.objects.create(publicacao=publicacao)
+    response = redirect(destino)
+    response["Cache-Control"] = "no-store"
+    response["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+@require_POST
+def sincronizar_receitas(request):
+    """Dispara sincronização automática dos relatórios do marketplace selecionado."""
+    marketplace = (request.POST.get("marketplace") or "").lower()
+    if marketplace not in {"mercadolivre", "amazon"}:
+        messages.error(request, "Marketplace inválido para sincronização.")
+        return redirect("home")
+    from apps.scrapers.relatorios import sync_marketplace
+    sync = sync_marketplace(request.user, marketplace)
+    if sync.status == "ok":
+        messages.success(
+            request,
+            f"{marketplace}: {sync.registros_criados} nova(s), "
+            f"{sync.registros_atualizados} atualizada(s)."
+        )
+    elif sync.status == "acao":
+        messages.warning(request, sync.erro)
+    else:
+        messages.error(request, sync.erro or "Sincronização não concluiu.")
+    return redirect("home")
+
+
 @staff_required
 def dashboard(request):
     """Painel + checklist de primeiros passos (onboarding orientado a conexões)."""
     from apps.scrapers.monitor_conexao import ml_conectado, wa_conectado
-    from apps.scrapers.afiliado import tag_ml
 
     user = request.user
     perfil = getattr(user, "perfil", None)
 
     ml_ok = ml_conectado(user)
-    tag_ok = bool(tag_ml(user))
-    wa_ok = wa_conectado()
+    tag_ok = ml_ok
+    wa_ok = wa_conectado(perfil.sessao_whatsapp() if perfil else str(user.id))
     tg_ok = bool(perfil and perfil.telegram_conectado())
     canal_ok = wa_ok or tg_ok
     regra_ok = ConfiguracaoEnvio.objects.filter(owner=user).exists()
@@ -87,9 +231,9 @@ def dashboard(request):
         {"key": "ml", "titulo": "Conectar sua conta do Mercado Livre", "feito": ml_ok,
          "desc": "Login seguro na própria página — gera seus links de afiliado.",
          "cta": "Conectar", "url": "/scrapers/ml/", "icon": "shopping-bag"},
-        {"key": "tag", "titulo": "Definir sua tag de afiliado", "feito": tag_ok,
-         "desc": "Sua comissão. Sem ela, o clique não te paga.",
-         "cta": "Definir", "url": "/scrapers/config/#afiliado", "icon": "badge-dollar-sign"},
+        {"key": "tag", "titulo": "Mercado Livre afiliado conectado", "feito": tag_ok,
+         "desc": "O Link Builder usa a conta logada para gerar o link comissionado.",
+         "cta": "Conectar", "url": "/scrapers/ml/", "icon": "badge-dollar-sign"},
         {"key": "canal", "titulo": "Conectar um canal de envio", "feito": canal_ok,
          "desc": "WhatsApp (QR) ou Telegram (bot) — por onde as ofertas saem.",
          "cta": "Conectar", "url": "/scrapers/whatsapp/", "icon": "message-circle"},
@@ -111,29 +255,28 @@ def comecar(request):
 
     Objetivo: um usuário novo consegue ficar operacional sozinho (tags → conexão →
     regra → ligar envio) sem depender do suporte."""
-    from apps.scrapers import automacao_state as st
     perfil = getattr(request.user, "perfil", None)
-    tem_tag = bool(perfil and (perfil.afiliado_tag_ml or perfil.afiliado_tag_amazon))
     wa_ok = bool(perfil and perfil.wa_estado)
     loja_ok = bool(perfil and (perfil.ml_estado or perfil.amazon_conectado()))
     tem_config = ConfiguracaoEnvio.objects.filter(owner=request.user).exists()
-    envio_ligado = st.is_enabled("envio")
+    teste_ok = Publicacao.objects.filter(usuario=request.user, status="enviado").exists()
+    envio_ligado = ConfiguracaoEnvio.objects.filter(owner=request.user, ativo=True).exists()
 
     passos = [
-        {"titulo": "Definir tag de afiliado", "feito": tem_tag,
-         "desc": "Sua tag ML e/ou Amazon — é ela que garante sua comissão.",
-         "url": "scraper-conta", "cta": "Configurar conta"},
         {"titulo": "Conectar WhatsApp", "feito": wa_ok,
          "desc": "Pareie seu aparelho pelo QR Code para disparar as ofertas.",
          "url": "scraper-whatsapp", "cta": "Conectar WhatsApp"},
         {"titulo": "Conectar loja (login no ML / Amazon)", "feito": loja_ok,
          "desc": "Faça login no Mercado Livre e salve a sessão no robô (ou conecte a Amazon Creators).",
          "url": "scraper-conta", "cta": "Conectar loja"},
-        {"titulo": "Criar primeira regra de envio", "feito": tem_config,
-         "desc": "Escolha nicho → grupo → intervalo na tela de Envios.",
+        {"titulo": "Descrever o público de um grupo", "feito": tem_config,
+         "desc": "Cada grupo pode ter nichos, descontos, horários e voz próprios.",
          "url": "scraper-configuracoes", "cta": "Criar regra"},
-        {"titulo": "Ligar o envio automático", "feito": envio_ligado,
-         "desc": "Ative a automação para as ofertas saírem sozinhas.",
+        {"titulo": "Publicar uma oferta de teste", "feito": teste_ok,
+         "desc": "Valide produto, preço, cupom, mensagem e link antes de automatizar.",
+         "url": "scraper-configuracoes", "cta": "Fazer teste"},
+        {"titulo": "Ativar uma automação", "feito": envio_ligado and teste_ok,
+         "desc": "Depois do teste, mantenha ativa somente a regra que estiver pronta.",
          "url": "scraper-configuracoes", "cta": "Ir para Envios"},
     ]
     feitos = sum(1 for p in passos if p["feito"])
@@ -161,10 +304,19 @@ def configurar_conta(request):
         perfil.afiliado_tag_amazon = (request.POST.get("afiliado_tag_amazon") or "").strip()
         perfil.amazon_credential_id = (request.POST.get("amazon_credential_id") or "").strip()
         perfil.amazon_creators_host = (request.POST.get("amazon_creators_host") or "").strip()
+        perfil.nome_marca = (request.POST.get("nome_marca") or perfil.nome_marca).strip()[:80]
+        perfil.tom_marca = (request.POST.get("tom_marca") or perfil.tom_marca).strip()[:20]
+        perfil.chamada_acao = (request.POST.get("chamada_acao") or perfil.chamada_acao).strip()[:120]
+        perfil.divulgacao_afiliado = (
+            request.POST.get("divulgacao_afiliado") or perfil.divulgacao_afiliado
+        ).strip()[:180]
+        perfil.template_a = (request.POST.get("template_a") or "").strip()
+        perfil.template_b = (request.POST.get("template_b") or "").strip()
         # Secret só sobrescreve se o campo veio preenchido (em branco mantém o atual).
         novo_secret = (request.POST.get("amazon_credential_secret") or "").strip()
         campos = ["afiliado_tag_ml", "afiliado_tag_amazon", "amazon_credential_id",
-                  "amazon_creators_host"]
+                  "amazon_creators_host", "nome_marca", "tom_marca", "chamada_acao",
+                  "divulgacao_afiliado", "template_a", "template_b"]
         if novo_secret:
             perfil.amazon_credential_secret = novo_secret
             campos.append("amazon_credential_secret")
@@ -177,6 +329,8 @@ def configurar_conta(request):
         "tem_secret": bool(perfil and perfil.amazon_credential_secret),
         "ml_sessao_ok": _tem_sessao_ml(request.user),
         "amazon_conectado": bool(perfil and perfil.amazon_conectado()),
+        "billing_checkout_url": settings.BILLING_CHECKOUT_URL,
+        "billing_portal_url": settings.BILLING_PORTAL_URL,
     })
 
 
@@ -277,11 +431,21 @@ def telegram_painel(request):
     return render(request, "scrapers/telegram.html")
 
 
+def _token_telegram_valido(token: str) -> bool:
+    """Formato canônico do BotFather: <id numérico>:<segredo>. Rejeita qualquer coisa
+    com '/', espaço ou caracteres fora do alfabeto — evita truques de path na URL do
+    getMe (f'.../bot{token}/getMe') e chamadas malformadas."""
+    import re
+    return bool(re.fullmatch(r"\d{3,}:[A-Za-z0-9_-]{30,}", token or ""))
+
+
 def _telegram_getme(token: str) -> dict:
     """Valida um token via getMe (só HTTP, sem browser). Não levanta."""
     import requests as _rq
     if not token:
         return {"token": False, "ok": False}
+    if not _token_telegram_valido(token):
+        return {"token": True, "ok": False, "erro": "Formato de token inválido."}
     try:
         r = _rq.get(f"https://api.telegram.org/bot{token}/getMe", timeout=8)
         d = r.json()
@@ -353,9 +517,34 @@ def configuracoes(request):
             # Sub-nichos: multi-select -> junta as strings de termos (OR no filtro)
             termos = [t.strip() for t in request.POST.getlist("termo_busca") if t.strip()]
             canal = (request.POST.get("canal") or "whatsapp").strip()
+            if canal not in {"whatsapp", "telegram"}:
+                messages.error(request, "Canal de envio inválido.")
+                return redirect("scraper-configuracoes")
             # Telegram usa o campo de chat_id digitado; WhatsApp usa o grupo escolhido.
             grupo_id = (request.POST.get("telegram_chat_id") if canal == "telegram"
                         else request.POST.get("grupo_id")) or ""
+            if not grupo_id.strip():
+                messages.error(request, "Escolha ou informe um grupo de destino.")
+                return redirect("scraper-configuracoes")
+            try:
+                intervalo = int(request.POST.get("intervalo_minutos") or 60)
+                janela_inicio = int(request.POST.get("janela_inicio") or 8)
+                janela_fim = int(request.POST.get("janela_fim") or 20)
+                desconto = float(request.POST.get("min_desconto_percent") or 15)
+                max_envios_dia = int(request.POST.get("max_envios_dia") or 20)
+                pausar_apos_falhas = int(request.POST.get("pausar_apos_falhas") or 5)
+            except (TypeError, ValueError):
+                messages.error(request, "Intervalo, horários ou desconto possuem valor inválido.")
+                return redirect("scraper-configuracoes")
+            if intervalo < 1 or not (0 <= janela_inicio <= 23 and 0 <= janela_fim <= 23):
+                messages.error(request, "Use intervalo positivo e horários entre 0 e 23.")
+                return redirect("scraper-configuracoes")
+            if not (0 <= desconto <= 100):
+                messages.error(request, "O desconto mínimo deve ficar entre 0% e 100%.")
+                return redirect("scraper-configuracoes")
+            if max_envios_dia < 1 or pausar_apos_falhas < 1:
+                messages.error(request, "Limites diários e de falhas devem ser positivos.")
+                return redirect("scraper-configuracoes")
             campos = dict(
                 macro_categoria=request.POST.get("macro_categoria", "").strip(),
                 termo_busca=", ".join(termos),
@@ -363,10 +552,19 @@ def configuracoes(request):
                 marketplace=(request.POST.get("marketplace") or "").strip(),
                 grupo_id=grupo_id.strip(),
                 grupo_nome=request.POST.get("grupo_nome", "").strip(),
-                intervalo_minutos=int(request.POST.get("intervalo_minutos") or 60),
-                janela_inicio=int(request.POST.get("janela_inicio") or 8),
-                janela_fim=int(request.POST.get("janela_fim") or 20),
-                min_desconto_percent=float(request.POST.get("min_desconto_percent") or 15),
+                intervalo_minutos=intervalo,
+                janela_inicio=janela_inicio,
+                janela_fim=janela_fim,
+                min_desconto_percent=desconto,
+                max_envios_dia=max_envios_dia,
+                pausar_apos_falhas=pausar_apos_falhas,
+                variante_template=(request.POST.get("variante_template") or "alternar"),
+                nome_marca=(request.POST.get("nome_marca") or "").strip()[:80],
+                tom_marca=(request.POST.get("tom_marca") or "").strip()[:20],
+                chamada_acao=(request.POST.get("chamada_acao") or "").strip()[:120],
+                divulgacao_afiliado=(request.POST.get("divulgacao_afiliado") or "").strip()[:180],
+                template_a=(request.POST.get("template_a") or "").strip(),
+                template_b=(request.POST.get("template_b") or "").strip(),
                 ativo=bool(request.POST.get("ativo")),
             )
             if cfg_id:
@@ -411,6 +609,7 @@ def configuracoes(request):
 
 
 @require_GET
+@throttle_sse(6)
 def enviar_agora_stream(request):
     """SSE — dispara um envio de teste para uma ConfiguracaoEnvio (?config=ID)."""
     from apps.scrapers.ofertas import selecionar_e_enviar
@@ -444,6 +643,8 @@ def enviar_agora_stream(request):
                         canal=getattr(cfg, "canal", "whatsapp"),
                         marketplace=getattr(cfg, "marketplace", "") or None,
                         usuario=cfg.owner,
+                        configuracao=cfg,
+                        destino_nome=cfg.grupo_nome,
                     )
                     if r.get("sucesso"):
                         from django.utils import timezone
@@ -476,6 +677,7 @@ def enviar_agora_stream(request):
 
 
 @require_GET
+@throttle_sse(6)
 def enviar_produto_stream(request):
     """SSE — envia UM produto específico (tela Promoções) p/ o destino escolhido no popup.
 
@@ -504,12 +706,18 @@ def enviar_produto_stream(request):
         if not prod:
             print("[ERRO] Produto não encontrado.")
             return
-        # Dedup POR usuário: este usuário já enviou este produto?
-        if HistoricoEnvio.objects.filter(produto_id=prod.id, usuario_id=uid).exists():
-            print("[ERRO] Você já enviou este produto antes — bloqueado p/ não repetir.")
+        from datetime import timedelta
+        recente = Publicacao.objects.filter(
+            produto_id=prod.id, usuario_id=uid, destino_id=grupo_id,
+            status="enviado", enviada_em__gte=timezone.now() - timedelta(hours=24),
+        ).order_by("-enviada_em").first()
+        if recente and prod.preco_com_cupom > recente.preco_final * .95:
+            print("[ERRO] Este destino recebeu a oferta nas últimas 24h.")
             return
         print(f"Enviando '{prod.nome[:60]}' → {grupo_nome or grupo_id} ({canal})...")
-        r = enviar_oferta_de_produto(prod, grupo_id, verificar=True, canal=canal, usuario=usuario)
+        r = enviar_oferta_de_produto(
+            prod, grupo_id, verificar=True, canal=canal, usuario=usuario,
+            destino_nome=grupo_nome)
         if r.get("sucesso"):
             print(f"__SENT__ OK Enviado (via {r.get('via')}). Link: {r.get('link')}")
         else:
@@ -521,6 +729,7 @@ def enviar_produto_stream(request):
 
 
 @require_GET
+@throttle_sse(6)
 def buscar_promocoes_stream(request):
     """SSE — busca itens por termo em TODAS as lojas (ML + Amazon) p/ a tela Promoções."""
     from apps.scrapers.marketplaces.registry import MARKETPLACES, get_marketplace
@@ -559,9 +768,36 @@ def top_promocoes(request):
     from apps.scrapers.marketplaces.registry import MARKETPLACES
     from apps.scrapers.senders.registry import SENDERS
 
-    macros_selecionados = request.GET.getlist("macro")
-    categorias_selecionadas = request.GET.getlist("categoria")
-    loja_selecionada = (request.GET.get("loja") or "").strip()
+    filtros_key = "top_promocoes_filtros"
+    if request.GET.get("reset") == "1":
+        request.session.pop(filtros_key, None)
+        return redirect("scraper-top")
+
+    tem_filtros_na_url = any(
+        chave in request.GET
+        for chave in ("macro", "categoria", "loja", "ordenar", "q", "min_desconto")
+    )
+    if tem_filtros_na_url:
+        filtros = {
+            "macro": request.GET.getlist("macro"),
+            "categoria": request.GET.getlist("categoria"),
+            "loja": (request.GET.get("loja") or "").strip(),
+            "ordenar": "valor" if request.GET.get("ordenar") == "valor" else "percent",
+            "q": (request.GET.get("q") or "").strip()[:120],
+            "min_desconto": (request.GET.get("min_desconto") or "").strip(),
+        }
+        request.session[filtros_key] = filtros
+    else:
+        filtros = request.session.get(filtros_key, {})
+
+    macros_selecionados = filtros.get("macro", [])
+    categorias_selecionadas = filtros.get("categoria", [])
+    loja_selecionada = filtros.get("loja", "")
+    busca = filtros.get("q", "")
+    try:
+        min_desconto = max(0, min(100, int(float(filtros.get("min_desconto") or 0))))
+    except (TypeError, ValueError):
+        min_desconto = 0
 
     macro_categorias = (
         Produto.objects
@@ -584,10 +820,12 @@ def top_promocoes(request):
         categorias_por_macro.setdefault(row["macro_categoria"], []).append(row["categoria"])
 
     # Ordenação: 'percent' (padrão — melhor p/ deal bot) ou 'valor' (R$ absoluto economizado).
-    ordenar = "valor" if request.GET.get("ordenar") == "valor" else "percent"
+    ordenar = "valor" if filtros.get("ordenar") == "valor" else "percent"
 
     from django.db.models import Q
-    qs = Produto.objects.filter(preco_sem_desconto__gt=0).filter(
+    qs = Produto.objects.filter(preco_sem_desconto__gt=0).exclude(
+        estado__in=["indisponivel", "invalido", "expirado", "stale"]
+    ).filter(
         # Pool compartilhado (ML, owner=None) + itens privados do usuário (Amazon dele).
         Q(owner__isnull=True) | Q(owner=request.user)
     ).annotate(
@@ -603,12 +841,23 @@ def top_promocoes(request):
         qs = qs.filter(categoria__in=categorias_selecionadas)
     if loja_selecionada:
         qs = qs.filter(marketplace=loja_selecionada)
+    if busca:
+        qs = qs.filter(
+            Q(nome__icontains=busca)
+            | Q(categoria__icontains=busca)
+            | Q(macro_categoria__icontains=busca)
+        )
+    if min_desconto:
+        qs = qs.filter(percent__gte=min_desconto)
 
     ordem = "-economia" if ordenar == "valor" else "-percent"
     produtos = list(qs.order_by(ordem)[:20])
     cupons_map = {
         c.campanha_id: c
-        for c in Cupom.objects.filter(campanha_id__in=[p.campanha_id for p in produtos])
+        for c in Cupom.objects.filter(
+            campanha_id__in=[p.campanha_id for p in produtos],
+            estado="ativo",
+        ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
     }
     # Marca itens já enviados POR ESTE usuário (manual OU automático): bloqueia reenvio na UI.
     ja_enviados = set(
@@ -619,10 +868,21 @@ def top_promocoes(request):
     for p in produtos:
         p.cupom = cupons_map.get(p.campanha_id)
         p.ja_enviado = p.id in ja_enviados
+        if (p.marketplace or "mercadolivre") == "mercadolivre" and p.link_afiliado:
+            p.afiliado_ok = True
+        p.motivos_score = [f"{p.percent:.0f}% de desconto"]
+        from apps.scrapers.precos import stats as preco_stats
+        hist_preco = preco_stats(p, dias=30)
+        if hist_preco and hist_preco["n"] >= 3 and p.preco_com_cupom <= hist_preco["minimo"] * 1.02:
+            p.motivos_score.append("mínima de 30 dias")
 
     # base da querystring (mantém filtros ao trocar a ordenação)
     from urllib.parse import urlencode
     qs_pairs = [("macro", m) for m in macros_selecionados] + [("categoria", c) for c in categorias_selecionadas]
+    if busca:
+        qs_pairs.append(("q", busca))
+    if min_desconto:
+        qs_pairs.append(("min_desconto", min_desconto))
     # base p/ os chips de loja: preserva macro/categoria/ordem, troca só a loja.
     qs_sem_loja = list(qs_pairs)
     if ordenar == "valor":
@@ -642,6 +902,10 @@ def top_promocoes(request):
         "lojas": list(MARKETPLACES.keys()),
         "canais": list(SENDERS.keys()),
         "ordenar": ordenar,
+        "busca": busca,
+        "min_desconto": min_desconto,
+        "filtros_ativos": len(macros_selecionados) + len(categorias_selecionadas)
+            + bool(loja_selecionada) + bool(busca) + bool(min_desconto),
         "qs_base": qs_base,
         "qs_base_sem_loja": qs_base_sem_loja,
     })
@@ -649,6 +913,7 @@ def top_promocoes(request):
 
 @staff_required
 @require_GET
+@throttle_sse(10)
 def run_scraper_stream(request):
     """SSE endpoint — streams every print() from the scraper to the browser."""
 
@@ -689,6 +954,7 @@ def run_scraper_stream(request):
 
 @staff_required
 @require_GET
+@throttle_sse(10)
 def scrape_ofertas_stream(request):
     """SSE endpoint — raspa as ofertas (de/por) do ML e já pré-gera os links de afiliado."""
     from apps.scrapers.scraper_mercadolivre.ofertas_scraper import mapear_ofertas
@@ -789,9 +1055,12 @@ def automacao_control(request):
     if tipo not in st.JOBS:
         tipo = "scrape"
 
-    # Loop de raspagem (scrape) é controle de admin; envio é do usuário comum.
-    if tipo == "scrape" and not request.user.is_staff:
-        raise PermissionDenied("Apenas administradores controlam a raspagem.")
+    # Os workers (scrape/envio) são loops GLOBAIS compartilhados por todos os tenants:
+    # ligar/desligar afeta todo mundo, então é controle de infra (staff). O usuário
+    # comum liga/desliga o PRÓPRIO envio pelo flag `ativo` de cada regra, sem derrubar
+    # o worker dos demais. GET (status) segue liberado para o polling do front.
+    if request.method == "POST" and not request.user.is_staff:
+        raise PermissionDenied("Apenas administradores controlam os workers de automação.")
 
     if request.method != "POST":
         rodando = st.is_running(tipo)
@@ -816,6 +1085,7 @@ def automacao_control(request):
 
 @staff_required
 @require_GET
+@throttle_sse(10)
 def scrape_cupons_codigo_stream(request):
     """SSE — raspa /ofertas/cupons (produtos + códigos de checkout)."""
     from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import mapear_cupons_codigo
@@ -823,6 +1093,7 @@ def scrape_cupons_codigo_stream(request):
 
 
 @require_GET
+@throttle_sse(6)
 def buscar_termo_stream(request):
     """SSE — busca direcionada por termo de uma config (?config=ID)."""
     from apps.scrapers.marketplaces.registry import get_marketplace
@@ -845,6 +1116,7 @@ def buscar_termo_stream(request):
 
 @staff_required
 @require_GET
+@throttle_sse(10)
 def gerar_links_stream(request):
     """SSE endpoint — gera links de afiliado em lote para produtos sem link."""
     from apps.scrapers.marketplaces.registry import get_marketplace

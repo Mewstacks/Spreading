@@ -2,7 +2,11 @@
 Mercado Livre — wrapper sobre o código existente (scrapers + link.py).
 Sem mudança de comportamento: só expõe o que já existe pelo contrato Marketplace.
 """
+import logging
+
 from apps.scrapers.marketplaces.base import Marketplace
+
+logger = logging.getLogger(__name__)
 
 
 class MercadoLivre(Marketplace):
@@ -20,7 +24,7 @@ class MercadoLivre(Marketplace):
             try:
                 buscar_por_termo(t)
             except Exception as e:
-                print(f"  busca '{t}' falhou: {e}")
+                logger.warning("Busca ML '%s' falhou: %s", t, e)
 
     def build_affiliate_link(self, produto, usuario=None):
         from apps.scrapers.scraper_mercadolivre.link import gerar_link_afiliado_para_produto
@@ -30,10 +34,11 @@ class MercadoLivre(Marketplace):
         from apps.scrapers.scraper_mercadolivre.link import link_tem_tag_afiliado
         return link_tem_tag_afiliado(link, usuario=usuario)
 
-    def verify_link(self, link, nome_esperado=None, confiar_desconto=False):
+    def verify_link(self, link, nome_esperado=None, confiar_desconto=False, usuario=None):
         from apps.scrapers.scraper_mercadolivre.link import verificar_link_afiliado
         return verificar_link_afiliado(link, nome_esperado=nome_esperado,
-                                       confiar_desconto=confiar_desconto)
+                                       confiar_desconto=confiar_desconto,
+                                       usuario=usuario)
 
     def is_alive(self, produto):
         from apps.scrapers.ofertas import esta_vivo

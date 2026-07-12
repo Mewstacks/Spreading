@@ -4,6 +4,8 @@ CSP e Permissions-Policy não têm setting embutido no Django 6, então
 adicionamos aqui. Mantém o resto do hardening em settings.py.
 """
 
+import os
+
 from django.conf import settings
 
 
@@ -32,6 +34,49 @@ _DEFAULT_PERMISSIONS_POLICY = (
     "accelerometer=(), camera=(), geolocation=(), gyroscope=(), "
     "magnetometer=(), microphone=(), payment=(), usb=()"
 )
+
+
+class DevAutoLoginMiddleware:
+    """DEV: dispensa o login local. Só ativa com DEBUG e DEV_AUTOLOGIN != '0'.
+
+    Quando a requisição chega anônima, anexa um superusuário de desenvolvimento
+    ao request.user (em memória, sem gravar sessão). Assim o LoginRequiredMiddleware
+    deixa passar e as views que usam request.user.perfil continuam funcionando.
+    NUNCA roda em produção (guardado por settings.DEBUG).
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.enabled = settings.DEBUG and os.getenv("DEV_AUTOLOGIN", "1") != "0"
+        self._user = None
+
+    def _dev_user(self):
+        # get_or_create tardio (o banco pode não existir ainda no import).
+        if self._user is not None:
+            return self._user
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        username = os.getenv("DEV_AUTOLOGIN_USER", "dev")
+        user, criado = User.objects.get_or_create(
+            username=username,
+            defaults={"email": f"{username}@localhost", "is_staff": True,
+                      "is_superuser": True},
+        )
+        if criado:
+            user.set_unusable_password()
+            user.save(update_fields=["password"])
+        self._user = user
+        return user
+
+    def __call__(self, request):
+        if self.enabled:
+            user = getattr(request, "user", None)
+            if user is None or not user.is_authenticated:
+                try:
+                    request.user = self._dev_user()
+                except Exception:
+                    pass  # banco indisponível (ex: migrate) — segue anônimo
+        return self.get_response(request)
 
 
 class SecurityHeadersMiddleware:
