@@ -67,6 +67,16 @@ def status(session=None) -> dict:
     return data
 
 
+def iniciar_sessao(session) -> dict:
+    """Inicia explicitamente o único runtime WhatsApp deste usuário."""
+    if not session:
+        return {"sucesso": False, "erro": "Sessão de usuário ausente."}
+    return _request_json(
+        "POST", "/api/sessoes", headers=_headers(),
+        json={"session": session}, timeout=10, attempts=1,
+    )
+
+
 def qrcode(session=None) -> dict:
     """Retorna {conectado, qr?} do serviço Node. Exige api-key (rota fechada)."""
     data = _request_json("GET", "/api/qrcode", headers=_headers_opt(),
@@ -124,14 +134,21 @@ def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
 
     try:
         r = requests.post(f"{_base_url()}/api/enviar", json=payload,
-                          headers=_headers(), timeout=30)
+                          headers=_headers(), timeout=75)
         try:
             corpo = r.json()
         except ValueError:
             corpo = {"erro": r.text[:200]}
         # Node devolve 200 com sucesso:true, ou 4xx/503 com erro.
-        if r.status_code == 200 and corpo.get("sucesso"):
+        if r.status_code == 200 and corpo.get("sucesso") and corpo.get("mensagem_id"):
             return corpo
+        if r.status_code == 200 and corpo.get("sucesso"):
+            return {
+                **corpo,
+                "sucesso": False,
+                "status": r.status_code,
+                "erro": "WhatsApp não devolveu o ID de confirmação da mensagem.",
+            }
         return {"sucesso": False, "status": r.status_code, **corpo}
     except WhatsAppError as e:
         return {"sucesso": False, "erro": str(e)}

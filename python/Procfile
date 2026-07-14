@@ -8,4 +8,5 @@ web: gunicorn core.wsgi:application --chdir django --bind 0.0.0.0:8080 --workers
 scrape: python django/manage.py automacao --modo scrape --scrape-horas 3
 scrapeflash: python django/manage.py automacao --modo scrape_rapido --tick 5
 envio: python django/manage.py automacao --modo envio --tick 5
+relatorios: python django/manage.py automacao --modo relatorios --tick 360
 canais: python django/manage.py monitorar_canais --tick 60

@@ -21,6 +21,7 @@ RUN npm ci --omit=dev
 
 # Copia o código da aplicação
 COPY index.js ./
+COPY session_policy.js ./
 
 EXPOSE 3000
 

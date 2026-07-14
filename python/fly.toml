@@ -8,6 +8,9 @@ primary_region = "gru"
 [build]
   dockerfile = "Dockerfile"
 
+[[restart]]
+  policy = "always"
+
 [env]
   DJANGO_DEBUG = "0"
   DJANGO_ALLOWED_HOSTS = "spreading-web.fly.dev"
@@ -33,6 +36,14 @@ primary_region = "gru"
   auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/healthz"
+    headers = { Host = "spreading-web.fly.dev", X-Forwarded-Proto = "https" }
 
 # 2 usuários: carga baixa. 1 vCPU basta; 2gb dá folga p/ Playwright (chromium ~400MB
 # no pico de raspagem) + gunicorn + workers. Suba p/ shared-cpu-2x se ficar lento.

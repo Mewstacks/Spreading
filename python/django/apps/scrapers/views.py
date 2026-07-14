@@ -343,8 +343,10 @@ def _wa_session(request):
 def whatsapp_painel(request):
     """Tela de conexão do WhatsApp: status + QR Code para parear pelo navegador."""
     from apps.scrapers import whatsapp_client
+    session = _wa_session(request)
+    whatsapp_client.iniciar_sessao(session)
     return render(request, "scrapers/whatsapp.html", {
-        "status": whatsapp_client.status(_wa_session(request)),
+        "status": whatsapp_client.status(session),
     })
 
 

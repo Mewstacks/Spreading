@@ -13,8 +13,9 @@ from apps.scrapers import whatsapp_client
 from apps.scrapers.afiliado import tag_ml
 from apps.scrapers.monitor_conexao import wa_conectado
 from apps.scrapers.models import (
-    CliquePublicacao, ConfiguracaoEnvio, Cupom, LinkAfiliadoUsuario, Produto,
-    EventoOperacional, Publicacao, ReceitaAfiliado, RelatorioSync,
+    CliquePublicacao, ConfiguracaoEnvio, Cupom, HistoricoEnvio,
+    LinkAfiliadoUsuario, Produto, EventoOperacional, Publicacao,
+    ReceitaAfiliado, RelatorioSync,
 )
 from apps.scrapers.precos import registrar as registrar_preco
 from apps.scrapers.scraper_amazon import link as amazon_link
@@ -83,12 +84,31 @@ class WhatsAppIsolationTests(SimpleTestCase):
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
         WHATSAPP_API_KEY="secret",
+    )
+    @patch("apps.scrapers.whatsapp_client.requests.request")
+    def test_session_is_started_only_by_explicit_command(self, request):
+        response = Mock()
+        response.json.return_value = {"sucesso": True, "instancia": "user-42"}
+        request.return_value = response
+
+        result = whatsapp_client.iniciar_sessao("user-42")
+
+        self.assertTrue(result["sucesso"])
+        request.assert_called_once_with(
+            "POST", "http://whatsapp.internal:3000/api/sessoes",
+            headers={"x-api-key": "secret", "Content-Type": "application/json"},
+            params=None, json={"session": "user-42"}, timeout=10,
+        )
+
+    @override_settings(
+        WHATSAPP_API_URL="http://whatsapp.internal:3000",
+        WHATSAPP_API_KEY="secret",
         WHATSAPP_GRUPO_ID="",
     )
     @patch("apps.scrapers.whatsapp_client.requests.post")
     def test_send_routes_to_the_users_session(self, post):
         response = Mock(status_code=200)
-        response.json.return_value = {"sucesso": True}
+        response.json.return_value = {"sucesso": True, "mensagem_id": "abc123"}
         post.return_value = response
 
         result = whatsapp_client.enviar_oferta(
@@ -98,6 +118,25 @@ class WhatsAppIsolationTests(SimpleTestCase):
         self.assertTrue(result["sucesso"])
         self.assertEqual(post.call_args.kwargs["json"]["session"], "user-42")
         self.assertEqual(post.call_args.kwargs["json"]["grupoid"], "123@g.us")
+        self.assertEqual(post.call_args.kwargs["timeout"], 75)
+
+    @override_settings(
+        WHATSAPP_API_URL="http://whatsapp.internal:3000",
+        WHATSAPP_API_KEY="secret",
+        WHATSAPP_GRUPO_ID="",
+    )
+    @patch("apps.scrapers.whatsapp_client.requests.post")
+    def test_send_rejects_success_without_message_confirmation(self, post):
+        response = Mock(status_code=200)
+        response.json.return_value = {"sucesso": True}
+        post.return_value = response
+
+        result = whatsapp_client.enviar_oferta(
+            "123@g.us", "mensagem", session="user-42"
+        )
+
+        self.assertFalse(result["sucesso"])
+        self.assertIn("ID de confirmação", result["erro"])
 
 
 class ConfiguracaoValidationTests(TestCase):
@@ -334,6 +373,38 @@ class AttributionWorkflowTests(TestCase):
         self.assertFalse(result["sucesso"])
         self.assertTrue(EventoOperacional.objects.filter(
             pipeline="publicacao", evento="send_failed", usuario=self.user).exists())
+
+    @patch("apps.scrapers.ofertas._baixar_imagem_b64", return_value=(None, None))
+    @patch("apps.scrapers.senders.registry.get_sender")
+    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
+    def test_successful_delivery_records_history_without_legacy_key(
+        self, get_marketplace, get_sender, _image
+    ):
+        from apps.scrapers.ofertas import enviar_oferta_de_produto
+        from apps.scrapers.senders.base import WhatsAppMarkup
+
+        marketplace = Mock()
+        marketplace.build_affiliate_link.return_value = {
+            "link_afiliado": "https://example.com/a?tracking_id=ok",
+            "afiliado_ok": True,
+        }
+        get_marketplace.return_value = marketplace
+        sender = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
+        sender.enviar_oferta.return_value = {"sucesso": True, "via": "test"}
+        get_sender.return_value = sender
+
+        result = enviar_oferta_de_produto(
+            self.product, "group@g.us", verificar=False,
+            usuario=self.user, destino_nome="Grupo",
+        )
+
+        self.assertTrue(result["sucesso"])
+        self.assertTrue(HistoricoEnvio.objects.filter(
+            produto=self.product, usuario=self.user,
+        ).exists())
+        self.assertEqual(
+            Publicacao.objects.get(produto=self.product).status, "enviado"
+        )
 
     def test_group_specific_branding_overrides_account_default(self):
         from apps.scrapers.ofertas import montar_mensagem

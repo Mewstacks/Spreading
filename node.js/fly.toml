@@ -6,8 +6,17 @@ primary_region = "gru"
 [build]
   dockerfile = "Dockerfile"
 
+[[restart]]
+  policy = "always"
+
 [env]
   PORT = "3000"
+  MAX_WHATSAPP_SESSIONS = "4"
+  SESSION_START_STAGGER_MS = "12000"
+  SESSION_INIT_TIMEOUT_MS = "90000"
+  GROUP_SYNC_TIMEOUT_MS = "45000"
+  QR_IDLE_DESTROY_MS = "180000"
+  SEND_TIMEOUT_MS = "60000"
 
 # Sessão do WhatsApp (LocalAuth) persiste no volume — sobrevive a restart/deploy.
 # IMPORTANTE: volume Fly prende a UMA máquina. Rode `fly scale count 1` para garantir
@@ -25,8 +34,24 @@ primary_region = "gru"
   auto_start_machines = true
   min_machines_running = 1
 
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [[services.http_checks]]
+    interval = "15s"
+    timeout = "10s"
+    grace_period = "60s"
+    method = "GET"
+    path = "/health"
+
 # Cada WhatsApp conectado = 1 Chromium (~350MB). Dimensione a memória pela
 # quantidade de instâncias simultâneas: 2gb ~ 3-4 sessões. Suba se OOM.
 [[vm]]
   size = "shared-cpu-2x"
-  memory = "2gb"
+  memory = "4gb"
