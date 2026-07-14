@@ -1067,6 +1067,10 @@ def automacao_control(request):
     if request.method != "POST":
         rodando = st.is_running(tipo)
         estado = st.read_state(tipo) if rodando else {}
+        # O estado é global e pode conter diagnóstico gravado por versões antigas.
+        # Nunca exponha traceback, caminhos do servidor ou detalhes do banco no UI.
+        if estado.get("erro"):
+            estado = {**estado, "erro": "Falha temporária no serviço. Uma nova tentativa será feita no próximo ciclo."}
         return JsonResponse({"rodando": rodando, "tipo": tipo, "estado": estado})
 
     acao = request.POST.get("acao")

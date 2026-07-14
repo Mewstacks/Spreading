@@ -9,15 +9,29 @@ Manual:  python manage.py automacao --modo scrape --scrape-horas 3
 """
 import logging
 import time
-import traceback
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand
+from django.db import connections
 from django.utils import timezone
 
 from apps.scrapers import automacao_state as st
 
 logger = logging.getLogger("apps.automacao")
+
+
+ERRO_PUBLICO = "Falha temporária no serviço. Uma nova tentativa será feita no próximo ciclo."
+RETRY_MINUTOS = 5
+
+
+def _renovar_conexoes_db():
+    """Descarta conexões herdadas/ociosas antes de cada ciclo do worker.
+
+    Estes comandos vivem por dias e passam horas dormindo. Nesse intervalo o
+    Postgres/proxy pode encerrar o socket sem que o Django saiba; reutilizá-lo
+    causava ``OperationalError: the connection is closed`` no ciclo seguinte.
+    """
+    connections.close_all()
 
 
 def _rodar_scrape():
@@ -31,6 +45,7 @@ def _rodar_scrape():
     lojas = list(MARKETPLACES.items())
     # Agnóstico de loja: cada marketplace raspa suas fontes. Habilitar Amazon/Shopee
     # depois não precisa editar este loop — basta registrar a loja no registry.
+    falhas = []
     for i, (slug, mp) in enumerate(lojas):
         msg = f"[{timezone.now():%H:%M}] SCRAPE: {slug}..."
         logger.info(msg)
@@ -40,9 +55,14 @@ def _rodar_scrape():
         )
         try:
             mp.scrape_all(termos=termos)
-        except Exception as e:
-            logger.warning("Scrape '%s' falhou: %s", slug, e)
-            st.write_state("scrape", erro=f"{slug}: {e}"[:300])
+        except Exception:
+            logger.exception("Scrape '%s' falhou", slug)
+            falhas.append(slug)
+            st.write_state("scrape", erro=ERRO_PUBLICO)
+    if falhas:
+        raise RuntimeError(
+            f"Falha em {len(falhas)}/{len(lojas)} marketplace(s): {', '.join(falhas)}"
+        )
     logger.info("[%s] SCRAPE concluido", timezone.now().strftime("%H:%M"))
 
 
@@ -93,6 +113,7 @@ class Command(BaseCommand):
                 continue
             st.write_state("scrape_rapido", fase="raspando")
             try:
+                _renovar_conexoes_db()
                 _rodar_scrape_rapido()
             except Exception:
                 logger.exception("Erro no scrape-flash")
@@ -109,6 +130,9 @@ class Command(BaseCommand):
         ciclos = 0
         proximo = timezone.now()  # vencido: raspa assim que ligarem
         while True:
+            # Heartbeat também durante as horas de espera; sem isto o supervisor
+            # considera o processo morto após 90s e pode iniciar workers duplicados.
+            st.write_state("scrape")
             if not st.is_enabled("scrape"):
                 st.write_state("scrape", fase="desligado", loja_atual=None,
                                ultima_msg="Desligado — ligue na tela Scraper.")
@@ -119,6 +143,7 @@ class Command(BaseCommand):
                 continue
             try:
                 st.write_state("scrape", fase="raspando", ciclos=ciclos, erro="")
+                _renovar_conexoes_db()
                 _rodar_scrape()
                 ciclos += 1
                 fim = timezone.now()
@@ -130,11 +155,10 @@ class Command(BaseCommand):
                     ultima_msg=f"Ciclo {ciclos} concluído às {fim:%H:%M}.",
                 )
             except Exception:
-                tb = traceback.format_exc()
                 logger.exception("Erro no scrape")
-                proximo = timezone.now() + timedelta(seconds=scrape_seg)
+                proximo = timezone.now() + timedelta(minutes=RETRY_MINUTOS)
                 st.write_state("scrape", fase="aguardando", loja_atual=None,
-                               proximo_ciclo=proximo.isoformat(), erro=tb[-300:])
+                               proximo_ciclo=proximo.isoformat(), erro=ERRO_PUBLICO)
 
     def _loop_envio(self, opts):
         from apps.scrapers.ofertas import processar_configs_de_envio
@@ -156,6 +180,7 @@ class Command(BaseCommand):
             agora = timezone.now()
             try:
                 st.write_state("envio", fase="processando", loja_atual=None)
+                _renovar_conexoes_db()
                 res = processar_configs_de_envio()
                 enviados = sum(1 for r in res if r.get("sucesso"))
                 # Watchdog de conexões: alerta por e-mail quando WA/ML cai (cooldown interno).
@@ -174,12 +199,11 @@ class Command(BaseCommand):
                     ultima_msg=f"{enviados} enviada(s) de {len(res)} vencida(s) às {agora:%H:%M}.",
                 )
             except Exception:
-                tb = traceback.format_exc()
                 logger.exception("Erro no tick de envio")
                 st.write_state(
                     "envio", fase="aguardando",
                     proximo_ciclo=(timezone.now() + timedelta(minutes=tick)).isoformat(),
-                    erro=tb[-300:],
+                    erro=ERRO_PUBLICO,
                 )
             proximo = timezone.now() + timedelta(minutes=tick)
 
@@ -203,6 +227,7 @@ class Command(BaseCommand):
             agora = timezone.now()
             try:
                 st.write_state("relatorios", fase="sincronizando", erro="")
+                _renovar_conexoes_db()
                 resultados = sync_due_reports()
                 ok = sum(1 for s in resultados if s.status == "ok")
                 acao = sum(1 for s in resultados if s.status == "acao")
@@ -218,8 +243,7 @@ class Command(BaseCommand):
                     erro="",
                 )
             except Exception:
-                tb = traceback.format_exc()
                 logger.exception("Erro no sync de relatórios")
                 proximo = timezone.now() + timedelta(minutes=tick)
                 st.write_state("relatorios", fase="aguardando",
-                               proximo_ciclo=proximo.isoformat(), erro=tb[-300:])
+                               proximo_ciclo=proximo.isoformat(), erro=ERRO_PUBLICO)

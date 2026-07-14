@@ -24,6 +24,29 @@ from apps.scrapers.scraper_mercadolivre.scraper import _sincronizar_produtos_no_
 from apps.scrapers.scraper_mercadolivre import link as ml_link
 
 
+class AutomationStatusSecurityTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("status-user", password="test")
+        self.user.perfil.marcar_verificado()
+        self.client.force_login(self.user)
+
+    @patch("apps.scrapers.automacao_state.is_running", return_value=True)
+    @patch("apps.scrapers.automacao_state.read_state")
+    def test_status_never_exposes_worker_traceback(self, read_state, _is_running):
+        read_state.return_value = {
+            "fase": "aguardando",
+            "erro": 'File "/usr/local/lib/python3.12/site-packages/psycopg/connection.py"\nOperationalError: the connection is closed',
+        }
+
+        response = self.client.get(reverse("scraper-automacao"), {"tipo": "scrape"})
+
+        self.assertEqual(response.status_code, 200)
+        error = response.json()["estado"]["erro"]
+        self.assertIn("Falha temporária", error)
+        self.assertNotIn("psycopg", error)
+        self.assertNotIn("/usr/local", error)
+
+
 class AffiliateIdentityTests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user("affiliate", password="test")
