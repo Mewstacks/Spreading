@@ -8,6 +8,7 @@ const {
     reconnectOutcome,
     isRevokedReason,
     syncGroupsOutcome,
+    groupRetryDelay,
     syncPollDelay,
     ocupaSlot,
 } = require('../session_policy');
@@ -110,6 +111,27 @@ test('pedido explicito durante um voo repica; automatico so aproveita', () => {
     assert.equal(syncGroupsOutcome(true, false), 'aguardar');
 });
 
+test('group retry backs off and eventually gives up', () => {
+    assert.equal(groupRetryDelay(1), 5000);
+    assert.equal(groupRetryDelay(2), 10000);
+    assert.equal(groupRetryDelay(3), 20000);
+    assert.equal(groupRetryDelay(5), 80000);
+    assert.equal(groupRetryDelay(6), 120000); // satura no teto
+    assert.equal(groupRetryDelay(7), null);   // esgotou: o botao assume
+});
+
+// O ponto do retry e cobrir a falha transitoria sem pedir clique nenhum. Se a
+// janela fosse curta demais, a lista voltaria a depender do usuario.
+test('group retry window spans minutes before giving up', () => {
+    let total = 0;
+    for (let i = 1; ; i += 1) {
+        const delay = groupRetryDelay(i);
+        if (delay === null) break;
+        total += delay;
+    }
+    assert.ok(total >= 240000, `janela de retry curta demais: ${total}ms`);
+});
+
 test('sync polling backs off and eventually gives up', () => {
     assert.equal(syncPollDelay(1), 3000);
     assert.equal(syncPollDelay(2), 6000);
@@ -119,14 +141,16 @@ test('sync polling backs off and eventually gives up', () => {
     assert.equal(syncPollDelay(9), null);  // esgotou: para de pollar
 });
 
-// getChats tem GROUP_SYNC_TIMEOUT_MS=45s no worker. A janela de repoll precisa
-// cobrir um getChats lento inteiro, senao o front desiste antes do Node.
-test('sync polling window outlasts a slow getChats', () => {
+// A leitura de grupos tem GROUP_SYNC_TIMEOUT_MS=15s no worker. A janela de
+// repoll precisa cobrir uma leitura lenta inteira, senao o front desiste antes
+// do Node. Sobra folga para as duas primeiras tentativas do groupRetryDelay,
+// entao a recuperacao tipica acontece com o usuario ainda olhando a tela.
+test('sync polling window outlasts a slow group read', () => {
     let total = 0;
     for (let i = 1; ; i += 1) {
         const delay = syncPollDelay(i);
         if (delay === null) break;
         total += delay;
     }
-    assert.ok(total >= 45000, `janela de repoll curta demais: ${total}ms`);
+    assert.ok(total >= 15000 + 5000 + 10000, `janela de repoll curta demais: ${total}ms`);
 });

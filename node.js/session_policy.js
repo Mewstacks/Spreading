@@ -48,6 +48,18 @@ function syncGroupsOutcome(syncEmVoo, forcar) {
     return forcar ? 'repicar' : 'aguardar';
 }
 
+// Backoff do retry automatico de sincronizacao de grupos DENTRO do worker.
+// Antes, uma unica falha era terminal: o latch `gruposSyncFalhou` bloqueava todo
+// GET /api/grupos e so o botao "Sincronizar grupos" reabria. Uma falha
+// transitoria (pagina ainda hidratando, rede oscilando) virava assim um estado
+// permanente de "lista indisponivel" que exigia acao manual.
+// null = esgotou: para de tentar e devolve o controle ao botao.
+function groupRetryDelay(attempt, baseMs = 5000, maxMs = 120000, maxAttempts = 6) {
+    const safeAttempt = Math.max(1, Number(attempt) || 1);
+    if (safeAttempt > maxAttempts) return null;
+    return Math.min(maxMs, baseMs * (2 ** Math.min(safeAttempt - 1, 5)));
+}
+
 // Backoff do repoll de sincronizacao de grupos no front.
 // Retorna null quando esgota: o front para de pollar e mostra o estado
 // 'lista indisponivel' em vez de repollar de 3 em 3s para sempre.
@@ -72,6 +84,7 @@ module.exports = {
     reconnectOutcome,
     isRevokedReason,
     syncGroupsOutcome,
+    groupRetryDelay,
     syncPollDelay,
     ocupaSlot,
 };

@@ -18,6 +18,7 @@ const fakeSession = (over = {}) => ({
     gruposCache: [],
     gruposCarregados: false,
     gruposSincronizando: false,
+    gruposRetryTimer: null,
     ultimoQR: null,
     ...over,
 });
@@ -67,6 +68,24 @@ test('grupos_indisponivel isolates "connected but the list never came"', () => {
     assert.equal(gruposIndisponivel(conectado({ gruposCarregados: true })), false);
     // Desconectado: o eixo relevante e `conectado`, nao este.
     assert.equal(gruposIndisponivel(fakeSession({ fase: 'desconectado' })), false);
+});
+
+// Entre duas tentativas nao ha leitura em voo, mas a lista esta a caminho. Se
+// isto reportasse "indisponivel", o front pararia de pollar segundos antes de o
+// worker tentar de novo — e a recuperacao automatica passaria despercebida.
+test('a scheduled retry counts as syncing, not as "indisponivel"', () => {
+    const s = conectado({ gruposRetryTimer: {} });
+    assert.equal(gruposIndisponivel(s), false);
+    assert.equal(buildGruposPayload(s).sincronizando, true);
+    assert.equal(buildSessionPayload(s).grupos_sincronizando, true);
+});
+
+// Depois que o backoff esgota, o estado terminal volta a aparecer: e o momento
+// em que o botao "Sincronizar grupos" passa a ser a unica saida.
+test('once retries are exhausted the list is reported "indisponivel"', () => {
+    const s = conectado({ gruposRetryTimer: null, gruposSyncFalhou: true });
+    assert.equal(gruposIndisponivel(s), true);
+    assert.equal(buildGruposPayload(s).sincronizando, false);
 });
 
 test('a connected session with an empty group list is not "indisponivel"', () => {

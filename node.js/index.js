@@ -10,8 +10,10 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 const {
     reconnectDelay, shouldPurgeAuth, reconnectOutcome, isRevokedReason, ocupaSlot,
+    groupRetryDelay,
 } = require('./session_policy');
 const { iniciarSync } = require('./group_sync');
+const { coletarGrupos, descreverErro } = require('./group_reader');
 const {
     buildSessionPayload, buildGruposPayload, buildInativoPayload,
 } = require('./payloads');
@@ -77,7 +79,10 @@ const WATCHDOG_TIMEOUT_MS = parseInt(process.env.WATCHDOG_TIMEOUT_MS, 10) || 450
 const WATCHDOG_INTERVAL_MS = parseInt(process.env.WATCHDOG_INTERVAL_MS, 10) || 5000;
 const MAX_WHATSAPP_SESSIONS = parseInt(process.env.MAX_WHATSAPP_SESSIONS, 10) || 4;
 const SESSION_INIT_TIMEOUT_MS = parseInt(process.env.SESSION_INIT_TIMEOUT_MS, 10) || 90000;
-const GROUP_SYNC_TIMEOUT_MS = parseInt(process.env.GROUP_SYNC_TIMEOUT_MS, 10) || 45000;
+// 15s e folgado: a leitura so percorre a collection em memoria da pagina, sem
+// round-trip de rede. Estourar aqui significa pagina morta, nao lentidao — por
+// isso nao vale mais os 45s que existiam quando isto era um getChats completo.
+const GROUP_SYNC_TIMEOUT_MS = parseInt(process.env.GROUP_SYNC_TIMEOUT_MS, 10) || 15000;
 const QR_IDLE_DESTROY_MS = parseInt(process.env.QR_IDLE_DESTROY_MS, 10) || 180000;
 const SEND_TIMEOUT_MS = parseInt(process.env.SEND_TIMEOUT_MS, 10) || 60000;
 const MIN_SEND_INTERVAL_MS = parseInt(process.env.MIN_SEND_INTERVAL_MS, 10) || 2500;
@@ -134,7 +139,9 @@ const createSessionState = (instanceId) => ({
     gruposCache: [],
     gruposCarregados: false,
     gruposSincronizando: false,
-    gruposSyncFalhou: false, // ultima sync falhou: nao insistir a cada GET
+    gruposSyncFalhou: false, // esgotou os retries: so o botao reabre
+    gruposSyncFalhas: 0,     // falhas seguidas; alimenta o backoff do retry
+    gruposRetryTimer: null,
     groupSyncPromise: null,
     syncPedidoDurante: false, // pedido explicito chegou com um sync em voo
     fase: 'iniciando',
@@ -218,6 +225,7 @@ const destroySessionRuntime = async (session, reason, removeFromMap = false) => 
     session.whatsappId = null;
     session.gruposSincronizando = false;
     session.syncPedidoDurante = false; // sem Chromium nao ha o que repicar
+    limparRetryGrupos(session);        // sem Chromium nao ha o que retentar
     if (removeFromMap) {
         try {
             fs.mkdirSync(session.authPath, { recursive: true });
@@ -242,30 +250,87 @@ const scheduleQrIdleDestroy = (session) => {
     }, QR_IDLE_DESTROY_MS).unref();
 };
 
+const limparRetryGrupos = (session) => {
+    if (session.gruposRetryTimer) clearTimeout(session.gruposRetryTimer);
+    session.gruposRetryTimer = null;
+};
+
+// Uma falha de leitura costuma ser transitoria (pagina ainda hidratando, rede
+// oscilando). Reagenda com backoff em vez de exigir clique no botao. Quando o
+// backoff esgota, `gruposSyncFalhou` assume como estado terminal e a rota para
+// de insistir — que era o comportamento antigo, agora so no fim da linha.
+const agendarRetryGrupos = (session) => {
+    limparRetryGrupos(session);
+    session.gruposSyncFalhas += 1;
+    const delay = session.isConnected ? groupRetryDelay(session.gruposSyncFalhas) : null;
+    if (!delay) {
+        session.gruposSyncFalhou = true;
+        session.faseMsg = 'Conectado - lista de grupos indisponivel temporariamente.';
+        return;
+    }
+    session.faseMsg = 'Conectado - atualizando a lista de grupos…';
+    session.gruposRetryTimer = setTimeout(() => {
+        session.gruposRetryTimer = null;
+        syncGroups(session, `retry-${session.gruposSyncFalhas}`);
+    }, delay).unref();
+    console.log(
+        `[${session.id}] Nova tentativa de sincronizar grupos em ${delay}ms`
+        + ` (falha ${session.gruposSyncFalhas}).`
+    );
+};
+
+// A leitura roda dentro do Chromium. Passamos a funcao como string porque
+// pupPage.evaluate(fn) serializa fn e quebraria qualquer closure — com `window`
+// entrando por parametro, coletarGrupos continua um modulo puro, testavel em
+// Node sem navegador (test/group_reader.test.js).
+const lerGruposDaPagina = (session) => session.client.pupPage.evaluate(
+    `(${coletarGrupos.toString()})(window)`
+);
+
 // Uma leitura de grupos. CONTRATO: nunca lanca — as rotas chamam syncGroups sem
 // await, entao uma rejeicao viraria unhandled rejection e derrubaria o processo.
 const lerGrupos = async (session, reason) => {
     try {
-        const chats = await withTimeout(session.client.getChats(), GROUP_SYNC_TIMEOUT_MS, 'getChats');
-        session.gruposCache = chats
-            .filter((c) => c.isGroup)
-            .map((c) => ({ id: c.id._serialized, nome: c.name }));
+        const resultado = await withTimeout(
+            lerGruposDaPagina(session), GROUP_SYNC_TIMEOUT_MS, 'lerGrupos'
+        );
+        if (!resultado || !resultado.ok) {
+            // `passo` diz onde o bundle do WA Web mudou (collections/models);
+            // sem ele o unico sinal era um throw minificado sem contexto.
+            throw new Error(
+                `leitura falhou no passo '${resultado && resultado.passo || 'desconhecido'}': `
+                + `${resultado && resultado.erro || 'sem envelope'}`
+                + (resultado && resultado.modulos ? ` | modulos: ${resultado.modulos.join(',')}` : '')
+            );
+        }
+
+        session.gruposCache = resultado.grupos.map(({ id, nome }) => ({ id, nome }));
         session.gruposCarregados = true;
+        limparRetryGrupos(session);
+        session.gruposSyncFalhas = 0;
         session.gruposSyncFalhou = false;
         session.fase = 'conectado';
         session.faseMsg = `Conectado - ${session.gruposCache.length} grupos.`;
-        console.log(`[${session.id}] Grupos sincronizados (${reason}): ${session.gruposCache.length}.`);
+        console.log(
+            `[${session.id}] Grupos sincronizados (${reason}): ${session.gruposCache.length}`
+            + ` de ${resultado.totalChats} chats; ignorados=${resultado.ignorados.length}.`
+        );
+        // Grupos ignorados sao o sinal precoce de que a leitura por grupo comecou
+        // a quebrar — antes, isso aparecia como lista vazia e nada no log.
+        if (resultado.ignorados.length) {
+            console.warn(
+                `[${session.id}] Grupos ignorados (${reason}):`,
+                JSON.stringify(resultado.ignorados.slice(0, 5))
+            );
+        }
         return true;
     } catch (err) {
         session.gruposCarregados = false;
-        // Lembra a falha: sem isto, cada GET /api/grupos dispararia um
-        // getChats novo (45s de timeout) enquanto o front pollava.
-        session.gruposSyncFalhou = true;
-        console.error(`[${session.id}] Erro ao sincronizar grupos (${reason}):`, err.message);
+        console.error(`[${session.id}] Erro ao sincronizar grupos (${reason}):`, descreverErro(err));
         // A lista de chats e secundaria. `ready` ja comprovou a conexao;
-        // nunca destrua uma sessao saudavel porque getChats ficou lento.
+        // nunca destrua uma sessao saudavel porque a leitura falhou.
         session.fase = 'conectado';
-        session.faseMsg = 'Conectado - lista de grupos indisponivel temporariamente.';
+        agendarRetryGrupos(session);
         return false;
     }
 };
@@ -360,6 +425,8 @@ const recycleSession = async (session, reason, purgeAuth = false, msgOverride = 
     session.gruposCarregados = false;
     session.gruposSincronizando = false;
     session.gruposSyncFalhou = false; // conexao nova merece tentativa nova
+    session.gruposSyncFalhas = 0;
+    limparRetryGrupos(session);
     session.syncPedidoDurante = false; // sem Chromium nao ha o que repicar
     session.authenticatedInAttempt = false;
     if (session.initTimer) clearTimeout(session.initTimer);
@@ -511,7 +578,10 @@ const initializeSession = (session) => {
         session.fase = 'conectado';
         session.progresso = 100;
         session.faseMsg = 'Conectado. Atualizando grupos em segundo plano.';
-        console.log(`[${session.id}] WhatsApp conectado!`);
+        // A versao do WA Web e o que correlaciona uma quebra de leitura com um
+        // rollout do WhatsApp. Sem ela, um erro vindo do bundle nao tem contexto.
+        const versaoWeb = await client.getWWebVersion().catch((err) => `desconhecida (${err.message})`);
+        console.log(`[${session.id}] WhatsApp conectado! WA Web ${versaoWeb}`);
         syncGroups(session, 'ready');
     });
 
@@ -523,6 +593,8 @@ const initializeSession = (session) => {
         session.gruposCarregados = false;
         session.gruposSincronizando = false;
         session.gruposSyncFalhou = false; // conexao nova merece tentativa nova
+        session.gruposSyncFalhas = 0;
+        limparRetryGrupos(session);
         session.syncPedidoDurante = false; // sem Chromium nao ha o que repicar
         session.fase = 'desconectado';
         session.progresso = 0;
@@ -825,10 +897,12 @@ app.get(['/api/grupos', '/api/grupos/:instance'], apiKeyAuth, async (req, res) =
     const session = resolveSessionParaGrupos(instanceId);
     if (!session) return res.json(buildInativoPayload(sanitizeInstanceId(instanceId)));
 
-    // Nao insiste se a ultima tentativa falhou: o payload reporta
-    // grupos_indisponivel e o usuario decide, pelo botao "Sincronizar grupos".
+    // Nao insiste se os retries automaticos ja esgotaram, e nao atropela um
+    // retry agendado: o payload reporta grupos_indisponivel e o usuario decide,
+    // pelo botao "Sincronizar grupos".
     if (session.isConnected && !session.gruposCarregados
-        && !session.gruposSyncFalhou && !session.groupSyncPromise) {
+        && !session.gruposSyncFalhou && !session.groupSyncPromise
+        && !session.gruposRetryTimer) {
         syncGroups(session, 'api-grupos');
     }
     return res.json(buildGruposPayload(session));
@@ -845,7 +919,11 @@ app.post(['/api/grupos/refresh', '/api/grupos/refresh/:instance'], apiKeyAuth, a
     }
 
     session.gruposCarregados = false;
-    session.gruposSyncFalhou = false; // pedido explicito: tenta de novo
+    // Pedido explicito: reabre o estado terminal e devolve o ciclo de retries
+    // inteiro. O timer pendente sai de cena — este sync o substitui agora.
+    session.gruposSyncFalhou = false;
+    session.gruposSyncFalhas = 0;
+    limparRetryGrupos(session);
     // forcar: um sync em voo leu o WhatsApp ANTES deste clique. Sem isto o
     // usuario que acabou de criar um grupo no celular recebia o snapshot velho.
     syncGroups(session, 'refresh-manual', { forcar: true });

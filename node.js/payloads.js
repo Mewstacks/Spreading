@@ -12,12 +12,20 @@
 //
 // Modulo puro: sem fs, sem express. Testavel em test/payloads.test.js.
 
+// Uma leitura em voo e um retry agendado sao a mesma coisa para quem olha a
+// tela: a lista ainda esta a caminho. Sem juntar os dois, a janela entre duas
+// tentativas apareceria como "indisponivel" e o front pararia de pollar
+// justamente enquanto o worker ia tentar de novo sozinho.
+const gruposEmRecuperacao = (session) => Boolean(
+    session.gruposSincronizando || session.gruposRetryTimer
+);
+
 // Ortogonal a `conectado`. syncGroups mantem fase='conectado' de proposito
-// quando getChats falha (a conexao ja foi provada pelo evento `ready`; a lista
+// quando a leitura falha (a conexao ja foi provada pelo evento `ready`; a lista
 // de chats e secundaria). Isso produz um estado legitimo que antes nao tinha
 // nome e aparecia como "Conectado / 0 grupos sincronizados".
 const gruposIndisponivel = (session) => Boolean(
-    session.isConnected && !session.gruposCarregados && !session.gruposSincronizando
+    session.isConnected && !session.gruposCarregados && !gruposEmRecuperacao(session)
 );
 
 const buildSessionPayload = (session) => ({
@@ -27,7 +35,7 @@ const buildSessionPayload = (session) => ({
     progresso: session.progresso,
     mensagem: session.faseMsg,
     grupos: session.gruposCarregados ? session.gruposCache.length : 0,
-    grupos_sincronizando: session.gruposSincronizando,
+    grupos_sincronizando: gruposEmRecuperacao(session),
     grupos_indisponivel: gruposIndisponivel(session),
     qr: session.ultimoQR,
 });
@@ -37,7 +45,7 @@ const buildGruposPayload = (session) => ({
     conectado: session.isConnected,
     fase: session.fase,
     mensagem: session.faseMsg,
-    sincronizando: session.gruposSincronizando,
+    sincronizando: gruposEmRecuperacao(session),
     grupos_indisponivel: gruposIndisponivel(session),
     grupos: session.gruposCarregados ? session.gruposCache : [],
 });
