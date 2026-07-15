@@ -11,6 +11,7 @@ const { spawn } = require('child_process');
 const {
     reconnectDelay, shouldPurgeAuth, reconnectOutcome, isRevokedReason, ocupaSlot,
 } = require('./session_policy');
+const { iniciarSync } = require('./group_sync');
 const {
     buildSessionPayload, buildGruposPayload, buildInativoPayload,
 } = require('./payloads');
@@ -135,6 +136,7 @@ const createSessionState = (instanceId) => ({
     gruposSincronizando: false,
     gruposSyncFalhou: false, // ultima sync falhou: nao insistir a cada GET
     groupSyncPromise: null,
+    syncPedidoDurante: false, // pedido explicito chegou com um sync em voo
     fase: 'iniciando',
     progresso: 0,
     reconnectTimer: null,
@@ -215,6 +217,7 @@ const destroySessionRuntime = async (session, reason, removeFromMap = false) => 
     session.isConnected = false;
     session.whatsappId = null;
     session.gruposSincronizando = false;
+    session.syncPedidoDurante = false; // sem Chromium nao ha o que repicar
     if (removeFromMap) {
         try {
             fs.mkdirSync(session.authPath, { recursive: true });
@@ -239,41 +242,41 @@ const scheduleQrIdleDestroy = (session) => {
     }, QR_IDLE_DESTROY_MS).unref();
 };
 
-const syncGroups = async (session, reason = 'auto') => {
+// Uma leitura de grupos. CONTRATO: nunca lanca — as rotas chamam syncGroups sem
+// await, entao uma rejeicao viraria unhandled rejection e derrubaria o processo.
+const lerGrupos = async (session, reason) => {
+    try {
+        const chats = await withTimeout(session.client.getChats(), GROUP_SYNC_TIMEOUT_MS, 'getChats');
+        session.gruposCache = chats
+            .filter((c) => c.isGroup)
+            .map((c) => ({ id: c.id._serialized, nome: c.name }));
+        session.gruposCarregados = true;
+        session.gruposSyncFalhou = false;
+        session.fase = 'conectado';
+        session.faseMsg = `Conectado - ${session.gruposCache.length} grupos.`;
+        console.log(`[${session.id}] Grupos sincronizados (${reason}): ${session.gruposCache.length}.`);
+        return true;
+    } catch (err) {
+        session.gruposCarregados = false;
+        // Lembra a falha: sem isto, cada GET /api/grupos dispararia um
+        // getChats novo (45s de timeout) enquanto o front pollava.
+        session.gruposSyncFalhou = true;
+        console.error(`[${session.id}] Erro ao sincronizar grupos (${reason}):`, err.message);
+        // A lista de chats e secundaria. `ready` ja comprovou a conexao;
+        // nunca destrua uma sessao saudavel porque getChats ficou lento.
+        session.fase = 'conectado';
+        session.faseMsg = 'Conectado - lista de grupos indisponivel temporariamente.';
+        return false;
+    }
+};
+
+// `forcar` = pedido explicito do usuario (botao "Sincronizar grupos"). Um sync ja
+// em voo comecou ANTES do clique, entao seu resultado nao reflete o que a pessoa
+// acabou de mudar no celular: reaproveita-lo e responder dado velho dizendo
+// sucesso. A orquestracao (repique, coalescencia, promise) vive em group_sync.js.
+const syncGroups = async (session, reason = 'auto', { forcar = false } = {}) => {
     if (!session.isConnected || !session.client) return false;
-    if (session.groupSyncPromise) return session.groupSyncPromise;
-
-    session.gruposSincronizando = true;
-    session.groupSyncPromise = (async () => {
-        try {
-            const chats = await withTimeout(session.client.getChats(), GROUP_SYNC_TIMEOUT_MS, 'getChats');
-            session.gruposCache = chats
-                .filter((c) => c.isGroup)
-                .map((c) => ({ id: c.id._serialized, nome: c.name }));
-            session.gruposCarregados = true;
-            session.gruposSyncFalhou = false;
-            session.fase = 'conectado';
-            session.faseMsg = `Conectado - ${session.gruposCache.length} grupos.`;
-            console.log(`[${session.id}] Grupos sincronizados (${reason}): ${session.gruposCache.length}.`);
-            return true;
-        } catch (err) {
-            session.gruposCarregados = false;
-            // Lembra a falha: sem isto, cada GET /api/grupos dispararia um
-            // getChats novo (45s de timeout) enquanto o front pollava.
-            session.gruposSyncFalhou = true;
-            console.error(`[${session.id}] Erro ao sincronizar grupos (${reason}):`, err.message);
-            // A lista de chats e secundaria. `ready` ja comprovou a conexao;
-            // nunca destrua uma sessao saudavel porque getChats ficou lento.
-            session.fase = 'conectado';
-            session.faseMsg = 'Conectado - lista de grupos indisponivel temporariamente.';
-            return false;
-        } finally {
-            session.gruposSincronizando = false;
-            session.groupSyncPromise = null;
-        }
-    })();
-
-    return session.groupSyncPromise;
+    return iniciarSync(session, (r) => lerGrupos(session, r), reason, { forcar });
 };
 
 // msgOverride sobrevive ao agendamento. Antes, quem quisesse explicar ao usuario
@@ -357,6 +360,7 @@ const recycleSession = async (session, reason, purgeAuth = false, msgOverride = 
     session.gruposCarregados = false;
     session.gruposSincronizando = false;
     session.gruposSyncFalhou = false; // conexao nova merece tentativa nova
+    session.syncPedidoDurante = false; // sem Chromium nao ha o que repicar
     session.authenticatedInAttempt = false;
     if (session.initTimer) clearTimeout(session.initTimer);
     session.initTimer = null;
@@ -519,6 +523,7 @@ const initializeSession = (session) => {
         session.gruposCarregados = false;
         session.gruposSincronizando = false;
         session.gruposSyncFalhou = false; // conexao nova merece tentativa nova
+        session.syncPedidoDurante = false; // sem Chromium nao ha o que repicar
         session.fase = 'desconectado';
         session.progresso = 0;
         session.faseMsg = 'Desconectado — reconectando…';
@@ -841,7 +846,9 @@ app.post(['/api/grupos/refresh', '/api/grupos/refresh/:instance'], apiKeyAuth, a
 
     session.gruposCarregados = false;
     session.gruposSyncFalhou = false; // pedido explicito: tenta de novo
-    syncGroups(session, 'refresh-manual');
+    // forcar: um sync em voo leu o WhatsApp ANTES deste clique. Sem isto o
+    // usuario que acabou de criar um grupo no celular recebia o snapshot velho.
+    syncGroups(session, 'refresh-manual', { forcar: true });
     return res.json({ sucesso: true, ...buildGruposPayload(session) });
 });
 

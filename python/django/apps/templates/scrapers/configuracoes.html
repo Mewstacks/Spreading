@@ -395,7 +395,17 @@
     // o repoll automático esgota.
     syncTentativa = 0;
     try {
-      const r = await fetch('/scrapers/whatsapp/refresh-grupos/');
+      const r = await fetch('/scrapers/whatsapp/refresh-grupos/', {
+        method: 'POST',
+        headers: { 'X-CSRFToken': getCookie('csrftoken') },
+      });
+      // Sem isto o 403 cai no catch (r.json() estoura no HTML de erro) e vira
+      // "Serviço indisponível" — mensagem errada para uma sessão expirada.
+      if (r.status === 403) {
+        msg.textContent = ' Sua sessão expirou. Recarregue a página e tente de novo.';
+        btn.disabled = false;
+        return;
+      }
       const d = await r.json();
       if (d.sucesso) {
         msg.textContent = ' sincronização iniciada…';

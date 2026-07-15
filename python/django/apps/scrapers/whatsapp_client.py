@@ -117,8 +117,13 @@ def listar_grupos(session=None) -> dict:
 
 def refresh_grupos(session=None) -> dict:
     """Força o Node a re-sincronizar a lista de grupos. POST /api/grupos/refresh."""
+    # attempts=1 de propósito: este POST não é idempotente. Se o Node aceita o
+    # pedido mas a resposta estoura os 30s, o retry cego de _request_json dispara
+    # um segundo refresh — e um segundo getChats no mesmo Chromium — além de
+    # dobrar a espera do usuário para 60s. O Node já coalesce pedidos repetidos
+    # num único repique (group_sync.js), então insistir aqui só custa.
     data = _request_json("POST", "/api/grupos/refresh", headers=_headers(),
-                         params=_params(session), timeout=30)
+                         params=_params(session), timeout=30, attempts=1)
     if "erro" in data:
         data.setdefault("sucesso", False)
     return data
@@ -131,18 +136,20 @@ def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
     Envia uma oferta para um grupo (ou número) via serviço Node.
 
     Args:
-        grupoid: id do grupo (ex '12345@g.us'). Se None, cai no WHATSAPP_GRUPO_ID padrão.
+        grupoid: id do grupo (ex '12345@g.us'), obrigatório.
         mensagem: texto da oferta (vira legenda quando há imagem).
         imagem_base64: opcional; se informado envia mídia em vez de texto puro.
 
     Returns:
         {sucesso: bool, via?: 'local'|'evolution', erro?: str}
     """
-    destino = grupoid or settings.WHATSAPP_GRUPO_ID
-    if not destino:
-        return {"sucesso": False, "erro": "Nenhum grupoid informado e WHATSAPP_GRUPO_ID vazio."}
+    # Sem destino padrão: num app multi-tenant o grupo vem sempre de
+    # ConfiguracaoEnvio.grupo_id do usuário. Um "grupo global" mandaria a oferta
+    # de um usuário para o grupo de outro.
+    if not grupoid:
+        return {"sucesso": False, "erro": "Nenhum grupoid informado."}
 
-    payload = {"grupoid": destino}
+    payload = {"grupoid": grupoid}
     if session:
         payload["session"] = session   # Node multi-cliente roteia pela sessão do usuário
     if imagem_base64:

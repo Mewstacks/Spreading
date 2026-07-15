@@ -244,7 +244,10 @@
     msg.style.color = 'var(--muted)';
     msg.textContent = 'Sincronizando…';
     try {
-      const { erro, corpo } = await acao('/scrapers/whatsapp/refresh-grupos/');
+      const { erro, corpo } = await acao('/scrapers/whatsapp/refresh-grupos/', {
+        method: 'POST',
+        headers: { 'X-CSRFToken': getCookie('csrftoken') },
+      });
       if (erro || corpo.sucesso === false) {
         msg.style.color = 'var(--red)';
         msg.textContent = erro || 'Não foi possível sincronizar agora.';

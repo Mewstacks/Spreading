@@ -7,6 +7,7 @@ const {
     shouldPurgeAuth,
     reconnectOutcome,
     isRevokedReason,
+    syncGroupsOutcome,
     syncPollDelay,
     ocupaSlot,
 } = require('../session_policy');
@@ -94,6 +95,19 @@ test('only sessions holding a Chromium count against the cap', () => {
     assert.equal(ocupaSlot({ client: null, initialized: false, reconnectTimer: null }), false,
         'expirada nao pode bloquear um usuario novo');
     assert.equal(ocupaSlot({}), false);
+});
+
+test('sem sync em voo, qualquer pedido inicia uma leitura', () => {
+    assert.equal(syncGroupsOutcome(false, false), 'iniciar');
+    assert.equal(syncGroupsOutcome(false, true), 'iniciar');
+});
+
+// Regressao: o botao "Sincronizar grupos" devolvia o snapshot lido ANTES do
+// clique. Quem criava um grupo no celular e clicava recebia sucesso e a lista
+// velha. Pedido explicito durante um voo TEM de gerar leitura nova.
+test('pedido explicito durante um voo repica; automatico so aproveita', () => {
+    assert.equal(syncGroupsOutcome(true, true), 'repicar');
+    assert.equal(syncGroupsOutcome(true, false), 'aguardar');
 });
 
 test('sync polling backs off and eventually gives up', () => {

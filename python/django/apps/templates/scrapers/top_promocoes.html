@@ -430,11 +430,17 @@ function abrirEnvio(id, nome) {
   document.getElementById('env-log').textContent = '';
   document.getElementById('env-go').disabled = false;
   document.getElementById('modal-envio').classList.add('open');
+  // Abrir o modal recarrega a lista: antes um flag de "já carregou" a congelava
+  // para sempre, e um grupo recém-sincronizado nunca aparecia sem dar F5.
+  envGruposParar();
   envToggleCanal();
   renderIcons();
 }
 function fecharEnvio() {
   document.getElementById('modal-envio').classList.remove('open');
+  // Sem isto a cadeia de repoll continua batendo em /api/grupos com o modal
+  // fechado, até esgotar o backoff.
+  envGruposParar();
   if (envEs) { envEs.close(); envEs = null; }
 }
 function envToggleCanal() {
@@ -443,30 +449,97 @@ function envToggleCanal() {
   document.getElementById('env-wa').style.display = tg ? 'none' : '';
   if (!tg) loadEnvGrupos();
 }
-var envGruposLoaded = false;
+// Backoff do repoll (espelha syncPollDelay do worker, node.js/session_policy.js).
+// getChats tem 45s de timeout no Node, então a janela precisa cobrir isso; antes
+// esta função repollava de 3 em 3s para sempre, e /api/grupos não tem rate limit.
+var envSyncTentativa = 0;
+function envSyncDelay(n) {
+  if (n > 8) return null;
+  return Math.min(15000, 3000 * Math.pow(2, Math.min(n - 1, 4)));
+}
+// Uma cadeia de repoll por vez. envToggleCanal() chama loadEnvGrupos a cada troca
+// para WhatsApp; sem esta guarda, alternar durante uma sincronização acumula
+// cadeias de setTimeout paralelas — e elas se multiplicam mais rápido do que cada
+// uma desacelera, anulando o backoff.
+//
+// A guarda precisa cobrir a ESPERA, não só o fetch: entre um repoll e outro há
+// 3–15s em que nada está em voo e um toggle abriria uma segunda cadeia.
+var envGruposEmVoo = false;   // requisição em curso
+var envGruposTimer = null;    // repoll agendado (a cadeia continua viva)
+function envGruposOcupado() { return envGruposEmVoo || envGruposTimer !== null; }
+
+// Ponto de entrada do usuário: abrir o modal, trocar o canal.
 async function loadEnvGrupos() {
-  if (envGruposLoaded) return;
+  if (envGruposOcupado()) return;
+  return envGruposCiclo();
+}
+// Um passo da cadeia. Só o repoll interno e loadEnvGrupos chamam.
+async function envGruposCiclo() {
+  if (envGruposEmVoo) return;
+  envGruposEmVoo = true;
+  try { await loadEnvGruposAgora(); } finally { envGruposEmVoo = false; }
+}
+function envGruposParar() {
+  if (envGruposTimer !== null) { window.clearTimeout(envGruposTimer); envGruposTimer = null; }
+  envSyncTentativa = 0;
+}
+async function loadEnvGruposAgora() {
   var msg = document.getElementById('env-grupos-msg');
   var field = document.getElementById('env-grupo-field');
   msg.textContent = '(carregando…)';
+  var d;
   try {
     var r = await fetch('/scrapers/whatsapp/grupos/');
-    var d = await r.json();
-    var grupos = d.grupos || [];
-    if (d.sincronizando) {
+    d = await r.json();
+  } catch (e) {
+    msg.textContent = '(serviço indisponível — digite o código)';
+    return;
+  }
+
+  // `erro` aqui só existe quando o worker Node está fora do ar
+  // (whatsapp_client._request_json). Estados normais nunca o emitem.
+  if (d.erro) { msg.textContent = '(serviço indisponível — digite o código)'; return; }
+  if (d.fase === 'capacidade') { msg.textContent = '(limite de conexões — digite o código)'; return; }
+  if (!d.conectado) { msg.textContent = '(WhatsApp desconectado — digite o código)'; return; }
+
+  if (d.sincronizando) {
+    envSyncTentativa += 1;
+    var delay = envSyncDelay(envSyncTentativa);
+    if (delay !== null) {
       msg.textContent = '(sincronizando grupos…)';
-      window.setTimeout(loadEnvGrupos, 3000);
+      envGruposTimer = window.setTimeout(function () {
+        envGruposTimer = null;
+        envGruposCiclo();
+      }, delay);
       return;
     }
-    if (d.erro || !grupos.length) { msg.textContent = d.erro ? '(não foi possível carregar — digite o código)' : '(nenhum grupo sincronizado — digite o código)'; return; }
-    msg.textContent = '(' + grupos.length + ' grupos)';
-    var sel = document.createElement('select');
-    sel.id = 'env-grupo-input';
-    sel.add(new Option('— escolha —', ''));
-    grupos.forEach(function (g) { sel.add(new Option(g.nome, g.id)); });
-    field.innerHTML = ''; field.appendChild(sel);
-    envGruposLoaded = true;
-  } catch (e) { msg.textContent = '(não foi possível carregar — digite o código)'; }
+    // Esgotou a espera com o sync em curso. Não é "sem grupos": a lista só não
+    // veio a tempo.
+    msg.textContent = '(a lista está demorando — digite o código)';
+    return;
+  }
+
+  var grupos = d.grupos || [];
+  if (d.grupos_indisponivel) {
+    // Conectado, mas o WhatsApp não entregou a lista. Não é desconexão.
+    msg.textContent = '(lista de grupos indisponível — digite o código)';
+    return;
+  }
+  if (!grupos.length) {
+    // Conectado, sync concluído, zero grupos: a conta não tem grupos mesmo.
+    msg.textContent = '(nenhum grupo encontrado — digite o código)';
+    return;
+  }
+
+  envSyncTentativa = 0;
+  msg.textContent = '(' + grupos.length + ' grupos)';
+  var sel = document.createElement('select');
+  sel.id = 'env-grupo-input';
+  // new Option() seta value/text via propriedades (escapadas) — nunca via
+  // innerHTML. Nomes de grupo são dados externos (WhatsApp). Evita XSS.
+  sel.add(new Option('— escolha —', ''));
+  grupos.forEach(function (g) { sel.add(new Option(g.nome, g.id)); });
+  field.innerHTML = ''; field.appendChild(sel);
 }
 function dispararEnvio() {
   var canal = document.getElementById('env-canal').value;

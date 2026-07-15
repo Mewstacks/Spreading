@@ -34,6 +34,20 @@ function isRevokedReason(reason) {
     return REVOKED_REASONS.has(String(reason).trim().toUpperCase());
 }
 
+// Decide o que fazer quando syncGroups e chamado com um sync ja em voo.
+// Um getChats por sessao de cada vez e inegociavel (dezenas de MB de Chromium),
+// entao 'repicar' NAO paraleliza: reaproveita a promise em voo e re-roda depois.
+//   'iniciar'  -> nao ha sync em voo: comeca um
+//   'aguardar' -> sync em voo, pedido automatico: reaproveita o resultado
+//   'repicar'  -> sync em voo, pedido explicito do usuario: reaproveita a promise
+//                 MAS re-roda ao final. Sem isto o botao "Sincronizar grupos"
+//                 devolvia o snapshot obtido ANTES do clique: quem criou um grupo
+//                 no celular e clicou nao via o grupo novo, e recebia sucesso.
+function syncGroupsOutcome(syncEmVoo, forcar) {
+    if (!syncEmVoo) return 'iniciar';
+    return forcar ? 'repicar' : 'aguardar';
+}
+
 // Backoff do repoll de sincronizacao de grupos no front.
 // Retorna null quando esgota: o front para de pollar e mostra o estado
 // 'lista indisponivel' em vez de repollar de 3 em 3s para sempre.
@@ -57,6 +71,7 @@ module.exports = {
     shouldPurgeAuth,
     reconnectOutcome,
     isRevokedReason,
+    syncGroupsOutcome,
     syncPollDelay,
     ocupaSlot,
 };

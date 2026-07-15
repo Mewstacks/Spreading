@@ -167,7 +167,6 @@ class WhatsAppIsolationTests(SimpleTestCase):
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
         WHATSAPP_API_KEY="secret",
-        WHATSAPP_GRUPO_ID="",
     )
     @patch("apps.scrapers.whatsapp_client.requests.post")
     def test_send_routes_to_the_users_session(self, post):
@@ -187,7 +186,6 @@ class WhatsAppIsolationTests(SimpleTestCase):
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
         WHATSAPP_API_KEY="secret",
-        WHATSAPP_GRUPO_ID="",
     )
     @patch("apps.scrapers.whatsapp_client.requests.post")
     def test_send_rejects_success_without_message_confirmation(self, post):
@@ -228,6 +226,32 @@ class WhatsAppDesconectarTests(TestCase):
         desconectar.assert_called_once_with(self.user.perfil.sessao_whatsapp())
 
 
+class WhatsAppRefreshGruposTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("wa-refresh", password="test")
+        self.user.perfil.marcar_verificado()
+        self.client.force_login(self.user)
+        self.url = reverse("scraper-whatsapp-refresh")
+
+    def test_refresh_requires_post(self):
+        # Dispara getChats no Chromium: em GET a rota ficava sem proteção CSRF,
+        # acionável por um <img src> de qualquer site.
+        self.assertEqual(self.client.get(self.url).status_code, 405)
+
+    def test_refresh_requires_login(self):
+        self.client.logout()
+        response = self.client.post(self.url)
+        self.assertIn(response.status_code, (302, 403))
+
+    @patch("apps.scrapers.whatsapp_client.refresh_grupos")
+    def test_refresh_targets_the_users_own_session(self, refresh):
+        refresh.return_value = {"sucesso": True, "grupos": []}
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["sucesso"])
+        refresh.assert_called_once_with(self.user.perfil.sessao_whatsapp())
+
+
 class WhatsAppTransportContractTests(SimpleTestCase):
     """O front distingue "Node fora do ar" de "WhatsApp desconectado" pela
     presença da chave `erro`. Ela só pode aparecer por falha de transporte."""
@@ -240,6 +264,22 @@ class WhatsAppTransportContractTests(SimpleTestCase):
     def test_unreachable_worker_is_reported_as_erro(self, request):
         request.side_effect = OSError("connection refused")
         self.assertIn("erro", whatsapp_client.listar_grupos("user-42"))
+
+    @override_settings(
+        WHATSAPP_API_URL="http://whatsapp.internal:3000",
+        WHATSAPP_API_KEY="secret",
+    )
+    @patch("apps.scrapers.whatsapp_client.requests.request")
+    def test_refresh_never_retries_a_non_idempotent_post(self, request):
+        # O Node pode ter ACEITO o refresh e só demorado a responder: repetir
+        # dispara um segundo getChats no mesmo Chromium e dobra a espera para 60s.
+        request.side_effect = OSError("timed out")
+
+        data = whatsapp_client.refresh_grupos("user-42")
+
+        self.assertEqual(request.call_count, 1)
+        self.assertIn("erro", data)
+        self.assertFalse(data["sucesso"])
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",

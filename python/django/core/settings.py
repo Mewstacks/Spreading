@@ -233,8 +233,6 @@ STORAGES = {
 WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:3000")
 # Reutiliza a API_KEY do .env (mesma chave do serviço Node).
 WHATSAPP_API_KEY = os.getenv("WHATSAPP_API_KEY") or os.getenv("API_KEY", "")
-# Grupo de destino padrão (id no formato 12345@g.us). Pegue via GET /api/grupos.
-WHATSAPP_GRUPO_ID = os.getenv("WHATSAPP_GRUPO_ID", "")
 
 
 # ─────────────────────────────────────────────────────────────

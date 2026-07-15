@@ -357,9 +357,15 @@ def whatsapp_status_json(request):
     return JsonResponse(whatsapp_client.status(_wa_session(request)))
 
 
-@require_GET
+@require_POST
 def whatsapp_refresh_grupos(request):
-    """Força re-sincronização da lista de grupos no Node e devolve o resultado."""
+    """Força re-sincronização da lista de grupos no Node e devolve o resultado.
+
+    POST porque dispara trabalho pesado (getChats no Chromium, 45s de timeout).
+    Em GET a rota ficava sem proteção CSRF — acionável por um <img src> de
+    qualquer site — e sujeita a pré-fetch do navegador. Espelha
+    whatsapp_desconectar e o POST /api/grupos/refresh do próprio Node.
+    """
     from apps.scrapers import whatsapp_client
     return JsonResponse(whatsapp_client.refresh_grupos(_wa_session(request)))
 
