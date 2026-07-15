@@ -52,8 +52,9 @@ def gerar_link_afiliado(url, marketplace, usuario):
 
     # Mercado Livre — Link Builder com a sessão do usuário, verificando a tag (A3).
     from apps.scrapers.scraper_mercadolivre.link import (
-        afiliate_link_builder, _auth_path, link_tem_tag_afiliado,
+        afiliate_link_builder, link_tem_tag_afiliado,
     )
+    from apps.scrapers.session_paths import ml_auth_path as _auth_path
     link = afiliate_link_builder(url, auth_path=_auth_path(usuario))
     if link and link_tem_tag_afiliado(link, usuario=usuario):
         return link

@@ -16,3 +16,17 @@ def expire_stale(max_age_hours=48):
     ProdutoCupom.objects.filter(cupom__estado="expirado").exclude(
         status="expirado").update(status="expirado")
     return {"products": stale_products, "coupons": expired_coupons}
+
+
+def reconciliar_publicacoes_orfas(max_age_minutes=30):
+    """Fecha Publicacao presas em 'pendente' — o worker morreu no meio do envio.
+
+    A linha nasce 'pendente' antes do trabalho e todo erro previsto já a marca
+    'falhou'; sobra o processo morto (deploy/crash) entre o create e o desfecho, que
+    nenhum except captura. Um envio real leva no máximo dezenas de segundos (Playwright
+    do ML), então 'pendente' há 30min não é um envio em curso — é uma órfã.
+    """
+    from apps.scrapers.models import Publicacao
+    cutoff = timezone.now() - timedelta(minutes=max_age_minutes)
+    return Publicacao.objects.filter(status="pendente", criada_em__lt=cutoff).update(
+        status="falhou", erro="Envio interrompido antes de concluir (worker reiniciado).")

@@ -1,16 +1,22 @@
 import os
 import tempfile
+import uuid
 from datetime import timedelta
+from io import StringIO
 from unittest.mock import Mock, patch
 
+import requests
 from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
+from django.core.management import call_command
 from django.urls import reverse
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
-from apps.scrapers import whatsapp_client
+from apps.scrapers import ofertas, whatsapp_client
 from apps.scrapers.afiliado import tag_ml
+from apps.scrapers.maintenance import reconciliar_publicacoes_orfas
+from apps.scrapers.marketplaces.registry import get_marketplace
 from apps.scrapers.monitor_conexao import wa_conectado
 from apps.scrapers.models import (
     CliquePublicacao, ConfiguracaoEnvio, Cupom, FonteIngestao, HistoricoEnvio,
@@ -82,7 +88,7 @@ class AffiliateIdentityTests(TestCase):
                 auth_file.write("{}")
 
             with (
-                patch.object(ml_link, "_auth_dir", return_value=auth_dir),
+                override_settings(ML_AUTH_DIR=auth_dir),
                 patch.object(
                     ml_link,
                     "afiliate_link_builder",
@@ -102,7 +108,19 @@ class AffiliateIdentityTests(TestCase):
         with tempfile.TemporaryDirectory() as auth_dir:
             with open(os.path.join(auth_dir, "auth.json"), "w", encoding="utf-8") as auth:
                 auth.write("{}")
-            with patch.object(ml_link, "_auth_dir", return_value=auth_dir):
+            with override_settings(ML_AUTH_DIR=auth_dir):
+                with self.assertRaises(ml_link.LoginError):
+                    ml_link.gerar_link_afiliado_para_produto(
+                        self.product, usuario=self.user
+                    )
+
+    def test_ml_link_never_falls_back_to_another_users_auth(self):
+        """O fallback de ml_auth_path é só p/ job sem usuário: com usuário, nunca."""
+        with tempfile.TemporaryDirectory() as auth_dir:
+            outro = os.path.join(auth_dir, f"auth_{self.user.id + 1}.json")
+            with open(outro, "w", encoding="utf-8") as auth:
+                auth.write("{}")
+            with override_settings(ML_AUTH_DIR=auth_dir):
                 with self.assertRaises(ml_link.LoginError):
                     ml_link.gerar_link_afiliado_para_produto(
                         self.product, usuario=self.user
@@ -138,6 +156,72 @@ class AffiliateIdentityTests(TestCase):
         self.assertEqual(enviar.call_args.kwargs["session"], str(self.user.id))
 
 
+class MLAuthPathTests(SimpleTestCase):
+    """Resolução da sessão do ML.
+
+    O bug que originou estes testes: a tela de conexão gravava auth_{id}.json e a
+    geração de links lia um auth.json hardcoded que nunca existiu. O Playwright
+    subia sem cookies, o ML mandava pro login, e o usuário via "Sessão ML
+    expirada" com a sessão perfeitamente viva.
+    """
+
+    def _tocar(self, caminho, quando=None):
+        with open(caminho, "w", encoding="utf-8") as arquivo:
+            arquivo.write("{}")
+        if quando is not None:
+            os.utime(caminho, (quando, quando))
+        return caminho
+
+    def test_usuario_recebe_o_proprio_arquivo(self):
+        from apps.scrapers.session_paths import ml_auth_path
+
+        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
+            user = Mock(id=7)
+            self.assertEqual(ml_auth_path(user), os.path.join(d, "auth_7.json"))
+
+    def test_usuario_ignora_o_auth_global_e_o_de_terceiros(self):
+        from apps.scrapers.session_paths import ml_auth_path
+
+        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
+            self._tocar(os.path.join(d, "auth.json"))
+            self._tocar(os.path.join(d, "auth_99.json"))
+            self.assertEqual(ml_auth_path(Mock(id=7)), os.path.join(d, "auth_7.json"))
+
+    def test_job_sem_usuario_prefere_o_auth_global_legado(self):
+        from apps.scrapers.session_paths import ml_auth_path
+
+        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
+            self._tocar(os.path.join(d, "auth.json"))
+            self._tocar(os.path.join(d, "auth_7.json"))
+            self.assertEqual(ml_auth_path(), os.path.join(d, "auth.json"))
+
+    def test_job_sem_usuario_cai_na_sessao_mais_recente(self):
+        """O que conserta cron/cupons: sem auth.json, usar a sessão real que existe."""
+        from apps.scrapers.session_paths import ml_auth_path
+
+        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
+            self._tocar(os.path.join(d, "auth_1.json"), quando=1_000_000)
+            self._tocar(os.path.join(d, "auth_2.json"), quando=2_000_000)
+            self.assertEqual(ml_auth_path(), os.path.join(d, "auth_2.json"))
+
+    def test_sem_nenhuma_sessao_devolve_o_caminho_legado(self):
+        """Não estoura aqui: quem chama reporta 'reconecte' com a mensagem certa."""
+        from apps.scrapers.session_paths import ml_auth_path
+
+        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
+            caminho = ml_auth_path()
+            self.assertEqual(caminho, os.path.join(d, "auth.json"))
+            self.assertFalse(os.path.exists(caminho))
+
+    def test_arquivo_alheio_no_diretorio_nao_vira_sessao(self):
+        from apps.scrapers.session_paths import ml_auth_path
+
+        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
+            self._tocar(os.path.join(d, "auth_1.json.bak"))
+            self._tocar(os.path.join(d, "outra_coisa.json"))
+            self.assertEqual(ml_auth_path(), os.path.join(d, "auth.json"))
+
+
 class WhatsAppIsolationTests(SimpleTestCase):
     @patch("apps.scrapers.whatsapp_client.status")
     def test_connection_monitor_checks_the_requested_session(self, status):
@@ -150,7 +234,12 @@ class WhatsAppIsolationTests(SimpleTestCase):
         WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.request")
-    def test_session_is_started_only_by_explicit_command(self, request):
+    def test_session_start_is_an_explicit_post_for_one_session(self, request):
+        # Renomeado de "..._only_by_explicit_command": o loop de envio também
+        # chama iniciar_sessao agora (ofertas._wa_pronto), então "só o usuário
+        # inicia sessão" deixou de ser verdade. O que este teste sempre travou —
+        # e segue travando — é a FORMA: um POST explícito, para uma sessão
+        # nomeada. Quem nunca pode iniciar sessão é o GET /api/status.
         response = Mock()
         response.json.return_value = {"sucesso": True, "instancia": "user-42"}
         request.return_value = response
@@ -316,6 +405,316 @@ class WhatsAppTransportContractTests(SimpleTestCase):
             headers={"x-api-key": "secret", "Content-Type": "application/json"},
             params=None, json={"session": "user-42"}, timeout=25,
         )
+
+
+class WhatsAppErrorTaxonomyTests(SimpleTestCase):
+    """Toda falha de envio carrega `classe`. O orquestrador decide por ela se
+    conta a falha contra a regra do usuário — ver EnvioResilienciaTests."""
+
+    def _post(self, **kwargs):
+        return patch("apps.scrapers.whatsapp_client.requests.post", **kwargs)
+
+    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000", WHATSAPP_API_KEY="k")
+    def test_node_classification_wins_over_the_status_code(self):
+        # O Node responde 503 para toda falha de envio, inclusive as permanentes
+        # (grupo apagado). Sem ler o corpo, o status sozinho diria "transitório"
+        # e a regra quebrada nunca pausaria.
+        response = Mock(status_code=503)
+        response.json.return_value = {
+            "sucesso": False,
+            "erro": "Grupo de destino nao encontrado nesta conta do WhatsApp.",
+            "classe": "permanente",
+        }
+        with self._post(return_value=response):
+            r = whatsapp_client.enviar_oferta("123@g.us", "m", session="u")
+        self.assertEqual(r["classe"], "permanente")
+
+    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000", WHATSAPP_API_KEY="k")
+    def test_timeout_and_refused_connection_are_transient(self):
+        # Os dois piores casos nunca chegam classificados pelo Node — ele não
+        # chegou a responder. São exatamente os que desligavam a automação.
+        for erro in (requests.Timeout("read timeout"),
+                     requests.ConnectionError("connection refused")):
+            with self.subTest(erro=type(erro).__name__), self._post(side_effect=erro):
+                r = whatsapp_client.enviar_oferta("123@g.us", "m", session="u")
+            self.assertFalse(r["sucesso"])
+            self.assertEqual(r["classe"], "transitorio")
+
+    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000", WHATSAPP_API_KEY="k")
+    def test_rate_limit_is_transient_and_bad_request_is_permanent(self):
+        casos = [(429, "transitorio"), (500, "transitorio"), (400, "permanente")]
+        for status, esperado in casos:
+            response = Mock(status_code=status)
+            response.json.return_value = {"erro": "x"}   # Node antigo: sem classe
+            with self.subTest(status=status), self._post(return_value=response):
+                r = whatsapp_client.enviar_oferta("123@g.us", "m", session="u")
+            self.assertEqual(r["classe"], esperado)
+
+    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000", WHATSAPP_API_KEY="k")
+    def test_node_regression_does_not_punish_the_user(self):
+        # sucesso sem mensagem_id é bug nosso, não da configuração dele.
+        response = Mock(status_code=200)
+        response.json.return_value = {"sucesso": True}
+        with self._post(return_value=response):
+            r = whatsapp_client.enviar_oferta("123@g.us", "m", session="u")
+        self.assertFalse(r["sucesso"])
+        self.assertEqual(r["classe"], "transitorio")
+
+
+class EnvioResilienciaTests(TestCase):
+    """Uma indisponibilidade transitória do WhatsApp não pode desligar a
+    automação nem queimar o pool de candidatos. Era o defeito relatado: o worker
+    ficava fora do ar, e algumas horas depois a regra estava `ativo=False`."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("envio-user", password="test")
+        self.user.perfil.marcar_verificado()
+        self.cfg = ConfiguracaoEnvio.objects.create(
+            owner=self.user, grupo_id="123@g.us", canal="whatsapp",
+            janela_inicio=0, janela_fim=0,       # janela 24h: o teste não depende da hora
+            pausar_apos_falhas=3,
+        )
+
+    def _processar(self, status, envio=None):
+        with patch("apps.scrapers.whatsapp_client.status", return_value=status) as st, \
+             patch("apps.scrapers.whatsapp_client.iniciar_sessao") as iniciar, \
+             patch("apps.scrapers.ofertas.selecionar_e_enviar",
+                   return_value=envio or {"sucesso": True}) as enviar:
+            resultados = ofertas.processar_configs_de_envio()
+        self.cfg.refresh_from_db()
+        return st, iniciar, enviar, resultados
+
+    def test_disconnected_session_skips_the_pool_entirely(self):
+        # O ponto caro: sem o gate, selecionar_e_enviar rodaria 8 candidatos a
+        # ~30s de Playwright cada para só então descobrir que não há WhatsApp.
+        _, _, enviar, _ = self._processar({"conectado": False, "fase": "reconectando"})
+        enviar.assert_not_called()
+        self.assertEqual(self.cfg.falhas_consecutivas, 0)
+        self.assertTrue(self.cfg.ativo)
+
+    def test_unreachable_worker_is_not_the_configs_fault(self):
+        _, _, enviar, _ = self._processar({"erro": "connection refused", "conectado": False})
+        enviar.assert_not_called()
+        self.assertEqual(self.cfg.falhas_consecutivas, 0)
+        self.assertTrue(self.cfg.ativo)
+
+    def test_inactive_session_is_revived_but_this_tick_does_not_send(self):
+        # 'inativo' é o único estado em que POST /api/sessoes reconecta sem
+        # humano (credencial no volume, sessão fora do Map). initializeSession é
+        # assíncrono: quem envia é o tick seguinte.
+        _, iniciar, enviar, _ = self._processar({"conectado": False, "fase": "inativo"})
+        iniciar.assert_called_once_with(self.user.perfil.sessao_whatsapp())
+        enviar.assert_not_called()
+        self.assertTrue(self.cfg.ativo)
+
+    def test_expired_session_is_not_revived_from_the_send_loop(self):
+        # O Node só chega em 'expirado' depois de purgar a credencial, então
+        # revivê-lo aqui não reconecta ninguém: só fabrica um QR que ninguém está
+        # olhando e prende um dos 4 slots de Chromium.
+        _, iniciar, enviar, _ = self._processar({"conectado": False, "fase": "expirado"})
+        iniciar.assert_not_called()
+        enviar.assert_not_called()
+
+    def test_session_state_is_read_once_per_tick_not_once_per_config(self):
+        ConfiguracaoEnvio.objects.create(
+            owner=self.user, grupo_id="456@g.us", canal="whatsapp",
+            janela_inicio=0, janela_fim=0,
+        )
+        st, _, _, _ = self._processar({"conectado": False, "fase": "reconectando"})
+        self.assertEqual(st.call_count, 1)
+
+    def test_transient_send_failures_never_pause_the_config(self):
+        # O cenário relatado, encenado: o worker pisca mais vezes que o teto.
+        falha = {"sucesso": False, "motivo": "Falha de transporte: timeout",
+                 "classe": "transitorio"}
+        for _ in range(self.cfg.pausar_apos_falhas + 2):
+            self.cfg.proximo_envio = None      # vence de novo
+            self.cfg.save(update_fields=["proximo_envio"])
+            self._processar({"conectado": True}, envio=falha)
+
+        self.assertTrue(self.cfg.ativo)
+        self.assertEqual(self.cfg.falhas_consecutivas, 0)
+
+    def test_an_empty_pool_is_not_a_failure(self):
+        vazio = {"sucesso": False, "motivo": "sem item elegível", "classe": "transitorio"}
+        for _ in range(self.cfg.pausar_apos_falhas + 1):
+            self.cfg.proximo_envio = None
+            self.cfg.save(update_fields=["proximo_envio"])
+            self._processar({"conectado": True}, envio=vazio)
+
+        self.assertTrue(self.cfg.ativo, "nicho estreito não pode desligar a regra")
+
+    def test_permanent_failures_still_pause_the_config(self):
+        # A contrapartida: se o grupo sumiu, insistir só martela o WhatsApp.
+        falha = {"sucesso": False, "motivo": "Grupo de destino nao encontrado.",
+                 "classe": "permanente"}
+        for _ in range(self.cfg.pausar_apos_falhas):
+            self.cfg.proximo_envio = None
+            self.cfg.save(update_fields=["proximo_envio"])
+            self._processar({"conectado": True}, envio=falha)
+
+        self.assertFalse(self.cfg.ativo)
+        self.assertIn("Grupo de destino", self.cfg.motivo_pausa)
+
+    def test_unclassified_failure_keeps_the_old_behaviour(self):
+        # Node antigo no ar, ou o throw minificado do bundle: na dúvida, conta.
+        falha = {"sucesso": False, "motivo": "erro estranho"}
+        for _ in range(self.cfg.pausar_apos_falhas):
+            self.cfg.proximo_envio = None
+            self.cfg.save(update_fields=["proximo_envio"])
+            self._processar({"conectado": True}, envio=falha)
+
+        self.assertFalse(self.cfg.ativo)
+
+
+class SelecionarEEnviarAbortTests(TestCase):
+    def test_a_transient_failure_aborts_the_candidate_pool(self):
+        # Mesma lógica que precisa_login_ml já tinha: os outros 7 candidatos
+        # falhariam igual, a ~30s de Playwright cada.
+        produtos = [Mock(id=i) for i in range(8)]
+        falha = {"sucesso": False, "motivo": "WhatsApp não está conectado",
+                 "classe": "transitorio"}
+        with patch("apps.scrapers.ofertas.selecionar_item_para_grupo",
+                   return_value=produtos), \
+             patch("apps.scrapers.ofertas.enviar_oferta_de_produto",
+                   return_value=falha) as enviar:
+            r = ofertas.selecionar_e_enviar(None, "123@g.us")
+
+        self.assertEqual(enviar.call_count, 1)
+        self.assertEqual(r["classe"], "transitorio")
+
+    def test_a_permanent_failure_still_tries_the_next_candidate(self):
+        # Um produto reprovado não diz nada sobre os outros: o pool existe
+        # justamente para não desistir por causa de um item ruim.
+        produtos = [Mock(id=i) for i in range(3)]
+        falha = {"sucesso": False, "motivo": "link sem tag de afiliado",
+                 "classe": "permanente"}
+        with patch("apps.scrapers.ofertas.selecionar_item_para_grupo",
+                   return_value=produtos), \
+             patch("apps.scrapers.ofertas.enviar_oferta_de_produto",
+                   return_value=falha) as enviar:
+            ofertas.selecionar_e_enviar(None, "123@g.us")
+
+        self.assertEqual(enviar.call_count, 3)
+
+    def test_an_empty_pool_is_reported_as_transient(self):
+        with patch("apps.scrapers.ofertas.selecionar_item_para_grupo", return_value=[]):
+            r = ofertas.selecionar_e_enviar(None, "123@g.us")
+        self.assertEqual(r["classe"], "transitorio")
+
+
+class AmazonConexaoTests(TestCase):
+    """A tag de afiliado é tudo que a Amazon exige. Exigir também as credenciais da
+    Creators API era um beco sem saída: elas só saem para contas com 10 vendas em
+    30 dias, então quem ainda não vendeu — justamente o público da ferramenta —
+    nunca conseguia "conectar", mesmo com a Amazon funcionando."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("amz", password="test")
+        self.perfil = self.user.perfil
+
+    def test_tag_alone_connects_amazon(self):
+        self.perfil.afiliado_tag_amazon = "pedromachad06-20"
+        self.assertTrue(self.perfil.amazon_conectado())
+
+    def test_credentials_are_not_required_to_connect(self):
+        self.perfil.afiliado_tag_amazon = "pedromachad06-20"
+        self.assertEqual(self.perfil.amazon_credential_id, "")
+        self.assertEqual(self.perfil.amazon_credential_secret, "")
+        self.assertTrue(
+            self.perfil.amazon_conectado(),
+            "credenciais da Creators API exigem 10 vendas/30d: não podem gatear a conexão",
+        )
+
+    def test_no_tag_is_not_connected(self):
+        # A contrapartida: sem tag não há link comissionado, então não há conexão.
+        self.perfil.amazon_credential_id = "AKIA123"
+        self.perfil.amazon_credential_secret = "segredo"
+        self.assertFalse(self.perfil.amazon_conectado())
+
+    def test_creators_api_status_is_orthogonal_to_being_connected(self):
+        self.perfil.afiliado_tag_amazon = "pedromachad06-20"
+        self.assertTrue(self.perfil.amazon_conectado())
+        self.assertFalse(self.perfil.amazon_creators_ativa())
+
+        self.perfil.amazon_credential_id = "AKIA123"
+        self.perfil.amazon_credential_secret = "segredo"
+        self.assertTrue(self.perfil.amazon_creators_ativa())
+        self.assertTrue(self.perfil.amazon_conectado())
+
+    def test_store_disconnected_alert_disappears_once_the_tag_is_saved(self):
+        # O aviso "Loja desconectada" no card "Precisa de atenção" da home.
+        self.perfil.marcar_verificado()
+        self.perfil.afiliado_tag_amazon = "pedromachad06-20"
+        self.perfil.save(update_fields=["afiliado_tag_amazon"])
+        self.client.force_login(self.user)
+
+        # A view importa de monitor_conexao dentro da função: o patch tem de ser na
+        # origem, não em views. Sem WhatsApp de propósito — o alerta da loja não
+        # pode depender do canal de envio.
+        with patch("apps.scrapers.monitor_conexao.wa_conectado", return_value=False):
+            response = self.client.get(reverse("home"))
+
+        titulos = [titulo for titulo, _texto, _rota in response.context["alertas"]]
+        self.assertNotIn("Loja desconectada", titulos)
+
+    def test_the_affiliate_link_carries_the_users_tag_without_any_credential(self):
+        # O que de fato importa: a comissão sai no nome do usuário.
+        from apps.scrapers.marketplaces.amazon import Amazon
+
+        self.perfil.afiliado_tag_amazon = "pedromachad06-20"
+        self.perfil.save(update_fields=["afiliado_tag_amazon"])
+        produto = Produto.objects.create(
+            marketplace="amazon", nome="Fone Bluetooth", asin="B0C1234XYZ",
+            categoria="Áudio", preco_sem_desconto=199.0, preco_com_cupom=149.0,
+        )
+
+        mp = Amazon()
+        r = mp.build_affiliate_link(produto, usuario=self.user)
+
+        self.assertIn("tag=pedromachad06-20", r["link_afiliado"])
+        self.assertTrue(r["afiliado_ok"])
+        self.assertTrue(mp.verify_affiliate_tag(r["link_afiliado"], usuario=self.user))
+
+
+class ReligarConfigsCommandTests(TestCase):
+    """One-shot de reparo: corrigir o código não desfaz o que já está no banco."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("religar-user", password="test")
+
+    def _cfg(self, motivo, grupo="1@g.us"):
+        return ConfiguracaoEnvio.objects.create(
+            owner=self.user, grupo_id=grupo, ativo=False,
+            falhas_consecutivas=5, motivo_pausa=motivo,
+        )
+
+    def _rodar(self, *args):
+        saida = StringIO()
+        call_command("religar_configs", *args, stdout=saida)
+        return saida.getvalue()
+
+    def test_transient_pause_is_undone_and_the_counter_is_cleared(self):
+        cfg = self._cfg("Falha de transporte: read timeout")
+        self._rodar()
+        cfg.refresh_from_db()
+        self.assertTrue(cfg.ativo)
+        self.assertEqual(cfg.falhas_consecutivas, 0)
+        self.assertEqual(cfg.motivo_pausa, "")
+
+    def test_a_genuinely_broken_config_stays_paused(self):
+        # Religar esta só produziria falha nova: o grupo não existe mais.
+        cfg = self._cfg("Grupo de destino nao encontrado nesta conta do WhatsApp.")
+        self._rodar()
+        cfg.refresh_from_db()
+        self.assertFalse(cfg.ativo)
+
+    def test_dry_run_writes_nothing(self):
+        cfg = self._cfg("sem item elegível")
+        saida = self._rodar("--dry-run")
+        cfg.refresh_from_db()
+        self.assertFalse(cfg.ativo)
+        self.assertIn("dry-run", saida)
 
 
 class ConfiguracaoValidationTests(TestCase):
@@ -625,6 +1024,24 @@ class AttributionWorkflowTests(TestCase):
         self.assertIn("Tech do Dia", message)
         self.assertIn("Ver a oferta", message)
 
+    @patch("apps.scrapers.ofertas.os.getenv", return_value="")
+    @override_settings(DEBUG=True)
+    def test_local_delivery_uses_affiliate_link_directly_without_public_url(self, _env):
+        """O redirecionador de produção não conhece a publicação do SQLite local."""
+        from apps.scrapers.ofertas import _link_publicado
+
+        publication = Mock(id_publico=uuid.uuid4())
+        affiliate = "https://meli.la/link-afiliado"
+        self.assertEqual(_link_publicado(publication, affiliate), affiliate)
+
+    @override_settings(DEBUG=False, PUBLIC_BASE_URL="https://spreading.example")
+    def test_production_delivery_uses_signed_tracking_redirect(self):
+        from apps.scrapers.ofertas import _link_publicado
+
+        publication = Mock(id_publico=uuid.uuid4())
+        link = _link_publicado(publication, "https://meli.la/link-afiliado")
+        self.assertTrue(link.startswith("https://spreading.example/scrapers/r/"))
+
 
 class RankingAndCooldownTests(TestCase):
     def setUp(self):
@@ -853,3 +1270,126 @@ class MercadoLivreCleanupIsolationTests(TestCase):
         old_product.refresh_from_db()
         self.assertEqual(old_product.estado, "stale")
         self.assertIn("sincronização", old_product.falha_verificacao)
+
+
+class AfiliacaoPorMarketplaceTests(TestCase):
+    """O badge da tela Promoções pergunta à loja se o item comissiona (can_affiliate).
+
+    Antes, a view só conhecia a regra do ML e todo item Amazon exibia 'pendente'
+    para sempre, mesmo com a tag salva e o link montável sem rede.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("afiliado-user", password="test")
+        self.user.perfil.marcar_verificado()
+        self.user.perfil.afiliado_tag_amazon = "minhaloja-20"
+        self.user.perfil.save(update_fields=["afiliado_tag_amazon"])
+
+    def _produto_amazon(self):
+        return Produto.objects.create(
+            marketplace="amazon", owner=self.user, asin="B0AFILIADO",
+            nome="Cafeteira", origem="oferta", preco_sem_desconto=200,
+            preco_com_cupom=100, link_produto="https://www.amazon.com.br/dp/B0AFILIADO",
+        )
+
+    def test_amazon_item_comissiona_quando_o_perfil_tem_tag(self):
+        produto = self._produto_amazon()
+
+        self.assertTrue(get_marketplace("amazon").can_affiliate(produto, self.user))
+
+    def test_amazon_item_nao_comissiona_sem_tag_no_perfil(self):
+        produto = self._produto_amazon()
+        outro = get_user_model().objects.create_user("sem-tag", password="test")
+
+        self.assertFalse(get_marketplace("amazon").can_affiliate(produto, outro))
+
+    def test_mercadolivre_depende_do_link_pre_gerado(self):
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Fone", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=50,
+            link_produto="https://example.com/fone",
+        )
+        mp = get_marketplace("mercadolivre")
+
+        self.assertFalse(mp.can_affiliate(produto, self.user))
+
+        produto.link_afiliado = "https://mercadolivre.com/sec/abc123"
+        self.assertTrue(mp.can_affiliate(produto, self.user))
+
+    def test_tela_promocoes_marca_item_amazon_como_pronto_sem_gravar_no_banco(self):
+        produto = self._produto_amazon()
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("scraper-top"), {"loja": "amazon"})
+
+        listados = {p.id: p for p in response.context["produtos"]}
+        self.assertTrue(listados[produto.id].afiliado_pronto)
+        # A visita é um GET: nada de escrita no campo persistido.
+        produto.refresh_from_db()
+        self.assertFalse(produto.afiliado_ok)
+
+
+class PublicacaoOrfaTests(TestCase):
+    """Publicacao nasce 'pendente' antes do trabalho; nada pode deixá-la assim."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("orfa-user", password="test")
+        self.produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Fone", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=50,
+            link_produto="https://example.com/fone",
+            link_afiliado="https://mercadolivre.com/sec/abc",
+        )
+
+    def _publicacao(self, status="pendente", idade_horas=0):
+        pub = Publicacao.objects.create(
+            usuario=self.user, produto=self.produto, canal="whatsapp",
+            destino_id="grupo@g.us", status=status,
+        )
+        if idade_horas:
+            Publicacao.objects.filter(pk=pub.pk).update(
+                criada_em=timezone.now() - timedelta(hours=idade_horas))
+        return pub
+
+    def test_pendente_antiga_e_fechada_como_falha(self):
+        pub = self._publicacao(idade_horas=2)
+
+        self.assertEqual(reconciliar_publicacoes_orfas(), 1)
+
+        pub.refresh_from_db()
+        self.assertEqual(pub.status, "falhou")
+        self.assertIn("interrompido", pub.erro)
+
+    def test_pendente_recente_e_um_envio_em_curso_e_nao_e_tocada(self):
+        pub = self._publicacao()
+
+        self.assertEqual(reconciliar_publicacoes_orfas(), 0)
+
+        pub.refresh_from_db()
+        self.assertEqual(pub.status, "pendente")
+
+    def test_envio_concluido_antigo_nao_e_reescrito(self):
+        pub = self._publicacao(status="enviado", idade_horas=5)
+
+        reconciliar_publicacoes_orfas()
+
+        pub.refresh_from_db()
+        self.assertEqual(pub.status, "enviado")
+
+    @patch("apps.scrapers.ofertas.montar_mensagem", side_effect=RuntimeError("boom"))
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.verify_affiliate_tag",
+           return_value=True)
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.build_affiliate_link")
+    def test_excecao_inesperada_fecha_a_publicacao_e_propaga(self, build, _tag, _msg):
+        build.return_value = {
+            "link_afiliado": "https://mercadolivre.com/sec/abc",
+            "afiliado_ok": True, "url_isca": "https://example.com/fone",
+        }
+
+        with self.assertRaises(RuntimeError):
+            ofertas.enviar_oferta_de_produto(
+                self.produto, "grupo@g.us", verificar=False, usuario=self.user)
+
+        pub = Publicacao.objects.get(usuario=self.user, produto=self.produto)
+        self.assertEqual(pub.status, "falhou")
+        self.assertIn("erro inesperado no envio", pub.erro)

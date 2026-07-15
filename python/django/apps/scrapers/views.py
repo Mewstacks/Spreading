@@ -329,6 +329,9 @@ def configurar_conta(request):
         "tem_secret": bool(perfil and perfil.amazon_credential_secret),
         "ml_sessao_ok": _tem_sessao_ml(request.user),
         "amazon_conectado": bool(perfil and perfil.amazon_conectado()),
+        # Ortogonal ao "conectado": a Creators API é upgrade opcional, exibido só
+        # como informação. Não pode voltar a virar requisito de conexão.
+        "amazon_creators_ativa": bool(perfil and perfil.amazon_creators_ativa()),
         "billing_checkout_url": settings.BILLING_CHECKOUT_URL,
         "billing_portal_url": settings.BILLING_PORTAL_URL,
     })
@@ -965,11 +968,13 @@ def top_promocoes(request):
             produto_id__in=[p.id for p in produtos], usuario=request.user)
         .values_list("produto_id", flat=True)
     )
+    from apps.scrapers.marketplaces.registry import get_marketplace
     for p in produtos:
         p.cupom = cupons_map.get(p.campanha_id)
         p.ja_enviado = p.id in ja_enviados
-        if (p.marketplace or "mercadolivre") == "mercadolivre" and p.link_afiliado:
-            p.afiliado_ok = True
+        # Atribuição é regra de cada loja (ver Marketplace.can_affiliate). Atributo só
+        # de exibição: `afiliado_ok` é campo persistido e não se sobrescreve num GET.
+        p.afiliado_pronto = get_marketplace(p.marketplace).can_affiliate(p, request.user)
         p.motivos_score = [f"{p.percent:.0f}% de desconto"]
         from apps.scrapers.precos import stats as preco_stats
         hist_preco = preco_stats(p, dias=30)
@@ -1083,6 +1088,9 @@ def scrape_ofertas_stream(request):
     except (TypeError, ValueError):
         links_limite = 60
 
+    # Fora da thread de propósito: _run roda noutra thread e não pode tocar request.
+    usuario = request.user
+
     def _event_stream():
         q: queue.Queue = queue.Queue()
         writer = _QueueWriter(q)
@@ -1099,7 +1107,9 @@ def scrape_ofertas_stream(request):
                         pendentes = list(pend_qs[:links_limite])
                         if pendentes:
                             print(f"\nGerando links de afiliado para {len(pendentes)} oferta(s)...")
-                            gerar_links_em_lote(pendentes)
+                            # O pool é compartilhado, mas a sessão do ML é do usuário:
+                            # sem isto, lia-se um auth.json que a tela nunca grava.
+                            gerar_links_em_lote(pendentes, usuario=usuario)
                         sobra = pend_qs.count()
                         if sobra:
                             print(f"{sobra} produto(s) ainda sem link (serão gerados no próximo scrape ou no envio).")
@@ -1258,6 +1268,9 @@ def gerar_links_stream(request):
     except (TypeError, ValueError):
         limite = 50
 
+    # Fora da thread de propósito: _run roda noutra thread e não pode tocar request.
+    usuario = request.user
+
     def _event_stream():
         q: queue.Queue = queue.Queue()
         writer = _QueueWriter(q)
@@ -1280,7 +1293,7 @@ def gerar_links_stream(request):
                         for p in pendentes:
                             por_loja.setdefault(p.marketplace or "mercadolivre", []).append(p)
                         for slug, grupo in por_loja.items():
-                            get_marketplace(slug).prefetch_links(grupo)
+                            get_marketplace(slug).prefetch_links(grupo, usuario=usuario)
                     sobra = Produto.objects.filter(link_afiliado="").count()
                     print(f"Sobraram {sobra} produto(s) sem link.")
             except Exception as exc:

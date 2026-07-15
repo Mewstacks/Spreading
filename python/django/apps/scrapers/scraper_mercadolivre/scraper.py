@@ -4,10 +4,10 @@ import re
 import time
 import logging
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
-from apps.scrapers.auxiliar import iniciar_browser, BrowserError
+from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada
 from apps.scrapers.models import Cupom, Produto
 from apps.scrapers.progresso import emitir_progresso
-from apps.scrapers.session_paths import ml_session_dir
+from apps.scrapers.session_paths import ml_auth_path
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,7 @@ def mapear_cupons(n=1):
     MAX_RETRIES = 3
     RETRY_WAIT = 5  # segundos entre tentativas
 
-    caminho_auth = os.path.join(ml_session_dir(), "auth.json")
+    caminho_auth = ml_auth_path()
     logger.info("Iniciando raspagem e limpeza de cupons")
     
     with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
@@ -506,7 +506,7 @@ def main():
         logger.info("Nada a fazer; todos os cupons ja tem produtos")
         return
 
-    caminho_auth = os.path.join(ml_session_dir(), "auth.json")
+    caminho_auth = ml_auth_path()
 
     resultados_pendentes = []
     total = len(cupons_pendentes)
@@ -539,6 +539,12 @@ def main():
             link_afiliado="",
         )
         gerar_links_em_lote(list(novos))
+    except SessaoExpirada as e:
+        # Sessão morta pede ação humana (reconectar). Como warning isto passou
+        # despercebido enquanto o lote inteiro falhava — daí o logger.error.
+        # Não propaga: os cupons já foram processados e a pré-geração é só um
+        # adiantamento; o link é gerado no envio se faltar.
+        logger.error("Sessao ML expirada ao pre-gerar links: %s", e)
     except Exception as e:
         logger.warning("Falha ao pre-gerar links de afiliado: %s", e)
 

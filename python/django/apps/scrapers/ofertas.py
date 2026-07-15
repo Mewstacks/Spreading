@@ -1,10 +1,12 @@
-import requests
 import logging
+import os
+import requests
 from datetime import timedelta
 from django.utils import timezone
 from django.db.models import F, FloatField, ExpressionWrapper, Count, Q
 from apps.scrapers.models import Produto, Cupom, HistoricoEnvio, Publicacao
 from apps.scrapers.precos import stats as _stats_preco
+from apps.scrapers.whatsapp_client import TRANSITORIO
 
 logger = logging.getLogger(__name__)
 
@@ -448,6 +450,34 @@ def _baixar_imagem_b64(url):
         return "", ""
 
 
+def _link_publicado(publicacao, link_afiliado: str) -> str:
+    """Link que entra na mensagem enviada ao grupo.
+
+    Em produção, passa pelo redirecionador assinado para contabilizar cliques e
+    depois encaminhar para o link afiliado. Em desenvolvimento local não há uma
+    URL pública nem o mesmo banco/SECRET_KEY da produção: apontar para o
+    fallback `spreading-web.fly.dev` gerava um link rastreado inválido para quem
+    recebia a oferta. Nesse caso manda o link de afiliado direto — que continua
+    válido e com atribuição. Um túnel público configurado explicitamente em
+    PUBLIC_BASE_URL continua habilitando rastreio em desenvolvimento.
+    """
+    if not publicacao:
+        return link_afiliado
+
+    from django.conf import settings
+
+    base_explicita = (os.getenv("PUBLIC_BASE_URL") or "").strip()
+    if settings.DEBUG and not base_explicita:
+        logger.info("Ambiente local sem PUBLIC_BASE_URL: enviando link afiliado direto.")
+        return link_afiliado
+
+    from django.core import signing
+
+    token = signing.dumps({"p": str(publicacao.id_publico)}, salt="click")
+    base = settings.PUBLIC_BASE_URL.rstrip("/")
+    return f"{base}/scrapers/r/{token}/"
+
+
 def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                              canal="whatsapp", usuario=None, configuracao=None,
                              destino_nome=""):
@@ -509,128 +539,162 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
     from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
     from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
 
-    try:
-        info = mp.build_affiliate_link(produto, usuario=usuario)
-    except (LoginError, AuthError, SessaoExpirada) as e:
-        # Sessão do ML caída: sem link de afiliado NENHUM produto sai. Motivo claro
-        # + flag p/ a UI oferecer a reconexão e o chamador parar de retentar.
-        return falhar(e, precisa_login_ml=True)
-    except BrowserError as e:
-        texto = str(e)
-        return falhar(texto.replace("LOGIN_REQUIRED: ", ""),
-                      precisa_login_ml="LOGIN_REQUIRED" in texto)
-    if not info:
-        return falhar("falha ao gerar link de afiliado "
-                      "(URL não afiliável ou o Link Builder recusou)")
-    link = info["link_afiliado"]
-
-    # A3 — sem tag de afiliado o clique não gera comissão. Recusa (ou avisa).
-    afiliado_ok = info.get("afiliado_ok")
-    if afiliado_ok is None:
-        afiliado_ok = mp.verify_affiliate_tag(link, usuario=usuario)
-    if not afiliado_ok:
-        if getattr(settings, "AFILIADO_EXIGIR", True):
-            return falhar("link sem tag de afiliado — não enviado", link=link)
-        logger.warning("Link sem tag de afiliado; envio permitido por configuracao")
-
-    verificacao = None
-    if verificar:
-        # 'oferta'/'busca' têm de/por confirmado na raspagem; 'cupom_codigo' precisa
-        # confirmar o desconto/badge na PDP (confiar_desconto=False).
-        origem = getattr(produto, "origem", "cupom")
-        confiar = origem in ("oferta", "busca")
+    # O trabalho roda aninhado para que QUALQUER exceção inesperada (a Publicacao já
+    # existe como 'pendente' neste ponto) feche a linha antes de propagar. Sem isto,
+    # um erro não previsto deixa a publicação pendente para sempre no dashboard.
+    def _executar():
         try:
-            verificacao = mp.verify_link(link, nome_esperado=produto.nome,
-                                         confiar_desconto=confiar, usuario=usuario)
+            info = mp.build_affiliate_link(produto, usuario=usuario)
         except (LoginError, AuthError, SessaoExpirada) as e:
-            # Mesma semântica do build: sessão caída na verificação também precisa
-            # marcar a Publicacao como falha e acionar a reconexão na UI.
+            # Sessão do ML caída: sem link de afiliado NENHUM produto sai. Motivo claro
+            # + flag p/ a UI oferecer a reconexão e o chamador parar de retentar.
             return falhar(e, precisa_login_ml=True)
         except BrowserError as e:
             texto = str(e)
             return falhar(texto.replace("LOGIN_REQUIRED: ", ""),
                           precisa_login_ml="LOGIN_REQUIRED" in texto)
-        if not verificacao.get("ok"):
-            return falhar("link reprovado na verificação",
-                          link=link, verificacao=verificacao)
+        if not info:
+            return falhar("falha ao gerar link de afiliado "
+                          "(URL não afiliável ou o Link Builder recusou)")
+        link = info["link_afiliado"]
 
-    # Ofertas (origem='oferta') não têm Cupom; só busca quando há campanha_id
-    cupom = None
-    if produto.campanha_id:
-        cupom = Cupom.objects.filter(
-            campanha_id=produto.campanha_id, estado="ativo",
-        ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now())).first()
-    variante = "A"
-    if configuracao and configuracao.variante_template == "B":
-        variante = "B"
-    elif configuracao and configuracao.variante_template == "alternar":
-        variante = "B" if configuracao.publicacoes.count() % 2 else "A"
-    link_publicado = link
-    if publicacao:
-        from django.core import signing
-        token = signing.dumps({"p": str(publicacao.id_publico)}, salt="click")
-        base = getattr(settings, "PUBLIC_BASE_URL", "https://spreading-web.fly.dev").rstrip("/")
-        link_publicado = f"{base}/scrapers/r/{token}/"
-        publicacao.variante = variante
-        publicacao.link_afiliado = link
-        publicacao.link_rastreado = link_publicado
-        publicacao.cupom = (
-            cupom.titulo if cupom else getattr(produto, "codigo_checkout", "") or "")
-        publicacao.save(update_fields=[
-            "variante", "link_afiliado", "link_rastreado", "cupom"])
-    mensagem = montar_mensagem(
-        produto, link_publicado, cupom, markup=sender.markup, usuario=usuario,
-        configuracao=configuracao, variante=variante)
-    if publicacao:
-        publicacao.mensagem = mensagem
-        publicacao.save(update_fields=["mensagem"])
+        # A3 — sem tag de afiliado o clique não gera comissão. Recusa (ou avisa).
+        afiliado_ok = info.get("afiliado_ok")
+        if afiliado_ok is None:
+            afiliado_ok = mp.verify_affiliate_tag(link, usuario=usuario)
+        if not afiliado_ok:
+            if getattr(settings, "AFILIADO_EXIGIR", True):
+                return falhar("link sem tag de afiliado — não enviado", link=link)
+            logger.warning("Link sem tag de afiliado; envio permitido por configuracao")
 
-    if dry_run:
+        verificacao = None
+        if verificar:
+            # 'oferta'/'busca' têm de/por confirmado na raspagem; 'cupom_codigo' precisa
+            # confirmar o desconto/badge na PDP (confiar_desconto=False).
+            origem = getattr(produto, "origem", "cupom")
+            confiar = origem in ("oferta", "busca")
+            try:
+                verificacao = mp.verify_link(link, nome_esperado=produto.nome,
+                                             confiar_desconto=confiar, usuario=usuario)
+            except (LoginError, AuthError, SessaoExpirada) as e:
+                # Mesma semântica do build: sessão caída na verificação também precisa
+                # marcar a Publicacao como falha e acionar a reconexão na UI.
+                return falhar(e, precisa_login_ml=True)
+            except BrowserError as e:
+                texto = str(e)
+                return falhar(texto.replace("LOGIN_REQUIRED: ", ""),
+                              precisa_login_ml="LOGIN_REQUIRED" in texto)
+            if not verificacao.get("ok"):
+                return falhar("link reprovado na verificação",
+                              link=link, verificacao=verificacao)
+
+        # Ofertas (origem='oferta') não têm Cupom; só busca quando há campanha_id
+        cupom = None
+        if produto.campanha_id:
+            cupom = Cupom.objects.filter(
+                campanha_id=produto.campanha_id, estado="ativo",
+            ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now())).first()
+        variante = "A"
+        if configuracao and configuracao.variante_template == "B":
+            variante = "B"
+        elif configuracao and configuracao.variante_template == "alternar":
+            variante = "B" if configuracao.publicacoes.count() % 2 else "A"
+        link_publicado = _link_publicado(publicacao, link)
         if publicacao:
-            publicacao.status = "ignorado"
-            publicacao.save(update_fields=["status"])
-        return {"sucesso": True, "dry_run": True, "link": link,
-                "mensagem": mensagem, "verificacao": verificacao}
-
-    # Sessão WhatsApp do DONO (multi-tenant): envia pela conexão dele, não pela default.
-    wa_session = None
-    if usuario is not None:
-        perfil = getattr(usuario, "perfil", None)
-        wa_session = perfil.sessao_whatsapp() if perfil else (str(getattr(usuario, "id", "")) or None)
-
-    # Imagem conforme o canal: Telegram aceita URL direto; WhatsApp precisa de base64.
-    if sender.prefers_image == "url":
-        resultado = sender.enviar_oferta(grupo_id, mensagem,
-                                         imagem_url=getattr(produto, "imagem_url", "") or None,
-                                         legenda=mensagem, usuario=usuario, session=wa_session)
-    else:
-        imagem_b64, img_mime = _baixar_imagem_b64(getattr(produto, "imagem_url", ""))
-        resultado = sender.enviar_oferta(grupo_id, mensagem, imagem_b64=imagem_b64 or None,
-                                         mimetype=img_mime or "image/jpeg", legenda=mensagem,
-                                         usuario=usuario, session=wa_session)
-
-    if resultado.get("sucesso"):
-        HistoricoEnvio.objects.create(produto=produto, usuario=usuario)  # só após sucesso
+            publicacao.variante = variante
+            publicacao.link_afiliado = link
+            publicacao.link_rastreado = link_publicado
+            publicacao.cupom = (
+                cupom.titulo if cupom else getattr(produto, "codigo_checkout", "") or "")
+            publicacao.save(update_fields=[
+                "variante", "link_afiliado", "link_rastreado", "cupom"])
+        mensagem = montar_mensagem(
+            produto, link_publicado, cupom, markup=sender.markup, usuario=usuario,
+            configuracao=configuracao, variante=variante)
         if publicacao:
-            Publicacao.objects.filter(pk=publicacao.pk).update(
-                status="enviado", enviada_em=timezone.now())
-        log_event(
-            "publicacao", "send_ok", "Oferta publicada com sucesso.",
-            usuario=usuario,
-            contexto={
-                "produto_id": getattr(produto, "id", None),
-                "marketplace": getattr(produto, "marketplace", ""),
-                "canal": canal,
-                "destino": destino_nome or grupo_id,
-                "via": resultado.get("via"),
-                "publicacao_id": getattr(publicacao, "id", None),
-            },
-        )
-        return {"sucesso": True, "link": link, "mensagem": mensagem,
-                "via": resultado.get("via"), "verificacao": verificacao,
-                "publicacao": publicacao}
-    return falhar(resultado.get("erro") or "falha no envio",
-                  link=link, verificacao=verificacao)
+            publicacao.mensagem = mensagem
+            publicacao.save(update_fields=["mensagem"])
+
+        if dry_run:
+            if publicacao:
+                publicacao.status = "ignorado"
+                publicacao.save(update_fields=["status"])
+            return {"sucesso": True, "dry_run": True, "link": link,
+                    "mensagem": mensagem, "verificacao": verificacao}
+
+        # Sessão WhatsApp do DONO (multi-tenant): envia pela conexão dele, não pela default.
+        wa_session = wa_session_de(usuario)
+
+        # Imagem conforme o canal: Telegram aceita URL direto; WhatsApp precisa de base64.
+        if sender.prefers_image == "url":
+            resultado = sender.enviar_oferta(grupo_id, mensagem,
+                                             imagem_url=getattr(produto, "imagem_url", "") or None,
+                                             legenda=mensagem, usuario=usuario, session=wa_session)
+        else:
+            imagem_b64, img_mime = _baixar_imagem_b64(getattr(produto, "imagem_url", ""))
+            resultado = sender.enviar_oferta(grupo_id, mensagem, imagem_b64=imagem_b64 or None,
+                                             mimetype=img_mime or "image/jpeg", legenda=mensagem,
+                                             usuario=usuario, session=wa_session)
+
+        if resultado.get("sucesso"):
+            HistoricoEnvio.objects.create(produto=produto, usuario=usuario)  # só após sucesso
+            if publicacao:
+                Publicacao.objects.filter(pk=publicacao.pk).update(
+                    status="enviado", enviada_em=timezone.now())
+            log_event(
+                "publicacao", "send_ok", "Oferta publicada com sucesso.",
+                usuario=usuario,
+                contexto={
+                    "produto_id": getattr(produto, "id", None),
+                    "marketplace": getattr(produto, "marketplace", ""),
+                    "canal": canal,
+                    "destino": destino_nome or grupo_id,
+                    "via": resultado.get("via"),
+                    "publicacao_id": getattr(publicacao, "id", None),
+                },
+            )
+            return {"sucesso": True, "link": link, "mensagem": mensagem,
+                    "via": resultado.get("via"), "verificacao": verificacao,
+                    "publicacao": publicacao}
+        # `classe` decide se esta falha conta contra a config (ver
+        # processar_configs_de_envio). Sem propagá-la aqui, toda falha de envio
+        # chegaria ao orquestrador como 'desconhecido' e a taxonomia não valeria nada.
+        return falhar(resultado.get("erro") or "falha no envio",
+                      link=link, verificacao=verificacao,
+                      classe=resultado.get("classe"))
+
+    try:
+        return _executar()
+    except Exception as e:
+        # Fecha a linha SÓ se ainda estiver pendente: uma exceção posterior ao desfecho
+        # (ex.: no log do sucesso) não pode reescrever um envio que já deu certo. Depois
+        # re-levanta — o estado no banco fica honesto sem alterar o fluxo de controle
+        # que os chamadores (e o loop de automacao) já esperam.
+        motivo = f"erro inesperado no envio: {e}"
+        if publicacao and Publicacao.objects.filter(
+            pk=publicacao.pk, status="pendente",
+        ).update(status="falhou", erro=motivo[:500]):
+            log_event(
+                "publicacao", "send_failed", motivo, level="warning", usuario=usuario,
+                contexto={
+                    "produto_id": getattr(produto, "id", None),
+                    "marketplace": getattr(produto, "marketplace", ""),
+                    "canal": canal,
+                    "destino": destino_nome or grupo_id,
+                    "publicacao_id": publicacao.id,
+                },
+            )
+        raise
+
+
+def wa_session_de(usuario):
+    """Sessão WhatsApp do dono (multi-tenant). None = sem dono (pool legado)."""
+    if usuario is None:
+        return None
+    perfil = getattr(usuario, "perfil", None)
+    if perfil is not None:
+        return perfil.sessao_whatsapp()
+    return str(getattr(usuario, "id", "")) or None
 
 
 def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
@@ -653,7 +717,10 @@ def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
         grupo_id=grupo_id,
     )
     if not pool:
-        return {"sucesso": False, "motivo": "sem item elegível"}
+        # Estoque vazio não é defeito da regra: resolve sozinho quando o scrape
+        # traz produto novo. Marcar como transitório é o que impede a config de
+        # nicho estreito de se autodesligar por simples falta de oferta.
+        return {"sucesso": False, "motivo": "sem item elegível", "classe": TRANSITORIO}
 
     ultimo = None
     for prod in pool:
@@ -673,6 +740,12 @@ def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
             # Sessão do ML caiu: os demais candidatos falhariam igual (cada tentativa
             # abre um browser e leva ~30s). Aborta e devolve o motivo real.
             return r
+        if r.get("classe") == TRANSITORIO:
+            # Mesma lógica do precisa_login_ml, para o outro lado do envio: o
+            # WhatsApp caiu (ou o worker piscou) no meio do tick. Insistir nos 7
+            # candidatos restantes custa ~30s de Playwright cada para colecionar
+            # a mesma falha 8 vezes — e enchia o histórico de Publicacao 'falhou'.
+            return r
     return ultimo or {"sucesso": False, "motivo": "nenhum candidato passou"}
 
 
@@ -682,6 +755,7 @@ def processar_configs_de_envio():
     intervalo), seleciona 1 item do nicho e envia. Chamado pelo tick do Celery.
     Retorna lista de resultados por config.
     """
+    from apps.scrapers import whatsapp_client
     from apps.scrapers.models import ConfiguracaoEnvio, HistoricoEnvio
 
     agora = timezone.now()
@@ -689,6 +763,41 @@ def processar_configs_de_envio():
     resultados = []
     # Cache por-owner dentro do tick: quantos envios já saíram hoje (cota diária).
     _envios_hoje: dict = {}
+    # Mesmo padrão, para o estado da sessão WhatsApp: uma leitura por sessão por
+    # tick, não uma por config.
+    _wa_status: dict = {}
+
+    def _wa_pronto(cfg) -> bool:
+        """Dá para enviar pelo WhatsApp deste dono agora?
+
+        Este gate é o que impede o pior efeito de uma sessão caída: sem ele,
+        `selecionar_e_enviar` gasta ~30s de Playwright por candidato (8 deles)
+        montando link de afiliado para só então descobrir, no POST, que não há
+        WhatsApp do outro lado — por config, por tick, indefinidamente.
+
+        Também religa a sessão 'inativo'. É o único estado em que POST
+        /api/sessoes reconecta sem humano: o worker tem a credencial no volume
+        mas ela não está no Map (restore pulado por capacidade no boot, ou
+        runtime destruído depois). 'expirado' fica DE FORA de propósito — o Node
+        só chega nele depois de purgar a credencial (session_policy.reconnectOutcome
+        só devolve 'expire' com authPurges > 0), então revivê-lo aqui não
+        reconecta ninguém: só fabrica um QR que ninguém está olhando e prende um
+        dos 4 slots de Chromium. Quem precisa de QR abre o painel, e o painel já
+        chama iniciar_sessao (views.whatsapp_painel).
+        """
+        sessao = wa_session_de(cfg.owner)
+        if not sessao:
+            return True   # pool legado sem dono: mantém o caminho de antes
+        if sessao not in _wa_status:
+            estado = whatsapp_client.status(sessao)
+            if not estado.get("conectado") and estado.get("fase") == "inativo":
+                whatsapp_client.iniciar_sessao(sessao)
+                # Não relê o status: initializeSession é assíncrono no Node e
+                # ainda não terminou. Este tick não envia; o próximo encontra a
+                # sessão de pé. Reler aqui só somaria latência para o mesmo 'não'.
+                logger.info("Sessão WhatsApp %s estava inativa; religada.", sessao)
+            _wa_status[sessao] = estado
+        return bool(_wa_status[sessao].get("conectado"))
 
     def _cota_estourada(owner) -> bool:
         """True se o dono está suspenso ou já bateu a cota diária de envios.
@@ -719,6 +828,13 @@ def processar_configs_de_envio():
             configuracao=cfg, status="enviado", enviada_em__date=hoje).count()
         if cfg.max_envios_dia and enviados_config_hoje >= cfg.max_envios_dia:
             continue
+        # 3. WhatsApp do dono fora do ar: não é falha da regra. Sai sem tocar em
+        # falhas_consecutivas e sem reagendar — quando a sessão voltar, a config
+        # continua vencida e envia no primeiro tick seguinte.
+        if getattr(cfg, "canal", "whatsapp") == "whatsapp" and not _wa_pronto(cfg):
+            logger.info(
+                "Config %s pulada: WhatsApp do dono não está conectado.", cfg.id)
+            continue
 
         macros = [cfg.macro_categoria] if cfg.macro_categoria else None  # vazio = qualquer (inclui ofertas)
         r = selecionar_e_enviar(
@@ -742,7 +858,17 @@ def processar_configs_de_envio():
             cfg.motivo_pausa = ""
             if cfg.owner_id is not None:
                 _envios_hoje[cfg.owner_id] = _envios_hoje.get(cfg.owner_id, 0) + 1
+        elif r.get("classe") == TRANSITORIO:
+            # Falha que some sozinha (worker piscou, timeout, 429, estoque vazio).
+            # Não conta e não pausa: era exatamente isto que desligava a automação
+            # de quem não tinha defeito nenhum na regra. Também não zera o
+            # contador — uma falha permanente intercalada com blips transitórios
+            # ainda precisa chegar ao teto.
+            logger.info("Config %s: falha transitória ignorada (%s).",
+                        cfg.id, r.get("motivo"))
         else:
+            # 'permanente' e 'desconhecido' seguem contando. Pausar no 'desconhecido'
+            # é o comportamento que já existia: na dúvida, para de martelar o grupo.
             cfg.falhas_consecutivas += 1
             if cfg.pausar_apos_falhas and cfg.falhas_consecutivas >= cfg.pausar_apos_falhas:
                 cfg.ativo = False

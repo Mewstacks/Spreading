@@ -267,8 +267,9 @@
               {% endif %}
               <div class="store-line">
                 <span class="badge badge-muted">{% if p.marketplace == "mercadolivre" %}Mercado Livre{% elif p.marketplace == "amazon" %}Amazon{% else %}{{ p.marketplace|title }}{% endif %}</span>
-                {% if p.afiliado_ok %}<span class="badge badge-green" title="Link de afiliado pronto"><i data-lucide="check"></i> afiliado</span>
-                {% else %}<span class="badge badge-yellow" title="Link de afiliado ainda não verificado"><i data-lucide="alert-triangle"></i> pendente</span>{% endif %}
+                {% if p.afiliado_pronto %}<span class="badge badge-green" title="Link de afiliado pronto"><i data-lucide="check"></i> afiliado</span>
+                {% elif p.marketplace == "amazon" %}<span class="badge badge-yellow" title="Cadastre sua tag de afiliado Amazon na tela Conta para comissionar este item"><i data-lucide="alert-triangle"></i> pendente</span>
+                {% else %}<span class="badge badge-yellow" title="Link de afiliado ainda não gerado"><i data-lucide="alert-triangle"></i> pendente</span>{% endif %}
               </div>
               <div class="muted" style="font-size:.74rem;margin-top:.3rem;"><i data-lucide="sparkles"></i> {{ p.motivos_score|join:" · " }}</div>
             </div>

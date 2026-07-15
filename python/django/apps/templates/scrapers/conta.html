@@ -38,10 +38,21 @@
     <div class="fld">
       <label>Tag de afiliado da Amazon</label>
       <input name="afiliado_tag_amazon" value="{{ perfil.afiliado_tag_amazon }}" placeholder="sualoja-20">
-      <small>Sua tag do programa Amazon Associados.</small>
+      <small>Sua tag do programa Amazon Associados (ex.: <code>sualoja-20</code>). É só isto que a Amazon exige: com a tag salva, seus links já saem comissionados.</small>
     </div>
     <details {% if perfil.amazon_credential_id %}open{% endif %}>
-      <summary class="muted" style="cursor:pointer;font-size:.85rem;margin-bottom:.8rem;">Credenciais da Amazon Creators API (opcional)</summary>
+      <summary class="muted" style="cursor:pointer;font-size:.85rem;margin-bottom:.8rem;">
+        Creators API — opcional
+        {% if amazon_creators_ativa %}· credenciais salvas
+        {% elif perfil.amazon_elegivel is False %}· sua conta ainda não é elegível
+        {% else %}· não configurada{% endif %}
+      </summary>
+      <p class="muted" style="font-size:.82rem;margin:0 0 .8rem;">
+        Melhora a origem dos dados de oferta, mas <strong>não</strong> é necessária para
+        vender: sem ela, as ofertas vêm da busca pública e seus links comissionados
+        funcionam igual. A Amazon só libera estas credenciais para contas com
+        10 vendas qualificadas em 30 dias — se você ainda não chegou lá, ignore esta seção.
+      </p>
       <div class="fld">
         <label>Credential ID</label>
         <input name="amazon_credential_id" value="{{ perfil.amazon_credential_id }}" placeholder="AKIA...">

@@ -38,11 +38,32 @@ class Perfil(models.Model):
     amazon_ultimo_erro = models.CharField(max_length=255, blank=True, default="")
 
     def amazon_conectado(self) -> bool:
-        """True se o usuário tem credenciais Amazon próprias completas.
+        """True se a Amazon está habilitada para este usuário — ou seja, se ele tem tag.
+
+        A tag é tudo o que a Amazon exige: o link comissionado é montado em Python
+        puro (`?tag=`, scraper_amazon/link.py) e os dados de oferta vêm do fallback
+        público quando não há Creators API. Com a tag, a Amazon funciona ponta a ponta.
+
+        Já exigiu também credential_id + secret, e isso era um beco sem saída: as
+        credenciais da Creators API só saem para contas com 10 vendas qualificadas em
+        30 dias. O app pedia para "conectar a loja para gerar links comissionados" e,
+        ao mesmo tempo, tornava a conexão inalcançável para quem ainda não vendeu —
+        exatamente quem precisa da ferramenta. Quem tinha a tag via "Não conectada" e
+        o alerta "Loja desconectada" para sempre, com a Amazon funcionando.
+
+        A Creators API é um upgrade opcional: veja amazon_creators_ativa().
+        """
+        return bool(self.afiliado_tag_amazon)
+
+    def amazon_creators_ativa(self) -> bool:
+        """True se o usuário tem credenciais próprias da Creators API (upgrade opcional).
+
+        Ortogonal a amazon_conectado(): melhora a origem dos dados de oferta (API oficial
+        em vez do fallback público), não a capacidade de gerar link comissionado.
         Host NÃO é exigido: é fixo global (creators_api.DATA_HOST = creatorsapi.amazon);
-        o campo amazon_creators_host só serve p/ override de dev."""
-        return bool(self.amazon_credential_id and self.amazon_credential_secret
-                    and self.afiliado_tag_amazon)
+        o campo amazon_creators_host só serve p/ override de dev.
+        """
+        return bool(self.amazon_credential_id and self.amazon_credential_secret)
 
     # ── Telegram por usuário (cada um conecta o próprio bot do @BotFather) ──
     # Vazio = cai no fallback global de settings (TELEGRAM_BOT_TOKEN). Criptografado

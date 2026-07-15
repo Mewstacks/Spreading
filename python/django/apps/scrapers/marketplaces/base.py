@@ -25,6 +25,15 @@ class Marketplace(ABC):
     def verify_affiliate_tag(self, link: str, usuario=None) -> bool:
         """True se o link final carrega a tag de afiliado (do usuário, ou global) — A3."""
 
+    def can_affiliate(self, produto, usuario=None) -> bool:
+        """
+        Este item comissionaria para ESTE usuário se fosse publicado agora? Predicado
+        de LEITURA: sem rede e sem escrita — a listagem chama isto por item, num GET.
+        Cada loja resolve a atribuição de um jeito (ML: sessão do Link Builder;
+        Amazon: tag do Perfil), por isso a regra mora aqui e não na view.
+        """
+        return bool(getattr(produto, "afiliado_ok", False))
+
     def verify_link(self, link: str, nome_esperado: str = None,
                     confiar_desconto: bool = False, usuario=None) -> dict:
         """

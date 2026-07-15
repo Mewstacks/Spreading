@@ -242,6 +242,16 @@ class Command(BaseCommand):
             try:
                 st.write_state("envio", fase="processando", loja_atual=None)
                 _renovar_conexoes_db()
+                # Faxina antes do tick: fecha publicações que ficaram 'pendente' porque
+                # o worker morreu no meio de um envio (deploy/crash). Nunca derruba o
+                # tick — envio é o que importa aqui.
+                try:
+                    from apps.scrapers.maintenance import reconciliar_publicacoes_orfas
+                    orfas = reconciliar_publicacoes_orfas()
+                    if orfas:
+                        logger.warning("%s publicacao(oes) orfa(s) fechada(s) como falha", orfas)
+                except Exception as e:
+                    logger.warning("Reconciliacao de publicacoes falhou: %s", e)
                 res = processar_configs_de_envio()
                 enviados = sum(1 for r in res if r.get("sucesso"))
                 # Watchdog de conexões: alerta por e-mail quando WA/ML cai (cooldown interno).

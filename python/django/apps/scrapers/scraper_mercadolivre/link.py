@@ -7,25 +7,9 @@ caminho_django = os.path.dirname(os.path.dirname(os.path.dirname(caminho_atual))
 sys.path.append(caminho_django)
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
 from apps.scrapers.progresso import emitir_progresso
+from apps.scrapers.session_paths import ml_auth_path as _auth_path
 
 logger = logging.getLogger(__name__)
-
-
-def _auth_dir() -> str:
-    """Dir persistente das sessões do ML (ML_AUTH_DIR). Fallback: pasta do scraper."""
-    try:
-        from django.conf import settings
-        return settings.ML_AUTH_DIR
-    except Exception:
-        return caminho_atual
-
-
-def _auth_path(usuario=None) -> str:
-    """auth.json do ML. Com usuário, exige o auth_{id}.json dele."""
-    base = _auth_dir()
-    if usuario is not None and getattr(usuario, "id", None):
-        return os.path.join(base, f"auth_{usuario.id}.json")
-    return os.path.join(base, "auth.json")
 
 
 class LoginError(Exception):
@@ -84,15 +68,57 @@ def _abrir_link_builder(page):
         raise LoginError(MSG_SESSAO_EXPIRADA)
 
 
+# Campo de resultado do Link Builder — é a fonte do botão "Copiar" (ele copia
+# este textarea), então ler daqui dá exatamente o que o clipboard daria, sem
+# depender de permissão de clipboard. O sufixo do id é numérico e varia: casamos
+# o prefixo.
+_SEL_RESULTADO = "textarea[id^='textfield-copyLink']"
+
+# Geração é ida ao servidor do ML; o campo só aparece depois da primeira.
+_TIMEOUT_RESULTADO_MS = 30000
+
+
+def _limpar_resultado(page):
+    """Zera o campo de resultado antes de gerar o próximo link.
+
+    É o que torna a espera determinística: o link do produto ANTERIOR fica na
+    tela, então sem zerar não há como distinguir "o novo chegou" de "o velho
+    ainda está aí". Era exatamente essa a corrida que fazia cada produto do lote
+    herdar o link do anterior. No-op na primeira geração (campo ainda não existe).
+    """
+    page.evaluate(
+        """(sel) => { const el = document.querySelector(sel); if (el) el.value = ''; }""",
+        _SEL_RESULTADO,
+    )
+
+
+def _esperar_resultado(page):
+    """Espera o Link Builder preencher o resultado e devolve o texto cru.
+
+    Chame sempre depois de _limpar_resultado + clique em Gerar. Devolve o texto
+    sem validar: mensagens de erro do ML caem aqui também e quem valida é
+    _validar_resultado_link.
+    """
+    page.wait_for_function(
+        """(sel) => {
+            const el = document.querySelector(sel);
+            return !!(el && el.value && el.value.trim());
+        }""",
+        arg=_SEL_RESULTADO,
+        timeout=_TIMEOUT_RESULTADO_MS,
+    )
+    return page.input_value(_SEL_RESULTADO)
+
+
 def _validar_resultado_link(bruto):
     """
-    O Link Builder escreve no clipboard tanto o link quanto mensagens de erro
-    (ex '⚠️ Este URL não é permitido pelo Programa.'). Só aceita http(s) real.
+    O Link Builder escreve no campo de resultado tanto o link quanto mensagens de
+    erro (ex '⚠️ Este URL não é permitido pelo Programa.'). Só aceita http(s) real.
     Levanta UrlNaoPermitidaError quando o ML rejeita a URL.
     """
     s = (bruto or "").strip()
     if not s:
-        raise ValueError("Link Builder não retornou nada (clipboard vazio).")
+        raise ValueError("Link Builder não retornou nada (resultado vazio).")
     baixo = s.lower()
     if "não é permitido" in baixo or "nao e permitido" in baixo or "não permitido" in baixo:
         raise UrlNaoPermitidaError(s)
@@ -139,18 +165,13 @@ def link_tem_tag_afiliado(link_curto: str, usuario=None) -> bool:
 
 def afiliate_link_builder(link_base, auth_path=None):
     with iniciar_browser(
-        auth_path=auth_path or os.path.join(_auth_dir(), "auth.json"),
+        auth_path=auth_path or _auth_path(),
         headless=True,
-        permissions=['clipboard-read', 'clipboard-write'],
     ) as (page, context):
         _abrir_link_builder(page)
 
         try:
-            page.get_by_role("textbox", name="Insira 1 ou mais URLs").fill(link_base)
-            page.get_by_role("button", name="Gerar").click()
-
-            page.get_by_role("button", name="Copiar").click()
-            link_final = _validar_resultado_link(page.evaluate("navigator.clipboard.readText()"))
+            link_final = _afiliar_url_na_pagina(page, link_base)
 
             logger.debug("Link afiliado ML gerado com sucesso")
             return link_final
@@ -223,20 +244,28 @@ def _afiliar_url_na_pagina(page, link_base: str):
     """
     Gera UM link de afiliado numa página do Link Builder já aberta/logada.
     Reutilizável para chamadas em lote sem reabrir o browser.
+
+    Zera o resultado e espera o novo: sem isso, o link do produto anterior ainda
+    está na tela e cada item do lote sai com o link do item anterior — link certo
+    apontando pro produto errado, sem erro nenhum no log.
     """
+    _limpar_resultado(page)
     page.get_by_role("textbox", name="Insira 1 ou mais URLs").fill(link_base)
     page.get_by_role("button", name="Gerar").click()
-    page.get_by_role("button", name="Copiar").click()
-    return _validar_resultado_link(page.evaluate("navigator.clipboard.readText()"))
+    return _validar_resultado_link(_esperar_resultado(page))
 
 
-def gerar_links_em_lote(produtos):
+def gerar_links_em_lote(produtos, usuario=None):
     """
     Pré-gera e persiste link_afiliado/url_isca para uma lista de Produtos numa
     ÚNICA sessão Playwright. Pula produtos que já têm link em cache.
 
     Detecta expiração de sessão UMA vez no início (login visível -> LoginError),
     em vez de quebrar no meio do lote.
+
+    `usuario` escolhe a sessão do ML (auth_{id}.json — o que a tela de conexão
+    grava). Sem ele, _auth_path resolve a sessão disponível: é o caso dos jobs de
+    cron, que não têm request.
 
     Retorna: (qtd_gerados, qtd_falhas).
     """
@@ -247,9 +276,8 @@ def gerar_links_em_lote(produtos):
     gerados = 0
     falhas = 0
     with iniciar_browser(
-        auth_path=os.path.join(_auth_dir(), "auth.json"),
+        auth_path=_auth_path(usuario),
         headless=True,
-        permissions=['clipboard-read', 'clipboard-write'],
     ) as (page, context):
         _abrir_link_builder(page)
 
@@ -324,7 +352,7 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
     # logo após o link ser gerado com sucesso).
     auth_path = _auth_path(usuario)
     if not os.path.exists(auth_path):
-        auth_path = os.path.join(_auth_dir(), "auth.json")
+        auth_path = _auth_path()
 
     with iniciar_browser(
         auth_path=auth_path,

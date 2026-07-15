@@ -48,6 +48,15 @@ def link_tem_tag_afiliado(link: str, usuario=None) -> bool:
     return tag in qs.get("tag", [])
 
 
+def pode_gerar_link(produto, usuario=None) -> bool:
+    """True quando o link comissionado já é montável: tag do Perfil + URL canônica.
+
+    Espelha as pré-condições de gerar_link_afiliado_para_produto sem executá-la (nem
+    escrever cache): a UI precisa saber se o item comissiona antes de qualquer envio.
+    """
+    return bool(_tag(usuario) and _url_canonica(produto))
+
+
 def gerar_link_afiliado_para_produto(produto, usuario=None):
     """
     Monta o link de afiliado da Amazon com a tag do usuário (ou global). Retorna dict

@@ -14,7 +14,7 @@ import logging
 from apps.scrapers.auxiliar import iniciar_browser, pausa_humana
 from apps.scrapers.models import Produto
 from apps.scrapers.progresso import emitir_progresso
-from apps.scrapers.session_paths import ml_session_dir
+from apps.scrapers.session_paths import ml_auth_path
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 logger = logging.getLogger(__name__)
@@ -292,7 +292,7 @@ def mapear_ofertas(max_paginas=40, substituir=True):
     substituir=False (lane RÁPIDA/flash, B3): upsert por link, sem zerar o feed."""
     logger.info("Iniciando raspagem de ofertas ML (%s)", "full" if substituir else "flash")
     coletados = []
-    caminho_auth = os.path.join(ml_session_dir(), "auth.json")
+    caminho_auth = ml_auth_path()
 
     with iniciar_browser(auth_path=caminho_auth, headless=True,
                          validar_sessao=False) as (page, context):
@@ -339,7 +339,7 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None):
     termos = [t.strip() for t in (termo_busca or "").split(",") if t.strip()]
     if not termos:
         return 0
-    caminho_auth = os.path.join(ml_session_dir(), "auth.json")
+    caminho_auth = ml_auth_path()
     coletados = []
 
     with iniciar_browser(auth_path=caminho_auth, headless=True,

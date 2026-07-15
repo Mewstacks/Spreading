@@ -145,6 +145,10 @@ class Amazon(Marketplace):
             logger.info("Busca por termo Amazon pulada: %s", e)
             return 0
 
+    def can_affiliate(self, produto, usuario=None) -> bool:
+        from apps.scrapers.scraper_amazon.link import pode_gerar_link
+        return pode_gerar_link(produto, usuario=usuario)
+
     def prefetch_links(self, produtos, usuario=None):
         from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_para_produto
         gerados = falhas = 0

@@ -64,6 +64,11 @@ class MercadoLivre(Marketplace):
         from apps.scrapers.scraper_mercadolivre.link import link_tem_tag_afiliado
         return link_tem_tag_afiliado(link, usuario=usuario)
 
+    def can_affiliate(self, produto, usuario=None) -> bool:
+        # A identidade vem da conta autenticada no Link Builder, não de uma tag: ter o
+        # link pré-gerado é a única evidência de atribuição disponível sem rede.
+        return bool(getattr(produto, "link_afiliado", ""))
+
     def verify_link(self, link, nome_esperado=None, confiar_desconto=False, usuario=None):
         from apps.scrapers.scraper_mercadolivre.link import verificar_link_afiliado
         return verificar_link_afiliado(link, nome_esperado=nome_esperado,
@@ -79,7 +84,11 @@ class MercadoLivre(Marketplace):
         from apps.scrapers.scraper_mercadolivre.ofertas_scraper import buscar_por_termo
         return buscar_por_termo(termo_busca, min_desconto=min_desconto, macro=macro)
 
-    def prefetch_links(self, produtos):
-        """Pré-gera links em lote (uma sessão Playwright). Retorna (gerados, falhas)."""
+    def prefetch_links(self, produtos, usuario=None):
+        """Pré-gera links em lote (uma sessão Playwright). Retorna (gerados, falhas).
+
+        O pool ML é compartilhado, mas a SESSÃO é por usuário: `usuario` diz qual
+        auth_{id}.json abrir. Sem ele, link.py resolve a sessão disponível.
+        """
         from apps.scrapers.scraper_mercadolivre.link import gerar_links_em_lote
-        return gerar_links_em_lote(produtos)
+        return gerar_links_em_lote(produtos, usuario=usuario)

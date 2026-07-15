@@ -25,10 +25,50 @@ import time
 import requests
 from django.conf import settings
 
+# Classificação de falha de envio. Espelha node.js/error_taxonomy.js — o Node
+# manda a `classe` no corpo de /api/enviar e ela tem precedência aqui.
+#
+# Existe porque o orquestrador (ofertas.processar_configs_de_envio) conta
+# falhas_consecutivas e desliga a ConfiguracaoEnvio ao bater o teto. Sem separar
+# "o worker piscou" de "o grupo foi apagado", algumas horas de indisponibilidade
+# desligavam a automação sozinhas e nada a religava.
+TRANSITORIO = "transitorio"
+PERMANENTE = "permanente"
+DESCONHECIDO = "desconhecido"
+
+_CLASSES = frozenset({TRANSITORIO, PERMANENTE, DESCONHECIDO})
+
 
 class WhatsAppError(Exception):
     """Falha de configuração/transporte ao falar com o serviço Node."""
     pass
+
+
+def _classe_do_corpo(corpo) -> str | None:
+    """A classe que o Node mandou, se ele for uma versão que a conhece.
+
+    Node antigo no ar não manda o campo → None → o chamador cai em DESCONHECIDO,
+    que é o comportamento anterior a esta taxonomia. Deploy fora de ordem
+    (Django novo, Node velho) degrada em vez de quebrar.
+    """
+    if not isinstance(corpo, dict):
+        return None
+    classe = corpo.get("classe")
+    return classe if classe in _CLASSES else None
+
+
+def _classe_do_status(status_code: int) -> str:
+    """Classifica pelo HTTP quando o Node não disse nada.
+
+    429 (limiter) e 503 (sessão fora do ar / capacidade) somem sozinhos; 5xx é
+    worker doente, não config errada. Os demais 4xx são pedido malformado: só
+    ação humana resolve, então pausar a config é a atitude certa.
+    """
+    if status_code == 429 or status_code >= 500:
+        return TRANSITORIO
+    if 400 <= status_code < 500:
+        return PERMANENTE
+    return DESCONHECIDO
 
 
 def _base_url() -> str:
@@ -141,13 +181,17 @@ def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
         imagem_base64: opcional; se informado envia mídia em vez de texto puro.
 
     Returns:
-        {sucesso: bool, via?: 'local'|'evolution', erro?: str}
+        {sucesso: bool, via?: 'local'|'evolution', erro?: str, classe?: str}
+
+    Toda falha carrega `classe` (TRANSITORIO/PERMANENTE/DESCONHECIDO); o
+    orquestrador usa isso para decidir se conta a falha contra a config.
     """
     # Sem destino padrão: num app multi-tenant o grupo vem sempre de
     # ConfiguracaoEnvio.grupo_id do usuário. Um "grupo global" mandaria a oferta
     # de um usuário para o grupo de outro.
     if not grupoid:
-        return {"sucesso": False, "erro": "Nenhum grupoid informado."}
+        return {"sucesso": False, "erro": "Nenhum grupoid informado.",
+                "classe": PERMANENTE}
 
     payload = {"grupoid": grupoid}
     if session:
@@ -173,14 +217,28 @@ def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
         if r.status_code == 200 and corpo.get("sucesso") and corpo.get("mensagem_id"):
             return corpo
         if r.status_code == 200 and corpo.get("sucesso"):
+            # Regressão do Node (sucesso sem id). Transitório: a config do
+            # usuário está correta e nada que ele faça resolve — quem conserta é
+            # um deploy. Pausá-lo puniria o usuário pelo nosso bug.
             return {
                 **corpo,
                 "sucesso": False,
                 "status": r.status_code,
                 "erro": "WhatsApp não devolveu o ID de confirmação da mensagem.",
+                "classe": TRANSITORIO,
             }
-        return {"sucesso": False, "status": r.status_code, **corpo}
+        classe = _classe_do_corpo(corpo) or _classe_do_status(r.status_code)
+        return {"sucesso": False, "status": r.status_code, **corpo, "classe": classe}
     except WhatsAppError as e:
-        return {"sucesso": False, "erro": str(e)}
+        # WHATSAPP_API_KEY ausente: nenhum envio de ninguém vai funcionar até
+        # alguém mexer no .env. Não é defeito da config do usuário.
+        return {"sucesso": False, "erro": str(e), "classe": TRANSITORIO}
+    except (requests.Timeout, requests.ConnectionError) as e:
+        # Os dois piores casos nunca chegam classificados: o Node não responde
+        # (worker reiniciando/deploy) ou demora mais que o timeout. Ambos somem
+        # sozinhos — e eram justamente estes que desligavam a automação.
+        return {"sucesso": False, "erro": f"Falha de transporte: {e}",
+                "classe": TRANSITORIO}
     except Exception as e:
-        return {"sucesso": False, "erro": f"Falha de transporte: {e}"}
+        return {"sucesso": False, "erro": f"Falha de transporte: {e}",
+                "classe": DESCONHECIDO}

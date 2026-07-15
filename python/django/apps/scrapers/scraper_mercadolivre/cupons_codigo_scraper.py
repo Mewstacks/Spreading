@@ -18,7 +18,7 @@ from apps.scrapers.auxiliar import iniciar_browser
 from apps.scrapers.models import Produto, CupomCodigo, FonteIngestao, CupomNormalizado
 from apps.scrapers.progresso import emitir_progresso
 from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _coletar_cards, _salvar
-from apps.scrapers.session_paths import ml_session_dir
+from apps.scrapers.session_paths import ml_auth_path
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ def _extrair_codigos(texto):
 def mapear_cupons_codigo():
     """Raspa /ofertas/cupons: produtos -> origem='cupom_codigo'; códigos -> CupomCodigo."""
     logger.info("Iniciando raspagem de cupons de codigo ML")
-    caminho_auth = os.path.join(ml_session_dir(), "auth.json")
+    caminho_auth = ml_auth_path()
     coletados, codigos = [], set()
 
     with iniciar_browser(auth_path=caminho_auth, headless=True,
