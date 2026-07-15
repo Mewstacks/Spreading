@@ -19,9 +19,11 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-# Copia o código da aplicação
-COPY index.js ./
-COPY session_policy.js ./
+# Copia o código da aplicação. Contexto inteiro de propósito: um allowlist por
+# arquivo deixou payloads.js e auth_store.js de fora e derrubou o boot em
+# produção, sem quebrar nada em dev. O que fica fora da imagem é decidido pelo
+# .dockerignore.
+COPY . .
 
 EXPOSE 3000
 
