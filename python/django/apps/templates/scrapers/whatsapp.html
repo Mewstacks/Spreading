@@ -87,12 +87,15 @@
     <button id="grupos-retry" class="btn btn-ghost" style="min-height:44px;margin-left:.4rem;">
       <i data-lucide="refresh-cw"></i> Sincronizar grupos
     </button>
+    <div id="grupos-retry-msg" style="font-size:.82rem;margin-top:.4rem;min-height:1em;"></div>
   </div>
 
   <div id="logout-area" style="display:none;margin-top:1.4rem;">
     <button id="wa-desconectar" class="btn btn-ghost" style="min-height:44px;">
       <i data-lucide="unplug"></i> Desconectar WhatsApp
     </button>
+    {# Toda ação precisa dizer no que deu: sem isto, uma falha fica idêntica a um sucesso. #}
+    <div id="logout-msg" style="font-size:.82rem;margin-top:.5rem;min-height:1em;"></div>
     <p class="muted" style="font-size:.82rem;margin-top:.5rem;">
       Desvincula este número e pede um QR novo. As regras de Telegram não são afetadas.
     </p>
@@ -219,21 +222,64 @@
     return m ? decodeURIComponent(m.pop()) : '';
   }
 
+  // Traduz a resposta de uma ação em texto para o usuário. `erro` no corpo só
+  // aparece quando o worker Node está inalcançável (whatsapp_client._request_json);
+  // o texto dele é diagnóstico interno e não serve para mostrar aqui.
+  function falhaAoUsuario(r, corpo) {
+    if (r && r.status === 403) return 'Sua sessão expirou. Recarregue a página e tente de novo.';
+    if (r && !r.ok) return 'Não foi possível concluir (erro ' + r.status + '). Tente de novo.';
+    if (corpo && corpo.erro) return 'O serviço de WhatsApp não respondeu. Tente de novo em instantes.';
+    return null;
+  }
+
+  async function acao(url, opts) {
+    const r = await fetch(url, opts);
+    const corpo = await r.json().catch(function () { return {}; });
+    return { erro: falhaAoUsuario(r, corpo), corpo: corpo };
+  }
+
   document.getElementById('grupos-retry').onclick = async function () {
+    const msg = document.getElementById('grupos-retry-msg');
     this.disabled = true;
-    try { await fetch('/scrapers/whatsapp/refresh-grupos/'); } catch (e) {}
-    setTimeout(() => { this.disabled = false; poll(); }, 1500);
+    msg.style.color = 'var(--muted)';
+    msg.textContent = 'Sincronizando…';
+    try {
+      const { erro, corpo } = await acao('/scrapers/whatsapp/refresh-grupos/');
+      if (erro || corpo.sucesso === false) {
+        msg.style.color = 'var(--red)';
+        msg.textContent = erro || 'Não foi possível sincronizar agora.';
+      } else {
+        msg.textContent = 'Sincronização iniciada…';
+      }
+    } catch (e) {
+      msg.style.color = 'var(--red)';
+      msg.textContent = 'Não foi possível falar com o servidor.';
+    }
+    this.disabled = false;
+    setTimeout(poll, 1500);
   };
 
   document.getElementById('wa-desconectar').onclick = async function () {
     if (!confirm('Desconectar o WhatsApp? Você precisará ler o QR code novamente para reconectar.')) return;
+    const msg = document.getElementById('logout-msg');
     this.disabled = true;
+    msg.style.color = 'var(--muted)';
+    msg.textContent = 'Desconectando…';
     try {
-      await fetch('/scrapers/whatsapp/desconectar/', {
+      const { erro, corpo } = await acao('/scrapers/whatsapp/desconectar/', {
         method: 'POST',
         headers: { 'X-CSRFToken': getCookie('csrftoken') },
       });
-    } catch (e) {}
+      if (erro || !corpo.sucesso) {
+        msg.style.color = 'var(--red)';
+        msg.textContent = erro || 'Não foi possível desconectar. Tente de novo.';
+      } else {
+        msg.textContent = 'Desconectado.';
+      }
+    } catch (e) {
+      msg.style.color = 'var(--red)';
+      msg.textContent = 'Não foi possível falar com o servidor.';
+    }
     this.disabled = false;
     poll();
   };
