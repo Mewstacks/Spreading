@@ -203,6 +203,81 @@ class WhatsAppIsolationTests(SimpleTestCase):
         self.assertIn("ID de confirmação", result["erro"])
 
 
+class WhatsAppDesconectarTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("wa-logout", password="test")
+        self.user.perfil.marcar_verificado()
+        self.client.force_login(self.user)
+        self.url = reverse("scraper-whatsapp-desconectar")
+
+    def test_disconnect_requires_post(self):
+        # Desparear é efeito colateral: GET deixaria a rota sem proteção CSRF.
+        self.assertEqual(self.client.get(self.url).status_code, 405)
+
+    def test_disconnect_requires_login(self):
+        self.client.logout()
+        response = self.client.post(self.url)
+        self.assertIn(response.status_code, (302, 403))
+
+    @patch("apps.scrapers.whatsapp_client.desconectar")
+    def test_disconnect_targets_the_users_own_session(self, desconectar):
+        desconectar.return_value = {"sucesso": True, "auth_removido": True}
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["sucesso"])
+        desconectar.assert_called_once_with(self.user.perfil.sessao_whatsapp())
+
+
+class WhatsAppTransportContractTests(SimpleTestCase):
+    """O front distingue "Node fora do ar" de "WhatsApp desconectado" pela
+    presença da chave `erro`. Ela só pode aparecer por falha de transporte."""
+
+    @override_settings(
+        WHATSAPP_API_URL="http://whatsapp.internal:3000",
+        WHATSAPP_API_KEY="secret",
+    )
+    @patch("apps.scrapers.whatsapp_client.requests.request")
+    def test_unreachable_worker_is_reported_as_erro(self, request):
+        request.side_effect = OSError("connection refused")
+        self.assertIn("erro", whatsapp_client.listar_grupos("user-42"))
+
+    @override_settings(
+        WHATSAPP_API_URL="http://whatsapp.internal:3000",
+        WHATSAPP_API_KEY="secret",
+    )
+    @patch("apps.scrapers.whatsapp_client.requests.request")
+    def test_a_healthy_worker_reply_is_passed_through_untouched(self, request):
+        response = Mock()
+        # Sessão viva sincronizando: NÃO pode virar "erro" para o front.
+        response.json.return_value = {
+            "conectado": True, "fase": "conectado", "sincronizando": True, "grupos": [],
+        }
+        request.return_value = response
+
+        data = whatsapp_client.listar_grupos("user-42")
+
+        self.assertNotIn("erro", data)
+        self.assertTrue(data["conectado"])
+
+    @override_settings(
+        WHATSAPP_API_URL="http://whatsapp.internal:3000",
+        WHATSAPP_API_KEY="secret",
+    )
+    @patch("apps.scrapers.whatsapp_client.requests.request")
+    def test_logout_does_not_retry(self, request):
+        response = Mock()
+        response.json.return_value = {"sucesso": True}
+        request.return_value = response
+
+        whatsapp_client.desconectar("user-42")
+
+        request.assert_called_once_with(
+            "POST", "http://whatsapp.internal:3000/api/sessoes/logout",
+            headers={"x-api-key": "secret", "Content-Type": "application/json"},
+            params=None, json={"session": "user-42"}, timeout=25,
+        )
+
+
 class ConfiguracaoValidationTests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user("config-user", password="test")

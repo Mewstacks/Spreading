@@ -8,7 +8,13 @@ const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
-const { reconnectDelay, shouldPurgeAuth } = require('./session_policy');
+const {
+    reconnectDelay, shouldPurgeAuth, reconnectOutcome, isRevokedReason, ocupaSlot,
+} = require('./session_policy');
+const {
+    buildSessionPayload, buildGruposPayload, buildInativoPayload,
+} = require('./payloads');
+const authStore = require('./auth_store');
 
 const app = express();
 
@@ -59,6 +65,11 @@ const sanitizeInstanceId = (value) => {
 
 const RECONNECT_DELAY_MS = parseInt(process.env.RECONNECT_DELAY_MS, 10) || 5000;
 const RECONNECT_MAX_DELAY_MS = parseInt(process.env.RECONNECT_MAX_DELAY_MS, 10) || 60000;
+// Teto por ciclo de recuperacao. Com o backoff (5s..60s), 6 tentativas ~= 3,2min;
+// dois ciclos (retry -> purge -> retry) ~= 6,5min ate a sessao expirar de vez.
+// Sem teto, o contador so crescia e o usuario via "tentativa 38..." para sempre.
+const RECONNECT_MAX_ATTEMPTS = parseInt(process.env.RECONNECT_MAX_ATTEMPTS, 10) || 6;
+const SESSION_START_STAGGER_MS = parseInt(process.env.SESSION_START_STAGGER_MS, 10) || 12000;
 const PUPPETEER_EXECUTABLE_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
 const PRINT_QR_TO_LOGS = process.env.PRINT_QR_TO_LOGS === '1';
 const WATCHDOG_TIMEOUT_MS = parseInt(process.env.WATCHDOG_TIMEOUT_MS, 10) || 45000;
@@ -122,6 +133,7 @@ const createSessionState = (instanceId) => ({
     gruposCache: [],
     gruposCarregados: false,
     gruposSincronizando: false,
+    gruposSyncFalhou: false, // ultima sync falhou: nao insistir a cada GET
     groupSyncPromise: null,
     fase: 'iniciando',
     progresso: 0,
@@ -131,6 +143,8 @@ const createSessionState = (instanceId) => ({
     qrIdleTimer: null,
     requestedAt: 0,
     initFailures: 0,
+    authPurges: 0,           // purgas de auth neste ciclo de recuperacao
+    encerrandoManual: false, // logout pedido pelo usuario: suprime o auto-reconnect
     authenticatedInAttempt: false,
     whatsappId: null,
     sendChain: Promise.resolve(),
@@ -145,7 +159,11 @@ const createCapacitySessionState = (instanceId) => ({
 });
 
 const sessions = new Map();
-const disabledMarkerPath = (session) => path.join(session.authPath, '.runtime-disabled');
+// Marca uma sessao encerrada de proposito (logout, duplicata). Lido pelo
+// restore do boot para nao religar quem foi desligado deliberadamente.
+const DISABLED_MARKER = '.runtime-disabled';
+const disabledMarkerPathFor = (authPath) => path.join(authPath, DISABLED_MARKER);
+const disabledMarkerPath = (session) => disabledMarkerPathFor(session.authPath);
 
 const encerrarSessoesDuplicadas = async (current) => {
     if (!current.whatsappId) return;
@@ -162,16 +180,14 @@ const encerrarSessoesDuplicadas = async (current) => {
     }
 };
 
-const buildSessionPayload = (session) => ({
-    instancia: session.id,
-    conectado: session.isConnected,
-    fase: session.fase,
-    progresso: session.progresso,
-    mensagem: session.faseMsg,
-    grupos: session.gruposCarregados ? session.gruposCache.length : 0,
-    grupos_sincronizando: session.gruposSincronizando,
-    qr: session.ultimoQR,
-});
+// Wrappers finos: os modulos puros nao conhecem authRootPath.
+const authPathDe = (instanceId) => path.join(authRootPath, instanceId);
+const purgeAuthDir = (session, reason) => authStore.purgeAuthDir(authRootPath, session.authPath, reason);
+const purgeAuthDirPorId = (instanceId, reason) => authStore.purgeAuthDir(
+    authRootPath, authPathDe(instanceId), reason
+);
+const markPaired = (session) => authStore.markPaired(authRootPath, session.authPath);
+const hasStoredAuth = (instanceId) => authStore.hasStoredAuth(authRootPath, authPathDe(instanceId));
 
 const withTimeout = (promise, timeoutMs, label) => {
     let timer;
@@ -235,12 +251,16 @@ const syncGroups = async (session, reason = 'auto') => {
                 .filter((c) => c.isGroup)
                 .map((c) => ({ id: c.id._serialized, nome: c.name }));
             session.gruposCarregados = true;
+            session.gruposSyncFalhou = false;
             session.fase = 'conectado';
             session.faseMsg = `Conectado - ${session.gruposCache.length} grupos.`;
             console.log(`[${session.id}] Grupos sincronizados (${reason}): ${session.gruposCache.length}.`);
             return true;
         } catch (err) {
             session.gruposCarregados = false;
+            // Lembra a falha: sem isto, cada GET /api/grupos dispararia um
+            // getChats novo (45s de timeout) enquanto o front pollava.
+            session.gruposSyncFalhou = true;
             console.error(`[${session.id}] Erro ao sincronizar grupos (${reason}):`, err.message);
             // A lista de chats e secundaria. `ready` ja comprovou a conexao;
             // nunca destrua uma sessao saudavel porque getChats ficou lento.
@@ -256,15 +276,47 @@ const syncGroups = async (session, reason = 'auto') => {
     return session.groupSyncPromise;
 };
 
-const scheduleReconnect = (session, reason) => {
+// msgOverride sobrevive ao agendamento. Antes, quem quisesse explicar ao usuario
+// o que estava acontecendo (ex.: "sessao corrompida, gerando novo QR") setava
+// faseMsg e via a mensagem ser sobrescrita aqui na linha seguinte.
+const scheduleReconnect = (session, reason, msgOverride = null) => {
     if (session.reconnectTimer) return;
+    if (session.encerrandoManual) return; // logout do usuario: nao ressuscitar
     session.reconnectAttempts += 1;
+
+    const outcome = reconnectOutcome(
+        session.reconnectAttempts, session.authPurges, RECONNECT_MAX_ATTEMPTS
+    );
+
+    if (outcome === 'expire') {
+        session.fase = 'expirado';
+        session.progresso = 0;
+        session.faseMsg = 'Sessão expirada. Leia o QR novamente.';
+        session.isConnected = false;
+        session.ultimoQR = null;
+        // Sem QR, o coletor de QR ocioso nunca dispara e ficaria se reagendando
+        // a cada QR_IDLE_DESTROY_MS para sempre.
+        if (session.qrIdleTimer) clearTimeout(session.qrIdleTimer);
+        session.qrIdleTimer = null;
+        console.error(
+            `[${session.id}] Sessao expirada apos ${session.authPurges} purga(s). Motivo final: ${reason}`
+        );
+        return; // TERMINAL: nao reagenda. reviveSession() e o caminho de volta.
+    }
+
+    if (outcome === 'purge') {
+        purgeAuthDir(session, `teto de ${RECONNECT_MAX_ATTEMPTS} tentativas`);
+        session.authPurges += 1;
+        session.reconnectAttempts = 1; // o tick da purga ja e a tentativa 1 do ciclo novo
+        msgOverride = 'Credencial expirada — gerando um novo QR…';
+    }
+
     const delay = reconnectDelay(
         session.reconnectAttempts, RECONNECT_DELAY_MS, RECONNECT_MAX_DELAY_MS
     );
     session.fase = 'reconectando';
     session.progresso = 0;
-    session.faseMsg = `Recuperando sessao (tentativa ${session.reconnectAttempts})...`;
+    session.faseMsg = msgOverride || `Recuperando sessão (tentativa ${session.reconnectAttempts})…`;
     console.log(`[${session.id}] Reconnect agendado em ${delay}ms. Motivo: ${reason}`);
 
     session.reconnectTimer = setTimeout(() => {
@@ -275,7 +327,26 @@ const scheduleReconnect = (session, reason) => {
     }, delay);
 };
 
-const recycleSession = async (session, reason, purgeAuth = false) => {
+// ensureSession so inicializa sessao ausente do Map, e initializeSession sai
+// cedo se ja inicializada. Uma sessao terminal fica no Map com initialized=false
+// e sem timer: sem isto o usuario ficaria preso em 'expirado' para sempre, sem QR.
+const FASES_TERMINAIS = new Set(['expirado', 'falha_auth']);
+const reviveSession = (session) => {
+    if (session.initialized || session.client) return session;
+    if (!FASES_TERMINAIS.has(session.fase)) return session;
+    console.log(`[${session.id}] Revivendo sessao terminal (${session.fase}).`);
+    session.reconnectAttempts = 0;
+    session.authPurges = 0;
+    session.initFailures = 0;
+    session.encerrandoManual = false;
+    session.fase = 'iniciando';
+    session.progresso = 0;
+    session.faseMsg = 'Iniciando serviço…';
+    initializeSession(session);
+    return session;
+};
+
+const recycleSession = async (session, reason, purgeAuth = false, msgOverride = null) => {
     const client = session.client;
     if (!client) return;
     console.error(`[${session.id}] Reciclando Chromium. Motivo: ${reason}`);
@@ -285,25 +356,15 @@ const recycleSession = async (session, reason, purgeAuth = false) => {
     session.whatsappId = null;
     session.gruposCarregados = false;
     session.gruposSincronizando = false;
+    session.gruposSyncFalhou = false; // conexao nova merece tentativa nova
     session.authenticatedInAttempt = false;
     if (session.initTimer) clearTimeout(session.initTimer);
     session.initTimer = null;
     try { await withTimeout(client.destroy(), 10000, 'client.destroy'); } catch (err) {
         console.warn(`[${session.id}] Chromium nao encerrou limpo:`, err.message);
     }
-    if (purgeAuth) {
-        const resolvedRoot = path.resolve(authRootPath);
-        const resolvedSession = path.resolve(session.authPath);
-        if (resolvedSession.startsWith(`${resolvedRoot}${path.sep}`)) {
-            try {
-                fs.rmSync(resolvedSession, { recursive: true, force: true });
-                console.error(`[${session.id}] Perfil LocalAuth corrompido removido; novo QR sera gerado.`);
-            } catch (err) {
-                console.error(`[${session.id}] Falha ao limpar perfil LocalAuth:`, err.message);
-            }
-        }
-    }
-    scheduleReconnect(session, reason);
+    if (purgeAuth) purgeAuthDir(session, `perfil corrompido: ${reason}`);
+    scheduleReconnect(session, reason, msgOverride);
 };
 
 const limparCachesChromium = (dir) => {
@@ -367,11 +428,9 @@ const initializeSession = (session) => {
             );
             session.initFailures += 1;
             const purgeAuth = shouldPurgeAuth(session.initFailures, authenticatedFailure);
-            if (purgeAuth) {
-                session.faseMsg = 'Sessao corrompida detectada - gerando um novo QR...';
-                session.initFailures = 0;
-            }
-            recycleSession(session, `timeout em ${stage}`, purgeAuth).catch((err) => {
+            if (purgeAuth) session.initFailures = 0;
+            const msg = purgeAuth ? 'Sessão corrompida — gerando um novo QR…' : null;
+            recycleSession(session, `timeout em ${stage}`, purgeAuth, msg).catch((err) => {
                 console.error(`[${session.id}] Falha ao reciclar sessao travada:`, err.message);
             });
         }, SESSION_INIT_TIMEOUT_MS);
@@ -406,6 +465,9 @@ const initializeSession = (session) => {
     client.on('authenticated', () => {
         if (session.client !== client) return;
         session.authenticatedInAttempt = true;
+        // A credencial no volume agora vale a pena restaurar num boot futuro.
+        // O layout do LocalAuth nao serve como sinal: ver auth_store.js.
+        markPaired(session);
         session.ultimoQR = null;
         session.fase = 'autenticado';
         session.faseMsg = 'Autenticado — preparando sessão…';
@@ -435,6 +497,8 @@ const initializeSession = (session) => {
         session.initFailures = 0;
         session.authenticatedInAttempt = false;
         session.reconnectAttempts = 0;
+        session.authPurges = 0; // ciclo de recuperacao fechado com sucesso
+        markPaired(session);    // rede de seguranca: 'authenticated' pode nao vir num restore
         session.whatsappId = client.info?.wid?._serialized || null;
         await encerrarSessoesDuplicadas(session);
         session.ultimoQR = null;
@@ -454,6 +518,7 @@ const initializeSession = (session) => {
         session.isConnected = false;
         session.gruposCarregados = false;
         session.gruposSincronizando = false;
+        session.gruposSyncFalhou = false; // conexao nova merece tentativa nova
         session.fase = 'desconectado';
         session.progresso = 0;
         session.faseMsg = 'Desconectado — reconectando…';
@@ -467,8 +532,25 @@ const initializeSession = (session) => {
             console.warn(`[${session.id}] Chromium nao encerrou limpo:`, err.message);
         }
 
-        // LOGOUT: o celular desvinculou → o LocalAuth some, gera novo QR na reinicialização.
-        // Outros motivos (queda de rede, etc.): a sessão no volume ainda é válida → reconecta sozinho.
+        // Logout pedido pelo usuário: a rota /api/sessoes/logout cuida do resto.
+        // Sem esta guarda, o client.logout() de lá dispara este handler e nós
+        // devolveríamos um QR novo na cara de quem acabou de clicar "Desconectar".
+        if (session.encerrandoManual) return;
+
+        if (isRevokedReason(reason)) {
+            // O celular desvinculou: a credencial no volume está morta. Reconectar
+            // com ela é o que produzia o loop infinito de "tentativa N".
+            purgeAuthDir(session, `desconectado: ${reason}`);
+            session.authPurges = 0;
+            session.reconnectAttempts = 0;
+            session.gruposCache = [];
+            session.fase = 'qr';
+            session.faseMsg = 'Aparelho desvinculado — leia o QR para reconectar.';
+            initializeSession(session);
+            return;
+        }
+
+        // Queda de rede e afins: a sessão no volume ainda é válida, reconecta sozinho.
         scheduleReconnect(session, reason);
     });
 
@@ -492,10 +574,12 @@ const initializeSession = (session) => {
     return session;
 };
 
+const sessoesOcupandoSlot = () => Array.from(sessions.values()).filter(ocupaSlot).length;
+
 const ensureSession = (instanceId) => {
     const normalizedId = sanitizeInstanceId(instanceId);
     if (!sessions.has(normalizedId)) {
-        if (sessions.size >= MAX_WHATSAPP_SESSIONS) {
+        if (sessoesOcupandoSlot() >= MAX_WHATSAPP_SESSIONS) {
             console.warn(`[${normalizedId}] Capacidade maxima atingida: ${MAX_WHATSAPP_SESSIONS} sessoes.`);
             return createCapacitySessionState(normalizedId);
         }
@@ -619,6 +703,9 @@ app.get('/health', (req, res) => {
     res.json({ ok: true });
 });
 
+// Nunca usar ensureSession aqui: o monitor_conexao do Django chama esta rota
+// para TODO perfil a cada tick, e o dashboard chama no render. Seria um Chromium
+// por perfil por tick. Quem ressuscita sessao e POST /api/sessoes e o restore do boot.
 app.get(['/api/status', '/api/status/:instance'], apiKeyAuth, (req, res) => {
     const instanceId = resolveInstanceId(req);
     const session = findSession(instanceId);
@@ -631,6 +718,7 @@ app.get(['/api/status', '/api/status/:instance'], apiKeyAuth, (req, res) => {
             mensagem: 'Sessao inativa.',
             grupos: 0,
             grupos_sincronizando: false,
+            grupos_indisponivel: false,
             qr: null,
         });
     }
@@ -653,6 +741,9 @@ app.get(['/api/sessoes', '/api/sessoes/:instance'], apiKeyAuth, (req, res) => {
 app.post('/api/sessoes', apiKeyAuth, (req, res) => {
     const instanceId = sanitizeInstanceId(req.body?.instance || req.body?.session || req.body?.userId);
     const session = ensureSession(instanceId);
+    // Pedido explicito do usuario (abrir a aba WhatsApp) e o unico caminho que
+    // tira uma sessao de uma fase terminal.
+    reviveSession(session);
     if (session.fase === 'capacidade') {
         return res.status(503).json({
             sucesso: false,
@@ -664,40 +755,94 @@ app.post('/api/sessoes', apiKeyAuth, (req, res) => {
     res.json({ sucesso: true, instancia: session.id, status: buildSessionPayload(session) });
 });
 
+// Desfaz o pareamento: revoga no celular (quando da) e apaga a credencial do
+// volume. Escape manual do usuario — antes so o proprio worker decidia purgar,
+// e nao havia como trocar de numero nem forcar um QR novo pela UI.
+app.post('/api/sessoes/logout', apiKeyAuth, async (req, res) => {
+    const instanceId = sanitizeInstanceId(req.body?.instance || req.body?.session || req.body?.userId);
+    const session = findSession(instanceId, false);
+
+    // Sem sessao viva no Map, ainda assim limpar o volume: o usuario quer desparear.
+    if (!session) {
+        const removido = purgeAuthDirPorId(instanceId, 'logout sem sessao ativa');
+        return res.json({
+            sucesso: true, logout_remoto: false, auth_removido: removido,
+            ...buildInativoPayload(instanceId),
+        });
+    }
+
+    // ANTES de qualquer destroy: client.logout() dispara 'disconnected' com
+    // reason LOGOUT, e sem este flag o handler purgaria e abriria um QR novo.
+    session.encerrandoManual = true;
+
+    let logoutRemoto = false;
+    if (session.isConnected && session.client) {
+        try {
+            // Sem timeout, um Chromium morto pendura a request ate o watchdog
+            // (45s) matar o processo inteiro, derrubando as outras sessoes.
+            await withTimeout(session.client.logout(), 15000, 'client.logout');
+            logoutRemoto = true;
+        } catch (err) {
+            console.warn(`[${session.id}] Logout remoto falhou (${err.message}); seguindo com destroy local.`);
+        }
+    }
+
+    await destroySessionRuntime(session, 'logout solicitado pelo usuario', true);
+    // Depois do destroy: ele escreve .runtime-disabled dentro do authPath, e
+    // este purge leva o diretorio inteiro. Na ordem inversa, o marker seria
+    // recriado e viraria lixo permanente no volume.
+    const authRemovido = purgeAuthDir(session, 'logout solicitado pelo usuario');
+
+    res.json({
+        sucesso: true, logout_remoto: logoutRemoto, auth_removido: authRemovido,
+        ...buildInativoPayload(session.id),
+    });
+});
+
+// Resolve a sessao para as rotas de grupo. Ressuscita SO quem ja tem credencial
+// pareada no volume: a aba Envios chama /api/grupos no load para todo usuario,
+// inclusive quem so usa Telegram, e um ensureSession incondicional queimaria um
+// dos MAX_WHATSAPP_SESSIONS slots com um Chromium que ninguem pediu.
+const resolveSessionParaGrupos = (instanceId) => {
+    const normalizedId = sanitizeInstanceId(instanceId);
+    const session = findSession(normalizedId);
+    if (session) return session;
+    if (!hasStoredAuth(normalizedId)) return null;
+    // Sessao pareada some do Map em restart/deploy/watchdog. Antes, so a aba
+    // WhatsApp a ressuscitava — por isso a aba Envios acusava "desconectado"
+    // com a credencial intacta no volume.
+    console.log(`[${normalizedId}] Sessao pareada ausente do Map; restaurando sob demanda.`);
+    return ensureSession(normalizedId);
+};
+
 app.get(['/api/grupos', '/api/grupos/:instance'], apiKeyAuth, async (req, res) => {
     const instanceId = resolveInstanceId(req);
-    const session = findSession(instanceId);
-    if (!session || !session.isConnected) {
-        return res.status(503).json({ erro: 'WhatsApp não está conectado.', instancia: session?.id || instanceId });
-    }
+    const session = resolveSessionParaGrupos(instanceId);
+    if (!session) return res.json(buildInativoPayload(sanitizeInstanceId(instanceId)));
 
-    if (session.gruposCarregados) {
-        return res.json({ instancia: session.id, grupos: session.gruposCache });
+    // Nao insiste se a ultima tentativa falhou: o payload reporta
+    // grupos_indisponivel e o usuario decide, pelo botao "Sincronizar grupos".
+    if (session.isConnected && !session.gruposCarregados
+        && !session.gruposSyncFalhou && !session.groupSyncPromise) {
+        syncGroups(session, 'api-grupos');
     }
-
-    syncGroups(session, 'api-grupos');
-    return res.status(202).json({
-        sincronizando: true,
-        erro: 'Sincronizando chats com o celular, tente novamente em alguns segundos.',
-        instancia: session.id,
-        grupos: [],
-    });
+    return res.json(buildGruposPayload(session));
 });
 
 app.post(['/api/grupos/refresh', '/api/grupos/refresh/:instance'], apiKeyAuth, async (req, res) => {
     const instanceId = resolveInstanceId(req);
-    const session = findSession(instanceId);
-    if (!session || !session.isConnected || !session.client) {
-        return res.status(503).json({ erro: 'WhatsApp não está conectado.', instancia: session?.id || instanceId });
+    const session = resolveSessionParaGrupos(instanceId);
+    if (!session) {
+        return res.json({ sucesso: false, ...buildInativoPayload(sanitizeInstanceId(instanceId)) });
+    }
+    if (!session.isConnected || !session.client) {
+        return res.json({ sucesso: false, ...buildGruposPayload(session) });
     }
 
     session.gruposCarregados = false;
+    session.gruposSyncFalhou = false; // pedido explicito: tenta de novo
     syncGroups(session, 'refresh-manual');
-    return res.status(202).json({
-        sincronizando: true,
-        instancia: session.id,
-        mensagem: 'Sincronizacao iniciada.',
-    });
+    return res.json({ sucesso: true, ...buildGruposPayload(session) });
 });
 
 app.get(['/api/qrcode', '/api/qrcode/:instance'], apiKeyAuth, (req, res) => {
@@ -750,7 +895,52 @@ app.post(['/api/enviar', '/api/enviar/:instance'], apiKeyAuth, async (req, res) 
     return res.status(400).json({ erro: 'Corpo da requisição vazio. Envie "mensagem" ou "base64".', instancia: instanceId });
 });
 
+// Religa as sessoes ja pareadas depois de um restart/deploy. Sem isto o Map
+// nasce vazio e a sessao so voltava quando alguem abria a aba WhatsApp — o que
+// fazia a aba Envios acusar "desconectado", o primeiro envio pos-deploy falhar,
+// e o monitor_conexao mandar e-mail de "WhatsApp caiu" para todo mundo.
+const restaurarSessoesDoVolume = () => {
+    if (process.env.DISABLE_SESSION_RESTORE === '1') {
+        console.log('Restauracao de sessoes desabilitada por env.');
+        return;
+    }
+    if (!fs.existsSync(authRootPath)) return;
+
+    let candidatos = [];
+    try {
+        candidatos = fs.readdirSync(authRootPath, { withFileTypes: true })
+            .filter((e) => e.isDirectory())
+            .map((e) => e.name)
+            .filter((id) => id === sanitizeInstanceId(id)) // ignora lixo no volume
+            .filter((id) => hasStoredAuth(id))             // so quem foi pareado de fato
+            .filter((id) => !fs.existsSync(disabledMarkerPathFor(authPathDe(id))))
+            .sort()
+            .slice(0, MAX_WHATSAPP_SESSIONS);
+    } catch (err) {
+        console.error('Falha ao varrer o volume de sessoes:', err.message);
+        return;
+    }
+
+    if (!candidatos.length) {
+        console.log('Nenhuma sessao pareada no volume para restaurar.');
+        return;
+    }
+
+    console.log(`Restaurando ${candidatos.length} sessao(oes) do volume: ${candidatos.join(', ')}.`);
+    candidatos.forEach((id, i) => {
+        // Escalonado: cada sessao sobe um Chromium (~350MB); subir todas juntas
+        // faz um pico de memoria e de CPU no boot.
+        setTimeout(() => {
+            console.log(`[${id}] Restaurando sessao do volume (${i + 1}/${candidatos.length}).`);
+            ensureSession(id);
+        }, i * SESSION_START_STAGGER_MS).unref();
+    });
+};
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '::', () => {
     console.log(`Servidor rodando na porta ${PORT}`);
+    // Depois do listen: /health tem de responder dentro do grace_period do Fly
+    // sem esperar Chromium nenhum.
+    restaurarSessoesDoVolume();
 });

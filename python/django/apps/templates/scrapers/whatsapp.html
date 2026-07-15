@@ -81,6 +81,23 @@
 
   <div id="grupos-chip" class="grupos-chip" style="display:none;"><i data-lucide="folder"></i> <span id="grupos-n">0</span> grupos sincronizados</div>
 
+  {# Conectado mas getChats falhou: antes isto aparecia como "0 grupos sincronizados". #}
+  <div id="grupos-aviso" class="muted" style="display:none;font-size:.85rem;margin-top:.6rem;">
+    Conectado, mas a lista de grupos não veio.
+    <button id="grupos-retry" class="btn btn-ghost" style="min-height:44px;margin-left:.4rem;">
+      <i data-lucide="refresh-cw"></i> Sincronizar grupos
+    </button>
+  </div>
+
+  <div id="logout-area" style="display:none;margin-top:1.4rem;">
+    <button id="wa-desconectar" class="btn btn-ghost" style="min-height:44px;">
+      <i data-lucide="unplug"></i> Desconectar WhatsApp
+    </button>
+    <p class="muted" style="font-size:.82rem;margin-top:.5rem;">
+      Desvincula este número e pede um QR novo. As regras de Telegram não são afetadas.
+    </p>
+  </div>
+
   <div id="offline-area" style="display:none;">
     <div id="qr-box-off" class="empty-box" style="margin:1.4rem auto; width:280px; height:140px; display:flex; align-items:center; justify-content:center; border-radius:12px;">Serviço indisponível</div>
     <p class="muted" style="font-size:.85rem;">O serviço de envio está fora do ar no momento. Recarregue a página em instantes; se o problema continuar, fale com o suporte.</p>
@@ -101,6 +118,8 @@
   const progMsg  = document.getElementById('prog-msg');
   const grpChip  = document.getElementById('grupos-chip');
   const grpN     = document.getElementById('grupos-n');
+  const grpAviso = document.getElementById('grupos-aviso');
+  const logoutArea = document.getElementById('logout-area');
 
   // Ordem das fases p/ marcar passos concluídos.
   const ORDEM = ['qr', 'autenticado', 'carregando', 'sincronizando', 'conectado'];
@@ -114,6 +133,11 @@
     sincronizando: { txt:'Sincronizando grupos…',      cls:'is-mid', qr:false, bar:true,  step:'sincronizando' },
     conectado:     { txt:'Conectado',                  cls:'is-on',  qr:false, bar:false, step:'conectado' },
     reconectando:  { txt:'Reconectando WhatsApp…',      cls:'is-mid', qr:false, bar:true,  step:'qr' },
+    // Terminal: a reconexão desistiu e a credencial foi apagada. Sem esta
+    // entrada o fallback mostraria "Desconectado" e o usuário nunca entenderia
+    // por que não volta sozinho.
+    expirado:      { txt:'Sessão expirada — leia o QR', cls:'is-off', qr:true,  bar:false, step:'qr', err:true },
+    inativo:       { txt:'Desconectado',               cls:'is-off', qr:true,  bar:false, step:'qr', err:true },
     capacidade:    { txt:'Limite de conexões atingido',  cls:'is-off', qr:false, bar:false, step:'qr', err:true },
     falha_auth:    { txt:'Falha de autenticação',      cls:'is-off', qr:true,  bar:false, step:'qr', err:true },
     desconectado:  { txt:'Desconectado',               cls:'is-off', qr:true,  bar:false, step:'qr', err:true },
@@ -129,6 +153,8 @@
     qrArea.style.display = 'none';
     progArea.style.display = 'none';
     grpChip.style.display = 'none';
+    grpAviso.style.display = 'none';
+    logoutArea.style.display = 'none';
     offline.style.display = 'block';
   }
 
@@ -162,8 +188,11 @@
       // Stepper
       pintarSteps(fase, f.err);
 
-      // QR
-      if (f.qr) { qrArea.style.display = 'block'; refreshQr(); }
+      // QR: `s.qr` vence a tabela de fases. O worker pode ter um QR pronto numa
+      // fase que não previa mostrá-lo (ex.: reconectando após purgar a
+      // credencial) — sem isto o usuário ficava preso na barra de progresso
+      // com um QR válido escondido do outro lado.
+      if (f.qr || s.qr) { qrArea.style.display = 'block'; refreshQr(); }
       else qrArea.style.display = 'none';
 
       // Barra
@@ -173,14 +202,42 @@
         progMsg.textContent = s.mensagem || '';
       } else progArea.style.display = 'none';
 
-      // Grupos (quando conectado)
-      if (fase === 'conectado') {
-        grpChip.style.display = 'inline-flex';
-        grpN.textContent = s.grupos || 0;
-      } else grpChip.style.display = 'none';
+      // Grupos: "0 grupos sincronizados" era mentira quando o getChats falhava.
+      const indisponivel = fase === 'conectado' && s.grupos_indisponivel;
+      grpChip.style.display = (fase === 'conectado' && !indisponivel) ? 'inline-flex' : 'none';
+      grpN.textContent = s.grupos || 0;
+      grpAviso.style.display = indisponivel ? 'block' : 'none';
+
+      logoutArea.style.display = (fase === 'conectado') ? 'block' : 'none';
+      renderIcons();
 
     } catch (e) { showOffline(); }
   }
+
+  function getCookie(nome) {
+    const m = document.cookie.match('(^|;)\\s*' + nome + '\\s*=\\s*([^;]+)');
+    return m ? decodeURIComponent(m.pop()) : '';
+  }
+
+  document.getElementById('grupos-retry').onclick = async function () {
+    this.disabled = true;
+    try { await fetch('/scrapers/whatsapp/refresh-grupos/'); } catch (e) {}
+    setTimeout(() => { this.disabled = false; poll(); }, 1500);
+  };
+
+  document.getElementById('wa-desconectar').onclick = async function () {
+    if (!confirm('Desconectar o WhatsApp? Você precisará ler o QR code novamente para reconectar.')) return;
+    this.disabled = true;
+    try {
+      await fetch('/scrapers/whatsapp/desconectar/', {
+        method: 'POST',
+        headers: { 'X-CSRFToken': getCookie('csrftoken') },
+      });
+    } catch (e) {}
+    this.disabled = false;
+    poll();
+  };
+
   poll();
   setInterval(poll, 2500);
 </script>

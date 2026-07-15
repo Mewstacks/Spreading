@@ -371,6 +371,13 @@ def whatsapp_grupos_json(request):
     return JsonResponse(whatsapp_client.listar_grupos(_wa_session(request)))
 
 
+@require_POST
+def whatsapp_desconectar(request):
+    """Desfaz o pareamento do WhatsApp deste usuário (espelha telegram_desconectar)."""
+    from apps.scrapers import whatsapp_client
+    return JsonResponse(whatsapp_client.desconectar(_wa_session(request)))
+
+
 # --- Conexão web do Mercado Livre (login via browser remoto, sem script local) ---
 
 def ml_conexao_painel(request):

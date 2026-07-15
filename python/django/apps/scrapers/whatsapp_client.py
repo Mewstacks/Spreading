@@ -1,14 +1,24 @@
 """
 Cliente HTTP fino para o serviço Node de WhatsApp (node.js/index.js).
 
-O Node expõe:
-  POST /api/enviar   (x-api-key) -> texto: {grupoid|numero, mensagem}
-                                    midia: {grupoid|numero, base64, mimetype, nomeArquivo, legenda}
-  GET  /api/grupos   (x-api-key) -> {grupos: [{id, nome}]}
-  GET  /api/status               -> {conectado: bool}
+O Node expõe (todas exigem x-api-key):
+  POST /api/enviar         -> texto: {grupoid|numero, mensagem}
+                              midia: {grupoid|numero, base64, mimetype, nomeArquivo, legenda}
+  POST /api/sessoes        -> cria/revive a sessão do usuário
+  POST /api/sessoes/logout -> desfaz o pareamento (revoga + limpa credencial)
+  GET  /api/status         -> {conectado, fase, progresso, mensagem, grupos, qr, ...}
+  GET  /api/grupos         -> {conectado, fase, sincronizando, grupos_indisponivel, grupos}
+  POST /api/grupos/refresh -> {sucesso, ...mesmo payload de /api/grupos}
 
 Toda função retorna dicts simples; nunca levanta por falha de envio
 (o orquestrador decide o que fazer com sucesso=False).
+
+CONTRATO: a chave "erro" num payload de status/grupos significa exclusivamente
+que o Node está inalcançável — ela só é injetada por _request_json, e o Node não
+emite "erro" para estados normais (sincronizando, desconectado, capacidade). O
+front depende disso para distinguir "serviço fora do ar" de "WhatsApp
+desconectado". Não adicione raise_for_status nem checagem de status_code aqui:
+o significado tem de vir do corpo.
 """
 import time
 
@@ -74,6 +84,19 @@ def iniciar_sessao(session) -> dict:
     return _request_json(
         "POST", "/api/sessoes", headers=_headers(),
         json={"session": session}, timeout=10, attempts=1,
+    )
+
+
+def desconectar(session) -> dict:
+    """Desfaz o pareamento: revoga no celular e apaga a credencial do volume."""
+    if not session:
+        return {"sucesso": False, "erro": "Sessão de usuário ausente."}
+    # timeout 25 > os 15s do client.logout no Node + margem do destroy.
+    # attempts=1 de propósito: o retry cego de _request_json dobraria a espera
+    # para 50s, e o Node já trata o logout como idempotente.
+    return _request_json(
+        "POST", "/api/sessoes/logout", headers=_headers(),
+        json={"session": session}, timeout=25, attempts=1,
     )
 
 

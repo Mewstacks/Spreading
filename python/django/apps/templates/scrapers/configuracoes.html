@@ -63,13 +63,10 @@
   </label>{% endif %}
 </div>
 
+{# Texto preenchido por loadGrupos(): o motivo varia e antes tudo virava "WhatsApp desconectado". #}
 <div id="wa-offline" class="alert alert-warn" style="display:none;">
   <i data-lucide="alert-triangle"></i>
-  <div>
-    <b>WhatsApp desconectado.</b> Não foi possível carregar seus grupos.
-    <a href="/scrapers/whatsapp/">Conecte o WhatsApp</a> ou digite o código do grupo manualmente abaixo.
-    As regras de Telegram não são afetadas.
-  </div>
+  <div id="wa-offline-msg"></div>
 </div>
 
 <div class="card" style="padding:0;overflow:hidden;">
@@ -277,44 +274,113 @@
   }
   document.addEventListener('DOMContentLoaded', () => { msFilter(); toggleCanal(); loadGrupos(); });
 
+  // Backoff do repoll de sincronização (espelha syncPollDelay do worker).
+  // getChats tem 45s de timeout no Node, então a janela precisa cobrir isso;
+  // antes o front repollava de 3 em 3s para sempre.
+  let syncTentativa = 0;
+  function syncDelay(n) {
+    if (n > 8) return null;
+    return Math.min(15000, 3000 * (2 ** Math.min(n - 1, 4)));
+  }
+
+  function mostrarBanner(html) {
+    const offline = document.getElementById('wa-offline');
+    document.getElementById('wa-offline-msg').innerHTML = html;
+    offline.style.display = 'flex';
+  }
+  function esconderBanner() {
+    document.getElementById('wa-offline').style.display = 'none';
+  }
+
   // Grupos carregados via AJAX (não travam o render da página).
+  //
+  // O critério de "desconectado" é `conectado`/`fase` — o MESMO que a aba
+  // WhatsApp usa. Antes era a presença de `d.erro`, que o Node mandava também
+  // durante a sincronização: um estado normal acendia o banner de desconexão
+  // com a sessão viva.
   async function loadGrupos() {
     const msg = document.getElementById('grupos-msg');
     const field = document.getElementById('grupo-field');
-    const offline = document.getElementById('wa-offline');
     msg.textContent = '(carregando…)';
+    let d;
     try {
       const r = await fetch('/scrapers/whatsapp/grupos/');
-      const d = await r.json();
-      const grupos = d.grupos || [];
-      if (d.sincronizando) {
-        offline.style.display = 'none';
-        msg.textContent = '(sincronizando grupos…)';
-        window.setTimeout(loadGrupos, 3000);
-        return;
-      }
-      if (d.erro || !grupos.length) {
-        msg.textContent = d.erro ? '(não foi possível carregar — digite o código)' : '(nenhum grupo sincronizado — digite o código)';
-        if (d.erro) offline.style.display = 'flex';
-        return;
-      }
-      offline.style.display = 'none';
-      msg.textContent = '(' + grupos.length + ' grupos)';
-      const sel = document.createElement('select');
-      sel.name = 'grupo_id';
-      // new Option() seta value/text via propriedades (escapadas) — nunca via innerHTML.
-      // Nomes de grupo são dados externos (WhatsApp) e não podem virar HTML. Evita XSS.
-      sel.add(new Option('— escolha —', ''));
-      grupos.forEach(g => sel.add(new Option(g.nome, g.id)));
-      sel.onchange = function () {
-        document.getElementsByName('grupo_nome')[0].value = this.options[this.selectedIndex].text;
-      };
-      field.innerHTML = '';
-      field.appendChild(sel);
+      d = await r.json();
     } catch (e) {
-      msg.textContent = '(não foi possível carregar — digite o código)';
-      offline.style.display = 'flex';
+      msg.textContent = '(serviço indisponível — digite o código)';
+      mostrarBanner('<b>Serviço de envio indisponível.</b> Não foi possível falar com o WhatsApp. '
+        + 'Tente de novo em instantes ou digite o código do grupo manualmente abaixo. '
+        + 'As regras de Telegram não são afetadas.');
+      return;
     }
+
+    // `erro` aqui só existe quando o worker Node está fora do ar.
+    if (d.erro) {
+      msg.textContent = '(serviço indisponível — digite o código)';
+      mostrarBanner('<b>Serviço de envio indisponível.</b> Não foi possível falar com o WhatsApp. '
+        + 'Tente de novo em instantes ou digite o código do grupo manualmente abaixo. '
+        + 'As regras de Telegram não são afetadas.');
+      return;
+    }
+
+    if (d.fase === 'capacidade') {
+      msg.textContent = '(limite de conexões — digite o código)';
+      mostrarBanner('<b>Limite de conexões atingido.</b> O serviço de WhatsApp está lotado no momento. '
+        + 'Tente de novo em alguns instantes ou digite o código do grupo manualmente abaixo.');
+      return;
+    }
+
+    if (!d.conectado) {
+      msg.textContent = '(WhatsApp desconectado — digite o código)';
+      mostrarBanner('<b>WhatsApp desconectado.</b> Não foi possível carregar seus grupos. '
+        + '<a href="/scrapers/whatsapp/">Conecte o WhatsApp</a> ou digite o código do grupo manualmente abaixo. '
+        + 'As regras de Telegram não são afetadas.');
+      return;
+    }
+
+    // Daqui para baixo o WhatsApp está conectado: nada disto é desconexão.
+    esconderBanner();
+
+    if (d.sincronizando) {
+      syncTentativa += 1;
+      const delay = syncDelay(syncTentativa);
+      if (delay !== null) {
+        msg.textContent = '(sincronizando grupos…)';
+        window.setTimeout(loadGrupos, delay);
+        return;
+      }
+      // Esgotou a espera com o sync ainda em curso. Não é "sem grupos" — a
+      // lista simplesmente não veio a tempo.
+      msg.textContent = '(a lista de grupos está demorando — use “Sincronizar grupos” ou digite o código)';
+      return;
+    }
+
+    const grupos = d.grupos || [];
+    if (d.grupos_indisponivel) {
+      // Conectado, mas o WhatsApp não entregou a lista. Não é desconexão: o
+      // usuário pode digitar o código do grupo ou tentar sincronizar de novo.
+      msg.textContent = '(lista de grupos indisponível — use “Sincronizar grupos” ou digite o código)';
+      return;
+    }
+    if (!grupos.length) {
+      // Conectado, sync concluído, zero grupos: a conta não tem grupos mesmo.
+      msg.textContent = '(nenhum grupo encontrado — digite o código)';
+      return;
+    }
+
+    syncTentativa = 0;
+    msg.textContent = '(' + grupos.length + ' grupos)';
+    const sel = document.createElement('select');
+    sel.name = 'grupo_id';
+    // new Option() seta value/text via propriedades (escapadas) — nunca via innerHTML.
+    // Nomes de grupo são dados externos (WhatsApp) e não podem virar HTML. Evita XSS.
+    sel.add(new Option('— escolha —', ''));
+    grupos.forEach(g => sel.add(new Option(g.nome, g.id)));
+    sel.onchange = function () {
+      document.getElementsByName('grupo_nome')[0].value = this.options[this.selectedIndex].text;
+    };
+    field.innerHTML = '';
+    field.appendChild(sel);
   }
   document.addEventListener('click', e => {
     const ms = document.getElementById('ms-sub');
@@ -325,23 +391,26 @@
     const btn = document.getElementById('refresh-grupos');
     const msg = document.getElementById('refresh-msg');
     btn.disabled = true; msg.textContent = ' sincronizando…';
+    // Clique explícito zera o backoff: sem isto o botão fica inerte depois que
+    // o repoll automático esgota.
+    syncTentativa = 0;
     try {
       const r = await fetch('/scrapers/whatsapp/refresh-grupos/');
       const d = await r.json();
       if (d.sucesso) {
-        msg.textContent = ' ' + d.total + ' grupos sincronizados.';
+        msg.textContent = ' sincronização iniciada…';
         await loadGrupos();
-        btn.disabled = false;
-      } else if (d.sincronizando) {
-        msg.textContent = ' grupos ainda sincronizando…';
-        btn.disabled = false;
-        window.setTimeout(loadGrupos, 3000);
+      } else if (d.erro) {
+        msg.textContent = ' Serviço indisponível. Tente novamente em alguns segundos.';
+      } else if (!d.conectado) {
+        msg.textContent = ' WhatsApp desconectado. Conecte na página WhatsApp.';
+        await loadGrupos();
       } else {
         msg.textContent = ' Não foi possível sincronizar. Tente novamente em alguns segundos.';
-        btn.disabled = false;
       }
+      btn.disabled = false;
     } catch (e) {
-      msg.textContent = ' WhatsApp desconectado. Conecte na página WhatsApp.';
+      msg.textContent = ' Serviço indisponível. Tente novamente em alguns segundos.';
       btn.disabled = false;
     }
   }
