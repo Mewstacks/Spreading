@@ -105,12 +105,12 @@ def creds_de_usuario(usuario) -> Credenciais:
     perfil = getattr(usuario, "perfil", None)
     g = creds_globais()
     if not perfil:
-        return g
+        return Credenciais("", "", g.host, "", g.marketplace)
     return Credenciais(
-        credential_id=(perfil.amazon_credential_id or g.credential_id),
-        credential_secret=(perfil.amazon_credential_secret or g.credential_secret),
+        credential_id=(perfil.amazon_credential_id or ""),
+        credential_secret=(perfil.amazon_credential_secret or ""),
         host=(perfil.amazon_creators_host or g.host),
-        partner_tag=(perfil.afiliado_tag_amazon or g.partner_tag),
+        partner_tag=(perfil.afiliado_tag_amazon or ""),
         marketplace=g.marketplace,
     )
 

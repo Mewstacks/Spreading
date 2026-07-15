@@ -20,6 +20,7 @@ def resolver_token(usuario=None) -> str:
         perfil = getattr(usuario, "perfil", None)
         if perfil and perfil.telegram_bot_token:
             return perfil.telegram_bot_token.strip()
+        return ""
     return (getattr(settings, "TELEGRAM_BOT_TOKEN", "") or "").strip()
 
 

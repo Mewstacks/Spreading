@@ -12,9 +12,7 @@ conteúdo do arquivo no painel: Scraper -> "Enviar sessão ML".
 Requer o Playwright (já em requirements.txt):  python -m playwright install chromium
 """
 import os
-
 from playwright.sync_api import sync_playwright
-
 DESTINO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth.json")
 
 

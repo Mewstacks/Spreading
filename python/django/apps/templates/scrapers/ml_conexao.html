@@ -19,14 +19,19 @@
 
   /* Live view: quebra o limite de 640px do .conn e ocupa a largura da tela.
      Viewport remoto é 1280x800 (ratio 16/10); casamos a proporção e limitamos
-     a altura pra caber na tela em telas baixas. */
+     a altura pra caber na tela em telas baixas. O <canvas> recebe os frames do
+     screencast (CDP) do Chromium local; mouse/teclado vão de volta via POST. */
   #live-area { width: min(1120px, 94vw); margin:1.3rem 0 0; margin-left:50%;
     transform: translateX(-50%); }
   #live-frame-wrap { position:relative; width:100%; margin:0 auto;
     aspect-ratio: 1280 / 800; max-height: 80vh; border-radius:12px; overflow:hidden;
     border:1px solid var(--border); background:var(--surface-2);
     box-shadow: 0 8px 30px rgba(0,0,0,.18); }
-  #live-frame { position:absolute; inset:0; width:100%; height:100%; border:0; }
+  #live-canvas { position:absolute; inset:0; width:100%; height:100%; border:0;
+    display:block; touch-action:none; cursor:default; background:#fff; }
+  /* Input escondido só p/ acordar o teclado do celular (foca ao tocar no canvas). */
+  #live-kbd { position:absolute; left:-9999px; top:0; width:1px; height:1px;
+    opacity:0; border:0; padding:0; }
 
   .actions { display:flex; gap:.6rem; flex-wrap:wrap; justify-content:center; margin-top:1.1rem; }
   .actions .btn { min-height:44px; }
@@ -62,9 +67,12 @@
     <p class="hint">Uma janela segura do Mercado Livre abre nesta página. Entre com seu e-mail e senha normalmente, inclusive a verificação em duas etapas.</p>
   </div>
 
-  <!-- Live view: usuário loga dentro do iframe -->
+  <!-- Live view: usuário loga dentro do canvas (tela do Chromium local) -->
   <div id="live-area" style="display:none;">
-    <div id="live-frame-wrap"><iframe id="live-frame" allow="clipboard-read; clipboard-write" sandbox="allow-forms allow-scripts allow-same-origin allow-popups"></iframe></div>
+    <div id="live-frame-wrap">
+      <canvas id="live-canvas" width="1280" height="800"></canvas>
+      <input id="live-kbd" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-hidden="true" tabindex="-1">
+    </div>
     <p class="hint">Entre na sua conta acima. Assim que o login terminar, a sessão é salva automaticamente. Se já entrou e não avançou, clique em <b>Já entrei</b>.</p>
     <div class="actions">
       <button id="salvar-btn" class="btn btn-green"><i data-lucide="check"></i> Já entrei</button>
@@ -93,7 +101,9 @@
   const startArea = document.getElementById('start-area');
   const liveArea  = document.getElementById('live-area');
   const okArea    = document.getElementById('ok-area');
-  const liveFrame = document.getElementById('live-frame');
+  const canvas  = document.getElementById('live-canvas');
+  const ctx     = canvas.getContext('2d');
+  const kbd     = document.getElementById('live-kbd');
   const startBtn  = document.getElementById('start-btn');
   const salvarBtn = document.getElementById('salvar-btn');
   const cancelarBtn = document.getElementById('cancelar-btn');
@@ -118,7 +128,97 @@
     erro:              { txt:'Erro na conexão',          cls:'is-off', bar:false },
   };
 
-  let ultimoLiveUrl = '';
+  // ───────────────────── Live view (canvas + input) ─────────────────────
+  // Frames chegam por SSE (JPEG base64) e são desenhados no canvas. Mouse/teclado
+  // são capturados aqui e mandados por POST; o backend traduz em comandos CDP.
+  const SPECIAL = new Set(['Enter','Backspace','Tab','Delete','Escape',
+    'ArrowLeft','ArrowUp','ArrowRight','ArrowDown','Home','End']);
+  const BTN = { 0:'left', 1:'middle', 2:'right' };
+  let framesES = null, inputAtivo = false, inputBuf = [], flushTimer = null, lastMove = 0;
+
+  function coords(e) {
+    const r = canvas.getBoundingClientRect();
+    const x = Math.round((e.clientX - r.left) / r.width  * canvas.width);
+    const y = Math.round((e.clientY - r.top)  / r.height * canvas.height);
+    return { x: Math.max(0, Math.min(canvas.width, x)), y: Math.max(0, Math.min(canvas.height, y)) };
+  }
+  function push(ev) { inputBuf.push(ev); if (!flushTimer) flushTimer = setTimeout(flush, 50); }
+  async function flush() {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    if (!inputBuf.length) return;
+    const batch = inputBuf; inputBuf = [];
+    try {
+      await fetch('/scrapers/ml/input/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCookie('csrftoken') },
+        body: JSON.stringify({ events: batch }),
+      });
+    } catch (e) { /* solta o lote; o próximo evento tenta de novo */ }
+  }
+
+  function onPointerDown(e) {
+    e.preventDefault();
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+    kbd.focus({ preventScroll: true });   // acorda o teclado no celular
+    const p = coords(e); push({ t:'down', x:p.x, y:p.y, button: BTN[e.button]||'left', clickCount: e.detail||1 }); flush();
+  }
+  function onPointerUp(e)   { const p = coords(e); push({ t:'up',   x:p.x, y:p.y, button: BTN[e.button]||'left', clickCount: e.detail||1 }); flush(); }
+  function onPointerMove(e) { const now = Date.now(); if (now - lastMove < 40) return; lastMove = now; const p = coords(e); push({ t:'move', x:p.x, y:p.y, buttons: e.buttons||0 }); }
+  function onWheel(e)       { e.preventDefault(); const p = coords(e); push({ t:'wheel', x:p.x, y:p.y, dx:e.deltaX, dy:e.deltaY }); flush(); }
+  function onCtx(e)         { e.preventDefault(); }
+  function onKeyDown(e) {
+    const k = e.key;
+    if (k && k.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      push({ t:'char', text:k }); flush(); e.preventDefault();
+    } else if (SPECIAL.has(k)) {
+      push({ t:'key', key:k }); flush(); e.preventDefault();
+    }
+  }
+  function onBeforeInput(e) {   // teclado virtual (mobile/IME) que não dispara keydown
+    if (e.inputType === 'insertText' && e.data) { push({ t:'char', text:e.data }); flush(); }
+    else if (e.inputType === 'deleteContentBackward') { push({ t:'key', key:'Backspace' }); flush(); }
+    else if (e.inputType === 'insertLineBreak') { push({ t:'key', key:'Enter' }); flush(); }
+    e.preventDefault();
+  }
+
+  function attachInput() {
+    if (inputAtivo) return; inputAtivo = true;
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('pointermove', onPointerMove);
+    canvas.addEventListener('wheel', onWheel, { passive:false });
+    canvas.addEventListener('contextmenu', onCtx);
+    kbd.addEventListener('keydown', onKeyDown);
+    kbd.addEventListener('beforeinput', onBeforeInput);
+    kbd.addEventListener('input', () => { kbd.value = ''; });  // nunca deixa acumular
+  }
+  function detachInput() {
+    if (!inputAtivo) return; inputAtivo = false;
+    canvas.removeEventListener('pointerdown', onPointerDown);
+    canvas.removeEventListener('pointerup', onPointerUp);
+    canvas.removeEventListener('pointermove', onPointerMove);
+    canvas.removeEventListener('wheel', onWheel);
+    canvas.removeEventListener('contextmenu', onCtx);
+    kbd.removeEventListener('keydown', onKeyDown);
+    kbd.removeEventListener('beforeinput', onBeforeInput);
+  }
+
+  function startLive() {
+    attachInput();
+    if (framesES) return;
+    framesES = new EventSource('/scrapers/ml/frames/');
+    framesES.onmessage = function (e) {
+      if (e.data === '__DONE__') { if (framesES) { framesES.close(); framesES = null; } return; }
+      const img = new Image();
+      img.onload = function () { ctx.drawImage(img, 0, 0, canvas.width, canvas.height); };
+      img.src = 'data:image/jpeg;base64,' + e.data;
+    };
+    framesES.onerror = function () { /* EventSource reconecta sozinho; poll reabre se preciso */ };
+  }
+  function stopLive() {
+    if (framesES) { framesES.close(); framesES = null; }
+    detachInput();
+  }
 
   function mostra(el, on) { el.style.display = on ? 'block' : 'none'; }
 
@@ -137,19 +237,11 @@
     if (fase === 'erro' && s.erro) { errBox.textContent = s.erro; mostra(errBox, true); }
     else mostra(errBox, false);
 
-    // Live view. Só (re)atribui o src quando a URL muda — reatribuir recarrega o
-    // iframe e o usuário perde o login pela metade. Em fases de transição breve
-    // (iniciando/salvando) mantemos o iframe montado p/ não piscar.
+    // Live view aberto durante as fases de conexão; o SSE começa a mandar frames
+    // assim que o worker inicia o screencast. startLive é idempotente.
     const conectando = (fase === 'iniciando' || fase === 'aguardando_login' || fase === 'salvando');
-    if (fase === 'aguardando_login' && s.live_view_url) {
-      if (s.live_view_url !== ultimoLiveUrl) { liveFrame.src = s.live_view_url; ultimoLiveUrl = s.live_view_url; }
-      mostra(liveArea, true);
-    } else if (conectando && ultimoLiveUrl) {
-      mostra(liveArea, true);              // segura o iframe atual, sem recarregar
-    } else {
-      mostra(liveArea, false);
-      ultimoLiveUrl = ''; liveFrame.removeAttribute('src');
-    }
+    if (conectando) { mostra(liveArea, true); startLive(); }
+    else { mostra(liveArea, false); stopLive(); }
 
     // Botão inicial aparece em idle/erro
     mostra(startArea, fase === 'idle' || fase === 'erro');
@@ -175,7 +267,7 @@
   };
   cancelarBtn.onclick = async function () {
     await post('/scrapers/ml/cancelar/');
-    ultimoLiveUrl = ''; liveFrame.removeAttribute('src');
+    stopLive();
     poll();
   };
 

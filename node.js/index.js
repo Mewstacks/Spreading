@@ -665,9 +665,10 @@ app.post('/api/sessoes', apiKeyAuth, (req, res) => {
 });
 
 app.get(['/api/grupos', '/api/grupos/:instance'], apiKeyAuth, async (req, res) => {
-    const session = findSession(resolveInstanceId(req));
+    const instanceId = resolveInstanceId(req);
+    const session = findSession(instanceId);
     if (!session || !session.isConnected) {
-        return res.status(503).json({ erro: 'WhatsApp não está conectado.', instancia: session.id });
+        return res.status(503).json({ erro: 'WhatsApp não está conectado.', instancia: session?.id || instanceId });
     }
 
     if (session.gruposCarregados) {
@@ -684,9 +685,10 @@ app.get(['/api/grupos', '/api/grupos/:instance'], apiKeyAuth, async (req, res) =
 });
 
 app.post(['/api/grupos/refresh', '/api/grupos/refresh/:instance'], apiKeyAuth, async (req, res) => {
-    const session = findSession(resolveInstanceId(req));
+    const instanceId = resolveInstanceId(req);
+    const session = findSession(instanceId);
     if (!session || !session.isConnected || !session.client) {
-        return res.status(503).json({ erro: 'WhatsApp não está conectado.', instancia: session.id });
+        return res.status(503).json({ erro: 'WhatsApp não está conectado.', instancia: session?.id || instanceId });
     }
 
     session.gruposCarregados = false;

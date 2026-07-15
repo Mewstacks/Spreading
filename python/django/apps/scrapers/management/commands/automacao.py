@@ -8,7 +8,9 @@ Manual:  python manage.py automacao --modo scrape --scrape-horas 3
          python manage.py automacao --modo envio  --tick 5
 """
 import logging
+import threading
 import time
+from contextlib import contextmanager
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand
@@ -22,6 +24,25 @@ logger = logging.getLogger("apps.automacao")
 
 ERRO_PUBLICO = "Falha temporária no serviço. Uma nova tentativa será feita no próximo ciclo."
 RETRY_MINUTOS = 5
+
+
+@contextmanager
+def _heartbeat_durante(job, intervalo=15):
+    """Mantém o estado operacional vivo enquanto uma coleta bloqueante executa."""
+    parar = threading.Event()
+
+    def _pulse():
+        while not parar.wait(intervalo):
+            st.write_state(job)
+
+    thread = threading.Thread(target=_pulse, daemon=True, name=f"heartbeat-{job}")
+    thread.start()
+    try:
+        yield
+    finally:
+        parar.set()
+        thread.join(timeout=1)
+        st.write_state(job)
 
 
 def _renovar_conexoes_db():
@@ -58,20 +79,54 @@ def _rodar_scrape():
         except Exception:
             logger.exception("Scrape '%s' falhou", slug)
             falhas.append(slug)
+            from apps.scrapers.models import FonteIngestao
+            FonteIngestao.objects.filter(marketplace=slug, habilitada=True).update(
+                status="degraded", ultima_tentativa=timezone.now(),
+                erro_publico="Falha temporária na coleta; dados anteriores preservados.")
             st.write_state("scrape", erro=ERRO_PUBLICO)
+    sucessos = len(lojas) - len(falhas)
+    if sucessos:
+        from apps.scrapers.maintenance import expire_stale
+        expire_stale()
+    from django.conf import settings
+    if getattr(settings, "AFFILIATE_FEED_URL", ""):
+        from apps.scrapers.sources import run_source
+        from apps.scrapers.sources.persistence import persist_items
+        feed = run_source("licensed-affiliate-feed")
+        persist_items(feed.get("offers", []) + feed.get("coupons", []))
+    if not sucessos:
+        raise RuntimeError(f"Todas as fontes falharam: {', '.join(falhas)}")
     if falhas:
-        raise RuntimeError(
-            f"Falha em {len(falhas)}/{len(lojas)} marketplace(s): {', '.join(falhas)}"
-        )
-    logger.info("[%s] SCRAPE concluido", timezone.now().strftime("%H:%M"))
+        logger.warning("SCRAPE concluído parcialmente; falharam: %s", ", ".join(falhas))
+    else:
+        logger.info("[%s] SCRAPE concluido", timezone.now().strftime("%H:%M"))
+    return {"sucessos": sucessos, "falhas": falhas}
 
 
 def _rodar_scrape_rapido(paginas=8):
     """LANE RÁPIDA/flash (B3): só o feed /ofertas do ML, poucas páginas, em UPSERT
     (não zera o feed da lane lenta). Pega deals-relâmpago entre as raspagens completas."""
     from apps.scrapers.scraper_mercadolivre.ofertas_scraper import mapear_ofertas
+    from apps.scrapers.models import FonteIngestao
     logger.info("[%s] SCRAPE-FLASH: feed ML (%s paginas)", timezone.now().strftime("%H:%M"), paginas)
-    mapear_ofertas(max_paginas=paginas, substituir=False)
+    total = mapear_ofertas(max_paginas=paginas, substituir=False)
+    now = timezone.now()
+    fonte, _ = FonteIngestao.objects.get_or_create(
+        slug="mercadolivre-web",
+        defaults={"marketplace": "mercadolivre", "nome": "Mercado Livre — páginas públicas"},
+    )
+    fonte.ultima_tentativa = now
+    fonte.ultimo_total = total
+    if total:
+        fonte.status = "ok"
+        fonte.ultimo_sucesso = now
+        fonte.falhas_consecutivas = 0
+        fonte.erro_publico = ""
+    elif not fonte.ultimo_sucesso:
+        fonte.status = "degraded"
+        fonte.erro_publico = "Coleta vazia; catálogo anterior preservado."
+    fonte.save()
+    return total
 
 
 class Command(BaseCommand):
@@ -144,15 +199,21 @@ class Command(BaseCommand):
             try:
                 st.write_state("scrape", fase="raspando", ciclos=ciclos, erro="")
                 _renovar_conexoes_db()
-                _rodar_scrape()
+                with _heartbeat_durante("scrape"):
+                    resultado = _rodar_scrape()
                 ciclos += 1
                 fim = timezone.now()
-                proximo = fim + timedelta(seconds=scrape_seg)
+                degradado = bool(resultado["falhas"])
+                proximo = fim + (timedelta(minutes=30) if degradado
+                                 else timedelta(seconds=scrape_seg))
+                erro = ("Falha parcial: " + ", ".join(resultado["falhas"])
+                        if degradado else "")
                 st.write_state(
-                    "scrape", fase="aguardando", loja_atual=None,
+                    "scrape", fase="degradado" if degradado else "aguardando", loja_atual=None,
                     ultimo_ciclo_fim=fim.isoformat(), proximo_ciclo=proximo.isoformat(),
-                    ciclos=ciclos, erro="",
-                    ultima_msg=f"Ciclo {ciclos} concluído às {fim:%H:%M}.",
+                    ciclos=ciclos, erro=erro,
+                    ultima_msg=(f"Ciclo {ciclos} parcial; nova tentativa em 30 min."
+                                if degradado else f"Ciclo {ciclos} concluído às {fim:%H:%M}."),
                 )
             except Exception:
                 logger.exception("Erro no scrape")

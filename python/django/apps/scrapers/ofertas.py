@@ -183,6 +183,7 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
 
     qs = Produto.objects.exclude(origem="cupom").exclude(
         estado__in=["indisponivel", "invalido", "expirado", "stale"])
+    qs = qs.filter(Q(valido_ate__isnull=True) | Q(valido_ate__gte=timezone.now()))
     qs = qs.filter(Q(owner__isnull=True) | Q(owner=usuario)) if usuario else qs.filter(
         owner__isnull=True)
     if marketplace:
@@ -241,6 +242,11 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
             continue
         score = produto.desconto_percent * 2 + produto.economia_rs / 20
         motivos = [f"{produto.desconto_percent:.0f}% de desconto"]
+        if produto.confianca == "alta":
+            score *= 1.15
+            motivos.append("fonte de alta confiança")
+        elif produto.confianca == "baixa":
+            score *= .75
         if produto.preco_com_cupom < 30:
             score += 20
             motivos.append("ticket acessível")
@@ -402,7 +408,10 @@ def _melhor_codigo(produto):
     via CupomCodigo.aplica_em e prioriza o de maior desconto percentual estimado.
     """
     from apps.scrapers.models import CupomCodigo
-    candidatos = [c for c in CupomCodigo.objects.filter(ativo=True) if c.aplica_em(produto)]
+    # Códigos descobertos por regex na página do ML não possuem vínculo comprovado
+    # com o produto. Permanecem no catálogo, mas nunca entram automaticamente.
+    candidatos = [c for c in CupomCodigo.objects.filter(ativo=True)
+                  .exclude(descricao="cupom ML (checkout)") if c.aplica_em(produto)]
     if not candidatos:
         return None
 

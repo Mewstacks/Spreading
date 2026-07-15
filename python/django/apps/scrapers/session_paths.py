@@ -3,7 +3,7 @@
 Centraliza a resolução do diretório p/ que produção (Fly.io) grave num VOLUME
 persistente via settings.ML_AUTH_DIR, sem espalhar `os.path.join(caminho_atual,
 "auth.json")` por vários módulos. É o MESMO diretório onde a conexão web
-(ml_conexao.py / Browserbase) grava o storage_state — tudo lê do mesmo lugar.
+(ml_conexao.py — Chromium local + live view) grava o storage_state — tudo lê do mesmo lugar.
 """
 import os
 

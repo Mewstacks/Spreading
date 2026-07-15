@@ -270,6 +270,9 @@ AMAZON_CREATORS_HOST = os.getenv("AMAZON_CREATORS_HOST", "")
 AMAZON_MARKETPLACE = os.getenv("AMAZON_MARKETPLACE", "www.amazon.com.br")
 # Desconto mínimo (%) para um item entrar no feed de ofertas Amazon.
 AMAZON_MIN_SAVINGS_PCT = float(os.getenv("AMAZON_MIN_SAVINGS_PCT", "15"))
+AMAZON_PUBLIC_FALLBACK = os.getenv("AMAZON_PUBLIC_FALLBACK", "1") == "1"
+AFFILIATE_FEED_URL = os.getenv("AFFILIATE_FEED_URL", "")
+AFFILIATE_FEED_TOKEN = os.getenv("AFFILIATE_FEED_TOKEN", "")
 # Palavras-chave de categorias amplas que alimentam o "feed" de ofertas Amazon
 # (a Creators API não expõe um feed de ofertas; varremos buscas com min savings).
 AMAZON_FEED_KEYWORDS = [
@@ -422,17 +425,11 @@ ML_AUTH_DIR = os.getenv("ML_AUTH_DIR", _ml_auth_default)
 os.makedirs(ML_AUTH_DIR, exist_ok=True)
 
 # ─────────────────────────────────────────────────────────────
-# Browser hospedado (Browserbase) p/ login web do Mercado Livre. O servidor é
-# headless; o login roda num Chromium remoto transmitido pro navegador do usuário
-# (live view). Sem essas chaves, a tela /scrapers/ml/ avisa o usuário.
+# Login web do Mercado Livre: o servidor é headless, então o login roda num Chromium
+# LOCAL (o mesmo da imagem/Playwright) e a tela é transmitida pro navegador do usuário
+# via CDP screencast (ver apps/scrapers/ml_conexao.py). Não precisa de serviço externo
+# nem de chaves — substituiu o antigo Browserbase (browser hospedado pago).
 # ─────────────────────────────────────────────────────────────
-BROWSERBASE_API_KEY = os.getenv("BROWSERBASE_API_KEY", "")
-BROWSERBASE_PROJECT_ID = os.getenv("BROWSERBASE_PROJECT_ID", "")
-# Proxy residencial reduz bloqueio anti-bot do ML no login, mas é recurso de plano
-# PAGO do Browserbase (free plan → 402). Fica OFF por padrão p/ funcionar no grátis.
-BROWSERBASE_USE_PROXY = os.getenv("BROWSERBASE_USE_PROXY", "0") == "1"
-# País do proxy residencial (só usado se BROWSERBASE_USE_PROXY=1).
-BROWSERBASE_PROXY_COUNTRY = os.getenv("BROWSERBASE_PROXY_COUNTRY", "BR")
 
 # Chave Fernet p/ criptografar segredos por usuário em repouso (Track A4).
 # Gere com: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"

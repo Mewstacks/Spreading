@@ -90,11 +90,15 @@
               {% if sync.erro %}<br>{{ sync.erro|truncatechars:140 }}{% endif %}
             </div>
           </div>
+          {% if sync.status == 'acao' and sync.marketplace == 'mercadolivre' %}
+          <a class="btn btn-blue btn-sm" href="{% url 'scraper-ml-conexao' %}"><i data-lucide="plug-zap"></i> Reconectar</a>
+          {% else %}
           <form method="post" action="{% url 'scraper-sincronizar-receitas' %}">
             {% csrf_token %}
             <input type="hidden" name="marketplace" value="{{ sync.marketplace }}">
             <button class="btn btn-blue btn-sm" type="submit"><i data-lucide="refresh-cw"></i> Sincronizar</button>
           </form>
+          {% endif %}
         </div>
         {% endfor %}
       </div>

@@ -1,9 +1,10 @@
 # Processos do app (honcho/Fly). Uma máquina só — compartilham o volume de sessões.
 # gunicorn serve o Django; os workers rodam os loops de automação full-time.
-# 1 worker (não 2): a conexão web do ML segura uma thread+CDP viva no processo e usa
-# um dict em memória p/ garantir 1 sessão Browserbase por usuário. Com 2 workers cada
-# um abriria a própria sessão -> live view recarregava e o login nunca concluía. Carga
-# é baixa (poucos usuários); --threads dá concorrência p/ o polling sem multiprocessar.
+# 1 worker (não 2): a conexão web do ML segura uma thread+Chromium local viva no
+# processo e guarda os frames/fila de input em dicts em memória (1 sessão por usuário).
+# Com 2 workers o EventSource de frames podia cair no worker sem o browser -> tela preta
+# e login nunca concluía. Carga é baixa (poucos usuários); --threads dá concorrência p/
+# o polling/SSE sem multiprocessar.
 web: gunicorn core.wsgi:application --chdir django --bind 0.0.0.0:8080 --workers 1 --threads 8 --timeout 120
 scrape: python django/manage.py automacao --modo scrape --scrape-horas 3
 scrapeflash: python django/manage.py automacao --modo scrape_rapido --tick 5

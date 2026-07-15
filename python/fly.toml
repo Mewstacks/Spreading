@@ -1,7 +1,7 @@
 # Fly.io — app Django (web + workers). Região São Paulo (gru).
 # Secrets (NÃO versionar): fly secrets set DJANGO_SECRET_KEY=... DATABASE_URL=... \
-#   BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... (login web do Mercado Livre) \
 #   WHATSAPP_API_KEY=... SECRETS_FERNET_KEY=... AMAZON_* EMAIL_* TELEGRAM_API_ID=...
+# (login web do ML NÃO precisa de secret: roda no Chromium local — ver ml_conexao.py)
 app = "spreading-web"
 primary_region = "gru"
 

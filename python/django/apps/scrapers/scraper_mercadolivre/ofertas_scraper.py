@@ -229,34 +229,31 @@ def _coletar_cards(page):
 
 
 def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):
-    """Cria Produtos a partir dos dicts coletados. Dedup por link nesta leva."""
+    """Upsert não destrutivo. Uma coleta parcial nunca apaga o catálogo anterior."""
     vistos = set()
-    novos = []
+    salvos = []
     for o in coletados:
         if o["link_produto"] in vistos:
             continue
         vistos.add(o["link_produto"])
-        novos.append(Produto(
-            campanha_id="",
-            origem=origem,
-            fonte="mercadolivre-web",
-            codigo_checkout=codigo_checkout,
-            nome=o["nome"],
-            preco_sem_desconto=o["preco_sem_desconto"],
-            preco_com_cupom=o["preco_com_cupom"],
-            preco_fonte=o["preco_sem_desconto"],
-            preco_efetivo=o["preco_com_cupom"],
-            link_produto=o["link_produto"],
-            categoria="DESCONHECIDO",
-            macro_categoria=macro_fixa or classificar_oferta_por_nome(o["nome"]),
-            imagem_url=o["imagem_url"],
-            frete_full=o["frete_full"],
-        ))
-    Produto.objects.bulk_create(novos, batch_size=500)
+        produto, _ = Produto.objects.update_or_create(
+            marketplace="mercadolivre", owner=None, link_produto=o["link_produto"],
+            defaults={"campanha_id": "", "origem": origem,
+                      "fonte": "mercadolivre-web", "codigo_checkout": codigo_checkout,
+                      "nome": o["nome"], "preco_sem_desconto": o["preco_sem_desconto"],
+                      "preco_com_cupom": o["preco_com_cupom"],
+                      "preco_fonte": o["preco_sem_desconto"],
+                      "preco_efetivo": o["preco_com_cupom"], "estado": "ativo",
+                      "falha_verificacao": "", "falhas_consecutivas": 0,
+                      "confianca": "media", "evidencia": {"transport": "public-web"},
+                      "categoria": "DESCONHECIDO",
+                      "macro_categoria": macro_fixa or classificar_oferta_por_nome(o["nome"]),
+                      "imagem_url": o["imagem_url"], "frete_full": o["frete_full"]})
+        salvos.append(produto)
     # Histórico de preços (B1): 1 observação por item p/ detectar queda real depois.
     from apps.scrapers.precos import registrar_varios
-    registrar_varios(novos)
-    return len(novos)
+    registrar_varios(salvos)
+    return len(salvos)
 
 
 def _upsert_ofertas(coletados):
@@ -297,7 +294,8 @@ def mapear_ofertas(max_paginas=40, substituir=True):
     coletados = []
     caminho_auth = os.path.join(ml_session_dir(), "auth.json")
 
-    with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
+    with iniciar_browser(auth_path=caminho_auth, headless=True,
+                         validar_sessao=False) as (page, context):
         for n in range(1, max_paginas + 1):
             emitir_progresso(f"[PROGRESSO] Ofertas página {n}/{max_paginas} ({n*100//max_paginas}%)")
             try:
@@ -317,16 +315,10 @@ def mapear_ofertas(max_paginas=40, substituir=True):
             coletados.extend(cards)
             pausa_humana()  # ritmo humano entre páginas (anti-bloqueio)
 
-    if substituir:
-        if not coletados:
-            logger.warning("Raspagem de ofertas ML vazia; feed existente preservado")
-            return 0
-        Produto.objects.filter(
-            marketplace="mercadolivre", owner__isnull=True, origem="oferta"
-        ).delete()
-        n = _salvar(coletados, origem="oferta")
-    else:
-        n = _upsert_ofertas(coletados)
+    if not coletados:
+        logger.warning("Raspagem de ofertas ML vazia; feed existente preservado")
+        return 0
+    n = _salvar(coletados, origem="oferta")
     logger.info("Ofertas ML salvas/atualizadas: %s", n)
     return n
 
@@ -350,7 +342,8 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None):
     caminho_auth = os.path.join(ml_session_dir(), "auth.json")
     coletados = []
 
-    with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
+    with iniciar_browser(auth_path=caminho_auth, headless=True,
+                         validar_sessao=False) as (page, context):
         for termo in termos:
             slug = _slug_busca(termo)
             if not slug:

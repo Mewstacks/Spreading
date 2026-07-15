@@ -18,13 +18,43 @@ class MercadoLivre(Marketplace):
         )
         from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import mapear_cupons_codigo
 
-        mapear_ofertas(max_paginas=40)
-        mapear_cupons_codigo()
-        for t in (termos or []):
-            try:
-                buscar_por_termo(t)
-            except Exception as e:
-                logger.warning("Busca ML '%s' falhou: %s", t, e)
+        from django.utils import timezone
+        from apps.scrapers.models import FonteIngestao, ExecucaoIngestao
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web", defaults={
+                "marketplace": "mercadolivre", "nome": "Mercado Livre — páginas públicas"})
+        run = ExecucaoIngestao.objects.create(fonte=fonte)
+        fonte.ultima_tentativa = timezone.now()
+        fonte.save(update_fields=["ultima_tentativa"])
+        try:
+            ofertas = mapear_ofertas(max_paginas=40)
+            cupons = mapear_cupons_codigo()
+            for t in (termos or []):
+                try:
+                    buscar_por_termo(t)
+                except Exception as e:
+                    logger.warning("Busca ML '%s' falhou: %s", t, e)
+        except Exception:
+            now = timezone.now()
+            run.status, run.finalizada_em = "error", now
+            run.erro_publico = "Falha temporária na coleta; dados anteriores preservados."
+            run.save(update_fields=["status", "finalizada_em", "erro_publico"])
+            fonte.status, fonte.erro_publico = "degraded", run.erro_publico
+            fonte.falhas_consecutivas += 1
+            fonte.save(update_fields=["status", "erro_publico", "falhas_consecutivas"])
+            raise
+        total = ofertas + cupons
+        now = timezone.now()
+        run.status = "ok" if total else "empty"
+        run.total_ofertas, run.total_cupons = ofertas, cupons
+        run.finalizada_em = now
+        run.save()
+        fonte.ultimo_total = total
+        fonte.status = "ok" if total else "degraded"
+        fonte.erro_publico = "" if total else "Coleta vazia; catálogo anterior preservado."
+        if total:
+            fonte.ultimo_sucesso, fonte.falhas_consecutivas = now, 0
+        fonte.save()
 
     def build_affiliate_link(self, produto, usuario=None):
         from apps.scrapers.scraper_mercadolivre.link import gerar_link_afiliado_para_produto

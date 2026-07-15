@@ -18,7 +18,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from apps.scrapers.models import (
     CliquePublicacao, ConfiguracaoEnvio, Cupom, Produto, Publicacao,
-    ReceitaAfiliado, RelatorioSync,
+    ReceitaAfiliado, RelatorioSync, FonteIngestao, CupomNormalizado,
 )
 from apps.scrapers.scraper_mercadolivre.scraper import main as scrapper_main
 
@@ -55,7 +55,7 @@ def superadmin_required(view):
 def throttle_sse(max_por_min=10):
     """Limita quantas vezes/min um usuário dispara um endpoint SSE pesado.
 
-    Cada stream sobe uma thread (Playwright/Browserbase/HTTP) na MÁQUINA COMPARTILHADA;
+    Cada stream sobe uma thread (Playwright/HTTP) na MÁQUINA COMPARTILHADA;
     sem teto, um tenant satura CPU/RAM/Chromium dos demais. Ao estourar, devolve um
     stream curto de erro (EventSource-friendly) em vez de rodar o job.
     """
@@ -409,6 +409,41 @@ def ml_conexao_cancelar(request):
     from apps.scrapers import ml_conexao
     ml_conexao.cancelar(request.user.id)
     return JsonResponse({"ok": True})
+
+
+@require_GET
+def ml_conexao_frames(request):
+    """SSE — transmite os frames (JPEG base64) do Chromium local pro <canvas> do front.
+
+    Live view self-hosted: o worker (ml_conexao) roda o browser e captura a tela via
+    CDP screencast; aqui só empurramos o último frame de CADA usuário (fila isolada por
+    request.user.id — um tenant nunca vê a tela do outro)."""
+    from apps.scrapers import ml_conexao
+
+    def _stream():
+        for frame in ml_conexao.frames(request.user.id):
+            yield f"data: {frame}\n\n"
+        yield "data: __DONE__\n\n"
+
+    resp = StreamingHttpResponse(_stream(), content_type="text/event-stream")
+    resp["Cache-Control"] = "no-cache"
+    resp["X-Accel-Buffering"] = "no"
+    return resp
+
+
+@require_POST
+def ml_conexao_input(request):
+    """Recebe eventos de mouse/teclado do front e encaminha pro browser de login.
+
+    Body JSON: {"events": [{"t":"down","x":..,"y":..}, {"t":"char","text":"a"}, ...]}.
+    A validação/limites ficam em ml_conexao.enfileirar_input (dados do cliente)."""
+    import json
+    from apps.scrapers import ml_conexao
+    try:
+        payload = json.loads((request.body or b"").decode("utf-8") or "{}")
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(ml_conexao.enfileirar_input(request.user.id, payload.get("events")))
 
 
 @require_GET
@@ -777,7 +812,8 @@ def top_promocoes(request):
 
     tem_filtros_na_url = any(
         chave in request.GET
-        for chave in ("macro", "categoria", "loja", "ordenar", "q", "min_desconto")
+        for chave in ("macro", "categoria", "loja", "ordenar", "q", "min_desconto",
+                      "tipo", "fonte", "confianca", "atualizado_desde")
     )
     if tem_filtros_na_url:
         filtros = {
@@ -787,6 +823,10 @@ def top_promocoes(request):
             "ordenar": "valor" if request.GET.get("ordenar") == "valor" else "percent",
             "q": (request.GET.get("q") or "").strip()[:120],
             "min_desconto": (request.GET.get("min_desconto") or "").strip(),
+            "tipo": "cupom" if request.GET.get("tipo") == "cupom" else "oferta",
+            "fonte": (request.GET.get("fonte") or "").strip()[:80],
+            "confianca": (request.GET.get("confianca") or "").strip()[:20],
+            "atualizado_desde": (request.GET.get("atualizado_desde") or "").strip(),
         }
         request.session[filtros_key] = filtros
     else:
@@ -796,6 +836,13 @@ def top_promocoes(request):
     categorias_selecionadas = filtros.get("categoria", [])
     loja_selecionada = filtros.get("loja", "")
     busca = filtros.get("q", "")
+    tipo = filtros.get("tipo", "oferta")
+    fonte_selecionada = filtros.get("fonte", "")
+    confianca_selecionada = filtros.get("confianca", "")
+    try:
+        atualizado_desde = max(0, min(168, int(filtros.get("atualizado_desde") or 0)))
+    except (TypeError, ValueError):
+        atualizado_desde = 0
     try:
         min_desconto = max(0, min(100, int(float(filtros.get("min_desconto") or 0))))
     except (TypeError, ValueError):
@@ -851,9 +898,47 @@ def top_promocoes(request):
         )
     if min_desconto:
         qs = qs.filter(percent__gte=min_desconto)
+    if fonte_selecionada:
+        qs = qs.filter(fonte=fonte_selecionada)
+    if confianca_selecionada:
+        qs = qs.filter(confianca=confianca_selecionada)
+    if atualizado_desde:
+        qs = qs.filter(ultima_observacao__gte=timezone.now() - timezone.timedelta(hours=atualizado_desde))
 
     ordem = "-economia" if ordenar == "valor" else "-percent"
     produtos = list(qs.order_by(ordem)[:20])
+    cupons_qs = CupomNormalizado.objects.select_related("fonte").filter(
+        estado="ativo"
+    ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
+    if loja_selecionada:
+        cupons_qs = cupons_qs.filter(marketplace=loja_selecionada)
+    if fonte_selecionada:
+        cupons_qs = cupons_qs.filter(fonte__slug=fonte_selecionada)
+    if confianca_selecionada:
+        cupons_qs = cupons_qs.filter(confianca=confianca_selecionada)
+    if busca:
+        cupons_qs = cupons_qs.filter(Q(titulo__icontains=busca) | Q(codigo__icontains=busca))
+    cupons_catalogo = list(cupons_qs.order_by("-ultima_observacao")[:50])
+    perfil = getattr(request.user, "perfil", None)
+    fontes_qs = FonteIngestao.objects.filter(habilitada=True).order_by("marketplace", "nome")
+    # Fontes Amazon are account-specific. Do not present an adapter that cannot
+    # run for this user as an operational incident.
+    if not perfil or not perfil.afiliado_tag_amazon:
+        fontes_qs = fontes_qs.exclude(marketplace="amazon")
+    else:
+        from apps.scrapers.scraper_amazon.creators_api import creds_de_usuario
+        if not creds_de_usuario(request.user).completo():
+            fontes_qs = fontes_qs.exclude(slug="amazon-creators-api")
+    fontes = list(fontes_qs)
+    amazon_count = qs.filter(marketplace="amazon").count()
+    if amazon_count:
+        amazon_diagnostico = "Amazon ativa para sua conta."
+    elif perfil and not perfil.afiliado_tag_amazon:
+        amazon_diagnostico = "Cadastre sua tag de afiliado Amazon para habilitar o catálogo."
+    elif perfil and perfil.amazon_elegivel is False:
+        amazon_diagnostico = "Creators API inelegível; o fallback público tentará alimentar sua conta."
+    else:
+        amazon_diagnostico = "Nenhuma oferta Amazon confirmada no último ciclo."
     cupons_map = {
         c.campanha_id: c
         for c in Cupom.objects.filter(
@@ -885,6 +970,13 @@ def top_promocoes(request):
         qs_pairs.append(("q", busca))
     if min_desconto:
         qs_pairs.append(("min_desconto", min_desconto))
+    qs_pairs.append(("tipo", tipo))
+    if fonte_selecionada:
+        qs_pairs.append(("fonte", fonte_selecionada))
+    if confianca_selecionada:
+        qs_pairs.append(("confianca", confianca_selecionada))
+    if atualizado_desde:
+        qs_pairs.append(("atualizado_desde", atualizado_desde))
     # base p/ os chips de loja: preserva macro/categoria/ordem, troca só a loja.
     qs_sem_loja = list(qs_pairs)
     if ordenar == "valor":
@@ -906,8 +998,16 @@ def top_promocoes(request):
         "ordenar": ordenar,
         "busca": busca,
         "min_desconto": min_desconto,
+        "tipo": tipo,
+        "fontes": fontes,
+        "fonte_selecionada": fonte_selecionada,
+        "confianca_selecionada": confianca_selecionada,
+        "atualizado_desde": atualizado_desde,
+        "cupons_catalogo": cupons_catalogo,
+        "amazon_diagnostico": amazon_diagnostico,
         "filtros_ativos": len(macros_selecionados) + len(categorias_selecionadas)
-            + bool(loja_selecionada) + bool(busca) + bool(min_desconto),
+            + bool(loja_selecionada) + bool(busca) + bool(min_desconto)
+            + bool(fonte_selecionada) + bool(confianca_selecionada) + bool(atualizado_desde),
         "qs_base": qs_base,
         "qs_base_sem_loja": qs_base_sem_loja,
     })
@@ -1065,13 +1165,26 @@ def automacao_control(request):
         raise PermissionDenied("Apenas administradores controlam os workers de automação.")
 
     if request.method != "POST":
-        rodando = st.is_running(tipo)
-        estado = st.read_state(tipo) if rodando else {}
+        habilitada = st.is_enabled(tipo)
+        worker_vivo = st.worker_alive(tipo)
+        estado = st.read_state(tipo) if habilitada else {}
         # O estado é global e pode conter diagnóstico gravado por versões antigas.
         # Nunca exponha traceback, caminhos do servidor ou detalhes do banco no UI.
         if estado.get("erro"):
             estado = {**estado, "erro": "Falha temporária no serviço. Uma nova tentativa será feita no próximo ciclo."}
-        return JsonResponse({"rodando": rodando, "tipo": tipo, "estado": estado})
+        fase = estado.get("fase", "")
+        degradada = fase == "degradado" or bool(estado.get("erro"))
+        saudavel = habilitada and worker_vivo and not degradada
+        return JsonResponse({
+            # Compatibilidade com os clientes antigos: rodando agora significa
+            # que o loop foi habilitado E há heartbeat recente.
+            "rodando": habilitada and worker_vivo,
+            "habilitada": habilitada,
+            "worker_vivo": worker_vivo,
+            "saudavel": saudavel,
+            "tipo": tipo,
+            "estado": estado,
+        })
 
     acao = request.POST.get("acao")
     if acao == "stop":

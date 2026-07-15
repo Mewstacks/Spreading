@@ -16,6 +16,7 @@ def tag_amazon(usuario=None) -> str:
         perfil = getattr(usuario, "perfil", None)
         if perfil and perfil.afiliado_tag_amazon:
             return perfil.afiliado_tag_amazon.strip()
+        return ""
     return (getattr(settings, "AMAZON_PARTNER_TAG", "") or "").strip()
 
 

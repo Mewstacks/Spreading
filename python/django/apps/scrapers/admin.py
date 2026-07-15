@@ -3,6 +3,7 @@ from django.contrib import admin
 from apps.scrapers.models import (
     Cupom, Produto, HistoricoEnvio, ConfiguracaoEnvio, CupomCodigo, LinkAfiliadoUsuario,
     Publicacao, CliquePublicacao, ReceitaAfiliado, RelatorioSync, EventoOperacional,
+    FonteIngestao, ExecucaoIngestao, CupomNormalizado, ProdutoCupom,
 )
 
 
@@ -80,3 +81,34 @@ class EventoOperacionalAdmin(admin.ModelAdmin):
     search_fields = ("mensagem", "erro", "usuario__username")
     readonly_fields = [field.name for field in EventoOperacional._meta.fields]
     date_hierarchy = "criado_em"
+
+
+@admin.register(FonteIngestao)
+class FonteIngestaoAdmin(admin.ModelAdmin):
+    list_display = ("nome", "marketplace", "status", "habilitada", "ultimo_total",
+                    "ultimo_sucesso", "falhas_consecutivas")
+    list_filter = ("status", "habilitada", "marketplace")
+    readonly_fields = ("ultimo_sucesso", "ultima_tentativa", "ultimo_total",
+                       "erro_publico", "falhas_consecutivas")
+
+
+@admin.register(ExecucaoIngestao)
+class ExecucaoIngestaoAdmin(admin.ModelAdmin):
+    list_display = ("fonte", "status", "total_ofertas", "total_cupons",
+                    "iniciada_em", "finalizada_em")
+    list_filter = ("status", "fonte")
+    readonly_fields = [field.name for field in ExecucaoIngestao._meta.fields]
+
+
+@admin.register(CupomNormalizado)
+class CupomNormalizadoAdmin(admin.ModelAdmin):
+    list_display = ("titulo", "codigo", "marketplace", "fonte", "confianca",
+                    "estado", "validade", "ultima_observacao")
+    list_filter = ("marketplace", "fonte", "confianca", "estado")
+    search_fields = ("titulo", "codigo", "external_id")
+
+
+@admin.register(ProdutoCupom)
+class ProdutoCupomAdmin(admin.ModelAdmin):
+    list_display = ("produto", "cupom", "status", "verificado_em")
+    list_filter = ("status",)

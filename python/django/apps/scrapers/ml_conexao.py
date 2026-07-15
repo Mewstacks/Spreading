@@ -2,22 +2,30 @@
 
 Substitui a gambiarra de "rode connect_ml.py no seu PC e cole o auth.json". Num
 servidor headless não dá pra abrir um browser pro usuário clicar, então rodamos o
-Chromium num serviço de browser hospedado (Browserbase) e transmitimos a tela pro
-navegador do usuário via *live view* (um iframe). Ele loga no ML ali dentro — no
-celular ou no desktop — e quando a sessão fica válida capturamos o storage_state
+Chromium NA PRÓPRIA MÁQUINA (o mesmo que o scraper já usa — Playwright/Chromium já
+está na imagem) e transmitimos a tela pro navegador do usuário via *live view*: um
+screencast do CDP (`Page.startScreencast`) desenhado num <canvas>, com o mouse e o
+teclado dele encaminhados de volta (`Input.dispatch*`). Ele loga no ML ali dentro —
+no celular ou no desktop — e quando a sessão fica válida capturamos o storage_state
 e salvamos no mesmo `auth_{id}.json` que o resto do scraper já espera.
 
+Isso troca o antigo Browserbase (browser hospedado pago; o free plan estourava com
+402 Payment Required). Custo zero, sem colar nada, e a senha é digitada direto na
+página REAL do ML — não passa pelo nosso backend.
+
 Fluxo (espelha o QR do WhatsApp):
-  1. criar_sessao(user)  -> abre sessão remota, navega pro login do ML, guarda o
-     live_view_url no cache e dispara uma thread que fica observando o login.
-  2. front embute o live_view_url num <iframe> e faz polling em status().
+  1. criar_sessao(user)  -> sobe o Chromium local, navega pro login do ML, começa o
+     screencast numa thread que fica observando o login.
+  2. front abre um EventSource em frames() e desenha cada frame no <canvas>; captura
+     mouse/teclado e faz POST em enfileirar_input().
   3. thread detecta o redirect pós-login -> salva auth_{id}.json -> fase 'conectado'.
 
-Estado compartilhado vai pro cache (Redis em prod) pra funcionar entre workers do
-gunicorn; a thread que segura a conexão CDP vive em um worker só, mas escreve o
-progresso no cache que qualquer worker lê no polling.
+Estado compartilhado (fase/erro) vai pro cache (Redis/DB em prod) pra funcionar entre
+threads do gunicorn; a thread que segura o browser vive em um worker só, e os frames
+e a fila de input ficam em dicts em memória desse mesmo processo (1 worker no Fly).
 """
 import os
+import queue
 import threading
 import time
 
@@ -27,14 +35,37 @@ from django.core.cache import cache
 LOGIN_URL = "https://www.mercadolivre.com/jms/mlb/lgz/msl/login/"
 HOME_HOST = "mercadolivre.com.br"
 
-SESSION_TIMEOUT_S = 900          # tempo máx. da sessão remota (Browserbase)
 LOGIN_DEADLINE_S = 600           # tempo máx. esperando o usuário logar
-POLL_INTERVAL_S = 2
+LOOP_MS = 50                     # granularidade do worker (bombeia CDP + drena input)
 
-# Threads ativas por usuário (dentro deste worker). O cache guarda o estado
-# visível entre workers; este dict só evita abrir 2 sessões no mesmo worker.
+# Viewport remoto. O front escala o <canvas> pra caber na tela mantendo a proporção.
+VIEW_W, VIEW_H = 1280, 800
+SCREENCAST = {"format": "jpeg", "quality": 55,
+              "maxWidth": VIEW_W, "maxHeight": VIEW_H, "everyNthFrame": 1}
+
+MAX_EVENTOS_POR_POST = 60        # teto de eventos por request (anti-abuso da fila)
+
+# Estado em memória DESTE worker (o cache guarda fase/erro visível entre threads).
 _threads: dict[int, threading.Thread] = {}
+_frames: dict[int, str] = {}                     # último frame base64 por usuário
+_inputs: dict[int, "queue.Queue"] = {}           # eventos de input pendentes por usuário
 _lock = threading.Lock()
+
+# Teclas não-imprimíveis que o front manda como {t:'key', key:'Enter'}. Imprimíveis
+# vão como {t:'char', text:'a'} e usam Input.insertText (sem mapa tecla-a-tecla).
+_SPECIAL_KEYS = {
+    "Enter":      {"code": "Enter", "key": "Enter", "windowsVirtualKeyCode": 13, "text": "\r"},
+    "Backspace":  {"code": "Backspace", "key": "Backspace", "windowsVirtualKeyCode": 8},
+    "Tab":        {"code": "Tab", "key": "Tab", "windowsVirtualKeyCode": 9},
+    "Delete":     {"code": "Delete", "key": "Delete", "windowsVirtualKeyCode": 46},
+    "Escape":     {"code": "Escape", "key": "Escape", "windowsVirtualKeyCode": 27},
+    "ArrowLeft":  {"code": "ArrowLeft", "key": "ArrowLeft", "windowsVirtualKeyCode": 37},
+    "ArrowUp":    {"code": "ArrowUp", "key": "ArrowUp", "windowsVirtualKeyCode": 38},
+    "ArrowRight": {"code": "ArrowRight", "key": "ArrowRight", "windowsVirtualKeyCode": 39},
+    "ArrowDown":  {"code": "ArrowDown", "key": "ArrowDown", "windowsVirtualKeyCode": 40},
+    "Home":       {"code": "Home", "key": "Home", "windowsVirtualKeyCode": 36},
+    "End":        {"code": "End", "key": "End", "windowsVirtualKeyCode": 35},
+}
 
 
 def _cache_key(user_id: int) -> str:
@@ -73,52 +104,6 @@ def status(user_id: int) -> dict:
     return estado
 
 
-def _config_ok() -> tuple[bool, str]:
-    if not getattr(settings, "BROWSERBASE_API_KEY", ""):
-        return False, "BROWSERBASE_API_KEY não configurada no servidor."
-    if not getattr(settings, "BROWSERBASE_PROJECT_ID", ""):
-        return False, "BROWSERBASE_PROJECT_ID não configurada no servidor."
-    return True, ""
-
-
-def _abrir_sessao_remota():
-    """Cria a sessão no Browserbase e devolve (connect_url, live_view_url, session_id)."""
-    from browserbase import Browserbase
-
-    bb = Browserbase(api_key=settings.BROWSERBASE_API_KEY)
-
-    kwargs = dict(
-        project_id=settings.BROWSERBASE_PROJECT_ID,
-        keep_alive=True,
-        api_timeout=SESSION_TIMEOUT_S,  # duração da sessão remota (não é o HTTP timeout)
-        # Viewport desktop: o login do ML renderiza confortável e o live view (iframe)
-        # não fica minúsculo. O front escala o iframe pra caber na tela.
-        browser_settings={"viewport": {"width": 1280, "height": 800}, "block_ads": True},
-    )
-    # Proxy residencial no país do usuário reduz o bloqueio anti-bot do ML no login,
-    # MAS é recurso de plano PAGO do Browserbase (o free plan responde 402). Só liga
-    # com BROWSERBASE_USE_PROXY=1; sem ele o login roda no plano grátis (IP do datacenter).
-    if getattr(settings, "BROWSERBASE_USE_PROXY", False):
-        pais = getattr(settings, "BROWSERBASE_PROXY_COUNTRY", "BR") or "BR"
-        kwargs["proxies"] = [{"type": "browserbase", "geolocation": {"country": pais}}]
-
-    sessao = bb.sessions.create(**kwargs)
-    live = bb.sessions.debug(sessao.id)
-    live_view_url = getattr(live, "debugger_fullscreen_url", None) or getattr(
-        live, "debuggerFullscreenUrl", None
-    )
-    return bb, sessao.id, sessao.connect_url, live_view_url
-
-
-def _liberar_sessao(bb, session_id: str):
-    try:
-        bb.sessions.update(
-            session_id, project_id=settings.BROWSERBASE_PROJECT_ID, status="REQUEST_RELEASE"
-        )
-    except Exception:
-        pass
-
-
 def _url_logada(url: str) -> bool:
     if not url:
         return False
@@ -128,36 +113,87 @@ def _url_logada(url: str) -> bool:
     return HOME_HOST in u or "mercadolibre.com" in u
 
 
-def _worker(user_id: int):
-    """Segura a conexão CDP, navega pro login e espera o usuário concluir."""
-    from playwright.sync_api import sync_playwright
-
-    bb = session_id = None
+def _despachar_input(cdp, ev: dict):
+    """Traduz UM evento do front em comando CDP no Chromium local. Nunca levanta."""
     try:
-        ok, msg = _config_ok()
-        if not ok:
-            _set_estado(user_id, fase="erro", erro=msg)
-            return
+        t = ev.get("t")
+        if t == "move":
+            cdp.send("Input.dispatchMouseEvent", {
+                "type": "mouseMoved", "x": ev["x"], "y": ev["y"],
+                "button": "none", "buttons": int(ev.get("buttons", 0))})
+        elif t == "down":
+            cdp.send("Input.dispatchMouseEvent", {
+                "type": "mousePressed", "x": ev["x"], "y": ev["y"],
+                "button": ev.get("button", "left"), "buttons": 1,
+                "clickCount": int(ev.get("clickCount", 1))})
+        elif t == "up":
+            cdp.send("Input.dispatchMouseEvent", {
+                "type": "mouseReleased", "x": ev["x"], "y": ev["y"],
+                "button": ev.get("button", "left"), "buttons": 0,
+                "clickCount": int(ev.get("clickCount", 1))})
+        elif t == "wheel":
+            cdp.send("Input.dispatchMouseEvent", {
+                "type": "mouseWheel", "x": ev["x"], "y": ev["y"],
+                "deltaX": float(ev.get("dx", 0)), "deltaY": float(ev.get("dy", 0))})
+        elif t == "char":
+            texto = str(ev.get("text", ""))[:8]
+            if texto:
+                cdp.send("Input.insertText", {"text": texto})
+        elif t == "key":
+            spec = _SPECIAL_KEYS.get(ev.get("key"))
+            if spec:
+                cdp.send("Input.dispatchKeyEvent", {"type": "keyDown", **spec})
+                cdp.send("Input.dispatchKeyEvent", {"type": "keyUp", **spec})
+    except Exception:
+        # Um evento malformado/tardio (browser fechando) não pode derrubar o worker.
+        pass
 
-        _set_estado(user_id, fase="iniciando", erro="", live_view_url="")
-        bb, session_id, connect_url, live_view_url = _abrir_sessao_remota()
-        if not live_view_url:
-            _set_estado(user_id, fase="erro", erro="Serviço não retornou o live view.")
-            _liberar_sessao(bb, session_id)
-            return
 
+def _worker(user_id: int):
+    """Sobe o Chromium local, transmite a tela e espera o usuário concluir o login."""
+    from playwright.sync_api import sync_playwright
+    from apps.scrapers.auxiliar import ua_aleatorio
+
+    # Fila limitada: um cliente que floode input só enche a PRÓPRIA fila; o excesso é
+    # descartado (enfileirar_input trata queue.Full) sem estourar memória do processo.
+    fila = queue.Queue(maxsize=2000)
+    with _lock:
+        _inputs[user_id] = fila
+        _frames.pop(user_id, None)
+
+    try:
+        _set_estado(user_id, fase="iniciando", erro="")
         with sync_playwright() as p:
-            browser = p.chromium.connect_over_cdp(connect_url)
-            context = browser.contexts[0] if browser.contexts else browser.new_context()
+            browser = p.chromium.launch(
+                headless=True,
+                # Mesmos flags do scraper (auxiliar.iniciar_browser) + dev-shm p/ não
+                # crashar o Chromium em container com /dev/shm pequeno (Fly).
+                args=["--disable-blink-features=AutomationControlled",
+                      "--disable-dev-shm-usage"],
+            )
+            context = browser.new_context(
+                viewport={"width": VIEW_W, "height": VIEW_H},
+                user_agent=ua_aleatorio(),
+                permissions=["clipboard-read", "clipboard-write"],
+            )
             page = context.pages[0] if context.pages else context.new_page()
+            cdp = context.new_cdp_session(page)
+
+            def _on_frame(params):
+                # Guarda só o último frame (coalesce): o SSE lê o mais recente.
+                _frames[user_id] = params.get("data", "")
+                try:
+                    cdp.send("Page.screencastFrameAck",
+                             {"sessionId": params.get("sessionId")})
+                except Exception:
+                    pass
+
+            cdp.send("Page.enable")
+            cdp.on("Page.screencastFrame", _on_frame)
 
             page.goto(LOGIN_URL, wait_until="domcontentloaded")
-            _set_estado(
-                user_id,
-                fase="aguardando_login",
-                live_view_url=live_view_url,
-                session_id=session_id,
-            )
+            cdp.send("Page.startScreencast", SCREENCAST)
+            _set_estado(user_id, fase="aguardando_login", erro="")
 
             deadline = time.time() + LOGIN_DEADLINE_S
             logado = False
@@ -167,60 +203,195 @@ def _worker(user_id: int):
                 if estado.get("cancelar"):
                     _set_estado(user_id, fase="idle", erro="")
                     break
-                try:
-                    url_atual = page.evaluate("() => location.href")
-                except Exception:
-                    url_atual = page.url
+
+                # Drena e aplica os eventos de input acumulados desde a última volta.
+                for _ in range(MAX_EVENTOS_POR_POST * 4):
+                    try:
+                        ev = fila.get_nowait()
+                    except queue.Empty:
+                        break
+                    _despachar_input(cdp, ev)
+
+                url_atual = page.url
                 # 'salvar_agora' = usuário clicou "já entrei"; força a captura.
                 if _url_logada(url_atual) or estado.get("salvar_agora"):
                     logado = True
                     break
-                # Heartbeat: reescreve o estado (renova TTL + atualizado_em) sem recriar
-                # a sessão. Mantém a MESMA live_view_url, então o iframe não recarrega.
+
+                # Heartbeat: renova TTL + atualizado_em sem trocar de fase (o front
+                # segue desenhando os frames pelo EventSource).
                 if time.time() - last_beat > 8:
-                    _set_estado(user_id, fase="aguardando_login",
-                                live_view_url=live_view_url, session_id=session_id)
+                    _set_estado(user_id, fase="aguardando_login")
                     last_beat = time.time()
-                time.sleep(POLL_INTERVAL_S)
+
+                # wait_for_timeout bombeia os eventos CDP (o screencastFrame chega aqui).
+                page.wait_for_timeout(LOOP_MS)
 
             if logado:
                 _set_estado(user_id, fase="salvando")
+                try:
+                    cdp.send("Page.stopScreencast")
+                except Exception:
+                    pass
                 context.storage_state(path=_auth_path(user_id))
-                _set_estado(user_id, fase="conectado", live_view_url="", salvar_agora=False)
+                _set_estado(user_id, fase="conectado", salvar_agora=False, erro="")
             elif (cache.get(_cache_key(user_id)) or {}).get("fase") != "idle":
-                _set_estado(
-                    user_id,
-                    fase="erro",
-                    erro="Tempo esgotado esperando o login. Tente de novo.",
-                )
+                _set_estado(user_id, fase="erro",
+                            erro="Tempo esgotado esperando o login. Tente de novo.")
             browser.close()
     except Exception as exc:  # noqa: BLE001 — qualquer falha vira mensagem pro usuário
         _set_estado(user_id, fase="erro", erro=f"Falha na conexão: {exc}")
     finally:
-        if bb and session_id:
-            _liberar_sessao(bb, session_id)
         with _lock:
+            _inputs.pop(user_id, None)
+            _frames.pop(user_id, None)
             _threads.pop(user_id, None)
 
 
 def criar_sessao(user) -> dict:
     """Inicia (ou reaproveita) a sessão de login web do ML pro usuário."""
     user_id = user.id
-    ok, msg = _config_ok()
-    if not ok:
-        return _set_estado(user_id, fase="erro", erro=msg)
-
     with _lock:
         viva = _threads.get(user_id)
         if viva and viva.is_alive():
             # Já tem sessão rolando neste worker — devolve o estado atual.
             return status(user_id)
-        _set_estado(user_id, fase="iniciando", erro="", live_view_url="", cancelar=False,
-                    salvar_agora=False)
+        _set_estado(user_id, fase="iniciando", erro="", cancelar=False, salvar_agora=False)
         t = threading.Thread(target=_worker, args=(user_id,), daemon=True)
         _threads[user_id] = t
         t.start()
     return status(user_id)
+
+
+def frames(user_id: int):
+    """Generator de frames base64 (JPEG) pro SSE. Liveness = a fila do worker existir
+    (`_inputs[user_id]`): SSE e worker vivem no MESMO processo (1 gunicorn worker), então
+    isso é estado em memória — zero hit no banco no loop de streaming. Encerra quando o
+    worker some (login concluído/cancelado/erro) ou após ~30s sem frame novo (o
+    EventSource do front reabre sozinho enquanto a fase seguir de conexão)."""
+    ultimo = None
+    ocioso = 0
+    espera_inicio = 0
+    while True:
+        if user_id not in _inputs:
+            # Grace no começo: a thread do worker pode ainda não ter registrado a fila.
+            espera_inicio += 1
+            if espera_inicio > 60:        # ~3s sem worker -> encerra
+                break
+            time.sleep(0.05)
+            continue
+        espera_inicio = 0
+        frame = _frames.get(user_id)
+        if frame and frame is not ultimo:
+            ultimo = frame
+            ocioso = 0
+            yield frame
+        else:
+            ocioso += 1
+            if ocioso > 600:              # ~30s sem frame novo -> encerra o stream
+                break
+        time.sleep(0.05)
+
+
+def enfileirar_input(user_id: int, eventos) -> dict:
+    """Recebe eventos de input do front (mouse/teclado) e empurra pra fila do worker.
+    Valida tipo/coords/limites — dados do cliente não são confiáveis."""
+    fila = _inputs.get(user_id)
+    if fila is None:
+        return {"ok": False, "erro": "sessao_inativa"}
+    if not isinstance(eventos, list):
+        return {"ok": False, "erro": "payload_invalido"}
+    aceitos = 0
+    for ev in eventos[:MAX_EVENTOS_POR_POST]:
+        if not isinstance(ev, dict):
+            continue
+        t = ev.get("t")
+        limpo = {"t": t}
+        if t in ("move", "down", "up", "wheel"):
+            try:
+                limpo["x"] = max(0, min(VIEW_W, int(ev.get("x", 0))))
+                limpo["y"] = max(0, min(VIEW_H, int(ev.get("y", 0))))
+            except (TypeError, ValueError):
+                continue
+            if t in ("down", "up"):
+                limpo["button"] = ev.get("button") if ev.get("button") in (
+                    "left", "right", "middle") else "left"
+                limpo["clickCount"] = ev.get("clickCount", 1)
+            if t == "wheel":
+                limpo["dx"] = ev.get("dx", 0)
+                limpo["dy"] = ev.get("dy", 0)
+            if t == "move":
+                limpo["buttons"] = ev.get("buttons", 0)
+        elif t == "char":
+            limpo["text"] = str(ev.get("text", ""))[:8]
+            if not limpo["text"]:
+                continue
+        elif t == "key":
+            if ev.get("key") not in _SPECIAL_KEYS:
+                continue
+            limpo["key"] = ev.get("key")
+        else:
+            continue
+        try:
+            fila.put_nowait(limpo)
+            aceitos += 1
+        except queue.Full:
+            break
+    return {"ok": True, "aceitos": aceitos}
+
+
+def salvar_sessao_manual(user_id: int, raw_json: str) -> dict:
+    """Caminho de EMERGÊNCIA (não exposto na UI): valida um storage_state do Playwright
+    com cookie do Mercado Livre e grava no mesmo auth_{id}.json que link.py/auxiliar.py
+    leem. Mantido como rede de segurança; o fluxo normal é o live view local.
+
+    Retorna o mesmo dict de status() (fase 'conectado' em sucesso, 'erro' senão).
+    """
+    import json
+
+    texto = (raw_json or "").strip()
+    if not texto:
+        return _set_estado(user_id, fase="erro",
+                           erro="Cole o conteúdo do auth.json (ou envie o arquivo).")
+    try:
+        dados = json.loads(texto)
+    except (ValueError, TypeError):
+        return _set_estado(user_id, fase="erro",
+                           erro="Isso não é um JSON válido. Cole o conteúdo completo do auth.json.")
+
+    cookies = dados.get("cookies") if isinstance(dados, dict) else None
+    if not isinstance(cookies, list) or not cookies:
+        return _set_estado(user_id, fase="erro",
+                           erro="Arquivo não parece um auth.json do Playwright (sem 'cookies').")
+    # Sanidade: precisa de ao menos 1 cookie do domínio do Mercado Livre, senão é
+    # sessão de outro site (colou o arquivo errado).
+    tem_ml = any(
+        ("mercadolivre" in (c.get("domain", "").lower())
+         or "mercadolibre" in (c.get("domain", "").lower()))
+        for c in cookies if isinstance(c, dict)
+    )
+    if not tem_ml:
+        return _set_estado(user_id, fase="erro",
+                           erro="Nenhum cookie do Mercado Livre no arquivo. "
+                                "Faça login no ML antes de salvar o auth.json.")
+
+    destino = _auth_path(user_id)
+    os.makedirs(os.path.dirname(destino), exist_ok=True)
+    # Escrita atômica: grava num temporário e renomeia, pra nunca deixar um
+    # auth.json truncado se algo falhar no meio.
+    tmp = destino + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(dados, fh)
+        os.replace(tmp, destino)
+    except OSError as exc:
+        try:
+            os.path.exists(tmp) and os.remove(tmp)
+        except OSError:
+            pass
+        return _set_estado(user_id, fase="erro", erro=f"Não foi possível salvar a sessão: {exc}")
+
+    return _set_estado(user_id, fase="conectado", erro="", salvar_agora=False, cancelar=False)
 
 
 def salvar_agora(user_id: int):

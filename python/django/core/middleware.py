@@ -13,9 +13,9 @@ from django.conf import settings
 #  - scripts/estilos inline existem em vários templates -> 'unsafe-inline'
 #  - ícones lucide vêm de unpkg.com
 #  - imagens de oferta vêm de CDNs externos (mercadolivre etc) -> https:
-#  - QR codes podem ser data: URIs
-#  - o live view do login do ML é um iframe do Browserbase -> frame-src externo
-_BROWSERBASE_FRAME_SRC = "https://browserbase.com https://*.browserbase.com"
+#  - QR codes e os frames do live view (login ML) são data: URIs -> img-src data:
+#  - o live view do login do ML é um <canvas> alimentado por SSE (mesma origem):
+#    frames por EventSource + input por fetch -> connect-src 'self' já cobre.
 _DEFAULT_CSP = (
     "default-src 'self'; "
     "script-src 'self' 'unsafe-inline' https://unpkg.com; "
@@ -23,7 +23,7 @@ _DEFAULT_CSP = (
     "img-src 'self' data: https:; "
     "font-src 'self' data:; "
     "connect-src 'self'; "
-    f"frame-src 'self' {_BROWSERBASE_FRAME_SRC}; "
+    "frame-src 'self'; "
     "base-uri 'self'; "
     "form-action 'self'; "
     "frame-ancestors 'none'"

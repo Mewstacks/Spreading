@@ -13,7 +13,7 @@ from apps.scrapers import whatsapp_client
 from apps.scrapers.afiliado import tag_ml
 from apps.scrapers.monitor_conexao import wa_conectado
 from apps.scrapers.models import (
-    CliquePublicacao, ConfiguracaoEnvio, Cupom, HistoricoEnvio,
+    CliquePublicacao, ConfiguracaoEnvio, Cupom, FonteIngestao, HistoricoEnvio,
     LinkAfiliadoUsuario, Produto, EventoOperacional, Publicacao,
     ReceitaAfiliado, RelatorioSync,
 )
@@ -30,9 +30,10 @@ class AutomationStatusSecurityTests(TestCase):
         self.user.perfil.marcar_verificado()
         self.client.force_login(self.user)
 
-    @patch("apps.scrapers.automacao_state.is_running", return_value=True)
+    @patch("apps.scrapers.automacao_state.worker_alive", return_value=True)
+    @patch("apps.scrapers.automacao_state.is_enabled", return_value=True)
     @patch("apps.scrapers.automacao_state.read_state")
-    def test_status_never_exposes_worker_traceback(self, read_state, _is_running):
+    def test_status_never_exposes_worker_traceback(self, read_state, _enabled, _alive):
         read_state.return_value = {
             "fase": "aguardando",
             "erro": 'File "/usr/local/lib/python3.12/site-packages/psycopg/connection.py"\nOperationalError: the connection is closed',
@@ -45,6 +46,17 @@ class AutomationStatusSecurityTests(TestCase):
         self.assertIn("Falha temporária", error)
         self.assertNotIn("psycopg", error)
         self.assertNotIn("/usr/local", error)
+
+    @patch("apps.scrapers.automacao_state.worker_alive", return_value=False)
+    @patch("apps.scrapers.automacao_state.is_enabled", return_value=True)
+    @patch("apps.scrapers.automacao_state.read_state", return_value={"fase": "aguardando"})
+    def test_enabled_flag_does_not_claim_worker_is_running(self, _state, _enabled, _alive):
+        response = self.client.get(reverse("scraper-automacao"), {"tipo": "scrape"})
+        data = response.json()
+        self.assertTrue(data["habilitada"])
+        self.assertFalse(data["worker_vivo"])
+        self.assertFalse(data["rodando"])
+        self.assertFalse(data["saudavel"])
 
 
 class AffiliateIdentityTests(TestCase):
@@ -95,6 +107,35 @@ class AffiliateIdentityTests(TestCase):
                     ml_link.gerar_link_afiliado_para_produto(
                         self.product, usuario=self.user
                     )
+
+    @override_settings(
+        AMAZON_PARTNER_TAG="global-20",
+        AMAZON_CREATOR_CREDENTIAL_ID="global-id",
+        AMAZON_CREATOR_CREDENTIAL_SECRET="global-secret",
+        TELEGRAM_BOT_TOKEN="global-token",
+    )
+    def test_user_integrations_never_inherit_global_credentials(self):
+        from apps.scrapers.afiliado import tag_amazon
+        from apps.scrapers.scraper_amazon.creators_api import creds_de_usuario
+        from apps.scrapers.senders.telegram import resolver_token
+
+        credentials = creds_de_usuario(self.user)
+        self.assertEqual(tag_amazon(self.user), "")
+        self.assertEqual(credentials.credential_id, "")
+        self.assertEqual(credentials.credential_secret, "")
+        self.assertEqual(credentials.partner_tag, "")
+        self.assertEqual(resolver_token(self.user), "")
+
+    @patch("apps.scrapers.senders.whatsapp.whatsapp_client.enviar_oferta")
+    def test_whatsapp_sender_derives_the_users_session(self, enviar):
+        enviar.return_value = {"sucesso": True}
+        from apps.scrapers.senders.whatsapp import WhatsAppSender
+
+        result = WhatsAppSender().enviar_oferta(
+            "grupo@g.us", "mensagem", usuario=self.user)
+
+        self.assertTrue(result["sucesso"])
+        self.assertEqual(enviar.call_args.kwargs["session"], str(self.user.id))
 
 
 class WhatsAppIsolationTests(SimpleTestCase):
@@ -282,6 +323,33 @@ class TopPromocoesFilterTests(TestCase):
         response = self.client.get(self.url, {"q": "Oferta velha"})
 
         self.assertNotIn(stale.id, [p.id for p in response.context["produtos"]])
+
+    def test_source_health_hides_disabled_and_inapplicable_connectors(self):
+        FonteIngestao.objects.filter(slug="mercadolivre-web").update(status="ok")
+        FonteIngestao.objects.filter(slug="amazon-public-web").update(status="degraded")
+        FonteIngestao.objects.filter(slug="promobit-community").update(
+            habilitada=False, status="disabled")
+
+        response = self.client.get(self.url)
+
+        self.assertEqual([source.slug for source in response.context["fontes"]],
+                         ["mercadolivre-web"])
+
+    @patch("apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
+           return_value=12)
+    def test_flash_scrape_marks_mercado_livre_source_healthy(self, _mapear):
+        source = FonteIngestao.objects.get(slug="mercadolivre-web")
+        source.status = "degraded"
+        source.falhas_consecutivas = 2
+        source.erro_publico = "timeout"
+        source.save()
+        from apps.scrapers.management.commands.automacao import _rodar_scrape_rapido
+
+        self.assertEqual(_rodar_scrape_rapido(paginas=2), 12)
+        source.refresh_from_db()
+        self.assertEqual(source.status, "ok")
+        self.assertEqual(source.falhas_consecutivas, 0)
+        self.assertEqual(source.erro_publico, "")
 
 
 class AttributionWorkflowTests(TestCase):

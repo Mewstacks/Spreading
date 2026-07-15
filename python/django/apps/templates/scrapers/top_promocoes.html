@@ -132,6 +132,18 @@
   <p class="sub">As melhores ofertas do Mercado Livre e da Amazon. Filtre, compare e envie para seus grupos.</p>
 </div>
 
+<div class="seg" style="margin-bottom:1rem;">
+  <a href="?tipo=oferta" class="{% if tipo != 'cupom' %}on{% endif %}">Ofertas</a>
+  <a href="?tipo=cupom" class="{% if tipo == 'cupom' %}on{% endif %}">Cupons</a>
+</div>
+<div class="filter-card" style="padding:.8rem 1rem;">
+  <div style="font-size:.84rem;margin-bottom:.55rem;"><strong>Saúde das fontes</strong> · {{ amazon_diagnostico }}</div>
+  <div style="display:flex;gap:.45rem;flex-wrap:wrap;">
+    {% for f in fontes %}<span class="badge {% if f.status == 'ok' %}badge-green{% elif f.status == 'blocked' %}badge-red{% else %}badge-yellow{% endif %}" title="{{ f.erro_publico|default:'Sem erro recente' }}">{{ f.nome }} · {{ f.status }}</span>
+    {% empty %}<span class="muted">As fontes serão registradas no próximo ciclo.</span>{% endfor %}
+  </div>
+</div>
+
 {{ categorias_por_macro|json_script:"cats-data" }}
 {{ categorias_selecionadas|json_script:"sel-cats-data" }}
 
@@ -148,6 +160,7 @@
       {% for lj in lojas %}<option value="{{ lj }}" {% if loja_selecionada == lj %}selected{% endif %}>{% if lj == "mercadolivre" %}Mercado Livre{% else %}{{ lj|title }}{% endif %}</option>{% endfor %}
     </select>
 
+    {% if tipo != 'cupom' %}
     <select name="min_desconto" class="min-discount" aria-label="Desconto mínimo">
       <option value="">Qualquer desconto</option>
       <option value="10" {% if min_desconto == 10 %}selected{% endif %}>10% ou mais</option>
@@ -178,7 +191,25 @@
     </button>
     <div class="dd-panel" id="panel-cat"></div>
   </div>
+  {% endif %}
 
+  <select name="fonte" aria-label="Fonte" style="width:auto;min-width:160px;">
+    <option value="">Todas as fontes</option>
+    {% for f in fontes %}<option value="{{ f.slug }}" {% if fonte_selecionada == f.slug %}selected{% endif %}>{{ f.nome }}</option>{% endfor %}
+  </select>
+  <select name="confianca" aria-label="Confiança" style="width:auto;min-width:130px;">
+    <option value="">Toda confiança</option>
+    <option value="alta" {% if confianca_selecionada == 'alta' %}selected{% endif %}>Alta</option>
+    <option value="media" {% if confianca_selecionada == 'media' %}selected{% endif %}>Média</option>
+    <option value="baixa" {% if confianca_selecionada == 'baixa' %}selected{% endif %}>Baixa</option>
+  </select>
+  <select name="atualizado_desde" aria-label="Atualização" style="width:auto;min-width:140px;">
+    <option value="">Qualquer idade</option>
+    <option value="6" {% if atualizado_desde == 6 %}selected{% endif %}>Últimas 6h</option>
+    <option value="24" {% if atualizado_desde == 24 %}selected{% endif %}>Últimas 24h</option>
+    <option value="48" {% if atualizado_desde == 48 %}selected{% endif %}>Últimas 48h</option>
+  </select>
+  <input type="hidden" name="tipo" value="{{ tipo }}">
   <input type="hidden" name="ordenar" id="ordenar-input" value="{{ ordenar }}">
   <button type="submit" class="btn btn-green btn-sm"><i data-lucide="filter"></i> Filtrar</button>
   {% if filtros_ativos %}
@@ -187,15 +218,15 @@
   </div>
 
   <div class="filter-meta">
-    <span class="result-count"><strong>{{ produtos|length }}</strong> promoções · seus filtros ficam salvos</span>
-    <span class="seg">
+    <span class="result-count"><strong>{% if tipo == 'cupom' %}{{ cupons_catalogo|length }}{% else %}{{ produtos|length }}{% endif %}</strong> resultado(s) · seus filtros ficam salvos</span>
+    {% if tipo != 'cupom' %}<span class="seg">
     <a href="?{{ qs_base }}ordenar=percent" class="{% if ordenar != 'valor' %}on{% endif %}">% desconto</a>
     <a href="?{{ qs_base }}ordenar=valor" class="{% if ordenar == 'valor' %}on{% endif %}">R$ economizado</a>
-    </span>
+    </span>{% endif %}
   </div>
 </form>
 
-<details style="margin-bottom:1rem;">
+{% if tipo != 'cupom' %}<details style="margin-bottom:1rem;">
   <summary class="muted" style="font-size:.84rem;cursor:pointer;">Não encontrou? Buscar novos produtos nas lojas</summary>
   <div class="busca-bar" style="margin-top:.7rem;">
     <input type="text" id="busca-termo" placeholder="Ex.: air fryer, fone bluetooth"
@@ -203,9 +234,20 @@
     <button type="button" class="btn btn-blue btn-sm" onclick="buscarItens()"><i data-lucide="radar"></i> Buscar nas lojas</button>
   </div>
   <div id="busca-log" class="modal-log"></div>
-</details>
+</details>{% endif %}
 
-{% if produtos %}
+{% if tipo == 'cupom' %}
+  {% if cupons_catalogo %}
+  <div class="table-wrap"><table><thead><tr><th>Código</th><th>Cupom</th><th>Loja</th><th>Confiança</th><th>Validade</th></tr></thead><tbody>
+  {% for c in cupons_catalogo %}<tr>
+    <td data-label="Código"><strong>{{ c.codigo|default:"—" }}</strong></td>
+    <td data-label="Cupom"><div><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div class="muted" style="font-size:.76rem;">Cupom genérico; confirme a aplicação no checkout.</div></div></td>
+    <td data-label="Loja">{{ c.marketplace|title }}</td>
+    <td data-label="Confiança"><span class="badge {% if c.confianca == 'alta' %}badge-green{% else %}badge-yellow{% endif %}">{{ c.confianca }}</span></td>
+    <td data-label="Validade">{% if c.validade %}{{ c.validade|date:"d/m/Y H:i" }}{% else %}Não informada{% endif %}</td>
+  </tr>{% endfor %}</tbody></table></div>
+  {% else %}<p class="empty">Nenhum cupom ativo encontrado pelas fontes.</p>{% endif %}
+{% elif produtos %}
 <div class="table-wrap">
   <table>
     <thead>
@@ -237,7 +279,7 @@
           {% if p.cupom %}
             <a class="link" href="{{ p.cupom.link_original }}" target="_blank" rel="noopener" style="font-size:.82rem;">{{ p.cupom.titulo }}</a>
             <div class="muted" style="font-size:.76rem;">{% if p.cupom.tipo_desconto == 'fixo' %}- R$ {{ p.cupom.valor_desconto|floatformat:2 }}{% else %}- {{ p.cupom.valor_desconto|floatformat:0 }}%{% endif %}</div>
-          {% else %}<span class="muted">—</span>{% endif %}
+          {% else %}<span class="muted">Oferta de preço · sem cupom</span>{% endif %}
           </div>
         </td>
         <td data-label="Oferta" class="deal-cell"><div class="td-val">
@@ -305,6 +347,7 @@
 (function () {
   var CATS = JSON.parse(document.getElementById('cats-data').textContent);
   var SEL_CATS = JSON.parse(document.getElementById('sel-cats-data').textContent);
+  if (!document.getElementById('dd-macro')) return;
 
   function toggleDD(id) {
     document.querySelectorAll('.dd-panel').forEach(function (p) {

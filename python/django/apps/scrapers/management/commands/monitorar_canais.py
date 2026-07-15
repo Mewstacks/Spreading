@@ -56,16 +56,18 @@ class Command(BaseCommand):
 
     def _varrer(self, client):
         from apps.scrapers.models import CanalMonitorado, EnvioCanal
-        from apps.scrapers.canais.relink import reescrever_mensagem
+        from apps.scrapers.canais.relink import reescrever_mensagem, extrair_urls
         from apps.scrapers.senders.registry import get_sender
 
         for canal in CanalMonitorado.objects.filter(ativo=True).select_related("owner"):
             try:
-                self._processar_canal(client, canal, EnvioCanal, reescrever_mensagem, get_sender)
+                self._processar_canal(client, canal, EnvioCanal, reescrever_mensagem,
+                                      get_sender, extrair_urls)
             except Exception as e:
                 logger.warning("Falha no canal %s: %s", canal.handle, e)
 
-    def _processar_canal(self, client, canal, EnvioCanal, reescrever_mensagem, get_sender):
+    def _processar_canal(self, client, canal, EnvioCanal, reescrever_mensagem,
+                         get_sender, extrair_urls):
         sender = get_sender(canal.destino_canal)
         maior_id = canal.ultimo_id
         # reverse=True: da mais antiga p/ a mais nova entre as não vistas (min_id).
@@ -76,6 +78,8 @@ class Command(BaseCommand):
             if not texto:
                 continue
             novo_texto, chaves = reescrever_mensagem(texto, canal.owner)
+            if extrair_urls(texto) and not chaves:
+                raise RuntimeError("Mensagem contém oferta, mas nenhum link afiliado foi gerado")
             if not chaves:
                 continue  # nenhuma URL de produto re-linkada
             # Dedup: já divulgou alguma dessas ofertas p/ este dono?
@@ -84,8 +88,11 @@ class Command(BaseCommand):
             novas = [c for c in chaves if c not in ja]
             if not novas:
                 continue
-            resultado = sender.enviar_oferta(canal.destino_grupo_id, novo_texto,
-                                             legenda=novo_texto)
+            perfil = getattr(canal.owner, "perfil", None)
+            session = perfil.sessao_whatsapp() if perfil else str(canal.owner_id)
+            resultado = sender.enviar_oferta(
+                canal.destino_grupo_id, novo_texto, legenda=novo_texto,
+                usuario=canal.owner, session=session)
             if resultado.get("sucesso"):
                 EnvioCanal.objects.bulk_create(
                     [EnvioCanal(owner=canal.owner, chave=c) for c in novas],
@@ -93,7 +100,7 @@ class Command(BaseCommand):
                 )
                 logger.info("Canal %s -> %s divulgado", canal.handle, canal.destino_grupo_id)
             else:
-                logger.warning("Falha no envio de canal: %s", resultado.get("erro"))
+                raise RuntimeError(resultado.get("erro") or "Falha no envio do canal")
         # Avança o cursor mesmo sem envio (não reprocessa msgs antigas no restart).
         if maior_id > canal.ultimo_id:
             canal.ultimo_id = maior_id

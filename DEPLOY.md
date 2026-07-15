@@ -35,7 +35,7 @@ Push all secrets from `.env.fly` (helper does both apps):
 powershell -ExecutionPolicy Bypass -File deploy\push-secrets.ps1
 ```
 `API_KEY` → spreading-wa. Everything else + `WHATSAPP_API_KEY`(=API_KEY) → spreading-web.
-Inclua também `BROWSERBASE_API_KEY` e `BROWSERBASE_PROJECT_ID` no `.env.fly` (login web do ML).
+(O login web do ML **não** precisa de secret: roda no Chromium local da imagem.)
 
 ## 5. Deploy the WhatsApp service
 ```
@@ -71,7 +71,7 @@ fly ssh console --app spreading-web -C "python /app/django/manage.py loaddata /a
 ```
 
 ## Notas / limitações
-- **Login ML (web-native)**: o usuário conecta o Mercado Livre pela própria interface (`/scrapers/ml/`). Abrimos um Chromium hospedado (Browserbase) e transmitimos a tela pro navegador dele (live view) — sem script local, sem colar `auth.json`. Requer os secrets `BROWSERBASE_API_KEY` e `BROWSERBASE_PROJECT_ID` (crie a conta em https://browserbase.com). Sem eles, a tela avisa que a conexão está indisponível em vez de quebrar.
+- **Login ML (web-native)**: o usuário conecta o Mercado Livre pela própria interface (`/scrapers/ml/`). Rodamos um Chromium **local** (o mesmo da imagem/Playwright) e transmitimos a tela pro navegador dele via **CDP screencast** desenhado num `<canvas>`, com mouse/teclado encaminhados de volta (`Input.dispatch*`) — sem script local, sem colar `auth.json`, sem serviço externo nem secret. A senha é digitada direto na página real do ML. Ver `apps/scrapers/ml_conexao.py`.
 - **Escala**: 1 máquina web só (volume de sessões preso a ela). Escala-out exige mover sessões p/ storage compartilhado.
 - **Telegram/canais (B4)**: opcional — só ativa com `TELEGRAM_API_ID/HASH/SESSION` setados.
 - Ver `plan` completo em `.claude/plans/what-is-missing-for-ticklish-prism.md`.

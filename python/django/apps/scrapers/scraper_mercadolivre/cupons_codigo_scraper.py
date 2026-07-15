@@ -15,7 +15,7 @@ import re
 import logging
 
 from apps.scrapers.auxiliar import iniciar_browser
-from apps.scrapers.models import Produto, CupomCodigo
+from apps.scrapers.models import Produto, CupomCodigo, FonteIngestao, CupomNormalizado
 from apps.scrapers.progresso import emitir_progresso
 from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _coletar_cards, _salvar
 from apps.scrapers.session_paths import ml_session_dir
@@ -48,7 +48,8 @@ def mapear_cupons_codigo():
     caminho_auth = os.path.join(ml_session_dir(), "auth.json")
     coletados, codigos = [], set()
 
-    with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
+    with iniciar_browser(auth_path=caminho_auth, headless=True,
+                         validar_sessao=False) as (page, context):
         for n in range(1, 6):  # algumas páginas
             emitir_progresso(f"[PROGRESSO] Cupons-código página {n}/5")
             url = "https://www.mercadolivre.com.br/ofertas/cupons"
@@ -82,9 +83,6 @@ def mapear_cupons_codigo():
     # lanes). Só troca se veio conteúdo novo (o guard acima já barra o caso 100% vazio).
     n_prod = 0
     if coletados:
-        Produto.objects.filter(
-            marketplace="mercadolivre", owner__isnull=True, origem="cupom_codigo"
-        ).delete()
         n_prod = _salvar(coletados, origem="cupom_codigo")
 
     # Códigos: upsert + REATIVA os vistos agora; DESATIVA os automáticos que sumiram
@@ -97,11 +95,25 @@ def mapear_cupons_codigo():
         if criado:
             CupomCodigo.objects.filter(codigo=cod).update(descricao=_DESC_AUTO)
             n_novos += 1
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web", defaults={
+                "marketplace": "mercadolivre", "nome": "Mercado Livre — páginas públicas"})
+        CupomNormalizado.objects.update_or_create(
+            fonte=fonte, external_id=f"checkout:{cod}",
+            defaults={"marketplace": "mercadolivre", "titulo": f"Cupom {cod}",
+                      "codigo": cod, "link": "https://www.mercadolivre.com.br/ofertas/cupons",
+                      "confianca": "baixa", "estado": "ativo",
+                      "evidencia": {"transport": "public-web", "association": "unverified"}},
+        )
 
-    stale = (CupomCodigo.objects
-             .filter(descricao=_DESC_AUTO, ativo=True)
-             .exclude(codigo__in=codigos))
-    n_stale = stale.update(ativo=False)
+    # Uma página pode continuar trazendo produtos e ocultar os banners/códigos por
+    # experimento ou localização. Zero códigos não é evidência de expiração.
+    n_stale = 0
+    if codigos:
+        stale = (CupomCodigo.objects
+                 .filter(descricao=_DESC_AUTO, ativo=True)
+                 .exclude(codigo__in=codigos))
+        n_stale = stale.update(ativo=False)
 
     logger.info(
         "Cupons de codigo ML: %s produtos, %s codigos (%s novos, %s desativados)",

@@ -61,6 +61,78 @@ class Produto(models.Model):
     falha_verificacao = models.CharField(max_length=255, blank=True, default="")
     preco_fonte = models.FloatField(null=True, blank=True)
     preco_efetivo = models.FloatField(null=True, blank=True)
+    confianca = models.CharField(max_length=20, default="media", db_index=True)
+    evidencia = models.JSONField(default=dict, blank=True)
+    valido_ate = models.DateTimeField(null=True, blank=True, db_index=True)
+    falhas_consecutivas = models.PositiveIntegerField(default=0)
+
+
+class FonteIngestao(models.Model):
+    """Estado durável de um conector. Nunca contém credenciais."""
+    STATUS = [(s, s) for s in ("ok", "degraded", "blocked", "disabled")]
+    slug = models.CharField(max_length=80, unique=True)
+    marketplace = models.CharField(max_length=20, db_index=True)
+    nome = models.CharField(max_length=120)
+    habilitada = models.BooleanField(default=True)
+    status = models.CharField(max_length=20, choices=STATUS, default="degraded")
+    ultimo_sucesso = models.DateTimeField(null=True, blank=True)
+    ultima_tentativa = models.DateTimeField(null=True, blank=True)
+    ultimo_total = models.PositiveIntegerField(default=0)
+    erro_publico = models.CharField(max_length=255, blank=True, default="")
+    falhas_consecutivas = models.PositiveIntegerField(default=0)
+
+    def __str__(self):
+        return self.nome
+
+
+class ExecucaoIngestao(models.Model):
+    STATUS = [(s, s) for s in ("running", "ok", "empty", "error", "blocked")]
+    fonte = models.ForeignKey(FonteIngestao, on_delete=models.CASCADE,
+                              related_name="execucoes")
+    iniciada_em = models.DateTimeField(auto_now_add=True, db_index=True)
+    finalizada_em = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS, default="running")
+    total_ofertas = models.PositiveIntegerField(default=0)
+    total_cupons = models.PositiveIntegerField(default=0)
+    erro_publico = models.CharField(max_length=255, blank=True, default="")
+
+
+class CupomNormalizado(models.Model):
+    """Cupom independente de produto; só é publicável via ProdutoCupom confirmado."""
+    fonte = models.ForeignKey(FonteIngestao, on_delete=models.CASCADE,
+                              related_name="cupons")
+    external_id = models.CharField(max_length=160)
+    marketplace = models.CharField(max_length=20, db_index=True)
+    titulo = models.CharField(max_length=255)
+    codigo = models.CharField(max_length=120, blank=True, default="")
+    regras = models.JSONField(default=dict, blank=True)
+    link = models.URLField(max_length=1000, blank=True, default="")
+    validade = models.DateTimeField(null=True, blank=True, db_index=True)
+    estado = models.CharField(max_length=20, default="ativo", db_index=True)
+    confianca = models.CharField(max_length=20, default="baixa", db_index=True)
+    evidencia = models.JSONField(default=dict, blank=True)
+    primeira_observacao = models.DateTimeField(auto_now_add=True)
+    ultima_observacao = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("fonte", "external_id")
+
+
+class ProdutoCupom(models.Model):
+    STATUS = [
+        ("confirmado", "Confirmado"), ("provavel", "Provável"),
+        ("nao_aplicavel", "Não aplicável"), ("expirado", "Expirado"),
+    ]
+    produto = models.ForeignKey(Produto, on_delete=models.CASCADE,
+                                related_name="cupons_normalizados")
+    cupom = models.ForeignKey(CupomNormalizado, on_delete=models.CASCADE,
+                              related_name="produtos")
+    status = models.CharField(max_length=20, choices=STATUS, default="provavel")
+    verificado_em = models.DateTimeField(null=True, blank=True)
+    evidencia = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        unique_together = ("produto", "cupom")
 
 class PrecoHistorico(models.Model):
     """Uma observação de preço por raspagem — base p/ detectar QUEDA REAL e derrubar

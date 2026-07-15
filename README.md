@@ -19,26 +19,18 @@ manual por usuário.
 
 ## Conexão do Mercado Livre (login web, sem script local)
 
-O login do Mercado Livre acontece dentro do próprio app: abrimos um Chromium num
-serviço de browser hospedado (Browserbase) e transmitimos a tela pro navegador do
-usuário (live view). Ele loga no ML ali — no celular ou desktop — e a sessão é
-salva sozinha. Não precisa mais rodar script nenhum nem colar `auth.json`.
+O login do Mercado Livre acontece dentro do próprio app: rodamos um Chromium **local**
+(o mesmo Chromium/Playwright que o scraper já usa) e transmitimos a tela pro navegador
+do usuário via **CDP screencast** desenhado num `<canvas>`; o mouse e o teclado dele
+voltam por POST e viram comandos `Input.dispatch*`. Ele loga no ML ali — no celular ou
+desktop, inclusive a verificação em duas etapas — e a sessão é salva sozinha. Não
+precisa rodar script nenhum, colar `auth.json`, nem contratar serviço externo. A senha
+é digitada direto na página real do ML (não passa pelo backend do Spreading).
 
-Adicione ao `.env` do Django (mesmo `.env` que o `core/settings.py` carrega):
+Não há chaves a configurar: o login usa o Chromium da própria imagem. Basta ter o
+Playwright + Chromium instalados (o `Dockerfile`/`setup.ps1` já fazem isso).
 
-```dotenv
-# Crie a conta em https://browserbase.com e pegue a chave + o Project ID
-BROWSERBASE_API_KEY=bb_live_sua_chave_aqui
-BROWSERBASE_PROJECT_ID=seu_project_id
-
-# País do proxy residencial usado no login do ML (default BR)
-# BROWSERBASE_PROXY_COUNTRY=BR
-```
-
-O estado da conexão (fase do login) é guardado no cache do Django. Em produção com
-`DATABASE_URL` (Postgres) o cache é no banco — compartilhado entre os workers do
-gunicorn, então o polling do front enxerga o login mesmo com +1 worker. Sem Postgres
-(dev), roda em processo único e também funciona.
-
-Sem as chaves do Browserbase, a tela `/scrapers/ml/` avisa o usuário que a conexão
-está indisponível, em vez de quebrar.
+O estado da conexão (fase do login) é guardado no cache do Django; os frames e a fila
+de input ficam em memória no processo do gunicorn (por isso 1 worker — ver `Procfile`).
+Em produção com `DATABASE_URL` (Postgres) o cache de fase é no banco, então o polling do
+front enxerga a fase mesmo entre threads.

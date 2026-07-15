@@ -10,6 +10,12 @@ class WhatsAppSender(Sender):
 
     def enviar_oferta(self, destino, mensagem, *, imagem_url=None, imagem_b64=None,
                       mimetype="image/jpeg", legenda=None, usuario=None, session=None):
+        if not session and usuario is not None:
+            perfil = getattr(usuario, "perfil", None)
+            session = perfil.sessao_whatsapp() if perfil else str(usuario.id)
+        if not session:
+            return {"sucesso": False,
+                    "erro": "Sessão WhatsApp do usuário ausente. Reconecte o WhatsApp."}
         if imagem_b64:
             return whatsapp_client.enviar_oferta(
                 destino, mensagem, imagem_base64=imagem_b64,

@@ -38,6 +38,12 @@ class SessaoExpirada(BrowserError):
     pass
 
 
+def _redirecionou_login(url: str) -> bool:
+    """True se o ML mandou a navegação p/ a tela de login (sessão caída)."""
+    u = (url or "").lower()
+    return any(t in u for t in ("/login", "/lgz/", "/registration", "loginhub"))
+
+
 @contextmanager
 def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
                     validar_sessao=True, **context_kwargs):
@@ -60,22 +66,42 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
                 browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
                 context = browser.new_context(storage_state=auth_path, **context_kwargs) if os.path.exists(auth_path) else browser.new_context(**context_kwargs)
                 page = context.new_page()
-                page.goto("https://myaccount.mercadolivre.com.br/my_purchases/list#menu-user")
-                page.wait_for_load_state("networkidle")
-                deslogado = "login" in page.url
-                browser.close()
             except Exception as e:
                 raise BrowserError(f"Erro ao iniciar o navegador para checar a sessão: {e}")
 
+            deslogado = False
+            checagem_inconclusiva = None
+            try:
+                # ML é pesado (ads/tracking): o evento "load" às vezes nunca dispara.
+                # domcontentloaded + timeout explícito (não os 30s default) e networkidle
+                # só best-effort — mesmo padrão do Link Builder (link.py).
+                page.goto("https://myaccount.mercadolivre.com.br/my_purchases/list#menu-user",
+                          wait_until="domcontentloaded", timeout=45000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass
+                deslogado = _redirecionou_login(page.url)
+            except Exception as e:
+                # Timeout/erro de rede NÃO é logout: não dá p/ concluir nada. Não apaga
+                # o auth (uma instabilidade não pode desconectar o usuário); segue e deixa
+                # o fluxo real (Link Builder) detectar login de verdade se for o caso.
+                checagem_inconclusiva = e
+            finally:
+                browser.close()
+
             if deslogado:
-                # Sessão morta: apaga o arquivo (o monitor passa a reportar 'desconectado'
-                # e dispara o alerta) e aborta esta fonte. O usuário reconecta pela web.
+                # Sessão morta CONFIRMADA (redirect p/ login): apaga o arquivo (o monitor
+                # passa a reportar 'desconectado' e dispara o alerta) e aborta esta fonte.
                 if os.path.exists(auth_path):
                     try:
                         os.remove(auth_path)
                     except OSError:
                         pass
                 raise SessaoExpirada("Sessão ML expirada — reconecte em Conexão Mercado Livre.")
+            elif checagem_inconclusiva is not None:
+                logger.warning("Checagem de sessão ML inconclusiva (%s); seguindo — "
+                               "o fluxo real valida o login.", checagem_inconclusiva)
             else:
                 logger.debug("Sessao Mercado Livre validada")
     if precisa_logar:

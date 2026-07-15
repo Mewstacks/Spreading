@@ -88,7 +88,7 @@
     <div class="auto-icon"><i data-lucide="radar"></i></div>
     <div style="min-width:0;flex:1;">
       <div class="auto-title">Raspagem automática <span id="auto-status"><span class="badge badge-muted"><span class="dot"></span>verificando…</span></span></div>
-      <div class="muted" style="font-size:.82rem;">Raspa a cada 3h, 24/7. Envios ficam em <a class="link" href="/scrapers/config/">Envios</a>.</div>
+      <div class="muted" style="font-size:.82rem;">Coleta completa a cada 3h e ofertas rápidas a cada 5min. Envios ficam em <a class="link" href="/scrapers/config/">Envios</a>.</div>
       <div id="auto-detail" class="auto-detail" style="display:none;"></div>
     </div>
   </div>
@@ -158,14 +158,17 @@
     return d.innerHTML;
   }
   function paintAuto(d) {
-    const rodando = !!d.rodando, e = d.estado || {};
-    document.getElementById('auto-toggle').checked = rodando;
-    document.getElementById('auto-status').innerHTML = rodando
-      ? '<span class="badge badge-green"><span class="dot"></span>ligada</span>'
-      : '<span class="badge badge-muted">desligada</span>';
+    const habilitada = !!d.habilitada, vivo = !!d.worker_vivo, e = d.estado || {};
+    document.getElementById('auto-toggle').checked = habilitada;
+    let status = '<span class="badge badge-muted">desligada</span>';
+    if (habilitada && !vivo) status = '<span class="badge badge-red"><span class="dot"></span>worker offline</span>';
+    else if (habilitada && !d.saudavel) status = '<span class="badge badge-yellow"><span class="dot"></span>degradada</span>';
+    else if (habilitada) status = '<span class="badge badge-green"><span class="dot"></span>saudável</span>';
+    document.getElementById('auto-status').innerHTML = status;
 
     const det = document.getElementById('auto-detail');
-    if (!rodando) { det.style.display = 'none'; det.innerHTML = ''; return; }
+    if (!habilitada) { det.style.display = 'none'; det.innerHTML = ''; return; }
+    if (!vivo) e.erro = 'O worker não está respondendo. A coleta não está rodando.';
     let html = '<div class="row"><span class="v">' + faseChip(e) + '</span></div>';
     html += '<div class="row"><span class="k">Última raspagem</span><span class="v">' + rel(e.ultimo_ciclo_fim, false) + '</span></div>';
     html += '<div class="row"><span class="k">Próxima</span><span class="v">' + rel(e.proximo_ciclo, true) + '</span></div>';
