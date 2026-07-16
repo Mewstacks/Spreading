@@ -5,6 +5,7 @@ import logging
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 caminho_django = os.path.dirname(os.path.dirname(os.path.dirname(caminho_atual)))
 sys.path.append(caminho_django)
+from apps.scrapers.afiliado import ids_com_link, salvar_cache
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
 from apps.scrapers.progresso import emitir_progresso
 from apps.scrapers.session_paths import ml_auth_path as _auth_path
@@ -257,19 +258,25 @@ def _afiliar_url_na_pagina(page, link_base: str):
 
 def gerar_links_em_lote(produtos, usuario=None):
     """
-    Pré-gera e persiste link_afiliado/url_isca para uma lista de Produtos numa
-    ÚNICA sessão Playwright. Pula produtos que já têm link em cache.
+    Pré-gera e persiste o link de afiliado de uma lista de Produtos numa ÚNICA
+    sessão Playwright. Pula produtos que já têm link em cache.
 
     Detecta expiração de sessão UMA vez no início (login visível -> LoginError),
     em vez de quebrar no meio do lote.
 
     `usuario` escolhe a sessão do ML (auth_{id}.json — o que a tela de conexão
-    grava). Sem ele, _auth_path resolve a sessão disponível: é o caso dos jobs de
-    cron, que não têm request.
+    grava) E onde o link é gravado: cada usuário afilia com a conta dele, então o
+    link vai pro cache por usuário (LinkAfiliadoUsuario), igual ao caminho de item
+    único. Sem `usuario`, grava no Produto.link_afiliado global — o modo antigo
+    single-tenant, mantido pelos chamadores legados.
 
     Retorna: (qtd_gerados, qtd_falhas).
     """
-    pendentes = [p for p in produtos if not p.link_afiliado]
+    if usuario is not None:
+        prontos = ids_com_link(usuario, produtos)
+        pendentes = [p for p in produtos if p.id not in prontos]
+    else:
+        pendentes = [p for p in produtos if not p.link_afiliado]
     if not pendentes:
         return (0, 0)
 
@@ -294,10 +301,13 @@ def gerar_links_em_lote(produtos, usuario=None):
                 continue
             try:
                 link = _afiliar_url_na_pagina(page, url_isca)
-                prod.url_isca = url_isca
-                prod.link_afiliado = link
-                prod.afiliado_ok = True
-                prod.save(update_fields=["url_isca", "link_afiliado", "afiliado_ok"])
+                if usuario is not None:
+                    salvar_cache(usuario, prod, link, url_isca, True)
+                else:
+                    prod.url_isca = url_isca
+                    prod.link_afiliado = link
+                    prod.afiliado_ok = True
+                    prod.save(update_fields=["url_isca", "link_afiliado", "afiliado_ok"])
                 gerados += 1
             except Exception as e:
                 if _pagina_de_login(page):

@@ -10,15 +10,17 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_not_required
 from django.core import signing
 from django.core.exceptions import PermissionDenied
-from django.db.models import F, ExpressionWrapper, FloatField, Q, Count, Sum
+from django.db.models import (
+    F, ExpressionWrapper, Exists, FloatField, OuterRef, Q, Count, Sum,
+)
 from django.http import StreamingHttpResponse, HttpResponse, JsonResponse
 from django.shortcuts import render, redirect
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.scrapers.models import (
-    CliquePublicacao, ConfiguracaoEnvio, Cupom, Produto, Publicacao,
-    ReceitaAfiliado, RelatorioSync, FonteIngestao, CupomNormalizado,
+    CliquePublicacao, ConfiguracaoEnvio, Cupom, LinkAfiliadoUsuario, Produto,
+    Publicacao, ReceitaAfiliado, RelatorioSync, FonteIngestao, CupomNormalizado,
 )
 from apps.scrapers.scraper_mercadolivre.scraper import main as scrapper_main
 
@@ -968,13 +970,18 @@ def top_promocoes(request):
             produto_id__in=[p.id for p in produtos], usuario=request.user)
         .values_list("produto_id", flat=True)
     )
+    # Atribuição é regra de cada loja (ver Marketplace.preparar_exibicao). Em lote e
+    # agrupado por loja: por item seria uma query por produto da página.
     from apps.scrapers.marketplaces.registry import get_marketplace
+    por_loja = {}
+    for p in produtos:
+        por_loja.setdefault(p.marketplace, []).append(p)
+    for slug, itens in por_loja.items():
+        get_marketplace(slug).preparar_exibicao(itens, request.user)
+
     for p in produtos:
         p.cupom = cupons_map.get(p.campanha_id)
         p.ja_enviado = p.id in ja_enviados
-        # Atribuição é regra de cada loja (ver Marketplace.can_affiliate). Atributo só
-        # de exibição: `afiliado_ok` é campo persistido e não se sobrescreve num GET.
-        p.afiliado_pronto = get_marketplace(p.marketplace).can_affiliate(p, request.user)
         p.motivos_score = [f"{p.percent:.0f}% de desconto"]
         from apps.scrapers.precos import stats as preco_stats
         hist_preco = preco_stats(p, dias=30)
@@ -1280,9 +1287,17 @@ def gerar_links_stream(request):
             asyncio.set_event_loop(asyncio.new_event_loop())
             try:
                 with redirect_stdout(writer):
-                    # Só o pool COMPARTILHADO (owner=None, ex: ML). Links de itens
-                    # privados (Amazon) são gerados por usuário, na hora do envio.
-                    base_qs = Produto.objects.filter(link_afiliado="", owner__isnull=True)
+                    # Pendente é por USUÁRIO: cada um afilia com a conta dele, então o
+                    # link vive em LinkAfiliadoUsuario e não no Produto. Filtrar por
+                    # link_afiliado="" (campo global) listava como pendente item que
+                    # este usuário já tem, e como pronto item que ele não tem.
+                    ja_tem = LinkAfiliadoUsuario.objects.filter(
+                        usuario=usuario, produto=OuterRef("pk")).exclude(link_afiliado="")
+                    base_qs = (
+                        Produto.objects
+                        .filter(Q(owner__isnull=True) | Q(owner=usuario))
+                        .exclude(Exists(ja_tem))
+                    )
                     pendentes = list(base_qs[:limite])
                     restantes = base_qs.count()
                     print(f"{restantes} produto(s) sem link. Gerando até {limite}...")
@@ -1294,7 +1309,7 @@ def gerar_links_stream(request):
                             por_loja.setdefault(p.marketplace or "mercadolivre", []).append(p)
                         for slug, grupo in por_loja.items():
                             get_marketplace(slug).prefetch_links(grupo, usuario=usuario)
-                    sobra = Produto.objects.filter(link_afiliado="").count()
+                    sobra = base_qs.count()
                     print(f"Sobraram {sobra} produto(s) sem link.")
             except Exception as exc:
                 q.put(f"[ERRO] {exc}")

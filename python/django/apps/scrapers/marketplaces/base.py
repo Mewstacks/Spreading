@@ -28,11 +28,24 @@ class Marketplace(ABC):
     def can_affiliate(self, produto, usuario=None) -> bool:
         """
         Este item comissionaria para ESTE usuário se fosse publicado agora? Predicado
-        de LEITURA: sem rede e sem escrita — a listagem chama isto por item, num GET.
-        Cada loja resolve a atribuição de um jeito (ML: sessão do Link Builder;
-        Amazon: tag do Perfil), por isso a regra mora aqui e não na view.
+        de LEITURA: sem rede e sem escrita. Cada loja resolve a atribuição de um jeito
+        (ML: sessão do Link Builder; Amazon: tag do Perfil), por isso a regra mora aqui
+        e não na view. Para uma lista inteira use preparar_exibicao.
         """
         return bool(getattr(produto, "afiliado_ok", False))
+
+    def preparar_exibicao(self, produtos, usuario=None) -> None:
+        """Resolve em LOTE o que a listagem mostra por item (hoje: afiliado_pronto).
+
+        A listagem chama isto UMA vez por página e por loja, não uma vez por item.
+        Default: pergunta item a item. Loja cujo can_affiliate toca o banco deve
+        sobrescrever, senão a página vira uma query por produto.
+
+        `afiliado_pronto` é atributo só de exibição: `afiliado_ok` é campo persistido
+        e não se escreve num GET.
+        """
+        for p in produtos:
+            p.afiliado_pronto = self.can_affiliate(p, usuario)
 
     def verify_link(self, link: str, nome_esperado: str = None,
                     confiar_desconto: bool = False, usuario=None) -> dict:

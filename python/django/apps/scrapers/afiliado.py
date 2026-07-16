@@ -28,6 +28,23 @@ def link_cacheado(usuario, produto):
     return LinkAfiliadoUsuario.objects.filter(usuario=usuario, produto=produto).first()
 
 
+def ids_com_link(usuario, produtos) -> set:
+    """IDs dos produtos que já têm link pronto para este usuário — UMA query.
+
+    Versão em lote de link_cacheado, para quem precisa do predicado de uma página
+    inteira de produtos (a listagem) sem fazer uma query por item.
+    """
+    if usuario is None or not produtos:
+        return set()
+    from apps.scrapers.models import LinkAfiliadoUsuario
+    return set(
+        LinkAfiliadoUsuario.objects
+        .filter(usuario=usuario, produto__in=produtos)
+        .exclude(link_afiliado="")
+        .values_list("produto_id", flat=True)
+    )
+
+
 def salvar_cache(usuario, produto, link_afiliado, url_isca, afiliado_ok) -> None:
     if usuario is None or not link_afiliado:
         return

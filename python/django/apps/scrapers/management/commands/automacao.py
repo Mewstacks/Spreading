@@ -134,15 +134,69 @@ def _rodar_scrape_rapido(paginas=8):
     return total
 
 
+def _rodar_links(lote=40):
+    """Pré-gera links de afiliado dos produtos pendentes — um lote por ciclo.
+
+    Sem isto nada em produção gerava link: o scrape só cria Produto (com link vazio),
+    e cada raspagem só aumentava a pilha de "pendente" na tela de Promoções.
+
+    Por usuário, porque o link carrega a conta de afiliado de quem envia: quem não
+    tem sessão ML válida é pulado (gerar exigiria o Link Builder logado). O lote é
+    pequeno de propósito — cada item custa uma ida ao Link Builder (~5s), e este
+    processo divide o Chromium e a CPU com a raspagem e o painel.
+    """
+    from django.contrib.auth import get_user_model
+    from django.db.models import Exists, OuterRef, Q
+
+    from apps.scrapers.marketplaces.registry import get_marketplace
+    from apps.scrapers.models import LinkAfiliadoUsuario, Produto
+    from apps.scrapers.monitor_conexao import ml_conectado
+
+    gerados = falhas = 0
+    for user in get_user_model().objects.filter(is_active=True):
+        if not ml_conectado(user):
+            continue
+        ja_tem = LinkAfiliadoUsuario.objects.filter(
+            usuario=user, produto=OuterRef("pk")).exclude(link_afiliado="")
+        pendentes = list(
+            Produto.objects.filter(marketplace="mercadolivre", preco_sem_desconto__gt=0)
+            .exclude(estado__in=["indisponivel", "invalido", "expirado", "stale"])
+            .filter(Q(owner__isnull=True) | Q(owner=user))
+            .exclude(Exists(ja_tem))
+            .order_by("-ultima_observacao")[:lote]
+        )
+        if not pendentes:
+            continue
+        try:
+            g, f = get_marketplace("mercadolivre").prefetch_links(pendentes, usuario=user)
+        except Exception as e:
+            # Sessão expirada/queda do Link Builder é de UM usuário: não pode
+            # impedir que os outros gerem os deles.
+            logger.warning("Geração de links falhou para %s: %s", user, e)
+            log_event("scraper", "links_erro",
+                      f"Não foi possível gerar links de afiliado: {e}",
+                      level="warning", usuario=user, exc=e)
+            continue
+        gerados += g
+        falhas += f
+        logger.info("Links ML p/ %s: %s gerado(s), %s falha(s) de %s pendente(s)",
+                    user, g, f, len(pendentes))
+    return {"gerados": gerados, "falhas": falhas}
+
+
 class Command(BaseCommand):
-    help = "Loop de automação: scrape (full) / scrape_rapido (flash) / envio / relatorios."
+    help = ("Loop de automação: scrape (full) / scrape_rapido (flash) / envio / "
+            "links (afiliação) / relatorios.")
 
     def add_arguments(self, parser):
-        parser.add_argument("--modo", choices=("scrape", "scrape_rapido", "envio", "relatorios"),
+        parser.add_argument("--modo",
+                            choices=("scrape", "scrape_rapido", "envio", "links", "relatorios"),
                             required=True,
                             help="scrape = raspagem completa; scrape_rapido = feed flash; "
-                                 "envio = envio pelas regras.")
-        parser.add_argument("--tick", type=int, default=5, help="Minutos entre ciclos (envio/flash).")
+                                 "envio = envio pelas regras; links = pré-gera links "
+                                 "de afiliado dos pendentes.")
+        parser.add_argument("--tick", type=int, default=5, help="Minutos entre ciclos (envio/flash/links).")
+        parser.add_argument("--lote", type=int, default=40, help="Links gerados por ciclo, por usuário.")
         parser.add_argument("--scrape-horas", type=float, default=3.0, help="Horas entre raspagens completas.")
 
     def handle(self, *args, **opts):
@@ -152,8 +206,50 @@ class Command(BaseCommand):
             self._loop_scrape_rapido(opts)
         elif opts["modo"] == "envio":
             self._loop_envio(opts)
+        elif opts["modo"] == "links":
+            self._loop_links(opts)
         else:
             self._loop_relatorios(opts)
+
+    def _loop_links(self, opts):
+        # Gate no MESMO flag "scrape" (igual à lane flash): afiliar é parte do
+        # pipeline de catálogo, e não faz sentido gerar link com a coleta desligada.
+        tick = max(1, opts["tick"])
+        lote = max(1, opts["lote"])
+        POLL = 15
+        logger.info("LINKS worker no ar; até %s link(s)/usuário a cada %smin quando ligado",
+                    lote, tick)
+        proximo = timezone.now()
+        while True:
+            if not st.is_enabled("scrape"):
+                st.write_state("links", fase="desligado",
+                               ultima_msg="Desligado — ligue na tela Scraper.")
+                time.sleep(POLL)
+                continue
+            if timezone.now() < proximo:
+                st.write_state("links", fase="aguardando")
+                time.sleep(POLL)
+                continue
+            agora = timezone.now()
+            try:
+                st.write_state("links", fase="gerando", erro="")
+                _renovar_conexoes_db()
+                with _heartbeat_durante("links"):
+                    res = _rodar_links(lote=lote)
+                proximo = timezone.now() + timedelta(minutes=tick)
+                st.write_state(
+                    "links", fase="aguardando", proximo_ciclo=proximo.isoformat(),
+                    gerados=res["gerados"], falhas=res["falhas"], erro="",
+                    ultima_msg=(f"{res['gerados']} link(s) gerado(s), "
+                                f"{res['falhas']} falha(s) às {agora:%H:%M}."),
+                )
+            except Exception as e:
+                logger.exception("Erro no ciclo de links")
+                log_event("scraper", "links_ciclo_erro",
+                          f"Ciclo de geração de links falhou: {e}", level="error", exc=e)
+                proximo = timezone.now() + timedelta(minutes=tick)
+                st.write_state("links", fase="aguardando",
+                               proximo_ciclo=proximo.isoformat(), erro=ERRO_PUBLICO)
 
     def _loop_scrape_rapido(self, opts):
         # Lane flash: gate no MESMO flag "scrape" (se a raspagem está ligada, roda).

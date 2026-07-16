@@ -9,5 +9,9 @@ web: gunicorn core.wsgi:application --chdir django --bind 0.0.0.0:8080 --workers
 scrape: python django/manage.py automacao --modo scrape --scrape-horas 3
 scrapeflash: python django/manage.py automacao --modo scrape_rapido --tick 5
 envio: python django/manage.py automacao --modo envio --tick 5
+# links: sem este processo nada gera link de afiliado e a tela de Promoções mostra
+# tudo como "pendente" -- cada raspagem so aumentava a pilha. Lote pequeno: cada link
+# custa ~5s no Link Builder e divide Chromium/CPU com a raspagem e o painel.
+links: python django/manage.py automacao --modo links --tick 5 --lote 40
 relatorios: python django/manage.py automacao --modo relatorios --tick 360
 canais: python django/manage.py monitorar_canais --tick 60

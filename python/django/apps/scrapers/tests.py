@@ -10,6 +10,8 @@ from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.core.management import call_command
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
@@ -17,6 +19,7 @@ from django.utils import timezone
 from apps.scrapers import ofertas, whatsapp_client
 from apps.scrapers.afiliado import tag_ml
 from apps.scrapers.maintenance import reconciliar_publicacoes_orfas
+from apps.scrapers.management.commands.automacao import _rodar_links
 from apps.scrapers.marketplaces.registry import get_marketplace
 from apps.scrapers.monitor_conexao import wa_conectado
 from apps.scrapers.models import (
@@ -1379,6 +1382,72 @@ class AfiliacaoPorMarketplaceTests(TestCase):
         produto.link_afiliado = "https://mercadolivre.com/sec/abc123"
         self.assertTrue(mp.can_affiliate(produto, self.user))
 
+    def _produto_ml(self, nome="Fone"):
+        return Produto.objects.create(
+            marketplace="mercadolivre", nome=nome, origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=50,
+            link_produto="https://example.com/fone",
+        )
+
+    def test_mercadolivre_conta_o_link_do_proprio_usuario(self):
+        # O bug: can_affiliate lia só o Produto.link_afiliado (global), enquanto o
+        # fluxo multi-tenant grava em LinkAfiliadoUsuario. Link gerado e funcionando
+        # aparecia como "pendente", e o Link Builder era reaberto a cada envio.
+        produto = self._produto_ml()
+        mp = get_marketplace("mercadolivre")
+        self.assertFalse(mp.can_affiliate(produto, self.user))
+
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto, afiliado_ok=True,
+            link_afiliado="https://mercadolivre.com/sec/meu-link",
+        )
+
+        self.assertTrue(mp.can_affiliate(produto, self.user))
+
+    def test_mercadolivre_nao_conta_o_link_de_outro_usuario(self):
+        # Cada um afilia com a conta dele: o link do vizinho não comissiona pra mim.
+        produto = self._produto_ml()
+        vizinho = get_user_model().objects.create_user("vizinho", password="test")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=vizinho, produto=produto, afiliado_ok=True,
+            link_afiliado="https://mercadolivre.com/sec/link-do-vizinho",
+        )
+
+        self.assertFalse(get_marketplace("mercadolivre").can_affiliate(produto, self.user))
+
+    def test_tela_promocoes_mostra_link_do_usuario_como_pronto(self):
+        produto = self._produto_ml("Fone com link")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto, afiliado_ok=True,
+            link_afiliado="https://mercadolivre.com/sec/meu-link",
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("scraper-top"), {"loja": "mercadolivre"})
+
+        listados = {p.id: p for p in response.context["produtos"]}
+        self.assertTrue(listados[produto.id].afiliado_pronto)
+
+    def test_tela_promocoes_resolve_afiliacao_em_lote(self):
+        # preparar_exibicao existe pra isto: uma query por página, não por produto.
+        # Sem o lote, corrigir o badge trocaria o bug por 20 queries por load.
+        for i in range(5):
+            LinkAfiliadoUsuario.objects.create(
+                usuario=self.user, produto=self._produto_ml(f"Fone {i}"),
+                link_afiliado=f"https://mercadolivre.com/sec/l{i}", afiliado_ok=True,
+            )
+        self.client.force_login(self.user)
+
+        with CaptureQueriesContext(connection) as ctx:
+            response = self.client.get(reverse("scraper-top"), {"loja": "mercadolivre"})
+
+        self.assertEqual(len(response.context["produtos"]), 5)
+        consultas_de_link = [
+            q for q in ctx.captured_queries
+            if "linkafiliadousuario" in q["sql"].lower()
+        ]
+        self.assertEqual(len(consultas_de_link), 1, consultas_de_link)
+
     def test_tela_promocoes_marca_item_amazon_como_pronto_sem_gravar_no_banco(self):
         produto = self._produto_amazon()
         self.client.force_login(self.user)
@@ -1390,6 +1459,83 @@ class AfiliacaoPorMarketplaceTests(TestCase):
         # A visita é um GET: nada de escrita no campo persistido.
         produto.refresh_from_db()
         self.assertFalse(produto.afiliado_ok)
+
+
+class GeracaoDeLinksEmLoteTests(TestCase):
+    """O worker que tira os produtos de 'pendente'.
+
+    Nada em produção gerava link: não havia worker Celery, o beat_schedule é vazio e
+    o endpoint de gerar links não é referenciado por template nenhum. Cada raspagem
+    só empilhava mais "pendente" na tela de Promoções.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("linkeiro", password="test")
+
+    def _produto(self, nome="Fone", **extra):
+        return Produto.objects.create(
+            marketplace="mercadolivre", nome=nome, origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=50,
+            link_produto="https://example.com/fone", **extra)
+
+    @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links")
+    def test_gera_para_os_pendentes_do_usuario(self, prefetch, _conectado):
+        prefetch.return_value = (1, 0)
+        produto = self._produto()
+
+        res = _rodar_links(lote=40)
+
+        prefetch.assert_called_once()
+        enviados, kwargs = prefetch.call_args
+        self.assertEqual([p.id for p in enviados[0]], [produto.id])
+        self.assertEqual(kwargs["usuario"], self.user)
+        self.assertEqual(res, {"gerados": 1, "falhas": 0})
+
+    @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links")
+    def test_nao_regera_o_que_o_usuario_ja_tem(self, prefetch, _conectado):
+        prefetch.return_value = (1, 0)
+        pronto = self._produto("Ja tenho")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=pronto, afiliado_ok=True,
+            link_afiliado="https://mercadolivre.com/sec/abc")
+        pendente = self._produto("Falta")
+
+        _rodar_links(lote=40)
+
+        enviados, _ = prefetch.call_args
+        self.assertEqual([p.id for p in enviados[0]], [pendente.id])
+
+    @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=False)
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links")
+    def test_pula_usuario_sem_sessao_ml(self, prefetch, _conectado):
+        # Gerar link exige o Link Builder logado: sem sessão não há o que fazer.
+        self._produto()
+
+        self.assertEqual(_rodar_links(lote=40), {"gerados": 0, "falhas": 0})
+        prefetch.assert_not_called()
+
+    @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links")
+    def test_respeita_o_tamanho_do_lote(self, prefetch, _conectado):
+        prefetch.return_value = (2, 0)
+        for i in range(5):
+            self._produto(f"Fone {i}")
+
+        _rodar_links(lote=2)
+
+        enviados, _ = prefetch.call_args
+        self.assertEqual(len(enviados[0]), 2)
+
+    @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links",
+           side_effect=RuntimeError("sessão expirada"))
+    def test_falha_de_um_usuario_nao_derruba_o_ciclo(self, _prefetch, _conectado):
+        # A sessão ML é de cada um: a do vizinho vencer não pode me impedir de gerar.
+        self._produto()
+
+        self.assertEqual(_rodar_links(lote=40), {"gerados": 0, "falhas": 0})
 
 
 class PublicacaoOrfaTests(TestCase):

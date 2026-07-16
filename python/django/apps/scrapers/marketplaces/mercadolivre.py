@@ -67,7 +67,22 @@ class MercadoLivre(Marketplace):
     def can_affiliate(self, produto, usuario=None) -> bool:
         # A identidade vem da conta autenticada no Link Builder, não de uma tag: ter o
         # link pré-gerado é a única evidência de atribuição disponível sem rede.
+        #
+        # O link mora em LinkAfiliadoUsuario (cada usuário afilia com a conta dele).
+        # Este predicado lia só o Produto.link_afiliado global e por isso mostrava
+        # "pendente" em item que o usuário já tinha afiliado. O campo global segue
+        # como fallback pelos itens gerados antes do multi-tenant.
+        from apps.scrapers.afiliado import link_cacheado
+        cacheado = link_cacheado(usuario, produto)
+        if cacheado and cacheado.link_afiliado:
+            return True
         return bool(getattr(produto, "link_afiliado", ""))
+
+    def preparar_exibicao(self, produtos, usuario=None) -> None:
+        from apps.scrapers.afiliado import ids_com_link
+        prontos = ids_com_link(usuario, produtos)
+        for p in produtos:
+            p.afiliado_pronto = p.id in prontos or bool(getattr(p, "link_afiliado", ""))
 
     def verify_link(self, link, nome_esperado=None, confiar_desconto=False, usuario=None):
         from apps.scrapers.scraper_mercadolivre.link import verificar_link_afiliado
