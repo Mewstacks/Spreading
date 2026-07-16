@@ -408,18 +408,17 @@ class Command(BaseCommand):
     def _loop_relatorios(self, opts):
         from apps.scrapers.relatorios import sync_due_reports
 
-        tick = max(30, opts["tick"])
-        POLL = 15
-        logger.info("RELATORIOS worker no ar; sincroniza a cada %smin quando ligado", tick)
+        # Quem decide a cadência é o proxima_execucao de cada RelatorioSync (6h após
+        # cada sync), e sync_due_reports já respeita isso — este loop só precisa
+        # perguntar de vez em quando. O --tick de 360min era um segundo agendador por
+        # cima do primeiro, e fazia o botão "Sincronizar" da tela esperar até 6h.
+        POLL = 60
+        logger.info("RELATORIOS worker no ar; checa vencidos a cada %ss quando ligado", POLL)
         ciclos = 0
-        proximo = timezone.now()
         while True:
             if not st.is_enabled("relatorios"):
                 st.write_state("relatorios", fase="desligado",
                                ultima_msg="Desligado — ligue quando quiser sync automático.")
-                time.sleep(POLL)
-                continue
-            if timezone.now() < proximo:
                 time.sleep(POLL)
                 continue
             agora = timezone.now()
@@ -427,11 +426,17 @@ class Command(BaseCommand):
                 st.write_state("relatorios", fase="sincronizando", erro="")
                 _renovar_conexoes_db()
                 resultados = sync_due_reports()
+                if not resultados:
+                    # Nada vencido: não é um ciclo, é silêncio. Não mexe no estado
+                    # visível pra não zerar o "última sincronização" da tela.
+                    st.write_state("relatorios", fase="aguardando")
+                    time.sleep(POLL)
+                    continue
                 ok = sum(1 for s in resultados if s.status == "ok")
                 acao = sum(1 for s in resultados if s.status == "acao")
                 erros = sum(1 for s in resultados if s.status == "erro")
                 ciclos += 1
-                proximo = timezone.now() + timedelta(minutes=tick)
+                proximo = timezone.now() + timedelta(seconds=POLL)
                 st.write_state(
                     "relatorios", fase="aguardando", ciclos=ciclos,
                     ultimo_ciclo_fim=timezone.now().isoformat(),
@@ -442,6 +447,5 @@ class Command(BaseCommand):
                 )
             except Exception:
                 logger.exception("Erro no sync de relatórios")
-                proximo = timezone.now() + timedelta(minutes=tick)
-                st.write_state("relatorios", fase="aguardando",
-                               proximo_ciclo=proximo.isoformat(), erro=ERRO_PUBLICO)
+                st.write_state("relatorios", fase="aguardando", erro=ERRO_PUBLICO)
+            time.sleep(POLL)

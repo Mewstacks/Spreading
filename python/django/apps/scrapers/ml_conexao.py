@@ -40,6 +40,8 @@ HOME_HOST = "mercadolivre.com.br"
 
 LOGIN_DEADLINE_S = 600           # tempo máx. esperando o usuário logar
 LOOP_MS = 50                     # granularidade do worker (bombeia CDP + drena input)
+GOTO_TIMEOUT_MS = 60000          # em prod (IP de datacenter) o gateway de login demora
+GOTO_TENTATIVAS = 2              # timeout na 1ª tenta de novo antes de desistir
 
 # Viewport remoto. O front escala o <canvas> pra caber na tela mantendo a proporção.
 VIEW_W, VIEW_H = 1280, 800
@@ -161,6 +163,38 @@ def _despachar_input(cdp, page, ev: dict):
         logger.debug("Evento de input descartado (%s)", ev.get("t"), exc_info=True)
 
 
+def _ir_para_login(page):
+    """Navega até a tela de login do ML, tolerante à lentidão do servidor em prod.
+
+    Local (IP residencial) a página carrega rápido; em prod o IP de datacenter da Fly
+    bate no gateway anti-bot da ML, que costuma travar a navegação. Por isso:
+    - `wait_until="commit"`: conclui assim que a resposta chega, sem esperar o DOM
+      inteiro — o screencast já começa e o usuário vê a tela carregando ao vivo;
+    - `timeout` de 60s (não os 30s default) e uma 2ª tentativa antes de desistir.
+    O `wait_for_load_state` posterior é best-effort: DOM lento não pode matar o fluxo.
+    """
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    ultimo_erro = None
+    for tentativa in range(1, GOTO_TENTATIVAS + 1):
+        try:
+            page.goto(LOGIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=GOTO_TIMEOUT_MS)
+            except PlaywrightTimeoutError:
+                pass  # DOM demorou; segue com o que já veio (screencast mostra o resto)
+            return
+        except PlaywrightTimeoutError as exc:
+            ultimo_erro = exc
+            logger.warning("Login ML: navegação estourou o tempo (tentativa %s/%s).",
+                           tentativa, GOTO_TENTATIVAS)
+    # Esgotou as tentativas: erro claro e acionável (não o TimeoutError cru do Playwright).
+    raise RuntimeError(
+        "O Mercado Livre demorou demais a responder a partir do servidor. "
+        "Tente novamente; se persistir, é bloqueio do IP do servidor."
+    ) from ultimo_erro
+
+
 def _worker(user_id: int):
     """Sobe o Chromium local, transmite a tela e espera o usuário concluir o login."""
     from playwright.sync_api import sync_playwright
@@ -215,15 +249,24 @@ def _worker(user_id: int):
                 logger.warning("setFocusEmulationEnabled falhou; seguindo sem ele.")
             cdp.on("Page.screencastFrame", _on_frame)
 
-            page.goto(LOGIN_URL, wait_until="domcontentloaded")
+            _ir_para_login(page)
             cdp.send("Page.startScreencast", SCREENCAST)
             _set_estado(user_id, fase="aguardando_login", erro="")
 
             deadline = time.time() + LOGIN_DEADLINE_S
             logado = False
             last_beat = time.time()
+            last_check = 0.0
+            estado = {}
             while time.time() < deadline:
-                estado = cache.get(_cache_key(user_id)) or {}
+                # O loop gira a cada 50ms para bombear os frames e drenar o input, mas
+                # os flags do usuário (cancelar / "já entrei") não mudam nessa escala:
+                # ler o cache 20x/s só gastava CPU. 500ms de latência num clique de
+                # cancelar ninguém percebe.
+                agora = time.time()
+                if agora - last_check > 0.5:
+                    estado = cache.get(_cache_key(user_id)) or {}
+                    last_check = agora
                 if estado.get("cancelar"):
                     _set_estado(user_id, fase="idle", erro="")
                     break

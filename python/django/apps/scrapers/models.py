@@ -37,7 +37,7 @@ class Produto(models.Model):
     preco_sem_desconto = models.FloatField()
     preco_com_cupom = models.FloatField()
     link_produto = models.URLField(max_length=1000)
-    categoria = models.CharField(max_length=100, null=True, blank=True) # Lembra do domain_id?
+    categoria = models.CharField(max_length=100, null=True, blank=True, db_index=True) # Lembra do domain_id?
     macro_categoria = models.CharField(max_length=100, null=True, blank=True, db_index=True)
     # Cache do link de afiliado pré-gerado (evita abrir Playwright na hora do envio)
     url_isca = models.URLField(max_length=1000, blank=True, default="")
@@ -53,9 +53,9 @@ class Produto(models.Model):
     frase_llm = models.CharField(max_length=255, blank=True, default="")
     # Proveniência e confiança: a UI e o seletor nunca precisam adivinhar se o
     # dado ainda é publicável.
-    fonte = models.CharField(max_length=80, blank=True, default="")
+    fonte = models.CharField(max_length=80, blank=True, default="", db_index=True)
     primeira_observacao = models.DateTimeField(auto_now_add=True, null=True)
-    ultima_observacao = models.DateTimeField(auto_now=True, null=True)
+    ultima_observacao = models.DateTimeField(auto_now=True, null=True, db_index=True)
     ultima_verificacao = models.DateTimeField(null=True, blank=True, db_index=True)
     estado = models.CharField(max_length=20, default="ativo", db_index=True)
     falha_verificacao = models.CharField(max_length=255, blank=True, default="")
@@ -112,7 +112,7 @@ class CupomNormalizado(models.Model):
     confianca = models.CharField(max_length=20, default="baixa", db_index=True)
     evidencia = models.JSONField(default=dict, blank=True)
     primeira_observacao = models.DateTimeField(auto_now_add=True)
-    ultima_observacao = models.DateTimeField(auto_now=True)
+    ultima_observacao = models.DateTimeField(auto_now=True, db_index=True)
 
     class Meta:
         unique_together = ("fonte", "external_id")
@@ -192,6 +192,11 @@ class Publicacao(models.Model):
     criada_em = models.DateTimeField(auto_now_add=True, db_index=True)
     enviada_em = models.DateTimeField(null=True, blank=True, db_index=True)
 
+    class Meta:
+        # O dashboard filtra sempre por (usuario, janela de data): os índices de
+        # coluna única obrigavam o banco a escolher um e filtrar o resto na mão.
+        indexes = [models.Index(fields=["usuario", "criada_em"])]
+
 
 class CliquePublicacao(models.Model):
     """Clique sem IP, cookie ou identificador pessoal."""
@@ -218,6 +223,10 @@ class ReceitaAfiliado(models.Model):
     granularidade = models.CharField(max_length=20, default="dia")
     hash_origem = models.CharField(max_length=64, unique=True)
     importada_em = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # resumo_financeiro busca o snapshot mais recente por (usuario, marketplace).
+        indexes = [models.Index(fields=["usuario", "marketplace", "data"])]
 
 
 class RelatorioSync(models.Model):

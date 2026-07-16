@@ -198,23 +198,24 @@ def redirect_rastreado(request, token):
 
 @require_POST
 def sincronizar_receitas(request):
-    """Dispara sincronização automática dos relatórios do marketplace selecionado."""
+    """Agenda a sincronização dos relatórios do marketplace selecionado.
+
+    Agenda, não executa: o sync sobe um Chromium (Playwright, goto de 45s) e fazer
+    isso DENTRO do request punha um browser inteiro no processo do gunicorn, contra o
+    timeout de 120s e disputando a CPU com o resto do painel. Quem executa é o worker
+    "relatorios" do Procfile, que já roda sync_due_reports; aqui só marcamos o
+    registro como vencido, e ele pega no próximo poll (~1min).
+    """
     marketplace = (request.POST.get("marketplace") or "").lower()
     if marketplace not in {"mercadolivre", "amazon"}:
         messages.error(request, "Marketplace inválido para sincronização.")
         return redirect("home")
-    from apps.scrapers.relatorios import sync_marketplace
-    sync = sync_marketplace(request.user, marketplace)
-    if sync.status == "ok":
-        messages.success(
-            request,
-            f"{marketplace}: {sync.registros_criados} nova(s), "
-            f"{sync.registros_atualizados} atualizada(s)."
-        )
-    elif sync.status == "acao":
-        messages.warning(request, sync.erro)
-    else:
-        messages.error(request, sync.erro or "Sincronização não concluiu.")
+    sync, _ = RelatorioSync.objects.get_or_create(
+        usuario=request.user, marketplace=marketplace)
+    RelatorioSync.objects.filter(pk=sync.pk).update(proxima_execucao=timezone.now())
+    messages.success(
+        request, f"{marketplace}: sincronização agendada. "
+                 "O resultado aparece aqui em instantes.")
     return redirect("home")
 
 
@@ -984,12 +985,15 @@ def top_promocoes(request):
     for slug, itens in por_loja.items():
         get_marketplace(slug).preparar_exibicao(itens, request.user)
 
+    # Histórico de preço de todos os itens da página numa query só (era uma por item).
+    from apps.scrapers.precos import chave_produto, stats_em_lote
+    historico = stats_em_lote(produtos, dias=30)
+
     for p in produtos:
         p.cupom = cupons_map.get(p.campanha_id)
         p.ja_enviado = p.id in ja_enviados
         p.motivos_score = [f"{p.percent:.0f}% de desconto"]
-        from apps.scrapers.precos import stats as preco_stats
-        hist_preco = preco_stats(p, dias=30)
+        hist_preco = historico.get(chave_produto(p))
         if hist_preco and hist_preco["n"] >= 3 and p.preco_com_cupom <= hist_preco["minimo"] * 1.02:
             p.motivos_score.append("mínima de 30 dias")
 

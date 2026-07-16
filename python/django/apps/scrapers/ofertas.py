@@ -761,6 +761,13 @@ def processar_configs_de_envio():
 
     agora = timezone.now()
     hoje = timezone.localtime(agora).date()
+    # Limites do dia LOCAL como datetimes aware. Com __date=hoje o Postgres aplicava
+    # timezone(...)::date na coluna e o índice de data_envio/enviada_em virava enfeite;
+    # com __range ele compara datetime com datetime e usa o índice.
+    _inicio_hoje = timezone.make_aware(
+        timezone.datetime.combine(hoje, timezone.datetime.min.time()),
+        timezone.get_current_timezone())
+    _hoje_range = (_inicio_hoje, _inicio_hoje + timedelta(days=1) - timedelta(microseconds=1))
     resultados = []
     # Cache por-owner dentro do tick: quantos envios já saíram hoje (cota diária).
     _envios_hoje: dict = {}
@@ -810,7 +817,7 @@ def processar_configs_de_envio():
             return True
         if owner.id not in _envios_hoje:
             _envios_hoje[owner.id] = HistoricoEnvio.objects.filter(
-                usuario=owner, data_envio__date=hoje).count()
+                usuario=owner, data_envio__range=_hoje_range).count()
         limite = perfil.cota_max_envios_dia() if perfil else 0
         return bool(limite) and _envios_hoje[owner.id] >= limite
 
@@ -826,7 +833,7 @@ def processar_configs_de_envio():
         if not vencido:
             continue
         enviados_config_hoje = Publicacao.objects.filter(
-            configuracao=cfg, status="enviado", enviada_em__date=hoje).count()
+            configuracao=cfg, status="enviado", enviada_em__range=_hoje_range).count()
         if cfg.max_envios_dia and enviados_config_hoje >= cfg.max_envios_dia:
             continue
         # 3. WhatsApp do dono fora do ar: não é falha da regra. Sai sem tocar em

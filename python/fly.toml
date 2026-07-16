@@ -19,10 +19,11 @@ primary_region = "gru"
   # Serviço do WhatsApp na rede privada do Fly (.internal).
   WHATSAPP_API_URL = "http://spreading-wa.internal:3000"
 
-# migra o banco + cria a tabela de cache (throttle de login compartilhado) a cada
-# deploy, antes de trocar as máquinas. createcachetable é idempotente (IF NOT EXISTS).
+# migra o banco a cada deploy, antes de trocar as máquinas.
+# (createcachetable saiu: o cache é LocMem por processo -- ver settings.py --, então
+# a tabela nunca foi lida por ninguém.)
 [deploy]
-  release_command = "sh -c 'python django/manage.py migrate --noinput && python django/manage.py createcachetable && python django/manage.py bootstrap_superuser'"
+  release_command = "sh -c 'python django/manage.py migrate --noinput && python django/manage.py bootstrap_superuser'"
 
 # Volume persistente das sessões do ML (auth_{id}.json). Preso a UMA máquina:
 # por isso web + workers rodam juntos (honcho) e não escalamos horizontalmente.

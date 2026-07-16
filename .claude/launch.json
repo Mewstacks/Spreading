@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "django",
+      "runtimeExecutable": "../../venv/bin/python",
+      "runtimeArgs": ["manage.py", "runserver", "8010"],
+      "cwd": "python/django",
+      "port": 8010
+    }
+  ]
+}

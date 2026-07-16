@@ -62,6 +62,32 @@ def registrar_varios(items) -> None:
             pass
 
 
+def stats_em_lote(produtos, dias: int = 30) -> dict:
+    """{chave: {n, minimo}} dos últimos `dias`, para uma lista de produtos — UMA query.
+
+    A listagem chamava stats() por item: uma query por produto da página, cada uma
+    trazendo TODAS as observações pra ordenar em Python. Aqui o banco agrega, e só o
+    que a listagem usa (n e mínimo — a mediana ninguém lia).
+
+    Filtra por marketplace junto com a chave pra bater com o índice composto
+    (marketplace, chave, data); a chave sozinha já é única, mas não é prefixo dele.
+    """
+    from django.db.models import Count, Min
+
+    if not produtos:
+        return {}
+    desde = timezone.now() - timedelta(days=dias)
+    linhas = (
+        PrecoHistorico.objects.filter(
+            marketplace__in={getattr(p, "marketplace", "mercadolivre") for p in produtos},
+            chave__in={chave_produto(p) for p in produtos},
+            data__gte=desde,
+        )
+        .values("chave").annotate(n=Count("id"), minimo=Min("preco"))
+    )
+    return {l["chave"]: {"n": l["n"], "minimo": l["minimo"]} for l in linhas}
+
+
 def stats(produto, dias: int = 30):
     """{n, minimo, mediana} das observações dos últimos `dias`. None se sem histórico."""
     desde = timezone.now() - timedelta(days=dias)

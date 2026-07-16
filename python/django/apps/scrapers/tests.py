@@ -1010,18 +1010,30 @@ class AttributionWorkflowTests(TestCase):
             pipeline="relatorios", evento="sync_ok", usuario=self.user).exists())
 
     @patch("apps.scrapers.relatorios.sync_marketplace")
-    def test_dashboard_sync_now_uses_automatic_sync(self, sync_marketplace):
-        sync_marketplace.return_value = RelatorioSync.objects.create(
-            usuario=self.user, marketplace="mercadolivre", status="ok",
-            registros_criados=1, registros_atualizados=0,
-        )
+    def test_botao_sincronizar_agenda_e_nao_executa_no_request(self, sync_marketplace):
+        # O sync sobe um Chromium (Playwright, goto de 45s). Rodar isso dentro do
+        # request punha um browser inteiro no processo do gunicorn, contra o timeout
+        # de 120s. Agora a view só marca o registro como vencido e o worker executa.
+        antes = timezone.now()
 
         response = self.client.post(reverse("scraper-sincronizar-receitas"), {
             "marketplace": "mercadolivre",
         })
 
         self.assertRedirects(response, reverse("home"))
-        sync_marketplace.assert_called_once_with(self.user, "mercadolivre")
+        sync_marketplace.assert_not_called()
+        sync = RelatorioSync.objects.get(usuario=self.user, marketplace="mercadolivre")
+        self.assertIsNotNone(sync.proxima_execucao)
+        self.assertGreaterEqual(sync.proxima_execucao, antes)
+        self.assertLessEqual(sync.proxima_execucao, timezone.now())
+
+    def test_botao_sincronizar_recusa_marketplace_invalido(self):
+        response = self.client.post(reverse("scraper-sincronizar-receitas"), {
+            "marketplace": "shopee",
+        })
+
+        self.assertRedirects(response, reverse("home"))
+        self.assertFalse(RelatorioSync.objects.filter(marketplace="shopee").exists())
 
     @patch("apps.scrapers.ofertas._baixar_imagem_b64", return_value=(None, None))
     @patch("apps.scrapers.senders.whatsapp.WhatsAppSender.enviar_oferta")
@@ -1815,6 +1827,51 @@ class RelatorioSaudeTests(TestCase):
         self.assertEqual(r["problemas"][0]["n"], 4)
         self.assertEqual(r["problemas"][0]["usuarios"], 1)
 
+    def test_relatorio_global_lista_todas_as_contas_afetadas(self):
+        """Erros iguais de contas diferentes ficam no mesmo problema, sem omitir nomes."""
+        from apps.scrapers.saude import resumo
+
+        outra_conta = get_user_model().objects.create_user("outra-conta", password="test")
+        self._evento("send_failed", level="warning", usuario=self.user)
+        self._evento("send_failed", level="warning", usuario=outra_conta)
+
+        problema = resumo(horas=24)["problemas"][0]
+
+        self.assertEqual(problema["usuarios"], 2)
+        # Ordem por username; cada conta traz o exemplo do próprio último erro.
+        self.assertEqual(
+            [(a["usuario_id"], a["usuario__username"]) for a in problema["afetados"]],
+            [(outra_conta.id, "outra-conta"), (self.user.id, "saude-user")],
+        )
+        self.assertTrue(all(a["exemplo"] is not None for a in problema["afetados"]))
+
+        self.client.force_login(self.admin)
+        with patch("apps.scrapers.saude._workers", return_value=[]):
+            resposta = self.client.get(reverse("superadmin-saude"))
+        self.assertContains(resposta, "outra-conta")
+        self.assertContains(
+            resposta, reverse("superadmin-usuario", args=[outra_conta.id]))
+
+    def test_evento_global_sem_conta_aparece_no_bucket_sistema(self):
+        """`fonte_falhou` ("uma loja parou de responder") não tem usuário: é do sistema
+        e não pode sumir da tela por não estar amarrado a uma conta."""
+        from apps.scrapers.saude import resumo
+
+        self._evento("fonte_falhou", level="error", pipeline="scraper",
+                     mensagem="A coleta da loja mercadolivre falhou.",
+                     contexto={"marketplace": "mercadolivre"}, usuario=None)
+
+        problema = resumo(horas=24)["problemas"][0]
+        self.assertEqual(problema["afetados"], [])
+        self.assertIsNotNone(problema["sistema"])
+        self.assertEqual(problema["sistema"].evento, "fonte_falhou")
+
+        self.client.force_login(self.admin)
+        with patch("apps.scrapers.saude._workers", return_value=[]):
+            resposta = self.client.get(reverse("superadmin-saude"))
+        self.assertContains(resposta, "Sistema (todas as contas)")
+        self.assertContains(resposta, "A coleta da loja mercadolivre falhou.")
+
     def test_erro_vem_antes_de_aviso_mesmo_sendo_menos_frequente(self):
         from apps.scrapers.saude import resumo
 
@@ -1884,6 +1941,42 @@ class RelatorioSaudeTests(TestCase):
             resposta = self.client.get(reverse("superadmin-saude"))
         self.assertEqual(resposta.status_code, 200)
         self.assertContains(resposta, "Automação pausada sozinha")
+        self.assertContains(resposta, "Visão geral: avisos e erros de todas as contas")
+
+
+class ReconexaoBancoScraperTests(TestCase):
+    """A raspagem passa minutos no browser antes de salvar; nesse intervalo o socket
+    do Postgres pode morrer. O save tem de reconectar e não derrubar o ciclo."""
+
+    def test_upsert_reconecta_e_tenta_de_novo_quando_o_socket_cai(self):
+        from django.db import OperationalError
+        from apps.scrapers.scraper_mercadolivre import ofertas_scraper
+
+        chamadas = {"n": 0}
+
+        def _falha_na_primeira(**kwargs):
+            chamadas["n"] += 1
+            if chamadas["n"] == 1:
+                raise OperationalError("server closed the connection unexpectedly")
+            return (object(), True)
+
+        with patch.object(ofertas_scraper.Produto.objects, "update_or_create",
+                          side_effect=_falha_na_primeira) as uoc, \
+             patch.object(ofertas_scraper, "_reconectar_db") as reconectar:
+            ofertas_scraper._upsert_resiliente(link_produto="x")
+
+        self.assertEqual(uoc.call_count, 2)       # falhou, reconectou, salvou
+        reconectar.assert_called_once()
+
+    def test_upsert_nao_engole_erro_persistente(self):
+        from django.db import OperationalError
+        from apps.scrapers.scraper_mercadolivre import ofertas_scraper
+
+        with patch.object(ofertas_scraper.Produto.objects, "update_or_create",
+                          side_effect=OperationalError("caiu de novo")), \
+             patch.object(ofertas_scraper, "_reconectar_db"):
+            with self.assertRaises(OperationalError):
+                ofertas_scraper._upsert_resiliente(link_produto="x")
 
 
 class InstrumentacaoTests(TestCase):

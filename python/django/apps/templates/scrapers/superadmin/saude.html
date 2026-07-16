@@ -35,6 +35,12 @@ vida. Quem abre isto às 8h precisa saber em 2 segundos se tem trabalho hoje.
     word-break: break-word; }
   .meta { color: var(--muted); font-size: .75rem; }
   .periodo { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .escopo { color: var(--muted); font-size: .78rem; margin: -.25rem 0 1rem; }
+  .contas-afetadas { display: flex; flex-wrap: wrap; gap: .35rem; }
+  .contas-afetadas a { min-height: 32px; display: inline-flex; align-items: center;
+    padding: .2rem .5rem; border: 1px solid var(--border); border-radius: 999px;
+    color: var(--purple); text-decoration: none; }
+  .contas-afetadas a:hover { background: var(--surface-3); }
   @media (min-width: 768px) { .veredito h2 { font-size: 1.2rem; } }
 </style>
 
@@ -46,6 +52,8 @@ vida. Quem abre isto às 8h precisa saber em 2 segundos se tem trabalho hoje.
     <a href="?horas=168" class="btn btn-sm {% if horas == 168 %}btn-purple{% else %}btn-ghost{% endif %}">7 dias</a>
   </div>
 </div>
+
+<p class="escopo"><i data-lucide="users"></i> Visão geral: avisos e erros de todas as contas. Selecione uma conta afetada para abrir seus detalhes.</p>
 
 <div class="veredito {{ r.estado }}">
   {% if r.estado == 'ok' %}<i data-lucide="check-circle-2"></i>
@@ -102,20 +110,39 @@ mentindo por omissão — nada roda, então nada falha.
       <dt>O que fazer</dt>
       <dd>{{ p.acao }}</dd>
       {% if p.afetados %}
-      <dt>Quem foi afetado</dt>
-      <dd>{{ p.afetados|join:", " }}{% if p.usuarios > 5 %} e mais {{ p.usuarios|add:"-5" }}{% endif %}</dd>
+      <dt>Contas afetadas ({{ p.usuarios }})</dt>
+      <dd class="contas-afetadas">
+        {% for afetado in p.afetados %}
+        <a href="{% url 'superadmin-usuario' user_id=afetado.usuario_id %}">{{ afetado.usuario__username }}</a>
+        {% endfor %}
+      </dd>
       {% endif %}
     </dl>
 
+    {% comment %}
+    Detalhe POR conta: o erro específico da última ocorrência de cada conta afetada,
+    aqui mesmo — o superadmin diagnostica todas as contas nesta tela, sem abrir conta
+    por conta. Eventos sem conta (globais, ex.: "uma loja parou de responder") caem no
+    bucket "Sistema (todas as contas)".
+    {% endcomment %}
+    {% for afetado in p.afetados %}
     <details>
-      <summary>Detalhe técnico ({{ p.evento }})</summary>
-      {% if p.exemplo %}
-        <p class="meta" style="margin:.4rem 0 0;">Exemplo mais recente — {{ p.exemplo.criado_em|date:"d/m/Y H:i:s" }}{% if p.exemplo.usuario %} · {{ p.exemplo.usuario.get_username }}{% endif %}</p>
-        <pre>{{ p.exemplo.mensagem }}</pre>
-        {% if p.exemplo.contexto %}<pre>{{ p.exemplo.contexto }}</pre>{% endif %}
-        {% if p.exemplo.erro %}<pre>{{ p.exemplo.erro }}</pre>{% endif %}
-      {% endif %}
+      <summary><i data-lucide="user"></i> {{ afetado.usuario__username }} — último erro em {{ afetado.exemplo.criado_em|date:"d/m/Y H:i:s" }}</summary>
+      <p class="meta" style="margin:.4rem 0 0;"><a href="{% url 'superadmin-usuario' user_id=afetado.usuario_id %}">Abrir conta {{ afetado.usuario__username }}</a></p>
+      <pre>{{ afetado.exemplo.mensagem }}</pre>
+      {% if afetado.exemplo.contexto %}<pre>{{ afetado.exemplo.contexto }}</pre>{% endif %}
+      {% if afetado.exemplo.erro %}<pre>{{ afetado.exemplo.erro }}</pre>{% endif %}
     </details>
+    {% endfor %}
+
+    {% if p.sistema %}
+    <details>
+      <summary><i data-lucide="server"></i> Sistema (todas as contas) — {{ p.evento }} · {{ p.sistema.criado_em|date:"d/m/Y H:i:s" }}</summary>
+      <pre>{{ p.sistema.mensagem }}</pre>
+      {% if p.sistema.contexto %}<pre>{{ p.sistema.contexto }}</pre>{% endif %}
+      {% if p.sistema.erro %}<pre>{{ p.sistema.erro }}</pre>{% endif %}
+    </details>
+    {% endif %}
   </div>
   {% empty %}
   <div class="msg msg-info">Nenhum erro nem aviso nas últimas {{ r.horas }}h.</div>

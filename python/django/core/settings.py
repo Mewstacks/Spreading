@@ -166,18 +166,6 @@ else:
         }
     }
 
-# Cache. O throttle de login (apps.accounts.views) guarda o contador de tentativas
-# aqui. Em produção há vários processos (gunicorn 2 workers + honcho): LocMemCache
-# é POR processo e não compartilha o contador → brute-force mais fraco. Com Postgres
-# usa cache no banco (compartilhado). Rode `createcachetable` uma vez (release_command).
-if _DATABASE_URL:
-    CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.db.DatabaseCache",
-            "LOCATION": "django_cache",
-        }
-    }
-
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
@@ -317,11 +305,24 @@ CELERY_TASK_TRACK_STARTED = True
 
 
 # ─────────────────────────────────────────────────────────────
-# Cache — compartilhado entre workers do gunicorn.
-# A conexão web do ML guarda o estado (fase, live_view_url) no cache: a thread
-# que segura o browser remoto vive em UM worker, mas o polling do front pode cair
-# em outro. Com o cache local (por processo) isso não enxergaria o estado, então
-# usamos o mesmo Redis do Celery em prod. Em dev sem Redis, cai no cache local.
+# Cache — POR PROCESSO, e isso é deliberado.
+#
+# Quem usa: a fase do login web do ML, o throttle de login e o status do WhatsApp.
+# Os dois primeiros só existem dentro do processo web, que roda com --workers 1
+# (ver Procfile: a thread do Chromium e a fila de input vivem em dicts em memória
+# desse processo). Com um processo só, LocMem é compartilhado entre as 8 threads e
+# resolve tudo isso sem tocar em rede nem no banco — e o loop do login lê o cache
+# várias vezes por segundo, então DatabaseCache viraria dezenas de queries/s.
+#
+# Havia aqui um bloco que ligava DatabaseCache quando existia DATABASE_URL; ele era
+# sobrescrito incondicionalmente por este e nunca teve efeito (o createcachetable do
+# fly.toml criava uma tabela que ninguém usava). Removido: o comportamento real é
+# este, e o comentário agora bate com ele.
+#
+# ATENÇÃO: `--workers 1` e este cache andam juntos. Subir para 2+ workers exige
+# mover o estado do ml_conexao (e este cache) para Redis ANTES — senão o login do
+# ML quebra de um jeito difícil de achar, e o throttle de login deixa de contar
+# tentativas direito.
 # ─────────────────────────────────────────────────────────────
 _REDIS_CACHE_URL = os.getenv("REDIS_CACHE_URL") or os.getenv("REDIS_URL") or (
     CELERY_BROKER_URL if os.getenv("USE_REDIS_CACHE", "0") == "1" else ""
@@ -371,7 +372,10 @@ SESSION_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_SAMESITE = "Lax"
 SESSION_EXPIRE_AT_BROWSER_CLOSE = False
 SESSION_COOKIE_AGE = 60 * 60 * 24 * 14  # 14 dias
-SESSION_SAVE_EVERY_REQUEST = True       # renova expiração a cada request (sliding)
+# False: a sessão é gravada no banco, então True dava um UPDATE em django_session a
+# CADA request — inclusive nos polls de status, que não trazem nada de novo. Com
+# SESSION_COOKIE_AGE de 14 dias a expiração deslizante não vale esse custo.
+SESSION_SAVE_EVERY_REQUEST = False
 
 
 # ─────────────────────────────────────────────────────────────

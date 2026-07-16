@@ -8,7 +8,7 @@ Duas decisões dão a forma deste módulo:
 
 1. AGRUPAR, não listar. 40 falhas do mesmo grupo apagado são UM problema, não 40
    linhas. A tela mostra ocorrências agregadas por (pipeline, evento) com contagem,
-   quem foi afetado e quando aconteceu por último.
+   todas as contas afetadas e quando aconteceu por último.
 
 2. TRADUZIR, não despejar. Cada evento tem uma entrada no CATALOGO com o que
    significa e o que fazer. "send_failed x12" não diz nada às 8h da manhã; "as
@@ -169,21 +169,42 @@ def _problemas(qs) -> list[dict]:
     )
     out = []
     for g in grupos:
-        # Um exemplo concreto por grupo: a contagem diz o tamanho, a mensagem diz o quê.
-        # São poucos grupos (dezenas no pior caso), então N+1 aqui é irrelevante.
-        exemplo = (
-            qs.filter(pipeline=g["pipeline"], evento=g["evento"], level=g["level"])
-            .select_related("usuario").order_by("-criado_em").first()
-        )
-        afetados = list(
-            qs.filter(pipeline=g["pipeline"], evento=g["evento"], level=g["level"],
-                      usuario__isnull=False)
-            .values_list("usuario__username", flat=True).distinct()[:5]
-        )
+        base = qs.filter(pipeline=g["pipeline"], evento=g["evento"], level=g["level"])
+
+        def _ultimo(**extra):
+            return base.filter(**extra).select_related("usuario").order_by("-criado_em").first()
+
+        # Detalhe POR conta: o erro específico da última ocorrência de CADA conta
+        # afetada — para o superadmin diagnosticar todas as contas nesta tela, sem
+        # abrir conta por conta. A saúde é visão do sistema, não da conta logada;
+        # por isso não limitamos a lista (o "e mais N" antigo escondia justamente a
+        # conta que precisava ser atendida). Poucos grupos e poucas contas: o N+1 é
+        # irrelevante.
+        afetados = []
+        ids = (base.filter(usuario__isnull=False)
+               .values_list("usuario_id", flat=True).distinct())
+        for uid in ids:
+            ex = _ultimo(usuario_id=uid)
+            if ex:
+                afetados.append({
+                    "usuario_id": uid,
+                    "usuario__username": ex.usuario.get_username() if ex.usuario else "",
+                    "exemplo": ex,
+                })
+        afetados.sort(key=lambda a: (a["usuario__username"], a["usuario_id"]))
+
+        # Bucket "Sistema": eventos sem conta (usuario=None, ex.: fonte_falhou "Uma
+        # loja parou de responder"). É global — vale para todas as contas —, então
+        # nunca deve sumir da tela por não estar amarrado a um usuário.
+        sistema = _ultimo(usuario__isnull=True)
+
         out.append({
             **g, **descrever(g["evento"]),
-            "exemplo": exemplo,
             "afetados": afetados,
+            "sistema": sistema,
+            # Exemplo de fallback do "Detalhe técnico": o do sistema, ou o mais recente
+            # de qualquer conta.
+            "exemplo": sistema or (afetados[0]["exemplo"] if afetados else None),
             "critico": g["level"] == "error",
         })
     # Erros antes de avisos; dentro de cada faixa, o mais frequente primeiro.

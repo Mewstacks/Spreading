@@ -11,6 +11,8 @@ import os
 import re
 import logging
 
+from django.db import OperationalError, connections
+
 from apps.scrapers.auxiliar import iniciar_browser, pausa_humana
 from apps.scrapers.models import Produto
 from apps.scrapers.progresso import emitir_progresso
@@ -18,6 +20,29 @@ from apps.scrapers.session_paths import ml_auth_path
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 logger = logging.getLogger(__name__)
+
+
+def _reconectar_db():
+    """Descarta conexões possivelmente mortas; o Django reabre na próxima query.
+
+    A raspagem coleta primeiro (minutos na fase de browser) e só depois salva. Nesse
+    intervalo a conexão aberta no início do ciclo fica ociosa, e o Postgres/proxy da
+    Fly derruba o socket sem o Django saber. Sem isto, a 1ª query do save reusa o
+    socket morto e estoura OperationalError("server closed the connection
+    unexpectedly"). Chamado no começo de cada fase de save.
+    """
+    connections.close_all()
+
+
+def _upsert_resiliente(**kwargs):
+    """`Produto.update_or_create` tolerante a socket morto: numa OperationalError,
+    reconecta e tenta de novo uma vez (cobre a queda no meio do save)."""
+    try:
+        return Produto.objects.update_or_create(**kwargs)
+    except OperationalError:
+        logger.warning("Conexão do banco caiu no save; reconectando e tentando de novo.")
+        _reconectar_db()
+        return Produto.objects.update_or_create(**kwargs)
 
 # Classificação de OFERTAS por palavra-chave no nome (PT), mapeando para os mesmos
 # nomes de macro de cateorize.py. Ordem importa: mais específico primeiro.
@@ -230,13 +255,14 @@ def _coletar_cards(page):
 
 def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):
     """Upsert não destrutivo. Uma coleta parcial nunca apaga o catálogo anterior."""
+    _reconectar_db()  # conexão fresca: a fase de browser pode ter matado o socket
     vistos = set()
     salvos = []
     for o in coletados:
         if o["link_produto"] in vistos:
             continue
         vistos.add(o["link_produto"])
-        produto, _ = Produto.objects.update_or_create(
+        produto, _ = _upsert_resiliente(
             marketplace="mercadolivre", owner=None, link_produto=o["link_produto"],
             defaults={"campanha_id": "", "origem": origem,
                       "fonte": "mercadolivre-web", "codigo_checkout": codigo_checkout,
@@ -260,12 +286,13 @@ def _upsert_ofertas(coletados):
     """Insere/atualiza ofertas por link SEM apagar o feed (usado pela LANE RÁPIDA/flash,
     B3, que roda com poucas páginas e não pode zerar o feed completo da lane lenta)."""
     from apps.scrapers.precos import registrar
+    _reconectar_db()  # conexão fresca: a fase de browser pode ter matado o socket
     vistos, n = set(), 0
     for o in coletados:
         if o["link_produto"] in vistos:
             continue
         vistos.add(o["link_produto"])
-        Produto.objects.update_or_create(
+        _upsert_resiliente(
             origem="oferta", link_produto=o["link_produto"], owner=None,
             defaults={
                 "nome": o["nome"],
@@ -369,7 +396,9 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None):
                 coletados.extend(cards)
                 pausa_humana()  # ritmo humano entre páginas (anti-bloqueio)
 
-    # Refresh escopado: remove itens 'busca' que casam com algum termo, recria
+    # Refresh escopado: remove itens 'busca' que casam com algum termo, recria.
+    # Reconecta antes: o delete é a 1ª query após a longa fase de browser.
+    _reconectar_db()
     from django.db.models import Q
     cond = Q()
     for t in termos:
