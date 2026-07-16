@@ -46,10 +46,12 @@ PUBLIC_BASE_URL = os.getenv(
 )
 BILLING_CHECKOUT_URL = os.getenv("BILLING_CHECKOUT_URL", "")
 BILLING_PORTAL_URL = os.getenv("BILLING_PORTAL_URL", "")
-ML_AFFILIATE_REPORT_URL = os.getenv(
-    "ML_AFFILIATE_REPORT_URL", "https://www.mercadolivre.com.br/afiliados")
-AMAZON_ASSOCIATES_REPORT_URL = os.getenv(
-    "AMAZON_ASSOCIATES_REPORT_URL", "https://associados.amazon.com.br/home/reports")
+# Sem default: o antigo apontava pra landing de afiliados (não um relatório), então o
+# sync raspava uma página sem tabela e reportava "erro" pra sempre. Vazio = a tela diz
+# "sincronização automática indisponível", que é a verdade, em vez de erro recorrente.
+# Preencha com a URL do relatório de verdade, já dentro da conta.
+ML_AFFILIATE_REPORT_URL = os.getenv("ML_AFFILIATE_REPORT_URL", "")
+AMAZON_ASSOCIATES_REPORT_URL = os.getenv("AMAZON_ASSOCIATES_REPORT_URL", "")
 if DEBUG and not ALLOWED_HOSTS:
     ALLOWED_HOSTS = ["localhost", "127.0.0.1", ".fly.dev", ".trycloudflare.com"]
 elif DEBUG:

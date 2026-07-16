@@ -227,6 +227,10 @@ class RelatorioSync(models.Model):
         ("ok", "Sincronizado"),
         ("erro", "Erro"),
         ("acao", "Precisa de ação"),
+        # Distinto de "acao": não há nada que o usuário possa fazer. A leitura
+        # automática daquele portal ainda não existe/não está configurada, e mandar
+        # ele "reconectar" uma conta que já está conectada é um loop sem saída.
+        ("nao_configurado", "Sincronização automática indisponível"),
     ]
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                                 related_name="syncs_relatorio")

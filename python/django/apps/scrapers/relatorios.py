@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -28,6 +29,15 @@ class ReportSyncError(Exception):
     """Falha operacional do sync."""
 
 
+class ReportSyncNaoConfigurado(Exception):
+    """A leitura automática deste portal não está disponível.
+
+    Diferente de ReportSyncActionRequired: aqui não há ação do usuário que resolva —
+    falta configuração/implementação nossa. Tratar os dois como a mesma coisa mandava
+    o usuário "reconectar" uma conta que já estava conectada, para sempre.
+    """
+
+
 @dataclass
 class ReportRow:
     marketplace: str
@@ -44,9 +54,32 @@ class ReportRow:
     granularidade: str = "dia"
 
 
+_SO_NUMERO = re.compile(r"[^\d,.\-]")
+_MILHAR_PT = re.compile(r"^-?\d{1,3}(\.\d{3})+$")
+
+
 def _num(value) -> float:
+    """Converte uma célula de portal em float. 0.0 quando não há número.
+
+    Os portais são pt-BR e devolvem texto formatado ('R$ 1.234,56', '12,50', '3,2%').
+    float() direto engolia tudo isso como 0.0 — e como o sync gravava status "ok" do
+    mesmo jeito, o dashboard exibia R$ 0,00 com selo verde de "sincronizado".
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        v = float(value)
+        return v if math.isfinite(v) else 0.0
+    texto = _SO_NUMERO.sub("", str(value or "").replace("\xa0", " ")).strip()
+    if not texto or texto in {"-", "."}:
+        return 0.0
+    if "," in texto:
+        # pt-BR: '.' é milhar, ',' é decimal.
+        texto = texto.replace(".", "").replace(",", ".")
+    elif _MILHAR_PT.match(texto):
+        # '1.234' sem vírgula: milhar pt-BR, não decimal ('1.234' = mil duzentos e
+        # trinta e quatro cliques). '1.5' cai fora daqui e segue sendo decimal.
+        texto = texto.replace(".", "")
     try:
-        v = float(value or 0)
+        v = float(texto)
     except (TypeError, ValueError):
         return 0.0
     return v if math.isfinite(v) else 0.0
@@ -59,6 +92,38 @@ def _digest(usuario, row: ReportRow) -> str:
         str(row.periodo_inicio or ""), str(row.periodo_fim or ""),
     ])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def resumo_financeiro(usuario) -> dict:
+    """Total de receita/comissão a exibir para este usuário.
+
+    Cada sync grava um SNAPSHOT: o portal devolve o acumulado de uma janela (14
+    dias), não uma série por dia, e a janela desliza — o sync de hoje e o de ontem
+    cobrem quase o mesmo período. Somar os snapshots soma a mesma comissão de novo
+    a cada dia (o dashboard fazia Sum sobre 30 dias de acumulados de 14 dias, e
+    inflava a receita ~30x). Então lê-se só o snapshot mais recente de cada loja, e
+    somam-se as linhas DENTRO dele — que aí sim são fatias distintas (por etiqueta
+    ou produto) do mesmo período.
+    """
+    from django.db.models import Max, Min, Q, Sum
+
+    ultimos = (
+        ReceitaAfiliado.objects.filter(usuario=usuario)
+        .values("marketplace").annotate(ultima=Max("data"))
+    )
+    filtro = Q(pk__in=[])
+    for linha in ultimos:
+        filtro |= Q(marketplace=linha["marketplace"], data=linha["ultima"])
+
+    snapshot = ReceitaAfiliado.objects.filter(usuario=usuario).filter(filtro)
+    dados = snapshot.aggregate(
+        pedidos=Sum("pedidos"), receita=Sum("receita"), comissao=Sum("comissao"),
+        cliques_mkt=Sum("cliques"), conversoes=Sum("conversoes"),
+        # Período que os números de fato cobrem — a tela precisa dizer isso, senão
+        # o usuário lê um acumulado de 14 dias como se fosse de 30.
+        periodo_inicio=Min("periodo_inicio"), periodo_fim=Max("periodo_fim"),
+    )
+    return dados
 
 
 def _upsert_rows(usuario, rows: list[ReportRow]) -> tuple[int, int]:
@@ -108,6 +173,11 @@ class MercadoLivreReportAdapter(BaseReportAdapter):
                 "Reconecte o Mercado Livre para sincronizar métricas de afiliado."
             )
         url = getattr(settings, "ML_AFFILIATE_REPORT_URL", "")
+        if not url:
+            raise ReportSyncNaoConfigurado(
+                "Leitura automática do relatório do Mercado Livre ainda não "
+                "configurada (defina ML_AFFILIATE_REPORT_URL)."
+            )
         return _fetch_browser_report(usuario, self.marketplace, url, desde, ate)
 
 
@@ -120,8 +190,15 @@ class AmazonReportAdapter(BaseReportAdapter):
             raise ReportSyncActionRequired(
                 "Conecte a Amazon Associates/Creators para sincronizar relatórios."
             )
-        url = getattr(settings, "AMAZON_ASSOCIATES_REPORT_URL", "")
-        return _fetch_browser_report(usuario, self.marketplace, url, desde, ate)
+        # _fetch_browser_report só sabe montar sessão do ML (auth_{id}.json). Para a
+        # Amazon ele abria um contexto ANÔNIMO: o portal redirecionava pro login, o
+        # parser via o campo de senha e concluía "sessão expirada, reconecte a conta"
+        # — para uma conta conectada, sem nada que o usuário pudesse fazer a respeito.
+        # Enquanto não existir sessão de relatórios da Amazon, dizemos a verdade.
+        raise ReportSyncNaoConfigurado(
+            "A Amazon ainda não tem leitura automática de relatórios: não guardamos "
+            "sessão do portal de Associados. Acompanhe a comissão pelo painel da Amazon."
+        )
 
 
 def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> list[ReportRow]:
@@ -178,6 +255,8 @@ def _extract_table_rows(page, marketplace: str, desde, ate) -> list[ReportRow]:
             continue
         out.append(ReportRow(
             marketplace=marketplace,
+            # Data do SNAPSHOT (quando lemos), não do faturamento: o portal devolve o
+            # acumulado da janela periodo_inicio..periodo_fim. Ver resumo_financeiro.
             data=hoje,
             etiqueta=cells[0] if cells else "",
             produto_nome=cells[1] if len(cells) > 1 else "",
@@ -189,6 +268,15 @@ def _extract_table_rows(page, marketplace: str, desde, ate) -> list[ReportRow]:
             periodo_fim=ate,
             granularidade="etiqueta",
         ))
+    # Achamos a tabela mas não entendemos um único número dela: é o parser que está
+    # errado, não a conta que faturou zero. Falhar aqui é o que impede o dashboard de
+    # exibir R$ 0,00 com selo verde de "sincronizado" — foi assim que um _num que não
+    # lia número brasileiro passou despercebido.
+    if out and not any(r.cliques or r.pedidos or r.receita or r.comissao for r in out):
+        raise ReportSyncError(
+            f"{marketplace}: {len(out)} linha(s) lidas e nenhum número reconhecido; "
+            "o parser precisa ser ajustado ao formato do portal."
+        )
     return out
 
 
@@ -216,6 +304,16 @@ def sync_marketplace(usuario, marketplace: str, dias: int = 14) -> RelatorioSync
     try:
         rows = ADAPTERS[marketplace].fetch(usuario, desde, ate)
         criadas, atualizadas = _upsert_rows(usuario, rows)
+    except ReportSyncNaoConfigurado as exc:
+        sync.status = "nao_configurado"
+        sync.erro = str(exc)[:500]
+        sync.ultimo_fim = timezone.now()
+        # Sem retry curto: não é falha transitória, é uma feature que não existe.
+        sync.proxima_execucao = timezone.now() + timedelta(days=1)
+        sync.save()
+        log_event("relatorios", "sync_nao_configurado", str(exc), level="info",
+                  usuario=usuario, contexto={"marketplace": marketplace})
+        return sync
     except ReportSyncActionRequired as exc:
         sync.status = "acao"
         sync.erro = str(exc)[:500]
@@ -259,7 +357,13 @@ def sync_user_reports(usuario, marketplace: str | None = None) -> list[Relatorio
 def sync_due_reports(limit: int = 20) -> list[RelatorioSync]:
     User = get_user_model()
     agora = timezone.now()
-    usuarios = User.objects.filter(is_active=True, perfil__bloqueado=False)[:limit]
+    # order_by explícito: o [:limit] fatiava uma ordem indefinida, então acima de
+    # `limit` usuários alguns podiam nunca ser sincronizados. select_related evita
+    # uma query de perfil por usuário nos adapters.
+    usuarios = (
+        User.objects.filter(is_active=True, perfil__bloqueado=False)
+        .select_related("perfil").order_by("id")[:limit]
+    )
     resultados = []
     for usuario in usuarios:
         for marketplace in ADAPTERS:

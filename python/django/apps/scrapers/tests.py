@@ -1461,6 +1461,187 @@ class AfiliacaoPorMarketplaceTests(TestCase):
         self.assertFalse(produto.afiliado_ok)
 
 
+class ParserDeNumeroDeRelatorioTests(SimpleTestCase):
+    """Os portais são pt-BR e devolvem texto formatado.
+
+    float() direto lia 'R$ 1.234,56' como 0.0 — e o sync gravava status "ok" do
+    mesmo jeito, então o dashboard exibia R$ 0,00 com selo verde de "sincronizado".
+    """
+
+    def test_le_moeda_brasileira(self):
+        from apps.scrapers.relatorios import _num
+
+        self.assertEqual(_num("R$ 1.234,56"), 1234.56)
+        self.assertEqual(_num("1.234,56"), 1234.56)
+        self.assertEqual(_num("12,50"), 12.5)
+        self.assertEqual(_num("R$ 0,00"), 0.0)
+
+    def test_le_milhar_sem_decimal(self):
+        from apps.scrapers.relatorios import _num
+
+        # '1.234' cliques é mil duzentos e trinta e quatro, não 1,234.
+        self.assertEqual(_num("1.234"), 1234)
+        self.assertEqual(_num("12.345.678"), 12345678)
+
+    def test_le_numero_cru_e_percentual(self):
+        from apps.scrapers.relatorios import _num
+
+        self.assertEqual(_num(1234.56), 1234.56)
+        self.assertEqual(_num("42"), 42)
+        self.assertEqual(_num("3,2%"), 3.2)
+        self.assertEqual(_num("-15,00"), -15.0)
+
+    def test_celula_sem_numero_vira_zero(self):
+        from apps.scrapers.relatorios import _num
+
+        for vazio in ("", None, "—", "n/d", "-"):
+            self.assertEqual(_num(vazio), 0.0, vazio)
+
+
+class _FakeLocator:
+    """Mínimo do contrato do Playwright que _extract_table_rows usa."""
+
+    def __init__(self, itens):
+        self._itens = itens
+
+    def count(self):
+        return len(self._itens)
+
+    def nth(self, i):
+        return self._itens[i]
+
+    def inner_text(self, timeout=None):
+        return self._itens
+
+
+class _FakeCelula:
+    def __init__(self, texto):
+        self._texto = texto
+
+    def inner_text(self, timeout=None):
+        return self._texto
+
+
+class _FakeLinha:
+    def __init__(self, celulas):
+        self._celulas = [_FakeCelula(c) for c in celulas]
+
+    def locator(self, seletor):
+        return _FakeLocator(self._celulas)
+
+
+class _FakePage:
+    def __init__(self, linhas, tem_senha=False):
+        self._linhas = [_FakeLinha(l) for l in linhas]
+        self._tem_senha = tem_senha
+
+    def locator(self, seletor):
+        if "password" in seletor:
+            return _FakeLocator([1] if self._tem_senha else [])
+        return _FakeLocator(self._linhas)
+
+
+class ExtracaoDeRelatorioTests(TestCase):
+    """_extract_table_rows era o ponto cego: o teste de idempotência montava
+    ReportRow na mão e pulava justamente a função onde os bugs moravam."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("relator", password="test")
+
+    def _extrair(self, linhas, desde=None, ate=None):
+        from datetime import date
+        from apps.scrapers.relatorios import _extract_table_rows
+
+        return _extract_table_rows(
+            _FakePage(linhas), "mercadolivre",
+            desde or date(2026, 7, 1), ate or date(2026, 7, 15))
+
+    def test_le_a_tabela_em_formato_brasileiro(self):
+        linhas = self._extrair([["grupo-casa", "Fone JBL", "1.234", "12", "R$ 1.999,90", "R$ 199,99"]])
+
+        self.assertEqual(len(linhas), 1)
+        self.assertEqual(linhas[0].cliques, 1234)
+        self.assertEqual(linhas[0].pedidos, 12)
+        self.assertEqual(linhas[0].receita, 1999.90)
+        self.assertEqual(linhas[0].comissao, 199.99)
+
+    def test_tabela_sem_numero_reconhecido_falha_em_vez_de_reportar_zero(self):
+        from apps.scrapers.relatorios import ReportSyncError
+
+        # Achar a tabela e não entender número nenhum é parser errado, não conta
+        # zerada. Reportar "ok" aqui é o que produzia R$ 0,00 com selo verde.
+        with self.assertRaises(ReportSyncError):
+            self._extrair([["grupo", "Fone", "n/d", "n/d", "n/d", "n/d"]])
+
+    def test_sessao_expirada_pede_acao(self):
+        from datetime import date
+        from apps.scrapers.relatorios import ReportSyncActionRequired, _extract_table_rows
+
+        with self.assertRaises(ReportSyncActionRequired):
+            _extract_table_rows(_FakePage([], tem_senha=True), "mercadolivre",
+                                date(2026, 7, 1), date(2026, 7, 15))
+
+
+class ResumoFinanceiroTests(TestCase):
+    """O dashboard somava snapshots sobrepostos e inflava a receita ~30x."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("dono-receita", password="test")
+
+    def _snapshot(self, dia, comissao, marketplace="mercadolivre", etiqueta="grupo"):
+        from datetime import date, timedelta as td
+
+        return ReceitaAfiliado.objects.create(
+            usuario=self.user, marketplace=marketplace, data=dia,
+            etiqueta=etiqueta, pedidos=2, receita=comissao * 10, comissao=comissao,
+            cliques=100, periodo_inicio=dia - td(days=14), periodo_fim=dia,
+            granularidade="etiqueta", origem="auto",
+            hash_origem=f"{marketplace}-{dia}-{etiqueta}",
+        )
+
+    def test_snapshots_de_dias_diferentes_nao_se_somam(self):
+        from datetime import date
+        from apps.scrapers.relatorios import resumo_financeiro
+
+        # Cada sync grava o acumulado dos últimos 14 dias carimbado com a data de
+        # hoje. Três dias de sync = quase a mesma comissão três vezes no banco.
+        self._snapshot(date(2026, 7, 13), 100.0)
+        self._snapshot(date(2026, 7, 14), 110.0)
+        self._snapshot(date(2026, 7, 15), 120.0)
+
+        resumo = resumo_financeiro(self.user)
+
+        # Só o mais recente, não 330.
+        self.assertEqual(resumo["comissao"], 120.0)
+        self.assertEqual(resumo["periodo_fim"], date(2026, 7, 15))
+
+    def test_linhas_do_mesmo_snapshot_se_somam(self):
+        from datetime import date
+        from apps.scrapers.relatorios import resumo_financeiro
+
+        # Dentro de um snapshot as linhas são fatias distintas (por etiqueta): aí
+        # somar é o certo.
+        self._snapshot(date(2026, 7, 15), 50.0, etiqueta="grupo-casa")
+        self._snapshot(date(2026, 7, 15), 30.0, etiqueta="grupo-tech")
+
+        self.assertEqual(resumo_financeiro(self.user)["comissao"], 80.0)
+
+    def test_soma_o_ultimo_snapshot_de_cada_loja(self):
+        from datetime import date
+        from apps.scrapers.relatorios import resumo_financeiro
+
+        # Lojas sincronizam em dias diferentes: cada uma contribui com o seu último.
+        self._snapshot(date(2026, 7, 15), 120.0, marketplace="mercadolivre")
+        self._snapshot(date(2026, 7, 10), 40.0, marketplace="amazon")
+
+        self.assertEqual(resumo_financeiro(self.user)["comissao"], 160.0)
+
+    def test_sem_receita_nao_quebra(self):
+        from apps.scrapers.relatorios import resumo_financeiro
+
+        self.assertIsNone(resumo_financeiro(self.user)["comissao"])
+
+
 class GeracaoDeLinksEmLoteTests(TestCase):
     """O worker que tira os produtos de 'pendente'.
 

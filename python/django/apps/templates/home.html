@@ -43,8 +43,8 @@
 </div>
 
 <div class="kpis">
-  <div class="kpi"><div class="kpi-label">Comissão</div><div class="kpi-value">R$ {{ financeiro.comissao|default:0|floatformat:2 }}</div><div class="kpi-note">Importada das contas conectadas</div></div>
-  <div class="kpi"><div class="kpi-label">Pedidos</div><div class="kpi-value">{{ financeiro.pedidos|default:0 }}</div><div class="kpi-note">{{ financeiro.conversoes|default:0 }} conversões reportadas</div></div>
+  <div class="kpi"><div class="kpi-label">Comissão</div><div class="kpi-value">R$ {{ financeiro.comissao|default:0|floatformat:2 }}</div><div class="kpi-note">{% if financeiro.periodo_inicio %}Lojas conectadas · {{ financeiro.periodo_inicio|date:"d/m" }} a {{ financeiro.periodo_fim|date:"d/m" }}{% else %}Importada das contas conectadas{% endif %}</div></div>
+  <div class="kpi"><div class="kpi-label">Pedidos</div><div class="kpi-value">{{ financeiro.pedidos|default:0 }}</div><div class="kpi-note">Reportados pelas lojas</div></div>
   <div class="kpi"><div class="kpi-label">Cliques</div><div class="kpi-value">{{ resumo.cliques|default:0 }}</div><div class="kpi-note">{{ financeiro.cliques_mkt|default:0 }} confirmados nas lojas</div></div>
   <div class="kpi"><div class="kpi-label">Comissão por publicação</div><div class="kpi-value">R$ {{ financeiro.comissao_por_post|default:0|floatformat:2 }}</div><div class="kpi-note">{{ resumo.enviados|default:0 }} publicações · {{ resumo.falhas|default:0 }} falhas</div></div>
 </div>
@@ -92,6 +92,9 @@
           </div>
           {% if sync.status == 'acao' and sync.marketplace == 'mercadolivre' %}
           <a class="btn btn-blue btn-sm" href="{% url 'scraper-ml-conexao' %}"><i data-lucide="plug-zap"></i> Reconectar</a>
+          {% elif sync.status == 'nao_configurado' %}
+          {# Sem botão: não há leitura automática desta loja, então "Sincronizar" só
+             repetiria a mesma resposta. Oferecer o botão seria mentir sobre o que ele faz. #}
           {% else %}
           <form method="post" action="{% url 'scraper-sincronizar-receitas' %}">
             {% csrf_token %}

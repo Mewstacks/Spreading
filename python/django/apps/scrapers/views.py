@@ -109,18 +109,18 @@ def operations_dashboard(request):
     from datetime import timedelta
     from apps.scrapers.monitor_conexao import ml_conectado, wa_conectado
 
+    from apps.scrapers.relatorios import resumo_financeiro
+
     desde = timezone.now() - timedelta(days=30)
     pubs = Publicacao.objects.filter(usuario=request.user, criada_em__gte=desde)
-    receitas = ReceitaAfiliado.objects.filter(usuario=request.user, data__gte=desde.date())
     resumo = pubs.aggregate(
         enviados=Count("id", filter=Q(status="enviado"), distinct=True),
         falhas=Count("id", filter=Q(status="falhou"), distinct=True),
         pendentes=Count("id", filter=Q(status="pendente"), distinct=True),
         cliques=Count("cliques"),
     )
-    financeiro = receitas.aggregate(
-        pedidos=Sum("pedidos"), receita=Sum("receita"), comissao=Sum("comissao"),
-        cliques_mkt=Sum("cliques"), conversoes=Sum("conversoes"))
+    # Snapshot mais recente por loja, não Sum de 30 dias: ver resumo_financeiro.
+    financeiro = resumo_financeiro(request.user)
     comissao = financeiro.get("comissao") or 0
     posts = resumo.get("enviados") or 0
     financeiro["comissao_por_post"] = comissao / posts if posts else 0
@@ -154,11 +154,16 @@ def operations_dashboard(request):
         syncs.setdefault(marketplace, RelatorioSync(
             usuario=request.user, marketplace=marketplace))
     for sync in syncs.values():
+        # "nao_configurado" fica de fora: não é incidente e não há ação do usuário —
+        # alertar sobre isso era um aviso permanente que ele não podia resolver. O
+        # estado aparece na lista de sincronizações, que é onde ele pertence.
         if sync.status in {"erro", "acao"}:
             alertas.append((
                 f"Relatório {sync.marketplace} precisa de atenção",
                 sync.erro or "Sincronização automática não concluiu.",
-                "home",
+                # Reconectar a conta é o que resolve; "home" apontava pra esta mesma
+                # página, então clicar no alerta não levava a lugar nenhum.
+                "scraper-conta",
             ))
     return render(request, "home.html", {
         "resumo": resumo, "financeiro": financeiro,
