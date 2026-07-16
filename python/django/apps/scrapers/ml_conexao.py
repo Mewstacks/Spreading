@@ -24,6 +24,7 @@ Estado compartilhado (fase/erro) vai pro cache (Redis/DB em prod) pra funcionar 
 threads do gunicorn; a thread que segura o browser vive em um worker só, e os frames
 e a fila de input ficam em dicts em memória desse mesmo processo (1 worker no Fly).
 """
+import logging
 import os
 import queue
 import threading
@@ -31,6 +32,8 @@ import time
 
 from django.conf import settings
 from django.core.cache import cache
+
+logger = logging.getLogger(__name__)
 
 LOGIN_URL = "https://www.mercadolivre.com/jms/mlb/lgz/msl/login/"
 HOME_HOST = "mercadolivre.com.br"
@@ -51,21 +54,14 @@ _frames: dict[int, str] = {}                     # último frame base64 por usu�
 _inputs: dict[int, "queue.Queue"] = {}           # eventos de input pendentes por usuário
 _lock = threading.Lock()
 
-# Teclas não-imprimíveis que o front manda como {t:'key', key:'Enter'}. Imprimíveis
-# vão como {t:'char', text:'a'} e usam Input.insertText (sem mapa tecla-a-tecla).
-_SPECIAL_KEYS = {
-    "Enter":      {"code": "Enter", "key": "Enter", "windowsVirtualKeyCode": 13, "text": "\r"},
-    "Backspace":  {"code": "Backspace", "key": "Backspace", "windowsVirtualKeyCode": 8},
-    "Tab":        {"code": "Tab", "key": "Tab", "windowsVirtualKeyCode": 9},
-    "Delete":     {"code": "Delete", "key": "Delete", "windowsVirtualKeyCode": 46},
-    "Escape":     {"code": "Escape", "key": "Escape", "windowsVirtualKeyCode": 27},
-    "ArrowLeft":  {"code": "ArrowLeft", "key": "ArrowLeft", "windowsVirtualKeyCode": 37},
-    "ArrowUp":    {"code": "ArrowUp", "key": "ArrowUp", "windowsVirtualKeyCode": 38},
-    "ArrowRight": {"code": "ArrowRight", "key": "ArrowRight", "windowsVirtualKeyCode": 39},
-    "ArrowDown":  {"code": "ArrowDown", "key": "ArrowDown", "windowsVirtualKeyCode": 40},
-    "Home":       {"code": "Home", "key": "Home", "windowsVirtualKeyCode": 36},
-    "End":        {"code": "End", "key": "End", "windowsVirtualKeyCode": 35},
-}
+# Teclas não-imprimíveis que o front manda como {t:'key', key:'Enter'}; imprimíveis vêm
+# como {t:'char', text:'a'}. Os dois casos vão pro page.keyboard do Playwright, que já
+# tem o mapa tecla->code/keyCode (USKeyboardLayout) e emite keydown/keypress/keyup de
+# verdade. Estes nomes são os mesmos que keyboard.press() aceita.
+_SPECIAL_KEYS = frozenset({
+    "Enter", "Backspace", "Tab", "Delete", "Escape",
+    "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Home", "End",
+})
 
 
 def _cache_key(user_id: int) -> str:
@@ -113,8 +109,16 @@ def _url_logada(url: str) -> bool:
     return HOME_HOST in u or "mercadolibre.com" in u
 
 
-def _despachar_input(cdp, ev: dict):
-    """Traduz UM evento do front em comando CDP no Chromium local. Nunca levanta."""
+def _despachar_input(cdp, page, ev: dict):
+    """Traduz UM evento do front em input no Chromium local. Nunca levanta.
+
+    Mouse vai por CDP cru (dispatchMouseEvent aceita coordenada; page.mouse também,
+    mas o CDP evita a ida-e-volta de estado do Playwright). Teclado vai por
+    page.keyboard: Input.insertText insere texto SEM disparar keydown/keypress/keyup,
+    e a página de login do ML ignora o que digita assim — o mouse funcionava e o texto
+    não entrava. page.keyboard.type() reusa o mapa de teclas do Playwright e emite os
+    eventos completos, que é o que o usuário de fato digitou do outro lado.
+    """
     try:
         t = ev.get("t")
         if t == "move":
@@ -138,15 +142,17 @@ def _despachar_input(cdp, ev: dict):
         elif t == "char":
             texto = str(ev.get("text", ""))[:8]
             if texto:
-                cdp.send("Input.insertText", {"text": texto})
+                # delay=0: a cadência real já é a do usuário; o front manda cada tecla
+                # assim que ela acontece.
+                page.keyboard.type(texto, delay=0)
         elif t == "key":
-            spec = _SPECIAL_KEYS.get(ev.get("key"))
-            if spec:
-                cdp.send("Input.dispatchKeyEvent", {"type": "keyDown", **spec})
-                cdp.send("Input.dispatchKeyEvent", {"type": "keyUp", **spec})
+            if ev.get("key") in _SPECIAL_KEYS:
+                page.keyboard.press(ev["key"])
     except Exception:
         # Um evento malformado/tardio (browser fechando) não pode derrubar o worker.
-        pass
+        # Em debug dá pra ver o que morreu — foi o silêncio aqui que escondeu o
+        # teclado quebrado por tanto tempo.
+        logger.debug("Evento de input descartado (%s)", ev.get("t"), exc_info=True)
 
 
 def _worker(user_id: int):
@@ -189,6 +195,12 @@ def _worker(user_id: int):
                     pass
 
             cdp.send("Page.enable")
+            # Headless não tem janela, então o Chromium trata o documento como sem foco
+            # e JS de login costuma ignorar input nesse estado. Isso força "focado".
+            try:
+                cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
+            except Exception:
+                logger.warning("setFocusEmulationEnabled falhou; seguindo sem ele.")
             cdp.on("Page.screencastFrame", _on_frame)
 
             page.goto(LOGIN_URL, wait_until="domcontentloaded")
@@ -210,7 +222,7 @@ def _worker(user_id: int):
                         ev = fila.get_nowait()
                     except queue.Empty:
                         break
-                    _despachar_input(cdp, ev)
+                    _despachar_input(cdp, page, ev)
 
                 url_atual = page.url
                 # 'salvar_agora' = usuário clicou "já entrei"; força a captura.
