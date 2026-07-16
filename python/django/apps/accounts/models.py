@@ -102,9 +102,7 @@ class Perfil(models.Model):
     tom_marca = models.CharField(max_length=20, default="direto")
     nivel_emoji = models.PositiveSmallIntegerField(default=2)
     chamada_acao = models.CharField(max_length=120, default="Compre aqui")
-    divulgacao_afiliado = models.CharField(
-        max_length=180, default="Este conteúdo contém link de afiliado."
-    )
+    divulgacao_afiliado = models.CharField(max_length=180, blank=True, default="")
     template_a = models.TextField(blank=True, default="")
     template_b = models.TextField(blank=True, default="")
 

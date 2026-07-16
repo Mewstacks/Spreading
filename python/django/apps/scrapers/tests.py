@@ -1177,6 +1177,15 @@ class AttributionWorkflowTests(TestCase):
         self.assertIn("Tech do Dia", message)
         self.assertIn("Ver a oferta", message)
 
+    def test_default_affiliate_disclosure_is_not_added_to_messages(self):
+        from apps.scrapers.ofertas import montar_mensagem
+
+        message = montar_mensagem(
+            self.product, "https://example.com/a", None, usuario=self.user,
+        )
+
+        self.assertNotIn("Este conteúdo contém link de afiliado.", message)
+
     @patch("apps.scrapers.ofertas.os.getenv", return_value="")
     @override_settings(DEBUG=True)
     def test_local_delivery_uses_affiliate_link_directly_without_public_url(self, _env):
