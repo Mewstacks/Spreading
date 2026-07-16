@@ -72,6 +72,12 @@ def _mapear_item(item: dict) -> dict | None:
     preco_de = _num(_primeiro(listing, ("price", "savingBasis", "money", "amount")))
     if preco_atual <= 0:
         return None
+    # savingBasis às vezes vem em unidade/escala diferente do price (ex.: milhares),
+    # inflando o "De:" ~1000x e gerando "100% OFF" absurdo (R$ 64,99 de R$ 64990,00).
+    # Se o desconto implícito for implausível (>= 90%, i.e. de > 10x o atual), o dado
+    # está corrompido: descarta o "De:" e trata como sem desconto de/por.
+    if preco_de > preco_atual * 10:
+        preco_de = preco_atual
     if preco_de <= preco_atual:
         preco_de = preco_atual  # sem desconto de/por; pode ainda ter promoção (dealDetails)
 

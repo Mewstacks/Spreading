@@ -284,11 +284,13 @@ TELEGRAM_SESSION = os.getenv("TELEGRAM_SESSION", "")  # StringSession do userbot
 
 
 # ─────────────────────────────────────────────────────────────
-# LLM local (Ollama) — descrições engraçadas das ofertas
+# LLM — resuminho engraçado das ofertas (API do Claude / Anthropic)
+# Trocado do Ollama local (não roda no Fly) para a API do Claude. Gate por
+# LLM_ATIVO + ANTHROPIC_API_KEY (setar nos secrets do Fly). Sem key => sem frase.
 # ─────────────────────────────────────────────────────────────
 LLM_ATIVO = os.getenv("LLM_ATIVO", "1") == "1"
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+LLM_MODELO = os.getenv("LLM_MODELO", "claude-haiku-4-5")
 
 
 # ─────────────────────────────────────────────────────────────

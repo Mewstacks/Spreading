@@ -91,9 +91,28 @@ class Amazon(Marketplace):
         return link_tem_tag_afiliado(link, usuario=usuario)
 
     def verify_link(self, link, nome_esperado=None, confiar_desconto=False, usuario=None):
-        # Dados vêm da API oficial; confiamos. (ok=True como o default da base.)
+        # Dados de oferta/preço vêm da Creators API (fonte oficial). Itens de origem
+        # confiável ('oferta'/'busca', confiar_desconto=True) NÃO precisam de raspagem:
+        # a checagem pública headless levava CAPTCHA/timeout ou seletor mudado a reprovar
+        # links perfeitamente válidos ("link reprovado na verificação"). Confiamos direto.
+        if confiar_desconto:
+            return {"ok": True, "motivo": "confiado (Creators API)"}
+        # Origem não confiável (ex.: cupom_codigo): tenta confirmar na PDP, mas trata
+        # CAPTCHA/timeout/DOM ausente como INCONCLUSIVO -> aprova (não bloqueia envio).
+        # Só reprova em indisponibilidade explícita do produto.
         from apps.scrapers.sources.amazon_public import verify_product_url
-        return verify_product_url(link, nome_esperado=nome_esperado)
+        try:
+            resultado = verify_product_url(link, nome_esperado=nome_esperado)
+        except Exception as e:
+            logger.warning("Verificação pública Amazon falhou (inconclusivo, aprovando): %s", e)
+            return {"ok": True, "motivo": "verificação inconclusiva"}
+        if not resultado.get("ok"):
+            motivo = (resultado.get("motivo") or "").lower()
+            if "indisponível" in motivo or "indisponivel" in motivo:
+                return resultado  # produto realmente indisponível -> reprova
+            logger.info("Verificação Amazon inconclusiva (%s); aprovando", resultado.get("motivo"))
+            return {"ok": True, "motivo": f"inconclusivo: {resultado.get('motivo')}"}
+        return resultado
 
     def is_alive(self, produto):
         """getItems(asin) com as creds do DONO do item: presente -> True; sumiu -> False."""

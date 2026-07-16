@@ -1,4 +1,3 @@
-import requests
 from django.conf import settings
 
 _PROMPT = """Você é um vendedor brasileiro especialista em grupos de WhatsApp. Seu estilo é direto, malandro e muito bem-humorado.
@@ -24,31 +23,32 @@ Agora faça o seu, no mesmo estilo:
 Produto: {nome}
 Frase:"""
 
-def gerar_descricao(nome: str, timeout: int = 120) -> str:
-    """Gera a frase engraçada para o produto. Retorna '' em qualquer falha."""
+
+def gerar_descricao(nome: str, timeout: int = 30) -> str:
+    """Gera a frase engraçada (resuminho) para o produto via API do Claude.
+    Retorna '' em qualquer falha, para nunca travar/derrubar o envio.
+
+    Gate: settings.LLM_ATIVO e uma ANTHROPIC_API_KEY presente. Motor trocado do
+    Ollama local (que não roda no Fly) para a API do Claude (anthropic SDK).
+    """
     if not getattr(settings, "LLM_ATIVO", False) or not nome:
         return ""
-    
+    api_key = getattr(settings, "ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return ""
+
     try:
-        r = requests.post(
-            f"{settings.OLLAMA_URL.rstrip('/')}/api/generate",
-            json={
-                "model": settings.OLLAMA_MODEL,
-                "prompt": _PROMPT.format(nome=nome.strip()),
-                "stream": False,
-                "keep_alive": "30m",
-                "options": {
-                    "temperature": 0.7, 
-                    "num_predict": 50,
-                    "top_p": 0.9
-                },
-            },
-            timeout=timeout,
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=api_key, timeout=float(timeout))
+        resposta = client.messages.create(
+            model=getattr(settings, "LLM_MODELO", "claude-haiku-4-5"),
+            max_tokens=80,
+            messages=[{"role": "user", "content": _PROMPT.format(nome=nome.strip())}],
         )
-        if r.status_code != 200:
-            return ""
-            
-        texto = (r.json().get("response") or "").strip()
+        texto = "".join(
+            bloco.text for bloco in resposta.content if getattr(bloco, "type", "") == "text"
+        ).strip()
         texto = texto.replace('"', "").replace("\n", " ").strip().strip("'").strip()
         return texto[:200]
     except Exception:

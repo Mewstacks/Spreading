@@ -21,3 +21,5 @@ honcho==2.0.0
 telethon==1.38.1
 # Observabilidade (opcional): só ativa se SENTRY_DSN estiver setado.
 sentry-sdk==2.20.0
+# Resuminho das ofertas via API do Claude (apps/scrapers/llm.py)
+anthropic==0.116.0

@@ -1,5 +1,4 @@
 import logging
-import os
 import requests
 from datetime import timedelta
 from django.utils import timezone
@@ -356,11 +355,21 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     if frase:
         linhas += ["", m.italic(esc(frase))]
 
-    linhas += [
-        "",
-        f"❌ De: {m.strike(f'R$ {produto.preco_sem_desconto:.2f}')}",
-        f"✅ {m.bold(f'Por: R$ {produto.preco_com_cupom:.2f}')} ({desconto_percent:.0f}% OFF)",
-    ]
+    # Guarda final: desconto >= 90% (ou "De:" <= "Por:") indica preço corrompido
+    # (ex.: savingBasis em escala errada). Em vez de imprimir "100% OFF" absurdo,
+    # esconde a linha "De:"/% OFF e mostra só o "Por:".
+    desconto_valido = 0 < desconto_percent < 90 and produto.preco_sem_desconto > produto.preco_com_cupom
+    if desconto_valido:
+        linhas += [
+            "",
+            f"❌ De: {m.strike(f'R$ {produto.preco_sem_desconto:.2f}')}",
+            f"✅ {m.bold(f'Por: R$ {produto.preco_com_cupom:.2f}')} ({desconto_percent:.0f}% OFF)",
+        ]
+    else:
+        linhas += [
+            "",
+            f"✅ {m.bold(f'Por: R$ {produto.preco_com_cupom:.2f}')}",
+        ]
 
     # REGRA: cupons NÃO acumulam no ML. Cada item anuncia no máximo UM cupom.
     # Prioridade: cupom do link (cupom_pai) > código do próprio item (codigo_checkout)
@@ -453,29 +462,14 @@ def _baixar_imagem_b64(url):
 def _link_publicado(publicacao, link_afiliado: str) -> str:
     """Link que entra na mensagem enviada ao grupo.
 
-    Em produção, passa pelo redirecionador assinado para contabilizar cliques e
-    depois encaminhar para o link afiliado. Em desenvolvimento local não há uma
-    URL pública nem o mesmo banco/SECRET_KEY da produção: apontar para o
-    fallback `spreading-web.fly.dev` gerava um link rastreado inválido para quem
-    recebia a oferta. Nesse caso manda o link de afiliado direto — que continua
-    válido e com atribuição. Um túnel público configurado explicitamente em
-    PUBLIC_BASE_URL continua habilitando rastreio em desenvolvimento.
+    Manda o link de afiliado DIRETO (meli.la / Amazon). O antigo wrapper assinado
+    `/scrapers/r/{token}/` (spreading-web.fly.dev) contabilizava cliques próprios
+    (CliquePublicacao), mas deixava a URL feia/estranha para quem recebia. Por
+    decisão do produto, o rastreio próprio foi abandonado — a atribuição/comissão
+    continua vindo do relatório do marketplace. A rota `r/<token>/` segue viva só
+    para os links já enviados no passado.
     """
-    if not publicacao:
-        return link_afiliado
-
-    from django.conf import settings
-
-    base_explicita = (os.getenv("PUBLIC_BASE_URL") or "").strip()
-    if settings.DEBUG and not base_explicita:
-        logger.info("Ambiente local sem PUBLIC_BASE_URL: enviando link afiliado direto.")
-        return link_afiliado
-
-    from django.core import signing
-
-    token = signing.dumps({"p": str(publicacao.id_publico)}, salt="click")
-    base = settings.PUBLIC_BASE_URL.rstrip("/")
-    return f"{base}/scrapers/r/{token}/"
+    return link_afiliado
 
 
 def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
