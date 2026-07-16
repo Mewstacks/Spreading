@@ -19,6 +19,7 @@ from apps.scrapers import automacao_state as st
 from apps.scrapers.fly_infra import snapshot as fly_snapshot
 from apps.scrapers.models import (
     CanalMonitorado, ConfiguracaoEnvio, EventoOperacional, HistoricoEnvio,
+    IncidenteSaude, Publicacao,
 )
 from apps.scrapers.saude import resumo as saude_resumo
 from apps.scrapers.views import superadmin_required
@@ -138,6 +139,59 @@ def superadmin_saude(request):
                                       usuario_nome=usuario_nome), "horas": horas,
                    "usuario_busca": usuario_nome,
                    "usuario_encontrado": usuario})
+
+
+@superadmin_required
+@require_POST
+def superadmin_saude_retest(request, incidente_id):
+    """Retesta a causa sem publicar promoção nem repetir mensagem."""
+    incidente = get_object_or_404(IncidenteSaude.objects.select_related("usuario"), pk=incidente_id)
+    contexto = incidente.contexto or {}
+    causa = incidente.causa
+    resultado = {"sucesso": False, "mensagem": "Este incidente exige correção manual antes de ser confirmado."}
+    try:
+        if causa.startswith("whatsapp_"):
+            from apps.scrapers import whatsapp_client
+            destino = ""
+            publicacao_id = contexto.get("publicacao_id")
+            if publicacao_id:
+                destino = (Publicacao.objects.filter(pk=publicacao_id)
+                            .values_list("destino_id", flat=True).first() or "")
+            sessao = incidente.usuario.perfil.sessao_whatsapp() if incidente.usuario else None
+            resultado = whatsapp_client.diagnosticar(sessao, destino)
+        elif causa.startswith("link_"):
+            from apps.scrapers.ofertas import enviar_oferta_de_produto
+            from apps.scrapers.models import Produto
+            produto = Produto.objects.filter(pk=contexto.get("produto_id")).first()
+            if produto and incidente.usuario:
+                r = enviar_oferta_de_produto(produto, "diagnostico@g.us", verificar=True,
+                                             dry_run=True, usuario=incidente.usuario,
+                                             destino_nome="Diagnóstico sem publicação")
+                resultado = {"sucesso": bool(r.get("sucesso")),
+                             "mensagem": "Link validado sem publicar oferta." if r.get("sucesso") else r.get("motivo", "Link não validado.")}
+            else:
+                resultado = {"sucesso": False, "mensagem": "Produto de referência não está mais disponível."}
+        elif causa.startswith("sync_") and incidente.usuario:
+            from apps.scrapers.relatorios import sync_marketplace
+            marketplace = str(contexto.get("marketplace") or incidente.escopo.removeprefix("marketplace:") or "")
+            sync = sync_marketplace(incidente.usuario, marketplace)
+            resultado = {"sucesso": sync.status == "ok", "mensagem": sync.erro or "Relatório sincronizado."}
+        elif causa == "email_falhou":
+            from django.core.mail import get_connection
+            connection = get_connection()
+            connection.open()
+            connection.close()
+            resultado = {"sucesso": True, "mensagem": "Conexão SMTP validada sem enviar e-mail."}
+    except Exception as exc:
+        resultado = {"sucesso": False, "mensagem": f"Reteste falhou: {exc}"}
+
+    if resultado.get("sucesso"):
+        from apps.scrapers.incidentes_saude import confirmar
+        confirmar(incidente, resultado["mensagem"])
+        messages.success(request, f"Ajuste concluído: {resultado['mensagem']}")
+    else:
+        messages.error(request, resultado.get("mensagem") or "O reteste não confirmou o ajuste.")
+    return redirect("superadmin-saude")
 
 
 @superadmin_required

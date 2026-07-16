@@ -288,9 +288,37 @@ class EventoOperacional(models.Model):
                                 null=True, blank=True, related_name="eventos_operacionais")
     contexto = models.JSONField(default=dict, blank=True)
     erro = models.TextField(blank=True, default="")
+    # Evita que a leitura do painel reprocese o mesmo log histórico como uma
+    # nova ocorrência do incidente.
+    incidente_processado = models.BooleanField(default=False, db_index=True)
 
     class Meta:
         indexes = [models.Index(fields=["pipeline", "level", "criado_em"])]
+
+
+class IncidenteSaude(models.Model):
+    """Problema operacional agregado e seu último diagnóstico confirmado."""
+    STATUS = [("aberto", "Aberto"), ("concluido", "Ajuste concluído")]
+    chave = models.CharField(max_length=64, unique=True)
+    causa = models.CharField(max_length=80, db_index=True)
+    pipeline = models.CharField(max_length=30, db_index=True)
+    escopo = models.CharField(max_length=255, default="sistema", db_index=True)
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                null=True, blank=True, related_name="incidentes_saude")
+    level = models.CharField(max_length=10, default="warning")
+    status = models.CharField(max_length=12, choices=STATUS, default="aberto", db_index=True)
+    ocorrencias = models.PositiveIntegerField(default=1)
+    primeira_ocorrencia = models.DateTimeField(default=timezone.now)
+    ultima_ocorrencia = models.DateTimeField(default=timezone.now, db_index=True)
+    ultima_mensagem = models.CharField(max_length=500, blank=True, default="")
+    contexto = models.JSONField(default=dict, blank=True)
+    evento_origem = models.ForeignKey(EventoOperacional, on_delete=models.SET_NULL,
+                                      null=True, blank=True, related_name="incidentes")
+    confirmado_em = models.DateTimeField(null=True, blank=True, db_index=True)
+    confirmacao = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta:
+        indexes = [models.Index(fields=["status", "ultima_ocorrencia"])]
 
 
 class LinkAfiliadoUsuario(models.Model):

@@ -32,6 +32,7 @@ const {
 const { donoDoSingletonLock, decidirSobreDono } = require('./chromium_locks');
 const authStore = require('./auth_store');
 const { criarPrazo, expirou, timeoutDaEtapa, timeoutComEnvioIniciado } = require('./send_deadline');
+const { timeoutPreflight, mensagemPreflight, iniciarRecuperacaoPreflight } = require('./preflight_recovery');
 
 const app = express();
 
@@ -964,6 +965,23 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
                 duracao_ms: duracao(),
             };
         }
+        if (timeoutPreflight(etapa, erro)) {
+            // getState/inspecionarGrupo travados significam Chromium morto ou WA Web
+            // congelado. Ainda não houve sendMessage, portanto é seguro recuperar e
+            // orientar a pessoa sem expor a stack interna do Puppeteer.
+            console.warn(`[${session.id}] Timeout em ${etapa}; reciclando sessão antes de novo envio.`);
+            iniciarRecuperacaoPreflight(session, etapa, recycleSession);
+            return {
+                sucesso: false,
+                erro: mensagemPreflight(etapa),
+                classe: TRANSITORIO,
+                repetir: true,
+                instancia: session.id,
+                etapa,
+                duracao_ms: duracao(),
+                falha_infra: true,
+            };
+        }
         if (erroFrameDestacado(erro)) {
             // Ainda não chamamos sendMessage: não há risco de duplicar. A sessão
             // está no meio de uma recarga e será restaurada para a próxima ação.
@@ -1185,6 +1203,46 @@ app.post(['/api/grupos/refresh', '/api/grupos/refresh/:instance'], apiKeyAuth, a
     // usuario que acabou de criar um grupo no celular recebia o snapshot velho.
     syncGroups(session, 'refresh-manual', { forcar: true });
     return res.json({ sucesso: true, ...buildGruposPayload(session) });
+});
+
+// Diagnóstico sem publicação. O painel de Saúde usa esta rota para comprovar que
+// a sessão e o grupo voltaram a responder sem repetir uma oferta.
+app.post(['/api/diagnostico', '/api/diagnostico/:instance'], apiKeyAuth, async (req, res) => {
+    const instanceId = resolveInstanceId(req);
+    const chatId = String(req.body?.grupoid || '').trim();
+    const session = resolveSessionParaGrupos(instanceId);
+    if (!session || !session.isConnected || !session.client) {
+        return res.status(503).json({ sucesso: false, causa: 'whatsapp_desconectado',
+            escopo: chatId || instanceId, mensagem: 'WhatsApp não está conectado.', classe: TRANSITORIO });
+    }
+    if (chatId && (!chatId.endsWith('@g.us') || !idChatValido(chatId))) {
+        return res.status(400).json({ sucesso: false, causa: 'destino_invalido',
+            escopo: chatId, mensagem: 'O código do grupo é inválido.', classe: PERMANENTE });
+    }
+    try {
+        const estado = await withTimeout(session.client.getState(), 10000, 'getState');
+        if (estado !== 'CONNECTED') {
+            throw erroClassificado(`WhatsApp sem conexão (${estado || 'estado desconhecido'}).`, TRANSITORIO);
+        }
+        if (chatId) {
+            const grupo = await withTimeout(lerGrupoDaPagina(session, chatId), 15000, 'inspecionarGrupo');
+            if (!grupo.ok) throw erroClassificado('Não foi possível validar o grupo.', TRANSITORIO);
+            if (!grupo.existe) throw erroClassificado('Grupo não encontrado nesta conta.', PERMANENTE);
+        }
+        return res.json({ sucesso: true, causa: 'whatsapp_preflight', escopo: chatId || instanceId,
+            mensagem: chatId ? 'Sessão e grupo validados sem enviar mensagem.' : 'Sessão validada sem enviar mensagem.' });
+    } catch (err) {
+        const etapa = /inspecionarGrupo/.test(String(err && err.message || err)) ? 'verificar_grupo' : 'getState';
+        const timeout = timeoutPreflight(etapa, err);
+        if (timeout) {
+            iniciarRecuperacaoPreflight(session, etapa, recycleSession);
+        }
+        return res.status(503).json({ sucesso: false,
+            causa: etapa === 'getState' ? 'whatsapp_preflight_timeout' : 'whatsapp_grupo_timeout',
+            escopo: chatId || instanceId,
+            mensagem: timeout ? mensagemPreflight(etapa) : 'O diagnóstico não conseguiu validar o WhatsApp.',
+            classe: classificarErro(err), etapa });
+    }
 });
 
 app.get(['/api/qrcode', '/api/qrcode/:instance'], apiKeyAuth, (req, res) => {

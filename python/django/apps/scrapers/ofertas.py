@@ -1,6 +1,9 @@
 import logging
+import os
 import requests
 from datetime import timedelta
+from django.conf import settings
+from django.core import signing
 from django.utils import timezone
 from django.db.models import F, FloatField, ExpressionWrapper, Count, Q
 from apps.scrapers.models import Produto, Cupom, HistoricoEnvio, Publicacao
@@ -464,14 +467,14 @@ def _baixar_imagem_b64(url):
 def _link_publicado(publicacao, link_afiliado: str) -> str:
     """Link que entra na mensagem enviada ao grupo.
 
-    Manda o link de afiliado DIRETO (meli.la / Amazon). O antigo wrapper assinado
-    `/scrapers/r/{token}/` (spreading-web.fly.dev) contabilizava cliques próprios
-    (CliquePublicacao), mas deixava a URL feia/estranha para quem recebia. Por
-    decisão do produto, o rastreio próprio foi abandonado — a atribuição/comissão
-    continua vindo do relatório do marketplace. A rota `r/<token>/` segue viva só
-    para os links já enviados no passado.
+    Em desenvolvimento mantém o link de afiliado direto: o SQLite local não tem a
+    publicação que será vista por quem clica. Em produção usa um redirecionador
+    assinado, preservando a URL afiliada como destino e registrando o clique.
     """
-    return link_afiliado
+    if settings.DEBUG or not settings.PUBLIC_BASE_URL:
+        return link_afiliado
+    token = signing.dumps({"p": str(publicacao.id_publico)}, salt="click")
+    return f"{settings.PUBLIC_BASE_URL.rstrip('/')}/scrapers/r/{token}/"
 
 
 def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
@@ -515,6 +518,18 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         )
 
     def falhar(motivo, **extra):
+        texto_motivo = str(motivo).lower()
+        etapa = extra.get("etapa") or ""
+        causa = extra.get("causa") or (
+            "whatsapp_preflight_timeout" if etapa == "getState" and (extra.get("falha_infra") or "timeout" in texto_motivo) else
+            "whatsapp_grupo_timeout" if etapa == "verificar_grupo" and (extra.get("falha_infra") or "timeout" in texto_motivo) else
+            "whatsapp_frame_recarregado" if "frame" in texto_motivo or "recarregando" in texto_motivo else
+            "whatsapp_confirmacao" if "confirma" in texto_motivo or "ack" in texto_motivo else
+            "link_afiliado_recusado" if "link de afiliado" in texto_motivo or "link builder" in texto_motivo else
+            "link_reprovado" if "link reprovado" in texto_motivo else
+            "marketplace_login" if extra.get("precisa_login_ml") else
+            "publicacao_falhou"
+        )
         incerto = bool(extra.get("resultado") == "incerto")
         status = "incerto" if incerto else "falhou"
         if publicacao:
@@ -526,6 +541,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             "canal": canal,
             "destino": destino_nome or grupo_id,
             "publicacao_id": getattr(publicacao, "id", None),
+            "causa": causa,
             **extra,
         }
         log_event(
@@ -691,6 +707,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                     "canal": canal,
                     "destino": destino_nome or grupo_id,
                     "publicacao_id": publicacao.id,
+                    "causa": "publicacao_inesperada",
                 },
             )
         raise

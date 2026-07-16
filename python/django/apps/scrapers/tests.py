@@ -2032,6 +2032,54 @@ class RelatorioSaudeTests(TestCase):
         self.assertContains(resposta, "Visão geral: avisos e erros de todas as contas")
 
 
+class IncidentesSaudeTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("incidente-user", password="test")
+
+    def test_envio_real_posterior_fecha_incidente_do_mesmo_destino(self):
+        from apps.scrapers.eventos import log_event
+        from apps.scrapers.models import IncidenteSaude
+
+        contexto = {"canal": "whatsapp", "destino": "123@g.us", "causa": "whatsapp_preflight_timeout"}
+        log_event("publicacao", "send_failed", "getState timeout", level="warning",
+                  usuario=self.user, contexto=contexto)
+        incidente = IncidenteSaude.objects.get(usuario=self.user)
+        self.assertEqual(incidente.status, "aberto")
+
+        log_event("publicacao", "send_ok", "Oferta publicada com sucesso.",
+                  usuario=self.user, contexto={"canal": "whatsapp", "destino": "123@g.us"})
+        incidente.refresh_from_db()
+        self.assertEqual(incidente.status, "concluido")
+        self.assertIn("Envio real", incidente.confirmacao)
+
+    def test_nova_falha_reabre_incidente_confirmado(self):
+        from apps.scrapers.eventos import log_event
+        from apps.scrapers.models import IncidenteSaude
+
+        contexto = {"canal": "whatsapp", "destino": "123@g.us", "causa": "whatsapp_preflight_timeout"}
+        log_event("publicacao", "send_failed", "getState timeout", level="warning", usuario=self.user, contexto=contexto)
+        log_event("publicacao", "send_ok", "ok", usuario=self.user,
+                  contexto={"canal": "whatsapp", "destino": "123@g.us"})
+        log_event("publicacao", "send_failed", "getState timeout", level="warning", usuario=self.user, contexto=contexto)
+        incidente = IncidenteSaude.objects.get(usuario=self.user)
+        self.assertEqual(incidente.status, "aberto")
+        self.assertEqual(incidente.ocorrencias, 2)
+
+    def test_leitura_da_saude_nao_reconta_evento_legado(self):
+        from apps.scrapers.models import IncidenteSaude
+        from apps.scrapers.saude import resumo
+
+        EventoOperacional.objects.create(
+            pipeline="publicacao", evento="send_failed", level="warning",
+            mensagem="getState timeout", usuario=self.user,
+            contexto={"canal": "whatsapp", "destino": "123@g.us"},
+        )
+        resumo(usuario=self.user)
+        resumo(usuario=self.user)
+        incidente = IncidenteSaude.objects.get(usuario=self.user)
+        self.assertEqual(incidente.ocorrencias, 1)
+
+
 class ReconexaoBancoScraperTests(TestCase):
     """A raspagem passa minutos no browser antes de salvar; nesse intervalo o socket
     do Postgres pode morrer. O save tem de reconectar e não derrubar o ciclo."""

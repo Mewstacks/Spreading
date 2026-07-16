@@ -6,6 +6,7 @@ urlpatterns = [
     path("painel-admin/", views_admin.superadmin_usuarios, name="superadmin-usuarios"),
     path("painel-admin/criar/", views_admin.superadmin_criar_usuario, name="superadmin-criar-usuario"),
     path("painel-admin/saude/", views_admin.superadmin_saude, name="superadmin-saude"),
+    path("painel-admin/saude/<int:incidente_id>/retestar/", views_admin.superadmin_saude_retest, name="superadmin-saude-retestar"),
     path("painel-admin/infra/", views_admin.superadmin_infra, name="superadmin-infra"),
     path("painel-admin/usuario/<int:user_id>/", views_admin.superadmin_usuario_detalhe, name="superadmin-usuario"),
     path("painel-admin/usuario/<int:user_id>/suspender/", views_admin.superadmin_suspender, name="superadmin-suspender"),

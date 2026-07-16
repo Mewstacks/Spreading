@@ -20,6 +20,7 @@ vida. Quem abre isto às 8h precisa saber em 2 segundos se tem trabalho hoje.
     padding: .85rem .9rem; margin-bottom: .7rem; background: var(--surface-2); }
   .prob.critico { border-left: 3px solid var(--red); }
   .prob.aviso   { border-left: 3px solid var(--yellow); }
+  .prob.concluido { border-left: 3px solid var(--green); background: var(--green-bg); }
   .prob-head { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: .45rem; }
   .prob-head strong { font-size: .95rem; }
   .prob dl { margin: .5rem 0 0; font-size: .82rem; line-height: 1.45; }
@@ -108,6 +109,7 @@ mentindo por omissão — nada roda, então nada falha.
         {{ p.n }}× {% if p.critico %}erro{% else %}aviso{% endif %}
       </span>
       <span class="badge badge-muted">{{ p.pipeline }}</span>
+      <span class="badge badge-muted">{{ p.escopo }}</span>
       <span class="meta" style="margin-left:auto;">último {{ p.ultimo|date:"d/m H:i" }}</span>
     </div>
 
@@ -116,44 +118,25 @@ mentindo por omissão — nada roda, então nada falha.
       <dd>{{ p.significa }}</dd>
       <dt>O que fazer</dt>
       <dd>{{ p.acao }}</dd>
-      {% if p.afetados %}
-      <dt>Contas afetadas ({{ p.usuarios }})</dt>
-      <dd class="contas-afetadas">
-        {% for afetado in p.afetados %}
-        <a href="{% url 'superadmin-usuario' user_id=afetado.usuario_id %}">{{ afetado.usuario__username }}</a>
-        {% endfor %}
-      </dd>
-      {% endif %}
+      {% if p.usuario %}<dt>Conta afetada</dt><dd><a class="link" href="{% url 'superadmin-usuario' user_id=p.usuario.id %}">{{ p.usuario.get_username }}</a></dd>{% elif p.afetados %}<dt>Contas afetadas ({{ p.usuarios }})</dt><dd>{% for afetado in p.afetados %}<a class="link" href="{% url 'superadmin-usuario' user_id=afetado.usuario_id %}">{{ afetado.usuario__username }}</a>{% if not forloop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+      {% if p.sistema %}<dt>Escopo</dt><dd>Sistema (todas as contas)</dd>{% endif %}
+      <dt>Último detalhe</dt><dd>{{ p.mensagem }}</dd>
     </dl>
-
-    {% comment %}
-    Detalhe POR conta: o erro específico da última ocorrência de cada conta afetada,
-    aqui mesmo — o superadmin diagnostica todas as contas nesta tela, sem abrir conta
-    por conta. Eventos sem conta (globais, ex.: "uma loja parou de responder") caem no
-    bucket "Sistema (todas as contas)".
-    {% endcomment %}
-    {% for afetado in p.afetados %}
-    <details>
-      <summary><i data-lucide="user"></i> {{ afetado.usuario__username }} — último erro em {{ afetado.exemplo.criado_em|date:"d/m/Y H:i:s" }}</summary>
-      <p class="meta" style="margin:.4rem 0 0;"><a href="{% url 'superadmin-usuario' user_id=afetado.usuario_id %}">Abrir conta {{ afetado.usuario__username }}</a></p>
-      <pre>{{ afetado.exemplo.mensagem }}</pre>
-      {% if afetado.exemplo.contexto %}<pre>{{ afetado.exemplo.contexto }}</pre>{% endif %}
-      {% if afetado.exemplo.erro %}<pre>{{ afetado.exemplo.erro }}</pre>{% endif %}
-    </details>
-    {% endfor %}
-
-    {% if p.sistema %}
-    <details>
-      <summary><i data-lucide="server"></i> Sistema (todas as contas) — {{ p.evento }} · {{ p.sistema.criado_em|date:"d/m/Y H:i:s" }}</summary>
-      <pre>{{ p.sistema.mensagem }}</pre>
-      {% if p.sistema.contexto %}<pre>{{ p.sistema.contexto }}</pre>{% endif %}
-      {% if p.sistema.erro %}<pre>{{ p.sistema.erro }}</pre>{% endif %}
-    </details>
-    {% endif %}
+    {% if p.retestavel %}<form method="post" action="{% url 'superadmin-saude-retestar' incidente_id=p.id %}" style="margin-top:.7rem;">{% csrf_token %}<button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="shield-check"></i> Retestar sem publicar</button></form>{% endif %}
   </div>
   {% empty %}
   <div class="msg msg-info">Nenhum erro nem aviso nas últimas {{ r.horas }}h.</div>
   {% endfor %}
+</div>
+
+<div class="card">
+  <div class="card-head"><h2><i data-lucide="circle-check"></i> Ajustes concluídos</h2></div>
+  {% for p in r.concluidos %}
+  <div class="prob concluido">
+    <div class="prob-head"><strong>{{ p.titulo }}</strong><span class="badge badge-green">Ajuste concluído</span><span class="badge badge-muted">{{ p.escopo }}</span><span class="meta" style="margin-left:auto;">{{ p.confirmado_em|date:"d/m H:i" }}</span></div>
+    <div class="meta">{{ p.confirmacao }}</div>
+  </div>
+  {% empty %}<div class="msg msg-info">Nenhum ajuste confirmado no período.</div>{% endfor %}
 </div>
 
 {# Prova de vida: "zero erro" só é boa notícia se algo aconteceu. #}

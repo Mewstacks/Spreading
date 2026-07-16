@@ -25,7 +25,7 @@ from django.db.models import Count, Max
 from django.utils import timezone
 
 from apps.scrapers import automacao_state as st
-from apps.scrapers.models import EventoOperacional
+from apps.scrapers.models import EventoOperacional, IncidenteSaude
 
 
 # Cada entrada responde às duas únicas perguntas que importam num relatório diário:
@@ -46,6 +46,11 @@ CATALOGO = {
         "acao": "Se repete no mesmo destino, confira se o grupo ainda existe e se o "
                 "WhatsApp do dono está conectado.",
     },
+    "publicacao_falhou": {
+        "titulo": "Oferta não foi entregue",
+        "significa": "Uma publicação falhou antes de uma causa mais específica ser identificada.",
+        "acao": "Confira o detalhe técnico, corrija a origem e execute um novo teste seguro.",
+    },
     "send_timeout": {
         "titulo": "Serviço WhatsApp não respondeu a tempo",
         "significa": "O transporte do WhatsApp ficou indisponível ou não confirmou a "
@@ -53,6 +58,46 @@ CATALOGO = {
                      "duplicar uma oferta no grupo.",
         "acao": "Confirme a mensagem no grupo antes de reenviar. Se repetir para várias "
                  "contas, investigue a máquina spreading-wa e o Chromium.",
+    },
+    "whatsapp_preflight_timeout": {
+        "titulo": "WhatsApp travou antes do envio",
+        "significa": "O WhatsApp Web não respondeu ao teste de conexão. Nenhuma promoção foi publicada nessa tentativa.",
+        "acao": "A sessão é recuperada automaticamente. Use “Retestar” para validar sessão e grupo sem enviar mensagem.",
+    },
+    "whatsapp_grupo_timeout": {
+        "titulo": "WhatsApp travou ao validar o grupo",
+        "significa": "A sessão estava viva, mas não respondeu ao conferir o destino antes do envio.",
+        "acao": "A sessão é recuperada automaticamente. Reteste o grupo antes de tentar publicar de novo.",
+    },
+    "whatsapp_frame_recarregado": {
+        "titulo": "WhatsApp Web estava recarregando",
+        "significa": "A página do WhatsApp foi trocada durante a preparação do envio; não houve repetição automática.",
+        "acao": "Aguarde a recuperação e use o reteste seguro antes de uma nova publicação.",
+    },
+    "whatsapp_confirmacao": {
+        "titulo": "Confirmação de envio inconsistente",
+        "significa": "O WhatsApp aceitou ou iniciou a mensagem, mas não devolveu confirmação confiável.",
+        "acao": "Confira o grupo antes de reenviar; o sistema não repete mensagens ambíguas.",
+    },
+    "whatsapp_erro_minificado": {
+        "titulo": "WhatsApp devolveu erro interno",
+        "significa": "O WhatsApp Web devolveu uma falha sem detalhe útil; o erro foi separado para investigação.",
+        "acao": "Reteste a sessão e o grupo. Se voltar a ocorrer, revise a versão do WhatsApp Web/Chromium.",
+    },
+    "link_afiliado_recusado": {
+        "titulo": "Link de afiliado recusado",
+        "significa": "O marketplace não gerou um link com atribuição para a promoção.",
+        "acao": "Reteste o produto sem publicar. Se falhar, reconecte o marketplace ou descarte a oferta.",
+    },
+    "link_reprovado": {
+        "titulo": "Link da oferta reprovado",
+        "significa": "A verificação não confirmou que o link ainda representa a promoção esperada.",
+        "acao": "Reteste sem publicar; mantenha a oferta fora dos grupos enquanto não for aprovada.",
+    },
+    "links_ciclo_erro": {
+        "titulo": "Worker de links de afiliado falhou",
+        "significa": "O ciclo inteiro de geração de links parou antes de concluir.",
+        "acao": "Confira o worker de links e a sessão Mercado Livre; um novo lote bem-sucedido confirma o ajuste.",
     },
     "tick_erro": {
         "titulo": "Ciclo de envio quebrou",
@@ -162,9 +207,11 @@ SINAIS = (
 
 # Nomes de worker legíveis (JOBS do automacao_state + o que cada um faz).
 WORKERS = (
-    ("scrape", "Raspagem de ofertas"),
-    ("envio", "Envio de ofertas"),
-    ("relatorios", "Relatórios de comissão"),
+    ("scrape", "scrape", "Raspagem de ofertas"),
+    ("scrape_rapido", "scrape", "Feed rápido de ofertas"),
+    ("links", "scrape", "Links de afiliado"),
+    ("envio", "envio", "Envio de ofertas"),
+    ("relatorios", "relatorios", "Relatórios de comissão"),
 )
 
 
@@ -230,9 +277,9 @@ def _problemas(qs) -> list[dict]:
 def _workers() -> list[dict]:
     """Estado dos loops. Explica o silêncio: zero erro com worker parado não é saúde."""
     out = []
-    for job, nome in WORKERS:
+    for job, controle, nome in WORKERS:
         try:
-            ligado = st.is_enabled(job)
+            ligado = st.is_enabled(controle)
             vivo = st.worker_alive(job)
             estado = st.read_state(job) or {}
         except Exception:
@@ -248,6 +295,54 @@ def _workers() -> list[dict]:
     return out
 
 
+def _incidentes(usuario, desde):
+    """Incidentes abertos sempre aparecem; concluídos seguem o período escolhido."""
+    base = IncidenteSaude.objects.select_related("usuario", "evento_origem")
+    if usuario is not None:
+        base = base.filter(usuario=usuario)
+    abertos = base.filter(status="aberto")
+    concluidos = base.filter(status="concluido", confirmado_em__gte=desde)
+
+    def agrupar(itens):
+        grupos = {}
+        for incidente in itens:
+            chave = (incidente.pipeline, incidente.causa, incidente.escopo)
+            grupo = grupos.setdefault(chave, [])
+            grupo.append(incidente)
+        saida = []
+        for (_, causa, _), itens_grupo in grupos.items():
+            ultimo = max(itens_grupo, key=lambda i: i.ultima_ocorrencia)
+            info = descrever(causa)
+            afetados = [{"usuario_id": i.usuario_id,
+                         "usuario__username": i.usuario.get_username(),
+                         "exemplo": i.evento_origem}
+                        for i in itens_grupo if i.usuario]
+            afetados.sort(key=lambda a: (a["usuario__username"], a["usuario_id"]))
+            sistema = next((i.evento_origem for i in itens_grupo if not i.usuario), None)
+            saida.append({
+                "id": ultimo.id if len(itens_grupo) == 1 else None,
+                "causa": causa,
+                # Compatibilidade da leitura anterior; causa é o identificador novo.
+                "evento": {"publicacao_falhou": "send_failed", "whatsapp_timeout_entrega": "send_timeout"}.get(causa, causa),
+                "pipeline": ultimo.pipeline, "escopo": ultimo.escopo,
+                "n": sum(i.ocorrencias for i in itens_grupo),
+                "level": "error" if any(i.level == "error" for i in itens_grupo) else "warning",
+                "critico": any(i.level == "error" for i in itens_grupo),
+                "ultimo": ultimo.ultima_ocorrencia, "mensagem": ultimo.ultima_mensagem,
+                "contexto": ultimo.contexto, "usuario": ultimo.usuario if len(itens_grupo) == 1 else None,
+                "usuarios": len(afetados), "afetados": afetados, "sistema": sistema,
+                "confirmado_em": ultimo.confirmado_em, "confirmacao": ultimo.confirmacao,
+                "retestavel": len(itens_grupo) == 1 and causa.startswith((
+                    "whatsapp_", "link_", "sync_", "email_")),
+                **info,
+            })
+        return saida
+
+    chave = lambda x: (x["level"] != "error", -x["n"], x["ultimo"])
+    return sorted(agrupar(abertos), key=chave), sorted(
+        agrupar(concluidos), key=lambda x: x["confirmado_em"], reverse=True)
+
+
 def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") -> dict:
     """Fotografia do período: veredito, problemas agrupados, sinais de vida, workers."""
     agora = agora or timezone.now()
@@ -259,7 +354,14 @@ def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") ->
         # Busca sem correspondência não pode cair silenciosamente no relatório global.
         qs = qs.none()
 
-    problemas = _problemas(qs)
+    # Compatibilidade com registros anteriores ao modelo de incidentes e com
+    # testes que inserem EventoOperacional diretamente.
+    from apps.scrapers.incidentes_saude import reconciliar_eventos
+    # Eventos antigos sem projeção são reconciliados uma única vez. A própria
+    # consulta da Saúde não pode inflar as ocorrências a cada carregamento.
+    reconciliar_eventos(qs.filter(incidente_processado=False))
+    qs.filter(incidente_processado=False).update(incidente_processado=True)
+    problemas, concluidos = _incidentes(usuario, desde) if not usuario_nome or usuario else ([], [])
     n_erros = sum(p["n"] for p in problemas if p["critico"])
     n_avisos = sum(p["n"] for p in problemas if not p["critico"])
     grupos_criticos = sum(1 for p in problemas if p["critico"])
@@ -288,6 +390,7 @@ def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") ->
         "horas": horas, "desde": desde, "agora": agora,
         "estado": estado, "texto": texto,
         "problemas": problemas,
+        "concluidos": concluidos,
         "n_erros": n_erros, "n_avisos": n_avisos,
         "sinais": sinais, "workers": workers,
         "total": qs.count(),

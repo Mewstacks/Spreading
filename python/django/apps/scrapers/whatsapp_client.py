@@ -197,6 +197,21 @@ def refresh_grupos(session=None) -> dict:
     return data
 
 
+def diagnosticar(session=None, grupoid: str = "") -> dict:
+    """Confere sessão e grupo sem criar ou enviar uma mensagem."""
+    if not session:
+        return {"sucesso": False, "causa": "whatsapp_desconectado",
+                "mensagem": "Sessão WhatsApp do usuário ausente."}
+    data = _request_json(
+        "POST", "/api/diagnostico", headers=_headers(), params=_params(session),
+        json={"session": session, "grupoid": grupoid}, timeout=30, attempts=1,
+    )
+    if "erro" in data:
+        return {"sucesso": False, "causa": "whatsapp_transporte",
+                "mensagem": "Não foi possível falar com o serviço WhatsApp."}
+    return data
+
+
 def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
                   mimetype: str = "image/jpeg", legenda: str = None,
                   session=None) -> dict:

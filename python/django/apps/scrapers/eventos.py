@@ -39,7 +39,7 @@ def log_event(pipeline: str, evento: str, mensagem: str, *, level="info",
         erro = ""
         if exc is not None:
             erro = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:]
-        return EventoOperacional.objects.create(
+        evento_criado = EventoOperacional.objects.create(
             pipeline=pipeline,
             evento=evento[:80],
             level=level,
@@ -48,5 +48,14 @@ def log_event(pipeline: str, evento: str, mensagem: str, *, level="info",
             contexto=_clean(contexto or {}),
             erro=erro,
         )
+        # O log cru continua imutável; o incidente é uma projeção operável dele.
+        # Falhar ao atualizar a projeção nunca pode derrubar o fluxo principal.
+        try:
+            from apps.scrapers.incidentes_saude import processar_evento
+            processar_evento(evento_criado)
+            EventoOperacional.objects.filter(pk=evento_criado.pk).update(incidente_processado=True)
+        except Exception:
+            pass
+        return evento_criado
     except Exception:
         return None
