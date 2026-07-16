@@ -33,6 +33,7 @@ const { donoDoSingletonLock, decidirSobreDono } = require('./chromium_locks');
 const authStore = require('./auth_store');
 const { criarPrazo, expirou, timeoutDaEtapa, timeoutComEnvioIniciado } = require('./send_deadline');
 const { timeoutPreflight, mensagemPreflight, iniciarRecuperacaoPreflight } = require('./preflight_recovery');
+const { aguardarStorePronto } = require('./store_ready');
 
 const app = express();
 
@@ -113,6 +114,13 @@ const SEND_TIMEOUT_MS = parseInt(process.env.SEND_TIMEOUT_MS, 10) || 60000;
 // cadeia da sessao, nao apenas o sendMessage do Chromium.
 const SEND_REQUEST_TIMEOUT_MS = parseInt(process.env.SEND_REQUEST_TIMEOUT_MS, 10) || 55000;
 const MIN_SEND_INTERVAL_MS = parseInt(process.env.MIN_SEND_INTERVAL_MS, 10) || 2500;
+// O evento `ready` do whatsapp-web.js pode chegar antes de a pagina injetar
+// window.WWebJS.getChat/window.Store. Em vez de falhar o envio na primeira
+// olhada, aguardamos os modulos por ate STORE_READY_WAIT_MS (no preflight do
+// envio) / READY_STORE_WAIT_MS (no gate do `ready`). A maioria das corridas
+// fecha em 1-3s, entao o envio conclui na mesma request e sem reciclar.
+const STORE_READY_WAIT_MS = parseInt(process.env.STORE_READY_WAIT_MS, 10) || 8000;
+const READY_STORE_WAIT_MS = parseInt(process.env.READY_STORE_WAIT_MS, 10) || 10000;
 
 const startWatchdog = () => {
     if (process.env.DISABLE_WATCHDOG === '1') return null;
@@ -385,6 +393,23 @@ const lerGruposDaPagina = (session) => session.client.pupPage.evaluate(
 // com um id ja validado por idChatValido.
 const lerGrupoDaPagina = (session, chatId) => session.client.pupPage.evaluate(
     `(${inspecionarGrupo.toString()})(window, ${JSON.stringify(chatId)})`
+);
+
+// O sendMessage resolve o destino via window.WWebJS.getChat DENTRO da pagina;
+// esses modulos (e window.Store) so existem depois que o bundle do WA Web
+// termina de injetar — o que pode acontecer alguns segundos APOS o evento
+// `ready`. storeInjetado faz uma checagem; aguardarStorePronto espera por eles.
+const storeInjetado = (session) => session.client.pupPage.evaluate(
+    () => Boolean(window.WWebJS && typeof window.WWebJS.getChat === 'function' && window.Store)
+);
+// Uma checagem do store, protegida por timeout e pelo retry de frame destacado.
+// probeTimeoutMs pode ser funcao para derivar do prazo compartilhado do envio.
+const sondarStore = (session, probeTimeoutMs = 10000) => repetirSeFrameDestacado(
+    () => withTimeout(
+        storeInjetado(session),
+        typeof probeTimeoutMs === 'function' ? probeTimeoutMs() : probeTimeoutMs,
+        'verificarStore'
+    )
 );
 
 // Uma leitura de grupos. CONTRATO: nunca lanca — as rotas chamam syncGroups sem
@@ -665,6 +690,22 @@ const initializeSession = (session) => {
 
     client.on('ready', async () => {
         if (session.client !== client) return;
+        // O `ready` pode chegar antes de window.WWebJS/Store existirem. Confirmar
+        // aqui evita que o Django despache um envio numa janela em que o preflight
+        // ainda veria os modulos ausentes. Best-effort: se estourar, seguimos
+        // marcando conectado (o preflight do envio ainda protege). Nao mexe no
+        // invariante `conectado === fase 'conectado'`: apenas atrasa os dois juntos.
+        const storePronto = await aguardarStorePronto({
+            sondar: () => sondarStore(session),
+            tetoMs: READY_STORE_WAIT_MS,
+        }).catch(() => false);
+        if (session.client !== client) return; // pode ter reciclado durante a espera
+        if (!storePronto) {
+            console.warn(
+                `[${session.id}] 'ready' recebido, mas o store ainda nao confirmou em ${READY_STORE_WAIT_MS}ms; `
+                + 'seguindo com o preflight de envio como rede de seguranca.'
+            );
+        }
         if (session.initTimer) clearTimeout(session.initTimer);
         session.initTimer = null;
         session.isConnected = true;
@@ -848,16 +889,16 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         // envio quebra com "reading 'getChat'" (incidente real em producao).
         // Checar aqui fecha a janela entre o getState e o sendMessage.
         etapa = 'verificar_store';
-        const storePronto = await repetirSeFrameDestacado(
-            () => withTimeout(
-                session.client.pupPage.evaluate(
-                    () => Boolean(window.WWebJS && typeof window.WWebJS.getChat === 'function' && window.Store)
-                ),
-                timeoutEtapa(etapa, 10000), 'verificarStore'
-            )
-        );
+        // Nao falhe na primeira olhada: se os modulos ainda estao carregando,
+        // espere por eles dentro do prazo compartilhado. So reciclamos quando o
+        // store nao aparece nem apos a espera — pagina genuinamente travada.
+        const storePronto = await aguardarStorePronto({
+            sondar: () => sondarStore(session, () => timeoutEtapa(etapa, 10000)), // mantem o prazo compartilhado
+            tetoMs: STORE_READY_WAIT_MS,
+            expirou: () => expirou(prazo),
+        });
         if (!storePronto) {
-            setTimeout(() => recycleSession(session, 'store do WhatsApp indefinido no preflight'), 0).unref();
+            setTimeout(() => recycleSession(session, 'store do WhatsApp indefinido apos espera no preflight'), 0).unref();
             throw erroClassificado(
                 'O WhatsApp Web ainda estava carregando os módulos internos. '
                 + 'A sessão será recuperada automaticamente; aguarde alguns segundos e tente novamente.',
