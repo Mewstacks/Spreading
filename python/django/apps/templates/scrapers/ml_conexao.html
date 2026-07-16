@@ -272,7 +272,9 @@
   };
 
   poll();
-  setInterval(poll, 2500);
+  // 5s: os frames chegam pelo EventSource, não por aqui. Este poll só acompanha a
+  // fase do login, e cada chamada custa uma query pra validar a sessão salva.
+  setInterval(poll, 5000);
   if (window.lucide) lucide.createIcons();
 </script>
 {% endblock %}

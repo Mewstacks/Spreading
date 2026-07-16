@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import requests
 from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
+from django.core.cache import cache
 from django.core.management import call_command
 from django.urls import reverse
 from django.test import SimpleTestCase, TestCase, override_settings
@@ -220,6 +221,68 @@ class MLAuthPathTests(SimpleTestCase):
             self._tocar(os.path.join(d, "auth_1.json.bak"))
             self._tocar(os.path.join(d, "outra_coisa.json"))
             self.assertEqual(ml_auth_path(), os.path.join(d, "auth.json"))
+
+
+@override_settings(
+    WHATSAPP_API_URL="http://whatsapp.internal:3000",
+    WHATSAPP_API_KEY="secret",
+)
+class WhatsAppStatusCacheTests(SimpleTestCase):
+    """O status do WhatsApp é cacheado por poucos segundos.
+
+    Sem isso, cada aba com o painel aberto batia no Node a cada poll; com o Node
+    fora do ar cada request levava até 10s (timeout 5 × 2 tentativas) segurando uma
+    thread do gunicorn, e poucas abas travavam o app inteiro.
+    """
+
+    def setUp(self):
+        # LocMemCache sobrevive entre testes do mesmo processo: sem isto, a ordem
+        # de execução decidiria o resultado.
+        cache.clear()
+        self.addCleanup(cache.clear)
+
+    @patch("apps.scrapers.whatsapp_client.requests.request")
+    def test_status_repetido_bate_uma_vez_so_no_node(self, request):
+        request.return_value = Mock(json=lambda: {"conectado": True})
+
+        for _ in range(5):
+            self.assertTrue(whatsapp_client.status("user-1")["conectado"])
+
+        self.assertEqual(request.call_count, 1)
+
+    @patch("apps.scrapers.whatsapp_client.requests.request")
+    def test_cache_e_por_sessao(self, request):
+        request.side_effect = [
+            Mock(json=lambda: {"conectado": True}),
+            Mock(json=lambda: {"conectado": False}),
+        ]
+
+        self.assertTrue(whatsapp_client.status("user-1")["conectado"])
+        self.assertFalse(whatsapp_client.status("user-2")["conectado"])
+        self.assertTrue(whatsapp_client.status("user-1")["conectado"])
+
+        self.assertEqual(request.call_count, 2)
+
+    @patch("apps.scrapers.whatsapp_client.requests.request")
+    def test_node_fora_do_ar_nao_e_remartelado(self, request):
+        request.side_effect = requests.ConnectionError("recusou")
+
+        for _ in range(3):
+            self.assertFalse(whatsapp_client.status("user-1")["conectado"])
+
+        # 2 tentativas do retry interno, uma vez só — as chamadas seguintes leem
+        # o erro cacheado em vez de esperar o timeout de novo.
+        self.assertEqual(request.call_count, 2)
+
+    @patch("apps.scrapers.whatsapp_client.requests.request")
+    def test_mexer_no_pareamento_invalida_o_cache(self, request):
+        request.return_value = Mock(json=lambda: {"conectado": False})
+        whatsapp_client.status("user-1")
+
+        request.return_value = Mock(json=lambda: {"conectado": True})
+        whatsapp_client.iniciar_sessao("user-1")
+
+        self.assertTrue(whatsapp_client.status("user-1")["conectado"])
 
 
 class WhatsAppIsolationTests(SimpleTestCase):

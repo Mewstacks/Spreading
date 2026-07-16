@@ -288,6 +288,8 @@
   };
 
   poll();
-  setInterval(poll, 2500);
+  // 5s, não 2,5s: o status é servido de um cache de 5s no backend, então polling mais
+  // rápido que isso só gasta thread de gunicorn sem trazer informação nova.
+  setInterval(poll, 5000);
 </script>
 {% endblock %}

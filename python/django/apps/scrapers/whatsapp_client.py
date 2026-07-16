@@ -24,6 +24,7 @@ import time
 
 import requests
 from django.conf import settings
+from django.core.cache import cache
 
 # Classificação de falha de envio. Espelha node.js/error_taxonomy.js — o Node
 # manda a `classe` no corpo de /api/enviar e ela tem precedência aqui.
@@ -109,11 +110,35 @@ def _request_json(method: str, path: str, *, headers=None, params=None, json=Non
     return {"erro": str(last_error)}
 
 
+_STATUS_TTL_S = 5
+
+
+def _chave_status(session=None) -> str:
+    return f"wa_status:{session or '_global'}"
+
+
+def invalidar_status(session=None) -> None:
+    """Descarta o status cacheado — chame depois de mexer no pareamento."""
+    cache.delete(_chave_status(session))
+
+
 def status(session=None) -> dict:
-    """Retorna {conectado: bool}. Exige api-key (rota fechada)."""
+    """Retorna {conectado: bool}. Exige api-key (rota fechada).
+
+    Cacheado por _STATUS_TTL_S porque o painel faz polling e cada chamada custa um
+    request ao Node — que, com o Node fora do ar, leva até 10s (timeout 5 × 2
+    tentativas) segurando uma thread do gunicorn. Com poucas threads e várias abas
+    abertas isso derrubava o app inteiro. Cachear a resposta de erro é intencional:
+    é justamente quando não se deve martelar o Node.
+    """
+    chave = _chave_status(session)
+    cacheado = cache.get(chave)
+    if cacheado is not None:
+        return cacheado
     data = _request_json("GET", "/api/status", headers=_headers_opt(),
                          params=_params(session), timeout=5)
     data.setdefault("conectado", False)
+    cache.set(chave, data, timeout=_STATUS_TTL_S)
     return data
 
 
@@ -121,6 +146,7 @@ def iniciar_sessao(session) -> dict:
     """Inicia explicitamente o único runtime WhatsApp deste usuário."""
     if not session:
         return {"sucesso": False, "erro": "Sessão de usuário ausente."}
+    invalidar_status(session)
     return _request_json(
         "POST", "/api/sessoes", headers=_headers(),
         json={"session": session}, timeout=10, attempts=1,
@@ -131,6 +157,7 @@ def desconectar(session) -> dict:
     """Desfaz o pareamento: revoga no celular e apaga a credencial do volume."""
     if not session:
         return {"sucesso": False, "erro": "Sessão de usuário ausente."}
+    invalidar_status(session)
     # timeout 25 > os 15s do client.logout no Node + margem do destroy.
     # attempts=1 de propósito: o retry cego de _request_json dobraria a espera
     # para 50s, e o Node já trata o logout como idempotente.

@@ -43,8 +43,14 @@ LOOP_MS = 50                     # granularidade do worker (bombeia CDP + drena 
 
 # Viewport remoto. O front escala o <canvas> pra caber na tela mantendo a proporção.
 VIEW_W, VIEW_H = 1280, 800
+
+# O frame transmitido é MENOR que o viewport de propósito: cada JPEG é encodado pelo
+# Chromium na mesma CPU do gunicorn, e o SSE lê a 20fps. A 1280x800/everyNthFrame:1
+# isso dava ~2MB/s e CPU saturada por espectador — numa tela de login, que é quase
+# toda estática. 960x600 + 1 frame a cada 2 mantém o login perfeitamente legível
+# (o front escala pro tamanho do canvas de qualquer jeito) por ~1/3 do custo.
 SCREENCAST = {"format": "jpeg", "quality": 55,
-              "maxWidth": VIEW_W, "maxHeight": VIEW_H, "everyNthFrame": 1}
+              "maxWidth": 960, "maxHeight": 600, "everyNthFrame": 2}
 
 MAX_EVENTOS_POR_POST = 60        # teto de eventos por request (anti-abuso da fila)
 
@@ -192,7 +198,13 @@ def _worker(user_id: int):
                     cdp.send("Page.screencastFrameAck",
                              {"sessionId": params.get("sessionId")})
                 except Exception:
-                    pass
+                    # O Chromium só manda o próximo frame depois do ack: perder um ack
+                    # congela a transmissão de vez. Não dá pra reagir aqui (o worker
+                    # segue vivo e o front reabre o EventSource), mas tem que aparecer
+                    # no log — congelado-e-silencioso é indepurável.
+                    logger.warning("screencastFrameAck falhou (user %s); a transmissão "
+                                   "pode congelar até o próximo start.", user_id,
+                                   exc_info=True)
 
             cdp.send("Page.enable")
             # Headless não tem janela, então o Chromium trata o documento como sem foco

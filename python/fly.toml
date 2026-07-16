@@ -45,8 +45,11 @@ primary_region = "gru"
     path = "/healthz"
     headers = { Host = "spreading-web.fly.dev", X-Forwarded-Proto = "https" }
 
-# 2 usuários: carga baixa. 1 vCPU basta; 2gb dá folga p/ Playwright (chromium ~400MB
-# no pico de raspagem) + gunicorn + workers. Suba p/ shared-cpu-2x se ficar lento.
+# CPU dedicada, não compartilhada: esta máquina roda gunicorn + 5 workers de automação
+# + Chromium (raspagem, Link Builder e o live view do login ML) ao mesmo tempo. Em
+# shared-cpu-* a Fly cobra por cota de baseline e aplica throttle agressivo quando ela
+# acaba — o Chromium sozinho queima a cota inteira e o painel inteiro fica lento junto,
+# inclusive o healthcheck. Playwright na mesma VM do servidor web exige dedicada.
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "2gb"
+  size = "performance-2x"
+  memory = "4gb"
