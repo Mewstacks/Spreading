@@ -27,7 +27,10 @@
   <div class="card-head">
     <h2><i data-lucide="users"></i> Usuários</h2>
     <span class="count">{{ total_users }}</span>
-    <a href="{% url 'superadmin-infra' %}" class="btn btn-sm btn-ghost" style="margin-left:.6rem;">
+    <a href="{% url 'superadmin-saude' %}" class="btn btn-sm btn-ghost" style="margin-left:.6rem;">
+      <i data-lucide="stethoscope"></i> Saúde
+    </a>
+    <a href="{% url 'superadmin-infra' %}" class="btn btn-sm btn-ghost">
       <i data-lucide="server"></i> Infra Fly
     </a>
   </div>

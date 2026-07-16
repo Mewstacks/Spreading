@@ -83,9 +83,21 @@ def signup(request):
             user = form.save()
             # Dispara verificação + boas-vindas. E-mail não verificado fica barrado
             # pelo EmailVerificadoMiddleware até clicar no link.
+            from apps.scrapers.eventos import log_event
             from .emails import enviar_verificacao, enviar_boas_vindas
-            enviar_verificacao(user, request)
+            log_event("onboarding", "signup", "Conta criada.", usuario=user,
+                      contexto={"email": user.email})
+            verificacao_ok = enviar_verificacao(user, request)
             enviar_boas_vindas(user)
+            if not verificacao_ok:
+                # O middleware barra quem não verificou, então e-mail que não sai =
+                # conta nova travada na porta. Sem este evento o usuário some e a
+                # gente nunca sabe que ele chegou a se cadastrar.
+                log_event(
+                    "onboarding", "verificacao_nao_enviada",
+                    "Conta criada mas o e-mail de verificação não saiu — usuário fica travado.",
+                    level="error", usuario=user, contexto={"email": user.email},
+                )
             login(request, user)  # sessão nova já autenticada (rotaciona session key)
             return redirect("verificacao-pendente")
     else:

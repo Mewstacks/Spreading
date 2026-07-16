@@ -39,7 +39,20 @@ def _enviar(assunto: str, destino: str, template_base: str, ctx: dict) -> bool:
         msg.send(fail_silently=False)
         return True
     except Exception as e:
+        # Registra no banco, não só no logger: e-mail que não sai é invisível por
+        # natureza — ninguém reclama de um e-mail que nunca chegou. Os chamadores
+        # tratam False como "segue o fluxo", então sem isto um SMTP mal configurado
+        # derruba verificação de conta e alerta de conexão sem deixar rastro.
+        from apps.scrapers.eventos import log_event
         logger.warning("Falha ao enviar e-mail '%s' para %s: %s", assunto, destino, e)
+        log_event(
+            "sistema", "email_falhou",
+            f"E-mail '{assunto}' não pôde ser enviado.",
+            level="error",
+            contexto={"assunto": assunto, "destino": destino,
+                      "backend": getattr(settings, "EMAIL_BACKEND", "")},
+            exc=e,
+        )
         return False
 
 

@@ -1393,3 +1393,221 @@ class PublicacaoOrfaTests(TestCase):
         pub = Publicacao.objects.get(usuario=self.user, produto=self.produto)
         self.assertEqual(pub.status, "falhou")
         self.assertIn("erro inesperado no envio", pub.erro)
+
+
+class RelatorioSaudeTests(TestCase):
+    """A tela de saúde é o que substitui a cliente como detector de falha.
+
+    Os testes fixam as duas propriedades que a tornam confiável: agrupar sem perder
+    gravidade, e nunca chamar de "saudável" um sistema que só está calado.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("saude-user", password="test")
+        self.admin = get_user_model().objects.create_superuser(
+            "saude-admin", "admin@x.com", "test")
+
+    def _evento(self, evento, level="error", pipeline="publicacao", **kw):
+        return EventoOperacional.objects.create(
+            pipeline=pipeline, evento=evento, level=level,
+            mensagem=kw.pop("mensagem", "falhou"), usuario=kw.pop("usuario", self.user),
+            contexto=kw.pop("contexto", {}),
+        )
+
+    def test_agrupa_ocorrencias_repetidas_num_problema_so(self):
+        from apps.scrapers.saude import resumo
+
+        for _ in range(4):
+            self._evento("send_failed", level="warning")
+
+        r = resumo(horas=24)
+        self.assertEqual(len(r["problemas"]), 1)
+        self.assertEqual(r["problemas"][0]["n"], 4)
+        self.assertEqual(r["problemas"][0]["usuarios"], 1)
+
+    def test_erro_vem_antes_de_aviso_mesmo_sendo_menos_frequente(self):
+        from apps.scrapers.saude import resumo
+
+        for _ in range(9):
+            self._evento("send_failed", level="warning")
+        self._evento("config_pausada", level="error")
+
+        problemas = resumo(horas=24)["problemas"]
+        self.assertEqual(problemas[0]["evento"], "config_pausada")
+        self.assertEqual(problemas[1]["evento"], "send_failed")
+
+    def test_evento_traduzido_para_linguagem_de_negocio(self):
+        from apps.scrapers.saude import resumo
+
+        self._evento("config_pausada")
+        p = resumo(horas=24)["problemas"][0]
+        self.assertEqual(p["titulo"], "Automação pausada sozinha")
+        self.assertIn("parou de receber ofertas", p["significa"])
+        self.assertTrue(p["acao"])
+
+    def test_evento_nao_catalogado_nao_some_da_tela(self):
+        from apps.scrapers.saude import resumo
+
+        self._evento("evento_que_nao_existe_no_catalogo")
+        p = resumo(horas=24)["problemas"][0]
+        self.assertEqual(p["titulo"], "evento_que_nao_existe_no_catalogo")
+        self.assertIn("não catalogado", p["significa"])
+
+    def test_ignora_evento_fora_da_janela(self):
+        from apps.scrapers.saude import resumo
+
+        antigo = self._evento("config_pausada")
+        EventoOperacional.objects.filter(pk=antigo.pk).update(
+            criado_em=timezone.now() - timedelta(hours=48))
+
+        self.assertEqual(resumo(horas=24)["problemas"], [])
+        self.assertEqual(len(resumo(horas=168)["problemas"]), 1)
+
+    def test_sem_erro_e_com_worker_saudavel_o_veredito_e_ok(self):
+        from apps.scrapers.saude import resumo
+
+        with patch("apps.scrapers.saude._workers", return_value=[]):
+            r = resumo(horas=24)
+        self.assertEqual(r["estado"], "ok")
+
+    def test_silencio_com_worker_parado_nao_e_saude(self):
+        """Zero erro porque nada rodou é o pior falso negativo possível."""
+        from apps.scrapers.saude import resumo
+
+        parado = [{"job": "envio", "nome": "Envio", "ligado": True, "vivo": False,
+                   "fase": "?", "ultima_msg": "", "alerta": True}]
+        with patch("apps.scrapers.saude._workers", return_value=parado):
+            r = resumo(horas=24)
+
+        self.assertEqual(r["estado"], "critico")
+        self.assertIn("não está rodando", r["texto"])
+
+    def test_pagina_exige_superadmin(self):
+        self.client.force_login(self.user)
+        resposta = self.client.get(reverse("superadmin-saude"))
+        self.assertNotEqual(resposta.status_code, 200)
+
+    def test_pagina_renderiza_para_superadmin(self):
+        self._evento("config_pausada")
+        self.client.force_login(self.admin)
+        with patch("apps.scrapers.saude._workers", return_value=[]):
+            resposta = self.client.get(reverse("superadmin-saude"))
+        self.assertEqual(resposta.status_code, 200)
+        self.assertContains(resposta, "Automação pausada sozinha")
+
+
+class InstrumentacaoTests(TestCase):
+    """Garante que os pontos que falhavam em silêncio agora deixam rastro."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            "instr-user", "instr@x.com", "test")
+
+    def test_email_que_nao_sai_vira_evento(self):
+        from apps.accounts.emails import enviar_boas_vindas
+
+        with patch("apps.accounts.emails.EmailMultiAlternatives") as msg:
+            msg.return_value.send.side_effect = OSError("SMTP recusou")
+            enviado = enviar_boas_vindas(self.user)
+
+        self.assertFalse(enviado)
+        evento = EventoOperacional.objects.get(evento="email_falhou")
+        self.assertEqual(evento.level, "error")
+        self.assertIn("SMTP recusou", evento.erro)
+
+    def test_queda_de_conexao_vira_evento_mesmo_sem_email(self):
+        """O evento não pode depender do e-mail: era exatamente esse o buraco."""
+        from apps.scrapers.monitor_conexao import _processar
+
+        perfil = self.user.perfil
+        perfil.wa_estado = True
+        enviar = Mock(return_value=False)  # SMTP quebrado
+
+        _processar(perfil, "WhatsApp", "wa", False, timezone.now(),
+                   timedelta(hours=6), enviar)
+
+        evento = EventoOperacional.objects.get(evento="conexao_caiu")
+        self.assertEqual(evento.pipeline, "conexao")
+        self.assertEqual(evento.level, "error")
+        self.assertEqual(evento.usuario, self.user)
+
+    def test_conexao_caida_nao_gera_evento_a_cada_tick(self):
+        """Com SMTP quebrado o cooldown precisa segurar mesmo assim.
+
+        O carimbo do alerta só era gravado quando o e-mail ia embora; com SMTP fora,
+        ficava None para sempre, o cooldown nunca fechava e cada tick (5min) refazia
+        alerta + evento. 288 linhas/dia por usuário caído tornariam a tela inútil.
+        """
+        from apps.scrapers.monitor_conexao import _processar
+
+        perfil = self.user.perfil
+        perfil.wa_estado = True
+        enviar = Mock(return_value=False)  # SMTP quebrado, como está em produção hoje
+        agora = timezone.now()
+
+        # 12 ticks de 5min = 1 hora caído, dentro do cooldown de 6h.
+        for i in range(12):
+            _processar(perfil, "WhatsApp", "wa", False, agora + timedelta(minutes=5 * i),
+                       timedelta(hours=6), enviar)
+
+        self.assertEqual(
+            EventoOperacional.objects.filter(evento="conexao_caiu").count(), 1)
+        self.assertEqual(enviar.call_count, 1)
+
+    def test_conexao_caida_reaparece_depois_do_cooldown(self):
+        """Silenciar não pode virar esquecer: quem segue caído volta a aparecer."""
+        from apps.scrapers.monitor_conexao import _processar
+
+        perfil = self.user.perfil
+        perfil.wa_estado = True
+        agora = timezone.now()
+        enviar = Mock(return_value=False)
+
+        _processar(perfil, "WhatsApp", "wa", False, agora, timedelta(hours=6), enviar)
+        _processar(perfil, "WhatsApp", "wa", False, agora + timedelta(hours=7),
+                   timedelta(hours=6), enviar)
+
+        eventos = EventoOperacional.objects.filter(evento="conexao_caiu")
+        self.assertEqual(eventos.count(), 2)
+        self.assertTrue(eventos.order_by("-criado_em").first().contexto["repique"])
+
+    def test_reconexao_vira_evento(self):
+        from apps.scrapers.monitor_conexao import _processar
+
+        perfil = self.user.perfil
+        perfil.wa_estado = False
+        _processar(perfil, "WhatsApp", "wa", True, timezone.now(),
+                   timedelta(hours=6), Mock(return_value=True))
+
+        self.assertTrue(EventoOperacional.objects.filter(
+            evento="conexao_voltou", usuario=self.user).exists())
+
+    def test_signup_sem_email_de_verificacao_vira_evento(self):
+        # O patch é em accounts.emails (não em accounts.views): o import lá é local,
+        # resolvido no módulo de origem só na hora da chamada.
+        with patch("apps.accounts.emails.enviar_verificacao", return_value=False):
+            self.client.post(reverse("signup"), {
+                "username": "novo-usuario", "email": "novo@x.com",
+                "password1": "senha-forte-123", "password2": "senha-forte-123",
+            })
+
+        self.assertTrue(EventoOperacional.objects.filter(
+            evento="verificacao_nao_enviada", level="error").exists())
+
+
+class PurgaEventosTests(TestCase):
+    def test_purga_remove_so_o_que_passou_da_janela(self):
+        from apps.scrapers.maintenance import purgar_eventos_antigos
+
+        velho = EventoOperacional.objects.create(
+            pipeline="sistema", evento="velho", mensagem="x")
+        EventoOperacional.objects.filter(pk=velho.pk).update(
+            criado_em=timezone.now() - timedelta(days=31))
+        EventoOperacional.objects.create(
+            pipeline="sistema", evento="novo", mensagem="x")
+
+        apagados = purgar_eventos_antigos(dias=30)
+
+        self.assertEqual(apagados, 1)
+        self.assertEqual(
+            list(EventoOperacional.objects.values_list("evento", flat=True)), ["novo"])

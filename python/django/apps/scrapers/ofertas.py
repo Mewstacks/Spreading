@@ -756,6 +756,7 @@ def processar_configs_de_envio():
     Retorna lista de resultados por config.
     """
     from apps.scrapers import whatsapp_client
+    from apps.scrapers.eventos import log_event
     from apps.scrapers.models import ConfiguracaoEnvio, HistoricoEnvio
 
     agora = timezone.now()
@@ -873,6 +874,21 @@ def processar_configs_de_envio():
             if cfg.pausar_apos_falhas and cfg.falhas_consecutivas >= cfg.pausar_apos_falhas:
                 cfg.ativo = False
                 cfg.motivo_pausa = (r.get("motivo") or "Falhas consecutivas")[:255]
+                # Nível error: a automação do usuário acabou de morrer e só volta
+                # com ação humana. É a falha mais cara do produto (ele para de
+                # receber ofertas e não é avisado), então precisa saltar no relatório.
+                log_event(
+                    "publicacao", "config_pausada",
+                    f"Automação pausada após {cfg.falhas_consecutivas} falhas: {cfg.motivo_pausa}",
+                    level="error", usuario=cfg.owner,
+                    contexto={
+                        "config_id": cfg.id,
+                        "destino": cfg.grupo_nome or cfg.grupo_id,
+                        "canal": getattr(cfg, "canal", "whatsapp"),
+                        "falhas_consecutivas": cfg.falhas_consecutivas,
+                        "motivo": cfg.motivo_pausa,
+                    },
+                )
         cfg.save(update_fields=[
             "proximo_envio", "ultimo_envio", "falhas_consecutivas",
             "motivo_pausa", "ativo"])

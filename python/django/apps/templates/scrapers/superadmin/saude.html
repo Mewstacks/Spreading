@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Superadmin — Saúde do sistema{% endblock %}
+
+{% block content %}
+{% comment %}
+Relatório diário legível. A ordem é deliberada: veredito -> o que fazer -> prova de
+vida. Quem abre isto às 8h precisa saber em 2 segundos se tem trabalho hoje.
+{% endcomment %}
+<style>
+  .veredito { border-radius: var(--radius); padding: 1rem 1.1rem; margin-bottom: 1rem;
+    border: 1px solid; display: flex; align-items: center; gap: .8rem; }
+  .veredito .lucide { width: 1.6rem; height: 1.6rem; flex: none; }
+  .veredito h2 { margin: 0; font-size: 1.05rem; line-height: 1.3; }
+  .veredito p { margin: .15rem 0 0; font-size: .8rem; opacity: .85; }
+  .veredito.ok      { background: var(--green-bg);  color: var(--green);  border-color: color-mix(in srgb, var(--green) 30%, transparent); }
+  .veredito.atencao { background: var(--yellow-bg); color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 30%, transparent); }
+  .veredito.critico { background: var(--red-bg);    color: var(--red);    border-color: color-mix(in srgb, var(--red) 30%, transparent); }
+
+  .prob { border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: .85rem .9rem; margin-bottom: .7rem; background: var(--surface-2); }
+  .prob.critico { border-left: 3px solid var(--red); }
+  .prob.aviso   { border-left: 3px solid var(--yellow); }
+  .prob-head { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: .45rem; }
+  .prob-head strong { font-size: .95rem; }
+  .prob dl { margin: .5rem 0 0; font-size: .82rem; line-height: 1.45; }
+  .prob dt { color: var(--muted); font-size: .7rem; text-transform: uppercase;
+    letter-spacing: .04em; margin-top: .5rem; }
+  .prob dd { margin: .1rem 0 0; }
+  .prob details { margin-top: .6rem; font-size: .78rem; }
+  /* min-height 44px: alvo de toque confortável no celular (ver CLAUDE.md). */
+  .prob summary { cursor: pointer; color: var(--muted); padding: .4rem 0;
+    min-height: 44px; display: flex; align-items: center; }
+  .prob pre { background: var(--surface-3); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: .6rem; overflow-x: auto; font-size: .72rem; margin: .4rem 0 0; white-space: pre-wrap;
+    word-break: break-word; }
+  .meta { color: var(--muted); font-size: .75rem; }
+  .periodo { display: flex; flex-wrap: wrap; gap: .4rem; }
+  @media (min-width: 768px) { .veredito h2 { font-size: 1.2rem; } }
+</style>
+
+<div style="display:flex;flex-wrap:wrap;gap:.5rem;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+  <a href="{% url 'superadmin-usuarios' %}" class="btn btn-sm btn-ghost"><i data-lucide="arrow-left"></i> Voltar</a>
+  <div class="periodo">
+    <a href="?horas=24"  class="btn btn-sm {% if horas == 24 %}btn-purple{% else %}btn-ghost{% endif %}">24 horas</a>
+    <a href="?horas=72"  class="btn btn-sm {% if horas == 72 %}btn-purple{% else %}btn-ghost{% endif %}">3 dias</a>
+    <a href="?horas=168" class="btn btn-sm {% if horas == 168 %}btn-purple{% else %}btn-ghost{% endif %}">7 dias</a>
+  </div>
+</div>
+
+<div class="veredito {{ r.estado }}">
+  {% if r.estado == 'ok' %}<i data-lucide="check-circle-2"></i>
+  {% elif r.estado == 'atencao' %}<i data-lucide="alert-triangle"></i>
+  {% else %}<i data-lucide="alert-octagon"></i>{% endif %}
+  <div>
+    <h2>{{ r.texto }}</h2>
+    <p>Período: últimas {{ r.horas }}h (desde {{ r.desde|date:"d/m H:i" }}) — {{ r.n_erros }} erro(s), {{ r.n_avisos }} aviso(s) em {{ r.total }} evento(s).</p>
+  </div>
+</div>
+
+{% comment %}
+Workers antes dos problemas: se um worker está parado, a lista de erros abaixo está
+mentindo por omissão — nada roda, então nada falha.
+{% endcomment %}
+<div class="card">
+  <div class="card-head"><h2><i data-lucide="activity"></i> Workers</h2></div>
+  <div class="stat-grid">
+    {% for w in r.workers %}
+    <div class="stat">
+      <div style="display:flex;align-items:center;gap:.4rem;">
+        <span class="dot {% if w.vivo and w.ligado %}on{% else %}off{% endif %}"></span>
+        <strong style="font-size:.85rem;">{{ w.nome }}</strong>
+      </div>
+      <div class="l" style="margin-top:.3rem;">
+        {% if w.alerta %}<span style="color:var(--red);font-weight:600;">Ligado mas não está rodando</span>
+        {% elif not w.ligado %}Desligado na tela
+        {% else %}{{ w.fase }}{% endif %}
+      </div>
+      {% if w.ultima_msg %}<div class="l" style="margin-top:.2rem;">{{ w.ultima_msg|truncatechars:60 }}</div>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2><i data-lucide="stethoscope"></i> Precisa de atenção</h2>
+  </div>
+  {% for p in r.problemas %}
+  <div class="prob {% if p.critico %}critico{% else %}aviso{% endif %}">
+    <div class="prob-head">
+      <strong>{{ p.titulo }}</strong>
+      <span class="badge {% if p.critico %}badge-red{% else %}badge-yellow{% endif %}">
+        {{ p.n }}× {% if p.critico %}erro{% else %}aviso{% endif %}
+      </span>
+      <span class="badge badge-muted">{{ p.pipeline }}</span>
+      <span class="meta" style="margin-left:auto;">último {{ p.ultimo|date:"d/m H:i" }}</span>
+    </div>
+
+    <dl>
+      <dt>O que significa</dt>
+      <dd>{{ p.significa }}</dd>
+      <dt>O que fazer</dt>
+      <dd>{{ p.acao }}</dd>
+      {% if p.afetados %}
+      <dt>Quem foi afetado</dt>
+      <dd>{{ p.afetados|join:", " }}{% if p.usuarios > 5 %} e mais {{ p.usuarios|add:"-5" }}{% endif %}</dd>
+      {% endif %}
+    </dl>
+
+    <details>
+      <summary>Detalhe técnico ({{ p.evento }})</summary>
+      {% if p.exemplo %}
+        <p class="meta" style="margin:.4rem 0 0;">Exemplo mais recente — {{ p.exemplo.criado_em|date:"d/m/Y H:i:s" }}{% if p.exemplo.usuario %} · {{ p.exemplo.usuario.get_username }}{% endif %}</p>
+        <pre>{{ p.exemplo.mensagem }}</pre>
+        {% if p.exemplo.contexto %}<pre>{{ p.exemplo.contexto }}</pre>{% endif %}
+        {% if p.exemplo.erro %}<pre>{{ p.exemplo.erro }}</pre>{% endif %}
+      {% endif %}
+    </details>
+  </div>
+  {% empty %}
+  <div class="msg msg-info">Nenhum erro nem aviso nas últimas {{ r.horas }}h.</div>
+  {% endfor %}
+</div>
+
+{# Prova de vida: "zero erro" só é boa notícia se algo aconteceu. #}
+<div class="card">
+  <div class="card-head"><h2><i data-lucide="heart-pulse"></i> Sinais de vida no período</h2></div>
+  <div class="stat-grid">
+    {% for s in r.sinais %}
+    <div class="stat"><div class="n">{{ s.n }}</div><div class="l">{{ s.nome }}</div></div>
+    {% endfor %}
+  </div>
+  <p style="color:var(--muted);font-size:.78rem;margin-top:.8rem;">
+    Zero erro com zero atividade não é saúde — confira os workers acima.
+    O log cru de cada evento fica em <a href="{% url 'superadmin-infra' %}">Infra</a> e no Django Admin.
+  </p>
+</div>
+{% endblock %}

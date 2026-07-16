@@ -20,6 +20,7 @@ from apps.scrapers.fly_infra import snapshot as fly_snapshot
 from apps.scrapers.models import (
     CanalMonitorado, ConfiguracaoEnvio, EventoOperacional, HistoricoEnvio,
 )
+from apps.scrapers.saude import resumo as saude_resumo
 from apps.scrapers.views import superadmin_required
 
 User = get_user_model()
@@ -114,6 +115,22 @@ def superadmin_usuario_detalhe(request, user_id):
     user = get_object_or_404(User.objects.select_related("perfil"), pk=user_id)
     return render(request, "scrapers/superadmin/usuario_detalhe.html",
                   {"u": _uso_usuario(user)})
+
+
+@superadmin_required
+def superadmin_saude(request):
+    """Relatório diário de saúde: o que quebrou, para quem, e o que fazer.
+
+    Período curto por padrão (24h) porque a pergunta que esta tela responde é "o que
+    aconteceu desde ontem"; 7 dias serve para ver se algo é recorrente ou foi blip.
+    """
+    try:
+        horas = int(request.GET.get("horas", 24))
+    except (TypeError, ValueError):
+        horas = 24
+    horas = horas if horas in (24, 72, 168) else 24
+    return render(request, "scrapers/superadmin/saude.html",
+                  {"r": saude_resumo(horas=horas), "horas": horas})
 
 
 @superadmin_required

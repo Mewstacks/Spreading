@@ -18,6 +18,7 @@ from django.db import connections
 from django.utils import timezone
 
 from apps.scrapers import automacao_state as st
+from apps.scrapers.eventos import log_event
 
 logger = logging.getLogger("apps.automacao")
 
@@ -76,8 +77,12 @@ def _rodar_scrape():
         )
         try:
             mp.scrape_all(termos=termos)
-        except Exception:
+        except Exception as e:
             logger.exception("Scrape '%s' falhou", slug)
+            # Por loja: uma fonte quebrada (seletor mudou, bloqueio) não derruba o
+            # ciclo, então some do radar. É a falha que envenena o catálogo devagar.
+            log_event("scraper", "fonte_falhou", f"A coleta da loja {slug} falhou.",
+                      level="error", contexto={"marketplace": slug}, exc=e)
             falhas.append(slug)
             from apps.scrapers.models import FonteIngestao
             FonteIngestao.objects.filter(marketplace=slug, habilitada=True).update(
@@ -170,8 +175,10 @@ class Command(BaseCommand):
             try:
                 _renovar_conexoes_db()
                 _rodar_scrape_rapido()
-            except Exception:
+            except Exception as e:
                 logger.exception("Erro no scrape-flash")
+                log_event("scraper", "flash_erro", f"Ciclo do feed rápido falhou: {e}",
+                          level="error", exc=e)
             proximo = timezone.now() + timedelta(minutes=tick)
             st.write_state("scrape_rapido", fase="aguardando",
                            proximo=proximo.isoformat())
@@ -215,8 +222,10 @@ class Command(BaseCommand):
                     ultima_msg=(f"Ciclo {ciclos} parcial; nova tentativa em 30 min."
                                 if degradado else f"Ciclo {ciclos} concluído às {fim:%H:%M}."),
                 )
-            except Exception:
+            except Exception as e:
                 logger.exception("Erro no scrape")
+                log_event("scraper", "scrape_erro", f"Ciclo de raspagem falhou: {e}",
+                          level="error", contexto={"ciclos": ciclos}, exc=e)
                 proximo = timezone.now() + timedelta(minutes=RETRY_MINUTOS)
                 st.write_state("scrape", fase="aguardando", loja_atual=None,
                                proximo_ciclo=proximo.isoformat(), erro=ERRO_PUBLICO)
@@ -228,6 +237,7 @@ class Command(BaseCommand):
         POLL = 15
         logger.info("ENVIO worker no ar; processa regras a cada %smin quando ligado", tick)
         ticks = 0
+        ultima_purga = None  # data da última purga do log (1x/dia, ver abaixo)
         proximo = timezone.now()  # vencido: processa assim que ligarem
         while True:
             if not st.is_enabled("envio"):
@@ -252,6 +262,19 @@ class Command(BaseCommand):
                         logger.warning("%s publicacao(oes) orfa(s) fechada(s) como falha", orfas)
                 except Exception as e:
                     logger.warning("Reconciliacao de publicacoes falhou: %s", e)
+                # Purga do log 1x/dia. Mora neste loop porque é o único ligado o dia
+                # todo em produção; se o envio estiver desligado nada gera evento, então
+                # não purgar também não é problema. Nunca derruba o tick.
+                hoje_purga = timezone.localdate()
+                if ultima_purga != hoje_purga:
+                    try:
+                        from apps.scrapers.maintenance import purgar_eventos_antigos
+                        apagados = purgar_eventos_antigos()
+                        ultima_purga = hoje_purga
+                        if apagados:
+                            logger.info("Purga de eventos: %s linha(s) removida(s)", apagados)
+                    except Exception as e:
+                        logger.warning("Purga de eventos falhou: %s", e)
                 res = processar_configs_de_envio()
                 enviados = sum(1 for r in res if r.get("sucesso"))
                 # Watchdog de conexões: alerta por e-mail quando WA/ML cai (cooldown interno).
@@ -260,6 +283,11 @@ class Command(BaseCommand):
                     verificar_e_notificar()
                 except Exception as e:
                     logger.warning("Monitor de conexao falhou: %s", e)
+                    # O watchdog é quem detecta queda de conexão; se ele morre, o
+                    # sistema fica cego justamente para o que mais importa.
+                    log_event("conexao", "watchdog_erro",
+                              f"O monitor de conexões falhou: {e}",
+                              level="error", exc=e)
                 ticks += 1
                 logger.info("[%s] tick: %s config(s) vencida(s), %s enviada(s)", agora.strftime("%H:%M"), len(res), enviados)
                 st.write_state(
@@ -269,8 +297,11 @@ class Command(BaseCommand):
                     vencidas=len(res), enviados=enviados, erro="",
                     ultima_msg=f"{enviados} enviada(s) de {len(res)} vencida(s) às {agora:%H:%M}.",
                 )
-            except Exception:
+            except Exception as e:
                 logger.exception("Erro no tick de envio")
+                # Tick inteiro morto = nenhum usuário recebe oferta neste ciclo.
+                log_event("publicacao", "tick_erro", f"Ciclo de envio falhou: {e}",
+                          level="error", contexto={"ticks": ticks}, exc=e)
                 st.write_state(
                     "envio", fase="aguardando",
                     proximo_ciclo=(timezone.now() + timedelta(minutes=tick)).isoformat(),

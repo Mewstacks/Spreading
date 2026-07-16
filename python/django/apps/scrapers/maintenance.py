@@ -18,6 +18,20 @@ def expire_stale(max_age_hours=48):
     return {"products": stale_products, "coupons": expired_coupons}
 
 
+def purgar_eventos_antigos(dias=30):
+    """Apaga EventoOperacional velho. Sem isto a tabela de log cresce para sempre.
+
+    30 dias porque o relatório de saúde olha no máximo 7 e o resto serve para
+    comparar com o mês anterior; guardar mais só paga armazenamento para responder
+    pergunta que ninguém faz. Erros que importam viram correção no código, não
+    arquivo histórico.
+    """
+    from apps.scrapers.models import EventoOperacional
+    cutoff = timezone.now() - timedelta(days=dias)
+    apagados, _ = EventoOperacional.objects.filter(criado_em__lt=cutoff).delete()
+    return apagados
+
+
 def reconciliar_publicacoes_orfas(max_age_minutes=30):
     """Fecha Publicacao presas em 'pendente' — o worker morreu no meio do envio.
 

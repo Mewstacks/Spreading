@@ -258,6 +258,7 @@ class EventoOperacional(models.Model):
         ("scraper", "Scraper"),
         ("ranking", "Ranking"),
         ("publicacao", "Publicação"),
+        ("conexao", "Conexão"),
         ("whatsapp", "WhatsApp"),
         ("telegram", "Telegram"),
         ("relatorios", "Relatórios"),

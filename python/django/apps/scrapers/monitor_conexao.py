@@ -1,8 +1,13 @@
-"""Watchdog de conexões — avisa o usuário por e-mail quando WhatsApp ou ML cai.
+"""Watchdog de conexões — avisa quando WhatsApp ou ML cai.
 
 Roda a cada tick do loop de envio (e via `manage.py monitorar`). Compara o estado
-atual de cada conexão com o último estado salvo no Perfil; em transição manda e-mail
-(caiu / reconectou), com cooldown p/ não floodar enquanto seguir caído.
+atual de cada conexão com o último estado salvo no Perfil; em transição registra um
+EventoOperacional (pipeline "conexao", visível em /painel-admin/saude) e manda e-mail
+ao usuário, com cooldown p/ não floodar enquanto seguir caído.
+
+O evento e o e-mail são independentes de propósito: o e-mail depende de SMTP
+configurado e é para o usuário; o evento é nosso e precisa existir mesmo quando o
+e-mail não sai — foi assim que quedas passaram meses invisíveis.
 
 Hoje WhatsApp/ML são globais (single-tenant em transição). As funções já recebem o
 usuário p/ quando a Fase 3 isolar conexão por usuário (sessão WA + auth_{id}.json).
@@ -62,7 +67,9 @@ def verificar_e_notificar() -> dict:
 
 
 def _processar(perfil, nome_servico, campo, conectado, agora, cooldown, enviar) -> int:
-    """Compara estado atual vs salvo; manda e-mail em transição (com cooldown). 1 se enviou."""
+    """Compara estado atual vs salvo; alerta em transição (com cooldown). 1 se enviou e-mail."""
+    from apps.scrapers.eventos import log_event
+
     estado_attr = f"{campo}_estado"
     alerta_attr = f"alerta_{campo}_em"
     anterior = getattr(perfil, estado_attr)        # True | False | None (nunca checado)
@@ -73,11 +80,31 @@ def _processar(perfil, nome_servico, campo, conectado, agora, cooldown, enviar) 
         primeira_vez = anterior is not False        # True ou None -> acabou de cair
         cooldown_ok = ultimo_alerta is None or (agora - ultimo_alerta) >= cooldown
         if primeira_vez or cooldown_ok:
+            # O carimbo marca a TENTATIVA, não o sucesso do e-mail. Antes só era gravado
+            # quando o envio dava certo, e com SMTP quebrado ele ficava None para sempre:
+            # o cooldown nunca fechava e o alerta era retentado a cada tick (5min). Isso
+            # passava despercebido porque ninguém contava e-mail que não sai — mas agora
+            # cada tentativa gera evento, e o relatório afogaria em 288 linhas/dia por
+            # usuário caído. Retentar SMTP quebrado de 5 em 5 min também nunca ajudou.
+            setattr(perfil, alerta_attr, agora)
+            # Evento independente do e-mail: o alerta depende de SMTP configurado, o
+            # relatório não pode depender. Cai no mesmo cooldown, então uma conexão
+            # cronicamente fora gera ~4 eventos/dia, não 288.
+            log_event(
+                "conexao", "conexao_caiu",
+                f"{nome_servico} de {perfil.user.get_username()} está fora do ar.",
+                level="error", usuario=perfil.user,
+                contexto={"servico": nome_servico, "repique": not primeira_vez},
+            )
             if enviar(perfil.user, nome_servico, caiu=True):
-                setattr(perfil, alerta_attr, agora)
                 enviou = 1
     else:
         if anterior is False:                       # estava caído -> reconectou
+            log_event(
+                "conexao", "conexao_voltou",
+                f"{nome_servico} de {perfil.user.get_username()} reconectou.",
+                usuario=perfil.user, contexto={"servico": nome_servico},
+            )
             if enviar(perfil.user, nome_servico, caiu=False):
                 enviou = 1
 
