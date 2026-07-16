@@ -7,8 +7,36 @@ Crie um arquivo `.env` na pasta `node.js/` com as variáveis abaixo.
 API_KEY=sk_live_sua_chave_aqui
 
 # Porta do servidor (só coloque se rodar local; Fly injeta via fly.toml)
-# PORT=3000
+# Use a mesma porta de WHATSAPP_API_URL em python/.env.
+PORT=3010
 ```
+
+## Rodando localmente
+
+O painel Django e o serviço de WhatsApp são processos separados. Abra dois
+terminais e mantenha ambos ativos:
+
+```bash
+# Terminal 1 — worker WhatsApp (necessário para a tela /scrapers/whatsapp/)
+cd node.js
+npm start
+
+# Terminal 2 — painel Django
+cd python/django
+python manage.py runserver
+```
+
+Use `npm start`, não `node index.js`. O worker tem um watchdog que o derruba com
+SIGKILL quando o event loop trava; em produção o Fly e o Docker Compose sobem o
+processo de volta sozinhos, e o `npm start` (`start-local.sh`) é o equivalente
+local disso. Com `node index.js` puro, o watchdog mata e o serviço fica fora do
+ar até alguém perceber. Ctrl+C encerra de vez.
+
+Se a tela de WhatsApp mostrar **"Serviço indisponível"**, o worker quase sempre
+está fora do ar — a config de porta raramente é a culpada. Cheque com
+`curl localhost:3010/health` (HTTP 200 = vivo) antes de investigar `.env`. Depois
+abra a tela WhatsApp novamente; se a sessão não tiver sido preservada, escaneie o
+QR Code exibido.
 
 ## Conexão do WhatsApp (automática, por usuário)
 

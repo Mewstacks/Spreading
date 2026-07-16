@@ -1,4 +1,8 @@
-require('dotenv').config();
+// O dotenv resolve o .env a partir do cwd, nao deste arquivo. Sem o path
+// explicito, `node node.js/index.js` rodado da raiz do repo nao acha este .env:
+// o PORT cai no default 3000, colide com o dev server de outro projeto e o
+// worker morre no boot com EADDRINUSE.
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const express = require('express');
@@ -7,16 +11,25 @@ const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const {
     reconnectDelay, shouldPurgeAuth, reconnectOutcome, isRevokedReason, ocupaSlot,
     groupRetryDelay,
 } = require('./session_policy');
 const { iniciarSync } = require('./group_sync');
-const { coletarGrupos, descreverErro } = require('./group_reader');
+const {
+    coletarGrupos, inspecionarGrupo, idChatValido, descreverErro,
+} = require('./group_reader');
 const {
     buildSessionPayload, buildGruposPayload, buildInativoPayload,
 } = require('./payloads');
+const {
+    confirmarMensagem, erroFrameDestacado, opcoesDeEnvio, repetirSeFrameDestacado,
+} = require('./message_confirmation');
+const {
+    TRANSITORIO, PERMANENTE, erroClassificado, classificarErro,
+} = require('./error_taxonomy');
+const { donoDoSingletonLock, decidirSobreDono } = require('./chromium_locks');
 const authStore = require('./auth_store');
 
 const app = express();
@@ -25,10 +38,19 @@ app.use(helmet());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// Path-scoped de proposito: montado global, alcancaria /api/status e /api/grupos
+// e injetaria `erro` neles — a chave que o Django le como "Node inalcancavel"
+// (whatsapp_client.py) e que o front usa para dizer "servico fora do ar".
 const limiter = rateLimit({
     windowMs: 1 * 60 * 1000,
     max: 30,
-    message: { erro: 'Muitas requisições. O limite é de 30 mensagens por minuto para proteger a conta.' }
+    // classe transitoria: ser barrado pelo limite e o oposto de um problema de
+    // configuracao. Sem isto o Django contava o 429 como falha da config e, na
+    // quinta, desligava a automacao de quem so estava enviando rapido demais.
+    message: {
+        erro: 'Muitas requisições. O limite é de 30 mensagens por minuto para proteger a conta.',
+        classe: TRANSITORIO,
+    },
 });
 app.use('/api/enviar', limiter);
 
@@ -115,6 +137,73 @@ const startWatchdog = () => {
 };
 
 const watchdog = startWatchdog();
+
+// Le a linha de comando de um PID. Especifico de plataforma: no Linux do
+// container o /proc e a fonte barata e sempre presente (node:20-slim nao traz
+// procps, entao `ps` pode nao existir la); no macOS do desenvolvimento nao ha
+// /proc e o `ps` e nativo. Devolve '' quando o processo sumiu no meio.
+const lerCmdline = (pid) => {
+    try {
+        if (process.platform === 'linux') {
+            // /proc/<pid>/cmdline separa os argumentos com NUL.
+            return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim();
+        }
+        return execFileSync('ps', ['-o', 'command=', '-p', String(pid)], {
+            encoding: 'utf8', timeout: 5000,
+        }).trim();
+    } catch (err) {
+        return ''; // processo morto, ou ps indisponivel: trata como "nao confirmado"
+    }
+};
+
+const processoVivo = (pid) => {
+    try {
+        process.kill(pid, 0); // sinal 0: so testa existencia/permissao
+        return true;
+    } catch (err) {
+        return err.code === 'EPERM'; // existe, mas e de outro dono
+    }
+};
+
+// Mata o Chromium orfao que ainda segura este perfil, ANTES de subir o nosso.
+//
+// Sem isto, removerLocksChromium apagava o SingletonLock de um processo VIVO e o
+// Client subia um segundo Chromium no mesmo --user-data-dir. Dois Chromiums sobre
+// um perfil o corrompem: o pareamento nao conclui, o `.paired` nunca e escrito e a
+// sessao fica "desconectada" para sempre — um ciclo que cada restart sujo repetia.
+//
+// Matar (em vez de recusar a subir) e deliberado: o watchdog derruba o worker com
+// SIGKILL por desenho, e SIGKILL nao roda o shutdown(). Se o boot desistisse ao
+// achar o perfil ocupado, um unico watchdog kill deixaria o worker quebrado ate
+// alguem aparecer. E o orfao e, por definicao, uma encarnacao morta nossa: quando
+// initializeSession roda, este processo ainda nao tem filho nenhum.
+//
+// Quem decide e chromium_locks (modulo puro, testado). Aqui so ha I/O.
+const liberarPerfilChromium = (authPath) => {
+    const lockPath = path.join(authPath, 'session', 'SingletonLock');
+    let alvo;
+    try {
+        alvo = fs.readlinkSync(lockPath);
+    } catch (err) {
+        return; // sem lock: caminho normal
+    }
+
+    const dono = donoDoSingletonLock(alvo);
+    const vivo = Boolean(dono) && processoVivo(dono.pid);
+    const cmdline = vivo ? lerCmdline(dono.pid) : '';
+    const perfilDir = path.join(authPath, 'session');
+
+    if (decidirSobreDono({ dono, vivo, cmdline, perfilDir }) !== 'liberar') return;
+
+    try {
+        process.kill(dono.pid, 'SIGKILL');
+        console.warn(
+            `Chromium orfao ${dono.pid} ainda segurava ${perfilDir}; encerrado antes de subir o novo.`
+        );
+    } catch (err) {
+        console.error(`Falha ao encerrar o Chromium orfao ${dono.pid}:`, err.message);
+    }
+};
 
 const removerLocksChromium = (dir) => {
     if (!fs.existsSync(dir)) return;
@@ -285,6 +374,12 @@ const agendarRetryGrupos = (session) => {
 // Node sem navegador (test/group_reader.test.js).
 const lerGruposDaPagina = (session) => session.client.pupPage.evaluate(
     `(${coletarGrupos.toString()})(window)`
+);
+
+// Mesma tecnica do lerGruposDaPagina, com o chatId serializado junto. So chame
+// com um id ja validado por idChatValido.
+const lerGrupoDaPagina = (session, chatId) => session.client.pupPage.evaluate(
+    `(${inspecionarGrupo.toString()})(window, ${JSON.stringify(chatId)})`
 );
 
 // Uma leitura de grupos. CONTRATO: nunca lanca — as rotas chamam syncGroups sem
@@ -463,6 +558,9 @@ const initializeSession = (session) => {
             console.error(`[${session.id}] Falha ao reativar sessao:`, err.message);
         }
     }
+    // Ordem obrigatoria: liberar ANTES de remover os locks. Invertido, apagariamos
+    // o SingletonLock e perderiamos o unico ponteiro para o orfao que segura o perfil.
+    liberarPerfilChromium(session.authPath);
     removerLocksChromium(session.authPath);
     limparCachesChromium(session.authPath);
     const client = new Client({
@@ -684,16 +782,27 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
     const session = ensureSession(instanceId);
 
     if (!session.isConnected || !session.client) {
-        return { sucesso: false, erro: 'WhatsApp não está conectado. Leia o QR Code.', instancia: session.id };
+        // Transitorio: quem religa e o gate de sessao do Django (POST /api/sessoes)
+        // ou o restore do boot. Contar isto como falha da config era o que
+        // desligava a automacao sozinha depois de ~5h de sessao caida.
+        return {
+            sucesso: false,
+            erro: 'WhatsApp não está conectado. Leia o QR Code.',
+            classe: TRANSITORIO,
+            instancia: session.id,
+        };
     }
 
     const executar = async () => {
       const espera = Math.max(0, MIN_SEND_INTERVAL_MS - (Date.now() - session.lastSendAt));
       if (espera) await new Promise((resolve) => setTimeout(resolve, espera));
+      let envioIniciado = false;
       try {
         // `ready` can become stale if Chromium loses connectivity without a
         // disconnected event. Check the live state immediately before sending.
-        const estado = await withTimeout(session.client.getState(), 10000, 'getState');
+        const estado = await repetirSeFrameDestacado(
+            () => withTimeout(session.client.getState(), 10000, 'getState')
+        );
         if (estado !== 'CONNECTED') {
             session.isConnected = false;
             session.fase = 'reconectando';
@@ -701,49 +810,134 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             setTimeout(() => recycleSession(
                 session, `estado ${estado || 'desconhecido'} antes do envio`
             ), 0).unref();
-            throw new Error('WhatsApp nao esta conectado. Reconecte antes de enviar.');
+            throw erroClassificado(
+                'WhatsApp nao esta conectado. Reconecte antes de enviar.', TRANSITORIO
+            );
         }
 
         // Validate that the destination still exists in this account. This
         // rejects stale group IDs instead of reporting a false success.
-        const chat = await withTimeout(session.client.getChatById(chatId), 15000, 'getChatById');
-        if (!chat || (chatId.endsWith('@g.us') && !chat.isGroup)) {
-            throw new Error('Grupo de destino nao encontrado nesta conta do WhatsApp.');
+        //
+        // A checagem e barata de proposito: o getChatById que estava aqui descia
+        // no getChatModel e era ele — nao o envio — que devolvia "r". Ver
+        // group_reader.inspecionarGrupo.
+        //
+        // So para grupos: um numero novo (@c.us) ainda nao tem chat na collection
+        // e nem por isso e destino invalido.
+        if (chatId.endsWith('@g.us')) {
+            const grupo = await repetirSeFrameDestacado(
+                () => withTimeout(
+                    lerGrupoDaPagina(session, chatId), 15000, 'inspecionarGrupo'
+                )
+            );
+            // ok=false e existe=false sao coisas MUITO diferentes, e tratar as duas
+            // como a mesma falha era o que pausava a config de quem nao tinha
+            // problema nenhum: 'nao consegui olhar' (pagina hidratando, bundle
+            // mudou) vira transitorio; so 'olhei e nao esta la' e permanente.
+            if (!grupo.ok) {
+                throw erroClassificado(
+                    `Nao foi possivel verificar o grupo de destino: ${grupo.erro}`, TRANSITORIO
+                );
+            }
+            if (!grupo.existe) {
+                throw erroClassificado(
+                    'Grupo de destino nao encontrado nesta conta do WhatsApp.', PERMANENTE
+                );
+            }
         }
 
         let enviada;
         if (tipo === 'texto') {
+            envioIniciado = true;
             enviada = await withTimeout(
-                session.client.sendMessage(chatId, dados), SEND_TIMEOUT_MS, 'sendMessage'
+                session.client.sendMessage(chatId, dados, opcoesDeEnvio()),
+                SEND_TIMEOUT_MS,
+                'sendMessage'
             );
         } else {
             const midia = new MessageMedia(opcoes.mimetype, dados, opcoes.nomeArquivo);
+            envioIniciado = true;
             enviada = await withTimeout(
-                session.client.sendMessage(chatId, midia, { caption: opcoes.legenda }),
+                session.client.sendMessage(chatId, midia, opcoesDeEnvio(opcoes.legenda)),
                 SEND_TIMEOUT_MS,
                 'sendMessage'
             );
         }
-        const mensagemId = enviada?.id?._serialized || enviada?.id?.id;
-        if (!mensagemId) {
-            throw new Error('WhatsApp nao confirmou a criacao da mensagem.');
+        const confirmacao = confirmarMensagem(enviada, session.id);
+        if (confirmacao.confirmacao !== 'nativa') {
+            // Não é falha: sendMessage resolveu e a mensagem foi aceita pelo WA
+            // Web, mas a versão atual não devolveu o modelo com Wid. O ID local
+            // só rastreia esta publicação no Spreading; não se passa por ID do WA.
+            console.warn(
+                `[${session.id}] Envio aceito sem ID nativo do WhatsApp; `
+                + `usando rastreio local ${confirmacao.mensagemId}.`
+            );
         }
         session.lastSendAt = Date.now();
-        console.log(`[${session.id}] Envio confirmado: ${mensagemId} -> ${chatId}`);
+        console.log(`[${session.id}] Envio confirmado: ${confirmacao.mensagemId} -> ${chatId}`);
         return {
             sucesso: true,
             via: 'local',
             tipo,
             instancia: session.id,
-            mensagem_id: mensagemId,
-            ack: Number.isInteger(enviada.ack) ? enviada.ack : null,
+            mensagem_id: confirmacao.mensagemId,
+            confirmacao: confirmacao.confirmacao,
+            // Na variante "aceita_sem_id", enviada e undefined por definição.
+            // ACK é telemetria opcional; jamais pode transformar um envio aceito
+            // em erro depois que já chegou ao grupo.
+            ack: Number.isInteger(enviada?.ack) ? enviada.ack : null,
         };
       } catch (erro) {
-        console.error(`[${session.id}] Falha no envio:`, erro.message);
-        if (erro.message === 'sendMessage timeout') {
+        if (envioIniciado && erroFrameDestacado(erro)) {
+            // Não retente: o usuário confirmou no caso real que o WA entrega a
+            // mensagem antes de Puppeteer perceber que o frame foi trocado.
+            // Marcar como falha causaria reenvio e duplicata no grupo.
+            const confirmacao = confirmarMensagem(undefined, session.id);
+            session.lastSendAt = Date.now();
+            console.warn(
+                `[${session.id}] Frame do WhatsApp foi recarregado após iniciar o envio; `
+                + `mantendo como envio protegido (${confirmacao.mensagemId}).`
+            );
+            setTimeout(() => recycleSession(session, 'frame destacado durante envio'), 0).unref();
+            return {
+                sucesso: true,
+                via: 'local',
+                tipo,
+                instancia: session.id,
+                mensagem_id: confirmacao.mensagemId,
+                confirmacao: 'incerta_pos_frame',
+                ack: null,
+            };
+        }
+        if (erroFrameDestacado(erro)) {
+            // Ainda não chamamos sendMessage: não há risco de duplicar. A sessão
+            // está no meio de uma recarga e será restaurada para a próxima ação.
+            console.warn(`[${session.id}] Frame do WhatsApp ainda instável antes do envio; reciclando sessão.`);
+            setTimeout(() => recycleSession(session, 'frame destacado antes do envio'), 0).unref();
+            return {
+                sucesso: false,
+                erro: 'WhatsApp Web estava recarregando. A conexão será recuperada automaticamente; aguarde alguns segundos e tente novamente.',
+                classe: TRANSITORIO,
+                instancia: session.id,
+            };
+        }
+        // descreverErro, nao erro.message: o bundle minificado lanca objetos que
+        // nao sao Error, e era isso que chegava ao usuario como "[ERRO] r".
+        const descrito = descreverErro(erro);
+        console.error(`[${session.id}] Falha no envio:`, descrito);
+        // Comparacao segue em erro.message: o texto descrito traz nome e stack.
+        if (erro && erro.message === 'sendMessage timeout') {
             setTimeout(() => recycleSession(session, 'timeout ao enviar mensagem'), 0).unref();
         }
-        return { sucesso: false, erro: erro.message || 'Falha ao enviar a mensagem.', instancia: session.id };
+        return {
+            sucesso: false,
+            erro: descrito || 'Falha ao enviar a mensagem.',
+            // Le a classe que os throws acima anexaram; o throw minificado do
+            // bundle (o "r") nao tem nenhuma e cai em 'desconhecido', que conta
+            // falha — o comportamento que ja existia antes desta taxonomia.
+            classe: classificarErro(erro),
+            instancia: session.id,
+        };
       }
     };
     const resultado = session.sendChain.then(executar, executar);
@@ -949,15 +1143,39 @@ app.post(['/api/enviar', '/api/enviar/:instance'], apiKeyAuth, async (req, res) 
     const instanceId = resolveInstanceId(req);
     const { numero, grupoid, mensagem, base64, mimetype, nomeArquivo, legenda } = req.body;
 
+    // Os 400 desta rota sao todos permanentes: repetir com o mesmo corpo da o
+    // mesmo resultado. Sao exatamente os casos em que pausar a config e a atitude
+    // certa — alguem precisa corrigir o destino ou a mensagem.
     if (!numero && !grupoid) {
-        return res.status(400).json({ erro: 'Você precisa informar um numero ou grupoid.', instancia: instanceId });
+        return res.status(400).json({
+            erro: 'Você precisa informar um numero ou grupoid.',
+            classe: PERMANENTE,
+            instancia: instanceId,
+        });
     }
 
     const chatId = grupoid || `${numero}@c.us`;
 
+    // Rejeitar aqui, e nao no Chromium: um id fora do formato faz o createWid
+    // lancar minificado la dentro, e o usuario recebia "[ERRO] r". O caso real e
+    // o nome do grupo ("MillStack") chegando pelo input de texto livre que a UI
+    // usa quando a lista de grupos nao carrega.
+    if (!idChatValido(chatId)) {
+        return res.status(400).json({
+            erro: `Destino invalido: "${chatId}". Use o codigo do grupo (termina em @g.us)`
+                + ` ou um numero so com digitos.`,
+            classe: PERMANENTE,
+            instancia: instanceId,
+        });
+    }
+
     if (base64 && mimetype) {
         if (!MIMETYPES_PERMITIDOS.has(mimetype)) {
-            return res.status(400).json({ erro: 'Tipo de arquivo não permitido.', instancia: instanceId });
+            return res.status(400).json({
+                erro: 'Tipo de arquivo não permitido.',
+                classe: PERMANENTE,
+                instancia: instanceId,
+            });
         }
 
         console.log(`[${instanceId}] [AUTO] Detectada Mídia para ${chatId}`);
@@ -971,13 +1189,23 @@ app.post(['/api/enviar', '/api/enviar/:instance'], apiKeyAuth, async (req, res) 
 
     if (mensagem) {
         console.log(`[${instanceId}] [AUTO] Detectado Texto para ${chatId}`);
-        if (mensagem.length > 4096) return res.status(400).json({ erro: 'Mensagem muito longa.', instancia: instanceId });
+        if (mensagem.length > 4096) {
+            return res.status(400).json({
+                erro: 'Mensagem muito longa.',
+                classe: PERMANENTE,
+                instancia: instanceId,
+            });
+        }
 
         const resultado = await executarEnvioInteligente(instanceId, chatId, 'texto', mensagem);
         return res.status(resultado.sucesso ? 200 : 503).json(resultado);
     }
 
-    return res.status(400).json({ erro: 'Corpo da requisição vazio. Envie "mensagem" ou "base64".', instancia: instanceId });
+    return res.status(400).json({
+        erro: 'Corpo da requisição vazio. Envie "mensagem" ou "base64".',
+        classe: PERMANENTE,
+        instancia: instanceId,
+    });
 });
 
 // Religa as sessoes ja pareadas depois de um restart/deploy. Sem isto o Map

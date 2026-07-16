@@ -331,7 +331,7 @@
         <a href="/scrapers/whatsapp/" class="{% if u == 'scraper-whatsapp' %}active{% endif %}"><i data-lucide="message-circle"></i> WhatsApp</a>
         <a href="/scrapers/telegram/" class="{% if u == 'scraper-telegram' %}active{% endif %}"><i data-lucide="send"></i> Telegram</a>
         <a href="/scrapers/conta/" class="{% if u == 'scraper-conta' %}active{% endif %}"><i data-lucide="user-cog"></i> Conta</a>
-        {% if request.user.is_superuser %}<a href="{% url 'superadmin-usuarios' %}" class="{% if u == 'superadmin-usuarios' or u == 'superadmin-usuario' or u == 'superadmin-infra' %}active{% endif %}"><i data-lucide="users"></i> Usuários</a>{% endif %}
+        {% if request.user.is_superuser %}<a href="{% url 'superadmin-usuarios' %}" class="{% if u == 'superadmin-usuarios' or u == 'superadmin-usuario' or u == 'superadmin-infra' or u == 'superadmin-saude' %}active{% endif %}"><i data-lucide="users"></i> Usuários</a>{% endif %}
         {% if request.user.is_staff %}<a href="/admin/"><i data-lucide="shield"></i> Admin</a>{% endif %}
         <a href="{% url 'password_change' %}" class="nav-user"><i data-lucide="user"></i> {{ request.user.get_username }}</a>
         <form method="post" action="{% url 'logout' %}" style="margin:0;" onclick="event.stopPropagation();">
