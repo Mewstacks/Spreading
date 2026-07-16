@@ -221,9 +221,11 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
     if usuario and grupo_id:
         desde = timezone.now() - timedelta(hours=horas_cooldown)
         for pub in Publicacao.objects.filter(
-            usuario=usuario, destino_id=grupo_id, status="enviado",
-            enviada_em__gte=desde, produto__isnull=False,
-        ).order_by("produto_id", "-enviada_em"):
+            usuario=usuario, destino_id=grupo_id, produto__isnull=False,
+        ).filter(
+            Q(status="enviado", enviada_em__gte=desde)
+            | Q(status="incerto", criada_em__gte=desde)
+        ).order_by("produto_id", "-criada_em"):
             recentes.setdefault(pub.produto_id, pub.preco_final)
     desempenho = {}
     if usuario:
@@ -513,21 +515,29 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         )
 
     def falhar(motivo, **extra):
+        incerto = bool(extra.get("resultado") == "incerto")
+        status = "incerto" if incerto else "falhou"
         if publicacao:
             Publicacao.objects.filter(pk=publicacao.pk).update(
-                status="falhou", erro=str(motivo)[:500])
+                status=status, erro=str(motivo)[:500])
+        contexto = {
+            "produto_id": getattr(produto, "id", None),
+            "marketplace": getattr(produto, "marketplace", ""),
+            "canal": canal,
+            "destino": destino_nome or grupo_id,
+            "publicacao_id": getattr(publicacao, "id", None),
+            **extra,
+        }
         log_event(
             "publicacao", "send_failed", str(motivo), level="warning",
-            usuario=usuario,
-            contexto={
-                "produto_id": getattr(produto, "id", None),
-                "marketplace": getattr(produto, "marketplace", ""),
-                "canal": canal,
-                "destino": destino_nome or grupo_id,
-                "publicacao_id": getattr(publicacao, "id", None),
-                **extra,
-            },
+            usuario=usuario, contexto=contexto,
         )
+        if extra.get("falha_infra") or incerto:
+            log_event(
+                "whatsapp", "send_timeout",
+                "Serviço WhatsApp não confirmou o envio dentro do prazo.",
+                level="error", usuario=usuario, contexto=contexto,
+            )
         return {"sucesso": False, "motivo": str(motivo), **extra}
 
     from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
@@ -655,7 +665,12 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         # chegaria ao orquestrador como 'desconhecido' e a taxonomia não valeria nada.
         return falhar(resultado.get("erro") or "falha no envio",
                       link=link, verificacao=verificacao,
-                      classe=resultado.get("classe"))
+                      classe=resultado.get("classe"),
+                      resultado=resultado.get("resultado"),
+                      repetir=resultado.get("repetir"),
+                      etapa=resultado.get("etapa"),
+                      duracao_ms=resultado.get("duracao_ms"),
+                      falha_infra=resultado.get("falha_infra", False))
 
     try:
         return _executar()

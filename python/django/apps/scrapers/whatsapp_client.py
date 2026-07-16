@@ -38,6 +38,7 @@ PERMANENTE = "permanente"
 DESCONHECIDO = "desconhecido"
 
 _CLASSES = frozenset({TRANSITORIO, PERMANENTE, DESCONHECIDO})
+_SEND_HTTP_TIMEOUT_S = 65
 
 
 class WhatsAppError(Exception):
@@ -234,8 +235,9 @@ def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
         payload["mensagem"] = mensagem
 
     try:
+        inicio = time.monotonic()
         r = requests.post(f"{_base_url()}/api/enviar", json=payload,
-                          headers=_headers(), timeout=75)
+                          headers=_headers(), timeout=_SEND_HTTP_TIMEOUT_S)
         try:
             corpo = r.json()
         except ValueError:
@@ -255,7 +257,8 @@ def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
                 "classe": TRANSITORIO,
             }
         classe = _classe_do_corpo(corpo) or _classe_do_status(r.status_code)
-        return {"sucesso": False, "status": r.status_code, **corpo, "classe": classe}
+        return {"sucesso": False, "status": r.status_code, **corpo, "classe": classe,
+                "duracao_ms": corpo.get("duracao_ms", round((time.monotonic() - inicio) * 1000))}
     except WhatsAppError as e:
         # WHATSAPP_API_KEY ausente: nenhum envio de ninguém vai funcionar até
         # alguém mexer no .env. Não é defeito da config do usuário.
@@ -265,7 +268,9 @@ def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
         # (worker reiniciando/deploy) ou demora mais que o timeout. Ambos somem
         # sozinhos — e eram justamente estes que desligavam a automação.
         return {"sucesso": False, "erro": f"Falha de transporte: {e}",
-                "classe": TRANSITORIO}
+                "classe": TRANSITORIO, "etapa": "http",
+                "duracao_ms": _SEND_HTTP_TIMEOUT_S * 1000,
+                "falha_infra": True}
     except Exception as e:
         return {"sucesso": False, "erro": f"Falha de transporte: {e}",
                 "classe": DESCONHECIDO}

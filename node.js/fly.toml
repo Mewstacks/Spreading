@@ -17,6 +17,7 @@ primary_region = "gru"
   GROUP_SYNC_TIMEOUT_MS = "45000"
   QR_IDLE_DESTROY_MS = "180000"
   SEND_TIMEOUT_MS = "60000"
+  SEND_REQUEST_TIMEOUT_MS = "55000"
 
 # Sessão do WhatsApp (LocalAuth) persiste no volume — sobrevive a restart/deploy.
 # IMPORTANTE: volume Fly prende a UMA máquina. Rode `fly scale count 1` para garantir

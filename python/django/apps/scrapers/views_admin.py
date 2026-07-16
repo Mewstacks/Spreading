@@ -129,8 +129,15 @@ def superadmin_saude(request):
     except (TypeError, ValueError):
         horas = 24
     horas = horas if horas in (24, 72, 168) else 24
+    usuario_nome = (request.GET.get("usuario") or "").strip()
+    usuario = None
+    if usuario_nome:
+        usuario = User.objects.filter(username__iexact=usuario_nome).first()
     return render(request, "scrapers/superadmin/saude.html",
-                  {"r": saude_resumo(horas=horas), "horas": horas})
+                  {"r": saude_resumo(horas=horas, usuario=usuario,
+                                      usuario_nome=usuario_nome), "horas": horas,
+                   "usuario_busca": usuario_nome,
+                   "usuario_encontrado": usuario})
 
 
 @superadmin_required

@@ -64,7 +64,7 @@
             <tr>
               <td class="cell-grow"><b>{{ p.produto.nome|default:"Oferta removida"|truncatechars:55 }}</b><div class="muted" style="font-size:.74rem;">{{ p.criada_em|date:"d/m H:i" }} · variante {{ p.variante }}</div></td>
               <td>{{ p.destino_nome|default:p.destino_id|truncatechars:24 }}</td>
-              <td><span class="badge {% if p.status == 'enviado' %}badge-green{% elif p.status == 'falhou' %}badge-red{% else %}badge-muted{% endif %}">{{ p.get_status_display }}</span>{% if p.erro %}<div class="muted" title="{{ p.erro }}" style="font-size:.7rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;">{{ p.erro }}</div>{% endif %}</td>
+              <td><span class="badge {% if p.status == 'enviado' %}badge-green{% elif p.status == 'falhou' %}badge-red{% elif p.status == 'incerto' %}badge-yellow{% else %}badge-muted{% endif %}">{{ p.get_status_display }}</span>{% if p.erro %}<div class="muted" title="{{ p.erro }}" style="font-size:.7rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;">{{ p.erro }}</div>{% endif %}</td>
               <td>{{ p.cliques.count }}</td>
             </tr>
           {% empty %}<tr><td colspan="4" class="empty">Nenhuma publicação ainda. Envie uma oferta em <a class="link" href="{% url 'scraper-top' %}">Promoções</a> para começar a medir.</td></tr>{% endfor %}

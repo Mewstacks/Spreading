@@ -4,6 +4,7 @@
 {% block content %}
 <div style="margin-bottom:1rem;">
   <a href="{% url 'superadmin-usuarios' %}" class="btn btn-sm btn-ghost"><i data-lucide="arrow-left"></i> Voltar</a>
+  <a href="{% url 'superadmin-saude' %}?usuario={{ u.user.get_username|urlencode }}" class="btn btn-sm btn-ghost"><i data-lucide="stethoscope"></i> Ver eventos na Saúde</a>
 </div>
 
 <div class="card">

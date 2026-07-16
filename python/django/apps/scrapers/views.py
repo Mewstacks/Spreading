@@ -770,10 +770,14 @@ def enviar_produto_stream(request):
         from datetime import timedelta
         recente = Publicacao.objects.filter(
             produto_id=prod.id, usuario_id=uid, destino_id=grupo_id,
-            status="enviado", enviada_em__gte=timezone.now() - timedelta(hours=24),
+            status__in=("enviado", "incerto"),
+            criada_em__gte=timezone.now() - timedelta(hours=24),
         ).order_by("-enviada_em").first()
         if recente and prod.preco_com_cupom > recente.preco_final * .95:
-            print("[ERRO] Este destino recebeu a oferta nas últimas 24h.")
+            if recente.status == "incerto":
+                print("[ERRO] O envio anterior não foi confirmado. Confira o grupo antes de tentar novamente.")
+            else:
+                print("[ERRO] Este destino recebeu a oferta nas últimas 24h.")
             return
         print(f"Enviando '{prod.nome[:60]}' → {grupo_nome or grupo_id} ({canal})...")
         r = enviar_oferta_de_produto(

@@ -47,13 +47,20 @@ vida. Quem abre isto às 8h precisa saber em 2 segundos se tem trabalho hoje.
 <div style="display:flex;flex-wrap:wrap;gap:.5rem;justify-content:space-between;align-items:center;margin-bottom:1rem;">
   <a href="{% url 'superadmin-usuarios' %}" class="btn btn-sm btn-ghost"><i data-lucide="arrow-left"></i> Voltar</a>
   <div class="periodo">
-    <a href="?horas=24"  class="btn btn-sm {% if horas == 24 %}btn-purple{% else %}btn-ghost{% endif %}">24 horas</a>
-    <a href="?horas=72"  class="btn btn-sm {% if horas == 72 %}btn-purple{% else %}btn-ghost{% endif %}">3 dias</a>
-    <a href="?horas=168" class="btn btn-sm {% if horas == 168 %}btn-purple{% else %}btn-ghost{% endif %}">7 dias</a>
+    <a href="?horas=24{% if usuario_busca %}&amp;usuario={{ usuario_busca|urlencode }}{% endif %}"  class="btn btn-sm {% if horas == 24 %}btn-purple{% else %}btn-ghost{% endif %}">24 horas</a>
+    <a href="?horas=72{% if usuario_busca %}&amp;usuario={{ usuario_busca|urlencode }}{% endif %}"  class="btn btn-sm {% if horas == 72 %}btn-purple{% else %}btn-ghost{% endif %}">3 dias</a>
+    <a href="?horas=168{% if usuario_busca %}&amp;usuario={{ usuario_busca|urlencode }}{% endif %}" class="btn btn-sm {% if horas == 168 %}btn-purple{% else %}btn-ghost{% endif %}">7 dias</a>
   </div>
 </div>
 
-<p class="escopo"><i data-lucide="users"></i> Visão geral: avisos e erros de todas as contas. Selecione uma conta afetada para abrir seus detalhes.</p>
+<form method="get" style="display:flex;gap:.45rem;align-items:center;margin:-.2rem 0 1rem;">
+  <input type="hidden" name="horas" value="{{ horas }}">
+  <input name="usuario" value="{{ usuario_busca }}" placeholder="Filtrar por usuário" aria-label="Filtrar por usuário"
+         style="max-width:240px;padding:.45rem .6rem;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px;">
+  <button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="search"></i> Buscar</button>
+  {% if usuario_busca %}<a href="?horas={{ horas }}" class="btn btn-sm btn-ghost">Limpar</a>{% endif %}
+</form>
+<p class="escopo"><i data-lucide="users"></i>{% if usuario_encontrado %} Eventos de {{ usuario_encontrado.get_username }}.{% elif usuario_busca %} Nenhum usuário encontrado para “{{ usuario_busca }}”.{% else %} Visão geral: avisos e erros de todas as contas. Selecione uma conta afetada para abrir seus detalhes.{% endif %}</p>
 
 <div class="veredito {{ r.estado }}">
   {% if r.estado == 'ok' %}<i data-lucide="check-circle-2"></i>

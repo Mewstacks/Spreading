@@ -2,6 +2,7 @@ import sys
 import os
 import re
 import logging
+from contextlib import contextmanager
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 caminho_django = os.path.dirname(os.path.dirname(os.path.dirname(caminho_atual)))
 sys.path.append(caminho_django)
@@ -11,6 +12,25 @@ from apps.scrapers.progresso import emitir_progresso
 from apps.scrapers.session_paths import ml_auth_path as _auth_path
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _orm_permitido_no_playwright():
+    """Permite a gravação síncrona do cache só no trecho do Playwright sync.
+
+    A API sync do Playwright mantém um loop interno ativo enquanto executa ações;
+    Django 6 bloqueia ORM nesse ponto, embora este worker seja serial e dedicado.
+    Restaurar a variável ao sair evita afrouxar a proteção no processo inteiro.
+    """
+    anterior = os.environ.get("DJANGO_ALLOW_ASYNC_UNSAFE")
+    os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+    try:
+        yield
+    finally:
+        if anterior is None:
+            os.environ.pop("DJANGO_ALLOW_ASYNC_UNSAFE", None)
+        else:
+            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = anterior
 
 
 class LoginError(Exception):
@@ -282,40 +302,52 @@ def gerar_links_em_lote(produtos, usuario=None):
 
     gerados = 0
     falhas = 0
-    with iniciar_browser(
-        auth_path=_auth_path(usuario),
-        headless=True,
-    ) as (page, context):
-        _abrir_link_builder(page)
+    ultimo_erro = None
+    with _orm_permitido_no_playwright():
+        with iniciar_browser(
+            auth_path=_auth_path(usuario),
+            headless=True,
+        ) as (page, context):
+            _abrir_link_builder(page)
 
-        total_lote = len(pendentes)
-        logger.info("Gerando links afiliados ML em lote para %s produtos", total_lote)
-        for i, prod in enumerate(pendentes, 1):
-            emitir_progresso(f"[PROGRESSO] Link {i}/{total_lote} ({i*100//total_lote}%)")
-            # Ofertas do feed têm campanha_id vazio: _montar_url_isca trata isso e só
-            # injeta coupon_campaign_id quando há campanha. Só pulamos quando a URL
-            # não é afiliável (catálogo/perfil) -> None.
-            url_isca = _montar_url_isca(prod.link_produto, prod.campanha_id)
-            if not url_isca:
-                falhas += 1
-                continue
-            try:
-                link = _afiliar_url_na_pagina(page, url_isca)
-                if usuario is not None:
-                    salvar_cache(usuario, prod, link, url_isca, True)
-                else:
-                    prod.url_isca = url_isca
-                    prod.link_afiliado = link
-                    prod.afiliado_ok = True
-                    prod.save(update_fields=["url_isca", "link_afiliado", "afiliado_ok"])
-                gerados += 1
-            except Exception as e:
-                if _pagina_de_login(page):
-                    raise LoginError(MSG_SESSAO_EXPIRADA)
-                logger.warning("Falha ao gerar link afiliado ML em lote para produto %s: %s", getattr(prod, "id", None), e)
-                falhas += 1
+            total_lote = len(pendentes)
+            logger.info("Gerando links afiliados ML em lote para %s produtos", total_lote)
+            for i, prod in enumerate(pendentes, 1):
+                emitir_progresso(f"[PROGRESSO] Link {i}/{total_lote} ({i*100//total_lote}%)")
+                # Ofertas do feed têm campanha_id vazio: _montar_url_isca trata isso e só
+                # injeta coupon_campaign_id quando há campanha. Só pulamos quando a URL
+                # não é afiliável (catálogo/perfil) -> None.
+                url_isca = _montar_url_isca(prod.link_produto, prod.campanha_id)
+                if not url_isca:
+                    falhas += 1
+                    continue
+                try:
+                    link = _afiliar_url_na_pagina(page, url_isca)
+                    if usuario is not None:
+                        salvar_cache(usuario, prod, link, url_isca, True)
+                    else:
+                        prod.url_isca = url_isca
+                        prod.link_afiliado = link
+                        prod.afiliado_ok = True
+                        prod.save(update_fields=["url_isca", "link_afiliado", "afiliado_ok"])
+                    gerados += 1
+                except Exception as e:
+                    if _pagina_de_login(page):
+                        raise LoginError(MSG_SESSAO_EXPIRADA)
+                    ultimo_erro = e
+                    logger.warning("Falha ao gerar link afiliado ML em lote para produto %s: %s", getattr(prod, "id", None), e)
+                    falhas += 1
 
     logger.info("Links afiliados ML em lote: %s gerados, %s falhas", gerados, falhas)
+    if falhas and usuario is not None:
+        from apps.scrapers.eventos import log_event
+        log_event(
+            "scraper", "links_erro",
+            f"Lote de links ML: {gerados} gerado(s), {falhas} falha(s).",
+            level="warning", usuario=usuario,
+            contexto={"gerados": gerados, "falhas": falhas, "total": len(pendentes)},
+            exc=ultimo_erro,
+        )
     return (gerados, falhas)
 
 

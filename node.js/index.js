@@ -31,6 +31,7 @@ const {
 } = require('./error_taxonomy');
 const { donoDoSingletonLock, decidirSobreDono } = require('./chromium_locks');
 const authStore = require('./auth_store');
+const { criarPrazo, expirou, timeoutDaEtapa, timeoutComEnvioIniciado } = require('./send_deadline');
 
 const app = express();
 
@@ -107,6 +108,9 @@ const SESSION_INIT_TIMEOUT_MS = parseInt(process.env.SESSION_INIT_TIMEOUT_MS, 10
 const GROUP_SYNC_TIMEOUT_MS = parseInt(process.env.GROUP_SYNC_TIMEOUT_MS, 10) || 15000;
 const QR_IDLE_DESTROY_MS = parseInt(process.env.QR_IDLE_DESTROY_MS, 10) || 180000;
 const SEND_TIMEOUT_MS = parseInt(process.env.SEND_TIMEOUT_MS, 10) || 60000;
+// Tem de ser menor que o read timeout do Django. Inclui o tempo esperando a
+// cadeia da sessao, nao apenas o sendMessage do Chromium.
+const SEND_REQUEST_TIMEOUT_MS = parseInt(process.env.SEND_REQUEST_TIMEOUT_MS, 10) || 55000;
 const MIN_SEND_INTERVAL_MS = parseInt(process.env.MIN_SEND_INTERVAL_MS, 10) || 2500;
 
 const startWatchdog = () => {
@@ -780,6 +784,21 @@ const resolveInstanceId = (req) => sanitizeInstanceId(
 
 const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes = {}) => {
     const session = ensureSession(instanceId);
+    const iniciadoEm = Date.now();
+    const prazo = criarPrazo(SEND_REQUEST_TIMEOUT_MS, iniciadoEm);
+    const duracao = () => Date.now() - iniciadoEm;
+    const semTempo = (etapa) => erroClassificado(
+        `Prazo total de envio esgotado na etapa ${etapa}.`, TRANSITORIO
+    );
+    const timeoutEtapa = (etapa, tetoMs) => {
+        const timeout = timeoutDaEtapa(prazo, tetoMs);
+        if (!timeout) throw semTempo(etapa);
+        return timeout;
+    };
+    // Mesmo quando a resposta ao Django expira, o CDP pode terminar o envio mais
+    // tarde. Mantemos a fila travada até ele assentar para nunca sobrepor outro
+    // sendMessage à mesma sessão.
+    let envioAindaEmVoo = null;
 
     if (!session.isConnected || !session.client) {
         // Transitorio: quem religa e o gate de sessao do Django (POST /api/sessoes)
@@ -790,18 +809,26 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             erro: 'WhatsApp não está conectado. Leia o QR Code.',
             classe: TRANSITORIO,
             instancia: session.id,
+            etapa: 'sessao',
+            duracao_ms: duracao(),
         };
     }
 
     const executar = async () => {
-      const espera = Math.max(0, MIN_SEND_INTERVAL_MS - (Date.now() - session.lastSendAt));
-      if (espera) await new Promise((resolve) => setTimeout(resolve, espera));
+      let etapa = 'fila';
       let envioIniciado = false;
       try {
+        const espera = Math.max(0, MIN_SEND_INTERVAL_MS - (Date.now() - session.lastSendAt));
+        if (espera) {
+            await withTimeout(new Promise((resolve) => setTimeout(resolve, espera)),
+                timeoutEtapa(etapa, espera), 'filaEnvio');
+        }
+        if (expirou(prazo)) throw semTempo(etapa);
         // `ready` can become stale if Chromium loses connectivity without a
         // disconnected event. Check the live state immediately before sending.
+        etapa = 'getState';
         const estado = await repetirSeFrameDestacado(
-            () => withTimeout(session.client.getState(), 10000, 'getState')
+            () => withTimeout(session.client.getState(), timeoutEtapa(etapa, 10000), 'getState')
         );
         if (estado !== 'CONNECTED') {
             session.isConnected = false;
@@ -825,9 +852,10 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         // So para grupos: um numero novo (@c.us) ainda nao tem chat na collection
         // e nem por isso e destino invalido.
         if (chatId.endsWith('@g.us')) {
+            etapa = 'verificar_grupo';
             const grupo = await repetirSeFrameDestacado(
                 () => withTimeout(
-                    lerGrupoDaPagina(session, chatId), 15000, 'inspecionarGrupo'
+                    lerGrupoDaPagina(session, chatId), timeoutEtapa(etapa, 15000), 'inspecionarGrupo'
                 )
             );
             // ok=false e existe=false sao coisas MUITO diferentes, e tratar as duas
@@ -847,19 +875,24 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         }
 
         let enviada;
+        etapa = 'sendMessage';
         if (tipo === 'texto') {
             envioIniciado = true;
+            const promessaEnvio = session.client.sendMessage(chatId, dados, opcoesDeEnvio());
+            envioAindaEmVoo = Promise.resolve(promessaEnvio).then(() => undefined, () => undefined);
             enviada = await withTimeout(
-                session.client.sendMessage(chatId, dados, opcoesDeEnvio()),
-                SEND_TIMEOUT_MS,
+                promessaEnvio,
+                timeoutEtapa(etapa, SEND_TIMEOUT_MS),
                 'sendMessage'
             );
         } else {
             const midia = new MessageMedia(opcoes.mimetype, dados, opcoes.nomeArquivo);
             envioIniciado = true;
+            const promessaEnvio = session.client.sendMessage(chatId, midia, opcoesDeEnvio(opcoes.legenda));
+            envioAindaEmVoo = Promise.resolve(promessaEnvio).then(() => undefined, () => undefined);
             enviada = await withTimeout(
-                session.client.sendMessage(chatId, midia, opcoesDeEnvio(opcoes.legenda)),
-                SEND_TIMEOUT_MS,
+                promessaEnvio,
+                timeoutEtapa(etapa, SEND_TIMEOUT_MS),
                 'sendMessage'
             );
         }
@@ -886,6 +919,8 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             // ACK é telemetria opcional; jamais pode transformar um envio aceito
             // em erro depois que já chegou ao grupo.
             ack: Number.isInteger(enviada?.ack) ? enviada.ack : null,
+            etapa,
+            duracao_ms: duracao(),
         };
       } catch (erro) {
         if (envioIniciado && erroFrameDestacado(erro)) {
@@ -907,6 +942,26 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
                 mensagem_id: confirmacao.mensagemId,
                 confirmacao: 'incerta_pos_frame',
                 ack: null,
+                etapa,
+                duracao_ms: duracao(),
+            };
+        }
+        // Depois que sendMessage comecou, nem o timeout nem o cancelamento do
+        // Puppeteer provam que a mensagem NAO chegou. Retentar cegamente duplica
+        // oferta; devolvemos um resultado explicito para o Django bloquear retry.
+        const timeoutDuranteEnvio = timeoutComEnvioIniciado(envioIniciado, etapa, erro, prazo);
+        if (timeoutDuranteEnvio) {
+            console.warn(`[${session.id}] Resultado incerto apos timeout de envio; reciclando sessao.`);
+            setTimeout(() => recycleSession(session, 'timeout com entrega incerta'), 0).unref();
+            return {
+                sucesso: false,
+                erro: 'O WhatsApp não confirmou o envio a tempo; confirme no grupo antes de tentar novamente.',
+                classe: TRANSITORIO,
+                resultado: 'incerto',
+                repetir: false,
+                instancia: session.id,
+                etapa,
+                duracao_ms: duracao(),
             };
         }
         if (erroFrameDestacado(erro)) {
@@ -919,6 +974,8 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
                 erro: 'WhatsApp Web estava recarregando. A conexão será recuperada automaticamente; aguarde alguns segundos e tente novamente.',
                 classe: TRANSITORIO,
                 instancia: session.id,
+                etapa,
+                duracao_ms: duracao(),
             };
         }
         // descreverErro, nao erro.message: o bundle minificado lanca objetos que
@@ -937,11 +994,17 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             // falha — o comportamento que ja existia antes desta taxonomia.
             classe: classificarErro(erro),
             instancia: session.id,
+            etapa,
+            duracao_ms: duracao(),
+            falha_infra: /timeout|prazo total/i.test(String(erro && erro.message || erro)),
         };
       }
     };
     const resultado = session.sendChain.then(executar, executar);
-    session.sendChain = resultado.then(() => undefined, () => undefined);
+    session.sendChain = resultado.then(
+        () => envioAindaEmVoo || undefined,
+        () => envioAindaEmVoo || undefined,
+    ).then(() => undefined, () => undefined);
     return resultado;
 };
 

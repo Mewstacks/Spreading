@@ -165,7 +165,8 @@ class Publicacao(models.Model):
     """Registro imutável da decisão e do resultado de uma publicação."""
     STATUS = [
         ("pendente", "Pendente"), ("enviado", "Enviado"),
-        ("falhou", "Falhou"), ("ignorado", "Ignorado"),
+        ("falhou", "Falhou"), ("incerto", "Confirmação pendente"),
+        ("ignorado", "Ignorado"),
     ]
     id_publico = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,

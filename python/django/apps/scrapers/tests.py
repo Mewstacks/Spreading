@@ -1,6 +1,7 @@
 import os
 import tempfile
 import uuid
+from contextlib import contextmanager
 from datetime import timedelta
 from io import StringIO
 from unittest.mock import Mock, patch
@@ -336,7 +337,7 @@ class WhatsAppIsolationTests(SimpleTestCase):
         self.assertTrue(result["sucesso"])
         self.assertEqual(post.call_args.kwargs["json"]["session"], "user-42")
         self.assertEqual(post.call_args.kwargs["json"]["grupoid"], "123@g.us")
-        self.assertEqual(post.call_args.kwargs["timeout"], 75)
+        self.assertEqual(post.call_args.kwargs["timeout"], 65)
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
@@ -354,6 +355,25 @@ class WhatsAppIsolationTests(SimpleTestCase):
 
         self.assertFalse(result["sucesso"])
         self.assertIn("ID de confirmação", result["erro"])
+
+    @override_settings(
+        WHATSAPP_API_URL="http://whatsapp.internal:3000",
+        WHATSAPP_API_KEY="secret",
+    )
+    @patch("apps.scrapers.whatsapp_client.requests.post")
+    def test_send_preserva_resultado_incerto_do_node(self, post):
+        response = Mock(status_code=503)
+        response.json.return_value = {
+            "sucesso": False, "classe": "transitorio", "resultado": "incerto",
+            "repetir": False, "etapa": "sendMessage", "duracao_ms": 55000,
+        }
+        post.return_value = response
+
+        result = whatsapp_client.enviar_oferta("123@g.us", "mensagem", session="user-42")
+
+        self.assertEqual(result["resultado"], "incerto")
+        self.assertFalse(result["repetir"])
+        self.assertEqual(result["classe"], "transitorio")
 
 
 class WhatsAppDesconectarTests(TestCase):
@@ -1058,6 +1078,34 @@ class AttributionWorkflowTests(TestCase):
             pipeline="publicacao", evento="send_failed", usuario=self.user).exists())
 
     @patch("apps.scrapers.ofertas._baixar_imagem_b64", return_value=(None, None))
+    @patch("apps.scrapers.senders.whatsapp.WhatsAppSender.enviar_oferta")
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.verify_link")
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.build_affiliate_link")
+    def test_uncertain_whatsapp_delivery_is_recorded_without_retry(
+        self, build_link, verify_link, send, _img
+    ):
+        from apps.scrapers.ofertas import enviar_oferta_de_produto
+        build_link.return_value = {
+            "link_afiliado": "https://example.com/a?tracking_id=ok",
+            "afiliado_ok": True,
+        }
+        verify_link.return_value = {"ok": True}
+        send.return_value = {
+            "sucesso": False, "erro": "confirmação pendente", "classe": "transitorio",
+            "resultado": "incerto", "repetir": False, "etapa": "sendMessage",
+            "duracao_ms": 55000,
+        }
+
+        result = enviar_oferta_de_produto(
+            self.product, "group@g.us", usuario=self.user, destino_nome="Grupo")
+
+        self.assertEqual(result["resultado"], "incerto")
+        self.assertFalse(result["repetir"])
+        self.assertEqual(Publicacao.objects.get(usuario=self.user).status, "incerto")
+        self.assertTrue(EventoOperacional.objects.filter(
+            pipeline="whatsapp", evento="send_timeout", usuario=self.user).exists())
+
+    @patch("apps.scrapers.ofertas._baixar_imagem_b64", return_value=(None, None))
     @patch("apps.scrapers.senders.registry.get_sender")
     @patch("apps.scrapers.marketplaces.registry.get_marketplace")
     def test_successful_delivery_records_history_without_legacy_key(
@@ -1721,6 +1769,28 @@ class GeracaoDeLinksEmLoteTests(TestCase):
         enviados, _ = prefetch.call_args
         self.assertEqual(len(enviados[0]), 2)
 
+    def test_lote_permite_orm_so_durante_o_playwright_e_restaura_o_ambiente(self):
+        produto = self._produto()
+        anterior = os.environ.pop("DJANGO_ALLOW_ASYNC_UNSAFE", None)
+
+        @contextmanager
+        def browser_falso(**_kwargs):
+            yield Mock(), Mock()
+
+        try:
+            with patch("apps.scrapers.scraper_mercadolivre.link.iniciar_browser", browser_falso), \
+                 patch("apps.scrapers.scraper_mercadolivre.link._abrir_link_builder"), \
+                 patch("apps.scrapers.scraper_mercadolivre.link._afiliar_url_na_pagina",
+                       return_value="https://meli.la/link"):
+                gerados, falhas = ml_link.gerar_links_em_lote([produto], usuario=self.user)
+            self.assertEqual((gerados, falhas), (1, 0))
+            self.assertTrue(LinkAfiliadoUsuario.objects.filter(
+                usuario=self.user, produto=produto, link_afiliado="https://meli.la/link").exists())
+            self.assertNotIn("DJANGO_ALLOW_ASYNC_UNSAFE", os.environ)
+        finally:
+            if anterior is not None:
+                os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = anterior
+
     @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
     @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links",
            side_effect=RuntimeError("sessão expirada"))
@@ -1851,6 +1921,24 @@ class RelatorioSaudeTests(TestCase):
         self.assertContains(resposta, "outra-conta")
         self.assertContains(
             resposta, reverse("superadmin-usuario", args=[outra_conta.id]))
+
+    def test_saude_filtra_por_username(self):
+        from apps.scrapers.saude import resumo
+
+        outra_conta = get_user_model().objects.create_user("lules", password="test")
+        self._evento("send_failed", level="warning", usuario=self.user)
+        self._evento("send_timeout", level="error", pipeline="whatsapp", usuario=outra_conta)
+
+        with patch("apps.scrapers.saude._workers", return_value=[]):
+            r = resumo(horas=24, usuario=outra_conta)
+        self.assertEqual([(p["pipeline"], p["evento"]) for p in r["problemas"]],
+                         [("whatsapp", "send_timeout")])
+
+        self.client.force_login(self.admin)
+        with patch("apps.scrapers.saude._workers", return_value=[]):
+            resposta = self.client.get(reverse("superadmin-saude"), {"usuario": "LuLeS"})
+        self.assertContains(resposta, "Eventos de lules")
+        self.assertNotContains(resposta, "saude-user")
 
     def test_evento_global_sem_conta_aparece_no_bucket_sistema(self):
         """`fonte_falhou` ("uma loja parou de responder") não tem usuário: é do sistema

@@ -46,6 +46,14 @@ CATALOGO = {
         "acao": "Se repete no mesmo destino, confira se o grupo ainda existe e se o "
                 "WhatsApp do dono está conectado.",
     },
+    "send_timeout": {
+        "titulo": "Serviço WhatsApp não respondeu a tempo",
+        "significa": "O transporte do WhatsApp ficou indisponível ou não confirmou a "
+                     "mensagem dentro do prazo. O resultado pode ser incerto para evitar "
+                     "duplicar uma oferta no grupo.",
+        "acao": "Confirme a mensagem no grupo antes de reenviar. Se repetir para várias "
+                 "contas, investigue a máquina spreading-wa e o Chromium.",
+    },
     "tick_erro": {
         "titulo": "Ciclo de envio quebrou",
         "significa": "O worker de envio falhou no ciclo inteiro — nenhum usuário recebeu "
@@ -90,6 +98,13 @@ CATALOGO = {
         "significa": "A lane de feed rápido do ML falhou. Impacto menor: a raspagem "
                      "completa ainda alimenta o catálogo.",
         "acao": "Se for isolado, ignore. Se repetir, investigue junto com o scrape.",
+    },
+    "links_erro": {
+        "titulo": "Links de afiliado não foram gerados",
+        "significa": "O lote de links do Mercado Livre falhou total ou parcialmente; "
+                     "as ofertas podem continuar pendentes para aquele usuário.",
+        "acao": "Veja o detalhe técnico. Se indicar contexto assíncrono ou navegador, "
+                 "corrija o worker; se indicar login, peça para reconectar o Mercado Livre.",
     },
     # ── Onboarding: o usuário nem entra ──
     "verificacao_nao_enviada": {
@@ -233,11 +248,16 @@ def _workers() -> list[dict]:
     return out
 
 
-def resumo(horas: int = 24, agora=None) -> dict:
+def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") -> dict:
     """Fotografia do período: veredito, problemas agrupados, sinais de vida, workers."""
     agora = agora or timezone.now()
     desde = agora - timedelta(hours=horas)
     qs = EventoOperacional.objects.filter(criado_em__gte=desde)
+    if usuario is not None:
+        qs = qs.filter(usuario=usuario)
+    elif usuario_nome:
+        # Busca sem correspondência não pode cair silenciosamente no relatório global.
+        qs = qs.none()
 
     problemas = _problemas(qs)
     n_erros = sum(p["n"] for p in problemas if p["critico"])
