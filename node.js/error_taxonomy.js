@@ -34,6 +34,24 @@ const erroClassificado = (mensagem, classe) => {
     return erro;
 };
 
+// O sendMessage do whatsapp-web.js resolve o destino chamando window.WWebJS
+// .getChat DENTRO da pagina (Client.js:1533). Quando o bundle do WA Web
+// recarrega, esses modulos somem e o evaluate lanca "TypeError: Cannot read
+// properties of undefined (reading 'getChat')" — incidente real em producao.
+// O getChat e o PRIMEIRO passo do sendMessage: a mensagem nunca saiu, entao
+// retentar nao duplica; mas a pagina fica sem os modulos ate recarregar, por
+// isso quem detectar isto deve reciclar a sessao.
+const erroStoreQuebrado = (erro) => {
+    try {
+        const mensagem = String((erro && erro.message) || erro || '');
+        return /Cannot read propert(y|ies) of undefined \(reading '(getChat|getChatModel)'\)/.test(mensagem)
+            || /\bwindow\.(WWebJS|Store)\b.*\bundefined\b/i.test(mensagem)
+            || /\b(WWebJS|Store) is not defined\b/.test(mensagem);
+    } catch (erroDeLeitura) {
+        return false;
+    }
+};
+
 // CONTRATO: nunca lanca e sempre devolve uma das tres classes. Roda dentro do
 // catch do envio — uma excecao aqui trocaria uma falha classificavel por um 500.
 //
@@ -45,6 +63,9 @@ const classificarErro = (erro) => {
     try {
         if (erro && typeof erro === 'object' && CLASSES.has(erro.classe)) return erro.classe;
         if (erroFrameDestacado(erro)) return TRANSITORIO;
+        // Store desmontado se resolve com o recycle da sessao; contar como falha
+        // da config puniria o usuario por um reload interno do WA Web.
+        if (erroStoreQuebrado(erro)) return TRANSITORIO;
 
         // withTimeout lanca `${label} timeout` (index.js). Todo timeout daqui e
         // de uma operacao no Chromium (getState, inspecionarGrupo, sendMessage):
@@ -59,5 +80,5 @@ const classificarErro = (erro) => {
 
 module.exports = {
     TRANSITORIO, PERMANENTE, DESCONHECIDO, CLASSES,
-    erroClassificado, classificarErro,
+    erroClassificado, classificarErro, erroStoreQuebrado,
 };

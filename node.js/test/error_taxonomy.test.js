@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
     TRANSITORIO, PERMANENTE, DESCONHECIDO, erroClassificado, classificarErro,
+    erroStoreQuebrado,
 } = require('../error_taxonomy');
 
 test('a classe anexada no throw sobrevive ate o catch', () => {
@@ -51,6 +52,32 @@ test('o throw minificado do WA Web e desconhecido, nunca um chute', () => {
     assert.equal(classificarErro({ message: 'r' }), DESCONHECIDO);
     assert.equal(classificarErro('r'), DESCONHECIDO);
     assert.equal(classificarErro(new Error('r')), DESCONHECIDO);
+});
+
+// O incidente real: o bundle do WA Web recarregou, window.WWebJS sumiu e o
+// sendMessage quebrou resolvendo o destino (Client.js:1533). Nunca chegou a
+// enviar, entao e transitorio e retentavel — nao pode contar falha da config.
+test('store desmontado (getChat undefined) e detectado e transitorio', () => {
+    const incidente = new TypeError(
+        "Cannot read properties of undefined (reading 'getChat')"
+    );
+    assert.equal(erroStoreQuebrado(incidente), true);
+    assert.equal(classificarErro(incidente), TRANSITORIO);
+
+    // Variantes do mesmo colapso de Store que o evaluate pode devolver.
+    assert.equal(erroStoreQuebrado(new Error('WWebJS is not defined')), true);
+    assert.equal(erroStoreQuebrado(new ReferenceError('Store is not defined')), true);
+    assert.equal(erroStoreQuebrado(
+        new Error('window.Store voltou undefined apos reload')), true);
+});
+
+test('erroStoreQuebrado nao dispara em erros comuns nem lanca em entrada hostil', () => {
+    assert.equal(erroStoreQuebrado(new Error('sendMessage timeout')), false);
+    assert.equal(erroStoreQuebrado(new Error("Cannot read properties of undefined (reading 'foo')")), false);
+    assert.equal(erroStoreQuebrado({ message: 'r' }), false);
+    assert.equal(erroStoreQuebrado(undefined), false);
+    const hostil = { get message() { throw new Error('boom'); } };
+    assert.equal(erroStoreQuebrado(hostil), false);
 });
 
 // CONTRATO: roda dentro do catch do envio. Lancar aqui trocaria uma falha

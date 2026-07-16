@@ -2,12 +2,14 @@
 
 // Operações ANTES de sendMessage. Se o Chromium não responde aqui, nenhuma
 // mensagem foi criada e é seguro reciclar a sessão para a próxima tentativa.
-const ETAPAS = new Set(['getState', 'verificar_grupo']);
+const ETAPAS = new Set(['getState', 'verificar_store', 'verificar_grupo']);
 
 const mensagemPreflight = (etapa) => (
     etapa === 'verificar_grupo'
         ? 'O WhatsApp não respondeu ao validar o grupo. A sessão será recuperada automaticamente; aguarde alguns segundos e tente novamente.'
-        : 'O WhatsApp não respondeu ao testar a conexão. A sessão será recuperada automaticamente; aguarde alguns segundos e tente novamente.'
+        : etapa === 'verificar_store'
+            ? 'O WhatsApp Web ainda estava carregando os módulos internos. A sessão será recuperada automaticamente; aguarde alguns segundos e tente novamente.'
+            : 'O WhatsApp não respondeu ao testar a conexão. A sessão será recuperada automaticamente; aguarde alguns segundos e tente novamente.'
 );
 
 const timeoutPreflight = (etapa, erro) => {

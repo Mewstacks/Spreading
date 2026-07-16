@@ -17,6 +17,8 @@ def causa_do_evento(evento) -> str:
     if evento.evento == "send_failed":
         if "getstate timeout" in texto:
             return "whatsapp_preflight_timeout"
+        if "getchat" in texto or "módulos internos" in texto:
+            return "whatsapp_store_recarregado"
         if "detached frame" in texto or "recarregando" in texto:
             return "whatsapp_frame_recarregado"
         if "confirma" in texto or "ack" in texto:

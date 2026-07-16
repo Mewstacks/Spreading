@@ -295,14 +295,20 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
 
 
 def _frase_marketing(produto):
-    """Frase de marketing: usa o cache (frase_llm); só chama o Ollama ao vivo como
-    último recurso, com timeout curto (10s, não os 120s antigos que travavam o envio),
-    e GRAVA no cache p/ o próximo envio ser instantâneo."""
+    """Frase de marketing: usa o cache (frase_llm); só chama a API do Claude ao vivo
+    como último recurso, com timeout curto (10s, não os 120s antigos que travavam o
+    envio), e GRAVA no cache p/ o próximo envio ser instantâneo."""
     cache = getattr(produto, "frase_llm", "") or ""
     if cache:
         return cache
     from apps.scrapers.llm import gerar_descricao
-    frase = gerar_descricao(produto.nome, timeout=10)
+    preco = getattr(produto, "preco_com_cupom", None)
+    de = getattr(produto, "preco_sem_desconto", 0) or 0
+    desconto = ((de - preco) / de) * 100 if preco and de and de > preco else None
+    frase = gerar_descricao(
+        produto.nome, timeout=10, preco=preco, desconto_percent=desconto,
+        categoria=getattr(produto, "macro_categoria", "") or getattr(produto, "categoria", ""),
+    )
     if frase and hasattr(produto, "save") and getattr(produto, "pk", None):
         try:
             produto.frase_llm = frase
@@ -468,13 +474,19 @@ def _link_publicado(publicacao, link_afiliado: str) -> str:
     """Link que entra na mensagem enviada ao grupo.
 
     Em desenvolvimento mantém o link de afiliado direto: o SQLite local não tem a
-    publicação que será vista por quem clica. Em produção usa um redirecionador
-    assinado, preservando a URL afiliada como destino e registrando o clique.
+    publicação que será vista por quem clica. Em produção usa o redirecionador
+    curto (/r/<slug>/), preservando a URL afiliada como destino e registrando o
+    clique. O formato antigo com token assinado (/scrapers/r/<token>/) segue
+    válido para as mensagens já publicadas.
     """
-    if settings.DEBUG or not settings.PUBLIC_BASE_URL:
+    if settings.DEBUG or not settings.PUBLIC_BASE_URL or publicacao is None:
         return link_afiliado
-    token = signing.dumps({"p": str(publicacao.id_publico)}, salt="click")
-    return f"{settings.PUBLIC_BASE_URL.rstrip('/')}/scrapers/r/{token}/"
+    base = settings.PUBLIC_BASE_URL.rstrip("/")
+    if not publicacao.slug_curto:
+        # Linha criada antes do campo existir: cai no formato antigo.
+        token = signing.dumps({"p": str(publicacao.id_publico)}, salt="click")
+        return f"{base}/scrapers/r/{token}/"
+    return f"{base}/r/{publicacao.slug_curto}/"
 
 
 def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
@@ -523,6 +535,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         causa = extra.get("causa") or (
             "whatsapp_preflight_timeout" if etapa == "getState" and (extra.get("falha_infra") or "timeout" in texto_motivo) else
             "whatsapp_grupo_timeout" if etapa == "verificar_grupo" and (extra.get("falha_infra") or "timeout" in texto_motivo) else
+            "whatsapp_store_recarregado" if etapa == "verificar_store" or "módulos internos" in texto_motivo else
             "whatsapp_frame_recarregado" if "frame" in texto_motivo or "recarregando" in texto_motivo else
             "whatsapp_confirmacao" if "confirma" in texto_motivo or "ack" in texto_motivo else
             "link_afiliado_recusado" if "link de afiliado" in texto_motivo or "link builder" in texto_motivo else

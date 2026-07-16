@@ -985,6 +985,33 @@ class AttributionWorkflowTests(TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertFalse(CliquePublicacao.objects.exists())
 
+    def test_short_redirect_records_anonymous_click(self):
+        publication = Publicacao.objects.create(
+            usuario=self.user, produto=self.product, canal="whatsapp",
+            destino_id="group@g.us", status="enviado",
+            link_afiliado="https://example.com/affiliate",
+        )
+        self.assertTrue(publication.slug_curto)
+
+        response = self.client.get(
+            reverse("redirect-curto", args=[publication.slug_curto]))
+
+        self.assertRedirects(
+            response, "https://example.com/affiliate", fetch_redirect_response=False)
+        self.assertEqual(CliquePublicacao.objects.filter(publicacao=publication).count(), 1)
+        self.assertEqual(response["Cache-Control"], "no-store")
+
+    def test_short_redirect_rejects_unknown_slug_and_pending_publication(self):
+        pending = Publicacao.objects.create(
+            usuario=self.user, produto=self.product, canal="whatsapp",
+            destino_id="group@g.us", status="pendente",
+            link_afiliado="https://example.com/affiliate",
+        )
+        for slug in ["nao-existe", pending.slug_curto]:
+            response = self.client.get(reverse("redirect-curto", args=[slug]))
+            self.assertEqual(response.status_code, 404)
+        self.assertFalse(CliquePublicacao.objects.exists())
+
     def test_operational_log_sanitizes_sensitive_context(self):
         from apps.scrapers.eventos import log_event
 
@@ -1161,10 +1188,19 @@ class AttributionWorkflowTests(TestCase):
         self.assertEqual(_link_publicado(publication, affiliate), affiliate)
 
     @override_settings(DEBUG=False, PUBLIC_BASE_URL="https://spreading.example")
-    def test_production_delivery_uses_signed_tracking_redirect(self):
+    def test_production_delivery_uses_short_tracking_redirect(self):
         from apps.scrapers.ofertas import _link_publicado
 
-        publication = Mock(id_publico=uuid.uuid4())
+        publication = Mock(id_publico=uuid.uuid4(), slug_curto="Ab3xK9z")
+        link = _link_publicado(publication, "https://meli.la/link-afiliado")
+        self.assertEqual(link, "https://spreading.example/r/Ab3xK9z/")
+
+    @override_settings(DEBUG=False, PUBLIC_BASE_URL="https://spreading.example")
+    def test_publication_without_slug_falls_back_to_signed_redirect(self):
+        """Linhas anteriores ao slug_curto continuam com o token assinado."""
+        from apps.scrapers.ofertas import _link_publicado
+
+        publication = Mock(id_publico=uuid.uuid4(), slug_curto="")
         link = _link_publicado(publication, "https://meli.la/link-afiliado")
         self.assertTrue(link.startswith("https://spreading.example/scrapers/r/"))
 

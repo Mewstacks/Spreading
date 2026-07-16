@@ -27,7 +27,7 @@ const {
     confirmarMensagem, erroFrameDestacado, opcoesDeEnvio, repetirSeFrameDestacado,
 } = require('./message_confirmation');
 const {
-    TRANSITORIO, PERMANENTE, erroClassificado, classificarErro,
+    TRANSITORIO, PERMANENTE, erroClassificado, classificarErro, erroStoreQuebrado,
 } = require('./error_taxonomy');
 const { donoDoSingletonLock, decidirSobreDono } = require('./chromium_locks');
 const authStore = require('./auth_store');
@@ -843,6 +843,28 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             );
         }
 
+        // O sendMessage resolve o destino via window.WWebJS.getChat DENTRO da
+        // pagina; quando o bundle do WA Web recarrega, esses modulos somem e o
+        // envio quebra com "reading 'getChat'" (incidente real em producao).
+        // Checar aqui fecha a janela entre o getState e o sendMessage.
+        etapa = 'verificar_store';
+        const storePronto = await repetirSeFrameDestacado(
+            () => withTimeout(
+                session.client.pupPage.evaluate(
+                    () => Boolean(window.WWebJS && typeof window.WWebJS.getChat === 'function' && window.Store)
+                ),
+                timeoutEtapa(etapa, 10000), 'verificarStore'
+            )
+        );
+        if (!storePronto) {
+            setTimeout(() => recycleSession(session, 'store do WhatsApp indefinido no preflight'), 0).unref();
+            throw erroClassificado(
+                'O WhatsApp Web ainda estava carregando os módulos internos. '
+                + 'A sessão será recuperada automaticamente; aguarde alguns segundos e tente novamente.',
+                TRANSITORIO
+            );
+        }
+
         // Validate that the destination still exists in this account. This
         // rejects stale group IDs instead of reporting a false success.
         //
@@ -994,6 +1016,25 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
                 instancia: session.id,
                 etapa,
                 duracao_ms: duracao(),
+            };
+        }
+        if (erroStoreQuebrado(erro)) {
+            // O getChat interno e o PRIMEIRO passo do sendMessage: o erro veio
+            // da resolucao do destino, antes de qualquer envio — retentar nao
+            // duplica. A pagina segue sem os modulos ate recarregar, entao
+            // recicla ja em vez de esperar o proximo timeout.
+            console.warn(`[${session.id}] Store do WhatsApp indefinido durante envio; reciclando sessão.`);
+            setTimeout(() => recycleSession(session, 'store do WhatsApp indefinido'), 0).unref();
+            return {
+                sucesso: false,
+                erro: 'O WhatsApp Web recarregou os módulos internos durante o envio. '
+                    + 'A sessão está sendo recuperada; aguarde alguns segundos e tente novamente.',
+                classe: TRANSITORIO,
+                repetir: true,
+                instancia: session.id,
+                etapa,
+                duracao_ms: duracao(),
+                falha_infra: true,
             };
         }
         // descreverErro, nao erro.message: o bundle minificado lanca objetos que

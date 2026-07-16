@@ -69,6 +69,13 @@ CATALOGO = {
         "significa": "A sessão estava viva, mas não respondeu ao conferir o destino antes do envio.",
         "acao": "A sessão é recuperada automaticamente. Reteste o grupo antes de tentar publicar de novo.",
     },
+    "whatsapp_store_recarregado": {
+        "titulo": "WhatsApp Web perdeu os módulos internos",
+        "significa": "O WhatsApp Web recarregou e a sessão perdeu a referência interna "
+                     "antes do envio; nenhuma mensagem saiu nessa tentativa.",
+        "acao": "A sessão é reciclada automaticamente. Aguarde alguns segundos e reteste; "
+                "a próxima tentativa deve enviar normalmente.",
+    },
     "whatsapp_frame_recarregado": {
         "titulo": "WhatsApp Web estava recarregando",
         "significa": "A página do WhatsApp foi trocada durante a preparação do envio; não houve repetição automática.",

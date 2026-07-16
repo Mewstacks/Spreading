@@ -36,6 +36,9 @@ def healthz(request):
 
 urlpatterns = [
     path('', scraper_views.operations_dashboard, name='home'),
+    # Link curto das mensagens (contagem de cliques). Fica na raiz de propósito:
+    # cada caractere a menos conta dentro da mensagem do WhatsApp/Telegram.
+    path('r/<str:slug>/', scraper_views.redirect_curto, name='redirect-curto'),
     path('healthz', healthz, name='healthz'),
     path('admin/', admin.site.urls),
     path('accounts/', include('apps.accounts.urls')),

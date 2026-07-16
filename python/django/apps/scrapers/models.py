@@ -3,7 +3,17 @@ from datetime import timedelta
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
+import secrets
 import uuid
+
+# Alfabeto base62 do slug curto de publicação. 7 caracteres dão 62^7 (~3,5
+# trilhões) de combinações: colisão é estatisticamente irrelevante e, se
+# acontecer, o unique do banco barra e o envio seguinte gera outro slug.
+_ALFABETO_SLUG = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+
+def gerar_slug_curto():
+    return "".join(secrets.choice(_ALFABETO_SLUG) for _ in range(7))
 
 class Cupom(models.Model):
     campanha_id = models.CharField(max_length=100, unique=True)
@@ -169,6 +179,10 @@ class Publicacao(models.Model):
         ("ignorado", "Ignorado"),
     ]
     id_publico = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    # Slug do link curto publicado na mensagem (/r/<slug>/). null p/ as linhas
+    # anteriores ao campo — o token assinado antigo continua funcionando p/ elas.
+    slug_curto = models.CharField(max_length=12, unique=True, null=True, blank=True,
+                                  default=gerar_slug_curto, editable=False)
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                                 related_name="publicacoes")
     produto = models.ForeignKey(Produto, on_delete=models.SET_NULL, null=True,

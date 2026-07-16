@@ -176,14 +176,8 @@ def operations_dashboard(request):
     })
 
 
-@login_not_required
-def redirect_rastreado(request, token):
+def _responder_clique(publicacao):
     """Registra somente o evento de clique e redireciona ao link afiliado."""
-    try:
-        payload = signing.loads(token, salt="click")
-        publicacao = Publicacao.objects.get(id_publico=payload["p"], status="enviado")
-    except (signing.BadSignature, KeyError, Publicacao.DoesNotExist):
-        return HttpResponse("Link inválido ou indisponível.", status=404)
     destino = publicacao.link_afiliado or ""
     # Defesa: só redireciona p/ http(s). Barra esquemas perigosos (javascript:, data:)
     # caso um link corrompido chegue ao banco.
@@ -194,6 +188,27 @@ def redirect_rastreado(request, token):
     response["Cache-Control"] = "no-store"
     response["Referrer-Policy"] = "no-referrer"
     return response
+
+
+@login_not_required
+def redirect_rastreado(request, token):
+    """Formato antigo (token assinado): mantém válidos os links já publicados."""
+    try:
+        payload = signing.loads(token, salt="click")
+        publicacao = Publicacao.objects.get(id_publico=payload["p"], status="enviado")
+    except (signing.BadSignature, KeyError, Publicacao.DoesNotExist):
+        return HttpResponse("Link inválido ou indisponível.", status=404)
+    return _responder_clique(publicacao)
+
+
+@login_not_required
+def redirect_curto(request, slug):
+    """Formato curto (/r/<slug>/) que entra nas mensagens novas."""
+    try:
+        publicacao = Publicacao.objects.get(slug_curto=slug, status="enviado")
+    except Publicacao.DoesNotExist:
+        return HttpResponse("Link inválido ou indisponível.", status=404)
+    return _responder_clique(publicacao)
 
 
 @require_POST
