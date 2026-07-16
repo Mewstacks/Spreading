@@ -6,6 +6,7 @@ const {
     reconnectDelay,
     shouldPurgeAuth,
     reconnectOutcome,
+    reconnectAction,
     isRevokedReason,
     syncGroupsOutcome,
     groupRetryDelay,
@@ -39,6 +40,12 @@ test('reconnectOutcome retries up to the cap, then purges, then expires', () => 
 test('reconnectOutcome honours a custom cap', () => {
     assert.equal(reconnectOutcome(10, 0, 10), 'retry');
     assert.equal(reconnectOutcome(11, 0, 10), 'purge');
+});
+
+test('paired credential pauses instead of being purged after retries', () => {
+    assert.equal(reconnectAction(7, 0, true, 6), 'pause');
+    assert.equal(reconnectAction(7, 0, false, 6), 'purge');
+    assert.equal(reconnectAction(7, 1, true, 6), 'expire');
 });
 
 // Regressao do bug em producao: 'Recuperando sessao (tentativa 38)...'.

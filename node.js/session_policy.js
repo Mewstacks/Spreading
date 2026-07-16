@@ -22,6 +22,14 @@ function reconnectOutcome(attempts, authPurges, maxAttempts = 6) {
     return safePurges > 0 ? 'expire' : 'purge';
 }
 
+// Uma credencial que ja foi pareada nunca deve ser removida como reação a uma
+// sequência de timeouts do Chromium. Nesse caso a recuperação para em estado
+// acionável e um novo pedido de conexão reutiliza o mesmo LocalAuth.
+function reconnectAction(attempts, authPurges, hasStoredAuth, maxAttempts = 6) {
+    const outcome = reconnectOutcome(attempts, authPurges, maxAttempts);
+    return outcome === 'purge' && hasStoredAuth ? 'pause' : outcome;
+}
+
 const REVOKED_REASONS = new Set(['LOGOUT', 'UNPAIRED', 'UNPAIRED_IDLE']);
 
 // Motivos de 'disconnected' que significam credencial revogada no celular:
@@ -82,6 +90,7 @@ module.exports = {
     reconnectDelay,
     shouldPurgeAuth,
     reconnectOutcome,
+    reconnectAction,
     isRevokedReason,
     syncGroupsOutcome,
     groupRetryDelay,

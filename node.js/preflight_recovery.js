@@ -12,6 +12,33 @@ const mensagemPreflight = (etapa) => (
             : 'O WhatsApp não respondeu ao testar a conexão. A sessão será recuperada automaticamente; aguarde alguns segundos e tente novamente.'
 );
 
+// O evento `ready` pode preceder a injeção de Store/WWebJS por alguns segundos.
+// Isso não prova que o Chromium morreu: derrubá-lo nessa janela transforma uma
+// indisponibilidade temporária em um novo pareamento. Timeouts continuam
+// seguindo timeoutPreflight() e reciclam a sessão.
+const mensagemStoreIndisponivel = () => (
+    'O WhatsApp Web ainda está preparando a sessão. Aguarde alguns instantes e tente novamente.'
+);
+
+const registrarStoreIndisponivel = (session) => {
+    if (session && session.isConnected) {
+        session.fase = 'conectado';
+        session.faseMsg = 'Conectado — WhatsApp Web ainda está preparando a sessão.';
+    }
+    return mensagemStoreIndisponivel();
+};
+
+const mensagemEstabilizacao = () => (
+    'O WhatsApp Web ainda está estabilizando a sessão. Aguarde alguns instantes e tente novamente.'
+);
+
+// Logo depois do QR, avaliações CDP podem expirar enquanto o próprio WhatsApp
+// ainda monta os módulos. Nesta janela o timeout não é evidência suficiente
+// para destruir o Chromium nem a credencial recém-pareada.
+const deveReciclarTimeoutPreflight = (session, agora = Date.now()) => !(
+    session && (session.preparando || Number(session.estabilizandoAte) > agora)
+);
+
 const timeoutPreflight = (etapa, erro) => {
     if (!ETAPAS.has(etapa)) return false;
     try {
@@ -38,4 +65,12 @@ const iniciarRecuperacaoPreflight = (session, etapa, recycle, agendar = setTimeo
     return true;
 };
 
-module.exports = { timeoutPreflight, mensagemPreflight, iniciarRecuperacaoPreflight };
+module.exports = {
+    timeoutPreflight,
+    mensagemPreflight,
+    mensagemStoreIndisponivel,
+    registrarStoreIndisponivel,
+    mensagemEstabilizacao,
+    deveReciclarTimeoutPreflight,
+    iniciarRecuperacaoPreflight,
+};

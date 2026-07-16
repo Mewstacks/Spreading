@@ -13,7 +13,7 @@ const path = require('path');
 const fs = require('fs');
 const { spawn, execFileSync } = require('child_process');
 const {
-    reconnectDelay, shouldPurgeAuth, reconnectOutcome, isRevokedReason, ocupaSlot,
+    reconnectDelay, shouldPurgeAuth, reconnectAction, isRevokedReason, ocupaSlot,
     groupRetryDelay,
 } = require('./session_policy');
 const { iniciarSync } = require('./group_sync');
@@ -31,8 +31,12 @@ const {
 } = require('./error_taxonomy');
 const { donoDoSingletonLock, decidirSobreDono } = require('./chromium_locks');
 const authStore = require('./auth_store');
+const { runtimePronto } = require('./session_readiness');
 const { criarPrazo, expirou, timeoutDaEtapa, timeoutComEnvioIniciado } = require('./send_deadline');
-const { timeoutPreflight, mensagemPreflight, iniciarRecuperacaoPreflight } = require('./preflight_recovery');
+const {
+    timeoutPreflight, mensagemPreflight, registrarStoreIndisponivel,
+    mensagemEstabilizacao, deveReciclarTimeoutPreflight, iniciarRecuperacaoPreflight,
+} = require('./preflight_recovery');
 const { aguardarStorePronto } = require('./store_ready');
 
 const app = express();
@@ -114,13 +118,13 @@ const SEND_TIMEOUT_MS = parseInt(process.env.SEND_TIMEOUT_MS, 10) || 60000;
 // cadeia da sessao, nao apenas o sendMessage do Chromium.
 const SEND_REQUEST_TIMEOUT_MS = parseInt(process.env.SEND_REQUEST_TIMEOUT_MS, 10) || 55000;
 const MIN_SEND_INTERVAL_MS = parseInt(process.env.MIN_SEND_INTERVAL_MS, 10) || 2500;
-// O evento `ready` do whatsapp-web.js pode chegar antes de a pagina injetar
-// window.WWebJS.getChat/window.Store. Em vez de falhar o envio na primeira
-// olhada, aguardamos os modulos por ate STORE_READY_WAIT_MS (no preflight do
-// envio) / READY_STORE_WAIT_MS (no gate do `ready`). A maioria das corridas
-// fecha em 1-3s, entao o envio conclui na mesma request e sem reciclar.
+// O evento `ready` do whatsapp-web.js pode chegar antes de WWebJS terminar de
+// injetar. O worker só libera envios depois do primeiro sync de grupos, para
+// não disputar o Chromium durante o pareamento.
 const STORE_READY_WAIT_MS = parseInt(process.env.STORE_READY_WAIT_MS, 10) || 8000;
 const READY_STORE_WAIT_MS = parseInt(process.env.READY_STORE_WAIT_MS, 10) || 10000;
+const CONNECTION_STABILIZATION_MS = parseInt(process.env.CONNECTION_STABILIZATION_MS, 10) || 120000;
+const READY_RETRY_MS = parseInt(process.env.READY_RETRY_MS, 10) || 5000;
 
 const startWatchdog = () => {
     if (process.env.DISABLE_WATCHDOG === '1') return null;
@@ -257,6 +261,13 @@ const createSessionState = (instanceId) => ({
     authPurges: 0,           // purgas de auth neste ciclo de recuperacao
     encerrandoManual: false, // logout pedido pelo usuario: suprime o auto-reconnect
     authenticatedInAttempt: false,
+    preparando: false,
+    preparationTimer: null,
+    pairedAt: null,
+    readyAt: null,
+    estabilizandoAte: 0,
+    lastRecoveryReason: null,
+    lastRecoveryAt: null,
     whatsappId: null,
     sendChain: Promise.resolve(),
     lastSendAt: 0,
@@ -313,9 +324,11 @@ const destroySessionRuntime = async (session, reason, removeFromMap = false) => 
     if (session.initTimer) clearTimeout(session.initTimer);
     if (session.qrIdleTimer) clearTimeout(session.qrIdleTimer);
     if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
+    if (session.preparationTimer) clearTimeout(session.preparationTimer);
     session.initTimer = null;
     session.qrIdleTimer = null;
     session.reconnectTimer = null;
+    session.preparationTimer = null;
     try {
         if (session.client) await withTimeout(session.client.destroy(), 10000, 'client.destroy');
     } catch (err) {
@@ -364,7 +377,8 @@ const limparRetryGrupos = (session) => {
 const agendarRetryGrupos = (session) => {
     limparRetryGrupos(session);
     session.gruposSyncFalhas += 1;
-    const delay = session.isConnected ? groupRetryDelay(session.gruposSyncFalhas) : null;
+    const delay = (session.isConnected || session.preparando)
+        ? groupRetryDelay(session.gruposSyncFalhas) : null;
     if (!delay) {
         session.gruposSyncFalhou = true;
         session.faseMsg = 'Conectado - lista de grupos indisponivel temporariamente.';
@@ -395,12 +409,11 @@ const lerGrupoDaPagina = (session, chatId) => session.client.pupPage.evaluate(
     `(${inspecionarGrupo.toString()})(window, ${JSON.stringify(chatId)})`
 );
 
-// O sendMessage resolve o destino via window.WWebJS.getChat DENTRO da pagina;
-// esses modulos (e window.Store) so existem depois que o bundle do WA Web
-// termina de injetar — o que pode acontecer alguns segundos APOS o evento
-// `ready`. storeInjetado faz uma checagem; aguardarStorePronto espera por eles.
+// O sendMessage resolve o destino via window.WWebJS.getChat DENTRO da pagina.
+// A versao atual do whatsapp-web.js nao expoe window.Store, portanto Store nao
+// pode ser usado como sinal de prontidao.
 const storeInjetado = (session) => session.client.pupPage.evaluate(
-    () => Boolean(window.WWebJS && typeof window.WWebJS.getChat === 'function' && window.Store)
+    `(${runtimePronto.toString()})(window)`
 );
 // Uma checagem do store, protegida por timeout e pelo retry de frame destacado.
 // probeTimeoutMs pode ser funcao para derivar do prazo compartilhado do envio.
@@ -434,8 +447,10 @@ const lerGrupos = async (session, reason) => {
         limparRetryGrupos(session);
         session.gruposSyncFalhas = 0;
         session.gruposSyncFalhou = false;
-        session.fase = 'conectado';
-        session.faseMsg = `Conectado - ${session.gruposCache.length} grupos.`;
+        if (!session.preparando) {
+            session.fase = 'conectado';
+            session.faseMsg = `Conectado - ${session.gruposCache.length} grupos.`;
+        }
         console.log(
             `[${session.id}] Grupos sincronizados (${reason}): ${session.gruposCache.length}`
             + ` de ${resultado.totalChats} chats; ignorados=${resultado.ignorados.length}.`
@@ -454,7 +469,7 @@ const lerGrupos = async (session, reason) => {
         console.error(`[${session.id}] Erro ao sincronizar grupos (${reason}):`, descreverErro(err));
         // A lista de chats e secundaria. `ready` ja comprovou a conexao;
         // nunca destrua uma sessao saudavel porque a leitura falhou.
-        session.fase = 'conectado';
+        if (!session.preparando) session.fase = 'conectado';
         agendarRetryGrupos(session);
         return false;
     }
@@ -465,8 +480,71 @@ const lerGrupos = async (session, reason) => {
 // acabou de mudar no celular: reaproveita-lo e responder dado velho dizendo
 // sucesso. A orquestracao (repique, coalescencia, promise) vive em group_sync.js.
 const syncGroups = async (session, reason = 'auto', { forcar = false } = {}) => {
-    if (!session.isConnected || !session.client) return false;
+    if ((!session.isConnected && !session.preparando) || !session.client) return false;
     return iniciarSync(session, (r) => lerGrupos(session, r), reason, { forcar });
+};
+
+const limparPreparationTimer = (session) => {
+    if (session.preparationTimer) clearTimeout(session.preparationTimer);
+    session.preparationTimer = null;
+};
+
+const agendarProbeProntidao = (session, client) => {
+    if (session.preparationTimer || session.client !== client) return;
+    session.preparationTimer = setTimeout(async () => {
+        session.preparationTimer = null;
+        if (session.client !== client || !session.preparando) return;
+        const pronto = await sondarStore(session, 5000).catch(() => false);
+        if (session.client !== client || !session.preparando) return;
+        if (!pronto) {
+            console.warn(`[${session.id}] WWebJS ainda nao pronto; mantendo sessao pareada em preparacao.`);
+            agendarProbeProntidao(session, client);
+            return;
+        }
+        concluirPreparacao(session, client);
+    }, READY_RETRY_MS);
+    session.preparationTimer.unref();
+};
+
+const concluirPreparacao = (session, client) => {
+    if (session.client !== client || !session.preparando) return;
+    limparPreparationTimer(session);
+    session.preparando = false;
+    session.isConnected = true;
+    session.readyAt = Date.now();
+    session.estabilizandoAte = session.readyAt + CONNECTION_STABILIZATION_MS;
+    session.fase = 'conectado';
+    session.progresso = 100;
+    session.faseMsg = 'Conectado. Sincronizando grupos antes de liberar envios…';
+    console.log(`[${session.id}] WhatsApp pronto; iniciando sincronizacao inicial de grupos.`);
+
+    // A versao e apenas telemetria. A chamada pode travar durante um rollout do
+    // WhatsApp Web, entao nunca participa do gate de conexao ou do sync.
+    setTimeout(() => {
+        if (session.client !== client) return;
+        withTimeout(client.getWWebVersion(), 10000, 'getWWebVersion')
+            .then((versao) => console.log(`[${session.id}] WA Web ${versao}`))
+            .catch((err) => console.warn(`[${session.id}] Versao WA Web indisponivel: ${err.message}`));
+    }, CONNECTION_STABILIZATION_MS).unref();
+
+    // Enquanto o primeiro sync lê a collection, envios ficam bloqueados para
+    // não enfileirar evaluate/getState contra a mesma página logo após o QR.
+    session.preparando = true;
+    session.isConnected = false;
+    session.fase = 'preparando';
+    session.faseMsg = 'WhatsApp conectado. Sincronizando grupos antes de liberar envios…';
+    Promise.resolve(syncGroups(session, 'ready'))
+        .catch(() => false)
+        .finally(() => {
+            if (session.client !== client || !session.preparando) return;
+            session.preparando = false;
+            session.isConnected = true;
+            session.fase = 'conectado';
+            session.faseMsg = session.gruposCarregados
+                ? `Conectado - ${session.gruposCache.length} grupos.`
+                : 'Conectado - atualizando a lista de grupos em segundo plano.';
+            console.log(`[${session.id}] Sessao estabilizada; envios liberados.`);
+        });
 };
 
 // msgOverride sobrevive ao agendamento. Antes, quem quisesse explicar ao usuario
@@ -477,8 +555,8 @@ const scheduleReconnect = (session, reason, msgOverride = null) => {
     if (session.encerrandoManual) return; // logout do usuario: nao ressuscitar
     session.reconnectAttempts += 1;
 
-    const outcome = reconnectOutcome(
-        session.reconnectAttempts, session.authPurges, RECONNECT_MAX_ATTEMPTS
+    const outcome = reconnectAction(
+        session.reconnectAttempts, session.authPurges, hasStoredAuth(session.id), RECONNECT_MAX_ATTEMPTS
     );
 
     if (outcome === 'expire') {
@@ -497,7 +575,20 @@ const scheduleReconnect = (session, reason, msgOverride = null) => {
         return; // TERMINAL: nao reagenda. reviveSession() e o caminho de volta.
     }
 
+    if (outcome === 'pause') {
+        session.fase = 'recuperacao_pausada';
+        session.progresso = 0;
+        session.preparando = false;
+        session.isConnected = false;
+        session.faseMsg = 'Não foi possível estabilizar o WhatsApp. Tente conectar novamente; sua sessão foi preservada.';
+        console.error(`[${session.id}] Recuperacao pausada sem apagar credencial. Motivo: ${reason}`);
+        return;
+    }
+
     if (outcome === 'purge') {
+        // Uma credencial que ja pareou nao pode ser apagada por timeouts de
+        // Chromium: isso desloga o aparelho vinculado e obriga novo QR. Pausa
+        // para que um POST /api/sessoes tente novamente com o mesmo LocalAuth.
         purgeAuthDir(session, `teto de ${RECONNECT_MAX_ATTEMPTS} tentativas`);
         session.authPurges += 1;
         session.reconnectAttempts = 1; // o tick da purga ja e a tentativa 1 do ciclo novo
@@ -523,7 +614,7 @@ const scheduleReconnect = (session, reason, msgOverride = null) => {
 // ensureSession so inicializa sessao ausente do Map, e initializeSession sai
 // cedo se ja inicializada. Uma sessao terminal fica no Map com initialized=false
 // e sem timer: sem isto o usuario ficaria preso em 'expirado' para sempre, sem QR.
-const FASES_TERMINAIS = new Set(['expirado', 'falha_auth']);
+const FASES_TERMINAIS = new Set(['expirado', 'falha_auth', 'recuperacao_pausada']);
 const reviveSession = (session) => {
     if (session.initialized || session.client) return session;
     if (!FASES_TERMINAIS.has(session.fase)) return session;
@@ -532,6 +623,8 @@ const reviveSession = (session) => {
     session.authPurges = 0;
     session.initFailures = 0;
     session.encerrandoManual = false;
+    session.preparando = false;
+    session.estabilizandoAte = 0;
     session.fase = 'iniciando';
     session.progresso = 0;
     session.faseMsg = 'Iniciando serviço…';
@@ -542,10 +635,14 @@ const reviveSession = (session) => {
 const recycleSession = async (session, reason, purgeAuth = false, msgOverride = null) => {
     const client = session.client;
     if (!client) return;
+    session.lastRecoveryReason = reason;
+    session.lastRecoveryAt = new Date().toISOString();
     console.error(`[${session.id}] Reciclando Chromium. Motivo: ${reason}`);
     session.client = null;
     session.initialized = false;
     session.isConnected = false;
+    session.preparando = false;
+    limparPreparationTimer(session);
     session.whatsappId = null;
     session.gruposCarregados = false;
     session.gruposSincronizando = false;
@@ -626,7 +723,8 @@ const initializeSession = (session) => {
                 session.authenticatedInAttempt || stage === 'pos-autenticacao'
             );
             session.initFailures += 1;
-            const purgeAuth = shouldPurgeAuth(session.initFailures, authenticatedFailure);
+            const purgeAuth = !hasStoredAuth(session.id)
+                && shouldPurgeAuth(session.initFailures, authenticatedFailure);
             if (purgeAuth) session.initFailures = 0;
             const msg = purgeAuth ? 'Sessão corrompida — gerando um novo QR…' : null;
             recycleSession(session, `timeout em ${stage}`, purgeAuth, msg).catch((err) => {
@@ -667,6 +765,7 @@ const initializeSession = (session) => {
         // A credencial no volume agora vale a pena restaurar num boot futuro.
         // O layout do LocalAuth nao serve como sinal: ver auth_store.js.
         markPaired(session);
+        session.pairedAt = Date.now();
         session.ultimoQR = null;
         session.fase = 'autenticado';
         session.faseMsg = 'Autenticado — preparando sessão…';
@@ -690,25 +789,15 @@ const initializeSession = (session) => {
 
     client.on('ready', async () => {
         if (session.client !== client) return;
-        // O `ready` pode chegar antes de window.WWebJS/Store existirem. Confirmar
-        // aqui evita que o Django despache um envio numa janela em que o preflight
-        // ainda veria os modulos ausentes. Best-effort: se estourar, seguimos
-        // marcando conectado (o preflight do envio ainda protege). Nao mexe no
-        // invariante `conectado === fase 'conectado'`: apenas atrasa os dois juntos.
+        // `ready` pode anteceder a injeção de WWebJS. Nesse caso a sessão fica
+        // em preparação e nenhum envio ou sync concorre com o Chromium.
         const storePronto = await aguardarStorePronto({
             sondar: () => sondarStore(session),
             tetoMs: READY_STORE_WAIT_MS,
         }).catch(() => false);
         if (session.client !== client) return; // pode ter reciclado durante a espera
-        if (!storePronto) {
-            console.warn(
-                `[${session.id}] 'ready' recebido, mas o store ainda nao confirmou em ${READY_STORE_WAIT_MS}ms; `
-                + 'seguindo com o preflight de envio como rede de seguranca.'
-            );
-        }
         if (session.initTimer) clearTimeout(session.initTimer);
         session.initTimer = null;
-        session.isConnected = true;
         session.initFailures = 0;
         session.authenticatedInAttempt = false;
         session.reconnectAttempts = 0;
@@ -719,21 +808,27 @@ const initializeSession = (session) => {
         session.ultimoQR = null;
         if (session.qrIdleTimer) clearTimeout(session.qrIdleTimer);
         session.qrIdleTimer = null;
-        session.fase = 'conectado';
+        session.preparando = true;
+        session.isConnected = false;
+        session.fase = 'preparando';
         session.progresso = 100;
-        session.faseMsg = 'Conectado. Atualizando grupos em segundo plano.';
-        // A versao do WA Web e o que correlaciona uma quebra de leitura com um
-        // rollout do WhatsApp. Sem ela, um erro vindo do bundle nao tem contexto.
-        const versaoWeb = await client.getWWebVersion().catch((err) => `desconhecida (${err.message})`);
-        console.log(`[${session.id}] WhatsApp conectado! WA Web ${versaoWeb}`);
-        syncGroups(session, 'ready');
+        session.faseMsg = 'WhatsApp autenticado. Preparando a sessão…';
+        if (storePronto) {
+            concluirPreparacao(session, client);
+        } else {
+            console.warn(`[${session.id}] 'ready' recebido sem WWebJS; aguardando sem reciclar a sessao.`);
+            agendarProbeProntidao(session, client);
+        }
     });
 
     client.on('disconnected', async (reason) => {
         if (session.client !== client) return;
+        const faseAnterior = session.fase;
         if (session.initTimer) clearTimeout(session.initTimer);
         session.initTimer = null;
         session.isConnected = false;
+        session.preparando = false;
+        limparPreparationTimer(session);
         session.gruposCarregados = false;
         session.gruposSincronizando = false;
         session.gruposSyncFalhou = false; // conexao nova merece tentativa nova
@@ -743,7 +838,14 @@ const initializeSession = (session) => {
         session.fase = 'desconectado';
         session.progresso = 0;
         session.faseMsg = 'Desconectado — reconectando…';
-        console.log(`[${session.id}] ❌ WhatsApp foi desconectado. Motivo:`, reason);
+        const idadePareamento = session.pairedAt ? `${Date.now() - session.pairedAt}ms` : 'desconhecida';
+        const contextoRecuperacao = session.lastRecoveryReason
+            ? ` Última recuperação: ${session.lastRecoveryReason} em ${session.lastRecoveryAt}.`
+            : '';
+        console.log(
+            `[${session.id}] ❌ WhatsApp foi desconectado. Motivo: ${reason}. `
+            + `Fase anterior=${faseAnterior}; idade do pareamento=${idadePareamento}.${contextoRecuperacao}`
+        );
 
         // Fecha o Chromium antigo para liberar memória antes de reconectar.
         session.client = null;
@@ -783,7 +885,7 @@ const initializeSession = (session) => {
         session.faseMsg = 'Falha ao inicializar a sessão';
         console.error(`[${session.id}] ❌ Falha na inicialização:`, error.message);
         session.initFailures += 1;
-        const purgeAuth = shouldPurgeAuth(
+        const purgeAuth = !hasStoredAuth(session.id) && shouldPurgeAuth(
             session.initFailures, session.authenticatedInAttempt
         );
         if (purgeAuth) session.initFailures = 0;
@@ -842,6 +944,18 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
     // sendMessage à mesma sessão.
     let envioAindaEmVoo = null;
 
+    if (session.preparando) {
+        return {
+            sucesso: false,
+            erro: mensagemEstabilizacao(),
+            classe: TRANSITORIO,
+            repetir: true,
+            instancia: session.id,
+            etapa: 'preparacao',
+            duracao_ms: duracao(),
+        };
+    }
+
     if (!session.isConnected || !session.client) {
         // Transitorio: quem religa e o gate de sessao do Django (POST /api/sessoes)
         // ou o restore do boot. Contar isto como falha da config era o que
@@ -890,20 +1004,18 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         // Checar aqui fecha a janela entre o getState e o sendMessage.
         etapa = 'verificar_store';
         // Nao falhe na primeira olhada: se os modulos ainda estao carregando,
-        // espere por eles dentro do prazo compartilhado. So reciclamos quando o
-        // store nao aparece nem apos a espera — pagina genuinamente travada.
+        // espere por eles dentro do prazo compartilhado. Mesmo esgotado esse
+        // prazo, Store ausente ainda pode ser apenas a hidratacao tardia do WA
+        // Web; destruir o Chromium aqui derrubaria uma sessao autenticada.
         const storePronto = await aguardarStorePronto({
             sondar: () => sondarStore(session, () => timeoutEtapa(etapa, 10000)), // mantem o prazo compartilhado
             tetoMs: STORE_READY_WAIT_MS,
             expirou: () => expirou(prazo),
         });
         if (!storePronto) {
-            setTimeout(() => recycleSession(session, 'store do WhatsApp indefinido apos espera no preflight'), 0).unref();
-            throw erroClassificado(
-                'O WhatsApp Web ainda estava carregando os módulos internos. '
-                + 'A sessão será recuperada automaticamente; aguarde alguns segundos e tente novamente.',
-                TRANSITORIO
-            );
+            const mensagem = registrarStoreIndisponivel(session);
+            console.warn(`[${session.id}] Store do WhatsApp ainda indisponivel no preflight; mantendo a sessao ativa.`);
+            throw erroClassificado(mensagem, TRANSITORIO);
         }
 
         // Validate that the destination still exists in this account. This
@@ -1029,6 +1141,19 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             };
         }
         if (timeoutPreflight(etapa, erro)) {
+            if (!deveReciclarTimeoutPreflight(session)) {
+                console.warn(`[${session.id}] Timeout em ${etapa} durante estabilizacao; mantendo sessao pareada.`);
+                return {
+                    sucesso: false,
+                    erro: mensagemEstabilizacao(),
+                    classe: TRANSITORIO,
+                    repetir: true,
+                    instancia: session.id,
+                    etapa,
+                    duracao_ms: duracao(),
+                    falha_infra: false,
+                };
+            }
             // getState/inspecionarGrupo travados significam Chromium morto ou WA Web
             // congelado. Ainda não houve sendMessage, portanto é seguro recuperar e
             // orientar a pessoa sem expor a stack interna do Puppeteer.
@@ -1062,20 +1187,20 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         if (erroStoreQuebrado(erro)) {
             // O getChat interno e o PRIMEIRO passo do sendMessage: o erro veio
             // da resolucao do destino, antes de qualquer envio — retentar nao
-            // duplica. A pagina segue sem os modulos ate recarregar, entao
-            // recicla ja em vez de esperar o proximo timeout.
-            console.warn(`[${session.id}] Store do WhatsApp indefinido durante envio; reciclando sessão.`);
-            setTimeout(() => recycleSession(session, 'store do WhatsApp indefinido'), 0).unref();
+            // duplica. O mesmo erro tambem aparece na hidratacao tardia logo
+            // apos `ready`; manter o Chromium evita perder a sessao por uma
+            // condicao que costuma se resolver sozinha.
+            const mensagem = registrarStoreIndisponivel(session);
+            console.warn(`[${session.id}] Store do WhatsApp indefinido durante envio; mantendo a sessao ativa.`);
             return {
                 sucesso: false,
-                erro: 'O WhatsApp Web recarregou os módulos internos durante o envio. '
-                    + 'A sessão está sendo recuperada; aguarde alguns segundos e tente novamente.',
+                erro: mensagem,
                 classe: TRANSITORIO,
                 repetir: true,
                 instancia: session.id,
                 etapa,
                 duracao_ms: duracao(),
-                falha_infra: true,
+                falha_infra: false,
             };
         }
         // descreverErro, nao erro.message: o bundle minificado lanca objetos que
