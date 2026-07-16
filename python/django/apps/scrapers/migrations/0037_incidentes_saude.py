@@ -3,16 +3,112 @@ from django.conf import settings
 from django.db import migrations, models
 import django.db.models.deletion
 import django.utils.timezone
+import hashlib
+
+
+def _texto(evento):
+    return " ".join([evento.evento or "", evento.mensagem or "", evento.erro or ""]).lower()
+
+
+def _causa(evento):
+    contexto = evento.contexto or {}
+    if contexto.get("causa"):
+        return str(contexto["causa"])[:80]
+    texto = _texto(evento)
+    if evento.evento == "send_failed":
+        if "getstate timeout" in texto:
+            return "whatsapp_preflight_timeout"
+        if "detached frame" in texto or "recarregando" in texto:
+            return "whatsapp_frame_recarregado"
+        if "confirma" in texto or "ack" in texto:
+            return "whatsapp_confirmacao"
+        if "link de afiliado" in texto or "link builder" in texto:
+            return "link_afiliado_recusado"
+        if texto.strip().endswith(" r") or "\nr" in texto:
+            return "whatsapp_erro_minificado"
+        return "publicacao_falhou"
+    if evento.evento == "send_timeout":
+        return "whatsapp_timeout_entrega"
+    return evento.evento
+
+
+def _escopo(evento):
+    contexto = evento.contexto or {}
+    if evento.evento.startswith("send_") or evento.pipeline in {"whatsapp", "telegram"}:
+        canal = contexto.get("canal") or ("whatsapp" if evento.pipeline == "whatsapp" else "")
+        destino = contexto.get("destino") or contexto.get("grupo_id") or "destino desconhecido"
+        return f"{canal}:{destino}"[:255]
+    for campo in ("marketplace", "fonte", "servico", "config_id", "view"):
+        if contexto.get(campo):
+            return f"{campo}:{contexto[campo]}"[:255]
+    return "sistema"
+
+
+def _chave(evento, causa, escopo):
+    bruto = f"{evento.pipeline}|{causa}|{evento.usuario_id or 0}|{escopo}".encode()
+    return hashlib.sha256(bruto).hexdigest()
 
 
 def backfill_incidentes(apps, schema_editor):
-    # A tabela já existe neste ponto. Reaproveitar o classificador de produção
-    # mantém o significado dos eventos antigos idêntico ao dos novos.
-    from apps.scrapers.incidentes_saude import reconciliar_eventos
-    # Use o modelo histórico: importar o modelo de produção nesta migração
-    # incluiria campos adicionados em migrações futuras no SELECT.
+    # Migrações não podem importar modelos de produção: eles podem ter campos ou
+    # classes de relacionamento diferentes dos disponíveis neste ponto do histórico.
+    # Use somente o registro histórico fornecido pelo Django e IDs nas relações.
     EventoOperacional = apps.get_model("scrapers", "EventoOperacional")
-    reconciliar_eventos(EventoOperacional.objects.all())
+    IncidenteSaude = apps.get_model("scrapers", "IncidenteSaude")
+
+    for evento in EventoOperacional.objects.order_by("criado_em").iterator():
+        escopo = _escopo(evento)
+        if evento.evento == "send_ok":
+            IncidenteSaude.objects.filter(
+                status="aberto", usuario_id=evento.usuario_id, escopo=escopo,
+                pipeline__in=("publicacao", "whatsapp", "telegram"),
+            ).update(status="concluido", confirmado_em=evento.criado_em,
+                     confirmacao="Envio real posterior concluído com sucesso.")
+            continue
+        if evento.evento == "sync_ok":
+            IncidenteSaude.objects.filter(
+                status="aberto", usuario_id=evento.usuario_id, pipeline="relatorios",
+                escopo=escopo,
+            ).update(status="concluido", confirmado_em=evento.criado_em,
+                     confirmacao="Sincronização posterior concluída com sucesso.")
+            continue
+        if evento.evento == "conexao_voltou":
+            IncidenteSaude.objects.filter(
+                status="aberto", usuario_id=evento.usuario_id, pipeline="conexao",
+                escopo=escopo,
+            ).update(status="concluido", confirmado_em=evento.criado_em,
+                     confirmacao="Conexão posterior restabelecida.")
+            continue
+        if evento.level not in {"warning", "error"}:
+            continue
+
+        causa = _causa(evento)
+        incidente, criado = IncidenteSaude.objects.get_or_create(
+            chave=_chave(evento, causa, escopo),
+            defaults={
+                "causa": causa, "pipeline": evento.pipeline, "escopo": escopo,
+                "usuario_id": evento.usuario_id, "level": evento.level,
+                "primeira_ocorrencia": evento.criado_em,
+                "ultima_ocorrencia": evento.criado_em,
+                "ultima_mensagem": evento.mensagem,
+                "contexto": evento.contexto or {},
+                "evento_origem_id": evento.id,
+            },
+        )
+        if not criado:
+            incidente.ocorrencias += 1
+            incidente.ultima_ocorrencia = evento.criado_em
+            incidente.ultima_mensagem = evento.mensagem
+            incidente.contexto = evento.contexto or {}
+            incidente.evento_origem_id = evento.id
+            incidente.level = "error" if evento.level == "error" else incidente.level
+            incidente.status = "aberto"
+            incidente.confirmado_em = None
+            incidente.confirmacao = ""
+            incidente.save(update_fields=[
+                "ocorrencias", "ultima_ocorrencia", "ultima_mensagem", "contexto",
+                "evento_origem", "level", "status", "confirmado_em", "confirmacao",
+            ])
 
 
 class Migration(migrations.Migration):
