@@ -134,12 +134,20 @@ def operations_dashboard(request):
         .annotate(envios=Count("id", distinct=True), cliques=Count("cliques"))
         .order_by("-cliques", "-envios")[:5]
     )
+    from apps.scrapers.conexoes import estado_ml, estado_whatsapp
+
     perfil = request.user.perfil
     configs = ConfiguracaoEnvio.objects.filter(owner=request.user)
     alertas = []
-    if not ml_conectado(request.user) and not perfil.amazon_conectado():
-        alertas.append(("Loja desconectada", "Conecte Mercado Livre ou Amazon para gerar links comissionados.", "scraper-conta"))
-    wa_ok = wa_conectado(perfil.sessao_whatsapp())
+    est_ml = estado_ml(request.user)
+    est_wa = estado_whatsapp(request.user, session=perfil.sessao_whatsapp())
+    ml_ok, wa_ok = est_ml.conectado, est_wa.conectado
+    if not ml_ok and not perfil.amazon_conectado():
+        # O motivo vem do estado: "sessão expirou" e "nunca conectou" pedem ações
+        # diferentes, e o texto fixo dizia a mesma coisa para os dois.
+        alertas.append(("Loja desconectada",
+                        est_ml.motivo or "Conecte Mercado Livre ou Amazon para gerar links comissionados.",
+                        "scraper-conta"))
     if not wa_ok and not perfil.telegram_conectado():
         alertas.append(("Nenhum canal conectado", "Conecte WhatsApp ou Telegram antes de ativar envios.", "scraper-whatsapp"))
     pausadas = configs.filter(ativo=False).exclude(motivo_pausa="").count()
@@ -171,7 +179,8 @@ def operations_dashboard(request):
         "melhores_destinos": melhores_destinos,
         "publicacoes": pubs.select_related("produto", "configuracao").order_by("-criada_em")[:10],
         "alertas": alertas, "configs": configs, "syncs": list(syncs.values()),
-        "ml_ok": ml_conectado(request.user), "wa_ok": wa_ok,
+        "ml_ok": ml_ok, "wa_ok": wa_ok,
+        "est_ml": est_ml, "est_wa": est_wa,
         "tg_ok": perfil.telegram_conectado(),
     })
 
@@ -278,9 +287,15 @@ def comecar(request):
 
     Objetivo: um usuário novo consegue ficar operacional sozinho (tags → conexão →
     regra → ligar envio) sem depender do suporte."""
+    from apps.scrapers.conexoes import estado_ml, estado_whatsapp
+
     perfil = getattr(request.user, "perfil", None)
-    wa_ok = bool(perfil and perfil.wa_estado)
-    loja_ok = bool(perfil and (perfil.ml_estado or perfil.amazon_conectado()))
+    # Estado ao vivo, não perfil.wa_estado/ml_estado: aquelas colunas são o último
+    # estado visto pelo watchdog e ficam `None` até ele rodar a primeira vez. Esta
+    # tela mostrava "desconectado" para quem estava conectado, enquanto o dashboard
+    # ao lado mostrava conectado.
+    wa_ok = estado_whatsapp(request.user).conectado
+    loja_ok = estado_ml(request.user).conectado or bool(perfil and perfil.amazon_conectado())
     tem_config = ConfiguracaoEnvio.objects.filter(owner=request.user).exists()
     teste_ok = Publicacao.objects.filter(usuario=request.user, status="enviado").exists()
     envio_ligado = ConfiguracaoEnvio.objects.filter(owner=request.user, ativo=True).exists()
@@ -310,9 +325,14 @@ def comecar(request):
 
 
 def _tem_sessao_ml(user) -> bool:
-    """True se o usuário já subiu a própria sessão do ML (auth_{id}.json)."""
-    from apps.scrapers.session_paths import ml_session_dir
-    return os.path.exists(os.path.join(ml_session_dir(), f"auth_{user.id}.json"))
+    """True se a sessão do ML deste usuário existe E o ML ainda a aceita.
+
+    Antes só checava a existência do arquivo, ignorando a validade — então a tela de
+    Conta dizia "sessão ok" com um auth de 30 dias enquanto o dashboard, que aplicava
+    a regra de staleness, dizia "loja desconectada".
+    """
+    from apps.scrapers.conexoes import estado_ml
+    return estado_ml(user).conectado
 
 
 def configurar_conta(request):

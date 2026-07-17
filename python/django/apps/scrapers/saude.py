@@ -19,6 +19,7 @@ zero envio não é saúde, é worker desligado — e é isso que a seção de wo
 """
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from django.db.models import Count, Max
@@ -26,6 +27,8 @@ from django.utils import timezone
 
 from apps.scrapers import automacao_state as st
 from apps.scrapers.models import EventoOperacional, IncidenteSaude
+
+logger = logging.getLogger(__name__)
 
 
 # Cada entrada responde às duas únicas perguntas que importam num relatório diário:
@@ -213,12 +216,16 @@ SINAIS = (
 )
 
 # Nomes de worker legíveis (JOBS do automacao_state + o que cada um faz).
+# `controle` é a flag que liga/desliga o job — None = sempre ligado, sem flag.
 WORKERS = (
     ("scrape", "scrape", "Raspagem de ofertas"),
     ("scrape_rapido", "scrape", "Feed rápido de ofertas"),
     ("links", "scrape", "Links de afiliado"),
     ("envio", "envio", "Envio de ofertas"),
     ("relatorios", "relatorios", "Relatórios de comissão"),
+    # Sem flag de propósito: monitorar conexão não pode depender de a automação
+    # estar ligada. Se este morrer, o sistema fica cego para quedas.
+    ("monitor", None, "Monitor de conexões"),
 )
 
 
@@ -285,16 +292,26 @@ def _workers() -> list[dict]:
     """Estado dos loops. Explica o silêncio: zero erro com worker parado não é saúde."""
     out = []
     for job, controle, nome in WORKERS:
+        erro_leitura = ""
         try:
-            ligado = st.is_enabled(controle)
+            # controle=None: job sem flag, sempre ligado (ex.: monitor).
+            ligado = st.is_enabled(controle) if controle else True
             vivo = st.worker_alive(job)
             estado = st.read_state(job) or {}
-        except Exception:
-            ligado, vivo, estado = False, False, {}
+        except Exception as e:
+            # Não pode virar "desligado": isso ZERAVA o alerta (ligado and not vivo)
+            # e escondia o problema em vez de mostrá-lo. Não saber o estado de um
+            # worker é, ele próprio, um alerta.
+            logger.warning("Não foi possível ler o estado do worker %s: %s", job, e)
+            ligado, vivo, estado = True, False, {}
+            erro_leitura = "Não foi possível ler o estado deste worker."
         out.append({
             "job": job, "nome": nome, "ligado": ligado, "vivo": vivo,
+            "controlavel": bool(controle),
+            "controle": controle or "",
             "fase": estado.get("fase", "?"),
-            "ultima_msg": estado.get("ultima_msg", ""),
+            "ultima_msg": erro_leitura or estado.get("ultima_msg", ""),
+            "erro": erro_leitura or estado.get("erro", ""),
             # Ligado mas sem processo vivo é o pior caso: a tela diz "ligado" e
             # nada roda. É o que o usuário chamaria de "o site parou sozinho".
             "alerta": ligado and not vivo,
@@ -361,13 +378,10 @@ def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") ->
         # Busca sem correspondência não pode cair silenciosamente no relatório global.
         qs = qs.none()
 
-    # Compatibilidade com registros anteriores ao modelo de incidentes e com
-    # testes que inserem EventoOperacional diretamente.
-    from apps.scrapers.incidentes_saude import reconciliar_eventos
-    # Eventos antigos sem projeção são reconciliados uma única vez. A própria
-    # consulta da Saúde não pode inflar as ocorrências a cada carregamento.
-    reconciliar_eventos(qs.filter(incidente_processado=False))
-    qs.filter(incidente_processado=False).update(incidente_processado=True)
+    # A projeção dos eventos em incidentes é do worker `monitor`
+    # (incidentes_saude.reconciliar_pendentes), não daqui: esta função roda em GET e
+    # agora também no polling do auto-refresh — escrever aqui inflaria as ocorrências
+    # a cada carregamento. resumo() é SÓ LEITURA.
     problemas, concluidos = _incidentes(usuario, desde) if not usuario_nome or usuario else ([], [])
     n_erros = sum(p["n"] for p in problemas if p["critico"])
     n_avisos = sum(p["n"] for p in problemas if not p["critico"])

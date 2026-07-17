@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import uuid
@@ -225,6 +226,128 @@ class MLAuthPathTests(SimpleTestCase):
             self._tocar(os.path.join(d, "auth_1.json.bak"))
             self._tocar(os.path.join(d, "outra_coisa.json"))
             self.assertEqual(ml_auth_path(), os.path.join(d, "auth.json"))
+
+
+class SondaSessaoMLTests(SimpleTestCase):
+    """A sonda pergunta ao ML se a sessão salva ainda vale.
+
+    A regra anterior era só a idade do arquivo (mtime <= 7 dias), o que mentia: um
+    cookie revogado pelo ML seguia "conectado" por uma semana, enquanto o sync de
+    relatório falhava e a Saúde abria incidente ao lado de um dashboard verde.
+    """
+
+    def _auth(self, d, nome="auth_7.json", cookies=True):
+        caminho = os.path.join(d, nome)
+        estado = {"cookies": [{"name": "ssid", "value": "x"}] if cookies else [],
+                  "origins": []}
+        with open(caminho, "w", encoding="utf-8") as f:
+            json.dump(estado, f)
+        return caminho
+
+    def test_200_e_sessao_viva(self):
+        from apps.scrapers.conexoes import sondar_sessao_ml
+
+        with tempfile.TemporaryDirectory() as d:
+            caminho = self._auth(d)
+            with patch("apps.scrapers.conexoes.requests.get",
+                       return_value=Mock(status_code=200, headers={})):
+                self.assertEqual(sondar_sessao_ml(caminho), ("conectado", ""))
+
+    def test_redirect_para_login_e_sessao_expirada(self):
+        from apps.scrapers.conexoes import sondar_sessao_ml
+
+        with tempfile.TemporaryDirectory() as d:
+            caminho = self._auth(d)
+            resposta = Mock(status_code=302,
+                            headers={"Location": "https://www.mercadolivre.com.br/jms/mlb/lgz/login"})
+            with patch("apps.scrapers.conexoes.requests.get", return_value=resposta):
+                veredito, _ = sondar_sessao_ml(caminho)
+        self.assertEqual(veredito, "expirado")
+
+    def test_timeout_e_inconclusivo_nao_expirado(self):
+        """Oscilação de rede não é logout — a lição de auxiliar.py:85-89."""
+        from apps.scrapers.conexoes import sondar_sessao_ml
+
+        with tempfile.TemporaryDirectory() as d:
+            caminho = self._auth(d)
+            with patch("apps.scrapers.conexoes.requests.get",
+                       side_effect=requests.Timeout("estourou")):
+                veredito, _ = sondar_sessao_ml(caminho)
+        self.assertEqual(veredito, "inconclusivo")
+
+    def test_erro_do_ml_e_inconclusivo(self):
+        """5xx é problema do ML, não da sessão: não pode desconectar o usuário."""
+        from apps.scrapers.conexoes import sondar_sessao_ml
+
+        with tempfile.TemporaryDirectory() as d:
+            caminho = self._auth(d)
+            with patch("apps.scrapers.conexoes.requests.get",
+                       return_value=Mock(status_code=503, headers={})):
+                veredito, _ = sondar_sessao_ml(caminho)
+        self.assertEqual(veredito, "inconclusivo")
+
+
+class EstadoMLTests(SimpleTestCase):
+    def setUp(self):
+        cache.clear()
+
+    def _auth(self, d, nome="auth_7.json"):
+        caminho = os.path.join(d, nome)
+        with open(caminho, "w", encoding="utf-8") as f:
+            json.dump({"cookies": [{"name": "ssid", "value": "x"}], "origins": []}, f)
+        return caminho
+
+    def test_sem_arquivo_e_desconectado_com_motivo(self):
+        from apps.scrapers.conexoes import estado_ml
+
+        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
+            est = estado_ml(Mock(id=7))
+        self.assertFalse(est.conectado)
+        self.assertEqual(est.detalhe, "sem_sessao")
+        self.assertTrue(est.motivo)
+
+    def test_sessao_expirada_apaga_o_arquivo(self):
+        """Confirmado o logout, some com a sessão morta: a tela passa a oferecer
+        'Reconectar' em vez de insistir que está tudo bem."""
+        from apps.scrapers.conexoes import estado_ml
+
+        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
+            caminho = self._auth(d)
+            with patch("apps.scrapers.conexoes.sondar_sessao_ml",
+                       return_value=("expirado", "redirect")):
+                est = estado_ml(Mock(id=7))
+            self.assertFalse(os.path.exists(caminho))
+        self.assertEqual(est.detalhe, "expirado")
+
+    def test_inconclusivo_preserva_o_ultimo_estado_e_nao_apaga(self):
+        from apps.scrapers.conexoes import estado_ml
+
+        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
+            caminho = self._auth(d)
+            user = Mock(id=7)
+            with patch("apps.scrapers.conexoes.sondar_sessao_ml",
+                       return_value=("conectado", "")):
+                self.assertTrue(estado_ml(user).conectado)      # popula o cache
+            with patch("apps.scrapers.conexoes.sondar_sessao_ml",
+                       return_value=("inconclusivo", "timeout")):
+                est = estado_ml(user, usar_cache=False)
+            self.assertTrue(os.path.exists(caminho))            # não apagou
+        self.assertTrue(est.conectado)                          # manteve o que sabia
+
+    def test_conectado_e_cacheado(self):
+        """A sonda vai à rede; dashboard e Saúde fazem polling. Sem cache, cada aba
+        aberta viraria uma ida ao ML."""
+        from apps.scrapers.conexoes import estado_ml
+
+        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
+            self._auth(d)
+            user = Mock(id=7)
+            with patch("apps.scrapers.conexoes.sondar_sessao_ml",
+                       return_value=("conectado", "")) as sonda:
+                estado_ml(user)
+                estado_ml(user)
+                estado_ml(user)
+        self.assertEqual(sonda.call_count, 1)
 
 
 @override_settings(
@@ -1925,11 +2048,20 @@ class RelatorioSaudeTests(TestCase):
             "saude-admin", "admin@x.com", "test")
 
     def _evento(self, evento, level="error", pipeline="publicacao", **kw):
-        return EventoOperacional.objects.create(
+        """Cria o evento e projeta o incidente, como log_event faz em produção.
+
+        A projeção é do worker `monitor`; resumo() é só leitura. Antes o próprio
+        resumo() reconciliava, e estes testes dependiam disso sem dizer.
+        """
+        from apps.scrapers.incidentes_saude import reconciliar_pendentes
+
+        criado = EventoOperacional.objects.create(
             pipeline=pipeline, evento=evento, level=level,
             mensagem=kw.pop("mensagem", "falhou"), usuario=kw.pop("usuario", self.user),
             contexto=kw.pop("contexto", {}),
         )
+        reconciliar_pendentes()
+        return criado
 
     def test_agrupa_ocorrencias_repetidas_num_problema_so(self):
         from apps.scrapers.saude import resumo
@@ -2033,15 +2165,38 @@ class RelatorioSaudeTests(TestCase):
         self.assertEqual(p["titulo"], "evento_que_nao_existe_no_catalogo")
         self.assertIn("não catalogado", p["significa"])
 
-    def test_ignora_evento_fora_da_janela(self):
+    def test_incidente_aberto_antigo_continua_aparecendo(self):
+        """Aberto é problema de AGORA, não histórico: a janela não o esconde.
+
+        Contrato de _incidentes: "abertos sempre aparecem; concluídos seguem o
+        período". Este teste já afirmou o contrário, e passava só porque a projeção
+        era preguiçosa e limitada à janela consultada — em produção, onde log_event
+        projeta na hora, um incidente aberto de 48h sempre apareceu no filtro de 24h.
+        """
+        from apps.scrapers.models import IncidenteSaude
         from apps.scrapers.saude import resumo
 
         antigo = self._evento("config_pausada")
-        EventoOperacional.objects.filter(pk=antigo.pk).update(
-            criado_em=timezone.now() - timedelta(hours=48))
+        ha_48h = timezone.now() - timedelta(hours=48)
+        EventoOperacional.objects.filter(pk=antigo.pk).update(criado_em=ha_48h)
+        IncidenteSaude.objects.update(primeira_ocorrencia=ha_48h, ultima_ocorrencia=ha_48h)
+
+        self.assertEqual(len(resumo(horas=24)["problemas"]), 1)
+        self.assertEqual(len(resumo(horas=168)["problemas"]), 1)
+
+    def test_concluido_fora_da_janela_some_da_tela(self):
+        """Concluído é histórico: some quando sai do período escolhido."""
+        from apps.scrapers.models import IncidenteSaude
+        from apps.scrapers.saude import resumo
+
+        self._evento("config_pausada")
+        ha_48h = timezone.now() - timedelta(hours=48)
+        IncidenteSaude.objects.update(status="concluido", confirmado_em=ha_48h,
+                                      confirmacao="resolvido")
 
         self.assertEqual(resumo(horas=24)["problemas"], [])
-        self.assertEqual(len(resumo(horas=168)["problemas"]), 1)
+        self.assertEqual(resumo(horas=24)["concluidos"], [])
+        self.assertEqual(len(resumo(horas=168)["concluidos"]), 1)
 
     def test_sem_erro_e_com_worker_saudavel_o_veredito_e_ok(self):
         from apps.scrapers.saude import resumo
@@ -2111,6 +2266,8 @@ class IncidentesSaudeTests(TestCase):
         self.assertEqual(incidente.ocorrencias, 2)
 
     def test_leitura_da_saude_nao_reconta_evento_legado(self):
+        """resumo() é só leitura: com auto-refresh, escrever aqui inflaria ocorrências."""
+        from apps.scrapers.incidentes_saude import reconciliar_pendentes
         from apps.scrapers.models import IncidenteSaude
         from apps.scrapers.saude import resumo
 
@@ -2119,10 +2276,25 @@ class IncidentesSaudeTests(TestCase):
             mensagem="getState timeout", usuario=self.user,
             contexto={"canal": "whatsapp", "destino": "123@g.us"},
         )
-        resumo(usuario=self.user)
-        resumo(usuario=self.user)
+        reconciliar_pendentes()
+        for _ in range(5):                      # simula o polling de 15s
+            resumo(usuario=self.user)
         incidente = IncidenteSaude.objects.get(usuario=self.user)
         self.assertEqual(incidente.ocorrencias, 1)
+
+    def test_reconciliar_pendentes_e_idempotente(self):
+        """O worker roda em loop: reprojetar o mesmo evento não pode recontar."""
+        from apps.scrapers.incidentes_saude import reconciliar_pendentes
+        from apps.scrapers.models import IncidenteSaude
+
+        EventoOperacional.objects.create(
+            pipeline="publicacao", evento="send_failed", level="warning",
+            mensagem="getState timeout", usuario=self.user,
+            contexto={"canal": "whatsapp", "destino": "123@g.us"},
+        )
+        self.assertEqual(reconciliar_pendentes(), 1)
+        self.assertEqual(reconciliar_pendentes(), 0)     # já marcado
+        self.assertEqual(IncidenteSaude.objects.get(usuario=self.user).ocorrencias, 1)
 
 
 class ReconexaoBancoScraperTests(TestCase):
@@ -2179,6 +2351,10 @@ class InstrumentacaoTests(TestCase):
         self.assertEqual(evento.level, "error")
         self.assertIn("SMTP recusou", evento.erro)
 
+    def _estado(self, conectado, motivo="", detalhe=""):
+        from apps.scrapers.conexoes import Estado
+        return Estado(conectado, "WhatsApp", "worker", motivo, detalhe, timezone.now())
+
     def test_queda_de_conexao_vira_evento_mesmo_sem_email(self):
         """O evento não pode depender do e-mail: era exatamente esse o buraco."""
         from apps.scrapers.monitor_conexao import _processar
@@ -2187,13 +2363,30 @@ class InstrumentacaoTests(TestCase):
         perfil.wa_estado = True
         enviar = Mock(return_value=False)  # SMTP quebrado
 
-        _processar(perfil, "WhatsApp", "wa", False, timezone.now(),
-                   timedelta(hours=6), enviar)
+        _processar(perfil, "WhatsApp", "wa",
+                   self._estado(False, "WhatsApp não está pareado.", "sem_pareamento"),
+                   timezone.now(), timedelta(hours=6), enviar)
 
         evento = EventoOperacional.objects.get(evento="conexao_caiu")
         self.assertEqual(evento.pipeline, "conexao")
         self.assertEqual(evento.level, "error")
         self.assertEqual(evento.usuario, self.user)
+
+    def test_evento_de_queda_carrega_o_motivo(self):
+        """"WhatsApp caiu" não é acionável; "não está pareado" vs "serviço fora do
+        ar" pedem ações diferentes, e a Saúde só sabe o que o evento contar."""
+        from apps.scrapers.monitor_conexao import _processar
+
+        perfil = self.user.perfil
+        perfil.wa_estado = True
+
+        _processar(perfil, "WhatsApp", "wa",
+                   self._estado(False, "Serviço de WhatsApp indisponível.", "servico_fora"),
+                   timezone.now(), timedelta(hours=6), Mock(return_value=False))
+
+        evento = EventoOperacional.objects.get(evento="conexao_caiu")
+        self.assertIn("indisponível", evento.mensagem)
+        self.assertEqual(evento.contexto["detalhe"], "servico_fora")
 
     def test_conexao_caida_nao_gera_evento_a_cada_tick(self):
         """Com SMTP quebrado o cooldown precisa segurar mesmo assim.
@@ -2211,8 +2404,8 @@ class InstrumentacaoTests(TestCase):
 
         # 12 ticks de 5min = 1 hora caído, dentro do cooldown de 6h.
         for i in range(12):
-            _processar(perfil, "WhatsApp", "wa", False, agora + timedelta(minutes=5 * i),
-                       timedelta(hours=6), enviar)
+            _processar(perfil, "WhatsApp", "wa", self._estado(False, "caiu"),
+                       agora + timedelta(minutes=5 * i), timedelta(hours=6), enviar)
 
         self.assertEqual(
             EventoOperacional.objects.filter(evento="conexao_caiu").count(), 1)
@@ -2227,9 +2420,10 @@ class InstrumentacaoTests(TestCase):
         agora = timezone.now()
         enviar = Mock(return_value=False)
 
-        _processar(perfil, "WhatsApp", "wa", False, agora, timedelta(hours=6), enviar)
-        _processar(perfil, "WhatsApp", "wa", False, agora + timedelta(hours=7),
+        _processar(perfil, "WhatsApp", "wa", self._estado(False, "caiu"), agora,
                    timedelta(hours=6), enviar)
+        _processar(perfil, "WhatsApp", "wa", self._estado(False, "caiu"),
+                   agora + timedelta(hours=7), timedelta(hours=6), enviar)
 
         eventos = EventoOperacional.objects.filter(evento="conexao_caiu")
         self.assertEqual(eventos.count(), 2)
@@ -2240,7 +2434,7 @@ class InstrumentacaoTests(TestCase):
 
         perfil = self.user.perfil
         perfil.wa_estado = False
-        _processar(perfil, "WhatsApp", "wa", True, timezone.now(),
+        _processar(perfil, "WhatsApp", "wa", self._estado(True), timezone.now(),
                    timedelta(hours=6), Mock(return_value=True))
 
         self.assertTrue(EventoOperacional.objects.filter(

@@ -118,6 +118,40 @@ def reconciliar_eventos(queryset):
         processar_evento(evento)
 
 
+def reconciliar_pendentes(lote: int = 500) -> int:
+    """Projeta os eventos ainda sem incidente e os marca. Roda no worker `monitor`.
+
+    Isto vivia dentro de saude.resumo(), ou seja, um GET escrevia no banco. Além de
+    ser efeito colateral numa leitura, impedia o auto-refresh: com polling, cada
+    carregamento reprocessaria o lote. Sem transação, dois superadmins com a tela
+    aberta (ou um F5 duplo) já dobravam as `ocorrencias` do mesmo incidente.
+
+    O select_for_update(skip_locked) garante que dois processos nunca projetem o
+    mesmo evento: quem não pegar o lock simplesmente pula.
+    """
+    from django.db import transaction
+    from apps.scrapers.models import EventoOperacional
+
+    total = 0
+    while True:
+        with transaction.atomic():
+            ids = list(
+                EventoOperacional.objects.select_for_update(skip_locked=True)
+                .filter(incidente_processado=False)
+                .order_by("criado_em")
+                .values_list("id", flat=True)[:lote]
+            )
+            if not ids:
+                return total
+            for evento in (EventoOperacional.objects.filter(id__in=ids)
+                           .order_by("criado_em")):
+                processar_evento(evento)
+            EventoOperacional.objects.filter(id__in=ids).update(incidente_processado=True)
+            total += len(ids)
+        if len(ids) < lote:
+            return total
+
+
 def confirmar(incidente, mensagem: str):
     incidente.status = "concluido"
     incidente.confirmado_em = timezone.now()

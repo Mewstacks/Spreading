@@ -96,15 +96,19 @@ def status(user_id: int) -> dict:
     fase: 'idle' | 'iniciando' | 'aguardando_login' | 'salvando' | 'conectado' | 'erro'
     """
     estado = cache.get(_cache_key(user_id)) or {"fase": "idle"}
-    # 'conectado' de verdade = arquivo existe e está fresco (mesma regra do monitor).
+    # 'conectado' de verdade vem da fonte única (conexoes.py) — a mesma que o
+    # dashboard e a Saúde leem. A `fase` acima é só o progresso do login em curso.
     try:
-        from apps.scrapers.monitor_conexao import ml_conectado
         from django.contrib.auth import get_user_model
+        from apps.scrapers.conexoes import estado_ml
 
         user = get_user_model().objects.filter(id=user_id).first()
-        estado["auth_valido"] = ml_conectado(user) if user else False
+        est = estado_ml(user) if user else None
+        estado["auth_valido"] = bool(est and est.conectado)
+        estado["motivo_desconexao"] = est.motivo if est and not est.conectado else ""
     except Exception:
         estado["auth_valido"] = os.path.exists(_auth_path(user_id))
+        estado["motivo_desconexao"] = ""
     return estado
 
 
@@ -301,6 +305,15 @@ def _worker(user_id: int):
                 except Exception:
                     pass
                 context.storage_state(path=_auth_path(user_id))
+                # A sonda de sessão é cacheada por 5min; sem invalidar, quem acabou
+                # de conectar continuaria vendo "desconectado" na tela até o cache
+                # vencer — logo depois de fazer exatamente o que pedimos.
+                try:
+                    from apps.scrapers.conexoes import invalidar_ml
+                    from django.contrib.auth import get_user_model
+                    invalidar_ml(get_user_model().objects.filter(id=user_id).first())
+                except Exception:
+                    pass
                 _set_estado(user_id, fase="conectado", salvar_agora=False, erro="")
             elif (cache.get(_cache_key(user_id)) or {}).get("fase") != "idle":
                 _set_estado(user_id, fase="erro",

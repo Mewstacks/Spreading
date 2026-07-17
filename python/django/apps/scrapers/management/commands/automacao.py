@@ -373,17 +373,10 @@ class Command(BaseCommand):
                         logger.warning("Purga de eventos falhou: %s", e)
                 res = processar_configs_de_envio()
                 enviados = sum(1 for r in res if r.get("sucesso"))
-                # Watchdog de conexões: alerta por e-mail quando WA/ML cai (cooldown interno).
-                try:
-                    from apps.scrapers.monitor_conexao import verificar_e_notificar
-                    verificar_e_notificar()
-                except Exception as e:
-                    logger.warning("Monitor de conexao falhou: %s", e)
-                    # O watchdog é quem detecta queda de conexão; se ele morre, o
-                    # sistema fica cego justamente para o que mais importa.
-                    log_event("conexao", "watchdog_erro",
-                              f"O monitor de conexões falhou: {e}",
-                              level="error", exc=e)
+                # O watchdog de conexões saiu daqui: virou o processo `monitor` do
+                # Procfile. Como este loop é gated pela flag "envio", o watchdog
+                # herdava o gate — envio desligado, ninguém via queda nem retomada
+                # de conexão, e os incidentes ficavam abertos para sempre.
                 ticks += 1
                 logger.info("[%s] tick: %s config(s) vencida(s), %s enviada(s)", agora.strftime("%H:%M"), len(res), enviados)
                 st.write_state(

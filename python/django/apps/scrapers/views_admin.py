@@ -44,6 +44,12 @@ def _uso_usuario(user, *, agora=None) -> dict:
         "perfil": perfil,
         "verificado": bool(perfil and perfil.email_verificado),
         "bloqueado": bool(perfil and perfil.bloqueado),
+        # Último estado visto pelo watchdog, não leitura ao vivo: esta função roda
+        # para TODOS os usuários na listagem, e sondar cada um seria uma ida à rede
+        # por linha. É honesto porque o processo `monitor` agora atualiza estas
+        # colunas a cada 5min incondicionalmente — antes elas congelavam em None
+        # enquanto o worker de envio estivesse desligado, que é o que fazia esta
+        # tela discordar do dashboard. Para o estado ao vivo, ver conexoes.py.
         "wa_estado": getattr(perfil, "wa_estado", None),
         "ml_estado": getattr(perfil, "ml_estado", None),
         "amazon_elegivel": getattr(perfil, "amazon_elegivel", None),
@@ -113,9 +119,13 @@ def superadmin_criar_usuario(request):
 
 @superadmin_required
 def superadmin_usuario_detalhe(request, user_id):
+    from apps.scrapers.conexoes import estados_do_usuario
+
     user = get_object_or_404(User.objects.select_related("perfil"), pk=user_id)
+    # Uma conta só: aqui cabe sondar ao vivo (na listagem seria uma ida à rede por
+    # linha). É esta tela que responde "a conexão dele está de pé AGORA?".
     return render(request, "scrapers/superadmin/usuario_detalhe.html",
-                  {"u": _uso_usuario(user)})
+                  {"u": _uso_usuario(user), "conexoes": estados_do_usuario(user)})
 
 
 @superadmin_required

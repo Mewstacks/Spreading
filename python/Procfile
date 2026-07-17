@@ -17,4 +17,9 @@ links: python django/manage.py automacao --modo links --tick 5 --lote 40
 # (6h). O worker so checa a cada 60s quem venceu -- e por isso o botao "Sincronizar"
 # da tela responde em ~1min em vez de esperar o tick de 6h.
 relatorios: python django/manage.py automacao --modo relatorios
+# watchdog de conexoes + projecao de incidentes. Processo PROPRIO e sem flag de
+# liga/desliga: antes isto era um passageiro do tick de envio, entao com o envio
+# desligado ninguem monitorava nada -- "conexao_voltou" nunca saia e os incidentes
+# de conexao ficavam abertos para sempre (Saude vermelha, dashboard verde).
+monitor: python django/manage.py monitorar --tick 5
 canais: python django/manage.py monitorar_canais --tick 60
