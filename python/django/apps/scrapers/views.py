@@ -1226,9 +1226,8 @@ def scrape_ofertas_stream(request):
                             # O pool é compartilhado, mas a sessão do ML é do usuário:
                             # sem isto, lia-se um auth.json que a tela nunca grava.
                             gerar_links_em_lote(pendentes, usuario=usuario)
-                        sobra = pend_qs.count()
-                        if sobra:
-                            print(f"{sobra} produto(s) ainda sem link (serão gerados no próximo scrape ou no envio).")
+                        from apps.scrapers.afiliado import frase_resumo_afiliacao
+                        print(frase_resumo_afiliacao(usuario))
             except Exception as exc:
                 q.put(f"[ERRO] {exc}")
             finally:
@@ -1423,7 +1422,7 @@ def gerar_links_stream(request):
                     )
                     pendentes = list(base_qs[:limite])
                     restantes = base_qs.count()
-                    print(f"{restantes} produto(s) sem link. Gerando até {limite}...")
+                    print(f"{restantes} produto(s) sem link pronto. Gerando até {limite}...")
                     # Agrupa por loja: cada marketplace gera seus links (ML=Playwright,
                     # Amazon=puro Python). Evita rodar o Link Builder do ML num ASIN.
                     if pendentes:
@@ -1432,8 +1431,8 @@ def gerar_links_stream(request):
                             por_loja.setdefault(p.marketplace or "mercadolivre", []).append(p)
                         for slug, grupo in por_loja.items():
                             get_marketplace(slug).prefetch_links(grupo, usuario=usuario)
-                    sobra = base_qs.count()
-                    print(f"Sobraram {sobra} produto(s) sem link.")
+                    from apps.scrapers.afiliado import frase_resumo_afiliacao
+                    print(frase_resumo_afiliacao(usuario))
             except Exception as exc:
                 q.put(f"[ERRO] {exc}")
             finally:

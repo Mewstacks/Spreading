@@ -67,6 +67,44 @@ def situacao_dos_links(usuario, produtos) -> dict:
     }
 
 
+def resumo_afiliacao(usuario) -> dict:
+    """Contagem honesta do catálogo visível ao usuário, separando fila de terminal.
+
+    A tela somava tudo que não tinha link num único "sem link" — e um catálogo
+    saudável, com só algumas centenas de itens realmente fora do Programa, parecia
+    milhares de falhas. Aqui "pendente" (na fila, o link vem) é distinto de "não
+    afiliável" e "erro" (terminais, o link não vem).
+    """
+    from django.db.models import Q
+    from apps.scrapers.models import Produto, LinkAfiliadoUsuario
+
+    escopo = Produto.objects.filter(Q(owner__isnull=True) | Q(owner=usuario))
+    total = escopo.count()
+    linhas = LinkAfiliadoUsuario.objects.filter(usuario=usuario, produto__in=escopo)
+    prontos = linhas.exclude(link_afiliado="").count()
+    nao_afiliavel = linhas.filter(estado="nao_afiliavel").count()
+    erro = linhas.filter(estado="erro").count()
+    # Legado: itens antigos com link no próprio Produto (pré-multi-tenant), sem
+    # linha em LinkAfiliadoUsuario.
+    legacy = escopo.exclude(link_afiliado="").exclude(
+        id__in=linhas.exclude(link_afiliado="").values("produto_id")).count()
+    prontos += legacy
+    pendente = max(total - prontos - nao_afiliavel - erro, 0)
+    return {"total": total, "prontos": prontos, "pendente": pendente,
+            "nao_afiliavel": nao_afiliavel, "erro": erro}
+
+
+def frase_resumo_afiliacao(usuario) -> str:
+    """Uma linha legível a partir de resumo_afiliacao — para o log SSE pós-raspagem."""
+    r = resumo_afiliacao(usuario)
+    partes = [f"{r['pendente']} aguardando link", f"{r['prontos']} prontos"]
+    if r["nao_afiliavel"]:
+        partes.append(f"{r['nao_afiliavel']} não afiliáveis (catálogo/URL fora do Programa)")
+    if r["erro"]:
+        partes.append(f"{r['erro']} com erro")
+    return "Afiliação: " + " · ".join(partes) + "."
+
+
 def salvar_cache(usuario, produto, link_afiliado, url_isca, afiliado_ok) -> None:
     if usuario is None or not link_afiliado:
         return

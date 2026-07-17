@@ -17,7 +17,7 @@ class MercadoLivre(Marketplace):
             mapear_ofertas, buscar_por_termo,
         )
         from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import mapear_cupons_codigo
-        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons, projetar_catalogo_cupons
 
         from django.utils import timezone
         from apps.scrapers.eventos import log_event
@@ -47,6 +47,13 @@ class MercadoLivre(Marketplace):
                           f"Não foi possível raspar os cupons de campanha do ML: {e}",
                           level="warning", contexto={"marketplace": "mercadolivre"}, exc=e)
                 cupons_campanha = 0
+            # A aba "Cupons" do site lê só o CupomNormalizado. Projeta a tabela Cupom
+            # (campanhas) para o catálogo, lendo o banco — vale mesmo quando a raspagem
+            # deste ciclo veio vazia (anti-wipe preserva as campanhas anteriores).
+            try:
+                projetar_catalogo_cupons()
+            except Exception as e:
+                logger.warning("Projeção do catálogo de cupons ML falhou: %s", e)
             cupons = cupons_codigo + cupons_campanha
             for t in (termos or []):
                 try:

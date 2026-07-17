@@ -5,7 +5,7 @@ import time
 import logging
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada
-from apps.scrapers.models import Cupom, Produto
+from apps.scrapers.models import Cupom, Produto, CupomNormalizado, FonteIngestao
 from apps.scrapers.progresso import emitir_progresso
 from apps.scrapers.session_paths import ml_auth_path
 from django.utils import timezone
@@ -266,6 +266,67 @@ def mapear_cupons(n=1):
         # Mesmo contrato de mapear_cupons_codigo e mapear_ofertas.
         logger.warning("Raspagem de cupons de campanha ML vazia; nada alterado")
     return len(todos_os_cupons_limpos)
+
+
+def projetar_catalogo_cupons():
+    """Projeta os cupons de campanha (tabela `Cupom`) para o catálogo público
+    (`CupomNormalizado`) — a aba "Cupons" do site lê SÓ o `CupomNormalizado`.
+
+    Sem isto, milhares de cupons de campanha válidos ficavam presos na tabela
+    `Cupom` e a aba Cupons aparecia vazia: o único caminho que escrevia
+    `CupomNormalizado` era o dos códigos digitáveis (`cupons_codigo_scraper`), e o
+    ML parou de expor esses códigos em texto. Roda a cada scrape, lendo o banco —
+    independe de a raspagem deste ciclo ter trazido cupom novo.
+    """
+    fonte, _ = FonteIngestao.objects.get_or_create(
+        slug="mercadolivre-web", defaults={
+            "marketplace": "mercadolivre", "nome": "Mercado Livre — páginas públicas"})
+
+    ativos = list(Cupom.objects.filter(estado="ativo"))
+    # Anti-wipe: sem cupom ativo, não desativa o catálogo (a coleta pode ter caído).
+    if not ativos:
+        logger.warning("Nenhum cupom de campanha ativo; catálogo de cupons preservado")
+        return 0
+
+    externos_vistos = set()
+    for c in ativos:
+        ext = f"campanha:{c.campanha_id}"
+        externos_vistos.add(ext)
+        if c.tipo_desconto == "fixo":
+            resumo = f"R$ {c.valor_desconto:.2f} de desconto"
+        elif c.tipo_desconto:
+            resumo = f"{c.valor_desconto:.0f}% de desconto"
+        else:
+            resumo = ""
+        titulo = c.titulo or (f"Cupom — {resumo}" if resumo else "Cupom Mercado Livre")
+        CupomNormalizado.objects.update_or_create(
+            fonte=fonte, external_id=ext,
+            defaults={
+                "marketplace": "mercadolivre",
+                "titulo": titulo[:255],
+                "codigo": c.codigo or "",
+                "link": c.link_original or "https://www.mercadolivre.com.br/cupons",
+                "validade": c.validade,
+                "confianca": "media",
+                "estado": "ativo",
+                "regras": {"tipo_desconto": c.tipo_desconto,
+                           "valor_desconto": c.valor_desconto,
+                           "valor_minimo": c.valor_minimo},
+                "evidencia": {"transport": "public-web", "association": "campaign"},
+            },
+        )
+
+    # Sincroniza o catálogo com o estado do `Cupom`: campanhas que saíram do ar
+    # deixam de aparecer. Só mexe nas projeções de campanha (external_id
+    # "campanha:"), nunca nos cupons de checkout ("checkout:").
+    obsoletos = (CupomNormalizado.objects
+                 .filter(fonte=fonte, estado="ativo", external_id__startswith="campanha:")
+                 .exclude(external_id__in=externos_vistos))
+    n_obsoletos = obsoletos.update(estado="expirado")
+    if n_obsoletos:
+        logger.info("%s cupom(ns) de campanha expirado(s) no catálogo", n_obsoletos)
+    logger.info("Catálogo de cupons: %s cupom(ns) de campanha projetado(s)", len(ativos))
+    return len(ativos)
 
 
 def listar_itens_por_cupom(cupom, page, max_paginas=5):
