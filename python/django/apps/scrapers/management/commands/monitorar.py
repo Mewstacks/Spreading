@@ -41,7 +41,8 @@ class Command(BaseCommand):
             r = self._ciclo()
             self.stdout.write(
                 f"Checados {r['checados']} perfil(s); {r['alertas_enviados']} alerta(s) "
-                f"enviado(s); {r['reconciliados']} evento(s) reconciliado(s)."
+                f"enviado(s); {r['reconciliados']} evento(s) reconciliado(s); "
+                f"{r['conexoes_fechadas']} incidente(s) de conexão fechado(s)."
             )
             return
 
@@ -80,8 +81,14 @@ class Command(BaseCommand):
             proximo = time.monotonic() + tick * 60
 
     def _ciclo(self) -> dict:
-        from apps.scrapers.incidentes_saude import reconciliar_pendentes
+        from apps.scrapers.incidentes_saude import (
+            fechar_conexoes_restabelecidas, reconciliar_pendentes,
+        )
 
         r = verificar_e_notificar()
         r["reconciliados"] = reconciliar_pendentes()
+        # Depois de reconciliar: incidente de conexão órfão (aberto por um watchdog
+        # que morreu antes de registrar a queda no Perfil) não tem transição futura
+        # para ser fechado por, e ficaria vermelho na Saúde para sempre.
+        r["conexoes_fechadas"] = fechar_conexoes_restabelecidas()
         return r

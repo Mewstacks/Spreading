@@ -16,6 +16,7 @@ from django.db.models import (
 from django.http import StreamingHttpResponse, HttpResponse, JsonResponse
 from django.shortcuts import render, redirect
 from django.utils import timezone
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.scrapers.models import (
@@ -1264,20 +1265,34 @@ def automacao_control(request):
             "estado": estado,
         })
 
+    # As telas de Scraper/Envios chamam por fetch e leem o JSON. A Saúde usa um form
+    # comum (sem JS), então precisa voltar para uma página: com `next`, redireciona.
+    def _responder(payload, msg_ok):
+        destino = request.POST.get("next")
+        if destino and url_has_allowed_host_and_scheme(
+                destino, allowed_hosts={request.get_host()},
+                require_https=request.is_secure()):
+            messages.success(request, msg_ok)
+            return redirect(destino)
+        return JsonResponse(payload)
+
     acao = request.POST.get("acao")
     if acao == "stop":
         st.parar(tipo)
-        return JsonResponse({"rodando": False, "tipo": tipo, "msg": "Parado."})
+        return _responder({"rodando": False, "tipo": tipo, "msg": "Parado."},
+                          f"Worker '{tipo}' desligado.")
 
     # start — liga o flag; garante que exista um worker. Em prod (honcho) o worker
     # já roda (heartbeat fresco) e o spawn é no-op; em dev (runserver) sobe um
     # subprocess destacado cross-platform. O loop trabalha no próximo ciclo.
     if st.is_running(tipo):
         st.spawn_worker(tipo)  # religa o worker se tiver morrido (dev)
-        return JsonResponse({"rodando": True, "tipo": tipo, "msg": "Já estava ligado."})
+        return _responder({"rodando": True, "tipo": tipo, "msg": "Já estava ligado."},
+                          f"Worker '{tipo}' já estava ligado.")
     st.iniciar(tipo)
     st.spawn_worker(tipo)
-    return JsonResponse({"rodando": True, "tipo": tipo, "msg": "Ligado."})
+    return _responder({"rodando": True, "tipo": tipo, "msg": "Ligado."},
+                      f"Worker '{tipo}' ligado. O primeiro ciclo roda em instantes.")
 
 
 @staff_required

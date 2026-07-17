@@ -6,14 +6,18 @@ Fly (compartilhadas) e permite suspender, definir cotas e impersonar um usuário
 Uso é COMPUTADO das tabelas existentes — não há metering novo. Infra é compartilhada
 (uma máquina por serviço), então o painel Fly é global, não por usuário.
 """
+import logging
 from datetime import timedelta
+from urllib.parse import urlencode
 
 from django.contrib import messages
 from django.contrib.auth import get_user_model, login
 from django.db.models import Count, Max, Q
+from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_GET, require_POST
 
 from apps.scrapers import automacao_state as st
 from apps.scrapers.fly_infra import snapshot as fly_snapshot
@@ -25,6 +29,7 @@ from apps.scrapers.saude import resumo as saude_resumo
 from apps.scrapers.views import superadmin_required
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 # Chave da sessão que guarda o superadmin original durante a impersonação.
 IMPERSONATOR_KEY = "impersonator_id"
@@ -135,15 +140,7 @@ def superadmin_saude(request):
     Período curto por padrão (24h) porque a pergunta que esta tela responde é "o que
     aconteceu desde ontem"; 7 dias serve para ver se algo é recorrente ou foi blip.
     """
-    try:
-        horas = int(request.GET.get("horas", 24))
-    except (TypeError, ValueError):
-        horas = 24
-    horas = horas if horas in (24, 72, 168) else 24
-    usuario_nome = (request.GET.get("usuario") or "").strip()
-    usuario = None
-    if usuario_nome:
-        usuario = User.objects.filter(username__iexact=usuario_nome).first()
+    horas, usuario, usuario_nome = _filtros_da_saude(request)
     return render(request, "scrapers/superadmin/saude.html",
                   {"r": saude_resumo(horas=horas, usuario=usuario,
                                       usuario_nome=usuario_nome), "horas": horas,
@@ -151,57 +148,194 @@ def superadmin_saude(request):
                    "usuario_encontrado": usuario})
 
 
+def _filtros_da_saude(request):
+    """(horas, usuario, usuario_nome) da querystring. Compartilhado pela tela e o JSON."""
+    try:
+        horas = int(request.GET.get("horas", 24))
+    except (TypeError, ValueError):
+        horas = 24
+    horas = horas if horas in (24, 72, 168) else 24
+    usuario_nome = (request.GET.get("usuario") or "").strip()
+    usuario = (User.objects.filter(username__iexact=usuario_nome).first()
+               if usuario_nome else None)
+    return horas, usuario, usuario_nome
+
+
+@superadmin_required
+@require_GET
+def superadmin_saude_json(request):
+    """Resumo da Saúde em JSON para o auto-refresh. SÓ LEITURA.
+
+    A tela não tinha refresh nenhum: quem consertava um worker ficava olhando um
+    vermelho velho até lembrar de dar F5. Só dá para fazer polling porque
+    saude.resumo() deixou de escrever — a projeção de incidentes virou trabalho do
+    worker `monitor`. Se voltar a escrever aqui, cada tela aberta reprocessa o lote
+    a cada 15s.
+    """
+    horas, usuario, usuario_nome = _filtros_da_saude(request)
+    r = saude_resumo(horas=horas, usuario=usuario, usuario_nome=usuario_nome)
+    return JsonResponse({
+        "estado": r["estado"], "texto": r["texto"],
+        "n_erros": r["n_erros"], "n_avisos": r["n_avisos"],
+        "atualizado_em": timezone.localtime(r["agora"]).strftime("%H:%M:%S"),
+        "conexoes": [{"servico": c["servico"], "conectado": c["conectado"],
+                      "motivo": c["motivo"]} for c in r["conexoes"]],
+        "workers": [{"job": w["job"], "nome": w["nome"], "ligado": w["ligado"],
+                     "vivo": w["vivo"], "alerta": w["alerta"], "fase": w["fase"],
+                     "ultima_msg": w["ultima_msg"]} for w in r["workers"]],
+        "problemas": [{"causa": p["causa"], "titulo": p["titulo"], "n": p["n"],
+                       "critico": p["critico"], "usuarios": p["usuarios"]}
+                      for p in r["problemas"]],
+        # A contagem move quando um reteste conclui algo: é o gatilho do reload.
+        "assinatura": f'{len(r["problemas"])}:{r["n_erros"]}:{r["n_avisos"]}:'
+                      f'{len(r["concluidos"])}',
+    })
+
+
+def _retestar_incidente(incidente) -> dict:
+    """Retesta UM incidente sem publicar promoção nem repetir mensagem.
+
+    Cada causa tem um teste que já existe no sistema; a única regra é que nenhum
+    deles pode ter efeito visível para o usuário final — reteste que publica oferta
+    seria pior que o problema.
+    """
+    contexto = incidente.contexto or {}
+    causa = incidente.causa
+
+    if causa.startswith("whatsapp_"):
+        from apps.scrapers import whatsapp_client
+        destino = ""
+        publicacao_id = contexto.get("publicacao_id")
+        if publicacao_id:
+            destino = (Publicacao.objects.filter(pk=publicacao_id)
+                        .values_list("destino_id", flat=True).first() or "")
+        # Sem guarda, um usuário sem Perfil levantava Perfil.DoesNotExist, que o
+        # except genérico transformava em "Reteste falhou" — escondendo a causa.
+        perfil = getattr(incidente.usuario, "perfil", None) if incidente.usuario else None
+        if perfil is None:
+            return {"sucesso": False, "mensagem": "A conta deste incidente não tem perfil."}
+        return whatsapp_client.diagnosticar(perfil.sessao_whatsapp(), destino)
+
+    if causa.startswith("link_"):
+        from apps.scrapers.ofertas import enviar_oferta_de_produto
+        from apps.scrapers.models import Produto
+        produto = Produto.objects.filter(pk=contexto.get("produto_id")).first()
+        if not (produto and incidente.usuario):
+            return {"sucesso": False,
+                    "mensagem": "Produto de referência não está mais disponível."}
+        r = enviar_oferta_de_produto(produto, "diagnostico@g.us", verificar=True,
+                                     dry_run=True, usuario=incidente.usuario,
+                                     destino_nome="Diagnóstico sem publicação")
+        return {"sucesso": bool(r.get("sucesso")),
+                "mensagem": ("Link validado sem publicar oferta." if r.get("sucesso")
+                             else r.get("motivo", "Link não validado."))}
+
+    if causa.startswith("sync_") and incidente.usuario:
+        from apps.scrapers.relatorios import sync_marketplace
+        marketplace = str(contexto.get("marketplace")
+                          or incidente.escopo.removeprefix("marketplace:") or "")
+        sync = sync_marketplace(incidente.usuario, marketplace)
+        return {"sucesso": sync.status == "ok",
+                "mensagem": sync.erro or "Relatório sincronizado."}
+
+    if causa == "email_falhou":
+        from django.core.mail import get_connection
+        connection = get_connection()
+        connection.open()
+        connection.close()
+        return {"sucesso": True, "mensagem": "Conexão SMTP validada sem enviar e-mail."}
+
+    # ── Conexão: agora tem reteste porque existe uma fonte única para perguntar ──
+    if causa.startswith("conexao_") or causa == "links_sem_sessao":
+        from apps.scrapers.conexoes import estado_ml, estado_whatsapp
+        servico = (contexto.get("servico") or "").lower()
+        if not incidente.usuario:
+            return {"sucesso": False, "mensagem": "Incidente de conexão sem conta associada."}
+        if "whats" in servico:
+            est = estado_whatsapp(incidente.usuario)
+        elif "mercado" in servico or causa == "links_sem_sessao":
+            est = estado_ml(incidente.usuario)
+        else:
+            wa, ml = estado_whatsapp(incidente.usuario), estado_ml(incidente.usuario)
+            est = wa if not wa.conectado else ml
+        return {"sucesso": est.conectado,
+                "mensagem": (f"{est.servico} está conectado agora." if est.conectado
+                             else est.motivo)}
+
+    # ── Scraper/fonte: o próprio registro de ingestão responde ──
+    if causa.startswith("scrape_") or causa in ("fonte_falhou", "flash_erro",
+                                                "cupons_vazios", "cupons_campanha_erro"):
+        from apps.scrapers.models import FonteIngestao
+        marketplace = contexto.get("marketplace") or contexto.get("fonte") or ""
+        fontes = FonteIngestao.objects.all()
+        if marketplace:
+            fontes = fontes.filter(marketplace=marketplace)
+        fonte = fontes.order_by("-ultimo_sucesso").first()
+        if fonte is None:
+            return {"sucesso": False, "mensagem": "Nenhuma fonte de ingestão registrada."}
+        # Só o último ciclo conta: um sucesso de ontem não prova que voltou hoje.
+        recente = (fonte.ultimo_sucesso
+                   and fonte.ultimo_sucesso >= timezone.now() - timedelta(hours=6))
+        if fonte.status == "ok" and recente:
+            return {"sucesso": True,
+                    "mensagem": (f"{fonte.nome} coletou {fonte.ultimo_total} item(ns) em "
+                                 f"{timezone.localtime(fonte.ultimo_sucesso):%d/%m %H:%M}.")}
+        return {"sucesso": False,
+                "mensagem": (fonte.erro_publico
+                             or "A fonte ainda não teve uma coleta bem-sucedida recente.")}
+
+    return {"sucesso": False,
+            "mensagem": "Este incidente exige correção manual antes de ser confirmado."}
+
+
 @superadmin_required
 @require_POST
 def superadmin_saude_retest(request, incidente_id):
-    """Retesta a causa sem publicar promoção nem repetir mensagem."""
-    incidente = get_object_or_404(IncidenteSaude.objects.select_related("usuario"), pk=incidente_id)
-    contexto = incidente.contexto or {}
-    causa = incidente.causa
-    resultado = {"sucesso": False, "mensagem": "Este incidente exige correção manual antes de ser confirmado."}
-    try:
-        if causa.startswith("whatsapp_"):
-            from apps.scrapers import whatsapp_client
-            destino = ""
-            publicacao_id = contexto.get("publicacao_id")
-            if publicacao_id:
-                destino = (Publicacao.objects.filter(pk=publicacao_id)
-                            .values_list("destino_id", flat=True).first() or "")
-            sessao = incidente.usuario.perfil.sessao_whatsapp() if incidente.usuario else None
-            resultado = whatsapp_client.diagnosticar(sessao, destino)
-        elif causa.startswith("link_"):
-            from apps.scrapers.ofertas import enviar_oferta_de_produto
-            from apps.scrapers.models import Produto
-            produto = Produto.objects.filter(pk=contexto.get("produto_id")).first()
-            if produto and incidente.usuario:
-                r = enviar_oferta_de_produto(produto, "diagnostico@g.us", verificar=True,
-                                             dry_run=True, usuario=incidente.usuario,
-                                             destino_nome="Diagnóstico sem publicação")
-                resultado = {"sucesso": bool(r.get("sucesso")),
-                             "mensagem": "Link validado sem publicar oferta." if r.get("sucesso") else r.get("motivo", "Link não validado.")}
-            else:
-                resultado = {"sucesso": False, "mensagem": "Produto de referência não está mais disponível."}
-        elif causa.startswith("sync_") and incidente.usuario:
-            from apps.scrapers.relatorios import sync_marketplace
-            marketplace = str(contexto.get("marketplace") or incidente.escopo.removeprefix("marketplace:") or "")
-            sync = sync_marketplace(incidente.usuario, marketplace)
-            resultado = {"sucesso": sync.status == "ok", "mensagem": sync.erro or "Relatório sincronizado."}
-        elif causa == "email_falhou":
-            from django.core.mail import get_connection
-            connection = get_connection()
-            connection.open()
-            connection.close()
-            resultado = {"sucesso": True, "mensagem": "Conexão SMTP validada sem enviar e-mail."}
-    except Exception as exc:
-        resultado = {"sucesso": False, "mensagem": f"Reteste falhou: {exc}"}
+    """Retesta o GRUPO do incidente e conclui os que passarem.
 
-    if resultado.get("sucesso"):
-        from apps.scrapers.incidentes_saude import confirmar
-        confirmar(incidente, resultado["mensagem"])
-        messages.success(request, f"Ajuste concluído: {resultado['mensagem']}")
+    Por grupo, não por incidente: a tela agrupa por (pipeline, causa, escopo), e só
+    oferecia o botão quando o grupo tinha exatamente 1 item — justamente o caso raro.
+    Com várias contas afetadas pelo mesmo problema, não havia como marcar nada como
+    resolvido, e a tela acumulava erro que ninguém conseguia baixar.
+    """
+    from apps.scrapers.incidentes_saude import confirmar
+
+    base = get_object_or_404(IncidenteSaude.objects.select_related("usuario"), pk=incidente_id)
+    grupo = list(IncidenteSaude.objects.select_related("usuario").filter(
+        pipeline=base.pipeline, causa=base.causa, escopo=base.escopo, status="aberto"))
+    if not grupo:
+        grupo = [base]
+
+    concluidos, falhas, ultima_msg = 0, 0, ""
+    for incidente in grupo:
+        try:
+            resultado = _retestar_incidente(incidente)
+        except Exception as exc:
+            logger.warning("Reteste do incidente %s falhou: %s", incidente.pk, exc)
+            resultado = {"sucesso": False, "mensagem": f"Reteste falhou: {exc}"}
+        ultima_msg = resultado.get("mensagem") or ultima_msg
+        if resultado.get("sucesso"):
+            confirmar(incidente, resultado["mensagem"])
+            concluidos += 1
+        else:
+            falhas += 1
+
+    if concluidos and not falhas:
+        messages.success(request, f"Ajuste concluído: {ultima_msg}")
+    elif concluidos:
+        messages.warning(
+            request, f"{concluidos} conta(s) confirmada(s), {falhas} ainda com "
+                     f"problema. Última mensagem: {ultima_msg}")
     else:
-        messages.error(request, resultado.get("mensagem") or "O reteste não confirmou o ajuste.")
-    return redirect("superadmin-saude")
+        messages.error(request, ultima_msg or "O reteste não confirmou o ajuste.")
+
+    # Preserva o filtro: o redirect nu jogava o superadmin de volta em 24h/global,
+    # perdendo a conta que ele estava investigando.
+    destino = reverse("superadmin-saude")
+    filtros = urlencode({k: v for k, v in (
+        ("horas", request.POST.get("horas") or ""),
+        ("usuario", request.POST.get("usuario") or "")) if v})
+    return redirect(f"{destino}?{filtros}" if filtros else destino)
 
 
 @superadmin_required

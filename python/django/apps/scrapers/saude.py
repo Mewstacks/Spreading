@@ -54,6 +54,18 @@ CATALOGO = {
         "significa": "Uma publicação falhou antes de uma causa mais específica ser identificada.",
         "acao": "Confira o detalhe técnico, corrija a origem e execute um novo teste seguro.",
     },
+    # Causa gerada por incidentes_saude.causa_do_evento a partir de send_timeout.
+    # Sem entrada aqui ela renderizava com o nome cru na tela: o mapa de compat em
+    # _incidentes preenche a chave `evento`, mas quem busca a tradução é
+    # descrever(causa), que não passa por ele.
+    "whatsapp_timeout_entrega": {
+        "titulo": "Serviço WhatsApp não respondeu a tempo",
+        "significa": "O transporte do WhatsApp ficou indisponível ou não confirmou a "
+                     "mensagem dentro do prazo. O resultado pode ser incerto para evitar "
+                     "duplicar uma oferta no grupo.",
+        "acao": "Confirme a mensagem no grupo antes de reenviar. Se repetir para várias "
+                 "contas, investigue a máquina spreading-wa e o Chromium.",
+    },
     "send_timeout": {
         "titulo": "Serviço WhatsApp não respondeu a tempo",
         "significa": "O transporte do WhatsApp ficou indisponível ou não confirmou a "
@@ -340,6 +352,40 @@ def _workers() -> list[dict]:
     return out
 
 
+# Causas que a tela sabe retestar sozinha (ver views_admin._retestar_incidente).
+# Nenhum destes testes tem efeito visível para o usuário final — reteste que publica
+# oferta ou manda mensagem seria pior que o problema.
+_RETESTAVEIS_PREFIXO = ("whatsapp_", "link_", "sync_", "email_", "conexao_", "scrape_")
+_RETESTAVEIS_EXATO = ("fonte_falhou", "flash_erro", "cupons_vazios",
+                      "cupons_campanha_erro", "links_sem_sessao")
+
+
+def _retestavel(causa: str) -> bool:
+    return causa.startswith(_RETESTAVEIS_PREFIXO) or causa in _RETESTAVEIS_EXATO
+
+
+def _conexoes_ao_vivo(usuario=None) -> list[dict]:
+    """Estado atual das conexões — o MESMO dado que o dashboard mostra.
+
+    A Saúde nunca consultava conexão: inferia de incidentes `conexao_*` abertos, sem
+    janela de tempo. Um `conexao_caiu` de semanas atrás seguia vermelho aqui ao lado
+    de um dashboard verde, e era essa a divergência que mais confundia. Lendo da
+    fonte única (conexoes.py), divergir virou impossível.
+
+    Só com uma conta escolhida: sondar todas as contas a cada carregamento (e a cada
+    polling de 15s) seria uma ida à rede por usuário.
+    """
+    if usuario is None:
+        return []
+    from apps.scrapers.conexoes import estados_do_usuario
+    try:
+        estados = estados_do_usuario(usuario)
+    except Exception as e:
+        logger.warning("Não foi possível ler as conexões de %s: %s", usuario, e)
+        return []
+    return [estados["whatsapp"].as_dict(), estados["mercadolivre"].as_dict()]
+
+
 def _incidentes(usuario, desde):
     """Incidentes abertos sempre aparecem; concluídos seguem o período escolhido."""
     base = IncidenteSaude.objects.select_related("usuario", "evento_origem")
@@ -365,7 +411,11 @@ def _incidentes(usuario, desde):
             afetados.sort(key=lambda a: (a["usuario__username"], a["usuario_id"]))
             sistema = next((i.evento_origem for i in itens_grupo if not i.usuario), None)
             saida.append({
-                "id": ultimo.id if len(itens_grupo) == 1 else None,
+                # Âncora do grupo: a view retesta (pipeline, causa, escopo) a partir
+                # dela. Era None em grupo com mais de um incidente, porque o reteste
+                # antigo só sabia lidar com um — e era esse None que apagava o botão
+                # justamente quando várias contas sofriam do mesmo problema.
+                "id": ultimo.id,
                 "causa": causa,
                 # Compatibilidade da leitura anterior; causa é o identificador novo.
                 "evento": {"publicacao_falhou": "send_failed", "whatsapp_timeout_entrega": "send_timeout"}.get(causa, causa),
@@ -377,8 +427,10 @@ def _incidentes(usuario, desde):
                 "contexto": ultimo.contexto, "usuario": ultimo.usuario if len(itens_grupo) == 1 else None,
                 "usuarios": len(afetados), "afetados": afetados, "sistema": sistema,
                 "confirmado_em": ultimo.confirmado_em, "confirmacao": ultimo.confirmacao,
-                "retestavel": len(itens_grupo) == 1 and causa.startswith((
-                    "whatsapp_", "link_", "sync_", "email_")),
+                # Sem o limite de 1 incidente: o reteste roda por grupo. Exigir grupo
+                # unitário deixava sem botão justamente o caso que mais importa — o
+                # mesmo problema atingindo várias contas.
+                "retestavel": _retestavel(causa),
                 **info,
             })
         return saida
@@ -435,5 +487,6 @@ def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") ->
         "concluidos": concluidos,
         "n_erros": n_erros, "n_avisos": n_avisos,
         "sinais": sinais, "workers": workers,
+        "conexoes": _conexoes_ao_vivo(usuario),
         "total": qs.count(),
     }

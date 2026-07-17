@@ -63,15 +63,44 @@ vida. Quem abre isto às 8h precisa saber em 2 segundos se tem trabalho hoje.
 </form>
 <p class="escopo"><i data-lucide="users"></i>{% if usuario_encontrado %} Eventos de {{ usuario_encontrado.get_username }}.{% elif usuario_busca %} Nenhum usuário encontrado para “{{ usuario_busca }}”.{% else %} Visão geral: avisos e erros de todas as contas. Selecione uma conta afetada para abrir seus detalhes.{% endif %}</p>
 
-<div class="veredito {{ r.estado }}">
+<div class="veredito {{ r.estado }}" id="veredito">
   {% if r.estado == 'ok' %}<i data-lucide="check-circle-2"></i>
   {% elif r.estado == 'atencao' %}<i data-lucide="alert-triangle"></i>
   {% else %}<i data-lucide="alert-octagon"></i>{% endif %}
   <div>
-    <h2>{{ r.texto }}</h2>
-    <p>Período: últimas {{ r.horas }}h (desde {{ r.desde|date:"d/m H:i" }}) — {{ r.n_erros }} erro(s), {{ r.n_avisos }} aviso(s) em {{ r.total }} evento(s).</p>
+    <h2 id="veredito-texto">{{ r.texto }}</h2>
+    <p>Período: últimas {{ r.horas }}h (desde {{ r.desde|date:"d/m H:i" }}) — {{ r.n_erros }} erro(s), {{ r.n_avisos }} aviso(s) em {{ r.total }} evento(s).
+       <span id="atualizado" class="meta"></span></p>
   </div>
 </div>
+
+{% comment %}
+Conexões ao vivo, da MESMA fonte que o dashboard lê (conexoes.py). Esta tela nunca
+consultava conexão: inferia de incidentes abertos, sem janela de tempo, então um
+"caiu" de semanas atrás seguia vermelho aqui ao lado de um dashboard verde. Era a
+divergência que mais confundia. Lendo da fonte única, divergir virou impossível.
+
+Só com uma conta filtrada: sondar todas a cada carregamento (e a cada polling)
+seria uma ida à rede por usuário.
+{% endcomment %}
+{% if r.conexoes %}
+<div class="card">
+  <div class="card-head"><h2><i data-lucide="plug-zap"></i> Conexões de {{ usuario_encontrado.get_username }} agora</h2></div>
+  <div class="stat-grid" id="conexoes">
+    {% for c in r.conexoes %}
+    <div class="stat">
+      <div style="display:flex;align-items:center;gap:.4rem;">
+        <span class="dot {% if c.conectado %}on{% else %}off{% endif %}"></span>
+        <strong style="font-size:.85rem;">{{ c.servico }}</strong>
+      </div>
+      <div class="l" style="margin-top:.3rem;">
+        {% if c.conectado %}Conectado{% else %}<span style="color:var(--red);">{{ c.motivo }}</span>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
 
 {% comment %}
 Workers antes dos problemas: se um worker está parado, a lista de erros abaixo está
@@ -79,7 +108,7 @@ mentindo por omissão — nada roda, então nada falha.
 {% endcomment %}
 <div class="card">
   <div class="card-head"><h2><i data-lucide="activity"></i> Workers</h2></div>
-  <div class="stat-grid">
+  <div class="stat-grid" id="workers">
     {% for w in r.workers %}
     <div class="stat">
       <div style="display:flex;align-items:center;gap:.4rem;">
@@ -88,10 +117,29 @@ mentindo por omissão — nada roda, então nada falha.
       </div>
       <div class="l" style="margin-top:.3rem;">
         {% if w.alerta %}<span style="color:var(--red);font-weight:600;">Ligado mas não está rodando</span>
+        {% elif not w.controlavel %}{{ w.fase }}
         {% elif not w.ligado %}Desligado na tela
         {% else %}{{ w.fase }}{% endif %}
       </div>
-      {% if w.ultima_msg %}<div class="l" style="margin-top:.2rem;">{{ w.ultima_msg|truncatechars:60 }}</div>{% endif %}
+      {% if w.ultima_msg %}<div class="l" style="margin-top:.2rem;">{{ w.ultima_msg|truncatechars:80 }}</div>{% endif %}
+      {% comment %}
+      Toggle do worker de relatórios: a flag existe em automacao_state.JOBS e o
+      endpoint já a aceita, mas NENHUMA tela a expunha — só ligava por SSH
+      (`touch .automacao/relatorios.enabled`) ou curl. Era o oposto de web-native, e
+      é por isso que o sync de comissão nunca rodou em produção.
+      {% endcomment %}
+      {% if w.job == 'relatorios' %}
+      <form method="post" action="{% url 'scraper-automacao' %}" style="margin-top:.5rem;">
+        {% csrf_token %}
+        <input type="hidden" name="tipo" value="relatorios">
+        <input type="hidden" name="acao" value="{% if w.ligado %}stop{% else %}start{% endif %}">
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <button class="btn btn-sm {% if w.ligado %}btn-ghost{% else %}btn-purple{% endif %}" type="submit">
+          <i data-lucide="{% if w.ligado %}pause{% else %}play{% endif %}"></i>
+          {% if w.ligado %}Desligar{% else %}Ligar sync de comissão{% endif %}
+        </button>
+      </form>
+      {% endif %}
     </div>
     {% endfor %}
   </div>
@@ -122,7 +170,14 @@ mentindo por omissão — nada roda, então nada falha.
       {% if p.sistema %}<dt>Escopo</dt><dd>Sistema (todas as contas)</dd>{% endif %}
       <dt>Último detalhe</dt><dd>{{ p.mensagem }}</dd>
     </dl>
-    {% if p.retestavel %}<form method="post" action="{% url 'superadmin-saude-retestar' incidente_id=p.id %}" style="margin-top:.7rem;">{% csrf_token %}<button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="shield-check"></i> Retestar sem publicar</button></form>{% endif %}
+    {% comment %}
+    p.id é o incidente âncora; a view retesta o GRUPO inteiro a partir dele. Antes o
+    botão só aparecia quando o grupo tinha exatamente 1 item — ou seja, sumia
+    justamente no caso que mais importa: o mesmo problema atingindo várias contas.
+    horas/usuario viajam no POST porque o redirect nu devolvia o superadmin para
+    24h/global, perdendo a conta que ele estava investigando.
+    {% endcomment %}
+    {% if p.retestavel %}<form method="post" action="{% url 'superadmin-saude-retestar' incidente_id=p.id %}" style="margin-top:.7rem;">{% csrf_token %}<input type="hidden" name="horas" value="{{ horas }}"><input type="hidden" name="usuario" value="{{ usuario_busca }}"><button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="shield-check"></i> Retestar {% if p.usuarios > 1 %}as {{ p.usuarios }} contas {% endif %}sem publicar</button></form>{% endif %}
   </div>
   {% empty %}
   <div class="msg msg-info">Nenhum erro nem aviso nas últimas {{ r.horas }}h.</div>
@@ -152,4 +207,44 @@ mentindo por omissão — nada roda, então nada falha.
     O log cru de cada evento fica em <a href="{% url 'superadmin-infra' %}">Infra</a> e no Django Admin.
   </p>
 </div>
+
+<script>
+/* Auto-refresh. A tela não tinha nenhum: quem consertava um worker ficava olhando
+   um vermelho velho até lembrar de dar F5 — e era isso que fazia a Saúde parecer
+   sempre quebrada.
+
+   15s (não os 5s das telas de conexão): aqui cada leitura agrega incidentes e sonda
+   conexão, e ninguém acompanha a Saúde segundo a segundo.
+
+   Só é possível fazer polling porque saude.resumo() virou SÓ LEITURA — a projeção de
+   incidentes é do worker `monitor`. Se algo voltar a escrever no GET, cada aba
+   aberta reprocessa o lote a cada 15s. */
+(() => {
+  const url = "{% url 'superadmin-saude-json' %}?horas={{ horas }}&usuario={{ usuario_busca|urlencode }}";
+  const veredito = document.getElementById('veredito');
+  const texto = document.getElementById('veredito-texto');
+  const carimbo = document.getElementById('atualizado');
+  let assinatura = null;
+
+  async function poll() {
+    try {
+      const r = await fetch(url, {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+      if (!r.ok) return;
+      const d = await r.json();
+
+      /* Recarrega só quando o conjunto de problemas muda de verdade (ex.: um reteste
+         concluiu um grupo). Repintar a lista inteira por JS duplicaria em script todo
+         o template acima — e as duas cópias divergiriam na primeira mudança. */
+      if (assinatura !== null && d.assinatura !== assinatura) { location.reload(); return; }
+      assinatura = d.assinatura;
+
+      veredito.className = 'veredito ' + d.estado;
+      texto.textContent = d.texto;
+      carimbo.textContent = '· atualizado às ' + d.atualizado_em;
+    } catch (e) { /* rede oscilando não pode encher o console nem parar o loop */ }
+  }
+  poll();
+  setInterval(poll, 15000);
+})();
+</script>
 {% endblock %}

@@ -2566,6 +2566,237 @@ class RelatorioSaudeTests(TestCase):
         self.assertContains(resposta, "Visão geral: avisos e erros de todas as contas")
 
 
+class RetesteDaSaudeTests(TestCase):
+    """A tela precisa conseguir baixar o próprio vermelho.
+
+    O botão só aparecia para grupos com EXATAMENTE 1 incidente e causas
+    whatsapp_/link_/sync_/email_ — ou seja, sumia justamente no caso que mais
+    importa (o mesmo problema em várias contas), e conexão/scraper não tinham
+    reteste nenhum. O resultado era uma pilha de erros que ninguém conseguia fechar.
+    """
+
+    def setUp(self):
+        self.admin = get_user_model().objects.create_superuser(
+            "reteste-admin", "a@x.com", "test")
+        self.u1 = get_user_model().objects.create_user("conta-1", password="test")
+        self.u2 = get_user_model().objects.create_user("conta-2", password="test")
+        self.client.force_login(self.admin)
+
+    def _incidente(self, usuario, causa="conexao_caiu", pipeline="conexao",
+                   escopo="servico:WhatsApp", **kw):
+        from apps.scrapers.models import IncidenteSaude
+        return IncidenteSaude.objects.create(
+            chave=uuid.uuid4().hex, causa=causa, pipeline=pipeline, escopo=escopo,
+            usuario=usuario, level=kw.pop("level", "error"), status="aberto",
+            primeira_ocorrencia=timezone.now(), ultima_ocorrencia=timezone.now(),
+            ultima_mensagem="caiu", contexto=kw.pop("contexto", {"servico": "WhatsApp"}),
+        )
+
+    def test_reteste_fecha_o_grupo_inteiro_nao_so_um(self):
+        from apps.scrapers.models import IncidenteSaude
+
+        a = self._incidente(self.u1)
+        self._incidente(self.u2)
+
+        with patch("apps.scrapers.conexoes.estado_whatsapp",
+                   return_value=_estado_conectado("WhatsApp")):
+            self.client.post(reverse("superadmin-saude-retestar", args=[a.pk]))
+
+        self.assertEqual(IncidenteSaude.objects.filter(status="aberto").count(), 0)
+        self.assertEqual(IncidenteSaude.objects.filter(status="concluido").count(), 2)
+
+    def test_conexao_de_pe_agora_conclui_o_incidente(self):
+        """A causa nº1 de 'Saúde vermelha, dashboard verde'."""
+        from apps.scrapers.models import IncidenteSaude
+
+        inc = self._incidente(self.u1)
+
+        with patch("apps.scrapers.conexoes.estado_whatsapp",
+                   return_value=_estado_conectado("WhatsApp")):
+            self.client.post(reverse("superadmin-saude-retestar", args=[inc.pk]))
+
+        inc.refresh_from_db()
+        self.assertEqual(inc.status, "concluido")
+        self.assertIn("conectado", inc.confirmacao.lower())
+
+    def test_conexao_ainda_caida_mantem_aberto_com_o_motivo(self):
+        inc = self._incidente(self.u1)
+
+        with patch("apps.scrapers.conexoes.estado_whatsapp",
+                   return_value=_estado_caido("WhatsApp", "WhatsApp não está pareado.")):
+            r = self.client.post(reverse("superadmin-saude-retestar", args=[inc.pk]),
+                                 follow=True)
+
+        inc.refresh_from_db()
+        self.assertEqual(inc.status, "aberto")
+        self.assertIn("não está pareado", " ".join(str(m) for m in get_messages(r.wsgi_request)))
+
+    def test_grupo_parcial_avisa_quantas_faltam(self):
+        """Uma conta voltar não pode dar 'tudo certo' quando a outra segue caída."""
+        from apps.scrapers.models import IncidenteSaude
+
+        a = self._incidente(self.u1)
+        self._incidente(self.u2)
+        estados = {self.u1: _estado_conectado("WhatsApp"),
+                   self.u2: _estado_caido("WhatsApp", "ainda fora")}
+
+        with patch("apps.scrapers.conexoes.estado_whatsapp",
+                   side_effect=lambda u, **k: estados[u]):
+            self.client.post(reverse("superadmin-saude-retestar", args=[a.pk]))
+
+        self.assertEqual(IncidenteSaude.objects.filter(status="aberto").count(), 1)
+        self.assertEqual(IncidenteSaude.objects.filter(status="concluido").count(), 1)
+
+    def test_reteste_preserva_o_filtro(self):
+        """O redirect nu devolvia o superadmin para 24h/global, perdendo a conta que
+        ele estava investigando."""
+        inc = self._incidente(self.u1)
+
+        with patch("apps.scrapers.conexoes.estado_whatsapp",
+                   return_value=_estado_conectado("WhatsApp")):
+            r = self.client.post(reverse("superadmin-saude-retestar", args=[inc.pk]),
+                                 {"horas": "168", "usuario": "conta-1"})
+
+        self.assertIn("horas=168", r.url)
+        self.assertIn("usuario=conta-1", r.url)
+
+    def test_conta_sem_perfil_nao_vira_reteste_falhou_generico(self):
+        """Perfil.DoesNotExist era capturado pelo except genérico e virava
+        'Reteste falhou', escondendo a causa real."""
+        from apps.scrapers.views_admin import _retestar_incidente
+
+        inc = self._incidente(self.u1, causa="whatsapp_confirmacao",
+                              pipeline="publicacao", escopo="whatsapp:123@g.us")
+        Perfil = self.u1.perfil.__class__
+        Perfil.objects.filter(user=self.u1).delete()
+        self.u1.refresh_from_db()
+
+        r = _retestar_incidente(inc)
+
+        self.assertFalse(r["sucesso"])
+        self.assertIn("perfil", r["mensagem"].lower())
+
+    def test_causas_de_conexao_e_scraper_agora_sao_retestaveis(self):
+        from apps.scrapers.saude import _retestavel
+
+        for causa in ("conexao_caiu", "scrape_erro", "fonte_falhou", "cupons_vazios",
+                      "links_sem_sessao", "whatsapp_confirmacao", "sync_failed"):
+            self.assertTrue(_retestavel(causa), causa)
+        self.assertFalse(_retestavel("signup"))
+
+
+def _estado_conectado(servico):
+    from apps.scrapers.conexoes import Estado
+    return Estado(True, servico, "sonda", "", "", timezone.now())
+
+
+def _estado_caido(servico, motivo):
+    from apps.scrapers.conexoes import Estado
+    return Estado(False, servico, "sonda", motivo, "sem_pareamento", timezone.now())
+
+
+class AutoRefreshDaSaudeTests(TestCase):
+    """O endpoint de polling. Só pode existir porque resumo() virou só leitura."""
+
+    def setUp(self):
+        self.admin = get_user_model().objects.create_superuser(
+            "json-admin", "a@x.com", "test")
+        self.client.force_login(self.admin)
+
+    def test_json_responde_o_resumo(self):
+        r = self.client.get(reverse("superadmin-saude-json"))
+
+        self.assertEqual(r.status_code, 200)
+        d = r.json()
+        self.assertIn(d["estado"], ("ok", "atencao", "critico"))
+        self.assertIn("assinatura", d)
+        self.assertTrue(d["workers"])
+
+    def test_polling_nao_infla_ocorrencias(self):
+        """A regressão que o auto-refresh podia introduzir: resumo() escrevendo no
+        GET faria cada aba reprocessar o lote a cada 15s."""
+        from apps.scrapers.incidentes_saude import reconciliar_pendentes
+        from apps.scrapers.models import IncidenteSaude
+
+        user = get_user_model().objects.create_user("pollado", password="x")
+        EventoOperacional.objects.create(
+            pipeline="publicacao", evento="send_failed", level="error",
+            mensagem="falhou", usuario=user, contexto={"canal": "whatsapp",
+                                                       "destino": "1@g.us"})
+        reconciliar_pendentes()
+
+        for _ in range(10):
+            self.client.get(reverse("superadmin-saude-json"))
+
+        self.assertEqual(IncidenteSaude.objects.get(usuario=user).ocorrencias, 1)
+
+    def test_json_e_so_para_superadmin(self):
+        self.client.force_login(get_user_model().objects.create_user("zé", password="x"))
+
+        r = self.client.get(reverse("superadmin-saude-json"))
+
+        self.assertNotEqual(r.status_code, 200)
+
+
+class IncidenteDeConexaoOrfaoTests(TestCase):
+    """Incidente aberto por um watchdog que morreu antes de registrar a queda no
+    Perfil não tem transição futura para fechá-lo: ficaria vermelho para sempre.
+    É a pilha de erros antigos da tela que ninguém conseguia baixar."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("orfao", password="x")
+
+    def test_fecha_incidente_cuja_conexao_esta_de_pe(self):
+        from apps.scrapers.incidentes_saude import fechar_conexoes_restabelecidas
+        from apps.scrapers.models import IncidenteSaude
+
+        inc = IncidenteSaude.objects.create(
+            chave=uuid.uuid4().hex, causa="conexao_caiu", pipeline="conexao",
+            escopo="servico:WhatsApp", usuario=self.user, level="error",
+            status="aberto", primeira_ocorrencia=timezone.now(),
+            ultima_ocorrencia=timezone.now(), ultima_mensagem="caiu",
+            contexto={"servico": "WhatsApp"})
+
+        with patch("apps.scrapers.conexoes.estado_whatsapp",
+                   return_value=_estado_conectado("WhatsApp")):
+            self.assertEqual(fechar_conexoes_restabelecidas(), 1)
+
+        inc.refresh_from_db()
+        self.assertEqual(inc.status, "concluido")
+
+    def test_nao_fecha_o_que_segue_caido(self):
+        from apps.scrapers.incidentes_saude import fechar_conexoes_restabelecidas
+        from apps.scrapers.models import IncidenteSaude
+
+        IncidenteSaude.objects.create(
+            chave=uuid.uuid4().hex, causa="conexao_caiu", pipeline="conexao",
+            escopo="servico:Mercado Livre", usuario=self.user, level="error",
+            status="aberto", primeira_ocorrencia=timezone.now(),
+            ultima_ocorrencia=timezone.now(), ultima_mensagem="caiu",
+            contexto={"servico": "Mercado Livre"})
+
+        with patch("apps.scrapers.conexoes.estado_ml",
+                   return_value=_estado_caido("Mercado Livre", "sessão expirou")):
+            self.assertEqual(fechar_conexoes_restabelecidas(), 0)
+
+
+class CatalogoDaSaudeTests(SimpleTestCase):
+    def test_toda_causa_gerada_tem_traducao(self):
+        """whatsapp_timeout_entrega era gerado mas não catalogado: renderizava com o
+        nome cru. O mapa de compat em _incidentes preenche a chave `evento`, não a
+        busca de descrever(causa)."""
+        from apps.scrapers.saude import CATALOGO
+
+        geradas = ("whatsapp_timeout_entrega", "whatsapp_store_recarregado",
+                   "whatsapp_preflight_timeout", "whatsapp_frame_recarregado",
+                   "whatsapp_confirmacao", "link_afiliado_recusado",
+                   "whatsapp_erro_minificado", "publicacao_falhou",
+                   "links_sem_sessao", "cupons_vazios", "cupons_campanha_erro")
+        faltando = [c for c in geradas if c not in CATALOGO]
+
+        self.assertEqual(faltando, [])
+
+
 class IncidentesSaudeTests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user("incidente-user", password="test")

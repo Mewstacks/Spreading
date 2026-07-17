@@ -152,6 +152,42 @@ def reconciliar_pendentes(lote: int = 500) -> int:
             return total
 
 
+def fechar_conexoes_restabelecidas() -> int:
+    """Fecha incidente de conexão cuja conexão está de pé agora. Roda no `monitor`.
+
+    O fechamento normal depende do evento `conexao_voltou`, que o watchdog só emite
+    quando VÊ a transição (Perfil.wa_estado False -> True). Isso deixa um buraco:
+    incidentes abertos por um watchdog que morreu antes de registrar a queda no
+    Perfil ficam órfãos — não há transição futura para ver, porque o estado salvo já
+    diz "conectado". Eles ficariam abertos para sempre, vermelhos na Saúde ao lado
+    de um dashboard verde. É a pilha de erros antigos que ninguém consegue baixar.
+
+    O estado atual é evidência suficiente: se está conectado agora, o incidente de
+    queda está resolvido, independentemente de quem viu a transição.
+    """
+    from apps.scrapers.conexoes import estado_ml, estado_whatsapp
+    from apps.scrapers.models import IncidenteSaude
+
+    fechados = 0
+    abertos = (IncidenteSaude.objects.select_related("usuario")
+               .filter(status="aberto", pipeline="conexao", usuario__isnull=False))
+    for incidente in abertos:
+        servico = (incidente.contexto or {}).get("servico", "").lower()
+        try:
+            if "whats" in servico:
+                est = estado_whatsapp(incidente.usuario)
+            elif "mercado" in servico:
+                est = estado_ml(incidente.usuario)
+            else:
+                continue
+        except Exception:
+            continue                      # sonda instável não conclui nada
+        if est.conectado:
+            confirmar(incidente, f"{est.servico} está conectado novamente.")
+            fechados += 1
+    return fechados
+
+
 def confirmar(incidente, mensagem: str):
     incidente.status = "concluido"
     incidente.confirmado_em = timezone.now()
