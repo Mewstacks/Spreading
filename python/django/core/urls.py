@@ -25,12 +25,18 @@ from apps.scrapers import views as scraper_views
 @login_not_required
 def healthz(request):
     """Readiness público: processo vivo e banco realmente utilizável."""
+    # Normalmente o DatabaseUnavailableMiddleware intercepta esta rota antes da
+    # sessão. Mantemos a mesma semântica caso a view seja chamada isoladamente.
     try:
+        connection.close()
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1")
             cursor.fetchone()
     except Exception:
+        connection.close()
         return HttpResponse("database unavailable", status=503, content_type="text/plain")
+    finally:
+        connection.close()
     return HttpResponse("ok", content_type="text/plain")
 
 

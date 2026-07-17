@@ -28,6 +28,10 @@ class EmailVerificadoMiddleware:
         return self.get_response(request)
 
     def process_view(self, request, view_func, view_args, view_kwargs):
+        # Health check da plataforma não deve carregar sessão/perfil. Quando o banco
+        # cai, a própria view /healthz responde 503 de forma determinística.
+        if request.path == "/healthz":
+            return None
         user = getattr(request, "user", None)
         if not (user and user.is_authenticated) or user.is_superuser:
             return None
@@ -56,6 +60,8 @@ class ContaBloqueadaMiddleware:
         return self.get_response(request)
 
     def process_view(self, request, view_func, view_args, view_kwargs):
+        if request.path == "/healthz":
+            return None
         user = getattr(request, "user", None)
         if not (user and user.is_authenticated) or user.is_superuser:
             return None

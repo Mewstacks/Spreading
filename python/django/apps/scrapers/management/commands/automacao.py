@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand
-from django.db import connections
+from django.db import DatabaseError, connections
 from django.utils import timezone
 
 from apps.scrapers import automacao_state as st
@@ -25,6 +25,7 @@ logger = logging.getLogger("apps.automacao")
 
 ERRO_PUBLICO = "Falha temporária no serviço. Uma nova tentativa será feita no próximo ciclo."
 RETRY_MINUTOS = 5
+BACKOFF_BANCO_MAX_S = 300
 
 
 @contextmanager
@@ -54,6 +55,24 @@ def _renovar_conexoes_db():
     causava ``OperationalError: the connection is closed`` no ciclo seguinte.
     """
     connections.close_all()
+
+
+def _pausar_por_banco(job, erro, falhas: int):
+    """Evita retry em loop quando o Postgres/proxy está indisponível.
+
+    Não gravamos EventoOperacional aqui: ele também depende do mesmo banco. O estado
+    do worker fica no volume e permite que a tela de Saúde mostre o ocorrido assim
+    que a conexão voltar.
+    """
+    espera = min(15 * (2 ** max(0, falhas - 1)), BACKOFF_BANCO_MAX_S)
+    proximo = timezone.now() + timedelta(seconds=espera)
+    connections.close_all()
+    logger.warning("%s pausado por banco indisponível; nova tentativa em %ss: %s",
+                   job, espera, erro)
+    st.write_state(job, fase="aguardando_banco", erro=ERRO_PUBLICO,
+                   proximo_ciclo=proximo.isoformat(),
+                   ultima_msg=f"Banco indisponível; nova tentativa em {espera}s.")
+    return proximo
 
 
 def _rodar_scrape():
@@ -252,6 +271,7 @@ class Command(BaseCommand):
         logger.info("LINKS worker no ar; até %s link(s)/usuário a cada %smin quando ligado",
                     lote, tick)
         proximo = timezone.now()
+        falhas_banco = 0
         while True:
             if not st.is_enabled("scrape"):
                 # A lane de links não tem flag própria; herda a da raspagem. O texto
@@ -270,8 +290,17 @@ class Command(BaseCommand):
             try:
                 st.write_state("links", fase="gerando", erro="")
                 _renovar_conexoes_db()
-                with _heartbeat_durante("links"):
-                    res = _rodar_links(lote=lote)
+                from apps.scrapers.carga import operacao_pesada
+                with operacao_pesada() as acquired:
+                    if not acquired:
+                        proximo = timezone.now() + timedelta(seconds=POLL)
+                        st.write_state("links", fase="aguardando_capacidade", erro="",
+                                       proximo_ciclo=proximo.isoformat(),
+                                       ultima_msg="Aguardando outra tarefa pesada terminar.")
+                        continue
+                    with _heartbeat_durante("links"):
+                        res = _rodar_links(lote=lote)
+                falhas_banco = 0
                 proximo = timezone.now() + timedelta(minutes=tick)
                 st.write_state(
                     "links", fase="aguardando", proximo_ciclo=proximo.isoformat(),
@@ -279,6 +308,9 @@ class Command(BaseCommand):
                     ultima_msg=(f"{res['gerados']} link(s) gerado(s), "
                                 f"{res['falhas']} falha(s) às {agora:%H:%M}."),
                 )
+            except DatabaseError as e:
+                falhas_banco += 1
+                proximo = _pausar_por_banco("links", e, falhas_banco)
             except Exception as e:
                 logger.exception("Erro no ciclo de links")
                 log_event("scraper", "links_ciclo_erro",
@@ -293,6 +325,7 @@ class Command(BaseCommand):
         POLL = 15
         logger.info("SCRAPE-FLASH worker no ar; feed a cada %smin quando ligado", tick)
         proximo = timezone.now()
+        falhas_banco = 0
         while True:
             # Heartbeat: marca o worker vivo (evita spawn duplicado em dev; worker_alive).
             if not st.is_enabled("scrape"):
@@ -306,7 +339,21 @@ class Command(BaseCommand):
             st.write_state("scrape_rapido", fase="raspando")
             try:
                 _renovar_conexoes_db()
-                _rodar_scrape_rapido()
+                from apps.scrapers.carga import operacao_pesada
+                with operacao_pesada() as acquired:
+                    if not acquired:
+                        proximo = timezone.now() + timedelta(seconds=POLL)
+                        st.write_state("scrape_rapido", fase="aguardando_capacidade", erro="",
+                                       proximo_ciclo=proximo.isoformat(),
+                                       ultima_msg="Aguardando outra tarefa pesada terminar.")
+                        continue
+                    with _heartbeat_durante("scrape_rapido"):
+                        _rodar_scrape_rapido()
+                falhas_banco = 0
+            except DatabaseError as e:
+                falhas_banco += 1
+                proximo = _pausar_por_banco("scrape_rapido", e, falhas_banco)
+                continue
             except Exception as e:
                 logger.exception("Erro no scrape-flash")
                 log_event("scraper", "flash_erro", f"Ciclo do feed rápido falhou: {e}",
@@ -323,6 +370,7 @@ class Command(BaseCommand):
         logger.info("SCRAPE worker no ar; raspa a cada %sh quando ligado", opts["scrape_horas"])
         ciclos = 0
         proximo = timezone.now()  # vencido: raspa assim que ligarem
+        falhas_banco = 0
         while True:
             # Heartbeat também durante as horas de espera; sem isto o supervisor
             # considera o processo morto após 90s e pode iniciar workers duplicados.
@@ -338,8 +386,17 @@ class Command(BaseCommand):
             try:
                 st.write_state("scrape", fase="raspando", ciclos=ciclos, erro="")
                 _renovar_conexoes_db()
-                with _heartbeat_durante("scrape"):
-                    resultado = _rodar_scrape()
+                from apps.scrapers.carga import operacao_pesada
+                with operacao_pesada() as acquired:
+                    if not acquired:
+                        proximo = timezone.now() + timedelta(seconds=POLL)
+                        st.write_state("scrape", fase="aguardando_capacidade", erro="",
+                                       proximo_ciclo=proximo.isoformat(),
+                                       ultima_msg="Aguardando outra tarefa pesada terminar.")
+                        continue
+                    with _heartbeat_durante("scrape"):
+                        resultado = _rodar_scrape()
+                falhas_banco = 0
                 ciclos += 1
                 fim = timezone.now()
                 degradado = bool(resultado["falhas"])
@@ -354,6 +411,9 @@ class Command(BaseCommand):
                     ultima_msg=(f"Ciclo {ciclos} parcial; nova tentativa em 30 min."
                                 if degradado else f"Ciclo {ciclos} concluído às {fim:%H:%M}."),
                 )
+            except DatabaseError as e:
+                falhas_banco += 1
+                proximo = _pausar_por_banco("scrape", e, falhas_banco)
             except Exception as e:
                 logger.exception("Erro no scrape")
                 log_event("scraper", "scrape_erro", f"Ciclo de raspagem falhou: {e}",
@@ -371,6 +431,7 @@ class Command(BaseCommand):
         ticks = 0
         ultima_purga = None  # data da última purga do log (1x/dia, ver abaixo)
         proximo = timezone.now()  # vencido: processa assim que ligarem
+        falhas_banco = 0
         while True:
             if not st.is_enabled("envio"):
                 st.write_state("envio", fase="desligado",
@@ -408,6 +469,7 @@ class Command(BaseCommand):
                     except Exception as e:
                         logger.warning("Purga de eventos falhou: %s", e)
                 res = processar_configs_de_envio()
+                falhas_banco = 0
                 enviados = sum(1 for r in res if r.get("sucesso"))
                 # O watchdog de conexões saiu daqui: virou o processo `monitor` do
                 # Procfile. Como este loop é gated pela flag "envio", o watchdog
@@ -422,6 +484,10 @@ class Command(BaseCommand):
                     vencidas=len(res), enviados=enviados, erro="",
                     ultima_msg=f"{enviados} enviada(s) de {len(res)} vencida(s) às {agora:%H:%M}.",
                 )
+            except DatabaseError as e:
+                falhas_banco += 1
+                proximo = _pausar_por_banco("envio", e, falhas_banco)
+                continue
             except Exception as e:
                 logger.exception("Erro no tick de envio")
                 # Tick inteiro morto = nenhum usuário recebe oferta neste ciclo.
@@ -444,21 +510,37 @@ class Command(BaseCommand):
         POLL = 60
         logger.info("RELATORIOS worker no ar; checa vencidos a cada %ss quando ligado", POLL)
         ciclos = 0
+        falhas_banco = 0
+        proximo = timezone.now()
         while True:
             if not st.is_enabled("relatorios"):
                 st.write_state("relatorios", fase="desligado",
                                ultima_msg="Desligado — ligue quando quiser sync automático.")
                 time.sleep(POLL)
                 continue
+            if timezone.now() < proximo:
+                st.write_state("relatorios", fase="aguardando_banco")
+                time.sleep(POLL)
+                continue
             agora = timezone.now()
             try:
                 st.write_state("relatorios", fase="sincronizando", erro="")
                 _renovar_conexoes_db()
-                resultados = sync_due_reports()
+                from apps.scrapers.carga import operacao_pesada
+                with operacao_pesada() as acquired:
+                    if not acquired:
+                        st.write_state("relatorios", fase="aguardando_capacidade", erro="",
+                                       ultima_msg="Aguardando outra tarefa pesada terminar.")
+                        time.sleep(POLL)
+                        continue
+                    with _heartbeat_durante("relatorios"):
+                        resultados = sync_due_reports()
+                falhas_banco = 0
                 if not resultados:
                     # Nada vencido: não é um ciclo, é silêncio. Não mexe no estado
                     # visível pra não zerar o "última sincronização" da tela.
                     st.write_state("relatorios", fase="aguardando")
+                    proximo = timezone.now() + timedelta(seconds=POLL)
                     time.sleep(POLL)
                     continue
                 ok = sum(1 for s in resultados if s.status == "ok")
@@ -474,6 +556,9 @@ class Command(BaseCommand):
                     ultima_msg=f"{ok} ok, {acao} ação, {erros} erro às {agora:%H:%M}.",
                     erro="",
                 )
+            except DatabaseError as e:
+                falhas_banco += 1
+                proximo = _pausar_por_banco("relatorios", e, falhas_banco)
             except Exception:
                 logger.exception("Erro no sync de relatórios")
                 st.write_state("relatorios", fase="aguardando", erro=ERRO_PUBLICO)

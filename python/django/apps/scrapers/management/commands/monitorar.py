@@ -18,7 +18,7 @@ import logging
 import time
 
 from django.core.management.base import BaseCommand
-from django.db import connections
+from django.db import DatabaseError, connections
 
 from apps.scrapers import automacao_state as st
 from apps.scrapers.monitor_conexao import verificar_e_notificar
@@ -49,6 +49,7 @@ class Command(BaseCommand):
         logger.info("MONITOR worker no ar; checagem de conexões a cada %smin", tick)
         POLL = 15
         proximo = time.monotonic()
+        falhas_banco = 0
         while True:
             if time.monotonic() < proximo:
                 st.write_state(JOB, fase="aguardando")
@@ -61,10 +62,32 @@ class Command(BaseCommand):
                 # _renovar_conexoes_db em automacao.py).
                 connections.close_all()
                 r = self._ciclo()
+                if falhas_banco >= 2:
+                    # Só é seguro gravar o evento depois que o banco voltou.
+                    from apps.scrapers.eventos import log_event
+                    log_event("infraestrutura", "banco_recuperado",
+                              "Conexão com o banco foi restabelecida.", level="info",
+                              contexto={"falhas_consecutivas": falhas_banco})
+                falhas_banco = 0
                 st.write_state(
                     JOB, fase="aguardando", erro="",
                     ultima_msg=(f"{r['checados']} conta(s) checada(s), "
                                 f"{r['alertas_enviados']} alerta(s)."),
+                )
+            except DatabaseError as e:
+                falhas_banco += 1
+                connections.close_all()
+                alerta = falhas_banco >= 2
+                if alerta:
+                    logger.error("ALERTA_BANCO: %s falhas consecutivas: %s", falhas_banco, e)
+                else:
+                    logger.warning("Banco indisponível no monitor: %s", e)
+                st.write_state(
+                    JOB, fase="aguardando_banco",
+                    erro="Banco temporariamente indisponível; monitorando recuperação.",
+                    falhas_banco=falhas_banco,
+                    ultima_msg=("Alerta: banco indisponível em duas checagens consecutivas."
+                                if alerta else "Banco indisponível; nova checagem agendada."),
                 )
             except Exception as e:
                 logger.exception("Erro no ciclo do monitor de conexões")

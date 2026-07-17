@@ -3,9 +3,11 @@ import os
 import tempfile
 from datetime import timedelta
 from unittest.mock import patch
+from unittest.mock import MagicMock
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.db import OperationalError
+from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from apps.scrapers.models import LinkAfiliadoUsuario, Produto, RelatorioSync
@@ -88,3 +90,52 @@ class ReportSessionTests(TestCase):
         self.assertEqual(rows[0].pedidos, 2)
         self.assertEqual(rows[0].receita, 199.90)
         self.assertEqual(rows[0].comissao, 12.50)
+
+
+class HeavyPipelineLockTests(SimpleTestCase):
+    @patch("apps.scrapers.carga.connections")
+    def test_postgres_lock_releases_only_when_acquired(self, connections):
+        from apps.scrapers.carga import operacao_pesada
+
+        connection = connections.__getitem__.return_value
+        connection.vendor = "postgresql"
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (True,)
+        connection.cursor.return_value.__enter__.return_value = cursor
+
+        with operacao_pesada() as acquired:
+            self.assertTrue(acquired)
+
+        self.assertEqual(cursor.execute.call_count, 2)
+        self.assertIn("pg_try_advisory_lock", cursor.execute.call_args_list[0].args[0])
+        self.assertIn("pg_advisory_unlock", cursor.execute.call_args_list[1].args[0])
+
+
+class DatabaseUnavailableMiddlewareTests(SimpleTestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def test_database_error_becomes_retryable_503(self):
+        from core.middleware import DatabaseUnavailableMiddleware
+
+        def unavailable(_request):
+            raise OperationalError("server closed the connection unexpectedly")
+
+        response = DatabaseUnavailableMiddleware(unavailable)(self.factory.get("/scrapers/whatsapp/"))
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response["Retry-After"], "15")
+        self.assertNotIn("unexpectedly", response.content.decode())
+
+    @patch("core.middleware.connections")
+    def test_healthz_bypasses_session_stack_and_returns_503(self, connections):
+        from core.middleware import DatabaseUnavailableMiddleware
+
+        connection = connections.__getitem__.return_value
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.execute.side_effect = OperationalError("database down")
+        downstream = MagicMock()
+
+        response = DatabaseUnavailableMiddleware(downstream)(self.factory.get("/healthz"))
+
+        self.assertEqual(response.status_code, 503)
+        downstream.assert_not_called()

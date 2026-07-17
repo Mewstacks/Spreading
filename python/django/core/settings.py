@@ -85,6 +85,8 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     # WhiteNoise serve os static (admin/etc) direto do processo, sem CDN/nginx.
     'whitenoise.middleware.WhiteNoiseMiddleware',
+    # Precisa envolver Session/Auth: falha do Postgres vira 503 controlado, não 500.
+    'core.middleware.DatabaseUnavailableMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -155,6 +157,10 @@ if _DATABASE_URL:
             ssl_require=os.getenv("DB_SSL_REQUIRE", "0") == "1",
         )
     }
+    DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
+    # Falha do proxy/VM não pode manter uma request (especialmente /healthz) presa
+    # no timeout TCP do sistema. O valor também protege reconexões dos workers.
+    DATABASES["default"].setdefault("OPTIONS", {}).setdefault("connect_timeout", 3)
 else:
     # Sem DATABASE_URL cai no SQLite. Em prod (Fly) fica no volume /data (se montado)
     # para sobreviver a deploys; em dev fica ao lado do projeto.

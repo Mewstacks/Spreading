@@ -5,8 +5,14 @@ adicionamos aqui. Mantém o resto do hardening em settings.py.
 """
 
 import os
+import logging
 
 from django.conf import settings
+from django.db import DatabaseError, InterfaceError, connections
+from django.http import HttpResponse
+
+
+logger = logging.getLogger("core.database")
 
 
 # CSP permissiva o suficiente para não quebrar a UI atual:
@@ -34,6 +40,49 @@ _DEFAULT_PERMISSIONS_POLICY = (
     "accelerometer=(), camera=(), geolocation=(), gyroscope=(), "
     "magnetometer=(), microphone=(), payment=(), usb=()"
 )
+
+
+class DatabaseUnavailableMiddleware:
+    """Converte falhas transitórias de Postgres em 503 controlado.
+
+    Fica antes de SessionMiddleware para também proteger a leitura da sessão feita
+    pelo AuthenticationMiddleware. Não tenta registrar nada no banco enquanto ele
+    está indisponível e fecha os sockets ruins antes da próxima requisição.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        # Curto-circuita antes de Session/Auth e de qualquer middleware que leia
+        # Perfil. O check continua sendo de prontidão real: SELECT 1 no banco.
+        if request.path == "/healthz":
+            health_connection = connections["default"]
+            try:
+                # Não reutiliza uma conexão persistente que possa ter morrido no
+                # proxy. `connect_timeout=3` em settings limita a tentativa nova.
+                health_connection.close()
+                with health_connection.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
+                return HttpResponse("ok", content_type="text/plain")
+            except (DatabaseError, InterfaceError):
+                health_connection.close()
+                return HttpResponse("database unavailable", status=503,
+                                    content_type="text/plain")
+            finally:
+                health_connection.close()
+        try:
+            return self.get_response(request)
+        except (DatabaseError, InterfaceError) as exc:
+            connections.close_all()
+            logger.warning("Banco indisponível em %s: %s", request.path, exc)
+            return HttpResponse(
+                "Serviço temporariamente indisponível. Tente novamente em instantes.",
+                status=503,
+                content_type="text/plain; charset=utf-8",
+                headers={"Retry-After": "15", "Cache-Control": "no-store"},
+            )
 
 
 class DevAutoLoginMiddleware:
