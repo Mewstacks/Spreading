@@ -17,8 +17,10 @@ class MercadoLivre(Marketplace):
             mapear_ofertas, buscar_por_termo,
         )
         from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import mapear_cupons_codigo
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
 
         from django.utils import timezone
+        from apps.scrapers.eventos import log_event
         from apps.scrapers.models import FonteIngestao, ExecucaoIngestao
         fonte, _ = FonteIngestao.objects.get_or_create(
             slug="mercadolivre-web", defaults={
@@ -28,7 +30,24 @@ class MercadoLivre(Marketplace):
         fonte.save(update_fields=["ultima_tentativa"])
         try:
             ofertas = mapear_ofertas(max_paginas=40)
-            cupons = mapear_cupons_codigo()
+            cupons_codigo = mapear_cupons_codigo()
+            # Cupons de campanha (tabela Cupom). Estava fora do loop automático: só
+            # rodava no clique manual da tela de Scraper, então em produção a tabela
+            # ficava vazia -- e link.py aborta a geração de link quando o produto tem
+            # campanha_id sem Cupom correspondente. Cupom faltando virava link pendente.
+            #
+            # Isolado do resto: o parser depende de um JSON embutido num bundle do ML
+            # (__NORDIC_RENDERING_CTX__), que é a peça mais frágil daqui. Se ele
+            # quebrar, as ofertas e os códigos ainda entram.
+            try:
+                cupons_campanha = mapear_cupons()
+            except Exception as e:
+                logger.warning("Raspagem de cupons de campanha ML falhou: %s", e)
+                log_event("scraper", "cupons_campanha_erro",
+                          f"Não foi possível raspar os cupons de campanha do ML: {e}",
+                          level="warning", contexto={"marketplace": "mercadolivre"}, exc=e)
+                cupons_campanha = 0
+            cupons = cupons_codigo + cupons_campanha
             for t in (termos or []):
                 try:
                     buscar_por_termo(t)
@@ -55,6 +74,16 @@ class MercadoLivre(Marketplace):
         if total:
             fonte.ultimo_sucesso, fonte.falhas_consecutivas = now, 0
         fonte.save()
+        logger.info("Raspagem ML: %s oferta(s), %s cupom(ns) de código, %s de campanha",
+                    ofertas, cupons_codigo, cupons_campanha)
+        # Trazer 800 ofertas e ZERO cupons era reportado como sucesso: o único sinal
+        # era o total zerado, e as ofertas sozinhas o mantinham positivo. Foi assim
+        # que os cupons puderam sumir sem ninguém notar.
+        if ofertas and not cupons:
+            log_event("scraper", "cupons_vazios",
+                      f"A raspagem trouxe {ofertas} oferta(s) e nenhum cupom.",
+                      level="warning", contexto={"marketplace": "mercadolivre",
+                                                 "ofertas": ofertas})
 
     def build_affiliate_link(self, produto, usuario=None):
         from apps.scrapers.scraper_mercadolivre.link import gerar_link_afiliado_para_produto

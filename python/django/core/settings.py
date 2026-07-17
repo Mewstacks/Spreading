@@ -466,6 +466,12 @@ FLY_CUSTO_MENSAL_USD = os.getenv("FLY_CUSTO_MENSAL_USD", "15-30")
 # Sentry opcional. Os loops (scrape/envio/senders) engolem exceções com try/except;
 # logar no logger 'apps' garante que apareçam nos logs (e no Sentry, se configurado).
 # ─────────────────────────────────────────────────────────────
+#
+# APPS_LOG_LEVEL sobe para DEBUG sem redeploy (fly secrets set APPS_LOG_LEVEL=DEBUG)
+# quando for preciso ver o erro card a card. Não é o default porque os scrapers logam
+# uma linha por item descartado e afogariam o resto — os pontos que importam ganharam
+# contadores agregados em nível INFO/WARNING (ver ofertas_scraper._logar_descartes).
+_APPS_LOG_LEVEL = os.getenv("APPS_LOG_LEVEL", "INFO").upper()
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
@@ -477,7 +483,7 @@ LOGGING = {
     },
     "root": {"handlers": ["console"], "level": "INFO"},
     "loggers": {
-        "apps": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "apps": {"handlers": ["console"], "level": _APPS_LOG_LEVEL, "propagate": False},
         "django.request": {"handlers": ["console"], "level": "ERROR", "propagate": False},
     },
 }

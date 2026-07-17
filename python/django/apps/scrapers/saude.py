@@ -104,6 +104,20 @@ CATALOGO = {
         "significa": "A verificação não confirmou que o link ainda representa a promoção esperada.",
         "acao": "Reteste sem publicar; mantenha a oferta fora dos grupos enquanto não for aprovada.",
     },
+    "cupons_vazios": {
+        "titulo": "A raspagem não trouxe nenhum cupom",
+        "significa": "Vieram ofertas, mas zero cupons. Quase sempre o ML mudou o "
+                     "formato da página de cupons e o parser parou de reconhecer.",
+        "acao": "Abra /ofertas/cupons e /cupons/filter no navegador e compare com os "
+                 "seletores dos scrapers de cupom. O catálogo anterior foi preservado.",
+    },
+    "cupons_campanha_erro": {
+        "titulo": "Cupons de campanha não foram raspados",
+        "significa": "A leitura de /cupons/filter falhou. Sem a tabela de cupons, "
+                     "produto com campanha não gera link de afiliado e fica pendente.",
+        "acao": "Veja o detalhe técnico: se citar __NORDIC_RENDERING_CTX__, o ML "
+                 "renomeou o bundle e o parser precisa ser ajustado.",
+    },
     "links_sem_sessao": {
         "titulo": "Conta sem sessão do Mercado Livre não gera links",
         "significa": "O worker pulou esta conta: sem o Mercado Livre conectado não dá "

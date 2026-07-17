@@ -1566,6 +1566,190 @@ class MercadoLivreCleanupIsolationTests(TestCase):
         self.assertIn("sincronização", old_product.falha_verificacao)
 
 
+class RaspagemDeCuponsTests(TestCase):
+    """Cupons pararam de vir e nada avisou.
+
+    mapear_cupons() — o único código que popula a tabela Cupom — ficou fora do
+    scrape_all: só rodava no clique manual de staff da tela de Scraper. Em produção
+    a tabela ficava vazia, e link.py aborta a geração de link quando o produto tem
+    campanha_id sem Cupom no banco: cupom faltando também virava link pendente.
+    """
+
+    def _patches(self, ofertas=10, cupons_codigo=3, cupons_campanha=5, campanha_erro=None):
+        return (
+            patch("apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
+                  return_value=ofertas),
+            patch("apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper.mapear_cupons_codigo",
+                  return_value=cupons_codigo),
+            patch("apps.scrapers.scraper_mercadolivre.scraper.mapear_cupons",
+                  side_effect=campanha_erro) if campanha_erro else
+            patch("apps.scrapers.scraper_mercadolivre.scraper.mapear_cupons",
+                  return_value=cupons_campanha),
+        )
+
+    def test_scrape_all_raspa_os_cupons_de_campanha(self):
+        from apps.scrapers.models import ExecucaoIngestao
+
+        p1, p2, p3 = self._patches()
+        with p1, p2, p3 as campanha:
+            get_marketplace("mercadolivre").scrape_all()
+
+        campanha.assert_called_once()
+        run = ExecucaoIngestao.objects.latest("id")
+        self.assertEqual(run.total_cupons, 8)      # 3 de código + 5 de campanha
+        self.assertEqual(run.status, "ok")
+
+    def test_falha_nos_cupons_de_campanha_nao_derruba_ofertas(self):
+        """O parser de campanha depende de um JSON embutido no bundle do ML — a peça
+        mais frágil daqui. Se ele cair, ofertas e códigos ainda têm de entrar."""
+        from apps.scrapers.models import ExecucaoIngestao
+
+        p1, p2, p3 = self._patches(campanha_erro=RuntimeError("NORDIC sumiu"))
+        with p1, p2, p3:
+            get_marketplace("mercadolivre").scrape_all()
+
+        run = ExecucaoIngestao.objects.latest("id")
+        self.assertEqual(run.status, "ok")
+        self.assertEqual(run.total_ofertas, 10)
+        self.assertEqual(run.total_cupons, 3)      # só os de código
+        self.assertTrue(EventoOperacional.objects.filter(
+            evento="cupons_campanha_erro", level="warning").exists())
+
+    def test_ofertas_sem_nenhum_cupom_vira_alerta(self):
+        """800 ofertas e zero cupons era reportado como sucesso: o único sinal era o
+        total zerado, e as ofertas sozinhas o mantinham positivo."""
+        p1, p2, p3 = self._patches(ofertas=800, cupons_codigo=0, cupons_campanha=0)
+        with p1, p2, p3:
+            get_marketplace("mercadolivre").scrape_all()
+
+        evento = EventoOperacional.objects.get(evento="cupons_vazios")
+        self.assertEqual(evento.level, "warning")
+        self.assertEqual(evento.contexto["ofertas"], 800)
+
+    def test_coleta_normal_nao_alerta(self):
+        p1, p2, p3 = self._patches()
+        with p1, p2, p3:
+            get_marketplace("mercadolivre").scrape_all()
+
+        self.assertFalse(EventoOperacional.objects.filter(evento="cupons_vazios").exists())
+
+    def test_evento_de_cupom_vazio_e_traduzido_na_saude(self):
+        from apps.scrapers.saude import descrever
+
+        info = descrever("cupons_vazios")
+
+        self.assertNotEqual(info["titulo"], "cupons_vazios")   # não caiu no fallback
+        self.assertTrue(info["acao"])
+
+
+class ParserDeCupomDeCampanhaTests(TestCase):
+    """O parser de /cupons/filter contra o DOM REAL do ML.
+
+    Ele lê um JSON embutido num bundle do ML (#__NORDIC_RENDERING_CTX__) e o extrai
+    por split de string (`_n.ctx.r=`). É a peça mais frágil da raspagem: qualquer
+    rename no bundle zera os cupons. python/debug_cupom.json é um dump verdadeiro
+    dessa página — o mesmo que serviu para escrever o parser.
+    """
+
+    DUMP = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))))), "debug_cupom.json")
+
+    def setUp(self):
+        # A página vazia custa 3 × RETRY_WAIT de sono real. Útil contra o ML,
+        # inútil aqui: sem isto a classe sozinha leva 30s.
+        sono = patch("apps.scrapers.scraper_mercadolivre.scraper.time.sleep")
+        sono.start()
+        self.addCleanup(sono.stop)
+
+    def _page_falsa(self, dados):
+        """Um `page` do Playwright só no que mapear_cupons usa, servindo o dump real."""
+        envelope = "_n.ctx.r=" + json.dumps(dados) + ";_n.ctx.r.assets={}"
+        page = Mock()
+        page.locator.return_value.text_content.return_value = envelope
+        return page
+
+    @contextmanager
+    def _browser_com(self, dados):
+        page = self._page_falsa(dados)
+
+        @contextmanager
+        def _fake(*a, **kw):
+            yield (page, Mock())
+
+        with patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser", _fake):
+            yield
+
+    def test_le_os_cupons_do_dom_real_do_ml(self):
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        with open(self.DUMP, encoding="utf-8") as f:
+            dados = json.load(f)
+        # A 2ª página vem vazia: encerra o laço (o dump é de uma página só).
+        vazio = {"appProps": {"pageProps": {"filteredCouponsData": {"coupons": []}}}}
+        paginas = [dados, vazio, vazio, vazio]
+        page = Mock()
+        page.locator.return_value.text_content.side_effect = [
+            "_n.ctx.r=" + json.dumps(p) + ";_n.ctx.r.assets={}" for p in paginas
+        ]
+
+        @contextmanager
+        def _fake(*a, **kw):
+            yield (page, Mock())
+
+        with patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser", _fake):
+            salvos = mapear_cupons()
+
+        self.assertEqual(salvos, 30)                       # o dump tem 30 cupons
+        self.assertEqual(Cupom.objects.count(), 30)
+        cupom = Cupom.objects.get(campanha_id="13642210")
+        self.assertIn("esquenta copa", cupom.titulo.lower())
+        self.assertEqual(cupom.estado, "ativo")
+
+    def test_pagina_vazia_nao_apaga_os_cupons_existentes(self):
+        """Guarda anti-wipe: ML bloqueando não pode zerar o catálogo."""
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        Cupom.objects.create(campanha_id="999", titulo="Cupom antigo", estado="ativo",
+                             valor_desconto=10.0, valor_minimo=0.0)
+        vazio = {"appProps": {"pageProps": {"filteredCouponsData": {"coupons": []}}}}
+
+        with self._browser_com(vazio):
+            salvos = mapear_cupons()
+
+        self.assertEqual(salvos, 0)
+        self.assertEqual(Cupom.objects.get(campanha_id="999").estado, "ativo")
+
+
+class DescartesDaRaspagemTests(SimpleTestCase):
+    """Os motivos de descarte moravam em `continue` mudos e num logger.debug que o
+    LOGGING em INFO apaga em produção. Um seletor renomeado zerava a coleta e o
+    único sinal era o total — que só cai quando TUDO quebra de uma vez."""
+
+    def test_card_perdido_por_seletor_sobe_para_warning(self):
+        from apps.scrapers.scraper_mercadolivre import ofertas_scraper
+
+        with self.assertLogs("apps.scrapers.scraper_mercadolivre.ofertas_scraper",
+                             level="WARNING") as logs:
+            ofertas_scraper._logar_descartes(
+                100, 60, {"sem_nome_ou_link": 30, "sem_desconto": 10,
+                          "preco_invalido": 0, "erro_no_card": 0})
+
+        self.assertIn("100 lidos", logs.output[0])
+        self.assertIn("sem nome ou link", logs.output[0])
+
+    def test_descarte_normal_fica_em_info(self):
+        """Card sem desconto é o trabalho normal da função, não um alerta."""
+        from apps.scrapers.scraper_mercadolivre import ofertas_scraper
+
+        with self.assertLogs("apps.scrapers.scraper_mercadolivre.ofertas_scraper",
+                             level="INFO") as logs:
+            ofertas_scraper._logar_descartes(
+                100, 60, {"sem_nome_ou_link": 0, "sem_desconto": 40,
+                          "preco_invalido": 0, "erro_no_card": 0})
+
+        self.assertTrue(logs.output[0].startswith("INFO"))
+
+
 class AfiliacaoPorMarketplaceTests(TestCase):
     """O badge da tela Promoções pergunta à loja se o item comissiona (can_affiliate).
 

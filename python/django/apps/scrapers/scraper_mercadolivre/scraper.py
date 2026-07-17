@@ -13,6 +13,13 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 def mapear_cupons(n=1):
+    """Raspa /cupons/filter e popula a tabela Cupom. Retorna quantos foram salvos.
+
+    Único caminho que preenche `Cupom`, e é dele que depende a geração de link de
+    produto com campanha: link.py aborta quando o produto tem campanha_id e não há
+    Cupom correspondente no banco. Ficou anos fora do loop automático, rodando só
+    no clique manual da tela de Scraper — ver marketplaces/mercadolivre.scrape_all.
+    """
     todos_os_cupons_limpos = []
     MAX_RETRIES = 3
     RETRY_WAIT = 5  # segundos entre tentativas
@@ -230,6 +237,11 @@ def mapear_cupons(n=1):
         if prods_expirados:
             logger.info("%s produto(s) de cupons marcados como expirados", prods_expirados)
         logger.info("%s cupons salvos/atualizados", len(todos_os_cupons_limpos))
+    else:
+        # Guarda anti-wipe: coleta vazia não expira nada (o bloco acima nem roda).
+        # Mesmo contrato de mapear_cupons_codigo e mapear_ofertas.
+        logger.warning("Raspagem de cupons de campanha ML vazia; nada alterado")
+    return len(todos_os_cupons_limpos)
 
 
 def listar_itens_por_cupom(cupom, page, max_paginas=5):

@@ -196,8 +196,16 @@ def _preco_float(texto_frac, texto_cents="0"):
 
 
 def _coletar_cards(page):
-    """Extrai todos os cards com desconto (de/por) da página atual. Lista de dicts."""
+    """Extrai todos os cards com desconto (de/por) da página atual. Lista de dicts.
+
+    Conta POR QUE cada card foi descartado. Os motivos moravam em `continue` mudos e
+    num logger.debug — que o LOGGING em INFO apaga em produção. Um seletor renomeado
+    pelo ML zerava a coleta e o único sinal era o total, que só cai quando TUDO
+    quebra: enquanto uma parte funcionasse, ninguém via nada.
+    """
     out = []
+    descartes = {"sem_nome_ou_link": 0, "sem_desconto": 0, "preco_invalido": 0,
+                 "erro_no_card": 0}
     cards = page.locator(".poly-card")
     total = cards.count()
     for i in range(total):
@@ -206,6 +214,7 @@ def _coletar_cards(page):
             nome = card.locator(".poly-component__title").first.inner_text(timeout=2000).strip()
             link = card.locator("a.poly-component__title, a[href*='/MLB'], a[href*='mercadolivre']").first.get_attribute("href", timeout=2000)
             if not link or not nome:
+                descartes["sem_nome_ou_link"] += 1
                 continue
 
             por = _preco_float(
@@ -215,6 +224,7 @@ def _coletar_cards(page):
             )
             de_loc = card.locator("s.andes-money-amount--previous .andes-money-amount__fraction")
             if de_loc.count() == 0:
+                descartes["sem_desconto"] += 1
                 continue  # sem desconto visível
             de = _preco_float(
                 de_loc.first.inner_text(timeout=2000),
@@ -222,6 +232,7 @@ def _coletar_cards(page):
                  if card.locator("s.andes-money-amount--previous .andes-money-amount__cents").count() else "0"),
             )
             if de <= 0 or por <= 0 or por >= de:
+                descartes["preco_invalido"] += 1
                 continue
 
             imagem = ""
@@ -249,8 +260,25 @@ def _coletar_cards(page):
                 "frete_full": full,
             })
         except Exception as e:
+            descartes["erro_no_card"] += 1
             logger.debug("Erro num card de oferta ML: %s", e)
+    _logar_descartes(total, len(out), descartes)
     return out
+
+
+def _logar_descartes(total, aproveitados, descartes):
+    """Resumo por etapa. É o sinal que teria mostrado um seletor quebrado no dia."""
+    perdidos = total - aproveitados
+    if not total or not perdidos:
+        return
+    detalhe = ", ".join(f"{n} {motivo.replace('_', ' ')}"
+                        for motivo, n in descartes.items() if n)
+    # Descartar card sem desconto é o trabalho normal desta função; o que merece
+    # atenção é perder card por erro ou por não achar nome/link — aí o seletor mudou.
+    quebrados = descartes["erro_no_card"] + descartes["sem_nome_ou_link"]
+    nivel = logger.warning if quebrados else logger.info
+    nivel("Cards ML: %s lidos, %s aproveitados, %s descartados (%s)",
+          total, aproveitados, perdidos, detalhe)
 
 
 def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):

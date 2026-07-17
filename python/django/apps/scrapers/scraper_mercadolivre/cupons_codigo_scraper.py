@@ -47,6 +47,7 @@ def mapear_cupons_codigo():
     logger.info("Iniciando raspagem de cupons de codigo ML")
     caminho_auth = ml_auth_path()
     coletados, codigos = [], set()
+    paginas_sem_codigo = 0
 
     with iniciar_browser(auth_path=caminho_auth, headless=True,
                          validar_sessao=False) as (page, context):
@@ -69,9 +70,18 @@ def mapear_cupons_codigo():
                 break
             coletados.extend(cards)
             try:
-                codigos.update(_extrair_codigos(page.locator("body").inner_text(timeout=5000)))
-            except Exception:
-                pass
+                achados = _extrair_codigos(page.locator("body").inner_text(timeout=5000))
+                codigos.update(achados)
+                if not achados:
+                    paginas_sem_codigo += 1
+            except Exception as e:
+                # Era `except Exception: pass`. Com o inner_text estourando o
+                # resultado era zero códigos, zero log — e como `coletados` não
+                # estava vazio, a raspagem ainda reportava sucesso. O scraper dizia
+                # "ok" sem ter trazido um único cupom.
+                paginas_sem_codigo += 1
+                logger.warning("Não foi possível ler os códigos da página %s de "
+                               "cupons ML: %s", n, e)
 
     # Guarda anti-wipe: se a raspagem não trouxe NADA (ML bloqueou/caiu), não apaga
     # os produtos nem desativa códigos válidos — evita zerar tudo por falha de rede.
@@ -119,4 +129,11 @@ def mapear_cupons_codigo():
         "Cupons de codigo ML: %s produtos, %s codigos (%s novos, %s desativados)",
         n_prod, len(codigos), n_novos, n_stale,
     )
+    # Página com produtos mas sem nenhum código é o alerta precoce de que o banner
+    # mudou de formato ou o inner_text quebrou. Não é motivo para desativar código
+    # (a página pode ocultar banners por experimento/localização — ver acima), mas
+    # também não pode seguir sendo silêncio.
+    if coletados and not codigos:
+        logger.warning("Raspagem de cupons de codigo ML: %s produto(s) e NENHUM "
+                       "codigo em %s pagina(s)", len(coletados), paginas_sem_codigo)
     return n_prod
