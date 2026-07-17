@@ -230,9 +230,25 @@ def estado_amazon_relatorios(user=None) -> Estado:
                   "sem_sessao", agora)
 
 
+def estado_ml_relatorios(user=None) -> Estado:
+    """Estado da sessão de RELATÓRIOS do ML (portal de afiliados), separada da
+    sessão do site principal (estado_ml). Reconectar o site principal não conserta
+    o relatório — o portal de afiliados tem sessão própria."""
+    agora = timezone.now()
+    if user is None:
+        return Estado(False, "Relatórios Mercado Livre", "arquivo", "Conta ausente.", "sem_sessao", agora)
+    from apps.scrapers.report_sessions import has_report_session
+    if has_report_session(user, "mercadolivre"):
+        return Estado(True, "Relatórios Mercado Livre", "arquivo", "", "", agora)
+    return Estado(False, "Relatórios Mercado Livre", "arquivo",
+                  "Conecte o portal de afiliados do Mercado Livre para sincronizar relatórios.",
+                  "sem_sessao", agora)
+
+
 # ─────────────────────────── Conveniências ───────────────────────────
 
 def estados_do_usuario(user) -> dict:
     """Os dois estados de uma conta. É o que as telas renderizam."""
     return {"whatsapp": estado_whatsapp(user), "mercadolivre": estado_ml(user),
-            "amazon_relatorios": estado_amazon_relatorios(user)}
+            "amazon_relatorios": estado_amazon_relatorios(user),
+            "ml_relatorios": estado_ml_relatorios(user)}

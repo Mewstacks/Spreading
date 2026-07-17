@@ -100,10 +100,15 @@
     Faça login no Mercado Livre sem sair do Spreading. A sessão fica salva
     e é usada para gerar seus links de afiliado.
   </p>
-  <div style="margin-top:.6rem;">
+  <div style="margin-top:.6rem;display:flex;gap:.5rem;flex-wrap:wrap;">
     <a class="btn btn-blue" href="{% url 'scraper-ml-conexao' %}">
       <i data-lucide="log-in"></i> Conectar Mercado Livre
     </a>
+    <a class="btn btn-ghost btn-sm" href="{% url 'scraper-ml-relatorio-conexao' %}"><i data-lucide="bar-chart-3"></i> {% if ml_relatorio_conectado %}Portal de relatórios conectado{% else %}Conectar portal de relatórios ML{% endif %}</a>
   </div>
+  <p style="font-size:.8rem;color:var(--muted);line-height:1.5;margin-top:.5rem;">
+    O portal de afiliados (comissão) tem login próprio, separado do site principal —
+    por isso a conexão de relatórios é uma etapa à parte.
+  </p>
 </div>
 {% endblock %}

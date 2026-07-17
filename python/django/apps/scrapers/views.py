@@ -368,7 +368,7 @@ def configurar_conta(request):
         messages.success(request, "Conta atualizada.")
         return redirect("scraper-conta")
 
-    from apps.scrapers.conexoes import estado_amazon_relatorios
+    from apps.scrapers.conexoes import estado_amazon_relatorios, estado_ml_relatorios
     return render(request, "scrapers/conta.html", {
         "perfil": perfil,
         "tem_secret": bool(perfil and perfil.amazon_credential_secret),
@@ -378,6 +378,7 @@ def configurar_conta(request):
         # como informação. Não pode voltar a virar requisito de conexão.
         "amazon_creators_ativa": bool(perfil and perfil.amazon_creators_ativa()),
         "amazon_relatorio_conectado": bool(estado_amazon_relatorios(request.user).conectado),
+        "ml_relatorio_conectado": bool(estado_ml_relatorios(request.user).conectado),
         "billing_checkout_url": settings.BILLING_CHECKOUT_URL,
         "billing_portal_url": settings.BILLING_PORTAL_URL,
     })
@@ -506,6 +507,66 @@ def amazon_conexao_input(request):
     except (ValueError, UnicodeDecodeError):
         return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
     return JsonResponse(amazon_conexao.enfileirar_input(request.user.id, events))
+
+
+# --- Conexão do portal de RELATÓRIOS do ML (afiliados), separada do site principal ---
+
+def ml_relatorio_conexao_painel(request):
+    """Login interativo no portal de afiliados do ML, exclusivo para relatórios."""
+    from apps.scrapers import ml_relatorio_conexao
+    return render(request, "scrapers/ml_conexao.html", {
+        "status": ml_relatorio_conexao.status(request.user.id),
+        "marketplace_nome": "Relatórios Mercado Livre",
+        "conexao_prefix": "/scrapers/ml-relatorio",
+        "relatorio": True,
+    })
+
+
+@require_GET
+def ml_relatorio_conexao_status_json(request):
+    from apps.scrapers import ml_relatorio_conexao
+    return JsonResponse(ml_relatorio_conexao.status(request.user.id))
+
+
+@require_POST
+def ml_relatorio_conexao_start(request):
+    from apps.scrapers import ml_relatorio_conexao
+    return JsonResponse(ml_relatorio_conexao.criar_sessao(request.user))
+
+
+@require_POST
+def ml_relatorio_conexao_salvar(request):
+    from apps.scrapers import ml_relatorio_conexao
+    ml_relatorio_conexao.salvar_agora(request.user.id)
+    return JsonResponse(ml_relatorio_conexao.status(request.user.id))
+
+
+@require_POST
+def ml_relatorio_conexao_cancelar(request):
+    from apps.scrapers import ml_relatorio_conexao
+    ml_relatorio_conexao.cancelar(request.user.id)
+    return JsonResponse({"ok": True})
+
+
+@require_GET
+def ml_relatorio_conexao_frames(request):
+    from apps.scrapers import ml_relatorio_conexao
+    def _stream():
+        yield from (f"data: {frame}\n\n" for frame in ml_relatorio_conexao.frames(request.user.id))
+        yield "data: __DONE__\n\n"
+    return StreamingHttpResponse(_stream(), content_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@require_POST
+def ml_relatorio_conexao_input(request):
+    import json
+    from apps.scrapers import ml_relatorio_conexao
+    try:
+        events = json.loads((request.body or b"").decode() or "{}").get("events")
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(ml_relatorio_conexao.enfileirar_input(request.user.id, events))
 
 
 @require_POST

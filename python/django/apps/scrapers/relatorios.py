@@ -164,13 +164,22 @@ class MercadoLivreReportAdapter(BaseReportAdapter):
     marketplace = "mercadolivre"
 
     def fetch(self, usuario, desde, ate) -> list[ReportRow]:
-        from apps.scrapers.monitor_conexao import ml_conectado
-        if not ml_conectado(usuario):
-            raise ReportSyncActionRequired("Reconecte o Mercado Livre para sincronizar métricas de afiliado.")
-        # É o portal autenticado, não uma variável global que pode apontar para uma
-        # landing pública. O estado é a sessão já conectada pelo usuário.
-        return _fetch_browser_report(usuario, self.marketplace,
-                                     "https://www.mercadolivre.com.br/afiliados/", desde, ate)
+        from django.conf import settings
+        from apps.scrapers.report_sessions import has_report_session
+        # A sessão de relatório é a do PORTAL DE AFILIADOS (SSO próprio), não a do
+        # site principal. Antes o gate sondava o site principal (my_purchases) e
+        # mandava "reconectar" uma conta que já estava conectada — para sempre.
+        if not has_report_session(usuario, self.marketplace):
+            raise ReportSyncNaoConfigurado(
+                "Conecte o portal de afiliados do Mercado Livre para sincronizar relatórios.")
+        # A landing /afiliados/ não tem tabela de relatório. A página real de
+        # métricas é configurada por ML_AFFILIATE_REPORT_URL (secret). Sem ela, não
+        # há o que ler automaticamente — e insistir só recriava o loop.
+        url = (getattr(settings, "ML_AFFILIATE_REPORT_URL", "") or "").strip()
+        if not url:
+            raise ReportSyncNaoConfigurado(
+                "Defina ML_AFFILIATE_REPORT_URL com a página de relatório do portal de afiliados.")
+        return _fetch_browser_report(usuario, self.marketplace, url, desde, ate)
 
 
 class AmazonReportAdapter(BaseReportAdapter):
@@ -193,14 +202,12 @@ def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> li
     """
     from playwright.sync_api import sync_playwright
 
+    # Tanto ML quanto Amazon leem o relatório da SESSÃO DE RELATÓRIO cifrada
+    # (report_sessions), não da sessão do site principal. Para o ML isso separa a
+    # sessão do portal de afiliados (comissão) da sessão do Link Builder.
+    from apps.scrapers.report_sessions import decrypted_state_file
     state_path = None
-    cleanup = None
-    if marketplace == "mercadolivre":
-        from apps.scrapers.scraper_mercadolivre.link import _auth_path
-        state_path = _auth_path(usuario)
-    else:
-        from apps.scrapers.report_sessions import decrypted_state_file
-        cleanup = decrypted_state_file(usuario, marketplace)
+    cleanup = decrypted_state_file(usuario, marketplace)
 
     try:
         if cleanup:
