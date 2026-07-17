@@ -1,6 +1,6 @@
 'use strict';
 
-const { erroFrameDestacado } = require('./message_confirmation');
+const { erroReloadEmVoo } = require('./message_confirmation');
 
 // Classificacao de falha de envio, consumida pelo Django em
 // whatsapp_client.enviar_oferta -> ofertas.processar_configs_de_envio.
@@ -62,7 +62,10 @@ const erroStoreQuebrado = (erro) => {
 const classificarErro = (erro) => {
     try {
         if (erro && typeof erro === 'object' && CLASSES.has(erro.classe)) return erro.classe;
-        if (erroFrameDestacado(erro)) return TRANSITORIO;
+        // Recarga em voo do WA Web (frame destacado OU contexto/alvo destruído):
+        // some sozinho com o recycle da sessão; punir a config por um reload
+        // interno do WA Web era o bug que desligava a automação e podia duplicar.
+        if (erroReloadEmVoo(erro)) return TRANSITORIO;
         // Store desmontado se resolve com o recycle da sessao; contar como falha
         // da config puniria o usuario por um reload interno do WA Web.
         if (erroStoreQuebrado(erro)) return TRANSITORIO;

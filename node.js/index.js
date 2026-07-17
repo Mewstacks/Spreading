@@ -24,7 +24,7 @@ const {
     buildSessionPayload, buildGruposPayload, buildInativoPayload,
 } = require('./payloads');
 const {
-    confirmarMensagem, erroFrameDestacado, opcoesDeEnvio, repetirSeFrameDestacado,
+    confirmarMensagem, erroReloadEmVoo, opcoesDeEnvio, repetirSeFrameDestacado,
 } = require('./message_confirmation');
 const {
     TRANSITORIO, PERMANENTE, erroClassificado, classificarErro, erroStoreQuebrado,
@@ -1099,10 +1099,12 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             duracao_ms: duracao(),
         };
       } catch (erro) {
-        if (envioIniciado && erroFrameDestacado(erro)) {
+        if (envioIniciado && erroReloadEmVoo(erro)) {
             // Não retente: o usuário confirmou no caso real que o WA entrega a
-            // mensagem antes de Puppeteer perceber que o frame foi trocado.
-            // Marcar como falha causaria reenvio e duplicata no grupo.
+            // mensagem antes de Puppeteer perceber que a página foi recarregada
+            // (frame destacado OU "Execution context was destroyed" — o mesmo
+            // reload do WA Web, assinaturas diferentes). Marcar como falha
+            // causaria reenvio e duplicata no grupo.
             const confirmacao = confirmarMensagem(undefined, session.id);
             session.lastSendAt = Date.now();
             console.warn(
@@ -1170,11 +1172,11 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
                 falha_infra: true,
             };
         }
-        if (erroFrameDestacado(erro)) {
+        if (erroReloadEmVoo(erro)) {
             // Ainda não chamamos sendMessage: não há risco de duplicar. A sessão
             // está no meio de uma recarga e será restaurada para a próxima ação.
-            console.warn(`[${session.id}] Frame do WhatsApp ainda instável antes do envio; reciclando sessão.`);
-            setTimeout(() => recycleSession(session, 'frame destacado antes do envio'), 0).unref();
+            console.warn(`[${session.id}] WhatsApp Web ainda instável antes do envio; reciclando sessão.`);
+            setTimeout(() => recycleSession(session, 'recarga do WA Web antes do envio'), 0).unref();
             return {
                 sucesso: false,
                 erro: 'WhatsApp Web estava recarregando. A conexão será recuperada automaticamente; aguarde alguns segundos e tente novamente.',

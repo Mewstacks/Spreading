@@ -39,6 +39,22 @@ const erroFrameDestacado = (erro) => /detached\s+frame|frame\s+was\s+detached/i.
     String(erro?.message || erro || '')
 );
 
+// Mesma causa raiz do frame destacado, outra assinatura: quando o WA Web recarrega
+// a página no meio de um `pupPage.evaluate` (o sendMessage do whatsapp-web.js roda
+// getChat+sendMessage num único evaluate/CDP Runtime.callFunctionOn), o contexto JS
+// é destruído e o puppeteer lança "Execution context was destroyed" — ou, se o
+// alvo/sessão do CDP caiu junto, "Target/Session closed". Nada disso casava com o
+// regex de frame destacado, então caía em 'desconhecido' (contava falha) e, durante
+// o envio, perdia a proteção contra duplicata. Ver index.js (catch do envio).
+const erroContextoDestruido = (erro) => /execution context (was destroyed|is not available)|cannot find context|target closed|session closed|protocol error \(runtime\.callfunctionon\)/i.test(
+    String(erro?.message || erro || '')
+);
+
+// "Recarga em voo": a página do WA Web foi trocada/destruída sob nossos pés,
+// qualquer que seja a assinatura. É o predicado que os pontos de decisão do envio
+// devem consultar (retry pré-envio, envio protegido pós-envio, classificação).
+const erroReloadEmVoo = (erro) => erroFrameDestacado(erro) || erroContextoDestruido(erro);
+
 // Antes de sendMessage é seguro repetir: nada foi enviado ainda. O WA Web troca
 // seu frame principal em recargas silenciosas; a primeira evaluate pode cair
 // nesse instante e a segunda, poucos ms depois, já encontra a página estável.
@@ -53,7 +69,7 @@ const repetirSeFrameDestacado = async (operacao, {
             return await operacao();
         } catch (erro) {
             ultimoErro = erro;
-            if (!erroFrameDestacado(erro) || tentativa === tentativas) throw erro;
+            if (!erroReloadEmVoo(erro) || tentativa === tentativas) throw erro;
             await esperar(atrasoMs);
         }
     }
@@ -78,6 +94,6 @@ const confirmarMensagem = (mensagem, instancia, {
 };
 
 module.exports = {
-    extrairMensagemId, opcoesDeEnvio, erroFrameDestacado, confirmarMensagem,
-    repetirSeFrameDestacado,
+    extrairMensagemId, opcoesDeEnvio, erroFrameDestacado, erroContextoDestruido,
+    erroReloadEmVoo, confirmarMensagem, repetirSeFrameDestacado,
 };

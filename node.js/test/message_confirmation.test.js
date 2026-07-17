@@ -3,8 +3,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-    extrairMensagemId, opcoesDeEnvio, erroFrameDestacado, confirmarMensagem,
-    repetirSeFrameDestacado,
+    extrairMensagemId, opcoesDeEnvio, erroFrameDestacado, erroContextoDestruido,
+    erroReloadEmVoo, confirmarMensagem, repetirSeFrameDestacado,
 } = require('../message_confirmation');
 
 test('extrai o Wid serializado normal do whatsapp-web.js', () => {
@@ -31,6 +31,20 @@ test('reconhece a troca de frame que torna o resultado do envio ambíguo', () =>
     assert.equal(erroFrameDestacado(new Error('sendMessage timeout')), false);
 });
 
+test('reconhece o contexto destruido pela recarga do WA Web como reload em voo', () => {
+    const contexto = new Error(
+        'Protocol error (Runtime.callFunctionOn): Execution context was destroyed.');
+    // A assinatura pura NAO e frame destacado, mas E reload em voo.
+    assert.equal(erroFrameDestacado(contexto), false);
+    assert.equal(erroContextoDestruido(contexto), true);
+    assert.equal(erroReloadEmVoo(contexto), true);
+    // "Target/Session closed" tambem sao a mesma queda de contexto do CDP.
+    assert.equal(erroReloadEmVoo(new Error('Target closed')), true);
+    // E o frame destacado classico continua sendo reload em voo.
+    assert.equal(erroReloadEmVoo(new Error('Attempted to use detached Frame')), true);
+    assert.equal(erroReloadEmVoo(new Error('sendMessage timeout')), false);
+});
+
 test('repete com segurança uma verificação anterior ao envio após frame destacado', async () => {
     let chamadas = 0;
     const valor = await repetirSeFrameDestacado(() => {
@@ -43,7 +57,19 @@ test('repete com segurança uma verificação anterior ao envio após frame dest
     assert.equal(chamadas, 2);
 });
 
-test('não repete erro que não é frame destacado', async () => {
+test('repete tambem quando o contexto foi destruido pela recarga (assinatura pura)', async () => {
+    let chamadas = 0;
+    const valor = await repetirSeFrameDestacado(() => {
+        chamadas += 1;
+        if (chamadas === 1) throw new Error('Execution context was destroyed.');
+        return 'CONNECTED';
+    }, { esperar: async () => {} });
+
+    assert.equal(valor, 'CONNECTED');
+    assert.equal(chamadas, 2);
+});
+
+test('não repete erro que não é reload em voo', async () => {
     await assert.rejects(
         repetirSeFrameDestacado(() => { throw new Error('falha real'); }),
         /falha real/,

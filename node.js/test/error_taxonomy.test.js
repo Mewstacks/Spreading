@@ -45,6 +45,18 @@ test('frame destacado e transitorio', () => {
         TRANSITORIO);
 });
 
+// A assinatura PURA (sem "detached frame") do reload em voo do WA Web: era ela
+// que caia em 'desconhecido' e contava falha (e, durante o envio, perdia a
+// protecao contra duplicata). Mesma causa raiz do frame destacado.
+test('contexto destruido pela recarga do WA Web e transitorio, sem "detached frame"', () => {
+    assert.equal(classificarErro(new Error(
+        'Protocol error (Runtime.callFunctionOn): Execution context was destroyed.')),
+        TRANSITORIO);
+    assert.equal(classificarErro(new Error('Target closed')), TRANSITORIO);
+    assert.equal(classificarErro(new Error('Session closed. Most likely the page has been closed.')),
+        TRANSITORIO);
+});
+
 // O throw que originou tudo isto: o bundle minificado do WA Web lanca objetos
 // que nao sao Error, com message "r". Nao da para afirmar nada sobre ele — e
 // 'desconhecido' conta falha, que era o comportamento antes desta taxonomia.
