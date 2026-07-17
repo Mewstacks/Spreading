@@ -1899,7 +1899,7 @@ class GeracaoDeLinksEmLoteTests(TestCase):
         enviados, kwargs = prefetch.call_args
         self.assertEqual([p.id for p in enviados[0]], [produto.id])
         self.assertEqual(kwargs["usuario"], self.user)
-        self.assertEqual(res, {"gerados": 1, "falhas": 0})
+        self.assertEqual(res, {"gerados": 1, "falhas": 0, "pulados": 0})
 
     @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
     @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links")
@@ -1920,9 +1920,11 @@ class GeracaoDeLinksEmLoteTests(TestCase):
     @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links")
     def test_pula_usuario_sem_sessao_ml(self, prefetch, _conectado):
         # Gerar link exige o Link Builder logado: sem sessão não há o que fazer.
+        cache.clear()
         self._produto()
 
-        self.assertEqual(_rodar_links(lote=40), {"gerados": 0, "falhas": 0})
+        self.assertEqual(_rodar_links(lote=40),
+                         {"gerados": 0, "falhas": 0, "pulados": 1})
         prefetch.assert_not_called()
 
     @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
@@ -1966,7 +1968,155 @@ class GeracaoDeLinksEmLoteTests(TestCase):
         # A sessão ML é de cada um: a do vizinho vencer não pode me impedir de gerar.
         self._produto()
 
-        self.assertEqual(_rodar_links(lote=40), {"gerados": 0, "falhas": 0})
+        self.assertEqual(_rodar_links(lote=40),
+                         {"gerados": 0, "falhas": 0, "pulados": 0})
+
+    @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links")
+    def test_item_nao_afiliavel_sai_da_fila(self, prefetch, _conectado):
+        """A starvation do lote: sem sair da fila, um punhado de itens que nunca
+        afiliam ocupa as 40 vagas a cada ciclo e nenhum outro produto avança."""
+        prefetch.return_value = (0, 1)
+        proibido = self._produto("Perfil de vendedor")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=proibido, estado="nao_afiliavel",
+            ultimo_erro="Não é uma página de produto.")
+        util = self._produto("Fone que afilia")
+
+        _rodar_links(lote=40)
+
+        enviados, _ = prefetch.call_args
+        self.assertEqual([p.id for p in enviados[0]], [util.id])
+
+    @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links")
+    def test_backoff_segura_o_item_ate_a_proxima_tentativa(self, prefetch, _conectado):
+        prefetch.return_value = (0, 0)
+        produto = self._produto()
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto, estado="pendente", tentativas=1,
+            proxima_tentativa=timezone.now() + timedelta(minutes=5))
+
+        _rodar_links(lote=40)
+        prefetch.assert_not_called()          # de castigo
+
+        LinkAfiliadoUsuario.objects.update(
+            proxima_tentativa=timezone.now() - timedelta(seconds=1))
+        _rodar_links(lote=40)
+        prefetch.assert_called_once()         # venceu, volta pra fila
+
+    @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=False)
+    def test_usuario_sem_sessao_ml_vira_evento(self, _conectado):
+        """Antes era um `continue` mudo: o usuário nunca gerava link e nada dizia
+        por quê — nem o log, nem a tela."""
+        cache.clear()
+        self._produto()
+
+        res = _rodar_links(lote=40)
+
+        self.assertEqual(res["pulados"], 1)
+        evento = EventoOperacional.objects.get(evento="links_sem_sessao")
+        self.assertEqual(evento.usuario, self.user)
+        self.assertEqual(evento.level, "warning")
+
+    @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=False)
+    def test_aviso_de_sessao_tem_cooldown(self, _conectado):
+        """Tick de 5min = 288 eventos/dia por usuário caído; a tela afogaria
+        justamente no aviso que precisa ser lido."""
+        cache.clear()
+        self._produto()
+
+        for _ in range(5):
+            _rodar_links(lote=40)
+
+        self.assertEqual(
+            EventoOperacional.objects.filter(evento="links_sem_sessao").count(), 1)
+
+
+class RegistroDeFalhaDeLinkTests(TestCase):
+    """Todo item sem link precisa carregar o motivo.
+
+    O gerador contava a falha e seguia (`falhas += 1; continue`), sem log nem
+    registro: o produto ficava "pendente" para sempre e não havia uma única linha
+    dizendo por quê. Era a origem mais provável da pilha que não saía.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("registrador", password="test")
+        self.produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="X", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=50,
+            link_produto="https://example.com/x")
+
+    def test_falha_terminal_sai_da_fila_de_vez(self):
+        from apps.scrapers.afiliado import registrar_falha
+
+        registrar_falha(self.user, self.produto, "Catálogo sem item real", terminal=True)
+
+        linha = LinkAfiliadoUsuario.objects.get(usuario=self.user, produto=self.produto)
+        self.assertEqual(linha.estado, "nao_afiliavel")
+        self.assertIsNone(linha.proxima_tentativa)
+        self.assertIn("Catálogo", linha.ultimo_erro)
+
+    def test_falha_transitoria_agenda_retry_com_backoff_crescente(self):
+        from apps.scrapers.afiliado import registrar_falha
+
+        registrar_falha(self.user, self.produto, "timeout")
+        primeira = LinkAfiliadoUsuario.objects.get(produto=self.produto).proxima_tentativa
+        registrar_falha(self.user, self.produto, "timeout")
+        segunda = LinkAfiliadoUsuario.objects.get(produto=self.produto).proxima_tentativa
+
+        self.assertGreater(segunda, primeira)
+        self.assertEqual(LinkAfiliadoUsuario.objects.get(produto=self.produto).tentativas, 2)
+
+    def test_desiste_depois_de_muitas_falhas(self):
+        """Insistir para sempre não é resiliência: é o item ocupando a fila."""
+        from apps.scrapers.afiliado import MAX_TENTATIVAS_ERRO, registrar_falha
+
+        for _ in range(MAX_TENTATIVAS_ERRO):
+            registrar_falha(self.user, self.produto, "o Link Builder recusou")
+
+        linha = LinkAfiliadoUsuario.objects.get(produto=self.produto)
+        self.assertEqual(linha.estado, "erro")
+        self.assertIsNone(linha.proxima_tentativa)
+
+    def test_item_com_link_ignora_falha_superveniente(self):
+        from apps.scrapers.afiliado import registrar_falha
+
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=self.produto, estado="pronto",
+            link_afiliado="https://meli.la/ok")
+
+        registrar_falha(self.user, self.produto, "ruído")
+
+        linha = LinkAfiliadoUsuario.objects.get(produto=self.produto)
+        self.assertEqual(linha.estado, "pronto")
+        self.assertEqual(linha.ultimo_erro, "")
+
+    def test_url_de_catalogo_e_recusada_com_motivo_legivel(self):
+        from apps.scrapers.scraper_mercadolivre.link import _motivo_url_recusada
+
+        motivo = _motivo_url_recusada("https://www.mercadolivre.com.br/up/MLBU123")
+
+        self.assertIn("catálogo", motivo.lower())
+
+    def test_listagem_distingue_na_fila_de_nao_afiliavel(self):
+        from apps.scrapers.marketplaces.registry import get_marketplace
+
+        outro = Produto.objects.create(
+            marketplace="mercadolivre", nome="Y", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=50,
+            link_produto="https://example.com/y")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=self.produto, estado="nao_afiliavel",
+            ultimo_erro="Perfil, não produto.")
+
+        produtos = [self.produto, outro]
+        get_marketplace("mercadolivre").preparar_exibicao(produtos, usuario=self.user)
+
+        self.assertEqual(self.produto.afiliado_estado, "nao_afiliavel")
+        self.assertEqual(self.produto.afiliado_motivo, "Perfil, não produto.")
+        self.assertEqual(outro.afiliado_estado, "pendente")
 
 
 class PublicacaoOrfaTests(TestCase):

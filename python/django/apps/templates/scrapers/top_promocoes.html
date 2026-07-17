@@ -267,9 +267,15 @@
               {% endif %}
               <div class="store-line">
                 <span class="badge badge-muted">{% if p.marketplace == "mercadolivre" %}Mercado Livre{% elif p.marketplace == "amazon" %}Amazon{% else %}{{ p.marketplace|title }}{% endif %}</span>
+                {% comment %}
+                Quatro estados, não dois: "pendente" para tudo fazia o usuário esperar
+                por um link que, para item de catálogo/perfil, nunca ia existir.
+                {% endcomment %}
                 {% if p.afiliado_pronto %}<span class="badge badge-green" title="Link de afiliado pronto"><i data-lucide="check"></i> afiliado</span>
                 {% elif p.marketplace == "amazon" %}<span class="badge badge-yellow" title="Cadastre sua tag de afiliado Amazon na tela Conta para comissionar este item"><i data-lucide="alert-triangle"></i> pendente</span>
-                {% else %}<span class="badge badge-yellow" title="Link de afiliado ainda não gerado"><i data-lucide="alert-triangle"></i> pendente</span>{% endif %}
+                {% elif p.afiliado_estado == "nao_afiliavel" %}<span class="badge badge-muted" title="{{ p.afiliado_motivo|default:'O Programa de Afiliados não aceita este item.' }}"><i data-lucide="slash"></i> não afiliável</span>
+                {% elif p.afiliado_estado == "erro" %}<span class="badge badge-red" title="{{ p.afiliado_motivo|default:'A geração do link falhou.' }}"><i data-lucide="alert-circle"></i> erro</span>
+                {% else %}<span class="badge badge-yellow" title="{% if p.afiliado_motivo %}{{ p.afiliado_motivo }} — nova tentativa em instantes.{% else %}Na fila para gerar o link de afiliado.{% endif %}"><i data-lucide="clock"></i> pendente</span>{% endif %}
               </div>
               <div class="muted" style="font-size:.74rem;margin-top:.3rem;"><i data-lucide="sparkles"></i> {{ p.motivos_score|join:" · " }}</div>
             </div>

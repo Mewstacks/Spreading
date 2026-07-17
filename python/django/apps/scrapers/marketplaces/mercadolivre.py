@@ -79,10 +79,26 @@ class MercadoLivre(Marketplace):
         return bool(getattr(produto, "link_afiliado", ""))
 
     def preparar_exibicao(self, produtos, usuario=None) -> None:
-        from apps.scrapers.afiliado import ids_com_link
-        prontos = ids_com_link(usuario, produtos)
+        from apps.scrapers.afiliado import situacao_dos_links
+
+        # UMA query para a página toda, e dela sai tudo: quem tem link e, para quem
+        # não tem, POR QUE não tem. Marcar tudo de "pendente" era desonesto — um item
+        # que o Programa de Afiliados nunca vai aceitar não está numa fila, e o
+        # usuário ficava olhando uma pilha esperando link que jamais viria.
+        situacao = situacao_dos_links(usuario, produtos)
         for p in produtos:
-            p.afiliado_pronto = p.id in prontos or bool(getattr(p, "link_afiliado", ""))
+            info = situacao.get(p.id) or {}
+            # O link_afiliado do Produto é o fallback legado (pré-multi-tenant).
+            p.afiliado_pronto = bool(info.get("link_afiliado")
+                                     or getattr(p, "link_afiliado", ""))
+            if p.afiliado_pronto:
+                p.afiliado_estado, p.afiliado_motivo = "pronto", ""
+            elif info:
+                p.afiliado_estado = info["estado"]
+                p.afiliado_motivo = info["ultimo_erro"]
+            else:
+                # Nunca tentado ainda — está mesmo na fila.
+                p.afiliado_estado, p.afiliado_motivo = "pendente", ""
 
     def verify_link(self, link, nome_esperado=None, confiar_desconto=False, usuario=None):
         from apps.scrapers.scraper_mercadolivre.link import verificar_link_afiliado

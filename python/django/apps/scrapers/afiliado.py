@@ -3,7 +3,10 @@
 No Mercado Livre a identidade vem exclusivamente da conta autenticada no Link
 Builder. A tag textual só existe no fluxo Amazon.
 """
+from datetime import timedelta
+
 from django.conf import settings
+from django.utils import timezone
 
 
 def tag_ml(usuario=None) -> str:
@@ -45,6 +48,25 @@ def ids_com_link(usuario, produtos) -> set:
     )
 
 
+def situacao_dos_links(usuario, produtos) -> dict:
+    """{produto_id: {estado, ultimo_erro, tentativas, link_afiliado}} — UMA query.
+
+    Superset de ids_com_link: traz também os itens SEM link, que é o que permite a
+    listagem distinguir "na fila" de "não afiliável" em vez de chamar tudo de
+    "pendente". Quem precisa das duas coisas deve chamar só esta e derivar os
+    prontos daqui — a listagem tem orçamento de uma query por loja, não duas.
+    """
+    if usuario is None or not produtos:
+        return {}
+    from apps.scrapers.models import LinkAfiliadoUsuario
+    return {
+        linha["produto_id"]: linha
+        for linha in LinkAfiliadoUsuario.objects
+        .filter(usuario=usuario, produto__in=produtos)
+        .values("produto_id", "estado", "ultimo_erro", "tentativas", "link_afiliado")
+    }
+
+
 def salvar_cache(usuario, produto, link_afiliado, url_isca, afiliado_ok) -> None:
     if usuario is None or not link_afiliado:
         return
@@ -52,5 +74,51 @@ def salvar_cache(usuario, produto, link_afiliado, url_isca, afiliado_ok) -> None
     LinkAfiliadoUsuario.objects.update_or_create(
         usuario=usuario, produto=produto,
         defaults={"link_afiliado": link_afiliado, "url_isca": url_isca,
-                  "afiliado_ok": afiliado_ok},
+                  "afiliado_ok": afiliado_ok, "estado": "pronto",
+                  "ultimo_erro": "", "proxima_tentativa": None,
+                  "ultima_tentativa": timezone.now()},
     )
+
+
+# Backoff entre tentativas de afiliar o mesmo produto. Antes não havia nenhum: o
+# item voltava ao lote a cada 5min, para sempre. Como o lote é de 40 e a fila é
+# ordenada pelos mais recentes, um punhado de produtos que nunca afiliam ocupava o
+# lote inteiro a cada ciclo e nenhum outro produto avançava — a pilha de "pendente"
+# que não saía mesmo com o worker rodando.
+_BACKOFF_MIN = (5, 15, 60, 180, 360)
+MAX_TENTATIVAS_ERRO = 8
+
+
+def registrar_falha(usuario, produto, motivo: str, *, terminal: bool = False) -> None:
+    """Grava POR QUE este produto não tem link, e quando tentar de novo.
+
+    `terminal` para causas que retentar não resolve (URL fora do Programa). Elas
+    saem da fila de vez: não são "pendente", são "não afiliável", e a tela precisa
+    dizer isso em vez de prometer um link que nunca vem.
+    """
+    if usuario is None or produto is None:
+        return
+    from apps.scrapers.models import LinkAfiliadoUsuario
+
+    agora = timezone.now()
+    linha, _ = LinkAfiliadoUsuario.objects.get_or_create(
+        usuario=usuario, produto=produto,
+        defaults={"ultima_tentativa": agora},
+    )
+    if linha.link_afiliado:
+        return                                  # já tem link; falha superveniente é ruído
+    linha.tentativas += 1
+    linha.ultimo_erro = (motivo or "")[:300]
+    linha.ultima_tentativa = agora
+    if terminal:
+        linha.estado, linha.proxima_tentativa = "nao_afiliavel", None
+    elif linha.tentativas >= MAX_TENTATIVAS_ERRO:
+        # Desistir também é honesto: 8 idas ao Link Builder falhando é sinal de que
+        # o problema não é transitório. Some da fila e a tela mostra o motivo.
+        linha.estado, linha.proxima_tentativa = "erro", None
+    else:
+        minutos = _BACKOFF_MIN[min(linha.tentativas - 1, len(_BACKOFF_MIN) - 1)]
+        linha.estado = "pendente"
+        linha.proxima_tentativa = agora + timedelta(minutes=minutos)
+    linha.save(update_fields=["tentativas", "ultimo_erro", "ultima_tentativa",
+                              "estado", "proxima_tentativa"])

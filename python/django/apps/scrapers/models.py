@@ -351,6 +351,27 @@ class LinkAfiliadoUsuario(models.Model):
     afiliado_ok = models.BooleanField(default=False)
     criado_em = models.DateTimeField(auto_now_add=True)
 
+    # ── Por que este item ainda não tem link ──
+    # Sem isto, um produto que nunca afilia fica "pendente" para sempre e não há um
+    # único registro do motivo: o gerador contava a falha e seguia (falhas += 1;
+    # continue). A linha passa a existir mesmo sem link, carregando a explicação.
+    ESTADOS = [
+        ("pendente", "Na fila"),
+        ("pronto", "Link gerado"),
+        # Terminal: a URL não é afiliável pelo Programa (catálogo /up/, perfil,
+        # /social/). Retentar não muda o resultado — e retentar para sempre era o
+        # que consumia o lote e impedia os outros produtos de avançarem.
+        ("nao_afiliavel", "Não afiliável"),
+        ("erro", "Falhou"),
+    ]
+    estado = models.CharField(max_length=20, choices=ESTADOS, default="pendente",
+                              db_index=True)
+    tentativas = models.PositiveIntegerField(default=0)
+    ultimo_erro = models.CharField(max_length=300, blank=True, default="")
+    ultima_tentativa = models.DateTimeField(null=True, blank=True)
+    # Quando tentar de novo. None + estado terminal = nunca mais.
+    proxima_tentativa = models.DateTimeField(null=True, blank=True, db_index=True)
+
     class Meta:
         unique_together = ("usuario", "produto")
 

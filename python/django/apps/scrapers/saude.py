@@ -104,6 +104,13 @@ CATALOGO = {
         "significa": "A verificação não confirmou que o link ainda representa a promoção esperada.",
         "acao": "Reteste sem publicar; mantenha a oferta fora dos grupos enquanto não for aprovada.",
     },
+    "links_sem_sessao": {
+        "titulo": "Conta sem sessão do Mercado Livre não gera links",
+        "significa": "O worker pulou esta conta: sem o Mercado Livre conectado não dá "
+                     "para abrir o Link Builder, então as ofertas dela ficam pendentes.",
+        "acao": "Peça para o usuário reconectar em Conexão Mercado Livre. O reteste "
+                 "confirma assim que a sessão voltar.",
+    },
     "links_ciclo_erro": {
         "titulo": "Worker de links de afiliado falhou",
         "significa": "O ciclo inteiro de geração de links parou antes de concluir.",

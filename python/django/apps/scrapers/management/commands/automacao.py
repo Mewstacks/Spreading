@@ -152,17 +152,31 @@ def _rodar_links(lote=40):
     from apps.scrapers.models import LinkAfiliadoUsuario, Produto
     from apps.scrapers.monitor_conexao import ml_conectado
 
-    gerados = falhas = 0
+    agora = timezone.now()
+    gerados = falhas = pulados = 0
     for user in get_user_model().objects.filter(is_active=True):
         if not ml_conectado(user):
+            # Antes isto era um `continue` mudo: o usuário simplesmente nunca gerava
+            # link e nada em lugar nenhum dizia por quê. Agora a Saúde mostra.
+            pulados += 1
+            _avisar_sem_sessao_ml(user)
             continue
         ja_tem = LinkAfiliadoUsuario.objects.filter(
             usuario=user, produto=OuterRef("pk")).exclude(link_afiliado="")
+        # Fora da fila: quem já tem link, quem é terminal (não afiliável / desistimos)
+        # e quem está de castigo no backoff. Sem isto, produtos que nunca afiliam
+        # ocupavam o lote de 40 a cada ciclo — os mais recentes primeiro — e nenhum
+        # outro produto chegava a ser tentado. A pilha de "pendente" não saía nunca.
+        fora_da_fila = LinkAfiliadoUsuario.objects.filter(
+            usuario=user, produto=OuterRef("pk")).filter(
+                Q(estado__in=["nao_afiliavel", "erro"])
+                | Q(proxima_tentativa__gt=agora))
         pendentes = list(
             Produto.objects.filter(marketplace="mercadolivre", preco_sem_desconto__gt=0)
             .exclude(estado__in=["indisponivel", "invalido", "expirado", "stale"])
             .filter(Q(owner__isnull=True) | Q(owner=user))
             .exclude(Exists(ja_tem))
+            .exclude(Exists(fora_da_fila))
             .order_by("-ultima_observacao")[:lote]
         )
         if not pendentes:
@@ -181,7 +195,25 @@ def _rodar_links(lote=40):
         falhas += f
         logger.info("Links ML p/ %s: %s gerado(s), %s falha(s) de %s pendente(s)",
                     user, g, f, len(pendentes))
-    return {"gerados": gerados, "falhas": falhas}
+    return {"gerados": gerados, "falhas": falhas, "pulados": pulados}
+
+
+def _avisar_sem_sessao_ml(user):
+    """Registra que este usuário não gera link por falta de sessão ML — com cooldown.
+
+    Sem cooldown seriam 288 eventos/dia por usuário desconectado (tick de 5min), e a
+    tela de Saúde afogaria justamente no aviso que precisa ser lido.
+    """
+    from django.core.cache import cache
+
+    chave = f"links_sem_sessao:{user.id}"
+    if cache.get(chave):
+        return
+    cache.set(chave, True, timeout=6 * 3600)
+    log_event("scraper", "links_sem_sessao",
+              f"{user.get_username()} não gera links de afiliado: a sessão do "
+              f"Mercado Livre não está conectada.",
+              level="warning", usuario=user, contexto={"servico": "Mercado Livre"})
 
 
 class Command(BaseCommand):
@@ -222,8 +254,12 @@ class Command(BaseCommand):
         proximo = timezone.now()
         while True:
             if not st.is_enabled("scrape"):
+                # A lane de links não tem flag própria; herda a da raspagem. O texto
+                # precisa dizer isso: "Desligado" sozinho não explicava por que a tela
+                # de Promoções estava cheia de "pendente" com o worker no ar.
                 st.write_state("links", fase="desligado",
-                               ultima_msg="Desligado — ligue na tela Scraper.")
+                               ultima_msg="Parado porque a Raspagem está desligada — "
+                                          "ligue na tela Scraper para voltar a gerar links.")
                 time.sleep(POLL)
                 continue
             if timezone.now() < proximo:

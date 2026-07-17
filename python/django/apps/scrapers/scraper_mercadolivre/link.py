@@ -6,7 +6,7 @@ from contextlib import contextmanager
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 caminho_django = os.path.dirname(os.path.dirname(os.path.dirname(caminho_atual)))
 sys.path.append(caminho_django)
-from apps.scrapers.afiliado import ids_com_link, salvar_cache
+from apps.scrapers.afiliado import ids_com_link, registrar_falha, salvar_cache
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
 from apps.scrapers.progresso import emitir_progresso
 from apps.scrapers.session_paths import ml_auth_path as _auth_path
@@ -261,6 +261,24 @@ def _montar_url_isca(url_produto: str, camp_id: str):
     return f"{base}{separador}coupon_campaign_id={camp_id}"
 
 
+def _motivo_url_recusada(url_produto: str) -> str:
+    """Por que _montar_url_isca devolveu None — em português, para a tela mostrar.
+
+    A função de montagem devolve só None; sem traduzir, "pendente" é tudo o que o
+    usuário vê e não há o que fazer a respeito. Aqui refazemos a mesma classificação
+    para dizer QUAL das regras barrou.
+    """
+    url = url_produto or ""
+    if not url:
+        return "O produto não tem link de origem."
+    if any(p in url.split("#")[0] for p in ("/social/", "/perfil/", "/usuario/", "/noindex/")):
+        return "Não é uma página de produto (perfil ou vitrine); o Programa de Afiliados não aceita."
+    if "/up/" in url or "click1.mercadolivre" in url or "/mclics/" in url:
+        return ("Anúncio de catálogo sem item real — o Programa de Afiliados só aceita "
+                "a página do produto.")
+    return "O Programa de Afiliados não aceita esta URL."
+
+
 def _afiliar_url_na_pagina(page, link_base: str):
     """
     Gera UM link de afiliado numa página do Link Builder já aberta/logada.
@@ -319,6 +337,12 @@ def gerar_links_em_lote(produtos, usuario=None):
                 # não é afiliável (catálogo/perfil) -> None.
                 url_isca = _montar_url_isca(prod.link_produto, prod.campanha_id)
                 if not url_isca:
+                    # Este era o ponto cego central: contava a falha e seguia, sem
+                    # log nem registro. O produto ficava "pendente" para sempre e
+                    # não havia como saber por quê.
+                    motivo = _motivo_url_recusada(prod.link_produto)
+                    logger.info("Produto %s não é afiliável: %s", getattr(prod, "id", None), motivo)
+                    registrar_falha(usuario, prod, motivo, terminal=True)
                     falhas += 1
                     continue
                 try:
@@ -331,11 +355,18 @@ def gerar_links_em_lote(produtos, usuario=None):
                         prod.afiliado_ok = True
                         prod.save(update_fields=["url_isca", "link_afiliado", "afiliado_ok"])
                     gerados += 1
+                except UrlNaoPermitidaError as e:
+                    # O Programa recusou explicitamente: retentar não muda nada.
+                    logger.info("Link Builder recusou o produto %s: %s",
+                                getattr(prod, "id", None), e)
+                    registrar_falha(usuario, prod, str(e), terminal=True)
+                    falhas += 1
                 except Exception as e:
                     if _pagina_de_login(page):
                         raise LoginError(MSG_SESSAO_EXPIRADA)
                     ultimo_erro = e
                     logger.warning("Falha ao gerar link afiliado ML em lote para produto %s: %s", getattr(prod, "id", None), e)
+                    registrar_falha(usuario, prod, str(e))
                     falhas += 1
 
     logger.info("Links afiliados ML em lote: %s gerados, %s falhas", gerados, falhas)
@@ -531,11 +562,18 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
     if camp_id:
         cupom = Cupom.objects.filter(campanha_id=camp_id).first()
         if cupom is None:
+            # A raspagem de cupons de campanha precisa ter rodado antes: sem a linha
+            # de Cupom não dá para montar a URL com coupon_campaign_id. Retentável —
+            # a próxima raspagem pode trazer o cupom.
             logger.info("Cupom %s nao encontrado no banco", camp_id)
+            registrar_falha(usuario, produto,
+                            f"A campanha {camp_id} deste produto ainda não foi raspada.")
             return None
 
     if not url_produto:
         logger.info("Produto sem link_produto salvo (campanha %s)", camp_id)
+        registrar_falha(usuario, produto, "O produto não tem link de origem.",
+                        terminal=True)
         return None
 
     # ── Multi-tenant: link por usuário, sempre com a sessão ML dele ──
@@ -546,10 +584,16 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
             raise LoginError(MSG_SESSAO_EXPIRADA)
         url_isca = _montar_url_isca(url_produto, camp_id)
         if not url_isca:
-            logger.info("URL de produto invalida para afiliacao ML")
+            motivo = _motivo_url_recusada(url_produto)
+            logger.info("URL de produto invalida para afiliacao ML: %s", motivo)
+            registrar_falha(usuario, produto, motivo, terminal=True)
             return None
         link_afiliado = afiliate_link_builder(url_isca, auth_path=auth_path)
         if not link_afiliado:
+            # afiliate_link_builder já logou a causa; aqui garantimos que ela também
+            # fique gravada no item, senão a tela só sabe dizer "pendente".
+            registrar_falha(usuario, produto,
+                            "O Link Builder do Mercado Livre não devolveu um link.")
             return None
         afiliado_ok = True
         salvar_cache(usuario, produto, link_afiliado, url_isca, afiliado_ok)
