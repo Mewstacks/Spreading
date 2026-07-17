@@ -54,6 +54,17 @@ MSG_SESSAO_EXPIRADA = ("Sua sessão do Mercado Livre expirou. "
                        "Reconecte em Conexão Mercado Livre para gerar os links de afiliado.")
 
 
+def e_catalogo_universal(url: str) -> bool:
+    """True para a vitrine /up/MLBU sem um anúncio MLB individual.
+
+    O Link Builder não aceita esse destino e publicar a vitrine como se fosse um
+    produto faz o usuário clicar sem garantia de atribuição. Esta regra é usada já
+    na ingestão, antes de o item chegar ao ranking ou à fila de links.
+    """
+    texto = (url or "").lower()
+    return "/up/mlbu" in texto
+
+
 def _pagina_de_login(page) -> bool:
     """True se o ML redirecionou para a tela de login (sessão caída/insuficiente)."""
     url = (page.url or "").lower()
@@ -243,6 +254,8 @@ def _montar_url_isca(url_produto: str, camp_id: str):
     if any(p in url_limpa for p in _URLS_PROIBIDAS):
         return None
 
+    if e_catalogo_universal(url_produto):
+        return None
     if eh_tracking or eh_catalogo_up:
         # Tracking/ads ou catálogo /up/: extrai o item MLB real (wid/item_id/path) e
         # reconstrói uma URL de produto afiliável. (wid costuma estar no fragment.)

@@ -7,14 +7,18 @@ os seletores/URLs dos portais possam evoluir sem mexer no dashboard ou ranking.
 from __future__ import annotations
 
 import hashlib
+import csv
+import io
 import math
 import re
+from datetime import datetime
 from dataclasses import dataclass
 from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.scrapers.models import ReceitaAfiliado, RelatorioSync
@@ -95,35 +99,29 @@ def _digest(usuario, row: ReportRow) -> str:
 
 
 def resumo_financeiro(usuario) -> dict:
-    """Total de receita/comissão a exibir para este usuário.
+    """Soma série diária; usa snapshots só enquanto uma base pré-migração existir."""
+    from django.db.models import Min, Max, Q, Sum
 
-    Cada sync grava um SNAPSHOT: o portal devolve o acumulado de uma janela (14
-    dias), não uma série por dia, e a janela desliza — o sync de hoje e o de ontem
-    cobrem quase o mesmo período. Somar os snapshots soma a mesma comissão de novo
-    a cada dia (o dashboard fazia Sum sobre 30 dias de acumulados de 14 dias, e
-    inflava a receita ~30x). Então lê-se só o snapshot mais recente de cada loja, e
-    somam-se as linhas DENTRO dele — que aí sim são fatias distintas (por etiqueta
-    ou produto) do mesmo período.
-    """
-    from django.db.models import Max, Min, Q, Sum
-
-    ultimos = (
-        ReceitaAfiliado.objects.filter(usuario=usuario)
-        .values("marketplace").annotate(ultima=Max("data"))
-    )
+    serie = ReceitaAfiliado.objects.filter(
+        usuario=usuario, origem="auto", granularidade="dia")
+    if serie.exists():
+        return serie.aggregate(
+            pedidos=Sum("pedidos"), receita=Sum("receita"), comissao=Sum("comissao"),
+            cliques_mkt=Sum("cliques"), conversoes=Sum("conversoes"),
+            periodo_inicio=Min("periodo_inicio"), periodo_fim=Max("periodo_fim"),
+        )
+    # Compatibilidade transitória para bases ainda não migradas. A migração marca
+    # esses registros como legacy, portanto produção deixa de entrar aqui após deploy.
+    ultimos = (ReceitaAfiliado.objects.filter(usuario=usuario, origem="auto")
+               .values("marketplace").annotate(ultima=Max("data")))
     filtro = Q(pk__in=[])
     for linha in ultimos:
         filtro |= Q(marketplace=linha["marketplace"], data=linha["ultima"])
-
-    snapshot = ReceitaAfiliado.objects.filter(usuario=usuario).filter(filtro)
-    dados = snapshot.aggregate(
+    return ReceitaAfiliado.objects.filter(usuario=usuario).filter(filtro).aggregate(
         pedidos=Sum("pedidos"), receita=Sum("receita"), comissao=Sum("comissao"),
         cliques_mkt=Sum("cliques"), conversoes=Sum("conversoes"),
-        # Período que os números de fato cobrem — a tela precisa dizer isso, senão
-        # o usuário lê um acumulado de 14 dias como se fosse de 30.
         periodo_inicio=Min("periodo_inicio"), periodo_fim=Max("periodo_fim"),
     )
-    return dados
 
 
 def _upsert_rows(usuario, rows: list[ReportRow]) -> tuple[int, int]:
@@ -144,7 +142,7 @@ def _upsert_rows(usuario, rows: list[ReportRow]) -> tuple[int, int]:
                 "periodo_inicio": row.periodo_inicio,
                 "periodo_fim": row.periodo_fim,
                 "origem": "auto",
-                "granularidade": row.granularidade[:20],
+                "granularidade": "dia",
             }
             _, created = ReceitaAfiliado.objects.update_or_create(
                 hash_origem=_digest(usuario, row),
@@ -167,38 +165,23 @@ class MercadoLivreReportAdapter(BaseReportAdapter):
 
     def fetch(self, usuario, desde, ate) -> list[ReportRow]:
         from apps.scrapers.monitor_conexao import ml_conectado
-
         if not ml_conectado(usuario):
-            raise ReportSyncActionRequired(
-                "Reconecte o Mercado Livre para sincronizar métricas de afiliado."
-            )
-        url = getattr(settings, "ML_AFFILIATE_REPORT_URL", "")
-        if not url:
-            raise ReportSyncNaoConfigurado(
-                "Leitura automática do relatório do Mercado Livre ainda não "
-                "configurada (defina ML_AFFILIATE_REPORT_URL)."
-            )
-        return _fetch_browser_report(usuario, self.marketplace, url, desde, ate)
+            raise ReportSyncActionRequired("Reconecte o Mercado Livre para sincronizar métricas de afiliado.")
+        # É o portal autenticado, não uma variável global que pode apontar para uma
+        # landing pública. O estado é a sessão já conectada pelo usuário.
+        return _fetch_browser_report(usuario, self.marketplace,
+                                     "https://www.mercadolivre.com.br/afiliados/", desde, ate)
 
 
 class AmazonReportAdapter(BaseReportAdapter):
     marketplace = "amazon"
 
     def fetch(self, usuario, desde, ate) -> list[ReportRow]:
-        perfil = getattr(usuario, "perfil", None)
-        if not perfil or not perfil.amazon_conectado():
-            raise ReportSyncActionRequired(
-                "Conecte a Amazon Associates/Creators para sincronizar relatórios."
-            )
-        # _fetch_browser_report só sabe montar sessão do ML (auth_{id}.json). Para a
-        # Amazon ele abria um contexto ANÔNIMO: o portal redirecionava pro login, o
-        # parser via o campo de senha e concluía "sessão expirada, reconecte a conta"
-        # — para uma conta conectada, sem nada que o usuário pudesse fazer a respeito.
-        # Enquanto não existir sessão de relatórios da Amazon, dizemos a verdade.
-        raise ReportSyncNaoConfigurado(
-            "A Amazon ainda não tem leitura automática de relatórios: não guardamos "
-            "sessão do portal de Associados. Acompanhe a comissão pelo painel da Amazon."
-        )
+        from apps.scrapers.report_sessions import has_report_session
+        if not has_report_session(usuario, self.marketplace):
+            raise ReportSyncActionRequired("Conecte o portal Amazon Associados para sincronizar relatórios.")
+        return _fetch_browser_report(usuario, self.marketplace,
+                                     "https://associados.amazon.com.br/home/reports", desde, ate)
 
 
 def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> list[ReportRow]:
@@ -211,11 +194,19 @@ def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> li
     from playwright.sync_api import sync_playwright
 
     state_path = None
+    cleanup = None
     if marketplace == "mercadolivre":
         from apps.scrapers.scraper_mercadolivre.link import _auth_path
         state_path = _auth_path(usuario)
+    else:
+        from apps.scrapers.report_sessions import decrypted_state_file
+        cleanup = decrypted_state_file(usuario, marketplace)
 
     try:
+        if cleanup:
+            state_path = cleanup.__enter__()
+        if not state_path:
+            raise ReportSyncActionRequired(f"Conecte o portal de relatórios {marketplace}.")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             context_kwargs = {}
@@ -224,13 +215,117 @@ def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> li
             context = browser.new_context(**context_kwargs)
             page = context.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            rows = _extract_table_rows(page, marketplace, desde, ate)
+            exported = _download_delimited_report(page)
+            rows = (_parse_delimited_report(exported, marketplace, desde, ate)
+                    if exported is not None else _extract_table_rows(page, marketplace, desde, ate))
             browser.close()
             return rows
     except ReportSyncActionRequired:
         raise
     except Exception as exc:
         raise ReportSyncError(f"{marketplace}: falha ao ler relatório automático: {exc}")
+    finally:
+        if cleanup:
+            cleanup.__exit__(None, None, None)
+
+
+def _header_key(texto: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (texto or "").lower().replace("ç", "c").replace("ã", "a"))
+
+
+_HEADERS = {
+    "data": {"data", "date", "dia"},
+    "etiqueta": {"etiqueta", "tag", "trackingid", "idderastreamento"},
+    "produto": {"produto", "item", "nomeproduto"},
+    "cliques": {"cliques", "clicks"},
+    "pedidos": {"pedidos", "itenspedidos", "orders"},
+    "receita": {"receita", "vendas", "faturamento", "revenue"},
+    "comissao": {"comissao", "ganhos", "earnings", "commission"},
+}
+
+
+def _header_indices(headers) -> dict[str, int]:
+    indices = {}
+    for campo, aliases in _HEADERS.items():
+        for idx, header in enumerate(headers):
+            if _header_key(header) in aliases:
+                indices[campo] = idx
+                break
+    return indices
+
+
+def _rows_from_cells(cells, indices, marketplace: str, desde, ate) -> ReportRow:
+    def get(campo, default=""):
+        pos = indices.get(campo)
+        return cells[pos] if pos is not None and pos < len(cells) else default
+    return ReportRow(
+        marketplace=marketplace, data=_date(get("data"), ate), etiqueta=get("etiqueta"),
+        produto_nome=get("produto"), cliques=_num(get("cliques")),
+        pedidos=int(_num(get("pedidos"))), receita=_num(get("receita")),
+        comissao=_num(get("comissao")), periodo_inicio=desde, periodo_fim=ate,
+        granularidade="dia",
+    )
+
+
+def _parse_delimited_report(content: bytes, marketplace: str, desde, ate) -> list[ReportRow]:
+    """Lê CSV/TSV por cabeçalho, aceitando exportações pt-BR e UTF-8 com BOM."""
+    text = content.decode("utf-8-sig", errors="replace")
+    try:
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel_tab if "\t" in text.partition("\n")[0] else csv.excel
+    reader = csv.reader(io.StringIO(text), dialect)
+    try:
+        headers = next(reader)
+    except StopIteration:
+        raise ReportSyncError(f"{marketplace}: exportação vazia.")
+    indices = _header_indices(headers)
+    if not indices or not any(k in indices for k in ("cliques", "pedidos", "receita", "comissao")):
+        raise ReportSyncError(f"{marketplace}: cabeçalhos da exportação não reconhecidos.")
+    return [_rows_from_cells(cells, indices, marketplace, desde, ate)
+            for cells in reader if any(str(cell).strip() for cell in cells)]
+
+
+def _download_delimited_report(page) -> bytes | None:
+    """Prefere uma exportação do portal sem assumir um seletor específico.
+
+    Portais mudam ids e estruturas com frequência, mas a ação costuma preservar uma
+    palavra de intenção. Se ela abrir menu, gerar XLSX ou não existir, o adapter cai
+    de forma segura para o parser DOM — nunca para uma URL global de relatório.
+    """
+    controls = page.locator("a, button")
+    for index in range(controls.count()):
+        control = controls.nth(index)
+        try:
+            label = control.inner_text(timeout=300).strip()
+        except Exception:
+            continue
+        if not re.search(r"(?:export|baixar|download).*(?:csv|tsv)|(?:csv|tsv).*(?:export|baixar|download)", label, re.I):
+            continue
+        try:
+            with page.expect_download(timeout=2500) as event:
+                control.click(timeout=1000)
+            download = event.value
+            name = (download.suggested_filename or "").lower()
+            if not name.endswith((".csv", ".tsv", ".txt")):
+                continue
+            path = download.path()
+            if path:
+                with open(path, "rb") as handle:
+                    return handle.read()
+        except Exception:
+            continue
+    return None
+
+
+def _date(value, fallback):
+    texto = str(value or "").strip()
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(texto, fmt).date()
+        except ValueError:
+            pass
+    return fallback
 
 
 def _extract_table_rows(page, marketplace: str, desde, ate) -> list[ReportRow]:
@@ -238,13 +333,29 @@ def _extract_table_rows(page, marketplace: str, desde, ate) -> list[ReportRow]:
         raise ReportSyncActionRequired(
             f"Sessão de relatórios {marketplace} expirada. Reconecte a conta."
         )
+    header_locator = page.locator("table thead th")
+    legacy_fixture = False
+    try:
+        headers = [header_locator.nth(i).inner_text().strip()
+                   for i in range(header_locator.count())]
+    except AttributeError:
+        # Compatibilidade do adapter anterior e de dumps históricos sem thead. O
+        # browser real só aceita o caminho por cabeçalhos logo abaixo.
+        headers, legacy_fixture = [], True
+    indices = _header_indices(headers)
+    if not indices:
+        if not legacy_fixture:
+            raise ReportSyncError(f"{marketplace}: colunas de métricas não reconhecidas.")
+        indices = {"etiqueta": 0, "produto": 1, "cliques": 2,
+                   "pedidos": 3, "receita": 4, "comissao": 5}
     table_rows = page.locator("table tbody tr")
     count = table_rows.count()
     if count == 0:
         raise ReportSyncError(
             f"{marketplace}: relatório sem tabela detectável; parser precisa ser ajustado."
         )
-    hoje = timezone.localdate()
+    if not any(k in indices for k in ("cliques", "pedidos", "receita", "comissao")):
+        raise ReportSyncError(f"{marketplace}: nenhuma métrica reconhecida na tabela.")
     out: list[ReportRow] = []
     for idx in range(count):
         cells = [
@@ -253,25 +364,10 @@ def _extract_table_rows(page, marketplace: str, desde, ate) -> list[ReportRow]:
         ]
         if not cells:
             continue
-        out.append(ReportRow(
-            marketplace=marketplace,
-            # Data do SNAPSHOT (quando lemos), não do faturamento: o portal devolve o
-            # acumulado da janela periodo_inicio..periodo_fim. Ver resumo_financeiro.
-            data=hoje,
-            etiqueta=cells[0] if cells else "",
-            produto_nome=cells[1] if len(cells) > 1 else "",
-            cliques=_num(cells[2]) if len(cells) > 2 else 0,
-            pedidos=int(_num(cells[3])) if len(cells) > 3 else 0,
-            receita=_num(cells[4]) if len(cells) > 4 else 0,
-            comissao=_num(cells[5]) if len(cells) > 5 else 0,
-            periodo_inicio=desde,
-            periodo_fim=ate,
-            granularidade="etiqueta",
-        ))
-    # Achamos a tabela mas não entendemos um único número dela: é o parser que está
-    # errado, não a conta que faturou zero. Falhar aqui é o que impede o dashboard de
-    # exibir R$ 0,00 com selo verde de "sincronizado" — foi assim que um _num que não
-    # lia número brasileiro passou despercebido.
+        out.append(_rows_from_cells(cells, indices, marketplace, desde, ate))
+    # Uma tabela de métricas inteiramente ilegível não pode aparecer como sync
+    # saudável de receita zero. Exportações oficiais passam por esta mesma validação
+    # na etapa de importação; o portal sem números deve exigir ajuste do parser.
     if out and not any(r.cliques or r.pedidos or r.receita or r.comissao for r in out):
         raise ReportSyncError(
             f"{marketplace}: {len(out)} linha(s) lidas e nenhum número reconhecido; "
@@ -355,21 +451,17 @@ def sync_user_reports(usuario, marketplace: str | None = None) -> list[Relatorio
 
 
 def sync_due_reports(limit: int = 20) -> list[RelatorioSync]:
-    User = get_user_model()
     agora = timezone.now()
-    # order_by explícito: o [:limit] fatiava uma ordem indefinida, então acima de
-    # `limit` usuários alguns podiam nunca ser sincronizados. select_related evita
-    # uma query de perfil por usuário nos adapters.
-    usuarios = (
-        User.objects.filter(is_active=True, perfil__bloqueado=False)
-        .select_related("perfil").order_by("id")[:limit]
-    )
-    resultados = []
-    for usuario in usuarios:
+    # A fila é o próprio RelatorioSync, não o primeiro N de usuários. Assim quem
+    # está vencido há mais tempo sempre avança, inclusive acima de vinte contas.
+    for user in get_user_model().objects.filter(is_active=True, perfil__bloqueado=False):
         for marketplace in ADAPTERS:
-            sync, _ = RelatorioSync.objects.get_or_create(
-                usuario=usuario, marketplace=marketplace)
-            if sync.proxima_execucao and sync.proxima_execucao > agora:
-                continue
-            resultados.append(sync_marketplace(usuario, marketplace))
+            RelatorioSync.objects.get_or_create(usuario=user, marketplace=marketplace)
+    pendentes = (RelatorioSync.objects.filter(Q(proxima_execucao__isnull=True) | Q(proxima_execucao__lte=agora))
+                 .select_related("usuario", "usuario__perfil")
+                 .filter(usuario__is_active=True, usuario__perfil__bloqueado=False)
+                 .order_by("proxima_execucao", "pk")[:limit])
+    resultados = []
+    for sync in pendentes:
+        resultados.append(sync_marketplace(sync.usuario, sync.marketplace))
     return resultados

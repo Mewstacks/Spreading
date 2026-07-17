@@ -394,6 +394,9 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         ]
     elif cod_item:
         linhas += ["", f"🎟️ Use o cupom {m.bold(esc(cod_item))} no checkout"]
+    elif (getattr(produto, "marketplace", "") == "amazon"
+          and (getattr(produto, "evidencia", {}) or {}).get("promotion", {}).get("coupon_confirmed")):
+        linhas += ["", f"🎟️ {m.bold('ATIVE O CUPOM:')} marque o cupom na página da Amazon antes de finalizar a compra."]
     else:
         # Códigos genéricos (CupomCodigo) são de checkout do ML — NÃO valem na Amazon
         # (lá cupom é de clipar, sem código). Só aplica p/ ML/legado.

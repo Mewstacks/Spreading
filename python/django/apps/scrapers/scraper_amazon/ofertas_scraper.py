@@ -13,6 +13,7 @@ entra nos campos de preço + rótulo; codigo_checkout fica vazio (não há códi
 """
 from django.conf import settings
 import logging
+import re
 
 from apps.scrapers.models import Produto
 from apps.scrapers.progresso import emitir_progresso
@@ -88,6 +89,10 @@ def _mapear_item(item: dict) -> dict | None:
     if isinstance(deal, dict):
         rotulo_promo = (deal.get("displayName") or deal.get("title")
                         or deal.get("badge") or deal.get("type") or "Promoção")[:60]
+    # `dealDetails` também representa lightning deals. Só tratamos como cupom
+    # quando a fonte afirma explicitamente coupon/cupom; qualquer outra promoção é
+    # exibida como desconto de preço, sem instruir o público a "ativar" algo falso.
+    cupom_confirmado = bool(re.search(r"coupon|cupom", rotulo_promo, re.I))
 
     # Prime/deliveryInfo não existe mais no catalog/v1. Aproxima "vendido pela Amazon"
     # (merchantInfo.name) como selo de confiança no lugar do antigo frete_full/Prime.
@@ -107,6 +112,7 @@ def _mapear_item(item: dict) -> dict | None:
         "frete_full": prime,
         "tem_promocao": tem_promocao,
         "rotulo_promo": rotulo_promo,
+        "cupom_confirmado": cupom_confirmado,
     }
 
 
@@ -133,6 +139,9 @@ def _upsert_produto(m: dict, origem: str, macro=None, owner=None) -> bool:
             "imagem_url": m["imagem_url"],
             "frete_full": m["frete_full"],
             "codigo_checkout": "",  # Amazon: cupom é de clipar, não tem código
+            "evidencia": {"promotion": {"present": m["tem_promocao"],
+                                         "label": m["rotulo_promo"],
+                                         "coupon_confirmed": m["cupom_confirmado"]}},
         },
     )
     # Histórico de preços (B1): observação por asin p/ medir queda real depois.

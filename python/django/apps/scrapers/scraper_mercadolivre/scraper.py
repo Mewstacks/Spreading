@@ -12,6 +12,42 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
+
+def _extrair_payload_cupons(page):
+    """Lê o payload de cupom sem acoplar a um único bundle Nordic.
+
+    O ML alterna entre script com id, script JSON e bundle inline. Todos carregam a
+    mesma chave ``filteredCouponsData``; a validação é por estrutura, não por uma
+    substring fixa que some a cada deploy do site.
+    """
+    candidatos = []
+    for selector in ("#__NORDIC_RENDERING_CTX__", "script[type='application/json']", "script"):
+        try:
+            loc = page.locator(selector)
+            direct = loc.text_content()
+            if direct:
+                candidatos.append(direct)
+            candidatos.extend(loc.nth(i).text_content() or "" for i in range(loc.count()))
+        except Exception:
+            continue
+    for text in candidatos:
+        if "filteredCouponsData" not in text:
+            continue
+        # Formato Nordic legado: _n.ctx.r={...};_n.ctx.r.assets
+        match = re.search(r"_n\.ctx\.r\s*=\s*(\{.*?\})\s*;\s*_n\.ctx\.r", text, re.S)
+        blobs = [match.group(1)] if match else [text]
+        for blob in blobs:
+            try:
+                data = json.loads(blob)
+            except (TypeError, ValueError):
+                continue
+            current = data
+            if isinstance(current, dict) and current.get("appProps"):
+                current = current["appProps"].get("pageProps", {})
+            if isinstance(current, dict) and isinstance(current.get("filteredCouponsData"), dict):
+                return data
+    return None
+
 def mapear_cupons(n=1):
     """Raspa /cupons/filter e popula a tabela Cupom. Retorna quantos foram salvos.
 
@@ -39,21 +75,9 @@ def mapear_cupons(n=1):
                 except Exception as e:
                     raise BrowserError(f"Nao foi possivel acessar a pagina de cupons: {e}")
 
-                try:
-                    page.wait_for_selector("#__NORDIC_RENDERING_CTX__", state="attached", timeout=15000)
-                except Exception:
-                    logger.debug("Tag nao encontrada na pagina %s, tentativa %s/%s", n, tentativa + 1, MAX_RETRIES)
-                    tentativa += 1
-                    time.sleep(RETRY_WAIT)
-                    continue
-
-                texto_script = page.locator("#__NORDIC_RENDERING_CTX__").text_content()
-
-                try:
-                    json_puro = texto_script.split('_n.ctx.r=')[1].split(';_n.ctx.r.assets')[0]
-                    dados = json.loads(json_puro)
-                except Exception as e:
-                    logger.debug("Erro ao ler JSON na pagina %s, tentativa %s/%s: %s", n, tentativa + 1, MAX_RETRIES, e)
+                dados = _extrair_payload_cupons(page)
+                if dados is None:
+                    logger.debug("Payload de cupons ausente na pagina %s, tentativa %s/%s", n, tentativa + 1, MAX_RETRIES)
                     tentativa += 1
                     time.sleep(RETRY_WAIT)
                     continue

@@ -46,8 +46,8 @@
 {% block content %}
 <div class="conn">
   <div class="page-head" style="text-align:center;">
-    <h1 style="justify-content:center;"><i data-lucide="shopping-bag"></i> Conexão Mercado Livre</h1>
-    <p class="sub">Entre na sua conta do Mercado Livre sem sair do Spreading. A sessão fica salva e gera seus links de afiliado automaticamente.</p>
+  <h1 style="justify-content:center;"><i data-lucide="shopping-bag"></i> Conexão {{ marketplace_nome|default:"Mercado Livre" }}</h1>
+    <p class="sub">Entre na sua conta sem sair do Spreading. A sessão fica salva e é usada somente nas integrações desta conta.</p>
   </div>
 
   <div id="conn-pill" class="conn-pill"><span class="dot"></span><span id="pill-txt">verificando…</span></div>
@@ -62,7 +62,7 @@
   <!-- Estado inicial / desconectado: botão pra iniciar -->
   <div id="start-area" style="display:none;">
     <div class="actions">
-      <button id="start-btn" class="btn btn-blue"><i data-lucide="log-in"></i> Conectar Mercado Livre</button>
+      <button id="start-btn" class="btn btn-blue"><i data-lucide="log-in"></i> Conectar {{ marketplace_nome|default:"Mercado Livre" }}</button>
     </div>
     <p class="hint">Uma janela segura do Mercado Livre abre nesta página. Entre com seu e-mail e senha normalmente, inclusive a verificação em duas etapas.</p>
   </div>
@@ -148,7 +148,7 @@
     if (!inputBuf.length) return;
     const batch = inputBuf; inputBuf = [];
     try {
-      await fetch('/scrapers/ml/input/', {
+      await fetch('{{ conexao_prefix|default:"/scrapers/ml" }}/input/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCookie('csrftoken') },
         body: JSON.stringify({ events: batch }),
@@ -206,7 +206,7 @@
   function startLive() {
     attachInput();
     if (framesES) return;
-    framesES = new EventSource('/scrapers/ml/frames/');
+    framesES = new EventSource('{{ conexao_prefix|default:"/scrapers/ml" }}/frames/');
     framesES.onmessage = function (e) {
       if (e.data === '__DONE__') { if (framesES) { framesES.close(); framesES = null; } return; }
       const img = new Image();
@@ -250,23 +250,23 @@
 
   async function poll() {
     try {
-      const r = await fetch('/scrapers/ml/status/');
+      const r = await fetch('{{ conexao_prefix|default:"/scrapers/ml" }}/status/');
       pintar(await r.json());
     } catch (e) { /* mantém último estado; próximo tick tenta de novo */ }
   }
 
   startBtn.onclick = reconectarBtn.onclick = async function () {
     startBtn.disabled = true;
-    pintar(await post('/scrapers/ml/start/'));
+    pintar(await post('{{ conexao_prefix|default:"/scrapers/ml" }}/start/'));
     startBtn.disabled = false;
   };
   salvarBtn.onclick = async function () {
     salvarBtn.disabled = true;
-    await post('/scrapers/ml/salvar/');
+    await post('{{ conexao_prefix|default:"/scrapers/ml" }}/salvar/');
     setTimeout(function () { salvarBtn.disabled = false; }, 2000);
   };
   cancelarBtn.onclick = async function () {
-    await post('/scrapers/ml/cancelar/');
+    await post('{{ conexao_prefix|default:"/scrapers/ml" }}/cancelar/');
     stopLive();
     poll();
   };

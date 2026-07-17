@@ -290,6 +290,8 @@ def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):
         if o["link_produto"] in vistos:
             continue
         vistos.add(o["link_produto"])
+        from apps.scrapers.scraper_mercadolivre.link import e_catalogo_universal
+        catalogo = e_catalogo_universal(o["link_produto"])
         produto, _ = _upsert_resiliente(
             marketplace="mercadolivre", owner=None, link_produto=o["link_produto"],
             defaults={"campanha_id": "", "origem": origem,
@@ -297,13 +299,21 @@ def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):
                       "nome": o["nome"], "preco_sem_desconto": o["preco_sem_desconto"],
                       "preco_com_cupom": o["preco_com_cupom"],
                       "preco_fonte": o["preco_sem_desconto"],
-                      "preco_efetivo": o["preco_com_cupom"], "estado": "ativo",
-                      "falha_verificacao": "", "falhas_consecutivas": 0,
+                      "preco_efetivo": o["preco_com_cupom"],
+                      "estado": "invalido" if catalogo else "ativo",
+                      "falha_verificacao": (
+                          "Catálogo universal sem anúncio individual afiliável."
+                          if catalogo else ""), "falhas_consecutivas": 0,
                       "confianca": "media", "evidencia": {"transport": "public-web"},
                       "categoria": "DESCONHECIDO",
                       "macro_categoria": macro_fixa or classificar_oferta_por_nome(o["nome"]),
                       "imagem_url": o["imagem_url"], "frete_full": o["frete_full"]})
-        salvos.append(produto)
+        if catalogo:
+            # Falhas terminais antigas não devem continuar ocupando a tela nem a
+            # fila quando a regra agora é global: catálogo universal não publica.
+            produto.links_usuario.all().delete()
+        else:
+            salvos.append(produto)
     # Histórico de preços (B1): 1 observação por item p/ detectar queda real depois.
     from apps.scrapers.precos import registrar_varios
     registrar_varios(salvos)
@@ -320,7 +330,9 @@ def _upsert_ofertas(coletados):
         if o["link_produto"] in vistos:
             continue
         vistos.add(o["link_produto"])
-        _upsert_resiliente(
+        from apps.scrapers.scraper_mercadolivre.link import e_catalogo_universal
+        catalogo = e_catalogo_universal(o["link_produto"])
+        produto, _ = _upsert_resiliente(
             origem="oferta", link_produto=o["link_produto"], owner=None,
             defaults={
                 "nome": o["nome"],
@@ -329,16 +341,21 @@ def _upsert_ofertas(coletados):
                 "preco_fonte": o["preco_sem_desconto"],
                 "preco_efetivo": o["preco_com_cupom"],
                 "fonte": "mercadolivre-web",
-                "estado": "ativo",
-                "falha_verificacao": "",
+                "estado": "invalido" if catalogo else "ativo",
+                "falha_verificacao": (
+                    "Catálogo universal sem anúncio individual afiliável."
+                    if catalogo else ""),
                 "categoria": "DESCONHECIDO",
                 "macro_categoria": classificar_oferta_por_nome(o["nome"]),
                 "imagem_url": o["imagem_url"],
                 "frete_full": o["frete_full"],
             },
         )
-        registrar("mercadolivre", "", o["link_produto"], o["preco_com_cupom"])
-        n += 1
+        if catalogo:
+            produto.links_usuario.all().delete()
+        else:
+            registrar("mercadolivre", "", o["link_produto"], o["preco_com_cupom"])
+            n += 1
     return n
 
 

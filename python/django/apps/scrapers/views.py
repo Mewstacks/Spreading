@@ -368,6 +368,7 @@ def configurar_conta(request):
         messages.success(request, "Conta atualizada.")
         return redirect("scraper-conta")
 
+    from apps.scrapers.conexoes import estado_amazon_relatorios
     return render(request, "scrapers/conta.html", {
         "perfil": perfil,
         "tem_secret": bool(perfil and perfil.amazon_credential_secret),
@@ -376,6 +377,7 @@ def configurar_conta(request):
         # Ortogonal ao "conectado": a Creators API é upgrade opcional, exibido só
         # como informação. Não pode voltar a virar requisito de conexão.
         "amazon_creators_ativa": bool(perfil and perfil.amazon_creators_ativa()),
+        "amazon_relatorio_conectado": bool(estado_amazon_relatorios(request.user).conectado),
         "billing_checkout_url": settings.BILLING_CHECKOUT_URL,
         "billing_portal_url": settings.BILLING_PORTAL_URL,
     })
@@ -438,6 +440,7 @@ def ml_conexao_painel(request):
     from apps.scrapers import ml_conexao
     return render(request, "scrapers/ml_conexao.html", {
         "status": ml_conexao.status(request.user.id),
+        "marketplace_nome": "Mercado Livre", "conexao_prefix": "/scrapers/ml",
     })
 
 
@@ -446,6 +449,63 @@ def ml_conexao_status_json(request):
     """JSON de status para polling do front (fase, live_view_url, auth_valido)."""
     from apps.scrapers import ml_conexao
     return JsonResponse(ml_conexao.status(request.user.id))
+
+
+def amazon_conexao_painel(request):
+    """Login interativo da Amazon Associates, exclusivo para relatórios."""
+    from apps.scrapers import amazon_conexao
+    return render(request, "scrapers/ml_conexao.html", {
+        "status": amazon_conexao.status(request.user.id),
+        "marketplace_nome": "Amazon Associados", "conexao_prefix": "/scrapers/amazon",
+        "relatorio": True,
+    })
+
+
+@require_GET
+def amazon_conexao_status_json(request):
+    from apps.scrapers import amazon_conexao
+    return JsonResponse(amazon_conexao.status(request.user.id))
+
+
+@require_POST
+def amazon_conexao_start(request):
+    from apps.scrapers import amazon_conexao
+    return JsonResponse(amazon_conexao.criar_sessao(request.user))
+
+
+@require_POST
+def amazon_conexao_salvar(request):
+    from apps.scrapers import amazon_conexao
+    amazon_conexao.salvar_agora(request.user.id)
+    return JsonResponse(amazon_conexao.status(request.user.id))
+
+
+@require_POST
+def amazon_conexao_cancelar(request):
+    from apps.scrapers import amazon_conexao
+    amazon_conexao.cancelar(request.user.id)
+    return JsonResponse({"ok": True})
+
+
+@require_GET
+def amazon_conexao_frames(request):
+    from apps.scrapers import amazon_conexao
+    def _stream():
+        yield from (f"data: {frame}\n\n" for frame in amazon_conexao.frames(request.user.id))
+        yield "data: __DONE__\n\n"
+    return StreamingHttpResponse(_stream(), content_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@require_POST
+def amazon_conexao_input(request):
+    import json
+    from apps.scrapers import amazon_conexao
+    try:
+        events = json.loads((request.body or b"").decode() or "{}").get("events")
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(amazon_conexao.enfileirar_input(request.user.id, events))
 
 
 @require_POST

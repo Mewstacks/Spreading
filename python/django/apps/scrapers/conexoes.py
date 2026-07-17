@@ -45,7 +45,7 @@ _MARCAS_LOGIN = ("/login", "/lgz/", "/registration", "loginhub")
 class Estado:
     """Estado de uma conexão. `conectado=False` sempre vem com `motivo` preenchido."""
     conectado: bool
-    servico: str                 # "WhatsApp" | "Mercado Livre"
+    servico: str                 # "WhatsApp" | "Mercado Livre" | "Amazon Relatórios"
     fonte: str                   # como sabemos: "worker" | "sonda" | "arquivo" | "cache"
     motivo: str = ""             # texto humano; vazio quando conectado
     detalhe: str = ""            # slug p/ a UI decidir o CTA: "expirado" | "sem_sessao" | ...
@@ -217,8 +217,22 @@ def invalidar_ml(user=None) -> None:
     cache.delete(_chave_ml(user))
 
 
+def estado_amazon_relatorios(user=None) -> Estado:
+    """Estado da sessão de relatórios Amazon, separada de tag/Creators API."""
+    agora = timezone.now()
+    if user is None:
+        return Estado(False, "Amazon Relatórios", "arquivo", "Conta ausente.", "sem_sessao", agora)
+    from apps.scrapers.report_sessions import has_report_session
+    if has_report_session(user, "amazon"):
+        return Estado(True, "Amazon Relatórios", "arquivo", "", "", agora)
+    return Estado(False, "Amazon Relatórios", "arquivo",
+                  "Conecte o portal Amazon Associados para sincronizar relatórios.",
+                  "sem_sessao", agora)
+
+
 # ─────────────────────────── Conveniências ───────────────────────────
 
 def estados_do_usuario(user) -> dict:
     """Os dois estados de uma conta. É o que as telas renderizam."""
-    return {"whatsapp": estado_whatsapp(user), "mercadolivre": estado_ml(user)}
+    return {"whatsapp": estado_whatsapp(user), "mercadolivre": estado_ml(user),
+            "amazon_relatorios": estado_amazon_relatorios(user)}

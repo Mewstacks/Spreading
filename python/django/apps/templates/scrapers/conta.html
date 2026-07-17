@@ -68,6 +68,10 @@
         <small>Preencha apenas se a Amazon indicar um host diferente do padrão.</small>
       </div>
     </details>
+    <div style="margin-top:.8rem;">
+      <a class="btn btn-ghost btn-sm" href="{% url 'scraper-amazon-conexao' %}"><i data-lucide="bar-chart-3"></i> {% if amazon_relatorio_conectado %}Portal de relatórios conectado{% else %}Conectar portal de relatórios Amazon{% endif %}</a>
+      <small style="display:block;margin-top:.45rem;">Esta sessão é separada da tag e das credenciais Creators API.</small>
+    </div>
   </div>
 
   <div class="card">

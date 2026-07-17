@@ -47,7 +47,7 @@ def verificar_e_notificar() -> dict:
     from django.conf import settings
     from apps.accounts.models import Perfil
     from apps.accounts.emails import enviar_alerta_conexao
-    from apps.scrapers.conexoes import estado_ml, estado_whatsapp
+    from apps.scrapers.conexoes import estado_amazon_relatorios, estado_ml, estado_whatsapp
 
     agora = timezone.now()
     cooldown = timedelta(hours=getattr(settings, "ALERTA_CONEXAO_COOLDOWN_H", 6))
@@ -64,10 +64,15 @@ def verificar_e_notificar() -> dict:
         # do ar não é acionável.
         wa = estado_whatsapp(perfil.user, session=perfil.sessao_whatsapp())
         ml = estado_ml(perfil.user)
+        amazon = estado_amazon_relatorios(perfil.user)
         enviados += _processar(perfil, "WhatsApp", "wa", wa, agora, cooldown,
                                enviar_alerta_conexao)
         enviados += _processar(perfil, "Mercado Livre", "ml", ml, agora, cooldown,
                                enviar_alerta_conexao)
+        # Só alertamos quem já usa Amazon: uma conta sem tag não pediu integração.
+        if perfil.amazon_conectado():
+            enviados += _processar(perfil, "Amazon Relatórios", "amazon_relatorio", amazon,
+                                   agora, cooldown, enviar_alerta_conexao)
     return {"checados": checados, "alertas_enviados": enviados}
 
 

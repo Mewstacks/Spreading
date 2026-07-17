@@ -84,6 +84,9 @@ class Perfil(models.Model):
     ml_estado = models.BooleanField(null=True, blank=True)
     alerta_wa_em = models.DateTimeField(null=True, blank=True)
     alerta_ml_em = models.DateTimeField(null=True, blank=True)
+    # Sessão do portal Amazon Associates (relatórios), distinta da tag/Creators API.
+    amazon_relatorio_estado = models.BooleanField(null=True, blank=True)
+    alerta_amazon_relatorio_em = models.DateTimeField(null=True, blank=True)
 
     # ── Suspensão pelo superadmin ──
     # Conta bloqueada não loga (middleware) e é ignorada pelos loops de envio/scrape.
