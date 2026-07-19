@@ -173,7 +173,9 @@ def operations_dashboard(request):
         alertas.append(("Loja desconectada",
                         est_ml.motivo or "Conecte Mercado Livre ou Amazon para gerar links comissionados.",
                         "scraper-conta"))
-    if not wa_ok and not perfil.telegram_conectado():
+    # "conectando" é o worker religando após deploy — piscar "Nenhum canal
+    # conectado" nesses segundos assustava sem haver o que fazer.
+    if not wa_ok and est_wa.detalhe != "conectando" and not perfil.telegram_conectado():
         alertas.append(("Nenhum canal conectado", "Conecte WhatsApp ou Telegram antes de ativar envios.", "scraper-whatsapp"))
     pausadas = configs.filter(ativo=False).exclude(motivo_pausa="").count()
     if pausadas:
@@ -419,10 +421,15 @@ def _wa_session(request):
 
 
 def whatsapp_painel(request):
-    """Tela de conexão do WhatsApp: status + QR Code para parear pelo navegador."""
+    """Tela de conexão do WhatsApp: status + QR Code para parear pelo navegador.
+
+    O GET não revive a sessão: consultar não pode ter efeito colateral (era a
+    metade "otimista" da divergência com a Saúde). Reviver segue existindo, mas
+    como intenção explícita: o front dá POST em whatsapp/iniciar/ quando vê uma
+    fase terminal.
+    """
     from apps.scrapers import whatsapp_client
     session = _wa_session(request)
-    whatsapp_client.iniciar_sessao(session)
     return render(request, "scrapers/whatsapp.html", {
         "status": whatsapp_client.status(session),
     })
@@ -453,6 +460,19 @@ def whatsapp_grupos_json(request):
     """Lista grupos (GET leve) para o front carregar via AJAX sem travar o render."""
     from apps.scrapers import whatsapp_client
     return JsonResponse(whatsapp_client.listar_grupos(_wa_session(request)))
+
+
+@require_POST
+def whatsapp_iniciar(request):
+    """Revive/inicia a sessão de WhatsApp deste usuário.
+
+    POST /api/sessoes é o único caminho que tira uma sessão de fase terminal no
+    worker Node (expirado, falha_auth, recuperacao_pausada, ausente do Map).
+    Antes isso acontecia como efeito colateral do GET da tela — o que a tornava
+    otimista e divergente da Saúde. POST espelha whatsapp_desconectar (CSRF).
+    """
+    from apps.scrapers import whatsapp_client
+    return JsonResponse(whatsapp_client.iniciar_sessao(_wa_session(request)))
 
 
 @require_POST

@@ -54,6 +54,7 @@ urlpatterns = [
     path("enviar-agora/", views.enviar_agora_stream, name="scraper-enviar-agora"),
     path("whatsapp/", views.whatsapp_painel, name="scraper-whatsapp"),
     path("whatsapp/status/", views.whatsapp_status_json, name="scraper-whatsapp-status"),
+    path("whatsapp/iniciar/", views.whatsapp_iniciar, name="scraper-whatsapp-iniciar"),
     path("whatsapp/qr.png", views.whatsapp_qr_png, name="scraper-whatsapp-qr"),
     path("whatsapp/refresh-grupos/", views.whatsapp_refresh_grupos, name="scraper-whatsapp-refresh"),
     path("whatsapp/grupos/", views.whatsapp_grupos_json, name="scraper-whatsapp-grupos"),

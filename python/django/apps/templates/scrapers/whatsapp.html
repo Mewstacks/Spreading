@@ -130,6 +130,7 @@
   // fase -> {pill text, classe da pill, mostra QR, mostra barra, é erro}
   const FASES = {
     iniciando:     { txt:'Iniciando serviço…',        cls:'is-mid', qr:false, bar:true,  step:'qr'  },
+    preparando:    { txt:'Preparando sessão…',         cls:'is-mid', qr:false, bar:true,  step:'qr'  },
     qr:            { txt:'Aguardando leitura do QR',   cls:'is-mid', qr:true,  bar:false, step:'qr'  },
     carregando:    { txt:'Carregando WhatsApp Web…',   cls:'is-mid', qr:false, bar:true,  step:'carregando' },
     autenticado:   { txt:'Autenticado',                cls:'is-mid', qr:false, bar:true,  step:'autenticado' },
@@ -144,7 +145,26 @@
     capacidade:    { txt:'Limite de conexões atingido',  cls:'is-off', qr:false, bar:false, step:'qr', err:true },
     falha_auth:    { txt:'Falha de autenticação',      cls:'is-off', qr:true,  bar:false, step:'qr', err:true },
     desconectado:  { txt:'Desconectado',               cls:'is-off', qr:true,  bar:false, step:'qr', err:true },
+    // Terminal com credencial preservada: o revive abaixo resolve sem QR novo.
+    recuperacao_pausada: { txt:'Reconexão pausada — reativando…', cls:'is-mid', qr:false, bar:true, step:'qr' },
   };
+
+  // O GET da tela não revive mais a sessão (efeito colateral que divergia da
+  // Saúde). Abrir a tela continua sendo a intenção explícita de conectar: ao ver
+  // uma fase terminal, dispara UM revive via POST e deixa o poll acompanhar.
+  const FASES_REVIVIVEIS = ['inativo', 'expirado', 'desconectado', 'falha_auth', 'recuperacao_pausada'];
+  let reviveTentado = false;
+
+  async function reviverSeTerminal(fase) {
+    if (reviveTentado || FASES_REVIVIVEIS.indexOf(fase) === -1) return;
+    reviveTentado = true;
+    try {
+      await acao('/scrapers/whatsapp/iniciar/', {
+        method: 'POST',
+        headers: { 'X-CSRFToken': getCookie('csrftoken') },
+      });
+    } catch (e) { /* o próximo poll mostra o estado real */ }
+  }
 
   qrImg.onerror = function () { qrImg.removeAttribute('src'); qrImg.alt = 'Gerando QR code…'; };
   function refreshQr() { qrImg.src = '/scrapers/whatsapp/qr.png?t=' + Date.now(); }
@@ -183,6 +203,7 @@
 
       const fase = s.fase || (s.conectado ? 'conectado' : 'desconectado');
       const f = FASES[fase] || FASES.desconectado;
+      reviverSeTerminal(fase);
 
       // Pill
       pill.className = 'conn-pill ' + f.cls;

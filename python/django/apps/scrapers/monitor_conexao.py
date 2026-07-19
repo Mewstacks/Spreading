@@ -80,6 +80,13 @@ def _processar(perfil, nome_servico, campo, estado, agora, cooldown, enviar) -> 
     """Compara estado atual vs salvo; alerta em transição (com cooldown). 1 se enviou e-mail."""
     from apps.scrapers.eventos import log_event
 
+    # Fase transitória (worker religando após deploy/restart) não é queda: alarmar
+    # aqui mandava "WhatsApp caiu" a cada deploy do spreading-wa. Também não grava
+    # o estado no perfil — se a reativação falhar, a próxima checagem ainda vê a
+    # transição e alerta como primeira vez.
+    if estado.detalhe == "conectando":
+        return 0
+
     estado_attr = f"{campo}_estado"
     alerta_attr = f"alerta_{campo}_em"
     anterior = getattr(perfil, estado_attr)        # True | False | None (nunca checado)

@@ -94,7 +94,7 @@ seria uma ida à rede por usuário.
         <strong style="font-size:.85rem;">{{ c.servico }}</strong>
       </div>
       <div class="l" style="margin-top:.3rem;">
-        {% if c.conectado %}Conectado{% else %}<span style="color:var(--red);">{{ c.motivo }}</span>{% endif %}
+        {% if c.conectado %}Conectado{% elif c.detalhe == 'conectando' or c.detalhe == 'capacidade' %}<span style="color:var(--yellow);">{{ c.motivo }}</span>{% else %}<span style="color:var(--red);">{{ c.motivo }}</span>{% endif %}
       </div>
     </div>
     {% endfor %}

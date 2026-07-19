@@ -3116,3 +3116,110 @@ class PurgaEventosTests(TestCase):
         self.assertEqual(apagados, 1)
         self.assertEqual(
             list(EventoOperacional.objects.values_list("evento", flat=True)), ["novo"])
+
+
+class EstadoWhatsAppFasesTests(TestCase):
+    """estado_whatsapp colapsava toda fase não-conectada em "escaneie o QR".
+
+    Para o MESMO payload do worker, a tela de WhatsApp mostrava progresso azul
+    ("Carregando WhatsApp Web…") e a Saúde mostrava erro vermelho — a divergência
+    relatada. Fases transitórias agora viram "conectando" (amarelo)."""
+
+    def _estado_para(self, payload):
+        from apps.scrapers.conexoes import estado_whatsapp
+        with patch("apps.scrapers.whatsapp_client.status", return_value=payload):
+            return estado_whatsapp(session="sessao-teste")
+
+    def test_fases_transitorias_viram_conectando_e_nao_erro_de_pareamento(self):
+        for fase in ("iniciando", "preparando", "carregando", "autenticado",
+                     "sincronizando", "reconectando"):
+            estado = self._estado_para({"conectado": False, "fase": fase})
+            self.assertFalse(estado.conectado)
+            self.assertEqual(estado.detalhe, "conectando", f"fase={fase}")
+            self.assertNotIn("QR", estado.motivo)
+
+    def test_capacidade_tem_motivo_proprio(self):
+        estado = self._estado_para({"conectado": False, "fase": "capacidade"})
+        self.assertEqual(estado.detalhe, "capacidade")
+        self.assertIn("limite", estado.motivo.lower())
+
+    def test_recuperacao_pausada_nao_manda_escanear_qr(self):
+        # Credencial preservada no worker: reviver resolve, QR novo não é preciso.
+        estado = self._estado_para({"conectado": False, "fase": "recuperacao_pausada"})
+        self.assertEqual(estado.detalhe, "recuperacao_pausada")
+        self.assertNotIn("QR", estado.motivo)
+
+    def test_fases_terminais_seguem_pedindo_pareamento(self):
+        for fase in ("inativo", "desconectado", "expirado", "falha_auth", "qr", ""):
+            estado = self._estado_para({"conectado": False, "fase": fase})
+            self.assertEqual(estado.detalhe, "sem_pareamento", f"fase={fase}")
+
+    def test_conectado_e_erro_seguem_inalterados(self):
+        self.assertTrue(self._estado_para({"conectado": True, "fase": "conectado"}).conectado)
+        self.assertEqual(
+            self._estado_para({"erro": "connection refused", "conectado": False}).detalhe,
+            "servico_fora")
+
+
+class WatchdogFaseTransitoriaTests(TestCase):
+    """Deploy do worker derrubava a sessão por segundos e o watchdog mandava
+    e-mail "WhatsApp caiu" — o alarme falso relatado."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            "watchdog-user", "wd@x.com", "test")
+
+    def test_fase_transitoria_nao_alarma_nem_grava_estado(self):
+        from apps.scrapers.conexoes import Estado
+        from apps.scrapers.monitor_conexao import _processar
+
+        perfil = self.user.perfil
+        perfil.wa_estado = True
+        perfil.save(update_fields=["wa_estado"])
+        enviar = Mock(return_value=True)
+
+        enviados = _processar(
+            perfil, "WhatsApp", "wa",
+            Estado(False, "WhatsApp", "worker",
+                   "WhatsApp reativando a conexão — aguarde alguns instantes.",
+                   "conectando", timezone.now()),
+            timezone.now(), timedelta(hours=6), enviar)
+
+        self.assertEqual(enviados, 0)
+        enviar.assert_not_called()
+        self.assertFalse(EventoOperacional.objects.filter(evento="conexao_caiu").exists())
+        # wa_estado intocado: se a reativação falhar, a próxima checagem ainda vê
+        # a transição True->False e alerta como primeira vez.
+        perfil.refresh_from_db()
+        self.assertTrue(perfil.wa_estado)
+
+
+class WhatsAppPainelSemEfeitoColateralTests(TestCase):
+    """O GET da tela de WhatsApp revivia a sessão antes de ler o status — a
+    metade "otimista" da divergência com a Saúde. Reviver agora é POST explícito."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("wa-user", password="test")
+        self.user.perfil.marcar_verificado()
+        self.client.force_login(self.user)
+
+    def test_get_da_tela_nao_revive_a_sessao(self):
+        with patch("apps.scrapers.whatsapp_client.iniciar_sessao") as iniciar, \
+             patch("apps.scrapers.whatsapp_client.status",
+                   return_value={"conectado": False, "fase": "inativo"}):
+            response = self.client.get(reverse("scraper-whatsapp"))
+
+        self.assertEqual(response.status_code, 200)
+        iniciar.assert_not_called()
+
+    def test_post_iniciar_revive_a_sessao_deste_usuario(self):
+        with patch("apps.scrapers.whatsapp_client.iniciar_sessao",
+                   return_value={"sucesso": True, "fase": "iniciando"}) as iniciar:
+            response = self.client.post(reverse("scraper-whatsapp-iniciar"))
+
+        self.assertEqual(response.status_code, 200)
+        iniciar.assert_called_once_with(self.user.perfil.sessao_whatsapp())
+
+    def test_iniciar_exige_post(self):
+        response = self.client.get(reverse("scraper-whatsapp-iniciar"))
+        self.assertEqual(response.status_code, 405)

@@ -60,9 +60,9 @@ class Estado:
 def estado_whatsapp(user=None, session=None) -> Estado:
     """Estado do WhatsApp do usuário. Consulta o worker Node (cache de 5s dele).
 
-    Não inicia sessão: consultar estado não pode ter efeito colateral. A tela de
-    WhatsApp chamava iniciar_sessao() ANTES de ler o status (views.py:373), o que
-    a tornava otimista por construção e era metade da divergência com a Saúde.
+    Não inicia sessão: consultar estado não pode ter efeito colateral. Reviver é
+    intenção explícita do usuário — o POST whatsapp/iniciar/ disparado pela tela
+    de WhatsApp (views.whatsapp_iniciar).
     """
     from apps.scrapers import whatsapp_client
 
@@ -86,6 +86,25 @@ def estado_whatsapp(user=None, session=None) -> Estado:
     if data.get("erro"):
         return Estado(False, "WhatsApp", "worker",
                       "Serviço de WhatsApp indisponível.", "servico_fora", agora)
+    fase = data.get("fase") or ""
+    # Fase transitória (worker religando após deploy/restart) não é falta de
+    # pareamento: a tela de WhatsApp mostra essas fases como progresso azul, e a
+    # Saúde dizia "escaneie o QR" para o MESMO payload — a outra metade da
+    # divergência entre as duas telas.
+    if fase in {"iniciando", "preparando", "carregando", "autenticado",
+                "sincronizando", "reconectando"}:
+        return Estado(False, "WhatsApp", "worker",
+                      "WhatsApp reativando a conexão — aguarde alguns instantes.",
+                      "conectando", agora)
+    if fase == "capacidade":
+        return Estado(False, "WhatsApp", "worker",
+                      "Serviço de WhatsApp no limite de conexões — tente novamente em instantes.",
+                      "capacidade", agora)
+    if fase == "recuperacao_pausada":
+        # Terminal com credencial preservada: reviver resolve sem QR novo.
+        return Estado(False, "WhatsApp", "worker",
+                      "WhatsApp pausou a reconexão após falhas — abra a tela do WhatsApp para reativar.",
+                      "recuperacao_pausada", agora)
     return Estado(False, "WhatsApp", "worker",
                   "WhatsApp não está pareado — escaneie o QR Code.", "sem_pareamento", agora)
 
