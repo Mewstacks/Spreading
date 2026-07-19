@@ -110,6 +110,30 @@ class AffiliateIdentityTests(TestCase):
             self.assertEqual(builder.call_args.kwargs["auth_path"], user_auth)
             save_cache.assert_called_once()
 
+    def test_ml_link_reuses_user_cache_without_session_or_link_builder(self):
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user,
+            produto=self.product,
+            link_afiliado="https://meli.la/link-cacheado",
+            url_isca=self.product.link_produto,
+            afiliado_ok=True,
+            estado="pronto",
+        )
+
+        with tempfile.TemporaryDirectory() as auth_dir, \
+             override_settings(ML_AUTH_DIR=auth_dir), \
+             patch.object(
+                 ml_link,
+                 "afiliate_link_builder",
+                 side_effect=AssertionError("Link Builder não deveria abrir"),
+             ) as builder:
+            result = ml_link.gerar_link_afiliado_para_produto(
+                self.product, usuario=self.user)
+
+        self.assertEqual(result["link_afiliado"], "https://meli.la/link-cacheado")
+        self.assertTrue(result["afiliado_ok"])
+        builder.assert_not_called()
+
     def test_ml_link_never_falls_back_to_global_auth_for_a_user(self):
         with tempfile.TemporaryDirectory() as auth_dir:
             with open(os.path.join(auth_dir, "auth.json"), "w", encoding="utf-8") as auth:
@@ -1906,6 +1930,27 @@ class AfiliacaoPorMarketplaceTests(TestCase):
         listados = {p.id: p for p in response.context["produtos"]}
         self.assertTrue(listados[produto.id].afiliado_pronto)
 
+    def test_tela_promocoes_mostra_resumo_e_ultimo_erro_da_afiliacao(self):
+        pronto = self._produto_ml("Fone pronto")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=pronto, estado="pronto",
+            link_afiliado="https://meli.la/pronto", afiliado_ok=True)
+        falhou = self._produto_ml("Fone falhou")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=falhou, estado="erro",
+            ultimo_erro="O Link Builder recusou a URL.",
+            ultima_tentativa=timezone.now())
+        self.client.force_login(self.user)
+
+        response = self.client.get(
+            reverse("scraper-top"), {"loja": "mercadolivre"})
+
+        self.assertEqual(response.context["afiliacao"]["prontos"], 1)
+        self.assertEqual(response.context["afiliacao"]["erro"], 1)
+        self.assertContains(response, "Afiliação: 1 prontos")
+        self.assertContains(response, "1 com erro")
+        self.assertContains(response, "O Link Builder recusou a URL.")
+
     def test_tela_promocoes_resolve_afiliacao_em_lote(self):
         # preparar_exibicao existe pra isto: uma query por página, não por produto.
         # Sem o lote, corrigir o badge trocaria o bug por 20 queries por load.
@@ -1920,11 +1965,15 @@ class AfiliacaoPorMarketplaceTests(TestCase):
             response = self.client.get(reverse("scraper-top"), {"loja": "mercadolivre"})
 
         self.assertEqual(len(response.context["produtos"]), 5)
-        consultas_de_link = [
+        consultas_dos_badges = [
             q for q in ctx.captured_queries
-            if "linkafiliadousuario" in q["sql"].lower()
+            if (
+                'SELECT "scrapers_linkafiliadousuario"."produto_id"' in q["sql"]
+                and '"scrapers_linkafiliadousuario"."estado"' in q["sql"]
+                and '"scrapers_linkafiliadousuario"."tentativas"' in q["sql"]
+            )
         ]
-        self.assertEqual(len(consultas_de_link), 1, consultas_de_link)
+        self.assertEqual(len(consultas_dos_badges), 1, consultas_dos_badges)
 
     def test_tela_promocoes_marca_item_amazon_como_pronto_sem_gravar_no_banco(self):
         produto = self._produto_amazon()
@@ -3207,3 +3256,32 @@ class WhatsAppPainelSemEfeitoColateralTests(TestCase):
     def test_iniciar_exige_post(self):
         response = self.client.get(reverse("scraper-whatsapp-iniciar"))
         self.assertEqual(response.status_code, 405)
+
+
+class ChecarAfiliacaoCommandTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            "autoteste-afiliacao", password="test")
+        self.produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Produto cacheado", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=80,
+            link_produto="https://produto.mercadolivre.com.br/MLB-123")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=self.produto, estado="pronto",
+            link_afiliado="https://meli.la/sem-atribuicao",
+            afiliado_ok=True)
+
+    @patch(
+        "apps.scrapers.management.commands.checar_afiliacao.ml_tem_tag",
+        return_value=False,
+    )
+    def test_link_sem_tag_vira_veredito_e_evento_retestavel(self, _tem_tag):
+        saida = StringIO()
+
+        call_command(
+            "checar_afiliacao", usuario=self.user.get_username(), stdout=saida)
+
+        self.assertIn("não confirmou a atribuição", saida.getvalue())
+        evento = EventoOperacional.objects.get(evento="afiliacao_sem_tag")
+        self.assertEqual(evento.usuario, self.user)
+        self.assertEqual(evento.contexto["causa"], "link_sem_tag")

@@ -75,15 +75,20 @@ def resumo_afiliacao(usuario) -> dict:
     milhares de falhas. Aqui "pendente" (na fila, o link vem) é distinto de "não
     afiliável" e "erro" (terminais, o link não vem).
     """
-    from django.db.models import Q
+    from django.db.models import Count, Q
     from apps.scrapers.models import Produto, LinkAfiliadoUsuario
 
     escopo = Produto.objects.filter(Q(owner__isnull=True) | Q(owner=usuario))
     total = escopo.count()
     linhas = LinkAfiliadoUsuario.objects.filter(usuario=usuario, produto__in=escopo)
-    prontos = linhas.exclude(link_afiliado="").count()
-    nao_afiliavel = linhas.filter(estado="nao_afiliavel").count()
-    erro = linhas.filter(estado="erro").count()
+    contagens = linhas.aggregate(
+        prontos=Count("id", filter=~Q(link_afiliado="")),
+        nao_afiliavel=Count("id", filter=Q(estado="nao_afiliavel")),
+        erro=Count("id", filter=Q(estado="erro")),
+    )
+    prontos = contagens["prontos"] or 0
+    nao_afiliavel = contagens["nao_afiliavel"] or 0
+    erro = contagens["erro"] or 0
     # Legado: itens antigos com link no próprio Produto (pré-multi-tenant), sem
     # linha em LinkAfiliadoUsuario.
     legacy = escopo.exclude(link_afiliado="").exclude(

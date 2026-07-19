@@ -591,7 +591,25 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
 
     # ── Multi-tenant: link por usuário, sempre com a sessão ML dele ──
     if usuario is not None:
-        from apps.scrapers.afiliado import salvar_cache
+        from apps.scrapers.afiliado import link_cacheado, salvar_cache
+
+        cacheado = link_cacheado(usuario, produto)
+        if cacheado and cacheado.link_afiliado:
+            # O envio ainda passa pelo gate A3 e, quando solicitado, pela
+            # revalidação da PDP em ofertas.py. Reaproveitar o cache aqui só
+            # evita abrir o Link Builder novamente — e faz um link já pronto
+            # continuar utilizável mesmo que a sessão ML tenha expirado.
+            return {
+                "link_afiliado": cacheado.link_afiliado,
+                "afiliado_ok": bool(cacheado.afiliado_ok),
+                "produto_nome": getattr(produto, "nome", ""),
+                "preco_vitrine": getattr(produto, "preco_sem_desconto", 0),
+                "preco_com_cupom": getattr(produto, "preco_com_cupom", 0),
+                "cupom_titulo": cupom.titulo if cupom else "",
+                "url_isca": cacheado.url_isca or _montar_url_isca(
+                    url_produto, camp_id),
+            }
+
         auth_path = _auth_path(usuario)
         if not os.path.exists(auth_path):
             raise LoginError(MSG_SESSAO_EXPIRADA)

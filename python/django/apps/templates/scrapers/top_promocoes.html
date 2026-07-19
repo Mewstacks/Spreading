@@ -138,6 +138,10 @@
 </div>
 <div class="filter-card" style="padding:.8rem 1rem;">
   <div style="font-size:.84rem;margin-bottom:.55rem;"><strong>Saúde das fontes</strong> · {{ amazon_diagnostico }}</div>
+  <div class="muted" style="font-size:.8rem;margin-bottom:.55rem;"
+       {% if afiliacao_ultimo_erro %}title="{{ afiliacao_ultimo_erro }}"{% endif %}>
+    Afiliação: {{ afiliacao.prontos }} prontos · {{ afiliacao.pendente }} na fila{% if afiliacao.erro %} · {{ afiliacao.erro }} com erro{% endif %}{% if afiliacao.nao_afiliavel %} · {{ afiliacao.nao_afiliavel }} não afiliáveis{% endif %}
+  </div>
   <div style="display:flex;gap:.45rem;flex-wrap:wrap;">
     {% for f in fontes %}<span class="badge {% if f.status == 'ok' %}badge-green{% elif f.status == 'blocked' %}badge-red{% else %}badge-yellow{% endif %}" title="{{ f.erro_publico|default:'Sem erro recente' }}">{{ f.nome }} · {{ f.status }}</span>
     {% empty %}<span class="muted">As fontes serão registradas no próximo ciclo.</span>{% endfor %}

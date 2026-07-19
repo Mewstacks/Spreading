@@ -1164,6 +1164,16 @@ def top_promocoes(request):
         if not creds_de_usuario(request.user).completo():
             fontes_qs = fontes_qs.exclude(slug="amazon-creators-api")
     fontes = list(fontes_qs)
+    from apps.scrapers.afiliado import resumo_afiliacao
+    afiliacao = resumo_afiliacao(request.user)
+    afiliacao_ultimo_erro = (
+        LinkAfiliadoUsuario.objects
+        .filter(usuario=request.user, estado="erro")
+        .exclude(ultimo_erro="")
+        .order_by("-ultima_tentativa", "-id")
+        .values_list("ultimo_erro", flat=True)
+        .first()
+    ) or ""
     amazon_count = qs.filter(marketplace="amazon").count()
     if amazon_count:
         amazon_diagnostico = "Amazon ativa para sua conta."
@@ -1244,6 +1254,8 @@ def top_promocoes(request):
         "min_desconto": min_desconto,
         "tipo": tipo,
         "fontes": fontes,
+        "afiliacao": afiliacao,
+        "afiliacao_ultimo_erro": afiliacao_ultimo_erro,
         "fonte_selecionada": fonte_selecionada,
         "confianca_selecionada": confianca_selecionada,
         "atualizado_desde": atualizado_desde,
