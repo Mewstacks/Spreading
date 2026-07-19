@@ -269,6 +269,19 @@ class RelatorioSync(models.Model):
     registros_atualizados = models.PositiveIntegerField(default=0)
     atualizado_em = models.DateTimeField(auto_now=True)
 
+    @property
+    def erro_publico(self):
+        """Texto para a UI. `erro` guarda a exceção crua (admin/logs), que não
+        pode vazar para o usuário; a home monta instâncias não salvas, então
+        isto não pode tocar o banco."""
+        if self.status == "acao":
+            return "Reconecte o portal de afiliados para voltar a sincronizar."
+        if self.status == "erro":
+            return "Falha temporária na leitura dos relatórios — tentaremos de novo."
+        if self.status == "nao_configurado":
+            return "Esta loja ainda não tem leitura automática de relatórios."
+        return ""
+
     class Meta:
         unique_together = ("usuario", "marketplace")
 

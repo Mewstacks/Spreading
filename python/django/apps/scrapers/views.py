@@ -105,6 +105,30 @@ class _QueueWriter:
             self._buf = ""
 
 
+# Espelha as heurísticas de causa de ofertas.falhar(): o texto cru da exceção fica
+# em Publicacao.erro (admin/Saúde); na home entra só a versão para o usuário.
+_ERROS_PUBLICACAO = [
+    (("link de afiliado", "link builder"),
+     "Não foi possível gerar o link de afiliado — verifique a conexão com a loja."),
+    (("link reprovado",), "O link foi reprovado na verificação de afiliação."),
+    (("módulos internos", "recarregando", "frame"),
+     "O WhatsApp Web recarregou durante o envio."),
+    (("timeout", "demorou"), "O WhatsApp demorou para responder ao envio."),
+    (("confirma", "ack"), "O envio saiu, mas não veio confirmação do WhatsApp."),
+    (("login", "sessão", "sessao"), "A sessão da loja expirou — reconecte na aba Conta."),
+]
+
+
+def _erro_publicacao(texto):
+    t = (texto or "").lower()
+    if not t:
+        return ""
+    for chaves, msg in _ERROS_PUBLICACAO:
+        if any(c in t for c in chaves):
+            return msg
+    return "Falha no envio — verifique as conexões se persistir."
+
+
 def operations_dashboard(request):
     """Centro operacional e de receita do afiliado."""
     from datetime import timedelta
@@ -169,16 +193,20 @@ def operations_dashboard(request):
         if sync.status in {"erro", "acao"}:
             alertas.append((
                 f"Relatório {sync.marketplace} precisa de atenção",
-                sync.erro or "Sincronização automática não concluiu.",
+                sync.erro_publico or "Sincronização automática não concluiu.",
                 # Reconectar a conta é o que resolve; "home" apontava pra esta mesma
                 # página, então clicar no alerta não levava a lugar nenhum.
                 "scraper-conta",
             ))
+    publicacoes = list(
+        pubs.select_related("produto", "configuracao").order_by("-criada_em")[:10])
+    for p in publicacoes:
+        p.erro_publico = _erro_publicacao(p.erro)
     return render(request, "home.html", {
         "resumo": resumo, "financeiro": financeiro,
         "melhores_categorias": melhores_categorias,
         "melhores_destinos": melhores_destinos,
-        "publicacoes": pubs.select_related("produto", "configuracao").order_by("-criada_em")[:10],
+        "publicacoes": publicacoes,
         "alertas": alertas, "configs": configs, "syncs": list(syncs.values()),
         "ml_ok": ml_ok, "wa_ok": wa_ok,
         "est_ml": est_ml, "est_wa": est_wa,

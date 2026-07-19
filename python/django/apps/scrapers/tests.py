@@ -1155,6 +1155,34 @@ class AttributionWorkflowTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Sua operação")
 
+    def test_home_mostra_copy_amigavel_nunca_erro_tecnico_cru(self):
+        # Regressão: str(exc) cru de RelatorioSync.erro e Publicacao.erro vazava na
+        # home, e um {#..#} multi-linha renderizava como texto no card de receita.
+        RelatorioSync.objects.create(
+            usuario=self.user, marketplace="mercadolivre", status="erro",
+            erro="Traceback: ML_AFFILIATE_REPORT_URL sem tabela detectável")
+        RelatorioSync.objects.create(
+            usuario=self.user, marketplace="amazon", status="nao_configurado")
+        Publicacao.objects.create(
+            usuario=self.user, produto=self.product, canal="whatsapp",
+            destino_id="group@g.us", status="falhou",
+            erro="Timeout de 45s no getState do WhatsApp")
+
+        with (
+            patch("apps.scrapers.monitor_conexao.wa_conectado", return_value=False),
+            patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=False),
+        ):
+            response = self.client.get(reverse("home"))
+
+        self.assertNotContains(response, "Traceback")
+        self.assertNotContains(response, "ML_AFFILIATE_REPORT_URL")
+        self.assertNotContains(response, "getState")
+        self.assertNotContains(response, "Sem botão")
+        self.assertContains(response, "Falha temporária na leitura dos relatórios")
+        self.assertContains(response, "O WhatsApp demorou para responder ao envio.")
+        self.assertContains(
+            response, "Esta loja ainda não tem leitura automática de relatórios.")
+
     @patch("apps.scrapers.relatorios.ADAPTERS")
     def test_automatic_report_sync_is_idempotent(self, adapters):
         from datetime import date

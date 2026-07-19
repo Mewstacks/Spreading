@@ -64,7 +64,7 @@
             <tr>
               <td class="cell-grow"><b>{{ p.produto.nome|default:"Oferta removida"|truncatechars:55 }}</b><div class="muted" style="font-size:.74rem;">{{ p.criada_em|date:"d/m H:i" }} · variante {{ p.variante }}</div></td>
               <td>{{ p.destino_nome|default:p.destino_id|truncatechars:24 }}</td>
-              <td><span class="badge {% if p.status == 'enviado' %}badge-green{% elif p.status == 'falhou' %}badge-red{% elif p.status == 'incerto' %}badge-yellow{% else %}badge-muted{% endif %}">{{ p.get_status_display }}</span>{% if p.erro %}<div class="muted" title="{{ p.erro }}" style="font-size:.7rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;">{{ p.erro }}</div>{% endif %}</td>
+              <td><span class="badge {% if p.status == 'enviado' %}badge-green{% elif p.status == 'falhou' %}badge-red{% elif p.status == 'incerto' %}badge-yellow{% else %}badge-muted{% endif %}">{{ p.get_status_display }}</span>{% if p.erro_publico %}<div class="muted" style="font-size:.7rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;">{{ p.erro_publico }}</div>{% endif %}</td>
               <td>{{ p.cliques.count }}</td>
             </tr>
           {% empty %}<tr><td colspan="4" class="empty">Nenhuma publicação ainda. Envie uma oferta em <a class="link" href="{% url 'scraper-top' %}">Promoções</a> para começar a medir.</td></tr>{% endfor %}
@@ -87,14 +87,16 @@
             </div>
             <div class="sync-meta">
               {% if sync.ultimo_sucesso %}Última sincronização: {{ sync.ultimo_sucesso|date:"d/m H:i" }}{% else %}Nenhuma sincronização concluída até agora{% endif %}
-              {% if sync.erro %}<br>{{ sync.erro|truncatechars:140 }}{% endif %}
+              {% if sync.erro_publico %}<br>{{ sync.erro_publico }}{% endif %}
             </div>
           </div>
           {% if sync.status == 'acao' and sync.marketplace == 'mercadolivre' %}
           <a class="btn btn-blue btn-sm" href="{% url 'scraper-ml-conexao' %}"><i data-lucide="plug-zap"></i> Reconectar</a>
           {% elif sync.status == 'nao_configurado' %}
-          {# Sem botão: não há leitura automática desta loja, então "Sincronizar" só
-             repetiria a mesma resposta. Oferecer o botão seria mentir sobre o que ele faz. #}
+          {% comment %}Sem botão: não há leitura automática desta loja, então "Sincronizar"
+             só repetiria a mesma resposta. Oferecer o botão seria mentir sobre o que ele
+             faz. Atenção: {# #} do Django é só de linha única — multi-linha vira texto
+             renderizado no card.{% endcomment %}
           {% else %}
           <form method="post" action="{% url 'scraper-sincronizar-receitas' %}">
             {% csrf_token %}
