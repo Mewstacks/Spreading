@@ -25,8 +25,8 @@ from apps.scrapers.management.commands.automacao import _rodar_links
 from apps.scrapers.marketplaces.registry import get_marketplace
 from apps.scrapers.monitor_conexao import wa_conectado
 from apps.scrapers.models import (
-    CliquePublicacao, ConfiguracaoEnvio, Cupom, FonteIngestao, HistoricoEnvio,
-    LinkAfiliadoUsuario, Produto, EventoOperacional, Publicacao,
+    CliquePublicacao, ConfiguracaoEnvio, Cupom, CupomNormalizado, FonteIngestao,
+    HistoricoEnvio, LinkAfiliadoUsuario, Produto, EventoOperacional, Publicacao,
     ReceitaAfiliado, RelatorioSync,
 )
 from apps.scrapers.precos import registrar as registrar_preco
@@ -1746,6 +1746,60 @@ class ParserDeCupomDeCampanhaTests(TestCase):
 
         self.assertEqual(salvos, 0)
         self.assertEqual(Cupom.objects.get(campanha_id="999").estado, "ativo")
+
+
+class ProjecaoCatalogoCuponsTests(TestCase):
+    """A aba Cupons lê só o CupomNormalizado. A projeção Cupom→CupomNormalizado
+    rodava apenas no loop automático; a raspagem manual enchia a tabela Cupom e a
+    aba seguia vazia."""
+
+    def test_projeta_ativos_expira_ausentes_e_preserva_checkout(self):
+        from apps.scrapers.scraper_mercadolivre.scraper import projetar_catalogo_cupons
+
+        Cupom.objects.create(campanha_id="111", titulo="Cupom A", estado="ativo",
+                             tipo_desconto="fixo", valor_desconto=10.0, valor_minimo=0.0)
+        Cupom.objects.create(campanha_id="222", titulo="Cupom B", estado="ativo",
+                             tipo_desconto="percentual", valor_desconto=15.0,
+                             valor_minimo=50.0)
+        Cupom.objects.create(campanha_id="333", titulo="Cupom vencido",
+                             estado="expirado", valor_desconto=5.0, valor_minimo=0.0)
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web", defaults={
+                "marketplace": "mercadolivre",
+                "nome": "Mercado Livre — páginas públicas"})
+        # Projeção antiga de uma campanha que saiu do ar + cupom de checkout,
+        # que a sincronização de campanhas nunca pode tocar.
+        CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:999", marketplace="mercadolivre",
+            titulo="Campanha antiga", link="https://x", estado="ativo")
+        CupomNormalizado.objects.create(
+            fonte=fonte, external_id="checkout:MEU10", marketplace="mercadolivre",
+            titulo="Código de checkout", link="https://x", estado="ativo")
+
+        projetados = projetar_catalogo_cupons()
+
+        self.assertEqual(projetados, 2)
+        ativos = set(CupomNormalizado.objects.filter(estado="ativo")
+                     .values_list("external_id", flat=True))
+        self.assertEqual(ativos, {"campanha:111", "campanha:222", "checkout:MEU10"})
+        self.assertEqual(CupomNormalizado.objects.get(
+            external_id="campanha:999").estado, "expirado")
+
+    def test_sem_cupom_ativo_preserva_o_catalogo(self):
+        """Anti-wipe: coleta caída não pode zerar a aba Cupons."""
+        from apps.scrapers.scraper_mercadolivre.scraper import projetar_catalogo_cupons
+
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web", defaults={
+                "marketplace": "mercadolivre",
+                "nome": "Mercado Livre — páginas públicas"})
+        CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:111", marketplace="mercadolivre",
+            titulo="Segue no ar", link="https://x", estado="ativo")
+
+        self.assertEqual(projetar_catalogo_cupons(), 0)
+        self.assertEqual(CupomNormalizado.objects.get(
+            external_id="campanha:111").estado, "ativo")
 
 
 class DescartesDaRaspagemTests(SimpleTestCase):

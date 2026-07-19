@@ -567,6 +567,12 @@ def _sincronizar_produtos_no_banco(cupons_com_produtos):
 
 def main():
     mapear_cupons()
+    # A aba Cupons lê o CupomNormalizado: projeta já aqui para os cupons aparecerem
+    # mesmo quando este fluxo roda fora do ciclo automático (scrape_all).
+    try:
+        projetar_catalogo_cupons()
+    except Exception as e:
+        logger.warning("Projeção do catálogo de cupons falhou: %s", e)
     cupons_qs = Cupom.objects.all().values(
         "campanha_id", "titulo", "tipo_desconto", "valor_desconto", "valor_minimo", "link_original"
     )

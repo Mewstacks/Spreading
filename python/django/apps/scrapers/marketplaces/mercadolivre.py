@@ -54,6 +54,9 @@ class MercadoLivre(Marketplace):
                 projetar_catalogo_cupons()
             except Exception as e:
                 logger.warning("Projeção do catálogo de cupons ML falhou: %s", e)
+                log_event("scraper", "cupons_projecao_erro",
+                          "Não foi possível publicar os cupons no catálogo.",
+                          level="warning", contexto={"marketplace": "mercadolivre"}, exc=e)
             cupons = cupons_codigo + cupons_campanha
             for t in (termos or []):
                 try:

@@ -357,7 +357,8 @@ def _workers() -> list[dict]:
 # oferta ou manda mensagem seria pior que o problema.
 _RETESTAVEIS_PREFIXO = ("whatsapp_", "link_", "sync_", "email_", "conexao_", "scrape_")
 _RETESTAVEIS_EXATO = ("fonte_falhou", "flash_erro", "cupons_vazios",
-                      "cupons_campanha_erro", "links_sem_sessao")
+                      "cupons_campanha_erro", "cupons_projecao_erro",
+                      "links_sem_sessao")
 
 
 def _retestavel(causa: str) -> bool:

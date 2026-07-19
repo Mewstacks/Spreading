@@ -1447,9 +1447,24 @@ def automacao_control(request):
 @require_GET
 @throttle_sse(10)
 def scrape_cupons_codigo_stream(request):
-    """SSE — raspa /ofertas/cupons (produtos + códigos de checkout)."""
+    """SSE — pipeline completo de cupons: campanhas, códigos e projeção p/ a aba."""
     from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import mapear_cupons_codigo
-    return _sse_runner(mapear_cupons_codigo)
+    from apps.scrapers.scraper_mercadolivre.scraper import (
+        mapear_cupons, projetar_catalogo_cupons)
+
+    def _job():
+        # A aba Cupons lê só o CupomNormalizado; sem projetar no fim, a raspagem
+        # manual enchia a tabela Cupom e a aba continuava vazia.
+        n_campanha = mapear_cupons()
+        print(f"{n_campanha} cupom(ns) de campanha raspados.")
+        try:
+            mapear_cupons_codigo()
+        except Exception as exc:
+            print(f"Aviso: raspagem de códigos de checkout falhou ({exc}).")
+        n_proj = projetar_catalogo_cupons()
+        print(f"{n_proj} cupom(ns) publicados na aba Cupons.")
+
+    return _sse_runner(_job)
 
 
 @require_GET
