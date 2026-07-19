@@ -1337,32 +1337,16 @@ class AttributionWorkflowTests(TestCase):
 
         self.assertNotIn("Este conteúdo contém link de afiliado.", message)
 
-    @patch("apps.scrapers.ofertas.os.getenv", return_value="")
-    @override_settings(DEBUG=True)
-    def test_local_delivery_uses_affiliate_link_directly_without_public_url(self, _env):
-        """O redirecionador de produção não conhece a publicação do SQLite local."""
-        from apps.scrapers.ofertas import _link_publicado
-
-        publication = Mock(id_publico=uuid.uuid4())
-        affiliate = "https://meli.la/link-afiliado"
-        self.assertEqual(_link_publicado(publication, affiliate), affiliate)
-
     @override_settings(DEBUG=False, PUBLIC_BASE_URL="https://spreading.example")
-    def test_production_delivery_uses_short_tracking_redirect(self):
+    def test_mensagem_leva_o_link_direto_da_loja_mesmo_em_producao(self):
+        """Decisão de produto: URL do sistema (…/r/<slug>/) na mensagem denuncia
+        promoção automatizada. O link publicado é sempre o afiliado direto."""
         from apps.scrapers.ofertas import _link_publicado
 
         publication = Mock(id_publico=uuid.uuid4(), slug_curto="Ab3xK9z")
-        link = _link_publicado(publication, "https://meli.la/link-afiliado")
-        self.assertEqual(link, "https://spreading.example/r/Ab3xK9z/")
-
-    @override_settings(DEBUG=False, PUBLIC_BASE_URL="https://spreading.example")
-    def test_publication_without_slug_falls_back_to_signed_redirect(self):
-        """Linhas anteriores ao slug_curto continuam com o token assinado."""
-        from apps.scrapers.ofertas import _link_publicado
-
-        publication = Mock(id_publico=uuid.uuid4(), slug_curto="")
-        link = _link_publicado(publication, "https://meli.la/link-afiliado")
-        self.assertTrue(link.startswith("https://spreading.example/scrapers/r/"))
+        affiliate = "https://meli.la/link-afiliado"
+        self.assertEqual(_link_publicado(publication, affiliate), affiliate)
+        self.assertEqual(_link_publicado(None, affiliate), affiliate)
 
 
 class RankingAndCooldownTests(TestCase):

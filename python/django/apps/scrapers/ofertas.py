@@ -3,7 +3,6 @@ import os
 import requests
 from datetime import timedelta
 from django.conf import settings
-from django.core import signing
 from django.utils import timezone
 from django.db.models import F, FloatField, ExpressionWrapper, Count, Q
 from apps.scrapers.models import Produto, Cupom, HistoricoEnvio, Publicacao
@@ -474,22 +473,16 @@ def _baixar_imagem_b64(url):
 
 
 def _link_publicado(publicacao, link_afiliado: str) -> str:
-    """Link que entra na mensagem enviada ao grupo.
+    """Link que entra na mensagem enviada ao grupo: sempre o link de afiliado
+    direto (meli.la / amazon.com.br).
 
-    Em desenvolvimento mantém o link de afiliado direto: o SQLite local não tem a
-    publicação que será vista por quem clica. Em produção usa o redirecionador
-    curto (/r/<slug>/), preservando a URL afiliada como destino e registrando o
-    clique. O formato antigo com token assinado (/scrapers/r/<token>/) segue
-    válido para as mensagens já publicadas.
+    Uma URL do sistema (spreading-web.fly.dev/r/...) na mensagem denuncia
+    promoção automatizada — decisão de produto. O custo aceito é a contagem
+    interna de cliques parar nos envios novos; a comissão continua vindo dos
+    relatórios das lojas. O redirecionador (/r/<slug>/ e /scrapers/r/<token>/)
+    segue no ar só para as mensagens já publicadas.
     """
-    if settings.DEBUG or not settings.PUBLIC_BASE_URL or publicacao is None:
-        return link_afiliado
-    base = settings.PUBLIC_BASE_URL.rstrip("/")
-    if not publicacao.slug_curto:
-        # Linha criada antes do campo existir: cai no formato antigo.
-        token = signing.dumps({"p": str(publicacao.id_publico)}, salt="click")
-        return f"{base}/scrapers/r/{token}/"
-    return f"{base}/r/{publicacao.slug_curto}/"
+    return link_afiliado
 
 
 def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,

@@ -45,7 +45,7 @@
 <div class="kpis">
   <div class="kpi"><div class="kpi-label">Comissão</div><div class="kpi-value">R$ {{ financeiro.comissao|default:0|floatformat:2 }}</div><div class="kpi-note">{% if financeiro.periodo_inicio %}Lojas conectadas · {{ financeiro.periodo_inicio|date:"d/m" }} a {{ financeiro.periodo_fim|date:"d/m" }}{% else %}Importada das contas conectadas{% endif %}</div></div>
   <div class="kpi"><div class="kpi-label">Pedidos</div><div class="kpi-value">{{ financeiro.pedidos|default:0 }}</div><div class="kpi-note">Reportados pelas lojas</div></div>
-  <div class="kpi"><div class="kpi-label">Cliques</div><div class="kpi-value">{{ resumo.cliques|default:0 }}</div><div class="kpi-note">{{ financeiro.cliques_mkt|default:0 }} confirmados nas lojas</div></div>
+  <div class="kpi"><div class="kpi-label">Cliques</div><div class="kpi-value">{{ financeiro.cliques_mkt|default:0 }}</div><div class="kpi-note">Confirmados nos relatórios das lojas</div></div>
   <div class="kpi"><div class="kpi-label">Comissão por publicação</div><div class="kpi-value">R$ {{ financeiro.comissao_por_post|default:0|floatformat:2 }}</div><div class="kpi-note">{{ resumo.enviados|default:0 }} publicações · {{ resumo.falhas|default:0 }} falhas</div></div>
 </div>
 
@@ -58,16 +58,18 @@
       </div>
       <div class="table-wrap" style="border:0;box-shadow:none;">
         <table>
-          <thead><tr><th>Oferta</th><th>Destino</th><th>Status</th><th>Cliques</th></tr></thead>
+          {% comment %}Sem coluna de cliques: a mensagem leva o link direto da
+             loja (meli.la/amazon), então o redirecionador não conta mais os
+             envios novos e a coluna congelaria em zero.{% endcomment %}
+          <thead><tr><th>Oferta</th><th>Destino</th><th>Status</th></tr></thead>
           <tbody>
           {% for p in publicacoes %}
             <tr>
               <td class="cell-grow"><b>{{ p.produto.nome|default:"Oferta removida"|truncatechars:55 }}</b><div class="muted" style="font-size:.74rem;">{{ p.criada_em|date:"d/m H:i" }} · variante {{ p.variante }}</div></td>
               <td>{{ p.destino_nome|default:p.destino_id|truncatechars:24 }}</td>
               <td><span class="badge {% if p.status == 'enviado' %}badge-green{% elif p.status == 'falhou' %}badge-red{% elif p.status == 'incerto' %}badge-yellow{% else %}badge-muted{% endif %}">{{ p.get_status_display }}</span>{% if p.erro_publico %}<div class="muted" style="font-size:.7rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;">{{ p.erro_publico }}</div>{% endif %}</td>
-              <td>{{ p.cliques.count }}</td>
             </tr>
-          {% empty %}<tr><td colspan="4" class="empty">Nenhuma publicação ainda. Envie uma oferta em <a class="link" href="{% url 'scraper-top' %}">Promoções</a> para começar a medir.</td></tr>{% endfor %}
+          {% empty %}<tr><td colspan="3" class="empty">Nenhuma publicação ainda. Envie uma oferta em <a class="link" href="{% url 'scraper-top' %}">Promoções</a> para começar a medir.</td></tr>{% endfor %}
           </tbody>
         </table>
       </div>
@@ -129,12 +131,12 @@
     {% endif %}
     <div class="card">
       <div class="card-head"><h2><i data-lucide="trophy"></i> Categorias</h2></div>
-      {% for r in melhores_categorias %}<div class="rank-row"><span>{{ r.categoria|default:"Sem categoria" }}</span><span>{{ r.envios }} posts</span><b>{{ r.cliques }} cliques</b></div>
-      {% empty %}<p class="muted" style="font-size:.82rem;">Os rankings aparecem após os primeiros cliques e relatórios sincronizados.</p>{% endfor %}
+      {% for r in melhores_categorias %}<div class="rank-row"><span>{{ r.categoria|default:"Sem categoria" }}</span><b>{{ r.envios }} posts</b></div>
+      {% empty %}<p class="muted" style="font-size:.82rem;">Os rankings aparecem após as primeiras publicações.</p>{% endfor %}
     </div>
     <div class="card">
       <div class="card-head"><h2><i data-lucide="users"></i> Destinos</h2></div>
-      {% for r in melhores_destinos %}<div class="rank-row"><span>{{ r.destino_nome|default:r.destino_id|truncatechars:22 }}</span><span>{{ r.envios }} posts</span><b>{{ r.cliques }} cliques</b></div>
+      {% for r in melhores_destinos %}<div class="rank-row"><span>{{ r.destino_nome|default:r.destino_id|truncatechars:22 }}</span><b>{{ r.envios }} posts</b></div>
       {% empty %}<p class="muted" style="font-size:.82rem;">Cada grupo terá seu próprio histórico.</p>{% endfor %}
     </div>
   </aside>

@@ -142,22 +142,23 @@ def operations_dashboard(request):
         enviados=Count("id", filter=Q(status="enviado"), distinct=True),
         falhas=Count("id", filter=Q(status="falhou"), distinct=True),
         pendentes=Count("id", filter=Q(status="pendente"), distinct=True),
-        cliques=Count("cliques"),
     )
     # Snapshot mais recente por loja, não Sum de 30 dias: ver resumo_financeiro.
     financeiro = resumo_financeiro(request.user)
     comissao = financeiro.get("comissao") or 0
     posts = resumo.get("enviados") or 0
     financeiro["comissao_por_post"] = comissao / posts if posts else 0
+    # Envios primeiro: com o link direto da loja na mensagem, cliques internos
+    # pararam de contar — ordenar por eles fossilizaria o ranking no legado.
     melhores_categorias = list(
         pubs.filter(status="enviado").values("categoria")
         .annotate(envios=Count("id", distinct=True), cliques=Count("cliques"))
-        .order_by("-cliques", "-envios")[:5]
+        .order_by("-envios", "-cliques")[:5]
     )
     melhores_destinos = list(
         pubs.filter(status="enviado").values("destino_nome", "destino_id")
         .annotate(envios=Count("id", distinct=True), cliques=Count("cliques"))
-        .order_by("-cliques", "-envios")[:5]
+        .order_by("-envios", "-cliques")[:5]
     )
     from apps.scrapers.conexoes import estado_ml, estado_whatsapp
 
