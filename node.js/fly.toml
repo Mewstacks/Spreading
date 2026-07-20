@@ -14,10 +14,10 @@ primary_region = "gru"
   MAX_WHATSAPP_SESSIONS = "4"
   SESSION_START_STAGGER_MS = "12000"
   SESSION_INIT_TIMEOUT_MS = "90000"
-  # Teto por tentativa abaixo do watchdog (45s) para o boot frio de Chromium nao
-  # levar um SIGKILL no meio do "novo QR". Menos por tentativa, uma tentativa a mais.
-  QR_BOOTSTRAP_TIMEOUT_MS = "40000"
-  QR_BOOTSTRAP_MAX_ATTEMPTS = "3"
+  # O watchdog mede bloqueio do event loop, não duração de uma operação async.
+  # Um bootstrap frio recebe a mesma janela da inicialização normal.
+  QR_BOOTSTRAP_TIMEOUT_MS = "90000"
+  QR_BOOTSTRAP_MAX_ATTEMPTS = "2"
   QR_BOOTSTRAP_RETRY_MS = "2000"
   GROUP_SYNC_TIMEOUT_MS = "45000"
   QR_IDLE_DESTROY_MS = "180000"

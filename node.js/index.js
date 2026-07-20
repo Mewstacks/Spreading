@@ -21,6 +21,7 @@ const {
     decidirRestauracao, MOTIVO_FALHA_RESET,
 } = require('./session_reset');
 const { iniciarSync } = require('./group_sync');
+const { collectBrowserDiagnostic } = require('./browser_diagnostics');
 const {
     coletarGrupos, inspecionarGrupo, idChatValido, descreverErro,
 } = require('./group_reader');
@@ -114,13 +115,11 @@ const WATCHDOG_TIMEOUT_MS = parseInt(process.env.WATCHDOG_TIMEOUT_MS, 10) || 450
 const WATCHDOG_INTERVAL_MS = parseInt(process.env.WATCHDOG_INTERVAL_MS, 10) || 5000;
 const MAX_WHATSAPP_SESSIONS = parseInt(process.env.MAX_WHATSAPP_SESSIONS, 10) || 4;
 const SESSION_INIT_TIMEOUT_MS = parseInt(process.env.SESSION_INIT_TIMEOUT_MS, 10) || 90000;
-// O teto por tentativa fica ABAIXO de WATCHDOG_TIMEOUT_MS (45s): um boot frio de
-// Chromium sob pressão de memória no Fly podia estourar os 60s antigos e, pior,
-// deixar a janela da tentativa passar do limite do watchdog — que então matava o
-// worker inteiro no meio do bootstrap. Menos por tentativa, mais tentativas.
-const QR_BOOTSTRAP_TIMEOUT_MS = parseInt(process.env.QR_BOOTSTRAP_TIMEOUT_MS, 10) || 40000;
+// O watchdog mede o heartbeat do event loop; uma inicializacao async longa nao
+// o aciona. O bootstrap frio recebe a mesma janela da inicializacao normal.
+const QR_BOOTSTRAP_TIMEOUT_MS = parseInt(process.env.QR_BOOTSTRAP_TIMEOUT_MS, 10) || 90000;
 const QR_BOOTSTRAP_MAX_ATTEMPTS =
-    parseInt(process.env.QR_BOOTSTRAP_MAX_ATTEMPTS, 10) || 3;
+    parseInt(process.env.QR_BOOTSTRAP_MAX_ATTEMPTS, 10) || 2;
 const QR_BOOTSTRAP_RETRY_MS = parseInt(process.env.QR_BOOTSTRAP_RETRY_MS, 10) || 2000;
 // 15s e folgado: a leitura so percorre a collection em memoria da pagina, sem
 // round-trip de rede. Estourar aqui significa pagina morta, nao lentidao — por
@@ -911,11 +910,16 @@ const initializeSession = (session) => {
         if (session.initTimer) clearTimeout(session.initTimer);
         const timeoutMs = session.qrBootstrapAtivo
             ? QR_BOOTSTRAP_TIMEOUT_MS : SESSION_INIT_TIMEOUT_MS;
-        session.initTimer = setTimeout(() => {
+        session.initTimer = setTimeout(async () => {
             session.initTimer = null;
             if (session.client !== client || session.isConnected || session.ultimoQR) return;
             console.error(
                 `[${session.id}] Sessao travada em "${stage}" por ${timeoutMs}ms. Reiniciando Chromium.`
+            );
+            const diagnostic = await collectBrowserDiagnostic(client);
+            if (session.client !== client || session.isConnected || session.ultimoQR) return;
+            console.error(
+                `[${session.id}] Diagnostico do bootstrap: ${JSON.stringify(diagnostic)}`
             );
             const authenticatedFailure = (
                 session.authenticatedInAttempt || stage === 'pos-autenticacao'
@@ -925,9 +929,11 @@ const initializeSession = (session) => {
                 && shouldPurgeAuth(session.initFailures, authenticatedFailure);
             if (purgeAuth) session.initFailures = 0;
             const msg = purgeAuth ? 'Sessão corrompida — gerando um novo QR…' : null;
-            recycleSession(session, `timeout em ${stage}`, purgeAuth, msg).catch((err) => {
+            try {
+                await recycleSession(session, `timeout em ${stage}`, purgeAuth, msg);
+            } catch (err) {
                 console.error(`[${session.id}] Falha ao reciclar sessao travada:`, err.message);
-            });
+            }
         }, timeoutMs);
     };
     armInitializationTimeout('inicializacao');
