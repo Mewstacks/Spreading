@@ -2,7 +2,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { resetSessionForQr } = require('../session_reset');
+const {
+    resetSessionForQr, markResetFailure, markQrBootstrap,
+    decidirRestauracao, MOTIVO_FALHA_RESET,
+} = require('../session_reset');
 
 const sessionState = (id = 'u1') => ({
     id,
@@ -117,6 +120,7 @@ test('falha ao apagar auth nao inicializa nem reutiliza a sessao antiga', async 
     assert.equal(inicializacoes, 0);
     assert.equal(substituicoes, 0);
     assert.equal(session.fase, 'falha_reset');
+    assert.equal(session.motivoFalhaReset, MOTIVO_FALHA_RESET.PURGE_FALHOU);
     assert.equal(session.encerrandoManual, true);
     assert.equal(session.client, null);
 });
@@ -147,7 +151,56 @@ test('falha ao encerrar Chromium antigo para antes de apagar auth', async () => 
     assert.equal(purges, 0);
     assert.equal(inicializacoes, 0);
     assert.equal(session.fase, 'falha_reset');
+    assert.equal(session.motivoFalhaReset, MOTIVO_FALHA_RESET.CHROMIUM_NAO_ENCERROU);
     assert.equal(session.qrBootstrapTimer, null);
+});
+
+test('markResetFailure grava a fase, o motivo e a mensagem legivel', () => {
+    const session = { id: 'u1', qrBootstrapAtivo: true };
+    markResetFailure(session, 'Não foi possível gerar o QR.', MOTIVO_FALHA_RESET.QR_NAO_GERADO);
+    assert.equal(session.fase, 'falha_reset');
+    assert.equal(session.faseMsg, 'Não foi possível gerar o QR.');
+    assert.equal(session.motivoFalhaReset, MOTIVO_FALHA_RESET.QR_NAO_GERADO);
+    assert.equal(session.qrBootstrapAtivo, false);
+    // Sem motivo explicito cai em 'desconhecido', nunca undefined.
+    const outra = { id: 'u2' };
+    markResetFailure(outra, 'falhou');
+    assert.equal(outra.motivoFalhaReset, MOTIVO_FALHA_RESET.DESCONHECIDO);
+});
+
+test('markQrBootstrap arma o bootstrap com contadores zerados', () => {
+    const fresh = markQrBootstrap({ id: 'u1' });
+    assert.equal(fresh.qrBootstrapAtivo, true);
+    assert.equal(fresh.qrBootstrapAttempts, 1);
+    assert.equal(fresh.encerrandoManual, false);
+    assert.equal(fresh.fase, 'reiniciando_qr');
+});
+
+test('decidirRestauracao: pareado restaura, QR em preparo re-arma, logout ignora', () => {
+    // Credencial pareada intacta -> restaura e reconecta.
+    assert.equal(
+        decidirRestauracao({ pareado: true, desabilitado: false, qrEmPreparo: false }),
+        'restaurar',
+    );
+    // Novo QR interrompido por restart (sem .paired) -> re-arma o QR.
+    assert.equal(
+        decidirRestauracao({ pareado: false, desabilitado: false, qrEmPreparo: true }),
+        'rearmar',
+    );
+    // Logout explicito vence qualquer marcador: nunca ressuscita sozinho.
+    assert.equal(
+        decidirRestauracao({ pareado: true, desabilitado: true, qrEmPreparo: true }),
+        'ignorar',
+    );
+    assert.equal(
+        decidirRestauracao({ pareado: false, desabilitado: true, qrEmPreparo: true }),
+        'ignorar',
+    );
+    // Lixo sem credencial nem QR em voo -> ignora.
+    assert.equal(
+        decidirRestauracao({ pareado: false, desabilitado: false, qrEmPreparo: false }),
+        'ignorar',
+    );
 });
 
 test('resets concorrentes compartilham a mesma operacao e um unico Chromium', async () => {

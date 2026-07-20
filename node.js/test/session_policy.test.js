@@ -49,15 +49,17 @@ test('paired credential pauses instead of being purged after retries', () => {
     assert.equal(reconnectAction(7, 1, true, 6), 'expire');
 });
 
-test('novo QR tem duas tentativas e nunca escolhe a escada de reconnect', () => {
+test('novo QR retenta ate o teto e nunca escolhe a escada de reconnect', () => {
     for (const motivo of [
         'timeout em inicializacao',
         'Navigating frame was detached',
         'Execution context was destroyed',
     ]) {
-        assert.equal(qrBootstrapOutcome(1, 2), 'retry', motivo);
-        assert.equal(qrBootstrapOutcome(2, 2), 'fail', motivo);
-        assert.notEqual(qrBootstrapOutcome(1, 2), 'reconnect', motivo);
+        // Teto atual = 3: duas primeiras tentativas retentam, a terceira encerra.
+        assert.equal(qrBootstrapOutcome(1, 3), 'retry', motivo);
+        assert.equal(qrBootstrapOutcome(2, 3), 'retry', motivo);
+        assert.equal(qrBootstrapOutcome(3, 3), 'fail', motivo);
+        assert.notEqual(qrBootstrapOutcome(1, 3), 'reconnect', motivo);
     }
 });
 

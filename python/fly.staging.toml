@@ -1,0 +1,32 @@
+# Ambiente Fly isolado: nunca compartilha volume, banco, WhatsApp ou host com produção.
+app = "spreading-web-staging"
+primary_region = "gru"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  DJANGO_DEBUG = "0"
+  DJANGO_ALLOWED_HOSTS = "spreading-web-staging.fly.dev"
+  DJANGO_CSRF_TRUSTED_ORIGINS = "https://spreading-web-staging.fly.dev"
+  PUBLIC_BASE_URL = "https://spreading-web-staging.fly.dev"
+  ML_AUTH_DIR = "/data/ml_sessions"
+  WHATSAPP_API_URL = "http://spreading-wa-staging.internal:3000"
+
+[deploy]
+  release_command = "sh -c 'python django/manage.py migrate --noinput && python django/manage.py bootstrap_superuser'"
+
+[[mounts]]
+  source = "ml_data_staging"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "performance-2x"
+  memory = "4gb"

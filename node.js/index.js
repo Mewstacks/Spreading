@@ -16,7 +16,10 @@ const {
     reconnectDelay, shouldPurgeAuth, reconnectAction, isRevokedReason, ocupaSlot,
     groupRetryDelay, qrBootstrapOutcome,
 } = require('./session_policy');
-const { resetSessionForQr, markResetFailure } = require('./session_reset');
+const {
+    resetSessionForQr, markResetFailure, markQrBootstrap,
+    decidirRestauracao, MOTIVO_FALHA_RESET,
+} = require('./session_reset');
 const { iniciarSync } = require('./group_sync');
 const {
     coletarGrupos, inspecionarGrupo, idChatValido, descreverErro,
@@ -111,9 +114,13 @@ const WATCHDOG_TIMEOUT_MS = parseInt(process.env.WATCHDOG_TIMEOUT_MS, 10) || 450
 const WATCHDOG_INTERVAL_MS = parseInt(process.env.WATCHDOG_INTERVAL_MS, 10) || 5000;
 const MAX_WHATSAPP_SESSIONS = parseInt(process.env.MAX_WHATSAPP_SESSIONS, 10) || 4;
 const SESSION_INIT_TIMEOUT_MS = parseInt(process.env.SESSION_INIT_TIMEOUT_MS, 10) || 90000;
-const QR_BOOTSTRAP_TIMEOUT_MS = parseInt(process.env.QR_BOOTSTRAP_TIMEOUT_MS, 10) || 60000;
+// O teto por tentativa fica ABAIXO de WATCHDOG_TIMEOUT_MS (45s): um boot frio de
+// Chromium sob pressão de memória no Fly podia estourar os 60s antigos e, pior,
+// deixar a janela da tentativa passar do limite do watchdog — que então matava o
+// worker inteiro no meio do bootstrap. Menos por tentativa, mais tentativas.
+const QR_BOOTSTRAP_TIMEOUT_MS = parseInt(process.env.QR_BOOTSTRAP_TIMEOUT_MS, 10) || 40000;
 const QR_BOOTSTRAP_MAX_ATTEMPTS =
-    parseInt(process.env.QR_BOOTSTRAP_MAX_ATTEMPTS, 10) || 2;
+    parseInt(process.env.QR_BOOTSTRAP_MAX_ATTEMPTS, 10) || 3;
 const QR_BOOTSTRAP_RETRY_MS = parseInt(process.env.QR_BOOTSTRAP_RETRY_MS, 10) || 2000;
 // 15s e folgado: a leitura so percorre a collection em memoria da pagina, sem
 // round-trip de rede. Estourar aqui significa pagina morta, nao lentidao — por
@@ -360,6 +367,47 @@ const sessions = new Map();
 const DISABLED_MARKER = '.runtime-disabled';
 const disabledMarkerPathFor = (authPath) => path.join(authPath, DISABLED_MARKER);
 const disabledMarkerPath = (session) => disabledMarkerPathFor(session.authPath);
+
+// Marca "QR sendo gerado agora". Escrito enquanto o bootstrap de um novo QR está
+// em voo (reset ou retry) e apagado quando a sessao autentica/conecta ou quando
+// o reset falha em definitivo. Por que existe: o reset apaga o `.paired` ANTES de
+// o QR novo aparecer; se o worker reiniciar nessa janela (deploy/OOM/SIGKILL do
+// watchdog), o restore do boot ignorava a pasta (sem `.paired`) e a tela ficava
+// presa em 'inativo', sem QR — exatamente o "novo QR nao volta". Com este
+// marcador, o boot RE-ARMA um QR novo. Consumido por decidirRestauracao.
+const QR_BOOTSTRAP_MARKER = '.qr-bootstrap';
+const qrBootstrapMarkerPathFor = (authPath) => path.join(authPath, QR_BOOTSTRAP_MARKER);
+const marcarQrBootstrap = (session) => {
+    try {
+        fs.mkdirSync(session.authPath, { recursive: true });
+        fs.writeFileSync(qrBootstrapMarkerPathFor(session.authPath), new Date().toISOString());
+    } catch (err) {
+        console.error(`[${session.id}] Falha ao marcar QR em preparo:`, err.message);
+    }
+};
+const limparMarcadorQrBootstrap = (session) => {
+    try {
+        fs.unlinkSync(qrBootstrapMarkerPathFor(session.authPath));
+    } catch (err) {
+        if (err.code !== 'ENOENT') {
+            console.error(`[${session.id}] Falha ao limpar marca de QR em preparo:`, err.message);
+        }
+    }
+};
+
+// Fecha o estado terminal de um "novo QR" que nao vingou: apaga o rastro do
+// bootstrap (para o boot nao re-armar em loop uma sessao insalvavel) e emite UMA
+// linha estruturada para o `fly logs` dizer qual das seis etapas falhou. Chamar
+// sempre logo apos markResetFailure.
+const finalizarFalhaReset = (session, causa = '') => {
+    limparMarcadorQrBootstrap(session);
+    console.error(
+        `[${session.id}] falha_reset`
+        + ` motivo=${session.motivoFalhaReset || MOTIVO_FALHA_RESET.DESCONHECIDO}`
+        + ` tentativas=${session.qrBootstrapAttempts || 0}`
+        + (causa ? ` causa="${causa}"` : '')
+    );
+};
 
 const encerrarSessoesDuplicadas = async (current) => {
     if (!current.whatsappId) return;
@@ -632,12 +680,10 @@ const scheduleQrBootstrapRetry = async (session, reason) => {
     if (qrBootstrapOutcome(
         session.qrBootstrapAttempts, QR_BOOTSTRAP_MAX_ATTEMPTS
     ) === 'fail') {
-        const mensagem = 'Não foi possível gerar o QR. Clique para tentar novamente.';
-        markResetFailure(session, mensagem);
-        console.error(
-            `[${session.id}] Geracao de QR encerrada apos `
-            + `${session.qrBootstrapAttempts} tentativa(s). Motivo: ${reason}`
-        );
+        const mensagem = `Não foi possível gerar o QR após ${session.qrBootstrapAttempts} `
+            + 'tentativa(s) — o leitor não respondeu a tempo. Clique para tentar novamente.';
+        markResetFailure(session, mensagem, MOTIVO_FALHA_RESET.QR_NAO_GERADO);
+        finalizarFalhaReset(session, reason);
         return true;
     }
 
@@ -648,12 +694,17 @@ const scheduleQrBootstrapRetry = async (session, reason) => {
     session.faseMsg =
         `Preparando um novo QR (tentativa ${proximaTentativa}/${QR_BOOTSTRAP_MAX_ATTEMPTS})…`;
 
+    // So encerra o Chromium anterior; NAO repurga o auth. Pos-reset nao ha
+    // credencial a limpar, e o initializeSession ja zera locks e caches. Repurgar
+    // a cada tentativa so gastava I/O no volume do Fly sem tornar o QR mais provavel.
     const runtimeClean = await encerrarChromiumsDoPerfil(session.authPath);
     if (sessions.get(session.id) !== session || !session.qrBootstrapAtivo) return true;
-    if (!runtimeClean || !purgeAuthDir(session, `retry de novo QR: ${reason}`)) {
+    if (!runtimeClean) {
         markResetFailure(
-            session, 'Não foi possível limpar o leitor anterior. Clique para tentar novamente.'
+            session, 'Não foi possível limpar o leitor anterior. Clique para tentar novamente.',
+            MOTIVO_FALHA_RESET.LIMPEZA_RETRY_FALHOU
         );
+        finalizarFalhaReset(session, reason);
         return true;
     }
 
@@ -682,9 +733,10 @@ const scheduleReconnect = (session, reason, msgOverride = null) => {
     if (session.qrBootstrapAtivo) {
         scheduleQrBootstrapRetry(session, reason).catch((err) => {
             markResetFailure(
-                session, 'Não foi possível preparar o novo QR. Clique para tentar novamente.'
+                session, 'Não foi possível preparar o novo QR. Clique para tentar novamente.',
+                MOTIVO_FALHA_RESET.RETRY_FALHOU
             );
-            console.error(`[${session.id}] Falha no retry de QR:`, err.message);
+            finalizarFalhaReset(session, err.message);
         });
         return;
     }
@@ -831,6 +883,9 @@ const initializeSession = (session) => {
     liberarPerfilChromium(session.authPath);
     removerLocksChromium(session.authPath);
     limparCachesChromium(session.authPath);
+    // Enquanto o QR nao chega, deixa um rastro no volume. Se o worker reiniciar
+    // agora, o boot re-arma um QR novo em vez de largar a sessao em 'inativo'.
+    if (session.qrBootstrapAtivo) marcarQrBootstrap(session);
     const client = new Client({
         authStrategy: new LocalAuth({ dataPath: session.authPath }),
         takeoverOnConflict: true,
@@ -913,6 +968,9 @@ const initializeSession = (session) => {
         session.qrBootstrapAttempts = 0;
         if (session.qrBootstrapTimer) clearTimeout(session.qrBootstrapTimer);
         session.qrBootstrapTimer = null;
+        // Bootstrap venceu: o `.paired` volta a existir logo abaixo, então o
+        // rastro de "QR em preparo" já não é necessário e não pode re-armar.
+        limparMarcadorQrBootstrap(session);
         session.authenticatedInAttempt = true;
         // A credencial no volume agora vale a pena restaurar num boot futuro.
         // O layout do LocalAuth nao serve como sinal: ver auth_store.js.
@@ -957,6 +1015,7 @@ const initializeSession = (session) => {
         session.qrBootstrapAttempts = 0;
         if (session.qrBootstrapTimer) clearTimeout(session.qrBootstrapTimer);
         session.qrBootstrapTimer = null;
+        limparMarcadorQrBootstrap(session); // conectou: o rastro de QR em preparo saiu de cena
         session.authenticatedInAttempt = false;
         session.reconnectAttempts = 0;
         session.authPurges = 0; // ciclo de recuperacao fechado com sucesso
@@ -1508,6 +1567,13 @@ app.post('/api/sessoes/reset', apiKeyAuth, async (req, res) => {
         initialize: initializeSession,
     });
 
+    // Falha ainda dentro da transição do reset (encerrar/purgar/iniciar): registra
+    // o motivo e limpa o rastro de bootstrap. O caminho de timeout do QR já é
+    // finalizado dentro de scheduleQrBootstrapRetry.
+    if (!resultado.sucesso && resultado.status && resultado.status.fase === 'falha_reset') {
+        finalizarFalhaReset(resultado.status);
+    }
+
     res.json({
         ...resultado,
         // Nunca exponha o objeto interno (client, timers, paths). O contrato da
@@ -1755,9 +1821,16 @@ const restaurarSessoesDoVolume = () => {
             .filter((e) => e.isDirectory())
             .map((e) => e.name)
             .filter((id) => id === sanitizeInstanceId(id)) // ignora lixo no volume
-            .filter((id) => hasStoredAuth(id))             // so quem foi pareado de fato
-            .filter((id) => !fs.existsSync(disabledMarkerPathFor(authPathDe(id))))
-            .sort()
+            .map((id) => ({
+                id,
+                acao: decidirRestauracao({
+                    pareado: hasStoredAuth(id),
+                    desabilitado: fs.existsSync(disabledMarkerPathFor(authPathDe(id))),
+                    qrEmPreparo: fs.existsSync(qrBootstrapMarkerPathFor(authPathDe(id))),
+                }),
+            }))
+            .filter((c) => c.acao !== 'ignorar')
+            .sort((a, b) => a.id.localeCompare(b.id))
             .slice(0, MAX_WHATSAPP_SESSIONS);
     } catch (err) {
         console.error('Falha ao varrer o volume de sessoes:', err.message);
@@ -1769,15 +1842,40 @@ const restaurarSessoesDoVolume = () => {
         return;
     }
 
-    console.log(`Restaurando ${candidatos.length} sessao(oes) do volume: ${candidatos.join(', ')}.`);
-    candidatos.forEach((id, i) => {
+    const resumo = candidatos.map((c) => `${c.id}:${c.acao}`).join(', ');
+    console.log(`Restaurando ${candidatos.length} sessao(oes) do volume: ${resumo}.`);
+    candidatos.forEach(({ id, acao }, i) => {
         // Escalonado: cada sessao sobe um Chromium (~350MB); subir todas juntas
         // faz um pico de memoria e de CPU no boot.
         setTimeout(() => {
-            console.log(`[${id}] Restaurando sessao do volume (${i + 1}/${candidatos.length}).`);
-            ensureSession(id);
+            if (acao === 'rearmar') {
+                console.log(`[${id}] QR estava em preparo no restart; re-armando um QR novo.`);
+                rearmarQrBootstrap(id);
+            } else {
+                console.log(`[${id}] Restaurando sessao do volume (${i + 1}/${candidatos.length}).`);
+                ensureSession(id);
+            }
         }, i * SESSION_START_STAGGER_MS).unref();
     });
+};
+
+// Recomeça um bootstrap de QR para uma sessao cujo "novo QR" foi interrompido por
+// um restart (marcador .qr-bootstrap, sem .paired). Espelha o /api/sessoes/reset,
+// mas sem destroy: no boot nao ha client vivo, so um perfil parcial em disco.
+const rearmarQrBootstrap = (instanceId) => {
+    const id = sanitizeInstanceId(instanceId);
+    purgeAuthDirPorId(id, 're-armar QR apos restart'); // descarta o perfil parcial
+    const fresh = markQrBootstrap(createSessionState(id));
+    sessions.set(id, fresh);
+    try {
+        initializeSession(fresh); // reescreve o marcador; se cair de novo, re-arma de novo
+    } catch (err) {
+        markResetFailure(
+            fresh, 'Não foi possível gerar o QR após reinício. Clique para tentar novamente.',
+            MOTIVO_FALHA_RESET.INIT_FALHOU
+        );
+        finalizarFalhaReset(fresh, err.message);
+    }
 };
 
 const PORT = process.env.PORT || 3000;

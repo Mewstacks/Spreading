@@ -1,0 +1,31 @@
+app = "spreading-wa-staging"
+primary_region = "gru"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+  MAX_WHATSAPP_SESSIONS = "1"
+  SESSION_START_STAGGER_MS = "12000"
+  SEND_TIMEOUT_MS = "60000"
+  SEND_REQUEST_TIMEOUT_MS = "55000"
+
+[[mounts]]
+  source = "wa_data_staging"
+  destination = "/app/.wwebjs_auth"
+
+[[services]]
+  internal_port = 3000
+  protocol = "tcp"
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[services.ports]]
+  port = 80
+  handlers = ["http"]
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
