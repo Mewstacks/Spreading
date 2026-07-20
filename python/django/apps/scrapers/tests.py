@@ -3517,6 +3517,11 @@ class WhatsAppPainelSemEfeitoColateralTests(TestCase):
         # Uma ocorrência é a declaração inicial. O handler do reset não pode
         # mais recolocar reviveTentado=false depois de descartar a sessão.
         self.assertEqual(html.count("reviveTentado = false"), 1)
+        self.assertIn("fase === 'reiniciando_qr'", html)
+        self.assertIn("fase === 'qr' && s.qr", html)
+        self.assertIn("fase === 'falha_reset'", html)
+        self.assertIn("QR novo pronto para leitura.", html)
+        self.assertIn("Não foi possível gerar o QR. Clique para tentar novamente.", html)
 
 
 class ChecarAfiliacaoCommandTests(TestCase):

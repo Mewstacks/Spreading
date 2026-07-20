@@ -55,4 +55,21 @@ const decidirSobreDono = ({ dono, vivo, cmdline, perfilDir }) => {
     return 'liberar';
 };
 
-module.exports = { donoDoSingletonLock, ehChromiumDoPerfil, decidirSobreDono };
+// Filtra um snapshot de processos para a limpeza forte usada pelo fluxo de
+// "novo QR". O match continua sendo pelo argumento inteiro do perfil: nunca
+// mate Chromium de outra sessão nem um processo que só menciona o caminho.
+const pidsDoPerfil = (processos, perfilDir) => {
+    if (!Array.isArray(processos)) return [];
+    return processos
+        .filter(({ pid, cmdline }) => (
+            Number.isInteger(pid) && pid > 0 && ehChromiumDoPerfil(cmdline, perfilDir)
+        ))
+        .map(({ pid }) => pid);
+};
+
+module.exports = {
+    donoDoSingletonLock,
+    ehChromiumDoPerfil,
+    decidirSobreDono,
+    pidsDoPerfil,
+};

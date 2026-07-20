@@ -7,6 +7,7 @@ const {
     shouldPurgeAuth,
     reconnectOutcome,
     reconnectAction,
+    qrBootstrapOutcome,
     isRevokedReason,
     syncGroupsOutcome,
     groupRetryDelay,
@@ -46,6 +47,18 @@ test('paired credential pauses instead of being purged after retries', () => {
     assert.equal(reconnectAction(7, 0, true, 6), 'pause');
     assert.equal(reconnectAction(7, 0, false, 6), 'purge');
     assert.equal(reconnectAction(7, 1, true, 6), 'expire');
+});
+
+test('novo QR tem duas tentativas e nunca escolhe a escada de reconnect', () => {
+    for (const motivo of [
+        'timeout em inicializacao',
+        'Navigating frame was detached',
+        'Execution context was destroyed',
+    ]) {
+        assert.equal(qrBootstrapOutcome(1, 2), 'retry', motivo);
+        assert.equal(qrBootstrapOutcome(2, 2), 'fail', motivo);
+        assert.notEqual(qrBootstrapOutcome(1, 2), 'reconnect', motivo);
+    }
 });
 
 // Regressao do bug em producao: 'Recuperando sessao (tentativa 38)...'.
@@ -98,6 +111,8 @@ test('only sessions holding a Chromium count against the cap', () => {
     assert.equal(ocupaSlot({ client: {}, initialized: false }), true, 'iniciando');
     assert.equal(ocupaSlot({ client: null, initialized: false, reconnectTimer: 1 }), true,
         'reconectando: vai subir um Chromium quando o timer disparar');
+    assert.equal(ocupaSlot({ client: null, initialized: false, qrBootstrapTimer: 1 }), true,
+        'gerando QR: vai subir um Chromium quando o timer disparar');
 
     // Terminais: sem client, sem init, sem timer.
     assert.equal(ocupaSlot({ client: null, initialized: false, reconnectTimer: null }), false,

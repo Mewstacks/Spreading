@@ -135,6 +135,7 @@
   const grpAviso = document.getElementById('grupos-aviso');
   const logoutArea = document.getElementById('logout-area');
   const cancelArea = document.getElementById('cancelar-area');
+  const cancelMsg = document.getElementById('cancelar-msg');
 
   // Ordem das fases p/ marcar passos concluídos.
   const ORDEM = ['qr', 'autenticado', 'carregando', 'sincronizando', 'conectado'];
@@ -227,6 +228,19 @@
       }
       reviverSeTerminal(fase);
 
+      // A mensagem da ação acompanha o estado real. Antes o texto de sucesso
+      // ficava preso mesmo quando o worker já tinha voltado a falhar.
+      if (fase === 'reiniciando_qr') {
+        cancelMsg.style.color = 'var(--muted)';
+        cancelMsg.textContent = s.mensagem || 'Sessão anterior descartada. Gerando um QR novo…';
+      } else if (fase === 'qr' && s.qr) {
+        cancelMsg.style.color = 'var(--muted)';
+        cancelMsg.textContent = 'QR novo pronto para leitura.';
+      } else if (fase === 'falha_reset') {
+        cancelMsg.style.color = 'var(--red)';
+        cancelMsg.textContent = s.mensagem || 'Não foi possível gerar o QR. Clique para tentar novamente.';
+      }
+
       // Pill
       pill.className = 'conn-pill ' + f.cls;
       pillTxt.textContent = f.txt;
@@ -310,7 +324,7 @@
 
   document.getElementById('wa-cancelar').onclick = async function () {
     if (!confirm('Cancelar a reconexão e começar do zero? A sessão atual é descartada e você precisará ler o QR code de novo.')) return;
-    const msg = document.getElementById('cancelar-msg');
+    const msg = cancelMsg;
     suprimirReviveAteQr = true;
     reviveTentado = true;
     this.disabled = true;

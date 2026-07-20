@@ -14,8 +14,9 @@ const fs = require('fs');
 const { spawn, execFileSync } = require('child_process');
 const {
     reconnectDelay, shouldPurgeAuth, reconnectAction, isRevokedReason, ocupaSlot,
-    groupRetryDelay,
+    groupRetryDelay, qrBootstrapOutcome,
 } = require('./session_policy');
+const { resetSessionForQr, markResetFailure } = require('./session_reset');
 const { iniciarSync } = require('./group_sync');
 const {
     coletarGrupos, inspecionarGrupo, idChatValido, descreverErro,
@@ -29,7 +30,9 @@ const {
 const {
     TRANSITORIO, PERMANENTE, erroClassificado, classificarErro, erroStoreQuebrado,
 } = require('./error_taxonomy');
-const { donoDoSingletonLock, decidirSobreDono } = require('./chromium_locks');
+const {
+    donoDoSingletonLock, decidirSobreDono, pidsDoPerfil,
+} = require('./chromium_locks');
 const authStore = require('./auth_store');
 const { runtimePronto } = require('./session_readiness');
 const { criarPrazo, expirou, timeoutDaEtapa, timeoutComEnvioIniciado } = require('./send_deadline');
@@ -108,6 +111,10 @@ const WATCHDOG_TIMEOUT_MS = parseInt(process.env.WATCHDOG_TIMEOUT_MS, 10) || 450
 const WATCHDOG_INTERVAL_MS = parseInt(process.env.WATCHDOG_INTERVAL_MS, 10) || 5000;
 const MAX_WHATSAPP_SESSIONS = parseInt(process.env.MAX_WHATSAPP_SESSIONS, 10) || 4;
 const SESSION_INIT_TIMEOUT_MS = parseInt(process.env.SESSION_INIT_TIMEOUT_MS, 10) || 90000;
+const QR_BOOTSTRAP_TIMEOUT_MS = parseInt(process.env.QR_BOOTSTRAP_TIMEOUT_MS, 10) || 60000;
+const QR_BOOTSTRAP_MAX_ATTEMPTS =
+    parseInt(process.env.QR_BOOTSTRAP_MAX_ATTEMPTS, 10) || 2;
+const QR_BOOTSTRAP_RETRY_MS = parseInt(process.env.QR_BOOTSTRAP_RETRY_MS, 10) || 2000;
 // 15s e folgado: a leitura so percorre a collection em memoria da pagina, sem
 // round-trip de rede. Estourar aqui significa pagina morta, nao lentidao — por
 // isso nao vale mais os 45s que existiam quando isto era um getChats completo.
@@ -222,6 +229,69 @@ const liberarPerfilChromium = (authPath) => {
     }
 };
 
+const listarProcessos = () => {
+    try {
+        if (process.platform === 'linux') {
+            const pids = fs.readdirSync('/proc')
+                .filter((entry) => /^\d+$/.test(entry))
+                .map(Number);
+            return pids.map((pid) => ({ pid, cmdline: lerCmdline(pid) }));
+        }
+        return execFileSync('ps', ['-axo', 'pid=,command='], {
+            encoding: 'utf8', timeout: 5000,
+        }).split('\n').map((line) => {
+            const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+            return match ? { pid: Number(match[1]), cmdline: match[2] } : null;
+        }).filter(Boolean);
+    } catch (err) {
+        console.error('Falha ao listar processos do Chromium:', err.message);
+        return null;
+    }
+};
+
+// Limpeza forte e restrita a UM perfil. client.destroy() pode estourar o timeout
+// e deixar processos sem SingletonLock; o scan pelo argumento exato fecha essa
+// lacuna sem tocar nos Chromiums das outras sessões.
+const encerrarChromiumsDoPerfil = async (authPath) => {
+    const perfilDir = path.join(authPath, 'session');
+    const encontrar = () => {
+        const processos = listarProcessos();
+        return processos === null ? null : pidsDoPerfil(processos, perfilDir);
+    };
+    const encontrados = encontrar();
+    if (encontrados === null) return false;
+    for (const pid of encontrados) {
+        try {
+            process.kill(pid, 'SIGKILL');
+        } catch (err) {
+            if (err.code !== 'ESRCH') {
+                console.error(`Falha ao encerrar Chromium ${pid} de ${perfilDir}:`, err.message);
+            }
+        }
+    }
+    if (encontrados.length) {
+        console.warn(
+            `Encerrando ${encontrados.length} processo(s) Chromium do perfil ${perfilDir}.`
+        );
+    }
+
+    for (let tentativa = 0; tentativa < 20; tentativa += 1) {
+        const restantes = encontrar();
+        if (restantes === null) return false;
+        if (!restantes.length) return true;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const restantes = encontrar();
+    if (restantes === null) return false;
+    if (restantes.length) {
+        console.error(
+            `Chromium do perfil ${perfilDir} continuou vivo: ${restantes.join(', ')}.`
+        );
+        return false;
+    }
+    return true;
+};
+
 const removerLocksChromium = (dir) => {
     if (!fs.existsSync(dir)) return;
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -253,6 +323,7 @@ const createSessionState = (instanceId) => ({
     fase: 'iniciando',
     progresso: 0,
     reconnectTimer: null,
+    qrBootstrapTimer: null,
     reconnectAttempts: 0,
     initTimer: null,
     qrIdleTimer: null,
@@ -260,6 +331,9 @@ const createSessionState = (instanceId) => ({
     initFailures: 0,
     authPurges: 0,           // purgas de auth neste ciclo de recuperacao
     encerrandoManual: false, // logout pedido pelo usuario: suprime o auto-reconnect
+    resetPromise: null,      // coalesce requisicoes simultaneas de novo QR
+    qrBootstrapAtivo: false, // reset pediu QR: nunca cair no recovery generico
+    qrBootstrapAttempts: 0,
     authenticatedInAttempt: false,
     preparando: false,
     preparationTimer: null,
@@ -324,10 +398,12 @@ const destroySessionRuntime = async (session, reason, removeFromMap = false) => 
     if (session.initTimer) clearTimeout(session.initTimer);
     if (session.qrIdleTimer) clearTimeout(session.qrIdleTimer);
     if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
+    if (session.qrBootstrapTimer) clearTimeout(session.qrBootstrapTimer);
     if (session.preparationTimer) clearTimeout(session.preparationTimer);
     session.initTimer = null;
     session.qrIdleTimer = null;
     session.reconnectTimer = null;
+    session.qrBootstrapTimer = null;
     session.preparationTimer = null;
     try {
         if (session.client) await withTimeout(session.client.destroy(), 10000, 'client.destroy');
@@ -547,10 +623,71 @@ const concluirPreparacao = (session, client) => {
         });
 };
 
+const scheduleQrBootstrapRetry = async (session, reason) => {
+    if (!session.qrBootstrapAtivo) return false;
+    if (session.qrBootstrapTimer) return true;
+    if (session.qrIdleTimer) clearTimeout(session.qrIdleTimer);
+    session.qrIdleTimer = null;
+
+    if (qrBootstrapOutcome(
+        session.qrBootstrapAttempts, QR_BOOTSTRAP_MAX_ATTEMPTS
+    ) === 'fail') {
+        const mensagem = 'Não foi possível gerar o QR. Clique para tentar novamente.';
+        markResetFailure(session, mensagem);
+        console.error(
+            `[${session.id}] Geracao de QR encerrada apos `
+            + `${session.qrBootstrapAttempts} tentativa(s). Motivo: ${reason}`
+        );
+        return true;
+    }
+
+    const proximaTentativa = session.qrBootstrapAttempts + 1;
+    session.fase = 'reiniciando_qr';
+    session.progresso = 0;
+    session.ultimoQR = null;
+    session.faseMsg =
+        `Preparando um novo QR (tentativa ${proximaTentativa}/${QR_BOOTSTRAP_MAX_ATTEMPTS})…`;
+
+    const runtimeClean = await encerrarChromiumsDoPerfil(session.authPath);
+    if (sessions.get(session.id) !== session || !session.qrBootstrapAtivo) return true;
+    if (!runtimeClean || !purgeAuthDir(session, `retry de novo QR: ${reason}`)) {
+        markResetFailure(
+            session, 'Não foi possível limpar o leitor anterior. Clique para tentar novamente.'
+        );
+        return true;
+    }
+
+    session.qrBootstrapAttempts = proximaTentativa;
+    session.qrBootstrapTimer = setTimeout(() => {
+        session.qrBootstrapTimer = null;
+        if (
+            sessions.get(session.id) !== session
+            || !session.qrBootstrapAtivo
+            || session.initialized
+        ) return;
+        console.log(
+            `[${session.id}] Nova tentativa de gerar QR `
+            + `(${session.qrBootstrapAttempts}/${QR_BOOTSTRAP_MAX_ATTEMPTS}).`
+        );
+        initializeSession(session);
+    }, QR_BOOTSTRAP_RETRY_MS);
+    session.qrBootstrapTimer.unref();
+    return true;
+};
+
 // msgOverride sobrevive ao agendamento. Antes, quem quisesse explicar ao usuario
 // o que estava acontecendo (ex.: "sessao corrompida, gerando novo QR") setava
 // faseMsg e via a mensagem ser sobrescrita aqui na linha seguinte.
 const scheduleReconnect = (session, reason, msgOverride = null) => {
+    if (session.qrBootstrapAtivo) {
+        scheduleQrBootstrapRetry(session, reason).catch((err) => {
+            markResetFailure(
+                session, 'Não foi possível preparar o novo QR. Clique para tentar novamente.'
+            );
+            console.error(`[${session.id}] Falha no retry de QR:`, err.message);
+        });
+        return;
+    }
     if (session.reconnectTimer) return;
     if (session.encerrandoManual) return; // logout do usuario: nao ressuscitar
     session.reconnectAttempts += 1;
@@ -656,6 +793,10 @@ const recycleSession = async (session, reason, purgeAuth = false, msgOverride = 
     try { await withTimeout(client.destroy(), 10000, 'client.destroy'); } catch (err) {
         console.warn(`[${session.id}] Chromium nao encerrou limpo:`, err.message);
     }
+    if (session.qrBootstrapAtivo) {
+        await scheduleQrBootstrapRetry(session, reason);
+        return;
+    }
     if (purgeAuth) purgeAuthDir(session, `perfil corrompido: ${reason}`);
     scheduleReconnect(session, reason, msgOverride);
 };
@@ -713,11 +854,13 @@ const initializeSession = (session) => {
     session.initialized = true;
     const armInitializationTimeout = (stage) => {
         if (session.initTimer) clearTimeout(session.initTimer);
+        const timeoutMs = session.qrBootstrapAtivo
+            ? QR_BOOTSTRAP_TIMEOUT_MS : SESSION_INIT_TIMEOUT_MS;
         session.initTimer = setTimeout(() => {
             session.initTimer = null;
             if (session.client !== client || session.isConnected || session.ultimoQR) return;
             console.error(
-                `[${session.id}] Sessao travada em "${stage}" por ${SESSION_INIT_TIMEOUT_MS}ms. Reiniciando Chromium.`
+                `[${session.id}] Sessao travada em "${stage}" por ${timeoutMs}ms. Reiniciando Chromium.`
             );
             const authenticatedFailure = (
                 session.authenticatedInAttempt || stage === 'pos-autenticacao'
@@ -730,7 +873,7 @@ const initializeSession = (session) => {
             recycleSession(session, `timeout em ${stage}`, purgeAuth, msg).catch((err) => {
                 console.error(`[${session.id}] Falha ao reciclar sessao travada:`, err.message);
             });
-        }, SESSION_INIT_TIMEOUT_MS);
+        }, timeoutMs);
     };
     armInitializationTimeout('inicializacao');
 
@@ -752,15 +895,24 @@ const initializeSession = (session) => {
         // This event can arrive late, even after ready. Do not downgrade a
         // session that was already proven connected.
         if (session.isConnected) return;
-        session.fase = 'carregando';
         session.progresso = parseInt(percent, 10) || 0;
-        session.faseMsg = message || 'Carregando WhatsApp Web…';
+        if (session.qrBootstrapAtivo) {
+            session.fase = 'reiniciando_qr';
+            session.faseMsg = 'Preparando o leitor para gerar um novo QR…';
+        } else {
+            session.fase = 'carregando';
+            session.faseMsg = message || 'Carregando WhatsApp Web…';
+        }
         if (!session.initTimer) armInitializationTimeout('carregamento do WhatsApp Web');
         console.log(`[${session.id}] ⏳ Carregando: ${session.progresso}% — ${session.faseMsg}`);
     });
 
     client.on('authenticated', () => {
         if (session.client !== client) return;
+        session.qrBootstrapAtivo = false;
+        session.qrBootstrapAttempts = 0;
+        if (session.qrBootstrapTimer) clearTimeout(session.qrBootstrapTimer);
+        session.qrBootstrapTimer = null;
         session.authenticatedInAttempt = true;
         // A credencial no volume agora vale a pena restaurar num boot futuro.
         // O layout do LocalAuth nao serve como sinal: ver auth_store.js.
@@ -779,8 +931,10 @@ const initializeSession = (session) => {
         if (session.client !== client) return;
         if (session.initTimer) clearTimeout(session.initTimer);
         session.initTimer = null;
-        session.fase = 'falha_auth';
-        session.faseMsg = 'Falha na autenticação — gere um novo QR.';
+        session.fase = session.qrBootstrapAtivo ? 'reiniciando_qr' : 'falha_auth';
+        session.faseMsg = session.qrBootstrapAtivo
+            ? 'O leitor falhou antes da autenticação. Preparando outro QR…'
+            : 'Falha na autenticação — gere um novo QR.';
         console.error(`[${session.id}] ❌ Falha de autenticação:`, msg);
         recycleSession(session, 'falha de autenticacao', true).catch((err) => {
             console.error(`[${session.id}] Falha ao renovar autenticacao:`, err.message);
@@ -799,6 +953,10 @@ const initializeSession = (session) => {
         if (session.initTimer) clearTimeout(session.initTimer);
         session.initTimer = null;
         session.initFailures = 0;
+        session.qrBootstrapAtivo = false;
+        session.qrBootstrapAttempts = 0;
+        if (session.qrBootstrapTimer) clearTimeout(session.qrBootstrapTimer);
+        session.qrBootstrapTimer = null;
         session.authenticatedInAttempt = false;
         session.reconnectAttempts = 0;
         session.authPurges = 0; // ciclo de recuperacao fechado com sucesso
@@ -835,9 +993,11 @@ const initializeSession = (session) => {
         session.gruposSyncFalhas = 0;
         limparRetryGrupos(session);
         session.syncPedidoDurante = false; // sem Chromium nao ha o que repicar
-        session.fase = 'desconectado';
+        session.fase = session.qrBootstrapAtivo ? 'reiniciando_qr' : 'desconectado';
         session.progresso = 0;
-        session.faseMsg = 'Desconectado — reconectando…';
+        session.faseMsg = session.qrBootstrapAtivo
+            ? 'Leitor interrompido. Preparando novamente o QR…'
+            : 'Desconectado — reconectando…';
         const idadePareamento = session.pairedAt ? `${Date.now() - session.pairedAt}ms` : 'desconhecida';
         const contextoRecuperacao = session.lastRecoveryReason
             ? ` Última recuperação: ${session.lastRecoveryReason} em ${session.lastRecoveryAt}.`
@@ -860,6 +1020,11 @@ const initializeSession = (session) => {
         // devolveríamos um QR novo na cara de quem acabou de clicar "Desconectar".
         if (session.encerrandoManual) return;
 
+        if (session.qrBootstrapAtivo) {
+            await scheduleQrBootstrapRetry(session, reason);
+            return;
+        }
+
         if (isRevokedReason(reason)) {
             // O celular desvinculou: a credencial no volume está morta. Reconectar
             // com ela é o que produzia o loop infinito de "tentativa N".
@@ -881,8 +1046,10 @@ const initializeSession = (session) => {
         if (session.client !== client) return;
         if (session.initTimer) clearTimeout(session.initTimer);
         session.initTimer = null;
-        session.fase = 'falha_auth';
-        session.faseMsg = 'Falha ao inicializar a sessão';
+        session.fase = session.qrBootstrapAtivo ? 'reiniciando_qr' : 'falha_auth';
+        session.faseMsg = session.qrBootstrapAtivo
+            ? 'O leitor de QR falhou ao iniciar. Preparando nova tentativa…'
+            : 'Falha ao inicializar a sessão';
         console.error(`[${session.id}] ❌ Falha na inicialização:`, error.message);
         session.initFailures += 1;
         const purgeAuth = !hasStoredAuth(session.id) && shouldPurgeAuth(
@@ -1314,6 +1481,39 @@ app.post('/api/sessoes', apiKeyAuth, (req, res) => {
         });
     }
     res.json({ sucesso: true, instancia: session.id, status: buildSessionPayload(session) });
+});
+
+// Transição atômica para um novo QR. Manter logout + POST /api/sessoes como
+// duas requests deixava uma janela em que o polling revivia a credencial antiga.
+app.post('/api/sessoes/reset', apiKeyAuth, async (req, res) => {
+    const instanceId = sanitizeInstanceId(req.body?.instance || req.body?.session || req.body?.userId);
+    let session = findSession(instanceId, false);
+    if (!session) {
+        // Placeholder deliberadamente não inicializado: primeiro apaga qualquer
+        // LocalAuth órfão; só depois cria o Chromium que produzirá o QR.
+        session = createSessionState(instanceId);
+        sessions.set(instanceId, session);
+    }
+
+    const resultado = await resetSessionForQr(session, {
+        destroyRuntime: (current) => destroySessionRuntime(
+            current, 'novo QR solicitado pelo usuario', false
+        ),
+        cleanupProfile: (current) => encerrarChromiumsDoPerfil(current.authPath),
+        purgeAuth: (current) => purgeAuthDir(current, 'novo QR solicitado pelo usuario'),
+        createState: createSessionState,
+        createCapacityState: createCapacitySessionState,
+        replaceSession: (fresh) => sessions.set(instanceId, fresh),
+        hasCapacity: () => sessoesOcupandoSlot() < MAX_WHATSAPP_SESSIONS,
+        initialize: initializeSession,
+    });
+
+    res.json({
+        ...resultado,
+        // Nunca exponha o objeto interno (client, timers, paths). O contrato da
+        // API usa apenas o payload serializado compartilhado com /api/status.
+        status: buildSessionPayload(resultado.status),
+    });
 });
 
 // Desfaz o pareamento: revoga no celular (quando da) e apaga a credencial do

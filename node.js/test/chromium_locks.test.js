@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-    donoDoSingletonLock, ehChromiumDoPerfil, decidirSobreDono,
+    donoDoSingletonLock, ehChromiumDoPerfil, decidirSobreDono, pidsDoPerfil,
 } = require('../chromium_locks');
 
 const PERFIL = '/app/.wwebjs_auth/1/session';
@@ -91,4 +91,26 @@ test('sem lock no perfil: nada a fazer', () => {
         decidirSobreDono({ dono: null, vivo: false, cmdline: '', perfilDir: PERFIL }),
         'ignorar'
     );
+});
+
+test('limpeza forte seleciona somente processos do perfil exato', () => {
+    const processos = [
+        { pid: 101, cmdline: CMDLINE_NOSSA },
+        {
+            pid: 102,
+            cmdline: '/usr/bin/chromium --user-data-dir=/app/.wwebjs_auth/2/session',
+        },
+        { pid: 103, cmdline: `tail -f ${PERFIL}/chrome_debug.log` },
+        { pid: 104, cmdline: `${CMDLINE_NOSSA} --type=renderer` },
+        { pid: 0, cmdline: CMDLINE_NOSSA },
+    ];
+
+    assert.deepEqual(pidsDoPerfil(processos, PERFIL), [101, 104]);
+    assert.deepEqual(pidsDoPerfil(processos, '/app/.wwebjs_auth/2/session'), [102]);
+});
+
+test('snapshot de processos hostil ou ausente nao seleciona ninguem', () => {
+    assert.deepEqual(pidsDoPerfil(null, PERFIL), []);
+    assert.deepEqual(pidsDoPerfil({}, PERFIL), []);
+    assert.deepEqual(pidsDoPerfil([{ pid: 1, cmdline: null }], PERFIL), []);
 });

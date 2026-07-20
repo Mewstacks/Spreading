@@ -30,6 +30,14 @@ function reconnectAction(attempts, authPurges, hasStoredAuth, maxAttempts = 6) {
     return outcome === 'purge' && hasStoredAuth ? 'pause' : outcome;
 }
 
+// O bootstrap de QR tem orçamento próprio e nunca participa da escada de
+// reconexão de uma credencial pareada. `attempt` inclui a tentativa atual.
+function qrBootstrapOutcome(attempt, maxAttempts = 2) {
+    const safeAttempt = Math.max(1, Number(attempt) || 1);
+    const safeMax = Math.max(1, Number(maxAttempts) || 1);
+    return safeAttempt < safeMax ? 'retry' : 'fail';
+}
+
 const REVOKED_REASONS = new Set(['LOGOUT', 'UNPAIRED', 'UNPAIRED_IDLE']);
 
 // Motivos de 'disconnected' que significam credencial revogada no celular:
@@ -83,7 +91,10 @@ function syncPollDelay(attempt, baseMs = 3000, maxMs = 15000, maxAttempts = 8) {
 // preservar a mensagem acionavel e nao seguram recurso nenhum: conta-las faria
 // sessoes mortas bloquearem o servico estando ele ocioso.
 function ocupaSlot(session) {
-    return Boolean(session.client || session.initialized || session.reconnectTimer);
+    return Boolean(
+        session.client || session.initialized
+        || session.reconnectTimer || session.qrBootstrapTimer
+    );
 }
 
 module.exports = {
@@ -91,6 +102,7 @@ module.exports = {
     shouldPurgeAuth,
     reconnectOutcome,
     reconnectAction,
+    qrBootstrapOutcome,
     isRevokedReason,
     syncGroupsOutcome,
     groupRetryDelay,
