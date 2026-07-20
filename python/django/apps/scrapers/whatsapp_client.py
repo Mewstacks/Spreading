@@ -5,6 +5,7 @@ O Node expõe (todas exigem x-api-key):
   POST /api/enviar         -> texto: {grupoid|numero, mensagem}
                               midia: {grupoid|numero, base64, mimetype, nomeArquivo, legenda}
   POST /api/sessoes        -> cria/revive a sessão do usuário
+  POST /api/sessoes/reset  -> descarta a sessão e inicia um QR novo atomicamente
   POST /api/sessoes/logout -> desfaz o pareamento (revoga + limpa credencial)
   GET  /api/status         -> {conectado, fase, progresso, mensagem, grupos, qr, ...}
   GET  /api/grupos         -> {conectado, fase, sincronizando, grupos_indisponivel, grupos}
@@ -166,6 +167,24 @@ def desconectar(session) -> dict:
         "POST", "/api/sessoes/logout", headers=_headers(),
         json={"session": session}, timeout=25, attempts=1,
     )
+
+
+def reiniciar_com_qr(session) -> dict:
+    """Descarta a sessão atual e inicia uma sessão limpa para emitir novo QR."""
+    if not session:
+        return {"sucesso": False, "erro": "Sessão de usuário ausente."}
+    invalidar_status(session)
+    try:
+        # attempts=1: repetir um reset cujo resultado se perdeu pode derrubar o
+        # Chromium novo que já está gerando o QR. O Node coalesce concorrência.
+        return _request_json(
+            "POST", "/api/sessoes/reset", headers=_headers(),
+            json={"session": session}, timeout=25, attempts=1,
+        )
+    finally:
+        # Um GET concorrente pode repopular o cache entre a invalidação acima e
+        # o fim do reset. Limpar de novo impede a UI de reviver estado antigo.
+        invalidar_status(session)
 
 
 def qrcode(session=None) -> dict:

@@ -149,6 +149,8 @@
     sincronizando: { txt:'Sincronizando grupos…',      cls:'is-mid', qr:false, bar:true,  step:'sincronizando' },
     conectado:     { txt:'Conectado',                  cls:'is-on',  qr:false, bar:false, step:'conectado' },
     reconectando:  { txt:'Reconectando WhatsApp…',      cls:'is-mid', qr:false, bar:true,  step:'qr' },
+    reiniciando_qr:{ txt:'Cancelando sessão e gerando novo QR…', cls:'is-mid', qr:false, bar:true, step:'qr' },
+    falha_reset:   { txt:'Não foi possível gerar um QR novo', cls:'is-off', qr:false, bar:false, step:'qr', err:true },
     // Terminal: a reconexão desistiu e a credencial foi apagada. Sem esta
     // entrada o fallback mostraria "Desconectado" e o usuário nunca entenderia
     // por que não volta sozinho.
@@ -166,9 +168,12 @@
   // uma fase terminal, dispara UM revive via POST e deixa o poll acompanhar.
   const FASES_REVIVIVEIS = ['inativo', 'expirado', 'desconectado', 'falha_auth', 'recuperacao_pausada'];
   let reviveTentado = false;
+  // O reset já cria a sessão nova no worker. Enquanto o QR não chegar, nenhum
+  // status terminal (inclusive um cache antigo) pode disparar outro /iniciar/.
+  let suprimirReviveAteQr = false;
 
   async function reviverSeTerminal(fase) {
-    if (reviveTentado || FASES_REVIVIVEIS.indexOf(fase) === -1) return;
+    if (suprimirReviveAteQr || reviveTentado || FASES_REVIVIVEIS.indexOf(fase) === -1) return;
     reviveTentado = true;
     try {
       await acao('/scrapers/whatsapp/iniciar/', {
@@ -217,6 +222,9 @@
 
       const fase = s.fase || (s.conectado ? 'conectado' : 'desconectado');
       const f = FASES[fase] || FASES.desconectado;
+      if (suprimirReviveAteQr && ((fase === 'qr' && s.qr) || fase === 'conectado')) {
+        suprimirReviveAteQr = false;
+      }
       reviverSeTerminal(fase);
 
       // Pill
@@ -303,6 +311,8 @@
   document.getElementById('wa-cancelar').onclick = async function () {
     if (!confirm('Cancelar a reconexão e começar do zero? A sessão atual é descartada e você precisará ler o QR code de novo.')) return;
     const msg = document.getElementById('cancelar-msg');
+    suprimirReviveAteQr = true;
+    reviveTentado = true;
     this.disabled = true;
     msg.style.color = 'var(--muted)';
     msg.textContent = 'Cancelando e preparando um QR novo…';
@@ -313,11 +323,8 @@
       });
       if (erro || !corpo.sucesso) {
         msg.style.color = 'var(--red)';
-        msg.textContent = erro || 'Não foi possível cancelar agora. Tente de novo.';
+        msg.textContent = erro || corpo.mensagem || 'Não foi possível cancelar agora. Tente de novo.';
       } else {
-        // A sessão antiga morreu: liberar o revive automático de novo, senão uma
-        // eventual fase terminal desta sessão nova ficaria sem quem a religasse.
-        reviveTentado = false;
         msg.textContent = 'Reconexão cancelada. Gerando um QR novo…';
       }
     } catch (e) {

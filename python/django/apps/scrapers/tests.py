@@ -436,6 +436,40 @@ class WhatsAppStatusCacheTests(SimpleTestCase):
 
         self.assertTrue(whatsapp_client.status("user-1")["conectado"])
 
+    @patch("apps.scrapers.whatsapp_client.requests.request")
+    def test_reset_invalida_status_tambem_depois_da_request(self, request):
+        cache.set("wa_status:user-1", {"fase": "reconectando"}, timeout=30)
+
+        def resposta_com_poll_concorrente(*_args, **_kwargs):
+            # Simula um GET que terminou durante o reset e repopulou o cache
+            # depois da primeira invalidação.
+            cache.set("wa_status:user-1", {"fase": "inativo"}, timeout=30)
+            return Mock(json=lambda: {"sucesso": True, "status": {"fase": "iniciando"}})
+
+        request.side_effect = resposta_com_poll_concorrente
+
+        resultado = whatsapp_client.reiniciar_com_qr("user-1")
+
+        self.assertTrue(resultado["sucesso"])
+        self.assertIsNone(cache.get("wa_status:user-1"))
+
+    @patch("apps.scrapers.whatsapp_client.requests.request")
+    def test_reset_uses_the_atomic_node_endpoint_without_retry(self, request):
+        request.return_value = Mock(json=lambda: {
+            "sucesso": True,
+            "auth_removido": True,
+            "status": {"fase": "iniciando"},
+        })
+
+        resultado = whatsapp_client.reiniciar_com_qr("user-42")
+
+        self.assertTrue(resultado["sucesso"])
+        request.assert_called_once_with(
+            "POST", "http://whatsapp.internal:3000/api/sessoes/reset",
+            headers={"x-api-key": "secret", "Content-Type": "application/json"},
+            params=None, json={"session": "user-42"}, timeout=25,
+        )
+
 
 class WhatsAppIsolationTests(SimpleTestCase):
     @patch("apps.scrapers.whatsapp_client.status")
@@ -547,6 +581,55 @@ class WhatsAppDesconectarTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["sucesso"])
         desconectar.assert_called_once_with(self.user.perfil.sessao_whatsapp())
+
+
+class WhatsAppCancelarReconexaoTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("wa-reset", password="test")
+        self.user.perfil.marcar_verificado()
+        self.client.force_login(self.user)
+        self.url = reverse("scraper-whatsapp-cancelar")
+
+    def test_reset_requires_post(self):
+        self.assertEqual(self.client.get(self.url).status_code, 405)
+
+    def test_reset_requires_login(self):
+        self.client.logout()
+        response = self.client.post(self.url)
+        self.assertIn(response.status_code, (302, 403))
+
+    @patch("apps.scrapers.whatsapp_client.iniciar_sessao")
+    @patch("apps.scrapers.whatsapp_client.desconectar")
+    @patch("apps.scrapers.whatsapp_client.reiniciar_com_qr")
+    def test_reset_is_one_atomic_call_for_the_users_session(
+        self, reiniciar, desconectar, iniciar
+    ):
+        reiniciar.return_value = {
+            "sucesso": True,
+            "auth_removido": True,
+            "status": {"fase": "iniciando"},
+        }
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["sucesso"])
+        reiniciar.assert_called_once_with(self.user.perfil.sessao_whatsapp())
+        desconectar.assert_not_called()
+        iniciar.assert_not_called()
+
+    @patch("apps.scrapers.whatsapp_client.reiniciar_com_qr")
+    def test_reset_failure_is_returned_without_automatic_recovery(self, reiniciar):
+        reiniciar.return_value = {
+            "sucesso": False,
+            "auth_removido": False,
+            "mensagem": "Não foi possível descartar a sessão antiga.",
+        }
+
+        response = self.client.post(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["sucesso"])
 
 
 class WhatsAppRefreshGruposTests(TestCase):
@@ -3419,6 +3502,21 @@ class WhatsAppPainelSemEfeitoColateralTests(TestCase):
     def test_iniciar_exige_post(self):
         response = self.client.get(reverse("scraper-whatsapp-iniciar"))
         self.assertEqual(response.status_code, 405)
+
+    def test_reset_suppresses_automatic_revive_until_the_new_qr_arrives(self):
+        with patch("apps.scrapers.whatsapp_client.status",
+                   return_value={"conectado": False, "fase": "reconectando"}):
+            response = self.client.get(reverse("scraper-whatsapp"))
+
+        html = response.content.decode()
+        self.assertIn("suprimirReviveAteQr = true", html)
+        self.assertIn(
+            "suprimirReviveAteQr || reviveTentado || FASES_REVIVIVEIS",
+            html,
+        )
+        # Uma ocorrência é a declaração inicial. O handler do reset não pode
+        # mais recolocar reviveTentado=false depois de descartar a sessão.
+        self.assertEqual(html.count("reviveTentado = false"), 1)
 
 
 class ChecarAfiliacaoCommandTests(TestCase):

@@ -494,24 +494,12 @@ def whatsapp_cancelar_reconexao(request):
     reviveu esse mesmo ciclo. Sem este botão o usuário não tinha como interromper
     (o "Desconectar" só aparece conectado, que é justamente o estado que falta).
 
-    Descarta a sessão (logout + limpeza da credencial no volume) e pede uma nova
-    na sequência: sessão nova nasce com reconnectAttempts/authPurges zerados e
-    emite QR em segundos.
+    O worker executa a transição atomicamente para que o polling não consiga
+    reviver a credencial antiga entre a limpeza e a criação da sessão nova.
     """
     from apps.scrapers import whatsapp_client
     session = _wa_session(request)
-    desconexao = whatsapp_client.desconectar(session)
-    # "erro" no corpo significa exclusivamente Node inalcançável (ver o CONTRATO
-    # em whatsapp_client). Sem credencial apagada, iniciar de novo só recolocaria
-    # o usuário no mesmo loop — então para aqui e deixa ele tentar outra vez.
-    if desconexao.get("erro") or desconexao.get("sucesso") is False:
-        return JsonResponse({"sucesso": False, "desconexao": desconexao})
-    inicio = whatsapp_client.iniciar_sessao(session)
-    return JsonResponse({
-        "sucesso": not inicio.get("erro") and inicio.get("sucesso") is not False,
-        "desconexao": desconexao,
-        "status": inicio,
-    })
+    return JsonResponse(whatsapp_client.reiniciar_com_qr(session))
 
 
 # --- Conexão web do Mercado Livre (login via browser remoto, sem script local) ---
