@@ -101,6 +101,17 @@
     </p>
   </div>
 
+  {# Saída manual do loop: sem isto, cada F5 só reiniciava as 6 tentativas de reconexão. #}
+  <div id="cancelar-area" style="display:none;margin-top:1.4rem;">
+    <button id="wa-cancelar" class="btn btn-ghost" style="min-height:44px;">
+      <i data-lucide="rotate-ccw"></i> Cancelar e ler o QR de novo
+    </button>
+    <div id="cancelar-msg" style="font-size:.82rem;margin-top:.5rem;min-height:1em;"></div>
+    <p class="muted" style="font-size:.82rem;margin-top:.5rem;">
+      Descarta a sessão atual e recomeça do zero, com um QR code novo.
+    </p>
+  </div>
+
   <div id="offline-area" style="display:none;">
     <div id="qr-box-off" class="empty-box" style="margin:1.4rem auto; width:280px; height:140px; display:flex; align-items:center; justify-content:center; border-radius:12px;">Serviço indisponível</div>
     <p class="muted" style="font-size:.85rem;">O serviço de envio está fora do ar no momento. Recarregue a página em instantes; se o problema continuar, fale com o suporte.</p>
@@ -123,6 +134,7 @@
   const grpN     = document.getElementById('grupos-n');
   const grpAviso = document.getElementById('grupos-aviso');
   const logoutArea = document.getElementById('logout-area');
+  const cancelArea = document.getElementById('cancelar-area');
 
   // Ordem das fases p/ marcar passos concluídos.
   const ORDEM = ['qr', 'autenticado', 'carregando', 'sincronizando', 'conectado'];
@@ -178,6 +190,8 @@
     grpChip.style.display = 'none';
     grpAviso.style.display = 'none';
     logoutArea.style.display = 'none';
+    // Sem worker no ar não há sessão para cancelar; o botão só levaria a um erro.
+    cancelArea.style.display = 'none';
     offline.style.display = 'block';
   }
 
@@ -233,6 +247,9 @@
       grpAviso.style.display = indisponivel ? 'block' : 'none';
 
       logoutArea.style.display = (fase === 'conectado') ? 'block' : 'none';
+      // Em qualquer fase não conectada — inclusive durante as tentativas de
+      // reconexão — o usuário precisa poder abortar e pedir um QR novo.
+      cancelArea.style.display = (fase === 'conectado') ? 'none' : 'block';
       renderIcons();
 
     } catch (e) { showOffline(); }
@@ -281,6 +298,34 @@
     }
     this.disabled = false;
     setTimeout(poll, 1500);
+  };
+
+  document.getElementById('wa-cancelar').onclick = async function () {
+    if (!confirm('Cancelar a reconexão e começar do zero? A sessão atual é descartada e você precisará ler o QR code de novo.')) return;
+    const msg = document.getElementById('cancelar-msg');
+    this.disabled = true;
+    msg.style.color = 'var(--muted)';
+    msg.textContent = 'Cancelando e preparando um QR novo…';
+    try {
+      const { erro, corpo } = await acao('/scrapers/whatsapp/cancelar/', {
+        method: 'POST',
+        headers: { 'X-CSRFToken': getCookie('csrftoken') },
+      });
+      if (erro || !corpo.sucesso) {
+        msg.style.color = 'var(--red)';
+        msg.textContent = erro || 'Não foi possível cancelar agora. Tente de novo.';
+      } else {
+        // A sessão antiga morreu: liberar o revive automático de novo, senão uma
+        // eventual fase terminal desta sessão nova ficaria sem quem a religasse.
+        reviveTentado = false;
+        msg.textContent = 'Reconexão cancelada. Gerando um QR novo…';
+      }
+    } catch (e) {
+      msg.style.color = 'var(--red)';
+      msg.textContent = 'Não foi possível falar com o servidor.';
+    }
+    this.disabled = false;
+    poll();
   };
 
   document.getElementById('wa-desconectar').onclick = async function () {

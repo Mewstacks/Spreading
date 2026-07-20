@@ -98,6 +98,16 @@
     td[data-label] .td-val { min-width: 0; text-align: right; overflow-wrap: anywhere; }
   }
 
+  /* Paginação (ofertas e cupons) */
+  .pager { display: flex; align-items: center; justify-content: center; gap: .6rem;
+    flex-wrap: wrap; margin: 1.1rem 0 .4rem; }
+  .pager .btn { min-height: 44px; }
+  .pager .pager-pos { color: var(--muted); font-size: .82rem; }
+  @media (max-width: 859px) {
+    .pager .btn { flex: 1; justify-content: center; }
+    .pager .pager-pos { order: -1; flex-basis: 100%; text-align: center; }
+  }
+
   /* Busca externa por novos itens nas duas lojas */
   .busca-bar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
   .busca-bar input[type="text"] { flex: 1; min-width: 180px; }
@@ -234,7 +244,8 @@
   </div>
 
   <div class="filter-meta">
-    <span class="result-count"><strong>{% if tipo == 'cupom' %}{{ cupons_catalogo|length }}{% else %}{{ produtos|length }}{% endif %}</strong> resultado(s) · seus filtros ficam salvos{% if tipo != 'cupom' and so_afiliados and pendentes_ocultos %} · {{ pendentes_ocultos }} sem link de afiliado ocultado(s){% endif %}</span>
+    {# Total, não o tamanho da página: "20 resultado(s)" em toda página escondia a lista real. #}
+    <span class="result-count"><strong>{% if tipo == 'cupom' %}{{ cupons_page.paginator.count }}{% else %}{{ page_obj.paginator.count }}{% endif %}</strong> resultado(s){% if tipo == 'cupom' %}{% if cupons_page.paginator.num_pages > 1 %} · página {{ cupons_page.number }} de {{ cupons_page.paginator.num_pages }}{% endif %}{% elif page_obj.paginator.num_pages > 1 %} · página {{ page_obj.number }} de {{ page_obj.paginator.num_pages }}{% endif %} · seus filtros ficam salvos{% if tipo != 'cupom' and so_afiliados and pendentes_ocultos %} · {{ pendentes_ocultos }} sem link de afiliado ocultado(s){% endif %}</span>
     {% if tipo != 'cupom' %}<span class="seg">
     <a href="?{{ qs_base }}ordenar=percent" class="{% if ordenar != 'valor' %}on{% endif %}">% desconto</a>
     <a href="?{{ qs_base }}ordenar=valor" class="{% if ordenar == 'valor' %}on{% endif %}">R$ economizado</a>
@@ -262,6 +273,7 @@
     <td data-label="Confiança"><span class="badge {% if c.confianca == 'alta' %}badge-green{% else %}badge-yellow{% endif %}">{{ c.confianca }}</span></td>
     <td data-label="Validade">{% if c.validade %}{{ c.validade|date:"d/m/Y H:i" }}{% else %}Não informada{% endif %}</td>
   </tr>{% endfor %}</tbody></table></div>
+  {% include "scrapers/_paginacao.html" with page=cupons_page %}
   {% else %}<p class="empty">Nenhum cupom ativo encontrado pelas fontes.</p>{% endif %}
 {% elif produtos %}
 <div class="table-wrap">
@@ -272,7 +284,8 @@
     <tbody>
       {% for p in produtos %}
       <tr>
-        <td class="muted td-rank" style="font-weight:700;">{{ forloop.counter }}</td>
+        {# Posição no ranking, não na página: sem o offset a página 2 recomeçava em 1. #}
+        <td class="muted td-rank" style="font-weight:700;">{{ page_obj.start_index|add:forloop.counter0 }}</td>
         <td class="td-prod">
           <div class="prod-cell">
             {% if p.imagem_url %}<img class="thumb" src="{{ p.imagem_url }}" alt="" loading="lazy">{% else %}<div class="thumb-ph"><i data-lucide="package"></i></div>{% endif %}
@@ -326,6 +339,7 @@
     </tbody>
   </table>
 </div>
+{% include "scrapers/_paginacao.html" with page=page_obj %}
 {% elif so_afiliados and pendentes_ocultos %}
 {% comment %}
 Lista vazia com fila cheia não é "não achou nada": é o link de afiliado que ainda

@@ -10,6 +10,7 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_not_required
 from django.core import signing
 from django.core.exceptions import PermissionDenied
+from django.core.paginator import Paginator
 from django.db.models import (
     F, ExpressionWrapper, Exists, FloatField, OuterRef, Q, Count, Sum,
 )
@@ -482,6 +483,35 @@ def whatsapp_desconectar(request):
     """Desfaz o pareamento do WhatsApp deste usuário (espelha telegram_desconectar)."""
     from apps.scrapers import whatsapp_client
     return JsonResponse(whatsapp_client.desconectar(_wa_session(request)))
+
+
+@require_POST
+def whatsapp_cancelar_reconexao(request):
+    """Aborta a recuperação em curso e começa do zero, com QR novo.
+
+    Saída manual do loop de reconexão: o worker tenta 6 vezes, purga a
+    credencial, tenta de novo e para numa fase terminal — e cada F5 na tela
+    reviveu esse mesmo ciclo. Sem este botão o usuário não tinha como interromper
+    (o "Desconectar" só aparece conectado, que é justamente o estado que falta).
+
+    Descarta a sessão (logout + limpeza da credencial no volume) e pede uma nova
+    na sequência: sessão nova nasce com reconnectAttempts/authPurges zerados e
+    emite QR em segundos.
+    """
+    from apps.scrapers import whatsapp_client
+    session = _wa_session(request)
+    desconexao = whatsapp_client.desconectar(session)
+    # "erro" no corpo significa exclusivamente Node inalcançável (ver o CONTRATO
+    # em whatsapp_client). Sem credencial apagada, iniciar de novo só recolocaria
+    # o usuário no mesmo loop — então para aqui e deixa ele tentar outra vez.
+    if desconexao.get("erro") or desconexao.get("sucesso") is False:
+        return JsonResponse({"sucesso": False, "desconexao": desconexao})
+    inicio = whatsapp_client.iniciar_sessao(session)
+    return JsonResponse({
+        "sucesso": not inicio.get("erro") and inicio.get("sucesso") is not False,
+        "desconexao": desconexao,
+        "status": inicio,
+    })
 
 
 # --- Conexão web do Mercado Livre (login via browser remoto, sem script local) ---
@@ -1035,6 +1065,11 @@ def buscar_promocoes_stream(request):
     return _sse_runner(_job)
 
 
+# Itens por tela em Promoções (ofertas e cupons). O teto de 200 candidatos do
+# ranking (ver `candidatos` abaixo) limita a lista de ofertas a ~10 páginas.
+POR_PAGINA = 20
+
+
 def top_promocoes(request):
     from apps.scrapers.models import HistoricoEnvio
     from apps.scrapers.marketplaces.registry import MARKETPLACES
@@ -1086,6 +1121,11 @@ def top_promocoes(request):
         min_desconto = max(0, min(100, int(float(filtros.get("min_desconto") or 0))))
     except (TypeError, ValueError):
         min_desconto = 0
+
+    # A página vem só da URL, nunca da sessão de filtros: guardá-la faria uma
+    # visita nova cair na página 12 de uma lista que já mudou. Fora de
+    # `tem_filtros_na_url` de propósito — paginar não pode reescrever os filtros.
+    pagina = request.GET.get("pagina")
 
     macro_categorias = (
         Produto.objects
@@ -1160,7 +1200,11 @@ def top_promocoes(request):
         cupons_qs = cupons_qs.filter(confianca=confianca_selecionada)
     if busca:
         cupons_qs = cupons_qs.filter(Q(titulo__icontains=busca) | Q(codigo__icontains=busca))
-    cupons_catalogo = list(cupons_qs.order_by("-ultima_observacao")[:50])
+    # Paginado no banco (o corte fixo em 50 escondia o resto sem dizer).
+    cupons_page = Paginator(
+        cupons_qs.order_by("-ultima_observacao"), POR_PAGINA
+    ).get_page(pagina)
+    cupons_catalogo = list(cupons_page)
     perfil = getattr(request.user, "perfil", None)
     fontes_qs = FonteIngestao.objects.filter(habilitada=True).order_by("marketplace", "nome")
     # Fontes Amazon are account-specific. Do not present an adapter that cannot
@@ -1209,7 +1253,12 @@ def top_promocoes(request):
         prontos = [p for p in candidatos if getattr(p, "afiliado_pronto", False)]
         pendentes_ocultos = len(candidatos) - len(prontos)
         candidatos = prontos
-    produtos = candidatos[:20]
+    # Pagina a lista já materializada, e não o queryset: `afiliado_pronto` é
+    # decidido em Python (acima), então uma paginação em SQL contaria itens que a
+    # tela nunca mostra. As queries por item abaixo continuam recebendo só a
+    # página corrente.
+    page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
+    produtos = list(page_obj)
 
     cupons_map = {
         c.campanha_id: c
@@ -1265,9 +1314,18 @@ def top_promocoes(request):
     if loja_selecionada:
         qs_pairs.append(("loja", loja_selecionada))
     qs_base = (urlencode(qs_pairs) + "&") if qs_pairs else ""
+    # Base dos links de página: como `pagina` nunca entra em qs_*, preserva
+    # filtros E ordenação sem arrastar a página atual junto.
+    qs_pagina = list(qs_pairs)
+    if ordenar == "valor":
+        qs_pagina.append(("ordenar", "valor"))
+    qs_base_pagina = (urlencode(qs_pagina) + "&") if qs_pagina else ""
 
     return render(request, "scrapers/top_promocoes.html", {
         "produtos": produtos,
+        "page_obj": page_obj,
+        "cupons_page": cupons_page,
+        "qs_base_pagina": qs_base_pagina,
         "macro_categorias": macro_categorias,
         "categorias_por_macro": categorias_por_macro,
         "macros_selecionados": macros_selecionados,

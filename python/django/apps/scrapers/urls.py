@@ -59,6 +59,7 @@ urlpatterns = [
     path("whatsapp/refresh-grupos/", views.whatsapp_refresh_grupos, name="scraper-whatsapp-refresh"),
     path("whatsapp/grupos/", views.whatsapp_grupos_json, name="scraper-whatsapp-grupos"),
     path("whatsapp/desconectar/", views.whatsapp_desconectar, name="scraper-whatsapp-desconectar"),
+    path("whatsapp/cancelar/", views.whatsapp_cancelar_reconexao, name="scraper-whatsapp-cancelar"),
     path("telegram/", views.telegram_painel, name="scraper-telegram"),
     path("telegram/status/", views.telegram_status_json, name="scraper-telegram-status"),
     path("telegram/conectar/", views.telegram_conectar, name="scraper-telegram-conectar"),

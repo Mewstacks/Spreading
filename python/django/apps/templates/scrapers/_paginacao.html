@@ -1,0 +1,24 @@
+{% comment %}
+Navegação de páginas compartilhada pelas abas Ofertas e Cupons de Promoções.
+Espera `page` (um Page do Paginator) e `qs_base_pagina` (querystring dos filtros
+já terminada em "&", sem o parâmetro `pagina`).
+{% endcomment %}
+{% if page.paginator.num_pages > 1 %}
+<nav class="pager" aria-label="Paginação">
+  {% if page.has_previous %}
+    <a class="btn btn-ghost btn-sm" href="?{{ qs_base_pagina }}pagina={{ page.previous_page_number }}">
+      <i data-lucide="chevron-left"></i> Anterior
+    </a>
+  {% else %}
+    <button class="btn btn-ghost btn-sm" disabled><i data-lucide="chevron-left"></i> Anterior</button>
+  {% endif %}
+  <span class="pager-pos">Página {{ page.number }} de {{ page.paginator.num_pages }}</span>
+  {% if page.has_next %}
+    <a class="btn btn-ghost btn-sm" href="?{{ qs_base_pagina }}pagina={{ page.next_page_number }}">
+      Próxima <i data-lucide="chevron-right"></i>
+    </a>
+  {% else %}
+    <button class="btn btn-ghost btn-sm" disabled>Próxima <i data-lucide="chevron-right"></i></button>
+  {% endif %}
+</nav>
+{% endif %}
