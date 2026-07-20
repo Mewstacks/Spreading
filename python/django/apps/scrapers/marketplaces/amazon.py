@@ -168,7 +168,31 @@ class Amazon(Marketplace):
         from apps.scrapers.scraper_amazon.link import pode_gerar_link
         return pode_gerar_link(produto, usuario=usuario)
 
-    def prefetch_links(self, produtos, usuario=None):
+    def preparar_exibicao(self, produtos, usuario=None) -> None:
+        """Link em cache vale tanto quanto tag+ASIN — e resolve a página em 1 query.
+
+        O default da base pergunta item a item por `can_affiliate`, que na Amazon só
+        olha a tag do Perfil: um item JÁ afiliado (link gravado em LinkAfiliadoUsuario)
+        sumia da listagem se a tag fosse removida depois, mesmo com o link funcionando.
+        """
+        from apps.scrapers.afiliado import situacao_dos_links
+
+        situacao = situacao_dos_links(usuario, produtos)
+        for p in produtos:
+            info = situacao.get(p.id) or {}
+            cacheado = bool(info.get("link_afiliado") or getattr(p, "link_afiliado", ""))
+            p.afiliado_pronto = cacheado or self.can_affiliate(p, usuario)
+            if p.afiliado_pronto:
+                p.afiliado_estado, p.afiliado_motivo = "pronto", ""
+            elif info:
+                p.afiliado_estado = info["estado"]
+                p.afiliado_motivo = info["ultimo_erro"]
+            else:
+                p.afiliado_estado, p.afiliado_motivo = "pendente", ""
+
+    def prefetch_links(self, produtos, usuario=None, faixa=None):
+        # `faixa` não se aplica: o link Amazon é montado em memória (tag + ASIN), a
+        # etapa é instantânea e não tem o que reportar numa barra.
         from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_para_produto
         gerados = falhas = 0
         for p in produtos:

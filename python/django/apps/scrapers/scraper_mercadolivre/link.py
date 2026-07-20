@@ -8,7 +8,7 @@ caminho_django = os.path.dirname(os.path.dirname(os.path.dirname(caminho_atual))
 sys.path.append(caminho_django)
 from apps.scrapers.afiliado import ids_com_link, registrar_falha, salvar_cache
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
-from apps.scrapers.progresso import emitir_progresso
+from apps.scrapers.progresso import emitir_fase
 from apps.scrapers.session_paths import ml_auth_path as _auth_path
 
 logger = logging.getLogger(__name__)
@@ -307,7 +307,7 @@ def _afiliar_url_na_pagina(page, link_base: str):
     return _validar_resultado_link(_esperar_resultado(page))
 
 
-def gerar_links_em_lote(produtos, usuario=None):
+def gerar_links_em_lote(produtos, usuario=None, faixa=None):
     """
     Pré-gera e persiste o link de afiliado de uma lista de Produtos numa ÚNICA
     sessão Playwright. Pula produtos que já têm link em cache.
@@ -320,6 +320,10 @@ def gerar_links_em_lote(produtos, usuario=None):
     link vai pro cache por usuário (LinkAfiliadoUsuario), igual ao caminho de item
     único. Sem `usuario`, grava no Produto.link_afiliado global — o modo antigo
     single-tenant, mantido pelos chamadores legados.
+
+    `faixa` (ini, fim) encaixa o progresso numa fatia da barra, para quem chama isto
+    como ETAPA FINAL de um pipeline maior (raspagem de cupons). Sem ela, o % é
+    absoluto — o lote é a operação inteira.
 
     Retorna: (qtd_gerados, qtd_falhas).
     """
@@ -344,7 +348,8 @@ def gerar_links_em_lote(produtos, usuario=None):
             total_lote = len(pendentes)
             logger.info("Gerando links afiliados ML em lote para %s produtos", total_lote)
             for i, prod in enumerate(pendentes, 1):
-                emitir_progresso(f"[PROGRESSO] Link {i}/{total_lote} ({i*100//total_lote}%)")
+                emitir_fase(f"Link {i}/{total_lote}", i / total_lote,
+                            faixa or (0, 100))
                 # Ofertas do feed têm campanha_id vazio: _montar_url_isca trata isso e só
                 # injeta coupon_campaign_id quando há campanha. Só pulamos quando a URL
                 # não é afiliável (catálogo/perfil) -> None.

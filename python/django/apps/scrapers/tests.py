@@ -1,3 +1,4 @@
+import itertools
 import json
 import os
 import tempfile
@@ -991,27 +992,36 @@ class TopPromocoesFilterTests(TestCase):
         self.user.perfil.marcar_verificado()
         self.client.force_login(self.user)
         self.url = reverse("scraper-top")
-        Produto.objects.create(
-            marketplace="mercadolivre",
-            nome="Fone Bluetooth",
-            categoria="Áudio",
-            macro_categoria="Eletrônicos",
-            preco_sem_desconto=100,
-            preco_com_cupom=50,
+        self.fone = self._criar_produto(
+            marketplace="mercadolivre", nome="Fone Bluetooth", categoria="Áudio",
+            macro_categoria="Eletrônicos", preco_sem_desconto=100, preco_com_cupom=50,
             link_produto="https://example.com/fone",
-            origem="oferta",
         )
-        Produto.objects.create(
-            marketplace="amazon",
-            owner=self.user,
-            nome="Cafeteira",
-            categoria="Cozinha",
-            macro_categoria="Casa",
-            preco_sem_desconto=100,
-            preco_com_cupom=90,
-            link_produto="https://example.com/cafeteira",
-            origem="oferta",
+        self.cafeteira = self._criar_produto(
+            marketplace="amazon", owner=self.user, nome="Cafeteira",
+            categoria="Cozinha", macro_categoria="Casa", preco_sem_desconto=100,
+            preco_com_cupom=90, link_produto="https://example.com/cafeteira",
         )
+
+    def _criar_produto(self, afiliado=True, **campos):
+        """Produto de fixture já afiliado — a listagem só mostra item com link.
+
+        Testar filtro (busca, loja, cupom vencido) com item não afiliado dava lista
+        vazia por um motivo que não era o do teste.
+        """
+        campos.setdefault("origem", "oferta")
+        produto = Produto.objects.create(**campos)
+        if afiliado:
+            self._afiliar(produto)
+        return produto
+
+    def _afiliar(self, produto):
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto,
+            link_afiliado=f"https://meli.la/{produto.id}",
+            url_isca=produto.link_produto, afiliado_ok=True, estado="pronto",
+        )
+        return produto
 
     def test_search_and_minimum_discount_are_applied(self):
         response = self.client.get(self.url, {"q": "fone", "min_desconto": "40"})
@@ -1031,7 +1041,7 @@ class TopPromocoesFilterTests(TestCase):
         self.assertEqual(len(response.context["produtos"]), 2)
 
     def test_expired_coupon_is_not_attached_to_top_promotion(self):
-        product = Produto.objects.create(
+        product = self._criar_produto(
             marketplace="mercadolivre",
             nome="Panela com cupom vencido",
             categoria="Cozinha",
@@ -1040,7 +1050,6 @@ class TopPromocoesFilterTests(TestCase):
             preco_sem_desconto=200,
             preco_com_cupom=120,
             link_produto="https://example.com/panela",
-            origem="oferta",
         )
         Cupom.objects.create(
             campanha_id="expired-coupon", titulo="Cupom vencido",
@@ -1055,7 +1064,9 @@ class TopPromocoesFilterTests(TestCase):
         self.assertIsNone(rendered.cupom)
 
     def test_stale_products_are_hidden_from_top_promotions(self):
-        stale = Produto.objects.create(
+        # Afiliado de propósito: assim o teste prova que é o `estado` que esconde o
+        # item, e não o filtro de afiliação.
+        stale = self._criar_produto(
             marketplace="mercadolivre",
             nome="Oferta velha",
             categoria="Cozinha",
@@ -1063,13 +1074,79 @@ class TopPromocoesFilterTests(TestCase):
             preco_sem_desconto=100,
             preco_com_cupom=50,
             link_produto="https://example.com/stale",
-            origem="oferta",
             estado="stale",
         )
 
         response = self.client.get(self.url, {"q": "Oferta velha"})
 
         self.assertNotIn(stale.id, [p.id for p in response.context["produtos"]])
+
+    def test_products_without_affiliate_link_are_hidden_from_sending_list(self):
+        """Item sem link de afiliado não pode chegar ao botão Enviar: enviá-lo não
+        comissiona nada. Antes ele aparecia com o badge 'pendente' e era enviável."""
+        pendente = self._criar_produto(
+            afiliado=False,
+            marketplace="mercadolivre",
+            nome="Fritadeira sem link",
+            categoria="Cozinha",
+            macro_categoria="Casa",
+            preco_sem_desconto=200,
+            preco_com_cupom=100,
+            link_produto="https://example.com/fritadeira",
+        )
+
+        response = self.client.get(self.url, {"q": "Fritadeira"})
+
+        self.assertNotIn(pendente.id, [p.id for p in response.context["produtos"]])
+        self.assertEqual(response.context["pendentes_ocultos"], 1)
+        self.assertTrue(response.context["so_afiliados"])
+
+    def test_pending_products_are_visible_under_the_diagnostic_filter(self):
+        pendente = self._criar_produto(
+            afiliado=False,
+            marketplace="mercadolivre",
+            nome="Fritadeira sem link",
+            categoria="Cozinha",
+            macro_categoria="Casa",
+            preco_sem_desconto=200,
+            preco_com_cupom=100,
+            link_produto="https://example.com/fritadeira",
+        )
+
+        response = self.client.get(self.url, {"q": "Fritadeira", "afiliado": "todos"})
+
+        self.assertIn(pendente.id, [p.id for p in response.context["produtos"]])
+        self.assertFalse(response.context["so_afiliados"])
+
+    def test_generating_affiliate_links_requires_login_but_not_staff(self):
+        """A fila é por usuário e a lista só mostra item afiliado: sem esta rota, quem
+        não é staff dependia só do worker para ter QUALQUER produto enviável."""
+        url = reverse("scraper-gerar-links")
+        self.assertFalse(self.user.is_staff)
+
+        self.client.logout()
+        anonima = self.client.get(url)
+        self.assertEqual(anonima.status_code, 302)
+        self.assertIn("/login", anonima["Location"])
+
+    def test_legacy_product_level_affiliate_link_still_counts_as_ready(self):
+        """Item afiliado antes do multi-tenant tem o link no próprio Produto e nenhuma
+        linha em LinkAfiliadoUsuario. Não pode sumir da tela por causa disso."""
+        legado = self._criar_produto(
+            afiliado=False,
+            marketplace="mercadolivre",
+            nome="Item legado",
+            categoria="Cozinha",
+            macro_categoria="Casa",
+            preco_sem_desconto=200,
+            preco_com_cupom=100,
+            link_produto="https://example.com/legado",
+            link_afiliado="https://meli.la/legado",
+        )
+
+        response = self.client.get(self.url, {"q": "Item legado"})
+
+        self.assertIn(legado.id, [p.id for p in response.context["produtos"]])
 
     def test_source_health_hides_disabled_and_inapplicable_connectors(self):
         FonteIngestao.objects.filter(slug="mercadolivre-web").update(status="ok")
@@ -1704,6 +1781,22 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         page.locator.return_value.text_content.return_value = envelope
         return page
 
+    def _page_paginada(self, primeira, resto):
+        """Página 1 com conteúdo, da 2ª em diante `resto` — sem fim.
+
+        `side_effect` de lista fixa não serve: o extractor varre 3 seletores e
+        consome várias leituras por tentativa, então a lista acabava no meio e o
+        StopIteration virava "payload ausente" — falsificando justamente o cenário
+        que estes testes separam (varredura completa × parcial).
+        """
+        def _envelope(d):
+            return d if isinstance(d, str) else "_n.ctx.r=" + json.dumps(d) + ";_n.ctx.r.assets={}"
+
+        page = Mock()
+        page.locator.return_value.text_content.side_effect = itertools.chain(
+            [_envelope(primeira)], itertools.repeat(_envelope(resto)))
+        return page
+
     @contextmanager
     def _browser_com(self, dados):
         page = self._page_falsa(dados)
@@ -1754,6 +1847,76 @@ class ParserDeCupomDeCampanhaTests(TestCase):
 
         self.assertEqual(salvos, 0)
         self.assertEqual(Cupom.objects.get(campanha_id="999").estado, "ativo")
+
+    def test_le_o_payload_tambem_no_formato_sem_appProps(self):
+        """O ML alterna entre o payload aninhado em appProps.pageProps e o achatado.
+
+        O extractor sempre aceitou os dois, mas devolvia a RAIZ e quem consumia só
+        sabia descer por appProps: no formato achatado a extração dava certo, a lista
+        vinha vazia, e a raspagem terminava em zero cupom sem dizer por quê.
+        """
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        with open(self.DUMP, encoding="utf-8") as f:
+            dump = json.load(f)
+        achatado = {"filteredCouponsData":
+                    dump["appProps"]["pageProps"]["filteredCouponsData"]}
+        page = self._page_paginada(achatado, {"filteredCouponsData": {"coupons": []}})
+
+        @contextmanager
+        def _fake(*a, **kw):
+            yield (page, Mock())
+
+        with patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser", _fake):
+            salvos = mapear_cupons()
+
+        self.assertEqual(salvos, 30)
+        self.assertEqual(Cupom.objects.count(), 30)
+
+    def test_varredura_parcial_nao_expira_o_que_nao_chegou_a_ver(self):
+        """Falhar na página 2 não é evidência de que o resto do catálogo morreu.
+
+        O bloco de expiração rodava com a FATIA já coletada, então uma falha de rede
+        no meio marcava todo o resto como expirado — e a aba Cupons esvaziava.
+        """
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        Cupom.objects.create(campanha_id="fora-da-fatia", titulo="Cupom de outra página",
+                             estado="ativo", valor_desconto=10.0, valor_minimo=0.0)
+        with open(self.DUMP, encoding="utf-8") as f:
+            dump = json.load(f)
+        # Página 1 ok; da 2ª em diante o payload some (as 3 tentativas falham).
+        page = self._page_paginada(dump, "<html>bloqueado</html>")
+
+        @contextmanager
+        def _fake(*a, **kw):
+            yield (page, Mock())
+
+        with patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser", _fake):
+            salvos = mapear_cupons()
+
+        self.assertEqual(salvos, 30)
+        self.assertEqual(Cupom.objects.get(campanha_id="fora-da-fatia").estado, "ativo")
+
+    def test_varredura_completa_expira_o_cupom_que_saiu_do_ar(self):
+        """O contrapeso do teste acima: chegando ao fim, expirar é o certo."""
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        Cupom.objects.create(campanha_id="saiu-do-ar", titulo="Cupom morto",
+                             estado="ativo", valor_desconto=10.0, valor_minimo=0.0)
+        with open(self.DUMP, encoding="utf-8") as f:
+            dump = json.load(f)
+        vazio = {"appProps": {"pageProps": {"filteredCouponsData": {"coupons": []}}}}
+        page = self._page_paginada(dump, vazio)
+
+        @contextmanager
+        def _fake(*a, **kw):
+            yield (page, Mock())
+
+        with patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser", _fake):
+            mapear_cupons()
+
+        self.assertEqual(Cupom.objects.get(campanha_id="saiu-do-ar").estado, "expirado")
 
 
 class ProjecaoCatalogoCuponsTests(TestCase):

@@ -72,8 +72,12 @@ class Marketplace(ABC):
         """
         return 0
 
-    def prefetch_links(self, produtos, usuario=None):
-        """Pré-gera links em lote. Default: loop sobre build_affiliate_link."""
+    def prefetch_links(self, produtos, usuario=None, faixa=None):
+        """Pré-gera links em lote. Default: loop sobre build_affiliate_link.
+
+        `faixa` (ini, fim) é opcional e só interessa a quem reporta progresso numa
+        barra compartilhada com outras etapas; lojas sem progresso ignoram.
+        """
         gerados = falhas = 0
         for p in produtos:
             try:

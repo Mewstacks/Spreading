@@ -154,11 +154,11 @@ class MercadoLivre(Marketplace):
         from apps.scrapers.scraper_mercadolivre.ofertas_scraper import buscar_por_termo
         return buscar_por_termo(termo_busca, min_desconto=min_desconto, macro=macro)
 
-    def prefetch_links(self, produtos, usuario=None):
+    def prefetch_links(self, produtos, usuario=None, faixa=None):
         """Pré-gera links em lote (uma sessão Playwright). Retorna (gerados, falhas).
 
         O pool ML é compartilhado, mas a SESSÃO é por usuário: `usuario` diz qual
         auth_{id}.json abrir. Sem ele, link.py resolve a sessão disponível.
         """
         from apps.scrapers.scraper_mercadolivre.link import gerar_links_em_lote
-        return gerar_links_em_lote(produtos, usuario=usuario)
+        return gerar_links_em_lote(produtos, usuario=usuario, faixa=faixa)

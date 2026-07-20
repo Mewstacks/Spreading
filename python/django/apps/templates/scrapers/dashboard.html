@@ -200,29 +200,58 @@
 
   let es;
 
+  function progressSet(texto, pct, estado) {
+    const wrap = document.getElementById('progress-wrap');
+    const bar = document.getElementById('progress-bar');
+    wrap.style.display = 'block';
+    document.getElementById('progress-text').textContent = texto;
+    // Sem % conhecido a barra fica indeterminada em vez de parada: é o único jeito
+    // de a tela distinguir "etapa longa rodando" de "travou".
+    bar.classList.toggle('indeterminate', pct === null);
+    bar.classList.toggle('failed', estado === 'falha');
+    if (pct !== null) bar.style.width = pct + '%';
+  }
+
   function updateProgress(data) {
+    const texto = data.replace('[PROGRESSO] ', '');
     const m = data.match(/\((\d+)%\)/);
-    if (!m) return;
-    document.getElementById('progress-wrap').style.display = 'block';
-    document.getElementById('progress-bar').style.width = m[1] + '%';
-    document.getElementById('progress-text').textContent = data.replace('[PROGRESSO] ', '');
+    // Linha sem % ainda é sinal de vida (a Amazon e a busca por termo só emitem
+    // assim): vira legenda e mantém a barra andando. Antes era descartada e a
+    // barra nunca chegava a aparecer nessas etapas.
+    progressSet(texto, m ? m[1] : null);
   }
 
   function runStream(url, btnId) {
     const btn = document.getElementById(btnId);
     const log = document.getElementById('log');
     btn.disabled = true; log.innerHTML = '';
+    // A barra sobe junto com o clique: a primeira etapa (abrir o browser, carregar
+    // a página do ML) pode levar um minuto antes da primeira linha chegar.
+    progressSet('Iniciando…', null);
     es = new EventSource(url);
     es.onmessage = function (e) {
       if (e.data === '__DONE__') {
         appendLine('--- Finalizado ---', 'line-done');
-        document.getElementById('progress-bar').style.width = '100%';
+        progressSet('Concluído', 100);
         es.close(); btn.disabled = false; return;
       }
+      if (e.data.indexOf('__ML_LOGIN__') !== -1) { appendReconectarML(); return; }
       if (e.data.startsWith('[PROGRESSO]')) { updateProgress(e.data); return; }
       appendLine(e.data, e.data.startsWith('[ERRO]') ? 'line-err' : '');
     };
-    es.onerror = function () { appendLine('[ERRO] Conexão perdida.', 'line-err'); es.close(); btn.disabled = false; };
+    es.onerror = function () {
+      appendLine('[ERRO] Conexão perdida.', 'line-err');
+      progressSet('Interrompido', 100, 'falha');
+      es.close(); btn.disabled = false;
+    };
+  }
+
+  function appendReconectarML() {
+    const ln = document.createElement('div');
+    ln.className = 'line-err';
+    ln.innerHTML = '&rarr; <a href="/scrapers/ml/" style="color:inherit;font-weight:600;text-decoration:underline">Reconectar Mercado Livre</a>';
+    const log = document.getElementById('log');
+    log.appendChild(ln); log.scrollTop = log.scrollHeight;
   }
 
   function startOfertas() { runStream('/scrapers/ofertas/?paginas=40', 'ofertas-btn'); }

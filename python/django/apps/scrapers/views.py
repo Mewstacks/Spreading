@@ -23,6 +23,7 @@ from apps.scrapers.models import (
     CliquePublicacao, ConfiguracaoEnvio, Cupom, LinkAfiliadoUsuario, Produto,
     Publicacao, ReceitaAfiliado, RelatorioSync, FonteIngestao, CupomNormalizado,
 )
+from apps.scrapers.progresso import emitir_fase
 from apps.scrapers.scraper_mercadolivre.scraper import main as scrapper_main
 
 
@@ -1047,7 +1048,7 @@ def top_promocoes(request):
     tem_filtros_na_url = any(
         chave in request.GET
         for chave in ("macro", "categoria", "loja", "ordenar", "q", "min_desconto",
-                      "tipo", "fonte", "confianca", "atualizado_desde")
+                      "tipo", "fonte", "confianca", "atualizado_desde", "afiliado")
     )
     if tem_filtros_na_url:
         filtros = {
@@ -1061,6 +1062,9 @@ def top_promocoes(request):
             "fonte": (request.GET.get("fonte") or "").strip()[:80],
             "confianca": (request.GET.get("confianca") or "").strip()[:20],
             "atualizado_desde": (request.GET.get("atualizado_desde") or "").strip(),
+            # Default = só afiliados: enviar item sem link de afiliado não comissiona.
+            # "todos" existe só para diagnóstico (ver o que está travado na fila).
+            "afiliado": "todos" if request.GET.get("afiliado") == "todos" else "prontos",
         }
         request.session[filtros_key] = filtros
     else:
@@ -1073,6 +1077,7 @@ def top_promocoes(request):
     tipo = filtros.get("tipo", "oferta")
     fonte_selecionada = filtros.get("fonte", "")
     confianca_selecionada = filtros.get("confianca", "")
+    so_afiliados = filtros.get("afiliado", "prontos") != "todos"
     try:
         atualizado_desde = max(0, min(168, int(filtros.get("atualizado_desde") or 0)))
     except (TypeError, ValueError):
@@ -1140,7 +1145,10 @@ def top_promocoes(request):
         qs = qs.filter(ultima_observacao__gte=timezone.now() - timezone.timedelta(hours=atualizado_desde))
 
     ordem = "-economia" if ordenar == "valor" else "-percent"
-    produtos = list(qs.order_by(ordem)[:20])
+    # Candidatos além dos 20 exibidos: a afiliação é resolvida por loja (abaixo) e só
+    # depois a lista é cortada, senão um bloco de pendentes no topo do ranking
+    # esvaziava a página inteira.
+    candidatos = list(qs.order_by(ordem)[:200])
     cupons_qs = CupomNormalizado.objects.select_related("fonte").filter(
         estado="ativo"
     ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
@@ -1183,6 +1191,26 @@ def top_promocoes(request):
         amazon_diagnostico = "Creators API inelegível; o fallback público tentará alimentar sua conta."
     else:
         amazon_diagnostico = "Nenhuma oferta Amazon confirmada no último ciclo."
+    # Atribuição é regra de cada loja (ver Marketplace.preparar_exibicao). Em lote e
+    # agrupado por loja: por item seria uma query por produto da página.
+    from apps.scrapers.marketplaces.registry import get_marketplace
+    por_loja = {}
+    for p in candidatos:
+        por_loja.setdefault(p.marketplace, []).append(p)
+    for slug, itens in por_loja.items():
+        get_marketplace(slug).preparar_exibicao(itens, request.user)
+
+    # O corte só acontece AQUI: item sem link de afiliado não vai para a tela de
+    # envio, porque enviá-lo não comissiona nada. O filtro é em Python, e não em SQL,
+    # de propósito — `afiliado_pronto` é contrato de cada loja (na Amazon sai de tag +
+    # ASIN, não de linha no banco), então só `preparar_exibicao` sabe respondê-lo.
+    pendentes_ocultos = 0
+    if so_afiliados:
+        prontos = [p for p in candidatos if getattr(p, "afiliado_pronto", False)]
+        pendentes_ocultos = len(candidatos) - len(prontos)
+        candidatos = prontos
+    produtos = candidatos[:20]
+
     cupons_map = {
         c.campanha_id: c
         for c in Cupom.objects.filter(
@@ -1196,14 +1224,6 @@ def top_promocoes(request):
             produto_id__in=[p.id for p in produtos], usuario=request.user)
         .values_list("produto_id", flat=True)
     )
-    # Atribuição é regra de cada loja (ver Marketplace.preparar_exibicao). Em lote e
-    # agrupado por loja: por item seria uma query por produto da página.
-    from apps.scrapers.marketplaces.registry import get_marketplace
-    por_loja = {}
-    for p in produtos:
-        por_loja.setdefault(p.marketplace, []).append(p)
-    for slug, itens in por_loja.items():
-        get_marketplace(slug).preparar_exibicao(itens, request.user)
 
     # Histórico de preço de todos os itens da página numa query só (era uma por item).
     from apps.scrapers.precos import chave_produto, stats_em_lote
@@ -1231,6 +1251,12 @@ def top_promocoes(request):
         qs_pairs.append(("confianca", confianca_selecionada))
     if atualizado_desde:
         qs_pairs.append(("atualizado_desde", atualizado_desde))
+    # base p/ o chip de afiliação: preserva o resto dos filtros e troca só ele.
+    qs_base_sem_afiliado = urlencode(qs_pairs + (
+        [("loja", loja_selecionada)] if loja_selecionada else []))
+    qs_base_sem_afiliado = (qs_base_sem_afiliado + "&") if qs_base_sem_afiliado else ""
+    if not so_afiliados:
+        qs_pairs.append(("afiliado", "todos"))
     # base p/ os chips de loja: preserva macro/categoria/ordem, troca só a loja.
     qs_sem_loja = list(qs_pairs)
     if ordenar == "valor":
@@ -1261,6 +1287,9 @@ def top_promocoes(request):
         "atualizado_desde": atualizado_desde,
         "cupons_catalogo": cupons_catalogo,
         "amazon_diagnostico": amazon_diagnostico,
+        "so_afiliados": so_afiliados,
+        "pendentes_ocultos": pendentes_ocultos,
+        "qs_base_sem_afiliado": qs_base_sem_afiliado,
         "filtros_ativos": len(macros_selecionados) + len(categorias_selecionadas)
             + bool(loja_selecionada) + bool(busca) + bool(min_desconto)
             + bool(fonte_selecionada) + bool(confianca_selecionada) + bool(atualizado_desde),
@@ -1485,19 +1514,95 @@ def scrape_cupons_codigo_stream(request):
     from apps.scrapers.scraper_mercadolivre.scraper import (
         mapear_cupons, projetar_catalogo_cupons)
 
+    from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
+    from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
+
+    uid = request.user.id  # capturado fora da thread
+
     def _job():
-        # A aba Cupons lê só o CupomNormalizado; sem projetar no fim, a raspagem
-        # manual enchia a tabela Cupom e a aba continuava vazia.
-        n_campanha = mapear_cupons()
-        print(f"{n_campanha} cupom(ns) de campanha raspados.")
+        from django.contrib.auth import get_user_model
+        from apps.scrapers.afiliado import frase_resumo_afiliacao
+        from apps.scrapers.eventos import log_event
+        from apps.scrapers.marketplaces.registry import get_marketplace
+        usuario = get_user_model().objects.filter(id=uid).first()
+
+        # O trabalho é dividido em faixas da barra porque nenhuma etapa sozinha
+        # conhece o total: sem isso a barra ou zerava a cada etapa, ou (o que
+        # acontecia) nunca aparecia e o botão ficava cinza sem explicação.
         try:
-            mapear_cupons_codigo()
+            n_campanha = mapear_cupons(faixa=(0, 45))
+        except (LoginError, AuthError, SessaoExpirada) as exc:
+            print(f"[ERRO] Sessão do Mercado Livre expirada: {exc}")
+            print("__ML_LOGIN__")
+            return
+        except BrowserError as exc:
+            print(f"[ERRO] Não foi possível abrir a página de cupons: {exc}")
+            return
+        print(f"{n_campanha} cupom(ns) de campanha raspados.")
+
+        try:
+            n_codigo = mapear_cupons_codigo(faixa=(45, 75))
+            print(f"{n_codigo} produto(s) de cupom de checkout raspados.")
         except Exception as exc:
             print(f"Aviso: raspagem de códigos de checkout falhou ({exc}).")
-        n_proj = projetar_catalogo_cupons()
+
+        n_proj = projetar_catalogo_cupons(faixa=(75, 85))
         print(f"{n_proj} cupom(ns) publicados na aba Cupons.")
+        if not n_proj:
+            # Antes esta etapa zerava em silêncio e a aba Cupons vazia não tinha
+            # explicação em lugar nenhum. Agora o motivo fica na Saúde também.
+            print("Aviso: nenhum cupom ativo para publicar — a aba Cupons segue "
+                  "com o conteúdo anterior.")
+            log_event("scraper", "cupons_vazios",
+                      "A raspagem manual de cupons não publicou nenhum cupom.",
+                      level="warning", usuario=usuario,
+                      contexto={"marketplace": "mercadolivre",
+                                "campanhas": n_campanha, "etapa": "projecao"})
+
+        # Produto de cupom sem link de afiliado não aparece na tela de envio (ver
+        # top_promocoes): raspar sem afiliar deixava a raspagem "sem efeito visível".
+        emitir_fase("Gerando links de afiliado", 0.0, (85, 100))
+        pendentes = _produtos_sem_link(usuario, origens=("cupom", "cupom_codigo"))
+        if not pendentes:
+            print("Todos os produtos de cupom já têm link de afiliado.")
+        else:
+            print(f"\nGerando links de afiliado para {len(pendentes)} produto(s) de cupom...")
+            por_loja = {}
+            for p in pendentes:
+                por_loja.setdefault(p.marketplace or "mercadolivre", []).append(p)
+            for slug, grupo in por_loja.items():
+                try:
+                    get_marketplace(slug).prefetch_links(grupo, usuario=usuario,
+                                                         faixa=(85, 100))
+                except (LoginError, AuthError, SessaoExpirada) as exc:
+                    print(f"[ERRO] Sessão do Mercado Livre expirada: {exc}")
+                    print("__ML_LOGIN__")
+                    break
+                except Exception as exc:
+                    print(f"Aviso: geração de links em {slug} falhou ({exc}).")
+        print(frase_resumo_afiliacao(usuario))
 
     return _sse_runner(_job)
+
+
+def _produtos_sem_link(usuario, origens=None, limite=80):
+    """Produtos visíveis ao usuário que ainda não têm link de afiliado dele.
+
+    Mesmo predicado de `gerar_links_stream` (pendente é por USUÁRIO: o link mora em
+    LinkAfiliadoUsuario, não no Produto), fatorado porque o fluxo de cupons passou a
+    precisar dele também.
+    """
+    ja_tem = LinkAfiliadoUsuario.objects.filter(
+        usuario=usuario, produto=OuterRef("pk")).exclude(link_afiliado="")
+    qs = (
+        Produto.objects
+        .filter(Q(owner__isnull=True) | Q(owner=usuario))
+        .exclude(estado__in=["indisponivel", "invalido", "expirado", "stale"])
+        .exclude(Exists(ja_tem))
+    )
+    if origens:
+        qs = qs.filter(origem__in=origens)
+    return list(qs.order_by("-ultima_observacao")[:limite])
 
 
 @require_GET
@@ -1522,71 +1627,50 @@ def buscar_termo_stream(request):
     return _sse_runner(_job)
 
 
-@staff_required
 @require_GET
 @throttle_sse(10)
 def gerar_links_stream(request):
-    """SSE endpoint — gera links de afiliado em lote para produtos sem link."""
+    """SSE endpoint — gera links de afiliado em lote para produtos sem link.
+
+    Não é mais só para staff: a fila é por usuário (LinkAfiliadoUsuario) e a tela de
+    Promoções só lista item afiliado, então quem não é staff precisava esperar o
+    worker para ter QUALQUER produto enviável.
+    """
     from apps.scrapers.marketplaces.registry import get_marketplace
+    from apps.scrapers.auxiliar import SessaoExpirada
+    from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
 
     try:
         limite = int(request.GET.get("limite", 50))
     except (TypeError, ValueError):
         limite = 50
+    uid = request.user.id  # capturado fora da thread
 
-    # Fora da thread de propósito: _run roda noutra thread e não pode tocar request.
-    usuario = request.user
+    def _job():
+        from django.contrib.auth import get_user_model
+        from apps.scrapers.afiliado import frase_resumo_afiliacao
+        usuario = get_user_model().objects.filter(id=uid).first()
 
-    def _event_stream():
-        q: queue.Queue = queue.Queue()
-        writer = _QueueWriter(q)
-
-        def _run():
-            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-            asyncio.set_event_loop(asyncio.new_event_loop())
+        pendentes = _produtos_sem_link(usuario, limite=limite)
+        if not pendentes:
+            print("Nenhum produto na fila — todos já têm link de afiliado.")
+            print(frase_resumo_afiliacao(usuario))
+            return
+        print(f"Gerando link de afiliado para {len(pendentes)} produto(s)...")
+        # Agrupa por loja: cada marketplace gera seus links (ML=Playwright,
+        # Amazon=puro Python). Evita rodar o Link Builder do ML num ASIN.
+        por_loja = {}
+        for p in pendentes:
+            por_loja.setdefault(p.marketplace or "mercadolivre", []).append(p)
+        for slug, grupo in por_loja.items():
             try:
-                with redirect_stdout(writer):
-                    # Pendente é por USUÁRIO: cada um afilia com a conta dele, então o
-                    # link vive em LinkAfiliadoUsuario e não no Produto. Filtrar por
-                    # link_afiliado="" (campo global) listava como pendente item que
-                    # este usuário já tem, e como pronto item que ele não tem.
-                    ja_tem = LinkAfiliadoUsuario.objects.filter(
-                        usuario=usuario, produto=OuterRef("pk")).exclude(link_afiliado="")
-                    base_qs = (
-                        Produto.objects
-                        .filter(Q(owner__isnull=True) | Q(owner=usuario))
-                        .exclude(Exists(ja_tem))
-                    )
-                    pendentes = list(base_qs[:limite])
-                    restantes = base_qs.count()
-                    print(f"{restantes} produto(s) sem link pronto. Gerando até {limite}...")
-                    # Agrupa por loja: cada marketplace gera seus links (ML=Playwright,
-                    # Amazon=puro Python). Evita rodar o Link Builder do ML num ASIN.
-                    if pendentes:
-                        por_loja = {}
-                        for p in pendentes:
-                            por_loja.setdefault(p.marketplace or "mercadolivre", []).append(p)
-                        for slug, grupo in por_loja.items():
-                            get_marketplace(slug).prefetch_links(grupo, usuario=usuario)
-                    from apps.scrapers.afiliado import frase_resumo_afiliacao
-                    print(frase_resumo_afiliacao(usuario))
-            except Exception as exc:
-                q.put(f"[ERRO] {exc}")
-            finally:
-                writer.flush()
-                q.put(None)
-
-        thread = threading.Thread(target=_run, daemon=True)
-        thread.start()
-
-        while True:
-            line = q.get()
-            if line is None:
-                yield "data: __DONE__\n\n"
+                get_marketplace(slug).prefetch_links(grupo, usuario=usuario)
+            except (LoginError, AuthError, SessaoExpirada) as exc:
+                print(f"[ERRO] Sessão do Mercado Livre expirada: {exc}")
+                print("__ML_LOGIN__")
                 break
-            yield f"data: {line}\n\n"
+            except Exception as exc:
+                print(f"Aviso: geração de links em {slug} falhou ({exc}).")
+        print(frase_resumo_afiliacao(usuario))
 
-    response = StreamingHttpResponse(_event_stream(), content_type="text/event-stream")
-    response["Cache-Control"] = "no-cache"
-    response["X-Accel-Buffering"] = "no"
-    return response
+    return _sse_runner(_job)

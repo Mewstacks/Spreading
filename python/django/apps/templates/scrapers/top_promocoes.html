@@ -142,6 +142,18 @@
        {% if afiliacao_ultimo_erro %}title="{{ afiliacao_ultimo_erro }}"{% endif %}>
     Afiliação: {{ afiliacao.prontos }} prontos · {{ afiliacao.pendente }} na fila{% if afiliacao.erro %} · {{ afiliacao.erro }} com erro{% endif %}{% if afiliacao.nao_afiliavel %} · {{ afiliacao.nao_afiliavel }} não afiliáveis{% endif %}
   </div>
+  {% if tipo != 'cupom' %}
+  <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.55rem;">
+    <button type="button" id="links-btn" class="btn btn-blue btn-sm acao-sm" onclick="gerarLinks()">
+      <i data-lucide="link"></i> Gerar links de afiliado</button>
+    {% if so_afiliados %}
+      <a class="btn btn-ghost btn-sm acao-sm" href="?{{ qs_base_sem_afiliado }}afiliado=todos">Mostrar também os pendentes</a>
+    {% else %}
+      <a class="btn btn-ghost btn-sm acao-sm" href="?{{ qs_base_sem_afiliado }}afiliado=prontos">Mostrar só os afiliados</a>
+    {% endif %}
+  </div>
+  <div id="links-log" class="modal-log"></div>
+  {% endif %}
   <div style="display:flex;gap:.45rem;flex-wrap:wrap;">
     {% for f in fontes %}<span class="badge {% if f.status == 'ok' %}badge-green{% elif f.status == 'blocked' %}badge-red{% else %}badge-yellow{% endif %}" title="{{ f.erro_publico|default:'Sem erro recente' }}">{{ f.nome }} · {{ f.status }}</span>
     {% empty %}<span class="muted">As fontes serão registradas no próximo ciclo.</span>{% endfor %}
@@ -222,7 +234,7 @@
   </div>
 
   <div class="filter-meta">
-    <span class="result-count"><strong>{% if tipo == 'cupom' %}{{ cupons_catalogo|length }}{% else %}{{ produtos|length }}{% endif %}</strong> resultado(s) · seus filtros ficam salvos</span>
+    <span class="result-count"><strong>{% if tipo == 'cupom' %}{{ cupons_catalogo|length }}{% else %}{{ produtos|length }}{% endif %}</strong> resultado(s) · seus filtros ficam salvos{% if tipo != 'cupom' and so_afiliados and pendentes_ocultos %} · {{ pendentes_ocultos }} sem link de afiliado ocultado(s){% endif %}</span>
     {% if tipo != 'cupom' %}<span class="seg">
     <a href="?{{ qs_base }}ordenar=percent" class="{% if ordenar != 'valor' %}on{% endif %}">% desconto</a>
     <a href="?{{ qs_base }}ordenar=valor" class="{% if ordenar == 'valor' %}on{% endif %}">R$ economizado</a>
@@ -314,6 +326,20 @@
     </tbody>
   </table>
 </div>
+{% elif so_afiliados and pendentes_ocultos %}
+{% comment %}
+Lista vazia com fila cheia não é "não achou nada": é o link de afiliado que ainda
+não saiu. Dizer só "nenhum produto encontrado" mandava o usuário raspar de novo,
+que era exatamente o que não resolvia.
+{% endcomment %}
+<p class="empty">
+  Nenhum item afiliado ainda — {{ pendentes_ocultos }} produto(s) aguardando link.<br>
+  <span class="muted" style="font-size:.85rem;">
+    {{ afiliacao.pendente }} na fila{% if afiliacao.erro %} · {{ afiliacao.erro }} com erro{% endif %}{% if afiliacao.nao_afiliavel %} · {{ afiliacao.nao_afiliavel }} não afiliáveis{% endif %}.
+    Use <strong>Gerar links de afiliado</strong> acima, ou
+    <a class="link" href="/scrapers/ml/">reconecte o Mercado Livre</a> se a sessão caiu.
+  </span>
+</p>
 {% else %}
 <p class="empty">Nenhum produto encontrado. Rode o <a class="link" href="/scrapers/">scraper</a> primeiro, ou pesquise um item acima.</p>
 {% endif %}
@@ -427,6 +453,33 @@ function buscarItens() {
     log.appendChild(ln); log.scrollTop = log.scrollHeight;
   };
   es.onerror = function () { var l=document.createElement('div'); l.className='err'; l.textContent='A conexão foi perdida. Tente novamente.'; log.appendChild(l); es.close(); };
+}
+
+// ─── Gerar links de afiliado da fila deste usuário ───
+// A lista só mostra item afiliado, então sem isto quem não é staff dependia só do
+// worker para ter QUALQUER produto enviável na tela.
+function gerarLinks() {
+  var btn = document.getElementById('links-btn');
+  var log = document.getElementById('links-log');
+  btn.disabled = true; log.textContent = '';
+  var es = new EventSource('/scrapers/gerar-links/');
+  es.onmessage = function (e) {
+    if (e.data === '__DONE__') { es.close(); location.reload(); return; }
+    var ln = document.createElement('div');
+    if (e.data.indexOf('__ML_LOGIN__') !== -1) {
+      ln.className = 'err';
+      ln.innerHTML = '&rarr; <a href="/scrapers/ml/" style="color:inherit;font-weight:600;text-decoration:underline">Reconectar Mercado Livre</a>';
+    } else {
+      if (e.data.startsWith('[ERRO]')) ln.className = 'err';
+      ln.textContent = e.data;
+    }
+    log.appendChild(ln); log.scrollTop = log.scrollHeight;
+  };
+  es.onerror = function () {
+    var l = document.createElement('div'); l.className = 'err';
+    l.textContent = 'A conexão foi perdida. Tente novamente.';
+    log.appendChild(l); es.close(); btn.disabled = false;
+  };
 }
 
 // ─── Popup de envio ───

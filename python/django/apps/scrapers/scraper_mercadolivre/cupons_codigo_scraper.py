@@ -16,7 +16,7 @@ import logging
 
 from apps.scrapers.auxiliar import iniciar_browser
 from apps.scrapers.models import Produto, CupomCodigo, FonteIngestao, CupomNormalizado
-from apps.scrapers.progresso import emitir_progresso
+from apps.scrapers.progresso import emitir_fase, emitir_progresso
 from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _coletar_cards, _salvar
 from apps.scrapers.session_paths import ml_auth_path
 
@@ -42,8 +42,12 @@ def _extrair_codigos(texto):
     return [c for c in cands if c not in _NAO_CODIGO]
 
 
-def mapear_cupons_codigo():
-    """Raspa /ofertas/cupons: produtos -> origem='cupom_codigo'; códigos -> CupomCodigo."""
+def mapear_cupons_codigo(faixa=None):
+    """Raspa /ofertas/cupons: produtos -> origem='cupom_codigo'; códigos -> CupomCodigo.
+
+    `faixa` (ini, fim) liga o progresso na tela; sem ela a linha sai sem % (é o que
+    o ciclo automático faz — não há barra para alimentar).
+    """
     logger.info("Iniciando raspagem de cupons de codigo ML")
     caminho_auth = ml_auth_path()
     coletados, codigos = [], set()
@@ -52,7 +56,7 @@ def mapear_cupons_codigo():
     with iniciar_browser(auth_path=caminho_auth, headless=True,
                          validar_sessao=False) as (page, context):
         for n in range(1, 6):  # algumas páginas
-            emitir_progresso(f"[PROGRESSO] Cupons-código página {n}/5")
+            emitir_fase(f"Cupons de checkout — página {n}/5", n / 5, faixa)
             url = "https://www.mercadolivre.com.br/ofertas/cupons"
             if n > 1:
                 url += f"?page={n}"
@@ -87,6 +91,10 @@ def mapear_cupons_codigo():
     # os produtos nem desativa códigos válidos — evita zerar tudo por falha de rede.
     if not coletados and not codigos:
         logger.warning("Raspagem de cupons de codigo ML vazia; nada alterado")
+        # Sem prefixo [PROGRESSO]: isto é log, tem que ficar na tela depois que a
+        # barra passar, não virar legenda efêmera da barra.
+        emitir_progresso("Aviso: a página de cupons do ML não devolveu nenhum item "
+                         "(nada foi alterado).")
         return 0
 
     # Produtos do cupom-código são efêmeros (recriados a cada raspagem, como as outras
@@ -136,4 +144,7 @@ def mapear_cupons_codigo():
     if coletados and not codigos:
         logger.warning("Raspagem de cupons de codigo ML: %s produto(s) e NENHUM "
                        "codigo em %s pagina(s)", len(coletados), paginas_sem_codigo)
+        emitir_progresso(
+            f"Aviso: {len(coletados)} produto(s) de cupom, mas nenhum código de "
+            f"checkout legível em {paginas_sem_codigo} página(s).")
     return n_prod

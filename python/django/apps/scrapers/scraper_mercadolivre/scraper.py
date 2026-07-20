@@ -6,7 +6,7 @@ import logging
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada
 from apps.scrapers.models import Cupom, Produto, CupomNormalizado, FonteIngestao
-from apps.scrapers.progresso import emitir_progresso
+from apps.scrapers.progresso import emitir_progresso, emitir_fase
 from apps.scrapers.session_paths import ml_auth_path
 from django.utils import timezone
 
@@ -19,6 +19,12 @@ def _extrair_payload_cupons(page):
     O ML alterna entre script com id, script JSON e bundle inline. Todos carregam a
     mesma chave ``filteredCouponsData``; a validação é por estrutura, não por uma
     substring fixa que some a cada deploy do site.
+
+    Devolve o ``filteredCouponsData`` JÁ DESEMBRULHADO. Antes devolvia a raiz: esta
+    função tolerava as duas formas do payload (com e sem ``appProps.pageProps``) mas
+    quem consumia só sabia descer por ``appProps``. No formato achatado a extração
+    dava certo, o consumidor via lista vazia, gastava as 3 tentativas por página e
+    a raspagem terminava em zero cupom sem uma linha dizendo por quê.
     """
     candidatos = []
     for selector in ("#__NORDIC_RENDERING_CTX__", "script[type='application/json']", "script"):
@@ -45,28 +51,38 @@ def _extrair_payload_cupons(page):
             if isinstance(current, dict) and current.get("appProps"):
                 current = current["appProps"].get("pageProps", {})
             if isinstance(current, dict) and isinstance(current.get("filteredCouponsData"), dict):
-                return data
+                return current["filteredCouponsData"]
     return None
 
-def mapear_cupons(n=1):
+def mapear_cupons(n=1, faixa=None):
     """Raspa /cupons/filter e popula a tabela Cupom. Retorna quantos foram salvos.
 
     Único caminho que preenche `Cupom`, e é dele que depende a geração de link de
     produto com campanha: link.py aborta quando o produto tem campanha_id e não há
     Cupom correspondente no banco. Ficou anos fora do loop automático, rodando só
     no clique manual da tela de Scraper — ver marketplaces/mercadolivre.scrape_all.
+
+    `faixa` (ini, fim) liga o progresso na tela; sem ela, o comportamento silencioso
+    de antes (o ciclo automático não tem barra para alimentar).
     """
     todos_os_cupons_limpos = []
     MAX_RETRIES = 3
     RETRY_WAIT = 5  # segundos entre tentativas
+    # O total de páginas é desconhecido (o laço vai até vir uma vazia), então a barra
+    # não pode ser i/total: a fração se aproxima do fim da faixa sem nunca chegar.
+    PAGINAS_TIPICAS = 8
+    varredura_completa = False
+    motivo_parada = ""
 
     caminho_auth = ml_auth_path()
     logger.info("Iniciando raspagem e limpeza de cupons")
-    
+
     with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
         while True:
             tentativa = 0
             dados = None
+            emitir_fase(f"Cupons de campanha — página {n}",
+                        min(n / PAGINAS_TIPICAS, 0.95), faixa)
 
             while tentativa < MAX_RETRIES:
                 try:
@@ -82,7 +98,7 @@ def mapear_cupons(n=1):
                     time.sleep(RETRY_WAIT)
                     continue
 
-                lista_check = dados.get("appProps", {}).get("pageProps", {}).get("filteredCouponsData", {}).get("coupons", [])
+                lista_check = dados.get("coupons", [])
                 if len(lista_check) == 0:
                     logger.debug("Pagina %s retornou vazia, tentativa %s/%s", n, tentativa + 1, MAX_RETRIES)
                     tentativa += 1
@@ -93,14 +109,20 @@ def mapear_cupons(n=1):
 
             if dados is None:
                 logger.warning("Pagina %s falhou apos %s tentativas; encerrando", n, MAX_RETRIES)
+                motivo_parada = (
+                    f"o payload de cupons não foi encontrado na página {n} "
+                    f"(o formato do site pode ter mudado)")
                 break
 
-            lista_da_pagina = dados.get("appProps", {}).get("pageProps", {}).get("filteredCouponsData", {}).get("coupons", [])
+            lista_da_pagina = dados.get("coupons", [])
             if len(lista_da_pagina) == 0:
                 logger.info("Pagina %s retornou vazia apos %s tentativas; fim da busca", n, MAX_RETRIES)
+                # Página vazia é o fim natural da paginação: a varredura viu o
+                # catálogo inteiro e só aqui é seguro expirar o que não apareceu.
+                varredura_completa = True
                 break
-                
-            tracking_list = dados.get("appProps", {}).get("pageProps", {}).get("filteredCouponsData", {}).get("tracking", {}).get("view", {}).get("eventData", {}).get("coupons_list", [])            
+
+            tracking_list = dados.get("tracking", {}).get("view", {}).get("eventData", {}).get("coupons_list", [])
             tracking_dict = {str(t.get("campaign_id")): t for t in tracking_list if "campaign_id" in t}
 
             for cupom in lista_da_pagina:
@@ -242,33 +264,48 @@ def mapear_cupons(n=1):
             ],
         )
         ids_ativos = {c["campaignId"] for c in todos_os_cupons_limpos}
-        expirados = Cupom.objects.exclude(campanha_id__in=ids_ativos).update(
-            estado="expirado", ultima_verificacao=timezone.now())
-        if expirados:
-            logger.info("%s cupom(ns) marcado(s) como expirado(s)", expirados)
-        # Limpa apenas a lane de cupons do pool compartilhado do ML. Um exclude()
-        # global aqui apagava também ofertas, buscas e produtos privados da Amazon.
-        prods_expirados = (
-            Produto.objects
-            .filter(marketplace="mercadolivre", owner__isnull=True, origem="cupom")
-            .exclude(campanha_id__in=ids_ativos)
-            .update(
-                estado="expirado",
-                falha_verificacao="Cupom não observado na última sincronização",
-                ultima_verificacao=timezone.now(),
+        # Expirar o que não apareceu só é válido se a varredura chegou ao fim. Quando
+        # ela para no meio (payload some na página 3), o que veio é uma FATIA do
+        # catálogo — e expirar "todo o resto" apagava a aba Cupons inteira por causa
+        # de uma falha de rede. A guarda anti-wipe antiga só cobria o caso 100% vazio.
+        if not varredura_completa:
+            logger.warning(
+                "Varredura de cupons parcial (%s cupom(ns) em %s página(s)): %s. "
+                "Nada foi expirado.", len(todos_os_cupons_limpos), n - 1,
+                motivo_parada or "interrompida")
+        else:
+            expirados = Cupom.objects.exclude(campanha_id__in=ids_ativos).update(
+                estado="expirado", ultima_verificacao=timezone.now())
+            if expirados:
+                logger.info("%s cupom(ns) marcado(s) como expirado(s)", expirados)
+            # Limpa apenas a lane de cupons do pool compartilhado do ML. Um exclude()
+            # global aqui apagava também ofertas, buscas e produtos privados da Amazon.
+            prods_expirados = (
+                Produto.objects
+                .filter(marketplace="mercadolivre", owner__isnull=True, origem="cupom")
+                .exclude(campanha_id__in=ids_ativos)
+                .update(
+                    estado="expirado",
+                    falha_verificacao="Cupom não observado na última sincronização",
+                    ultima_verificacao=timezone.now(),
+                )
             )
-        )
-        if prods_expirados:
-            logger.info("%s produto(s) de cupons marcados como expirados", prods_expirados)
+            if prods_expirados:
+                logger.info("%s produto(s) de cupons marcados como expirados", prods_expirados)
         logger.info("%s cupons salvos/atualizados", len(todos_os_cupons_limpos))
     else:
         # Guarda anti-wipe: coleta vazia não expira nada (o bloco acima nem roda).
         # Mesmo contrato de mapear_cupons_codigo e mapear_ofertas.
         logger.warning("Raspagem de cupons de campanha ML vazia; nada alterado")
+    if motivo_parada:
+        # A tela precisa saber POR QUE veio pouco/nada. Sem esta linha o SSE dizia
+        # apenas "0 cupom(ns)" e não havia como distinguir catálogo vazio de parser
+        # quebrado. `_sse_runner` captura o stdout; no worker vira log.
+        emitir_progresso(f"Aviso: a varredura de cupons parou — {motivo_parada}.")
     return len(todos_os_cupons_limpos)
 
 
-def projetar_catalogo_cupons():
+def projetar_catalogo_cupons(faixa=None):
     """Projeta os cupons de campanha (tabela `Cupom`) para o catálogo público
     (`CupomNormalizado`) — a aba "Cupons" do site lê SÓ o `CupomNormalizado`.
 
@@ -278,6 +315,7 @@ def projetar_catalogo_cupons():
     ML parou de expor esses códigos em texto. Roda a cada scrape, lendo o banco —
     independe de a raspagem deste ciclo ter trazido cupom novo.
     """
+    emitir_fase("Publicando os cupons na aba Cupons", 0.0, faixa)
     fonte, _ = FonteIngestao.objects.get_or_create(
         slug="mercadolivre-web", defaults={
             "marketplace": "mercadolivre", "nome": "Mercado Livre — páginas públicas"})
@@ -289,7 +327,11 @@ def projetar_catalogo_cupons():
         return 0
 
     externos_vistos = set()
-    for c in ativos:
+    for i, c in enumerate(ativos, 1):
+        # São milhares de update_or_create: sem um pulso aqui a barra congelava na
+        # última linha da etapa anterior por minutos.
+        if faixa and (i % 50 == 0 or i == 1):
+            emitir_fase(f"Publicando cupons {i}/{len(ativos)}", i / len(ativos), faixa)
         ext = f"campanha:{c.campanha_id}"
         externos_vistos.add(ext)
         if c.tipo_desconto == "fixo":
