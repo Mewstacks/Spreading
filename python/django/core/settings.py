@@ -46,6 +46,10 @@ PUBLIC_BASE_URL = os.getenv(
 )
 BILLING_CHECKOUT_URL = os.getenv("BILLING_CHECKOUT_URL", "")
 BILLING_PORTAL_URL = os.getenv("BILLING_PORTAL_URL", "")
+# Cadastro público FECHADO por padrão: o produto é vendido com onboarding
+# controlado — o superadmin cria as contas pelo painel (/scrapers/painel-admin/).
+# Reabra o self-service só se quiser, com PERMITIR_CADASTRO_PUBLICO=1 no .env.
+PERMITIR_CADASTRO_PUBLICO = os.getenv("PERMITIR_CADASTRO_PUBLICO", "0") == "1"
 # Sem default: o antigo apontava pra landing de afiliados (não um relatório), então o
 # sync raspava uma página sem tabela e reportava "erro" pra sempre. Vazio = a tela diz
 # "sincronização automática indisponível", que é a verdade, em vez de erro recorrente.

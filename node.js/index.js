@@ -114,6 +114,15 @@ const PRINT_QR_TO_LOGS = process.env.PRINT_QR_TO_LOGS === '1';
 const WATCHDOG_TIMEOUT_MS = parseInt(process.env.WATCHDOG_TIMEOUT_MS, 10) || 45000;
 const WATCHDOG_INTERVAL_MS = parseInt(process.env.WATCHDOG_INTERVAL_MS, 10) || 5000;
 const MAX_WHATSAPP_SESSIONS = parseInt(process.env.MAX_WHATSAPP_SESSIONS, 10) || 4;
+// takeoverOnConflict=TRUE fazia o worker ROUBAR o socket de qualquer outra sessao
+// WhatsApp Web do mesmo numero. Se esse numero tambem esta aberto no navegador do
+// dono (o celular mostra o aparelho "Google Chrome (macOS)"), os dois lados ficam
+// se roubando sem parar e o celular re-sincroniza a cada roubo -> spam infinito de
+// "Syncing.../Finished syncing...". Default FALSE: o worker para de brigar. O ideal
+// e o worker ser o UNICO dispositivo web vinculado (use um numero dedicado). Ligue
+// com WA_TAKEOVER_ON_CONFLICT=1 so se o worker precisar mesmo assumir de um web
+// aberto por engano.
+const WA_TAKEOVER_ON_CONFLICT = process.env.WA_TAKEOVER_ON_CONFLICT === '1';
 const SESSION_INIT_TIMEOUT_MS = parseInt(process.env.SESSION_INIT_TIMEOUT_MS, 10) || 90000;
 // O watchdog mede o heartbeat do event loop; uma inicializacao async longa nao
 // o aciona. O bootstrap frio recebe a mesma janela da inicializacao normal.
@@ -887,7 +896,7 @@ const initializeSession = (session) => {
     if (session.qrBootstrapAtivo) marcarQrBootstrap(session);
     const client = new Client({
         authStrategy: new LocalAuth({ dataPath: session.authPath }),
-        takeoverOnConflict: true,
+        takeoverOnConflict: WA_TAKEOVER_ON_CONFLICT,
         takeoverTimeoutMs: 10000,
         puppeteer: {
             protocolTimeout: 300000,

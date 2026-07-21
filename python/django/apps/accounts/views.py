@@ -4,6 +4,7 @@ LoginRequiredMiddleware tranca o site inteiro por padrão; estas views são as
 únicas públicas (marcadas com @login_not_required). Login tem rate-limit por
 IP+usuário via cache para frear brute-force sem depender de Redis/axes.
 """
+from django.conf import settings
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_not_required
 from django.contrib.auth.views import LoginView
@@ -77,6 +78,14 @@ class ThrottledLoginView(LoginView):
 def signup(request):
     if request.user.is_authenticated:
         return redirect("home")
+    # Cadastro público fechado por padrão: só o superadmin cria contas (pelo painel).
+    # Sem isto, qualquer um se registra na máquina compartilhada. Reabra com
+    # PERMITIR_CADASTRO_PUBLICO=1 se um dia quiser self-service.
+    if not settings.PERMITIR_CADASTRO_PUBLICO:
+        from django.contrib import messages
+        messages.info(request, "O cadastro é feito pelo administrador. "
+                      "Fale com o suporte para liberar seu acesso.")
+        return redirect("login")
     if request.method == "POST":
         form = SignUpForm(request.POST)
         if form.is_valid():

@@ -65,7 +65,7 @@
           <tbody>
           {% for p in publicacoes %}
             <tr>
-              <td class="cell-grow"><b>{{ p.produto.nome|default:"Oferta removida"|truncatechars:55 }}</b><div class="muted" style="font-size:.74rem;">{{ p.criada_em|date:"d/m H:i" }} · variante {{ p.variante }}</div></td>
+              <td class="cell-grow"><b>{% if p.origem == "cupom" %}{{ p.cupom_normalizado.titulo|default:p.cupom|default:"Cupom"|truncatechars:55 }}{% else %}{{ p.produto.nome|default:"Oferta removida"|truncatechars:55 }}{% endif %}</b><div class="muted" style="font-size:.74rem;">{{ p.criada_em|date:"d/m H:i" }} · variante {{ p.variante }}</div></td>
               <td>{{ p.destino_nome|default:p.destino_id|truncatechars:24 }}</td>
               <td><span class="badge {% if p.status == 'enviado' %}badge-green{% elif p.status == 'falhou' %}badge-red{% elif p.status == 'incerto' %}badge-yellow{% else %}badge-muted{% endif %}">{{ p.get_status_display }}</span>{% if p.erro_publico %}<div class="muted" style="font-size:.7rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;">{{ p.erro_publico }}</div>{% endif %}</td>
             </tr>

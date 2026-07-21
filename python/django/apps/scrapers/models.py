@@ -115,6 +115,9 @@ class CupomNormalizado(models.Model):
     marketplace = models.CharField(max_length=20, db_index=True)
     titulo = models.CharField(max_length=255)
     codigo = models.CharField(max_length=120, blank=True, default="")
+    # Categoria/ação da fonte (Sellers, Fashion, "site inteiro", ...). Vem do
+    # `escopo` das regras normalizadas; alimenta o filtro por categoria dos cupons.
+    categoria = models.CharField(max_length=100, blank=True, default="", db_index=True)
     regras = models.JSONField(default=dict, blank=True)
     link = models.URLField(max_length=1000, blank=True, default="")
     validade = models.DateTimeField(null=True, blank=True, db_index=True)
@@ -179,6 +182,7 @@ class Publicacao(models.Model):
         ("ignorado", "Ignorado"),
     ]
     id_publico = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    origem = models.CharField(max_length=30, default="produto", db_index=True)
     # Slug do link curto publicado na mensagem (/r/<slug>/). null p/ as linhas
     # anteriores ao campo — o token assinado antigo continua funcionando p/ elas.
     slug_curto = models.CharField(max_length=12, unique=True, null=True, blank=True,
@@ -187,6 +191,10 @@ class Publicacao(models.Model):
                                 related_name="publicacoes")
     produto = models.ForeignKey(Produto, on_delete=models.SET_NULL, null=True,
                                 related_name="publicacoes")
+    cupom_normalizado = models.ForeignKey(
+        "CupomNormalizado", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="publicacoes",
+    )
     configuracao = models.ForeignKey("ConfiguracaoEnvio", on_delete=models.SET_NULL,
                                      null=True, blank=True, related_name="publicacoes")
     canal = models.CharField(max_length=20)
@@ -217,6 +225,24 @@ class CliquePublicacao(models.Model):
     """Clique sem IP, cookie ou identificador pessoal."""
     publicacao = models.ForeignKey(Publicacao, on_delete=models.CASCADE, related_name="cliques")
     clicado_em = models.DateTimeField(auto_now_add=True, db_index=True)
+
+
+class LinkAfiliadoCupomUsuario(models.Model):
+    """Cache de link afiliado de um cupom por usuario e URL de origem."""
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                related_name="links_cupons")
+    cupom = models.ForeignKey(CupomNormalizado, on_delete=models.CASCADE,
+                              related_name="links_usuarios")
+    url_origem = models.URLField(max_length=1000)
+    link_afiliado = models.URLField(max_length=1500)
+    afiliado_ok = models.BooleanField(default=False)
+    atualizado_em = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["usuario", "cupom"],
+                                    name="uniq_link_cupom_usuario"),
+        ]
 
 
 class ReceitaAfiliado(models.Model):

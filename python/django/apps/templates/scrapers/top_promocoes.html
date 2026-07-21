@@ -43,6 +43,11 @@
   .store-line { display: flex; align-items: center; gap: .45rem; margin-top: .35rem; }
   .table-wrap table { min-width: 880px; }
   .td-prod { width: 100%; white-space: normal; }
+  /* Código de cupom pode ser bem longo (até 120 chars): quebra e limita a largura
+     p/ não empurrar a coluna Cupom pra fora da tela (bug da tabela cortada). */
+  .cell-code { white-space: normal; width: 200px; min-width: 160px; }
+  .cell-code .td-val { white-space: normal; overflow-wrap: anywhere; }
+  #modal-envio .btn, #modal-envio select, #modal-envio input, #modal-envio .x-btn { min-height: 44px; }
   .td-prod .prod-name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .col-actions { position: sticky; right: 0; background: var(--surface); box-shadow: -10px 0 18px rgba(0,0,0,.12); }
   thead .col-actions { background: var(--surface-2); z-index: 2; }
@@ -97,6 +102,14 @@
     }
     td[data-label] .td-val { min-width: 0; text-align: right; overflow-wrap: anywhere; }
   }
+
+  /* Filtro de geração de links: recolhido até o clique no gatilho */
+  .links-collapse { display: inline-block; }
+  .links-summary { list-style: none; cursor: pointer; user-select: none; }
+  .links-summary::-webkit-details-marker { display: none; }
+  .links-summary::marker { content: ""; }
+  .links-panel { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center;
+    margin-top: .55rem; }
 
   /* Paginação (ofertas e cupons) */
   .pager { display: flex; align-items: center; justify-content: center; gap: .6rem;
@@ -154,8 +167,19 @@
   </div>
   {% if tipo != 'cupom' %}
   <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.55rem;">
-    <button type="button" id="links-btn" class="btn btn-blue btn-sm acao-sm" onclick="gerarLinks()">
-      <i data-lucide="link"></i> Gerar links de afiliado</button>
+    {# Filtro de geração de links recolhido: só aparece o gatilho até o clique. #}
+    <details class="links-collapse">
+      <summary class="btn btn-blue btn-sm acao-sm links-summary">
+        <i data-lucide="link"></i> Gerar links de afiliado</summary>
+      <div class="links-panel">
+        <select id="links-macro" class="btn-sm acao-sm" aria-label="Categoria para gerar links" style="width:auto;min-width:150px;">
+          <option value="">Todas as categorias</option>
+          {% for mc in macro_categorias %}<option value="{{ mc }}">{{ mc }}</option>{% endfor %}
+        </select>
+        <button type="button" id="links-btn" class="btn btn-green btn-sm acao-sm" onclick="gerarLinks()">
+          <i data-lucide="zap"></i> Gerar</button>
+      </div>
+    </details>
     {% if so_afiliados %}
       <a class="btn btn-ghost btn-sm acao-sm" href="?{{ qs_base_sem_afiliado }}afiliado=todos">Mostrar também os pendentes</a>
     {% else %}
@@ -185,6 +209,18 @@
       <option value="">Todas as lojas</option>
       {% for lj in lojas %}<option value="{{ lj }}" {% if loja_selecionada == lj %}selected{% endif %}>{% if lj == "mercadolivre" %}Mercado Livre{% else %}{{ lj|title }}{% endif %}</option>{% endfor %}
     </select>
+
+    {% if tipo == 'cupom' %}
+    <select name="categoria_cupom" aria-label="Categoria do cupom" style="width:auto;min-width:160px;">
+      <option value="">Todas as categorias</option>
+      {% for cat in cupom_categorias %}<option value="{{ cat }}" {% if categoria_cupom_selecionada == cat %}selected{% endif %}>{{ cat }}</option>{% endfor %}
+    </select>
+    <select name="como_usar" aria-label="Como usar" style="width:auto;min-width:150px;">
+      <option value="">Como usar: qualquer</option>
+      <option value="codigo" {% if como_usar_selecionado == 'codigo' %}selected{% endif %}>Com código</option>
+      <option value="ativacao" {% if como_usar_selecionado == 'ativacao' %}selected{% endif %}>Ativar no link</option>
+    </select>
+    {% endif %}
 
     {% if tipo != 'cupom' %}
     <select name="min_desconto" class="min-discount" aria-label="Desconto mínimo">
@@ -265,13 +301,16 @@
 
 {% if tipo == 'cupom' %}
   {% if cupons_catalogo %}
-  <div class="table-wrap"><table><thead><tr><th>Código</th><th>Cupom</th><th>Loja</th><th>Confiança</th><th>Validade</th></tr></thead><tbody>
+  <div class="table-wrap"><table><thead><tr><th>Como usar</th><th class="cell-grow">Cupom</th><th>Loja</th><th>Confiança</th><th>Validade</th><th>Ação</th></tr></thead><tbody>
   {% for c in cupons_catalogo %}<tr>
-    <td data-label="Código"><strong>{{ c.codigo|default:"—" }}</strong></td>
-    <td data-label="Cupom"><div><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div class="muted" style="font-size:.76rem;">Cupom genérico; confirme a aplicação no checkout.</div></div></td>
-    <td data-label="Loja">{{ c.marketplace|title }}</td>
-    <td data-label="Confiança"><span class="badge {% if c.confianca == 'alta' %}badge-green{% else %}badge-yellow{% endif %}">{{ c.confianca }}</span></td>
-    <td data-label="Validade">{% if c.validade %}{{ c.validade|date:"d/m/Y H:i" }}{% else %}Não informada{% endif %}</td>
+    <td data-label="Como usar" class="cell-code"><div class="td-val" style="white-space:normal;overflow-wrap:anywhere;"><strong>{% if c.codigo_publico %}{{ c.codigo_publico }}{% else %}Ativar no link{% endif %}</strong></div></td>
+    <td data-label="Cupom"><div class="td-val"><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div class="muted" style="font-size:.76rem;">Cupom genérico; confirme a aplicação no checkout.</div></div></td>
+    <td data-label="Loja"><div class="td-val">{{ c.marketplace|title }}</div></td>
+    <td data-label="Confiança"><div class="td-val"><span class="badge {% if c.confianca == 'alta' %}badge-green{% else %}badge-yellow{% endif %}">{{ c.confianca }}</span></div></td>
+    <td data-label="Validade"><div class="td-val">{% if c.validade %}{{ c.validade|date:"d/m/Y H:i" }}{% else %}Não informada{% endif %}</div></td>
+    <td data-label="Ação" class="col-actions"><div class="td-val" style="display:flex;justify-content:flex-end;">
+      <button class="btn btn-green btn-sm" onclick="abrirEnvioCupom({{ c.id }}, '{{ c.codigo_publico|escapejs }}')"><i data-lucide="send"></i> Enviar</button>
+    </div></td>
   </tr>{% endfor %}</tbody></table></div>
   {% include "scrapers/_paginacao.html" with page=cupons_page %}
   {% else %}<p class="empty">Nenhum cupom ativo encontrado pelas fontes.</p>{% endif %}
@@ -362,7 +401,7 @@ que era exatamente o que não resolvia.
 <div class="modal-ov" id="modal-envio" onclick="if(event.target===this)fecharEnvio()">
   <div class="modal" role="dialog" aria-modal="true">
     <div class="modal-head">
-      <h3><i data-lucide="send"></i> Enviar oferta</h3>
+      <h3 id="env-titulo"><i data-lucide="send"></i> Enviar oferta</h3>
       <button class="x-btn" type="button" onclick="fecharEnvio()" aria-label="Fechar"><i data-lucide="x"></i></button>
     </div>
     <div class="modal-body">
@@ -476,7 +515,10 @@ function gerarLinks() {
   var btn = document.getElementById('links-btn');
   var log = document.getElementById('links-log');
   btn.disabled = true; log.textContent = '';
-  var es = new EventSource('/scrapers/gerar-links/');
+  var macroSel = document.getElementById('links-macro');
+  var macro = macroSel ? macroSel.value.trim() : '';
+  var url = '/scrapers/gerar-links/' + (macro ? '?macro=' + encodeURIComponent(macro) : '');
+  var es = new EventSource(url);
   es.onmessage = function (e) {
     if (e.data === '__DONE__') { es.close(); location.reload(); return; }
     var ln = document.createElement('div');
@@ -497,14 +539,16 @@ function gerarLinks() {
 }
 
 // ─── Popup de envio ───
-var envProdId = null, envEs = null;
+var envProdId = null, envAbort = null, envTipo = 'produto';
 function getCookie(nome) {
   var m = document.cookie.match('(^|;)\\s*' + nome + '\\s*=\\s*([^;]+)');
   return m ? decodeURIComponent(m.pop()) : '';
 }
 function abrirEnvio(id, nome) {
+  envTipo = 'produto';
   envProdId = id;
   document.getElementById('env-prod').textContent = nome;
+  document.getElementById('env-titulo').innerHTML = '<i data-lucide="send"></i> Enviar oferta';
   document.getElementById('env-log').textContent = '';
   document.getElementById('env-go').disabled = false;
   document.getElementById('modal-envio').classList.add('open');
@@ -514,12 +558,25 @@ function abrirEnvio(id, nome) {
   envToggleCanal();
   renderIcons();
 }
+// Mesmo popup dos produtos, mas envia um cupom: só troca a origem do conteúdo.
+function abrirEnvioCupom(id, codigo) {
+  envTipo = 'cupom';
+  envProdId = id;
+  document.getElementById('env-prod').textContent = codigo ? ('Cupom ' + codigo) : 'Cupom para ativar no link';
+  document.getElementById('env-titulo').innerHTML = '<i data-lucide="ticket-percent"></i> Enviar cupom';
+  document.getElementById('env-log').textContent = '';
+  document.getElementById('env-go').disabled = false;
+  document.getElementById('modal-envio').classList.add('open');
+  envGruposParar();
+  envToggleCanal();
+  renderIcons();
+}
 function fecharEnvio() {
   document.getElementById('modal-envio').classList.remove('open');
   // Sem isto a cadeia de repoll continua batendo em /api/grupos com o modal
   // fechado, até esgotar o backoff.
   envGruposParar();
-  if (envEs) { envEs.close(); envEs = null; }
+  if (envAbort) { envAbort.abort(); envAbort = null; }
 }
 function envToggleCanal() {
   var tg = document.getElementById('env-canal').value === 'telegram';
@@ -619,7 +676,7 @@ async function loadEnvGruposAgora() {
   grupos.forEach(function (g) { sel.add(new Option(g.nome, g.id)); });
   field.innerHTML = ''; field.appendChild(sel);
 }
-function dispararEnvio() {
+async function dispararEnvio() {
   var canal = document.getElementById('env-canal').value;
   var el = document.getElementById(canal === 'telegram' ? 'env-tg-input' : 'env-grupo-input');
   var grupo = (el && el.value || '').trim();
@@ -628,21 +685,46 @@ function dispararEnvio() {
   if (!grupo) { log.innerHTML = '<span class="err">Escolha ou digite o grupo de destino.</span>'; return; }
   document.getElementById('env-go').disabled = true;
   log.textContent = '';
-  var url = '/scrapers/enviar-produto/?produto=' + envProdId
-    + '&canal=' + encodeURIComponent(canal)
-    + '&grupo=' + encodeURIComponent(grupo)
-    + '&grupo_nome=' + encodeURIComponent(nome);
-  envEs = new EventSource(url);
-  envEs.onmessage = function (e) {
-    if (e.data === '__DONE__') { envEs.close(); envEs = null; return; }
+  var url = envTipo === 'cupom' ? '/scrapers/enviar-cupom/' : '/scrapers/enviar-produto/';
+  var form = new URLSearchParams();
+  form.set(envTipo === 'cupom' ? 'cupom' : 'produto', envProdId);
+  form.set('canal', canal); form.set('grupo', grupo); form.set('grupo_nome', nome);
+  envAbort = new AbortController();
+  function receber(data) {
+    if (data === '__DONE__') { envAbort = null; return; }
     var ln = document.createElement('div');
-    if (e.data.indexOf('__SENT__') !== -1) { ln.className = 'ok'; ln.textContent = e.data.replace('__SENT__ ', ''); setTimeout(function(){ location.reload(); }, 1200); }
-    else if (e.data.indexOf('__ML_LOGIN__') !== -1) { ln.className = 'err'; ln.innerHTML = '&rarr; <a href="/scrapers/ml/" style="color:inherit;font-weight:600;text-decoration:underline">Reconectar Mercado Livre</a>'; document.getElementById('env-go').disabled = false; }
-    else if (e.data.startsWith('[ERRO]')) { ln.className = 'err'; ln.textContent = e.data; document.getElementById('env-go').disabled = false; }
-    else ln.textContent = e.data;
+    if (data.indexOf('__SENT__') !== -1) { ln.className = 'ok'; ln.textContent = data.replace('__SENT__ ', ''); setTimeout(function(){ location.reload(); }, 1200); }
+    else if (data.indexOf('__ML_LOGIN__') !== -1) { ln.className = 'err'; ln.innerHTML = '&rarr; <a href="/scrapers/ml/" style="color:inherit;font-weight:600;text-decoration:underline">Reconectar Mercado Livre</a>'; document.getElementById('env-go').disabled = false; }
+    else if (data.startsWith('[ERRO]')) { ln.className = 'err'; ln.textContent = data; document.getElementById('env-go').disabled = false; }
+    else ln.textContent = data;
     log.appendChild(ln); log.scrollTop = log.scrollHeight;
-  };
-  envEs.onerror = function () { var l=document.createElement('div'); l.className='err'; l.textContent='A conexão foi perdida. Tente novamente.'; log.appendChild(l); document.getElementById('env-go').disabled = false; if(envEs){envEs.close();envEs=null;} };
+  }
+  try {
+    var resposta = await fetch(url, {
+      method: 'POST', body: form, signal: envAbort.signal,
+      headers: {'X-CSRFToken': getCookie('csrftoken'),
+                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'}
+    });
+    if (!resposta.ok || !resposta.body) throw new Error('HTTP ' + resposta.status);
+    var leitor = resposta.body.getReader(), decoder = new TextDecoder(), buffer = '';
+    while (true) {
+      var parte = await leitor.read();
+      if (parte.done) break;
+      buffer += decoder.decode(parte.value, {stream:true});
+      var blocos = buffer.split('\n\n'); buffer = blocos.pop();
+      blocos.forEach(function (bloco) {
+        bloco.split('\n').forEach(function (linha) {
+          if (linha.indexOf('data: ') === 0) receber(linha.slice(6));
+        });
+      });
+    }
+  } catch (erro) {
+    if (erro.name !== 'AbortError') {
+      var l=document.createElement('div'); l.className='err';
+      l.textContent='A conexão foi perdida. Tente novamente.'; log.appendChild(l);
+      document.getElementById('env-go').disabled=false;
+    }
+  } finally { envAbort = null; }
 }
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape') fecharEnvio(); });
 </script>

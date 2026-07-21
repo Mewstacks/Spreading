@@ -49,6 +49,7 @@ urlpatterns = [
     path("r/<str:token>/", views.redirect_rastreado, name="scraper-redirect"),
     path("sincronizar-receitas/", views.sincronizar_receitas, name="scraper-sincronizar-receitas"),
     path("enviar-produto/", views.enviar_produto_stream, name="scraper-enviar-produto"),
+    path("enviar-cupom/", views.enviar_cupom_stream, name="scraper-enviar-cupom"),
     path("buscar-promocoes/", views.buscar_promocoes_stream, name="scraper-buscar-promocoes"),
     path("config/", views.configuracoes, name="scraper-configuracoes"),
     path("enviar-agora/", views.enviar_agora_stream, name="scraper-enviar-agora"),

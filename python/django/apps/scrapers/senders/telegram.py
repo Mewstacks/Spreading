@@ -9,9 +9,11 @@ Setup: o usuário cria um bot no @BotFather e cola o token na tela Conexão Tele
 `destino` = '@nomedocanal' ou id numérico (ex '-1001234567890').
 """
 import requests
+import time
+import re
 from django.conf import settings
 
-from apps.scrapers.senders.base import Sender, TelegramHTMLMarkup
+from apps.scrapers.senders.base import Sender, TelegramHTMLMarkup, padronizar_resultado
 
 
 def resolver_token(usuario=None) -> str:
@@ -19,7 +21,7 @@ def resolver_token(usuario=None) -> str:
     if usuario is not None:
         perfil = getattr(usuario, "perfil", None)
         if perfil and perfil.telegram_bot_token:
-            return perfil.telegram_bot_token.strip()
+            return str(perfil.telegram_bot_token).strip()
         return ""
     return (getattr(settings, "TELEGRAM_BOT_TOKEN", "") or "").strip()
 
@@ -29,6 +31,9 @@ class TelegramSender(Sender):
     prefers_image = "url"          # sendPhoto aceita a URL da imagem do ML direto
     markup = TelegramHTMLMarkup()
 
+    def _resultado(self, dados):
+        return padronizar_resultado(dados, self.slug)
+
     def _api(self, metodo, token):
         if not token:
             return None
@@ -37,12 +42,20 @@ class TelegramSender(Sender):
     def enviar_oferta(self, destino, mensagem, *, imagem_url=None, imagem_b64=None,
                       mimetype="image/jpeg", legenda=None, usuario=None, session=None):
         # session ignorado: o Bot API do Telegram usa `usuario` (token do bot por-usuário).
-        if not destino:
-            return {"sucesso": False, "erro": "destino (chat_id) vazio."}
+        destino = str(destino or "").strip()
+        mensagem = str(mensagem or "")
+        if not destino or not mensagem:
+            return self._resultado({"sucesso": False, "erro": "Destino ou mensagem vazia.",
+                    "classe": "permanente", "via": "telegram"})
+        if not re.fullmatch(r"(?:@[A-Za-z][A-Za-z0-9_]{4,31}|-?\d+)", destino):
+            return self._resultado({"sucesso": False,
+                    "erro": "Destino do Telegram inválido. Use @canal ou o ID numérico.",
+                    "classe": "permanente", "via": "telegram"})
         token = resolver_token(usuario)
         if not token:
-            return {"sucesso": False,
-                    "erro": "Bot do Telegram não conectado. Conecte em Conexão Telegram."}
+            return self._resultado({"sucesso": False,
+                    "erro": "Bot do Telegram não conectado. Conecte em Conexão Telegram.",
+                    "classe": "permanente", "via": "telegram"})
 
         # Telegram: legenda de foto tem limite de 1024 chars; texto puro até 4096.
         if imagem_url:
@@ -55,10 +68,24 @@ class TelegramSender(Sender):
                        "parse_mode": "HTML", "disable_web_page_preview": False}
 
         try:
+            inicio = time.monotonic()
             r = requests.post(url, json=payload, timeout=30)
             corpo = r.json()
             if corpo.get("ok"):
-                return {"sucesso": True, "via": "telegram"}
-            return {"sucesso": False, "erro": corpo.get("description") or f"HTTP {r.status_code}"}
+                msg = corpo.get("result") if isinstance(corpo.get("result"), dict) else {}
+                return self._resultado({"sucesso": True, "via": "telegram",
+                        "mensagem_id": str(msg.get("message_id") or ""),
+                        "duracao_ms": round((time.monotonic() - inicio) * 1000)})
+            codigo = int(corpo.get("error_code") or r.status_code)
+            classe = "transitorio" if codigo == 429 or codigo >= 500 else "permanente"
+            return self._resultado({"sucesso": False,
+                    "erro": corpo.get("description") or f"HTTP {r.status_code}",
+                    "status": codigo, "classe": classe, "via": "telegram",
+                    "duracao_ms": round((time.monotonic() - inicio) * 1000)})
+        except (requests.Timeout, requests.ConnectionError) as e:
+            return self._resultado({"sucesso": False, "erro": f"Falha de transporte: {e}",
+                    "classe": "transitorio", "via": "telegram", "etapa": "http",
+                    "duracao_ms": 30000, "falha_infra": True})
         except Exception as e:
-            return {"sucesso": False, "erro": f"Falha de transporte: {e}"}
+            return self._resultado({"sucesso": False, "erro": f"Falha de transporte: {e}",
+                    "classe": "desconhecido", "via": "telegram"})

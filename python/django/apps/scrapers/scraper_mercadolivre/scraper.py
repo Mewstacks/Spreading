@@ -346,15 +346,27 @@ def projetar_catalogo_cupons(faixa=None):
             defaults={
                 "marketplace": "mercadolivre",
                 "titulo": titulo[:255],
-                "codigo": c.codigo or "",
+                # `code`/`inputCode` desta API e um token opaco de ativacao, nao
+                # um codigo digitavel. Mantemos como evidencia e nunca o exibimos.
+                "codigo": "",
                 "link": c.link_original or "https://www.mercadolivre.com.br/cupons",
                 "validade": c.validade,
                 "confianca": "media",
                 "estado": "ativo",
-                "regras": {"tipo_desconto": c.tipo_desconto,
+                "regras": {"tipo_desconto": (
+                                "porcentagem" if c.tipo_desconto == "percentual"
+                                else c.tipo_desconto),
                            "valor_desconto": c.valor_desconto,
-                           "valor_minimo": c.valor_minimo},
-                "evidencia": {"transport": "public-web", "association": "campaign"},
+                           "valor_minimo": c.valor_minimo,
+                           "desconto_maximo": None,
+                           "modo_resgate": "ativacao",
+                           "escopo": "",
+                           "container_url": "",
+                           "container_name": "",
+                           "is_mar_aberto": False,
+                           "dia_inicio": "", "dia_fim": ""},
+                "evidencia": {"transport": "public-web", "association": "campaign",
+                              "token_ativacao": c.codigo or ""},
             },
         )
 

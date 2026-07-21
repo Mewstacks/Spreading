@@ -120,6 +120,11 @@ def mapear_cupons_codigo(faixa=None):
             fonte=fonte, external_id=f"checkout:{cod}",
             defaults={"marketplace": "mercadolivre", "titulo": f"Cupom {cod}",
                       "codigo": cod, "link": "https://www.mercadolivre.com.br/ofertas/cupons",
+                      "regras": {"tipo_desconto": "", "valor_desconto": None,
+                                 "valor_minimo": None, "desconto_maximo": None,
+                                 "modo_resgate": "codigo", "escopo": "",
+                                 "container_url": "", "container_name": "",
+                                 "is_mar_aberto": False, "dia_inicio": "", "dia_fim": ""},
                       "confianca": "baixa", "estado": "ativo",
                       "evidencia": {"transport": "public-web", "association": "unverified"}},
         )

@@ -8,13 +8,36 @@ Telegram usa HTML <b>/<i>/<s>).
 from abc import ABC, abstractmethod
 
 
+def padronizar_resultado(resultado, canal: str) -> dict:
+    """Completa o envelope do transporte sem apagar dados específicos do canal."""
+    dados = dict(resultado or {})
+    sucesso = bool(dados.get("sucesso"))
+    classe = str(dados.get("classe") or ("" if sucesso else "desconhecido"))
+    desfecho = str(dados.get("resultado") or ("confirmado" if sucesso else "falha"))
+    repetir = dados.get("repetir")
+    if repetir is None:
+        repetir = bool(not sucesso and classe == "transitorio" and desfecho != "incerto")
+    dados.update({
+        "sucesso": sucesso,
+        "mensagem_id": str(dados.get("mensagem_id") or ""),
+        "canal": canal,
+        "via": str(dados.get("via") or canal),
+        "classe": classe,
+        "resultado": desfecho,
+        "repetir": bool(repetir),
+        "etapa": str(dados.get("etapa") or "transporte"),
+        "duracao_ms": max(0, int(dados.get("duracao_ms") or 0)),
+    })
+    return dados
+
+
 class Markup:
     """Formatação neutra (sem marcação). Subclasses aplicam a sintaxe do canal."""
     def bold(self, s):   return s
     def italic(self, s): return s
     def strike(self, s): return s
     def code(self, s):   return s
-    def escape(self, s): return s  # escapa caracteres reservados do canal
+    def escape(self, s): return "" if s is None else str(s)  # escapa caracteres reservados
 
 
 class WhatsAppMarkup(Markup):
@@ -26,7 +49,7 @@ class WhatsAppMarkup(Markup):
 
 class TelegramHTMLMarkup(Markup):
     def escape(self, s):
-        return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return super().escape(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     def bold(self, s):   return f"<b>{s}</b>"
     def italic(self, s): return f"<i>{s}</i>"
     def strike(self, s): return f"<s>{s}</s>"
@@ -36,7 +59,8 @@ class TelegramHTMLMarkup(Markup):
 class Sender(ABC):
     """
     Canal de broadcast. Contrato de retorno idêntico ao whatsapp_client legado:
-    dict {sucesso: bool, via?: str, erro?: str} — nunca levanta por falha de envio.
+    dict {sucesso, via, mensagem_id, erro, classe, resultado, repetir, etapa,
+    duracao_ms} — nunca levanta por falha de envio.
     """
     slug: str = ""
     # "url" -> o canal aceita URL de imagem direto (Telegram); "b64" -> precisa de

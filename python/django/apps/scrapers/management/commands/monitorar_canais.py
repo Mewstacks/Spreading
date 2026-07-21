@@ -68,6 +68,10 @@ class Command(BaseCommand):
 
     def _processar_canal(self, client, canal, EnvioCanal, reescrever_mensagem,
                          get_sender, extrair_urls):
+        from django.utils import timezone
+        from apps.scrapers.models import Publicacao
+        from apps.scrapers.eventos import log_event
+
         sender = get_sender(canal.destino_canal)
         maior_id = canal.ultimo_id
         # reverse=True: da mais antiga p/ a mais nova entre as não vistas (min_id).
@@ -89,17 +93,55 @@ class Command(BaseCommand):
             if not novas:
                 continue
             perfil = getattr(canal.owner, "perfil", None)
+            if perfil and perfil.bloqueado:
+                logger.info("Canal %s pulado: conta bloqueada", canal.handle)
+                continue
+            limite = perfil.cota_max_envios_dia() if perfil else 0
+            inicio_dia = timezone.localtime().replace(hour=0, minute=0, second=0,
+                                                       microsecond=0)
+            if limite and Publicacao.objects.filter(
+                usuario=canal.owner, criada_em__gte=inicio_dia,
+                status__in=("enviado", "incerto", "pendente"),
+            ).count() >= limite:
+                logger.info("Canal %s pulado: cota diaria atingida", canal.handle)
+                continue
             session = perfil.sessao_whatsapp() if perfil else str(canal.owner_id)
+            publicacao = Publicacao.objects.create(
+                usuario=canal.owner, origem="canal_monitorado", canal=canal.destino_canal,
+                destino_id=canal.destino_grupo_id, destino_nome=canal.handle,
+                mensagem=novo_texto, categoria="Canal monitorado",
+            )
             resultado = sender.enviar_oferta(
                 canal.destino_grupo_id, novo_texto, legenda=novo_texto,
                 usuario=canal.owner, session=session)
             if resultado.get("sucesso"):
+                Publicacao.objects.filter(pk=publicacao.pk).update(
+                    status="enviado", enviada_em=timezone.now())
                 EnvioCanal.objects.bulk_create(
                     [EnvioCanal(owner=canal.owner, chave=c) for c in novas],
                     ignore_conflicts=True,
                 )
+                log_event("publicacao", "send_ok", "Canal monitorado divulgado.",
+                          usuario=canal.owner,
+                          contexto={"publicacao_id": publicacao.id,
+                                    "canal_monitorado_id": canal.id,
+                                    "destino": canal.destino_grupo_id})
                 logger.info("Canal %s -> %s divulgado", canal.handle, canal.destino_grupo_id)
+            elif resultado.get("resultado") == "incerto":
+                Publicacao.objects.filter(pk=publicacao.pk).update(
+                    status="incerto", erro=str(resultado.get("erro") or "")[:500])
+                # Não retentar: o transporte pode ter entregue antes de perder a confirmação.
+                EnvioCanal.objects.bulk_create(
+                    [EnvioCanal(owner=canal.owner, chave=c) for c in novas],
+                    ignore_conflicts=True,
+                )
+                log_event("publicacao", "send_failed", "Entrega do canal não confirmada.",
+                          level="warning", usuario=canal.owner,
+                          contexto={"publicacao_id": publicacao.id,
+                                    "resultado": "incerto", "repetir": False})
             else:
+                Publicacao.objects.filter(pk=publicacao.pk).update(
+                    status="falhou", erro=str(resultado.get("erro") or "Falha")[:500])
                 raise RuntimeError(resultado.get("erro") or "Falha no envio do canal")
         # Avança o cursor mesmo sem envio (não reprocessa msgs antigas no restart).
         if maior_id > canal.ultimo_id:

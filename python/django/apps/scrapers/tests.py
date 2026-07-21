@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import uuid
+from types import SimpleNamespace
 from contextlib import contextmanager
 from datetime import timedelta
 from io import StringIO
@@ -16,7 +17,7 @@ from django.core.management import call_command
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from apps.scrapers import ofertas, whatsapp_client
@@ -181,7 +182,7 @@ class AffiliateIdentityTests(TestCase):
         from apps.scrapers.senders.whatsapp import WhatsAppSender
 
         result = WhatsAppSender().enviar_oferta(
-            "grupo@g.us", "mensagem", usuario=self.user)
+            "123@g.us", "mensagem", usuario=self.user)
 
         self.assertTrue(result["sucesso"])
         self.assertEqual(enviar.call_args.kwargs["session"], str(self.user.id))
@@ -3366,6 +3367,7 @@ class InstrumentacaoTests(TestCase):
         self.assertTrue(EventoOperacional.objects.filter(
             evento="conexao_voltou", usuario=self.user).exists())
 
+    @override_settings(PERMITIR_CADASTRO_PUBLICO=True)
     def test_signup_sem_email_de_verificacao_vira_evento(self):
         # O patch é em accounts.emails (não em accounts.views): o import lá é local,
         # resolvido no módulo de origem só na hora da chamada.
@@ -3377,6 +3379,16 @@ class InstrumentacaoTests(TestCase):
 
         self.assertTrue(EventoOperacional.objects.filter(
             evento="verificacao_nao_enviada", level="error").exists())
+
+    def test_signup_publico_fechado_por_padrao(self):
+        # Produto vendido: cadastro público bloqueado a menos de flag explícita.
+        resp = self.client.post(reverse("signup"), {
+            "username": "intruso", "email": "intruso@x.com",
+            "password1": "senha-forte-123", "password2": "senha-forte-123",
+        })
+        self.assertRedirects(resp, reverse("login"))
+        self.assertFalse(
+            get_user_model().objects.filter(username="intruso").exists())
 
 
 class PurgaEventosTests(TestCase):
@@ -3551,3 +3563,397 @@ class ChecarAfiliacaoCommandTests(TestCase):
         evento = EventoOperacional.objects.get(evento="afiliacao_sem_tag")
         self.assertEqual(evento.usuario, self.user)
         self.assertEqual(evento.contexto["causa"], "link_sem_tag")
+
+
+class CuponsAfiliadosMLTests(SimpleTestCase):
+    """Parser da página pública de cupons de afiliados do ML (peça frágil: o HTML
+    embute os cupons num array JS; se o formato mudar, isto quebra explicitamente)."""
+
+    HTML = """
+    <html><head><script>
+      const OUTRA = [1, 2, 3];
+      const COUPONS = [
+        {"nome":"ATIVO","acao":"Fashion","dia_inicio":"01/01/2099","dia_fim":"31/12/2099",
+         "valor_desconto":"20%","min_compra":"49","desconto_max":"60",
+         "container_url":"https://lista.mercadolivre.com.br/_Container_x","container_name":"x",
+         "is_mar_aberto":false,"days_left":5,"discount_num":20},
+        {"nome":"SITEWIDE","acao":"Sellers","dia_inicio":"01/01/2099","dia_fim":"31/12/2099",
+         "valor_desconto":"10%","min_compra":"29","desconto_max":"100",
+         "container_url":"","container_name":"","is_mar_aberto":true,"days_left":10,"discount_num":10},
+        {"nome":"VENCIDO","acao":"Sellers","dia_inicio":"01/01/2020","dia_fim":"02/01/2020",
+         "valor_desconto":"30%","min_compra":"0","desconto_max":"0",
+         "container_url":"","container_name":"","is_mar_aberto":false,"days_left":0,"discount_num":30}
+      ];
+      const DEPOIS = [4, 5];
+    </script></head><body></body></html>
+    """
+
+    def _fake_get(self, *a, **k):
+        return Mock(text=self.HTML, raise_for_status=Mock())
+
+    def test_extrai_ativos_ignora_vencidos_e_marca_escopo(self):
+        from apps.scrapers.sources.ml_public_coupons import MLPublicCouponsSource
+        src = MLPublicCouponsSource()
+        with patch("apps.scrapers.sources.ml_public_coupons.requests.get",
+                   side_effect=self._fake_get):
+            itens = list(src.discover_coupons())
+
+        por_codigo = {it.coupon_code: it for it in itens}
+        # VENCIDO (dia_fim em 2020) não entra; os dois ativos entram.
+        self.assertEqual(set(por_codigo), {"ATIVO", "SITEWIDE"})
+        self.assertTrue(all(it.kind == "coupon" for it in itens))
+
+        site = por_codigo["SITEWIDE"]
+        self.assertTrue(site.coupon_rules["is_mar_aberto"])
+        self.assertIn("site inteiro", site.title)
+        self.assertTrue(site.external_id.endswith(":site"))
+
+        ativo = por_codigo["ATIVO"]
+        self.assertEqual(ativo.coupon_rules["valor_desconto"], 20)
+        self.assertEqual(ativo.coupon_rules["valor_minimo"], 49)
+        self.assertEqual(ativo.coupon_rules["modo_resgate"], "codigo")
+        self.assertEqual(ativo.coupon_rules["container_name"], "x")
+        self.assertIsNotNone(ativo.valid_until)
+
+    def test_html_sem_array_devolve_vazio(self):
+        from apps.scrapers.sources.ml_public_coupons import _extrair_array_js
+        self.assertEqual(_extrair_array_js("<html>sem cupons</html>", "COUPONS"), [])
+
+
+class MelhorCupomNormalizadoTests(TestCase):
+    """Gate de confiança do auto-apply de cupom na mensagem (fase 2)."""
+
+    def setUp(self):
+        self.fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="ml-cupons-afiliados",
+            defaults={"marketplace": "mercadolivre", "nome": "Cupons afiliados"})
+        self.produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Air fryer", origem="oferta",
+            macro_categoria="Casa", categoria="Casa",
+            preco_sem_desconto=200, preco_com_cupom=100,
+            link_produto="https://example.com/airfryer")
+
+    def _cupom(self, ext, codigo, **regras):
+        return CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id=ext, marketplace="mercadolivre",
+            titulo=codigo, codigo=codigo, estado="ativo",
+            link="https://x", regras=regras)
+
+    def test_site_wide_entra_container_sem_confirmacao_nao(self):
+        from apps.scrapers.ofertas import _melhor_cupom_normalizado
+        self._cupom("a:SITE20", "SITE20", is_mar_aberto=True, discount_num=20, min_compra=0)
+        # Desconto maior, mas é de container e não tem match confirmado: NÃO pode entrar.
+        self._cupom("a:CONT30", "CONT30", is_mar_aberto=False, discount_num=30, min_compra=0)
+        # Site-wide com mínimo acima do preço do item: fora.
+        self._cupom("a:MIN99", "MIN99", is_mar_aberto=True, discount_num=99, min_compra=500)
+
+        self.assertEqual(_melhor_cupom_normalizado(self.produto), "SITE20")
+
+    def test_produtocupom_confirmado_libera_cupom_de_container(self):
+        from apps.scrapers.models import ProdutoCupom
+        from apps.scrapers.ofertas import _melhor_cupom_normalizado
+        self._cupom("a:SITE20", "SITE20", is_mar_aberto=True, discount_num=20, min_compra=0)
+        conf = self._cupom("a:CONF40", "CONF40", is_mar_aberto=False, discount_num=40, min_compra=0)
+        ProdutoCupom.objects.create(produto=self.produto, cupom=conf, status="confirmado")
+
+        # Confirmado e de maior desconto -> vence o site-wide.
+        self.assertEqual(_melhor_cupom_normalizado(self.produto), "CONF40")
+
+    def test_sem_cupom_aplicavel_retorna_none(self):
+        from apps.scrapers.ofertas import _melhor_cupom_normalizado
+        self._cupom("a:CONT30", "CONT30", is_mar_aberto=False, discount_num=30, min_compra=0)
+        self.assertIsNone(_melhor_cupom_normalizado(self.produto))
+
+
+class CasarCuponsContainerTests(TestCase):
+    """Casamento cupom-container -> ProdutoCupom confirmado (fase 2), sem Playwright."""
+
+    def setUp(self):
+        self.fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="ml-cupons-afiliados",
+            defaults={"marketplace": "mercadolivre", "nome": "Cupons afiliados"})
+        self.no_container = Produto.objects.create(
+            marketplace="mercadolivre", nome="Fritadeira", origem="oferta",
+            macro_categoria="Casa", categoria="Casa",
+            preco_sem_desconto=200, preco_com_cupom=100,
+            link_produto="https://produto.mercadolivre.com.br/MLB-1234567-fritadeira")
+        self.fora = Produto.objects.create(
+            marketplace="mercadolivre", nome="Outro", origem="oferta",
+            macro_categoria="Casa", categoria="Casa",
+            preco_sem_desconto=200, preco_com_cupom=100,
+            link_produto="https://produto.mercadolivre.com.br/MLB-9999999-outro")
+
+    def _cupom(self, ext, codigo, **regras):
+        return CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id=ext, marketplace="mercadolivre",
+            titulo=codigo, codigo=codigo, estado="ativo", link="https://x", regras=regras)
+
+    def test_confirma_produto_presente_no_container_e_ignora_os_de_fora(self):
+        from apps.scrapers.models import ProdutoCupom
+        from apps.scrapers.scraper_mercadolivre.cupons_container import casar_cupons_container
+        cont = self._cupom("a:CONT", "CONT20", is_mar_aberto=False, discount_num=20,
+                           container_url="https://lista.mercadolivre.com.br/_Container_x",
+                           container_name="x")
+        # Site-wide não passa pelo matcher (vale para tudo, não precisa confirmar).
+        self._cupom("a:SITE", "SITE10", is_mar_aberto=True, discount_num=10)
+
+        # Coletor fake: o container só contém o item id do produto "no_container".
+        total = casar_cupons_container(
+            coletor=lambda url, paginas: {"MLB1234567"}, max_paginas=1)
+
+        self.assertEqual(total, 1)
+        self.assertTrue(ProdutoCupom.objects.filter(
+            produto=self.no_container, cupom=cont, status="confirmado").exists())
+        self.assertFalse(ProdutoCupom.objects.filter(produto=self.fora).exists())
+        # Nenhum vínculo criado para o cupom site-wide.
+        self.assertFalse(ProdutoCupom.objects.filter(cupom__codigo="SITE10").exists())
+
+    def test_sem_cupom_de_container_nao_faz_nada(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_container import casar_cupons_container
+        self._cupom("a:SITE", "SITE10", is_mar_aberto=True, discount_num=10)
+        chamado = {"n": 0}
+
+        def coletor(url, paginas):
+            chamado["n"] += 1
+            return set()
+
+        self.assertEqual(casar_cupons_container(coletor=coletor), 0)
+        self.assertEqual(chamado["n"], 0)  # nem abre container
+
+
+class MensagemCupomTests(SimpleTestCase):
+    def test_formata_esquema_legado_numerico_sem_expor_token(self):
+        from apps.scrapers.ofertas import montar_mensagem_cupom
+        token = "CATVgkl4DHYJgqaPQXEQ5VMES_mNsb7UfYtN-EXEMPLO=="
+        cupom = SimpleNamespace(
+            external_id="campanha:123", marketplace="mercadolivre", codigo=token,
+            link="https://lista.mercadolivre.com.br/x",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 15.0,
+                    "valor_minimo": 79.0},
+        )
+
+        mensagem = montar_mensagem_cupom(cupom, link_afiliado="https://meli.la/abc")
+
+        self.assertIn("15% DE DESCONTO", mensagem)
+        self.assertIn("acima de R$ 79", mensagem)
+        self.assertIn("Ative o cupom no link", mensagem)
+        self.assertNotIn(token, mensagem)
+
+    def test_formata_esquema_novo_e_escapa_telegram(self):
+        from apps.scrapers.ofertas import montar_mensagem_cupom
+        from apps.scrapers.senders.base import TelegramHTMLMarkup
+        cupom = SimpleNamespace(
+            external_id="afiliados:PROMO:site", marketplace="Loja & Cia",
+            codigo="PROMO20", link="https://example.com",
+            regras={"valor_desconto": "20%", "min_compra": "R$ 49",
+                    "desconto_max": "60", "modo_resgate": "codigo"},
+        )
+
+        mensagem = montar_mensagem_cupom(
+            cupom, markup=TelegramHTMLMarkup(), link_afiliado="https://example.com?a=1&b=2")
+
+        self.assertIn("Loja &amp; Cia", mensagem)
+        self.assertIn("PROMO20", mensagem)
+        self.assertIn("limitado a R$ 60", mensagem)
+        self.assertIn("a=1&amp;b=2", mensagem)
+
+    def test_json_malformado_nao_levanta(self):
+        from apps.scrapers.ofertas import montar_mensagem_cupom
+        cupom = SimpleNamespace(external_id="x", marketplace=None, codigo=None,
+                                link=None, regras=[1, 2, 3])
+        self.assertIn("Ative o cupom", montar_mensagem_cupom(cupom))
+
+
+class EnvioCupomTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("cupom-send", password="test")
+        self.fonte = FonteIngestao.objects.create(
+            slug="cupom-send-source", marketplace="mercadolivre", nome="Cupons")
+        self.cupom = CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id="afiliados:SAVE20:site",
+            marketplace="mercadolivre", titulo="20% OFF", codigo="SAVE20",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 20,
+                    "modo_resgate": "codigo", "is_mar_aberto": True},
+            link="https://www.mercadolivre.com.br/cupons", estado="ativo")
+
+    def _sender(self, resultado):
+        from apps.scrapers.senders.base import WhatsAppMarkup
+        sender = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
+        sender.enviar_oferta.return_value = resultado
+        return sender
+
+    @patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom",
+           return_value={"sucesso": True, "link": "https://meli.la/afiliado"})
+    def test_sucesso_registra_e_bloqueia_mesmo_destino_por_24h(self, _link):
+        from apps.scrapers.ofertas import enviar_cupom
+        sender = self._sender({"sucesso": True, "via": "whatsapp",
+                               "mensagem_id": "m1"})
+        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
+            primeiro = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+            segundo = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+            outro = enviar_cupom(self.cupom, "456@g.us", usuario=self.user)
+
+        self.assertTrue(primeiro["sucesso"])
+        self.assertTrue(segundo["duplicado"])
+        self.assertTrue(outro["sucesso"])
+        self.assertEqual(Publicacao.objects.filter(
+            origem="cupom", status="enviado", usuario=self.user).count(), 2)
+
+    @patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom",
+           return_value={"sucesso": True, "link": "https://meli.la/afiliado"})
+    def test_resultado_incerto_e_registrado_e_nao_repetido(self, _link):
+        from apps.scrapers.ofertas import enviar_cupom
+        sender = self._sender({"sucesso": False, "erro": "confirmação pendente",
+                               "classe": "transitorio", "resultado": "incerto",
+                               "repetir": False})
+        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
+            primeiro = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+            segundo = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertEqual(primeiro["resultado"], "incerto")
+        self.assertTrue(segundo["duplicado"])
+        self.assertEqual(Publicacao.objects.get(usuario=self.user).status, "incerto")
+
+    @patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom",
+           return_value={"sucesso": False, "motivo": "sem link"})
+    def test_falha_de_afiliacao_fecha_publicacao_e_permite_retentativa(self, _link):
+        from apps.scrapers.ofertas import enviar_cupom
+        sender = self._sender({"sucesso": True})
+        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
+            primeiro = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+            segundo = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+        self.assertFalse(primeiro["sucesso"])
+        self.assertFalse(segundo.get("duplicado", False))
+        self.assertEqual(Publicacao.objects.filter(status="falhou").count(), 2)
+
+
+class LinkAfiliadoCupomTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("coupon-link", password="test")
+        self.fonte = FonteIngestao.objects.create(
+            slug="coupon-link-source", marketplace="mercadolivre", nome="Cupons")
+        self.cupom = CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id="campanha:123", marketplace="mercadolivre",
+            titulo="Ativação", link="https://www.mercadolivre.com.br/cupons/123",
+            regras={"modo_resgate": "ativacao"}, estado="ativo")
+
+    @patch("apps.scrapers.scraper_mercadolivre.link.afiliate_link_builder",
+           return_value="https://meli.la/cupom-afiliado")
+    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
+    def test_link_direto_verificado_e_cacheado_por_usuario_cupom(self, marketplace, builder):
+        from apps.scrapers.ofertas import resolver_link_afiliado_cupom
+        marketplace.return_value.verify_affiliate_tag.return_value = True
+
+        primeiro = resolver_link_afiliado_cupom(self.cupom, self.user)
+        segundo = resolver_link_afiliado_cupom(self.cupom, self.user)
+
+        self.assertTrue(primeiro["sucesso"])
+        self.assertTrue(segundo["cache"])
+        builder.assert_called_once()
+        marketplace.return_value.verify_affiliate_tag.assert_called_once()
+
+    @patch("apps.scrapers.scraper_mercadolivre.link.afiliate_link_builder",
+           return_value="")
+    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
+    def test_fallback_usa_produto_confirmado(self, marketplace, _builder):
+        from apps.scrapers.models import ProdutoCupom
+        from apps.scrapers.ofertas import resolver_link_afiliado_cupom
+        produto = Produto.objects.create(
+            nome="Produto compatível", preco_sem_desconto=100, preco_com_cupom=80,
+            link_produto="https://produto.mercadolivre.com.br/MLB-123", origem="oferta")
+        ProdutoCupom.objects.create(
+            produto=produto, cupom=self.cupom, status="confirmado",
+            verificado_em=timezone.now())
+        marketplace.return_value.build_affiliate_link.return_value = {
+            "link_afiliado": "https://meli.la/produto-afiliado", "afiliado_ok": True}
+
+        resultado = resolver_link_afiliado_cupom(self.cupom, self.user)
+
+        self.assertTrue(resultado["sucesso"])
+        self.assertEqual(resultado["produto"], produto)
+
+
+class SenderContractTests(SimpleTestCase):
+    def _telegram_user(self):
+        return SimpleNamespace(perfil=SimpleNamespace(telegram_bot_token="token-seguro"))
+
+    @patch("apps.scrapers.senders.telegram.requests.post")
+    def test_telegram_classifica_429_como_transitorio(self, post):
+        from apps.scrapers.senders.telegram import TelegramSender
+        post.return_value = Mock(
+            status_code=429, json=Mock(return_value={
+                "ok": False, "error_code": 429, "description": "Too Many Requests"}))
+
+        resultado = TelegramSender().enviar_oferta(
+            "@canal_teste", "mensagem", usuario=self._telegram_user())
+
+        self.assertEqual(resultado["classe"], "transitorio")
+        self.assertTrue(resultado["repetir"])
+        self.assertEqual(resultado["canal"], "telegram")
+
+    @patch("apps.scrapers.senders.telegram.requests.post")
+    def test_telegram_classifica_credencial_como_permanente(self, post):
+        from apps.scrapers.senders.telegram import TelegramSender
+        post.return_value = Mock(
+            status_code=401, json=Mock(return_value={
+                "ok": False, "error_code": 401, "description": "Unauthorized"}))
+
+        resultado = TelegramSender().enviar_oferta(
+            "@canal_teste", "mensagem", usuario=self._telegram_user())
+
+        self.assertEqual(resultado["classe"], "permanente")
+        self.assertFalse(resultado["repetir"])
+
+    def test_canal_desconhecido_e_rejeitado(self):
+        from apps.scrapers.senders.registry import get_sender
+        with self.assertRaisesMessage(ValueError, "Canal de envio inválido"):
+            get_sender("smtp")
+
+
+class EndpointsEnvioPostTests(TransactionTestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("endpoint-send", password="test")
+        self.user.perfil.marcar_verificado()
+        self.client.force_login(self.user)
+
+    def test_endpoints_de_envio_rejeitam_get(self):
+        for nome in ("scraper-enviar-agora", "scraper-enviar-produto",
+                     "scraper-enviar-cupom"):
+            with self.subTest(nome=nome):
+                self.assertEqual(self.client.get(reverse(nome)).status_code, 405)
+
+    def test_post_sem_csrf_e_rejeitado(self):
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.user)
+        response = client.post(reverse("scraper-enviar-cupom"), {
+            "cupom": 1, "grupo": "123@g.us", "canal": "whatsapp",
+        })
+        self.assertEqual(response.status_code, 403)
+
+    def test_id_com_sql_injection_nao_e_interpretado(self):
+        response = self.client.post(reverse("scraper-enviar-cupom"), {
+            "cupom": "1 OR 1=1; DROP TABLE scrapers_cupomnormalizado",
+            "grupo": "123@g.us", "canal": "whatsapp",
+        })
+        corpo = b"".join(response.streaming_content).decode()
+        self.assertIn("Cupom não encontrado", corpo)
+        self.assertNotIn("DROP TABLE", corpo)
+
+    def test_html_escapa_campos_e_oculta_token_tecnico(self):
+        fonte = FonteIngestao.objects.create(
+            slug="xss-coupon-source", marketplace="mercadolivre", nome="Fonte")
+        token = "CATVgkl4DHYJgqaPQXEQ5VMES_mNsb7UfYtN-SEGREDO=="
+        CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:xss", marketplace="mercadolivre",
+            titulo='<script>alert("xss")</script>', codigo=token,
+            regras={"modo_resgate": "ativacao"}, estado="ativo")
+
+        response = self.client.get(reverse("scraper-top"), {
+            "tipo": "cupom", "afiliado": "todos"})
+        corpo = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("&lt;script&gt;", corpo)
+        self.assertNotIn('<script>alert("xss")</script>', corpo)
+        self.assertNotIn(token, corpo)
+        self.assertIn("Ativar no link", corpo)

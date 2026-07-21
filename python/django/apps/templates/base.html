@@ -351,7 +351,6 @@
         </form>
         {% else %}
         <a href="{% url 'login' %}" class="{% if u == 'login' %}active{% endif %}"><i data-lucide="log-in"></i> Entrar</a>
-        <a href="{% url 'signup' %}" class="{% if u == 'signup' %}active{% endif %}"><i data-lucide="user-plus"></i> Criar conta</a>
         {% endif %}
         <button class="theme-btn" type="button" onclick="event.stopPropagation();toggleTheme()" title="Alternar tema" aria-label="Alternar tema">
           <i data-lucide="sun" class="sun"></i><i data-lucide="moon" class="moon"></i>

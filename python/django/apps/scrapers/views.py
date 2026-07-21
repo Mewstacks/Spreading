@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import queue
 import threading
@@ -26,6 +27,8 @@ from apps.scrapers.models import (
 )
 from apps.scrapers.progresso import emitir_fase
 from apps.scrapers.scraper_mercadolivre.scraper import main as scrapper_main
+
+logger = logging.getLogger(__name__)
 
 
 def staff_required(view):
@@ -204,7 +207,8 @@ def operations_dashboard(request):
                 "scraper-conta",
             ))
     publicacoes = list(
-        pubs.select_related("produto", "configuracao").order_by("-criada_em")[:10])
+        pubs.select_related("produto", "configuracao", "cupom_normalizado")
+        .order_by("-criada_em")[:10])
     for p in publicacoes:
         p.erro_publico = _erro_publicacao(p.erro)
     return render(request, "home.html", {
@@ -894,13 +898,16 @@ def configuracoes(request):
     })
 
 
-@require_GET
+@require_POST
 @throttle_sse(6)
 def enviar_agora_stream(request):
-    """SSE — dispara um envio de teste para uma ConfiguracaoEnvio (?config=ID)."""
+    """SSE via POST — dispara um envio de teste para uma ConfiguracaoEnvio."""
     from apps.scrapers.ofertas import selecionar_e_enviar
 
-    cfg_id = request.GET.get("config")
+    try:
+        cfg_id = int(request.POST.get("config") or 0)
+    except (TypeError, ValueError):
+        cfg_id = 0
     uid = request.user.id  # capturado fora da thread (request.user não cruza thread)
 
     def _event_stream():
@@ -942,7 +949,8 @@ def enviar_agora_stream(request):
                         if r.get("precisa_login_ml"):
                             print("__ML_LOGIN__")
             except Exception as exc:
-                q.put(f"[ERRO] {exc}")
+                logger.exception("Falha inesperada no envio de teste")
+                q.put("[ERRO] Falha inesperada ao preparar o envio.")
             finally:
                 writer.flush()
                 q.put(None)
@@ -962,7 +970,7 @@ def enviar_agora_stream(request):
     return response
 
 
-@require_GET
+@require_POST
 @throttle_sse(6)
 def enviar_produto_stream(request):
     """SSE — envia UM produto específico (tela Promoções) p/ o destino escolhido no popup.
@@ -971,17 +979,21 @@ def enviar_produto_stream(request):
     fica permanentemente bloqueado p/ o envio automático (anti-repetição global).
     """
     from apps.scrapers.ofertas import enviar_oferta_de_produto
-    from apps.scrapers.models import HistoricoEnvio
-
-    prod_id = request.GET.get("produto")
-    grupo_id = (request.GET.get("grupo") or "").strip()
-    grupo_nome = (request.GET.get("grupo_nome") or "").strip()
-    canal = (request.GET.get("canal") or "whatsapp").strip()
+    try:
+        prod_id = int(request.POST.get("produto") or 0)
+    except (TypeError, ValueError):
+        prod_id = 0
+    grupo_id = (request.POST.get("grupo") or "").strip()[:100]
+    grupo_nome = (request.POST.get("grupo_nome") or "").strip()[:255]
+    canal = (request.POST.get("canal") or "whatsapp").strip().lower()
     uid = request.user.id  # capturado fora da thread
 
     def _job():
         from django.contrib.auth import get_user_model
         usuario = get_user_model().objects.filter(id=uid).first()
+        if not usuario:
+            print("[ERRO] Usuário não encontrado ou sessão encerrada.")
+            return
         if not grupo_id:
             print("[ERRO] Nenhum destino informado (grupo/chat).")
             return
@@ -991,18 +1003,6 @@ def enviar_produto_stream(request):
             Q(owner__isnull=True) | Q(owner_id=uid), id=prod_id).first()
         if not prod:
             print("[ERRO] Produto não encontrado.")
-            return
-        from datetime import timedelta
-        recente = Publicacao.objects.filter(
-            produto_id=prod.id, usuario_id=uid, destino_id=grupo_id,
-            status__in=("enviado", "incerto"),
-            criada_em__gte=timezone.now() - timedelta(hours=24),
-        ).order_by("-enviada_em").first()
-        if recente and prod.preco_com_cupom > recente.preco_final * .95:
-            if recente.status == "incerto":
-                print("[ERRO] O envio anterior não foi confirmado. Confira o grupo antes de tentar novamente.")
-            else:
-                print("[ERRO] Este destino recebeu a oferta nas últimas 24h.")
             return
         print(f"Enviando '{prod.nome[:60]}' → {grupo_nome or grupo_id} ({canal})...")
         r = enviar_oferta_de_produto(
@@ -1014,6 +1014,47 @@ def enviar_produto_stream(request):
             print(f"[ERRO] {r.get('motivo')}")
             if r.get("precisa_login_ml"):
                 print("__ML_LOGIN__")  # a UI troca por um botão "Reconectar Mercado Livre"
+
+    return _sse_runner(_job)
+
+
+@require_POST
+@throttle_sse(6)
+def enviar_cupom_stream(request):
+    """SSE — envia um cupom afiliado, auditado e deduplicado por 24 horas."""
+    from apps.scrapers.ofertas import enviar_cupom
+
+    try:
+        cupom_id = int(request.POST.get("cupom") or 0)
+    except (TypeError, ValueError):
+        cupom_id = 0
+    grupo_id = (request.POST.get("grupo") or "").strip()[:100]
+    grupo_nome = (request.POST.get("grupo_nome") or "").strip()[:255]
+    canal = (request.POST.get("canal") or "whatsapp").strip().lower()
+    uid = request.user.id  # capturado fora da thread
+
+    def _job():
+        from django.contrib.auth import get_user_model
+        from apps.scrapers.coupon_rules import codigo_publicavel
+        usuario = get_user_model().objects.filter(id=uid).first()
+        if not usuario:
+            print("[ERRO] Usuário não encontrado ou sessão encerrada.")
+            return
+        if not grupo_id:
+            print("[ERRO] Nenhum destino informado (grupo/chat).")
+            return
+        cupom = CupomNormalizado.objects.filter(id=cupom_id, estado="ativo").first()
+        if not cupom:
+            print("[ERRO] Cupom não encontrado ou inativo.")
+            return
+        rotulo = codigo_publicavel(cupom) or "Ativar no link"
+        print(f"Enviando cupom '{rotulo}' → {grupo_nome or grupo_id} ({canal})...")
+        resultado = enviar_cupom(
+            cupom, grupo_id, canal=canal, usuario=usuario, destino_nome=grupo_nome)
+        if resultado.get("sucesso"):
+            print(f"__SENT__ OK Cupom enviado (via {resultado.get('via', canal)}).")
+        else:
+            print(f"[ERRO] {resultado.get('motivo') or 'falha ao enviar o cupom'}")
 
     return _sse_runner(_job)
 
@@ -1071,7 +1112,8 @@ def top_promocoes(request):
     tem_filtros_na_url = any(
         chave in request.GET
         for chave in ("macro", "categoria", "loja", "ordenar", "q", "min_desconto",
-                      "tipo", "fonte", "confianca", "atualizado_desde", "afiliado")
+                      "tipo", "fonte", "confianca", "atualizado_desde", "afiliado",
+                      "categoria_cupom", "como_usar")
     )
     if tem_filtros_na_url:
         filtros = {
@@ -1085,6 +1127,11 @@ def top_promocoes(request):
             "fonte": (request.GET.get("fonte") or "").strip()[:80],
             "confianca": (request.GET.get("confianca") or "").strip()[:20],
             "atualizado_desde": (request.GET.get("atualizado_desde") or "").strip(),
+            # Filtros exclusivos da aba Cupons.
+            "categoria_cupom": (request.GET.get("categoria_cupom") or "").strip()[:100],
+            "como_usar": (request.GET.get("como_usar")
+                          if request.GET.get("como_usar") in ("codigo", "ativacao")
+                          else ""),
             # Default = só afiliados: enviar item sem link de afiliado não comissiona.
             # "todos" existe só para diagnóstico (ver o que está travado na fila).
             "afiliado": "todos" if request.GET.get("afiliado") == "todos" else "prontos",
@@ -1100,6 +1147,8 @@ def top_promocoes(request):
     tipo = filtros.get("tipo", "oferta")
     fonte_selecionada = filtros.get("fonte", "")
     confianca_selecionada = filtros.get("confianca", "")
+    categoria_cupom_selecionada = filtros.get("categoria_cupom", "")
+    como_usar_selecionado = filtros.get("como_usar", "")
     so_afiliados = filtros.get("afiliado", "prontos") != "todos"
     try:
         atualizado_desde = max(0, min(168, int(filtros.get("atualizado_desde") or 0)))
@@ -1180,18 +1229,36 @@ def top_promocoes(request):
     cupons_qs = CupomNormalizado.objects.select_related("fonte").filter(
         estado="ativo"
     ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
+    # Categorias disponíveis p/ o dropdown da aba Cupons (só cupons vivos).
+    cupom_categorias = list(
+        CupomNormalizado.objects.filter(estado="ativo")
+        .filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
+        .exclude(categoria="")
+        .values_list("categoria", flat=True).distinct().order_by("categoria")
+    )
     if loja_selecionada:
         cupons_qs = cupons_qs.filter(marketplace=loja_selecionada)
     if fonte_selecionada:
         cupons_qs = cupons_qs.filter(fonte__slug=fonte_selecionada)
     if confianca_selecionada:
         cupons_qs = cupons_qs.filter(confianca=confianca_selecionada)
+    if categoria_cupom_selecionada:
+        cupons_qs = cupons_qs.filter(categoria=categoria_cupom_selecionada)
     if busca:
         cupons_qs = cupons_qs.filter(Q(titulo__icontains=busca) | Q(codigo__icontains=busca))
-    # Paginado no banco (o corte fixo em 50 escondia o resto sem dizer).
-    cupons_page = Paginator(
-        cupons_qs.order_by("-ultima_observacao"), POR_PAGINA
-    ).get_page(pagina)
+    # "Como usar" (código vs. ativar no link) vem da normalização de `regras`, não
+    # de coluna — então materializa, calcula por cupom e filtra em Python, igual ao
+    # corte de afiliação das ofertas. O conjunto de cupons ativos é pequeno.
+    from apps.scrapers.coupon_rules import codigo_publicavel, regras_do_cupom
+    cupons_lista = list(cupons_qs.order_by("-ultima_observacao"))
+    for cupom_catalogo in cupons_lista:
+        cupom_catalogo.codigo_publico = codigo_publicavel(cupom_catalogo)
+        cupom_catalogo.modo_resgate = regras_do_cupom(cupom_catalogo)["modo_resgate"]
+    if como_usar_selecionado == "codigo":
+        cupons_lista = [c for c in cupons_lista if c.codigo_publico]
+    elif como_usar_selecionado == "ativacao":
+        cupons_lista = [c for c in cupons_lista if not c.codigo_publico]
+    cupons_page = Paginator(cupons_lista, POR_PAGINA).get_page(pagina)
     cupons_catalogo = list(cupons_page)
     perfil = getattr(request.user, "perfil", None)
     fontes_qs = FonteIngestao.objects.filter(habilitada=True).order_by("marketplace", "nome")
@@ -1288,6 +1355,10 @@ def top_promocoes(request):
         qs_pairs.append(("confianca", confianca_selecionada))
     if atualizado_desde:
         qs_pairs.append(("atualizado_desde", atualizado_desde))
+    if categoria_cupom_selecionada:
+        qs_pairs.append(("categoria_cupom", categoria_cupom_selecionada))
+    if como_usar_selecionado:
+        qs_pairs.append(("como_usar", como_usar_selecionado))
     # base p/ o chip de afiliação: preserva o resto dos filtros e troca só ele.
     qs_base_sem_afiliado = urlencode(qs_pairs + (
         [("loja", loja_selecionada)] if loja_selecionada else []))
@@ -1331,6 +1402,9 @@ def top_promocoes(request):
         "fonte_selecionada": fonte_selecionada,
         "confianca_selecionada": confianca_selecionada,
         "atualizado_desde": atualizado_desde,
+        "cupom_categorias": cupom_categorias,
+        "categoria_cupom_selecionada": categoria_cupom_selecionada,
+        "como_usar_selecionado": como_usar_selecionado,
         "cupons_catalogo": cupons_catalogo,
         "amazon_diagnostico": amazon_diagnostico,
         "so_afiliados": so_afiliados,
@@ -1338,7 +1412,8 @@ def top_promocoes(request):
         "qs_base_sem_afiliado": qs_base_sem_afiliado,
         "filtros_ativos": len(macros_selecionados) + len(categorias_selecionadas)
             + bool(loja_selecionada) + bool(busca) + bool(min_desconto)
-            + bool(fonte_selecionada) + bool(confianca_selecionada) + bool(atualizado_desde),
+            + bool(fonte_selecionada) + bool(confianca_selecionada) + bool(atualizado_desde)
+            + bool(categoria_cupom_selecionada) + bool(como_usar_selecionado),
         "qs_base": qs_base,
         "qs_base_sem_loja": qs_base_sem_loja,
     })
@@ -1363,8 +1438,9 @@ def run_scraper_stream(request):
             try:
                 with redirect_stdout(writer):
                     scrapper_main()
-            except Exception as exc:
-                q.put(f"[ERRO] {exc}")
+            except Exception:
+                logger.exception("Falha inesperada no scraper principal")
+                q.put("[ERRO] Falha inesperada ao processar a solicitação.")
             finally:
                 writer.flush()
                 q.put(None)  # sentinel
@@ -1425,8 +1501,9 @@ def scrape_ofertas_stream(request):
                             gerar_links_em_lote(pendentes, usuario=usuario)
                         from apps.scrapers.afiliado import frase_resumo_afiliacao
                         print(frase_resumo_afiliacao(usuario))
-            except Exception as exc:
-                q.put(f"[ERRO] {exc}")
+            except Exception:
+                logger.exception("Falha inesperada na raspagem de ofertas")
+                q.put("[ERRO] Falha inesperada ao processar a solicitação.")
             finally:
                 writer.flush()
                 q.put(None)
@@ -1458,8 +1535,9 @@ def _sse_runner(fn):
             try:
                 with redirect_stdout(writer):
                     fn()
-            except Exception as exc:
-                q.put(f"[ERRO] {exc}")
+            except Exception:
+                logger.exception("Falha inesperada no job SSE %s", fn.__name__)
+                q.put("[ERRO] Falha inesperada ao processar a solicitação.")
             finally:
                 writer.flush()
                 q.put(None)
@@ -1631,7 +1709,7 @@ def scrape_cupons_codigo_stream(request):
     return _sse_runner(_job)
 
 
-def _produtos_sem_link(usuario, origens=None, limite=80):
+def _produtos_sem_link(usuario, origens=None, limite=80, macros=None):
     """Produtos visíveis ao usuário que ainda não têm link de afiliado dele.
 
     Mesmo predicado de `gerar_links_stream` (pendente é por USUÁRIO: o link mora em
@@ -1648,6 +1726,10 @@ def _produtos_sem_link(usuario, origens=None, limite=80):
     )
     if origens:
         qs = qs.filter(origem__in=origens)
+    # Mesmo filtro de categoria da tela de Promoções (macro_categoria): gera link só
+    # do nicho escolhido no seletor ao lado do botão.
+    if macros:
+        qs = qs.filter(macro_categoria__in=macros)
     return list(qs.order_by("-ultima_observacao")[:limite])
 
 
@@ -1690,6 +1772,9 @@ def gerar_links_stream(request):
         limite = int(request.GET.get("limite", 50))
     except (TypeError, ValueError):
         limite = 50
+    # Filtro opcional de categoria (mesmo campo `macro` da tela de Promoções): gera
+    # link só do nicho escolhido no seletor ao lado do botão. Vazio = todos.
+    macros = [m for m in request.GET.getlist("macro") if m.strip()]
     uid = request.user.id  # capturado fora da thread
 
     def _job():
@@ -1697,12 +1782,16 @@ def gerar_links_stream(request):
         from apps.scrapers.afiliado import frase_resumo_afiliacao
         usuario = get_user_model().objects.filter(id=uid).first()
 
-        pendentes = _produtos_sem_link(usuario, limite=limite)
+        pendentes = _produtos_sem_link(usuario, limite=limite, macros=macros or None)
         if not pendentes:
-            print("Nenhum produto na fila — todos já têm link de afiliado.")
+            if macros:
+                print(f"Nenhum produto sem link na categoria selecionada ({', '.join(macros)}).")
+            else:
+                print("Nenhum produto na fila — todos já têm link de afiliado.")
             print(frase_resumo_afiliacao(usuario))
             return
-        print(f"Gerando link de afiliado para {len(pendentes)} produto(s)...")
+        alvo = f" ({', '.join(macros)})" if macros else ""
+        print(f"Gerando link de afiliado para {len(pendentes)} produto(s){alvo}...")
         # Agrupa por loja: cada marketplace gera seus links (ML=Playwright,
         # Amazon=puro Python). Evita rodar o Link Builder do ML num ASIN.
         por_loja = {}

@@ -9,5 +9,8 @@ SENDERS = {
 
 
 def get_sender(canal: str):
-    """Retorna o Sender do canal (default WhatsApp se vazio/desconhecido)."""
-    return SENDERS.get((canal or "whatsapp").lower(), SENDERS["whatsapp"])
+    """Retorna o Sender; canal desconhecido nunca pode virar WhatsApp em silêncio."""
+    slug = str(canal or "whatsapp").strip().lower()
+    if slug not in SENDERS:
+        raise ValueError("Canal de envio inválido.")
+    return SENDERS[slug]

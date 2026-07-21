@@ -16,6 +16,7 @@ def persist_items(items, owner=None):
                 fonte=fonte, external_id=item.external_id,
                 defaults={"marketplace": item.marketplace, "titulo": item.title,
                           "codigo": item.coupon_code, "regras": item.coupon_rules,
+                          "categoria": (item.coupon_rules.get("escopo") or "").strip()[:100],
                           "link": item.canonical_url, "validade": item.valid_until,
                           "estado": "ativo", "confianca": "media",
                           "evidencia": item.evidence},

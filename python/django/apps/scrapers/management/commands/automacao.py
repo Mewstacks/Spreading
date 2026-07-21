@@ -113,11 +113,23 @@ def _rodar_scrape():
         from apps.scrapers.maintenance import expire_stale
         expire_stale()
     from django.conf import settings
+    from apps.scrapers.sources import run_source
+    from apps.scrapers.sources.persistence import persist_items
     if getattr(settings, "AFFILIATE_FEED_URL", ""):
-        from apps.scrapers.sources import run_source
-        from apps.scrapers.sources.persistence import persist_items
         feed = run_source("licensed-affiliate-feed")
         persist_items(feed.get("offers", []) + feed.get("coupons", []))
+    # Cupons oficiais de afiliados do ML (página pública, sem segredo). run_source já
+    # isola exceções e devolve listas vazias, então uma falha aqui não derruba o ciclo.
+    cupons_ml = run_source("ml-cupons-afiliados")
+    persist_items(cupons_ml.get("coupons", []))
+    # Casa cada cupom de container com os produtos rastreados (via item id MLB) e grava
+    # ProdutoCupom 'confirmado' — é isso que libera o cupom a entrar na mensagem. Roda
+    # depois da raspagem (produtos já no banco) e nunca derruba o ciclo.
+    try:
+        from apps.scrapers.scraper_mercadolivre.cupons_container import casar_cupons_container
+        casar_cupons_container()
+    except Exception:
+        logger.exception("Casamento cupom-container falhou")
     if not sucessos:
         raise RuntimeError(f"Todas as fontes falharam: {', '.join(falhas)}")
     if falhas:
