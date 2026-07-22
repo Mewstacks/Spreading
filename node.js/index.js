@@ -123,6 +123,22 @@ const MAX_WHATSAPP_SESSIONS = parseInt(process.env.MAX_WHATSAPP_SESSIONS, 10) ||
 // com WA_TAKEOVER_ON_CONFLICT=1 so se o worker precisar mesmo assumir de um web
 // aberto por engano.
 const WA_TAKEOVER_ON_CONFLICT = process.env.WA_TAKEOVER_ON_CONFLICT === '1';
+// Bundle do WhatsApp Web FIXADO. A whatsapp-web.js 1.34.7 injeta funcoes proprias
+// (WWebJS.sendMessage) escritas para um layout de modulos especifico. Quando o
+// WhatsApp serve um bundle novo demais (visto em producao: 2.3000.1043584437), o
+// sendMessage estoura DENTRO da pagina com o throw minificado "r" e o envio falha
+// como "desconhecido" — a sessao aparece conectada, mas nenhuma mensagem sai.
+// O default 'local' da lib segue a versao ao vivo, que e justamente a que quebra.
+// Fixamos um bundle mais antigo, ainda aceito pelos servidores do WhatsApp, via o
+// cache remoto do wppconnect (repo wa-version). WA_WEB_VERSION permite trocar o
+// build por um Fly secret + restart, SEM deploy de codigo: se este for recusado
+// por antigo ou continuar quebrando, basta apontar para outro build do repo
+// (https://github.com/wppconnect-team/wa-version/tree/main/html). O nome do
+// arquivo carrega o sufixo -alpha; mantenha-o na versao. strict=false: se o pin
+// nao carregar, a lib cai para a versao ao vivo em vez de derrubar o worker.
+const WA_WEB_VERSION = process.env.WA_WEB_VERSION || '2.3000.1039963358-alpha';
+const WA_WEB_VERSION_REMOTE_PATH = process.env.WA_WEB_VERSION_REMOTE_PATH
+    || 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html';
 const SESSION_INIT_TIMEOUT_MS = parseInt(process.env.SESSION_INIT_TIMEOUT_MS, 10) || 90000;
 // O watchdog mede o heartbeat do event loop; uma inicializacao async longa nao
 // o aciona. O bootstrap frio recebe a mesma janela da inicializacao normal.
@@ -898,6 +914,15 @@ const initializeSession = (session) => {
         authStrategy: new LocalAuth({ dataPath: session.authPath }),
         takeoverOnConflict: WA_TAKEOVER_ON_CONFLICT,
         takeoverTimeoutMs: 10000,
+        // Fixa o bundle do WA Web (ver WA_WEB_VERSION): impede que um bundle novo
+        // demais quebre a injecao do sendMessage. strict=false cai para a versao
+        // ao vivo se o pin nao carregar, em vez de derrubar a sessao.
+        webVersion: WA_WEB_VERSION,
+        webVersionCache: {
+            type: 'remote',
+            remotePath: WA_WEB_VERSION_REMOTE_PATH,
+            strict: false,
+        },
         puppeteer: {
             protocolTimeout: 300000,
             executablePath: PUPPETEER_EXECUTABLE_PATH,
