@@ -8,6 +8,7 @@ from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada
 from apps.scrapers.models import Cupom, Produto, CupomNormalizado, FonteIngestao
 from apps.scrapers.progresso import emitir_progresso, emitir_fase
 from apps.scrapers.session_paths import ml_auth_path
+from django.db import close_old_connections
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -239,6 +240,11 @@ def mapear_cupons(n=1, faixa=None):
             n += 1
 
     if todos_os_cupons_limpos:
+        # A raspagem no browser leva vários minutos sem tocar o banco, então a
+        # conexão persistente (conn_max_age=600) morre ociosa e o proxy do Fly a
+        # derruba. CONN_HEALTH_CHECKS só revalida no início de cada request, não no
+        # meio deste. Descarta a conexão stale para o bulk_create abrir uma nova.
+        close_old_connections()
         cupons_db = [
             Cupom(
                 campanha_id=c["campaignId"],
