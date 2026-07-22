@@ -1400,7 +1400,7 @@ def top_promocoes(request):
         chave in request.GET
         for chave in ("macro", "categoria", "loja", "ordenar", "q", "min_desconto",
                       "tipo", "fonte", "confianca", "atualizado_desde", "afiliado",
-                      "categoria_cupom", "como_usar")
+                      "categoria_cupom", "como_usar", "anunciante")
     )
     if tem_filtros_na_url:
         filtros = {
@@ -1416,6 +1416,7 @@ def top_promocoes(request):
             "atualizado_desde": (request.GET.get("atualizado_desde") or "").strip(),
             # Filtros exclusivos da aba Cupons.
             "categoria_cupom": (request.GET.get("categoria_cupom") or "").strip()[:100],
+            "anunciante": (request.GET.get("anunciante") or "").strip()[:100],
             "como_usar": (request.GET.get("como_usar")
                           if request.GET.get("como_usar") in ("codigo", "ativacao")
                           else ""),
@@ -1435,6 +1436,7 @@ def top_promocoes(request):
     fonte_selecionada = filtros.get("fonte", "")
     confianca_selecionada = filtros.get("confianca", "")
     categoria_cupom_selecionada = filtros.get("categoria_cupom", "")
+    anunciante_selecionado = filtros.get("anunciante", "")
     como_usar_selecionado = filtros.get("como_usar", "")
     so_afiliados = filtros.get("afiliado", "prontos") != "todos"
     try:
@@ -1525,6 +1527,14 @@ def top_promocoes(request):
         .exclude(categoria="")
         .values_list("categoria", flat=True).distinct().order_by("categoria")
     )
+    # Anunciantes/'sobre o que é' disponíveis p/ o filtro da aba Cupons. Preenchido
+    # pela projeção (rotulo_anunciante) — antes a coluna Loja só ecoava "Mercado Livre".
+    cupom_anunciantes = list(
+        CupomNormalizado.objects.filter(cupons_visiveis, estado="ativo")
+        .filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
+        .exclude(anunciante_nome="")
+        .values_list("anunciante_nome", flat=True).distinct().order_by("anunciante_nome")
+    )
     if loja_selecionada:
         cupons_qs = cupons_qs.filter(marketplace=loja_selecionada)
     if fonte_selecionada:
@@ -1533,6 +1543,8 @@ def top_promocoes(request):
     # valor herdado da aba Ofertas para não zerar a lista sem querer.
     if categoria_cupom_selecionada:
         cupons_qs = cupons_qs.filter(categoria=categoria_cupom_selecionada)
+    if anunciante_selecionado:
+        cupons_qs = cupons_qs.filter(anunciante_nome=anunciante_selecionado)
     if busca:
         cupons_qs = cupons_qs.filter(Q(titulo__icontains=busca) | Q(codigo__icontains=busca))
     # "Como usar" (código vs. ativar no link) vem da normalização de `regras`, não
@@ -1650,6 +1662,8 @@ def top_promocoes(request):
         qs_pairs.append(("atualizado_desde", atualizado_desde))
     if categoria_cupom_selecionada:
         qs_pairs.append(("categoria_cupom", categoria_cupom_selecionada))
+    if anunciante_selecionado:
+        qs_pairs.append(("anunciante", anunciante_selecionado))
     if como_usar_selecionado:
         qs_pairs.append(("como_usar", como_usar_selecionado))
     # base p/ o chip de afiliação: preserva o resto dos filtros e troca só ele.
@@ -1699,6 +1713,8 @@ def top_promocoes(request):
         "atualizado_desde": atualizado_desde,
         "cupom_categorias": cupom_categorias,
         "categoria_cupom_selecionada": categoria_cupom_selecionada,
+        "cupom_anunciantes": cupom_anunciantes,
+        "anunciante_selecionado": anunciante_selecionado,
         "como_usar_selecionado": como_usar_selecionado,
         "cupons_catalogo": cupons_catalogo,
         "awin_programas": ProgramaAfiliado.objects.filter(
@@ -1713,7 +1729,8 @@ def top_promocoes(request):
         "filtros_ativos": len(macros_selecionados) + len(categorias_selecionadas)
             + bool(loja_selecionada) + bool(busca) + bool(min_desconto)
             + bool(fonte_selecionada) + bool(confianca_selecionada) + bool(atualizado_desde)
-            + bool(categoria_cupom_selecionada) + bool(como_usar_selecionado),
+            + bool(categoria_cupom_selecionada) + bool(anunciante_selecionado)
+            + bool(como_usar_selecionado),
         "qs_base": qs_base,
         "qs_base_sem_loja": qs_base_sem_loja,
     })

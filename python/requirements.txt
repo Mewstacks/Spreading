@@ -4,6 +4,9 @@ Django==6.0.6
 requests==2.33.0
 urllib3==2.7.0
 idna==3.15
+# Colagem das fotos do cupom + conversão webp→jpeg no envio (apps/scrapers/colagem.py,
+# ofertas._baixar_imagem_b64). Explícito p/ não depender do extra transitivo do qrcode.
+Pillow==12.3.0
 qrcode[pil]==8.1
 python-dotenv==1.2.2
 celery==5.4.0

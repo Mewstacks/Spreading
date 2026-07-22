@@ -8,7 +8,8 @@ from contextlib import contextmanager
 import requests
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada, ua_aleatorio
-from apps.scrapers.coupon_rules import derivar_categoria_cupom, extrair_escopo_produtos
+from apps.scrapers.coupon_rules import (
+    derivar_categoria_cupom, extrair_escopo_produtos, rotulo_anunciante)
 from apps.scrapers.models import Cupom, Produto, CupomNormalizado, FonteIngestao
 from apps.scrapers.progresso import emitir_progresso, emitir_fase
 from apps.scrapers.session_paths import ml_auth_path
@@ -420,6 +421,30 @@ def mapear_cupons(n=1, faixa=None):
     return len(todos_os_cupons_limpos)
 
 
+def _categoria_dominante_por_campanha(campanha_ids):
+    """{campanha_id: macro_categoria mais comum} em UMA query agregada.
+
+    Usado p/ rotular o cupom quando o título não revela nada. Preferimos
+    `macro_categoria` (bucket grosso, ex.: 'Livros'); só campanhas com produto
+    categorizado aparecem — as demais caem no fallback do template.
+    """
+    from collections import defaultdict
+    from django.db.models import Count
+
+    ids = [c for c in campanha_ids if c]
+    if not ids:
+        return {}
+    linhas = (Produto.objects
+              .filter(campanha_id__in=ids, marketplace="mercadolivre")
+              .exclude(macro_categoria__isnull=True).exclude(macro_categoria="")
+              .values("campanha_id", "macro_categoria")
+              .annotate(n=Count("id")))
+    contagem = defaultdict(dict)
+    for row in linhas:
+        contagem[row["campanha_id"]][row["macro_categoria"]] = row["n"]
+    return {cid: max(mapa, key=mapa.get) for cid, mapa in contagem.items() if mapa}
+
+
 def projetar_catalogo_cupons(faixa=None):
     """Projeta os cupons de campanha (tabela `Cupom`) para o catálogo público
     (`CupomNormalizado`) — a aba "Cupons" do site lê SÓ o `CupomNormalizado`.
@@ -440,6 +465,11 @@ def projetar_catalogo_cupons(faixa=None):
     if not ativos:
         logger.warning("Nenhum cupom de campanha ativo; catálogo de cupons preservado")
         return 0
+
+    # Categoria dominante dos produtos de cada campanha (UMA query) — fallback do
+    # rótulo do anunciante quando o título é genérico. É o que diz "de que se trata".
+    dominante_por_campanha = _categoria_dominante_por_campanha(
+        [c.campanha_id for c in ativos])
 
     externos_vistos = set()
     for i, c in enumerate(ativos, 1):
@@ -479,6 +509,12 @@ def projetar_catalogo_cupons(faixa=None):
                 "codigo": "",
                 # Campanha nao traz escopo; deriva categoria p/ o filtro nao ficar vazio.
                 "categoria": derivar_categoria_cupom(titulo, regras),
+                # 'Sobre o que e' derivado do titulo (ou da categoria dominante dos
+                # produtos): a coluna Loja parava em "Mercado Livre" p/ todo cupom de
+                # link e nao dava p/ saber do que se tratava.
+                "anunciante_nome": rotulo_anunciante(
+                    titulo, regras,
+                    categoria_fallback=dominante_por_campanha.get(c.campanha_id, "")),
                 "link": c.link_original or "https://www.mercadolivre.com.br/cupons",
                 "validade": c.validade,
                 "confianca": "media",

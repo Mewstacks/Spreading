@@ -196,6 +196,26 @@ def derivar_categoria_cupom(titulo, regras) -> str:
     return "Geral"
 
 
+def rotulo_anunciante(titulo="", regras=None, categoria_fallback="") -> str:
+    """'Sobre o que é o cupom' p/ a coluna Loja e o filtro por anunciante na aba Cupons.
+
+    Cupom de campanha do ML não guarda anunciante; o sinal confiável é o escopo do
+    título oficial (marca/produto contemplado, ex.: 'monitores Samsung'). Quando o
+    título é genérico ('Cupom Mercado Livre'), cai na `categoria_fallback` — a
+    categoria dominante dos produtos cobertos, o que a cliente realmente quer saber.
+    Awin e cupons manuais já gravam o anunciante real; a projeção só chama isto p/
+    quem fica vazio. Retorna '' quando nada é identificável (o template mantém o
+    nome da loja como fallback).
+    """
+    escopo = ""
+    if isinstance(regras, Mapping):
+        escopo = _texto(regras.get("escopo") or regras.get("acao"))
+    sobre = extrair_escopo_produtos(titulo, escopo).strip(" .:-")
+    if sobre:
+        return sobre[:100]
+    return (categoria_fallback or "").strip()[:100]
+
+
 def score_cupom(cupom) -> float:
     """Ranking de qualidade de um cupom p/ ordenar a aba Cupons (maior = melhor).
 

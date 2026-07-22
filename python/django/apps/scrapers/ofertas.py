@@ -460,6 +460,131 @@ def _produto_para_cupom(cupom):
     return None
 
 
+def produtos_do_cupom(cupom, limite=8):
+    """Produtos afiliáveis cobertos pelo cupom, p/ a mensagem-colagem (multi-item).
+
+    Generaliza `_produto_para_cupom` (que devolve 1): mesma precedência de
+    associação — vínculo `ProdutoCupom` confirmado > campanha (`external_id`
+    "campanha:X") > cupom de site inteiro (`is_mar_aberto`) — mas devolve os
+    melhores por desconto. Só entra item com foto (a colagem precisa dela).
+    Lista vazia => o envio cai no texto puro de sempre.
+    """
+    from apps.scrapers.coupon_rules import regras_do_cupom
+    from apps.scrapers.models import ProdutoCupom
+
+    mkt = getattr(cupom, "marketplace", "mercadolivre") or "mercadolivre"
+    ativos = Produto.objects.exclude(
+        estado__in=["indisponivel", "invalido", "expirado", "stale"]
+    ).filter(marketplace=mkt).exclude(imagem_url="")
+
+    conf_ids = list(ProdutoCupom.objects.filter(
+        cupom=cupom, status="confirmado", produto__in=ativos,
+    ).values_list("produto_id", flat=True))
+    if conf_ids:
+        qs = ativos.filter(id__in=conf_ids)
+    else:
+        external_id = str(getattr(cupom, "external_id", "") or "")
+        if external_id.startswith("campanha:"):
+            qs = ativos.filter(campanha_id=external_id.split(":", 1)[1])
+        else:
+            regras = regras_do_cupom(cupom)
+            if regras.get("is_mar_aberto"):
+                minimo = regras.get("valor_minimo") or 0
+                qs = ativos.filter(preco_sem_desconto__gte=minimo)
+            else:
+                return []
+
+    qs = qs.filter(preco_com_cupom__gt=0, preco_sem_desconto__gt=0).annotate(
+        _desc=ExpressionWrapper(
+            (F("preco_sem_desconto") - F("preco_com_cupom")) * 100.0
+            / F("preco_sem_desconto"), output_field=FloatField()),
+    ).filter(_desc__lt=90).order_by("-_desc")
+    return list(qs[:limite])
+
+
+def _preparar_itens_cupom(cupom, usuario, limite=8):
+    """[{produto, link}] com link de afiliado válido + foto, p/ a mensagem-colagem.
+
+    Cada produto leva o PRÓPRIO link comissionado (como na imagem-modelo). Usa o
+    cache em lote (`situacao_dos_links`) e, só p/ quem não tem, gera via Link
+    Builder. Se a sessão do ML cair, para de tentar (evita N falhas lentas) e
+    devolve o que houver — o chamador cai no texto puro, que reporta a reconexão.
+    """
+    from apps.scrapers.marketplaces.registry import get_marketplace
+    from apps.scrapers.afiliado import situacao_dos_links, salvar_cache
+    from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
+    from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
+
+    produtos = produtos_do_cupom(cupom, limite=limite * 2)
+    if not produtos:
+        return []
+    mkt = str(getattr(cupom, "marketplace", "mercadolivre") or "mercadolivre").lower()
+    mp = get_marketplace(mkt)
+    situacao = situacao_dos_links(usuario, produtos)
+
+    itens, sessao_caiu = [], False
+    for p in produtos:
+        if len(itens) >= limite:
+            break
+        link = ((situacao.get(p.id) or {}).get("link_afiliado")
+                or getattr(p, "link_afiliado", "") or "")
+        if not link and not sessao_caiu:
+            try:
+                info = mp.build_affiliate_link(p, usuario=usuario)
+            except (LoginError, AuthError, SessaoExpirada, BrowserError) as exc:
+                logger.warning("Sessão/navegador ao afiliar produto %s do cupom %s: %s",
+                               getattr(p, "id", "?"), getattr(cupom, "pk", "?"), exc)
+                sessao_caiu = True
+                info = None
+            except Exception as exc:
+                logger.debug("Falha ao afiliar produto %s do cupom: %s",
+                             getattr(p, "id", "?"), exc)
+                info = None
+            if info and info.get("link_afiliado") and info.get("afiliado_ok") is not False:
+                link = info["link_afiliado"]
+                try:
+                    salvar_cache(usuario, p, link, info.get("url_isca", ""), True)
+                except Exception:
+                    pass
+        if link:
+            itens.append({"produto": p, "link": link})
+    return itens
+
+
+def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
+    """Mensagem de cupom no formato da imagem-modelo: cabeçalho + lista de produtos.
+
+        Cupom ⚡ Mercado Livre
+
+        📖 Chama de Ferro | Capa dura
+        🛒 De ~R$197,90~ por R$83,54
+        ➡️ https://meli.la/...
+
+    Cada produto leva nome, preço De/por e o próprio link. A foto vai na colagem
+    (imagem única acima da mensagem), montada em `colagem.montar_colagem_b64`.
+    """
+    from apps.scrapers.senders.base import WhatsAppMarkup
+    m = markup or WhatsAppMarkup()
+    esc = m.escape
+
+    loja = _nome_loja(getattr(cupom, "marketplace", ""), cupom=cupom)
+    linhas = [m.bold(f"Cupom ⚡ {esc(loja)}"), ""]
+    for it in itens:
+        p = it["produto"]
+        linhas.append(f"📖 {m.bold(esc(p.nome.strip()))}")
+        por = _preco_br(p.preco_com_cupom)
+        de_val = p.preco_sem_desconto or 0
+        pct = ((de_val - p.preco_com_cupom) / de_val * 100) if de_val else 0
+        if 0 < pct < 90 and de_val > p.preco_com_cupom:
+            de = _preco_br(de_val)
+            linhas.append(f"🛒 De {m.strike(f'R${de}')} por {m.bold(f'R${por}')}")
+        else:
+            linhas.append(f"🛒 {m.bold(f'R${por}')}")
+        linhas.append(f"➡️ {esc(it['link'])}")
+        linhas.append("")
+    return "\n".join(linhas).strip()
+
+
 def resolver_link_afiliado_cupom(cupom, usuario):
     """Gera link comissionado direto; cai para produto confirmado quando preciso."""
     from apps.scrapers.models import LinkAfiliadoCupomUsuario
@@ -645,22 +770,39 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         return {"sucesso": False, "motivo": str(motivo), **extra}
 
     try:
-        afiliado = resolver_link_afiliado_cupom(cupom, usuario)
-        if not afiliado.get("sucesso"):
-            return falhar(afiliado.get("motivo") or "Link afiliado indisponível.",
-                          precisa_login_ml=afiliado.get("precisa_login_ml", False),
-                          classe="permanente")
-        mensagem = montar_mensagem_cupom(
-            cupom, markup=sender.markup, link_afiliado=afiliado["link"])
+        # Caminho preferido (imagem-modelo): produtos do cupom viram uma colagem +
+        # lista com De/por e link próprio por item. Sem produtos afiliáveis (ou com
+        # foto custom escolhida no envio), cai no texto puro de sempre.
+        itens_cupom = [] if imagem_b64_custom else _preparar_itens_cupom(cupom, usuario)
+        img_kwargs = {}
+        if itens_cupom:
+            mensagem = montar_mensagem_cupom_produtos(
+                cupom, itens_cupom, markup=sender.markup)
+            link_registro = itens_cupom[0]["link"]
+            # Colagem só no transporte base64/WhatsApp; Telegram (url) segue a lista em texto.
+            if getattr(sender, "prefers_image", "") != "url":
+                from apps.scrapers.colagem import montar_colagem_b64
+                colagem_b64, colagem_mime = montar_colagem_b64(
+                    [it["produto"].imagem_url for it in itens_cupom])
+                if colagem_b64:
+                    img_kwargs = {"imagem_b64": colagem_b64, "mimetype": colagem_mime}
+        else:
+            afiliado = resolver_link_afiliado_cupom(cupom, usuario)
+            if not afiliado.get("sucesso"):
+                return falhar(afiliado.get("motivo") or "Link afiliado indisponível.",
+                              precisa_login_ml=afiliado.get("precisa_login_ml", False),
+                              classe="permanente")
+            mensagem = montar_mensagem_cupom(
+                cupom, markup=sender.markup, link_afiliado=afiliado["link"])
+            link_registro = afiliado["link"]
+            # Só o transporte base64/WhatsApp aceita a foto custom; Telegram segue texto.
+            if imagem_b64_custom and getattr(sender, "prefers_image", "") != "url":
+                img_kwargs = {"imagem_b64": imagem_b64_custom, "mimetype": "image/jpeg"}
         if not mensagem.strip():
             return falhar("Não foi possível montar uma mensagem válida.", classe="permanente")
         Publicacao.objects.filter(pk=publicacao.pk).update(
-            mensagem=mensagem, link_afiliado=afiliado["link"],
-            link_rastreado=afiliado["link"])
-        img_kwargs = {}
-        # Só o transporte base64/WhatsApp aceita a foto custom; Telegram segue texto.
-        if imagem_b64_custom and getattr(sender, "prefers_image", "") != "url":
-            img_kwargs = {"imagem_b64": imagem_b64_custom, "mimetype": "image/jpeg"}
+            mensagem=mensagem, link_afiliado=link_registro,
+            link_rastreado=link_registro)
         resultado = sender.enviar_oferta(
             grupo_id, mensagem, legenda=mensagem, usuario=usuario,
             session=wa_session_de(usuario), **img_kwargs)
