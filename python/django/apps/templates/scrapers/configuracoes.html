@@ -39,6 +39,10 @@
       font-size: .72rem; text-transform: uppercase; letter-spacing: .04em;
       font-weight: 600; text-align: left; flex: none; margin-right: auto; }
     .cfg-table td.col-actions, .cfg-table .row-actions { justify-content: flex-end; }
+    .cfg-table td[data-label="Nicho"] { flex-wrap: wrap; }
+    .cfg-table .rule-niche { margin-left: auto; min-width: 0; }
+    .cfg-table .rank-preview { flex: 1 0 100%; max-width: none !important;
+      padding-top: .2rem; text-align: left; overflow-wrap: anywhere; }
     .cfg-table td.empty { justify-content: center; text-align: center; }
     .cfg-table td.empty::before { content: ''; }
   }
@@ -84,7 +88,7 @@
       <tbody>
       {% for c in configs %}
         <tr>
-          <td data-label="Nicho" class="cell-grow"><b>{{ c.macro_categoria|default:"Todas" }}</b>{% if c.termo_busca %} <span class="muted">{{ c.termo_busca }}</span>{% endif %}</td>
+          <td data-label="Nicho" class="cell-grow"><div class="rule-niche"><b>{{ c.macro_categoria|default:"Todas" }}</b>{% if c.termo_busca %} <span class="muted">{{ c.termo_busca }}</span>{% endif %}</div>{% if c.previa_conteudo %}<div class="muted rank-preview" style="font-size:.72rem;margin-top:.3rem;max-width:28rem;">Prévia: {{ c.previa_conteudo.titulo }}{% if c.previa_conteudo.score %} · score {{ c.previa_conteudo.score }}{% endif %} · {{ c.previa_conteudo.motivos|join:", " }}</div>{% endif %}</td>
           <td data-label="Destino">
             {% if c.canal == "telegram" %}<span class="badge badge-accent"><i data-lucide="send"></i> Telegram</span>{% else %}<span class="badge badge-green"><i data-lucide="message-circle"></i> WhatsApp</span>{% endif %}
             <span class="mono" style="font-size:.8rem;display:inline-block;margin-left:.35rem;">{{ c.grupo_nome|default:c.grupo_id }}</span>
@@ -193,6 +197,12 @@
       <div class="form-grid">
         <div><label>Limite diário de envios</label><input name="max_envios_dia" type="number" value="20" min="1" max="300"></div>
         <div><label>Pausar após falhas consecutivas</label><input name="pausar_apos_falhas" type="number" value="5" min="1" max="20"></div>
+      </div>
+      <div class="adv-title">Fontes e campanhas</div>
+      <div class="form-grid">
+        {% if awin_programas %}<div style="grid-column:1/-1;"><label>Anunciantes Awin (opcional)</label><select name="programas" multiple size="5">{% for p in awin_programas %}<option value="{{ p.id }}">{{ p.nome }}</option>{% endfor %}</select><span class="muted" style="font-size:.72rem;">Sem seleção, todos os anunciantes conectados participam do ranking.</span></div>{% endif %}
+        <label class="field-check"><input name="incluir_restritos" type="checkbox" checked> Incluir cupons restritos</label>
+        <label class="field-check"><input name="incluir_sem_desconto" type="checkbox" checked> Incluir campanhas sem desconto calculável</label>
       </div>
       <div class="adv-title">Personalização deste grupo</div>
       <div class="form-grid">

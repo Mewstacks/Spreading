@@ -34,6 +34,7 @@ from apps.scrapers.coupon_rules import normalizar_regras_cupom
 
 DEFAULT_URL = ("https://afiliadosmercadolivre.github.io/"
                "cupons-afiliadosmercadolivre/")
+_HTTP_CACHE = {}
 
 
 def _extrair_array_js(html, nome_var):
@@ -79,10 +80,24 @@ class MLPublicCouponsSource(SourceAdapter):
         return getattr(settings, "ML_CUPONS_AFILIADOS_URL", "") or DEFAULT_URL
 
     def _cupons_brutos(self):
-        resp = requests.get(self._url(), timeout=20,
-                            headers={"User-Agent": "Spreading/1.0 (+cupons)"})
+        url = self._url()
+        cached = _HTTP_CACHE.get(url, {})
+        headers = {"User-Agent": "Spreading/1.0 (+cupons)"}
+        if cached.get("etag"):
+            headers["If-None-Match"] = cached["etag"]
+        if cached.get("modified"):
+            headers["If-Modified-Since"] = cached["modified"]
+        resp = requests.get(url, timeout=20, headers=headers)
+        if resp.status_code == 304:
+            return cached.get("coupons", [])
         resp.raise_for_status()
-        return _extrair_array_js(resp.text, "COUPONS")
+        coupons = _extrair_array_js(resp.text, "COUPONS")
+        _HTTP_CACHE[url] = {
+            "etag": resp.headers.get("ETag", ""),
+            "modified": resp.headers.get("Last-Modified", ""),
+            "coupons": coupons,
+        }
+        return coupons
 
     def discover_coupons(self, **kwargs):
         agora = timezone.now()
@@ -134,6 +149,8 @@ class MLPublicCouponsSource(SourceAdapter):
                     "modo_resgate": "codigo",
                     "escopo": escopo,
                 }, external_id=external_id, codigo=nome),
+                restricted=not is_site,
+                flash=bool(c.get("days_left") in (0, "0")),
                 valid_until=validade,
                 observed_at=agora,
                 evidence={"fonte": "afiliados-github", "url": self._url()},

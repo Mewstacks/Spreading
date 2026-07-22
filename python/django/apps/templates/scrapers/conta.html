@@ -10,6 +10,11 @@
   .fld small { color: var(--muted); font-size: .74rem; }
   .status-pill { display: inline-flex; align-items: center; gap: .4rem; font-size: .82rem;
     padding: .3rem .6rem; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); }
+  .program-list { display:grid;grid-template-columns:1fr;gap:.55rem;margin-top:.8rem; }
+  .program-row { display:flex;align-items:center;gap:.7rem;padding:.7rem;border:1px solid var(--border);border-radius:10px; }
+  .program-row img { width:36px;height:36px;object-fit:contain;border-radius:6px;background:white; }
+  .program-row form { margin-left:auto; }
+  @media (min-width:860px) { .program-list { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 </style>
 {% endblock %}
 
@@ -111,4 +116,44 @@
     por isso a conexão de relatórios é uma etapa à parte.
   </p>
 </div>
+
+{% if awin_enabled %}
+<div class="card" id="awin">
+  <div class="card-head">
+    <h2><i data-lucide="network"></i> Awin</h2>
+    {% if awin_integracao.status == 'conectada' %}<span class="status-pill"><span class="dot on"></span> Conectada</span>
+    {% elif awin_integracao.status == 'reconectar' %}<span class="status-pill"><span class="dot off"></span> Reconectar</span>
+    {% elif awin_integracao %}<span class="status-pill"><span class="dot"></span> {{ awin_integracao.get_status_display }}</span>
+    {% else %}<span class="status-pill"><span class="dot off"></span> Não conectada</span>{% endif %}
+  </div>
+  {% if awin_integracao and awin_integracao.status == 'conectada' %}
+    <p class="muted" style="font-size:.82rem;">Publisher <strong>{{ awin_integracao.nome_conta|default:awin_integracao.identificador_conta }}</strong> · {{ awin_programas|length }} programa(s) · última sincronização {{ awin_integracao.ultimo_sucesso|default:"ainda não concluída" }}.</p>
+    {% if awin_integracao.erro_publico %}<div class="alert alert-warn"><i data-lucide="alert-triangle"></i><div>{{ awin_integracao.erro_publico }}</div></div>{% endif %}
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;">
+      <form method="post" action="{% url 'scraper-awin-sincronizar' %}">{% csrf_token %}<button class="btn btn-blue btn-sm"><i data-lucide="refresh-cw"></i> Sincronizar agora</button></form>
+      <form method="post" action="{% url 'scraper-awin-desconectar' %}" onsubmit="return confirm('Desconectar a Awin? O histórico será preservado.')">{% csrf_token %}<button class="btn btn-ghost btn-sm"><i data-lucide="unlink"></i> Desconectar</button></form>
+    </div>
+    <div class="program-list">
+      {% for p in awin_programas %}<div class="program-row">
+        {% if p.logo_url %}<img src="{{ p.logo_url }}" alt="">{% endif %}
+        <div style="min-width:0"><strong style="display:block;overflow-wrap:anywhere;">{{ p.nome }}</strong><span class="muted" style="font-size:.72rem;">{{ p.dominio|default:p.status_vinculo }} · {{ p.link_status }}</span></div>
+        <form method="post" action="{% url 'scraper-awin-programa-toggle' p.id %}">{% csrf_token %}<button class="btn btn-sm {% if p.habilitado %}btn-green{% else %}btn-ghost{% endif %}" style="min-height:44px;">{% if p.habilitado %}Ativo{% else %}Pausado{% endif %}</button></form>
+      </div>{% empty %}<p class="muted">Nenhum programa brasileiro ativo foi encontrado.</p>{% endfor %}
+    </div>
+  {% else %}
+    <p class="muted" style="font-size:.82rem;line-height:1.55;">Gere seu token em <a href="https://ui.awin.com/awin-api" target="_blank" rel="noopener">API Credentials da Awin</a> e cole abaixo. O Spreading nunca solicita sua senha.</p>
+    {% if awin_contas %}
+      <form method="post" action="{% url 'scraper-awin-selecionar' %}">{% csrf_token %}
+        <div class="fld"><label>Conta Publisher</label><select name="publisher_id" required>{% for c in awin_contas %}<option value="{{ c.id }}">{{ c.nome }} · {{ c.id }}</option>{% endfor %}</select></div>
+        <button class="btn btn-blue" type="submit"><i data-lucide="check"></i> Usar esta conta</button>
+      </form>
+    {% else %}
+      <form method="post" action="{% url 'scraper-awin-conectar' %}">{% csrf_token %}
+        <div class="fld"><label>Token pessoal da Awin</label><input name="token" type="password" autocomplete="new-password" required placeholder="Cole o token"><small>Armazenado criptografado e nunca exibido novamente.</small></div>
+        <button class="btn btn-blue" type="submit"><i data-lucide="plug"></i> Validar e conectar</button>
+      </form>
+    {% endif %}
+  {% endif %}
+</div>
+{% endif %}
 {% endblock %}

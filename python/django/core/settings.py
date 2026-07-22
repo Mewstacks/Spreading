@@ -271,6 +271,7 @@ AMAZON_MIN_SAVINGS_PCT = float(os.getenv("AMAZON_MIN_SAVINGS_PCT", "15"))
 AMAZON_PUBLIC_FALLBACK = os.getenv("AMAZON_PUBLIC_FALLBACK", "1") == "1"
 AFFILIATE_FEED_URL = os.getenv("AFFILIATE_FEED_URL", "")
 AFFILIATE_FEED_TOKEN = os.getenv("AFFILIATE_FEED_TOKEN", "")
+AWIN_INTEGRATION_ENABLED = os.getenv("AWIN_INTEGRATION_ENABLED", "1") == "1"
 # Palavras-chave de categorias amplas que alimentam o "feed" de ofertas Amazon
 # (a Creators API não expõe um feed de ofertas; varremos buscas com min savings).
 AMAZON_FEED_KEYWORDS = [

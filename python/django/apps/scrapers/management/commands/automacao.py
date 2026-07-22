@@ -112,12 +112,8 @@ def _rodar_scrape():
     if sucessos:
         from apps.scrapers.maintenance import expire_stale
         expire_stale()
-    from django.conf import settings
     from apps.scrapers.sources import run_source
     from apps.scrapers.sources.persistence import persist_items
-    if getattr(settings, "AFFILIATE_FEED_URL", ""):
-        feed = run_source("licensed-affiliate-feed")
-        persist_items(feed.get("offers", []) + feed.get("coupons", []))
     # Cupons oficiais de afiliados do ML (página pública, sem segredo). run_source já
     # isola exceções e devolve listas vazias, então uma falha aqui não derruba o ciclo.
     cupons_ml = run_source("ml-cupons-afiliados")
@@ -139,6 +135,37 @@ def _rodar_scrape():
     return {"sucessos": sucessos, "falhas": falhas}
 
 
+def _rodar_feed_afiliados():
+    """Ativa e ingere o feed somente quando sua URL esta configurada.
+
+    A migracao 0031 semeou a fonte como desabilitada. A URL de ambiente e o gate
+    definitivo para este adaptador: assim o secret liga o conector em bancos ja
+    existentes, mas ele continua ausente da UI em instalacoes sem feed contratado.
+    """
+    from django.conf import settings
+    from apps.scrapers.models import FonteIngestao
+    from apps.scrapers.sources import run_source
+    from apps.scrapers.sources.persistence import persist_items
+
+    if not getattr(settings, "AFFILIATE_FEED_URL", ""):
+        return {"offers": 0, "coupons": 0}
+    fonte, _ = FonteIngestao.objects.get_or_create(
+        slug="licensed-affiliate-feed",
+        defaults={
+            "marketplace": "multiloja",
+            "nome": "Feed licenciado de afiliados",
+            "habilitada": True,
+        },
+    )
+    if not fonte.habilitada:
+        fonte.habilitada = True
+        fonte.status = "degraded"
+        fonte.erro_publico = ""
+        fonte.save(update_fields=("habilitada", "status", "erro_publico"))
+    feed = run_source("licensed-affiliate-feed")
+    return persist_items(feed.get("offers", []) + feed.get("coupons", []))
+
+
 def _rodar_scrape_rapido(paginas=8):
     """LANE RÁPIDA/flash (B3): só o feed /ofertas do ML, poucas páginas, em UPSERT
     (não zera o feed da lane lenta). Pega deals-relâmpago entre as raspagens completas."""
@@ -146,6 +173,13 @@ def _rodar_scrape_rapido(paginas=8):
     from apps.scrapers.models import FonteIngestao
     logger.info("[%s] SCRAPE-FLASH: feed ML (%s paginas)", timezone.now().strftime("%H:%M"), paginas)
     total = mapear_ofertas(max_paginas=paginas, substituir=False)
+    # A mesma lane rapida traz cupons oficiais do ML. A fonte e HTTP e idempotente;
+    # assim os cupons limitados nao esperam o ciclo completo de tres horas.
+    from apps.scrapers.sources import run_source
+    from apps.scrapers.sources.persistence import persist_items
+    cupons_ml = run_source("ml-cupons-afiliados")
+    persist_items(cupons_ml.get("coupons", []))
+    _rodar_awin_integracoes()
     now = timezone.now()
     fonte, _ = FonteIngestao.objects.get_or_create(
         slug="mercadolivre-web",
@@ -163,6 +197,29 @@ def _rodar_scrape_rapido(paginas=8):
         fonte.erro_publico = "Coleta vazia; catálogo anterior preservado."
     fonte.save()
     return total
+
+
+def _rodar_awin_integracoes():
+    """Executa somente contas Awin vencidas; credenciais e catálogo são por usuário."""
+    from django.conf import settings
+    if not getattr(settings, "AWIN_INTEGRATION_ENABLED", False):
+        return {"ok": 0, "falhas": 0}
+    from django.db.models import Q
+    from apps.scrapers.awin import AwinError, sincronizar_integracao
+    from apps.scrapers.models import IntegracaoAfiliado
+
+    now = timezone.now()
+    integracoes = IntegracaoAfiliado.objects.filter(
+        provedor="awin", habilitada=True, status__in=("conectada", "degradada"),
+    ).filter(Q(proxima_sincronizacao__isnull=True) | Q(proxima_sincronizacao__lte=now))
+    ok = falhas = 0
+    for integracao in integracoes.select_related("owner"):
+        try:
+            sincronizar_integracao(integracao)
+            ok += 1
+        except AwinError:
+            falhas += 1
+    return {"ok": ok, "falhas": falhas}
 
 
 def _rodar_links(lote=40):

@@ -6,6 +6,8 @@ from django.utils import timezone
 import secrets
 import uuid
 
+from apps.accounts.fields import EncryptedCharField
+
 # Alfabeto base62 do slug curto de publicação. 7 caracteres dão 62^7 (~3,5
 # trilhões) de combinações: colisão é estatisticamente irrelevante e, se
 # acontecer, o unique do banco barra e o envio seguinte gera outro slug.
@@ -98,10 +100,80 @@ class FonteIngestao(models.Model):
         return self.nome
 
 
+class IntegracaoAfiliado(models.Model):
+    """Conta de uma rede de afiliacao pertencente a um usuario.
+
+    Mercado Livre e Amazon ainda usam os fluxos legados do Perfil. Este modelo e o
+    contrato extensivel das redes com API, com Awin como primeiro provedor.
+    """
+
+    STATUS = [
+        ("pendente", "Pendente"), ("conectada", "Conectada"),
+        ("degradada", "Degradada"), ("reconectar", "Reconectar"),
+        ("desativada", "Desativada"),
+    ]
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                              related_name="integracoes_afiliado")
+    provedor = models.CharField(max_length=30, default="awin", db_index=True)
+    identificador_conta = models.CharField(max_length=120, blank=True, default="")
+    nome_conta = models.CharField(max_length=160, blank=True, default="")
+    token = EncryptedCharField(max_length=4096, blank=True, default="")
+    habilitada = models.BooleanField(default=True)
+    status = models.CharField(max_length=20, choices=STATUS, default="pendente",
+                              db_index=True)
+    ultima_tentativa = models.DateTimeField(null=True, blank=True)
+    ultimo_sucesso = models.DateTimeField(null=True, blank=True)
+    proxima_sincronizacao = models.DateTimeField(null=True, blank=True, db_index=True)
+    programas_sincronizados_em = models.DateTimeField(null=True, blank=True)
+    erro_publico = models.CharField(max_length=255, blank=True, default="")
+    falhas_consecutivas = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["owner", "provedor"],
+                                    name="uniq_integracao_provedor_usuario"),
+        ]
+
+    def __str__(self):
+        return f"{self.provedor}:{self.nome_conta or self.identificador_conta}"
+
+
+class ProgramaAfiliado(models.Model):
+    """Anunciante/programa habilitado dentro de uma integracao do usuario."""
+
+    integracao = models.ForeignKey(IntegracaoAfiliado, on_delete=models.CASCADE,
+                                   related_name="programas")
+    external_id = models.CharField(max_length=80)
+    nome = models.CharField(max_length=180)
+    dominio = models.CharField(max_length=255, blank=True, default="")
+    dominios_validos = models.JSONField(default=list, blank=True)
+    logo_url = models.URLField(max_length=1000, blank=True, default="")
+    status_vinculo = models.CharField(max_length=30, default="joined", db_index=True)
+    link_status = models.CharField(max_length=30, default="online", db_index=True)
+    deeplink_habilitado = models.BooleanField(default=True)
+    habilitado = models.BooleanField(default=True)
+    comissao_min = models.FloatField(null=True, blank=True)
+    comissao_max = models.FloatField(null=True, blank=True)
+    comissao_tipo = models.CharField(max_length=20, blank=True, default="")
+    comissao_sincronizada_em = models.DateTimeField(null=True, blank=True)
+    atualizado_em = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["integracao", "external_id"],
+                                    name="uniq_programa_por_integracao"),
+        ]
+
+    def __str__(self):
+        return self.nome
+
+
 class ExecucaoIngestao(models.Model):
     STATUS = [(s, s) for s in ("running", "ok", "empty", "error", "blocked")]
     fonte = models.ForeignKey(FonteIngestao, on_delete=models.CASCADE,
                               related_name="execucoes")
+    integracao = models.ForeignKey(IntegracaoAfiliado, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="execucoes")
     iniciada_em = models.DateTimeField(auto_now_add=True, db_index=True)
     finalizada_em = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS, default="running")
@@ -114,8 +186,17 @@ class CupomNormalizado(models.Model):
     """Cupom independente de produto; só é publicável via ProdutoCupom confirmado."""
     fonte = models.ForeignKey(FonteIngestao, on_delete=models.CASCADE,
                               related_name="cupons")
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                              null=True, blank=True, db_index=True,
+                              related_name="cupons_normalizados")
+    integracao = models.ForeignKey(IntegracaoAfiliado, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="cupons")
+    programa = models.ForeignKey(ProgramaAfiliado, on_delete=models.SET_NULL,
+                                 null=True, blank=True, related_name="cupons")
     external_id = models.CharField(max_length=160)
     marketplace = models.CharField(max_length=20, db_index=True)
+    tipo_conteudo = models.CharField(max_length=20, default="voucher", db_index=True)
+    anunciante_nome = models.CharField(max_length=180, blank=True, default="")
     titulo = models.CharField(max_length=255)
     codigo = models.CharField(max_length=120, blank=True, default="")
     # Categoria/ação da fonte (Sellers, Fashion, "site inteiro", ...). Vem do
@@ -123,7 +204,10 @@ class CupomNormalizado(models.Model):
     categoria = models.CharField(max_length=100, blank=True, default="", db_index=True)
     regras = models.JSONField(default=dict, blank=True)
     link = models.URLField(max_length=1000, blank=True, default="")
+    inicio = models.DateTimeField(null=True, blank=True, db_index=True)
     validade = models.DateTimeField(null=True, blank=True, db_index=True)
+    restrito = models.BooleanField(default=False, db_index=True)
+    relampago = models.BooleanField(default=False, db_index=True)
     estado = models.CharField(max_length=20, default="ativo", db_index=True)
     confianca = models.CharField(max_length=20, default="baixa", db_index=True)
     evidencia = models.JSONField(default=dict, blank=True)
@@ -131,7 +215,15 @@ class CupomNormalizado(models.Model):
     ultima_observacao = models.DateTimeField(auto_now=True, db_index=True)
 
     class Meta:
-        unique_together = ("fonte", "external_id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["fonte", "external_id"], condition=models.Q(owner__isnull=True),
+                name="uniq_cupom_compartilhado_fonte_external"),
+            models.UniqueConstraint(
+                fields=["owner", "fonte", "external_id"],
+                condition=models.Q(owner__isnull=False),
+                name="uniq_cupom_privado_owner_fonte_external"),
+        ]
 
 
 class ProdutoCupom(models.Model):
@@ -499,6 +591,10 @@ class ConfiguracaoEnvio(models.Model):
     canal = models.CharField(max_length=20, default="whatsapp")
     # Filtro opcional de marketplace ('' = qualquer). Ex: só 'mercadolivre'.
     marketplace = models.CharField(max_length=20, blank=True, default="")
+    programas = models.ManyToManyField(ProgramaAfiliado, blank=True,
+                                       related_name="configuracoes")
+    incluir_restritos = models.BooleanField(default=True)
+    incluir_sem_desconto = models.BooleanField(default=True)
     grupo_id = models.CharField(max_length=100)          # ex '12345@g.us' (WA) ou '@canal'/-100... (TG)
     grupo_nome = models.CharField(max_length=255, blank=True, default="")
     intervalo_minutos = models.PositiveIntegerField(default=60)

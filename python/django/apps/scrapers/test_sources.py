@@ -123,6 +123,94 @@ class SourcePipelineTests(TestCase):
         from apps.scrapers.sources.external_feed import LicensedFeedSource
         self.assertEqual(list(LicensedFeedSource().discover_offers()), [])
 
+    @override_settings(
+        AFFILIATE_FEED_URL="https://feed.example/coupons.json",
+        AFFILIATE_FEED_TOKEN="secret-token",
+    )
+    @patch("apps.scrapers.sources.external_feed.requests.get")
+    def test_licensed_feed_ingests_only_ml_and_amazon_coupons(self, get):
+        response = get.return_value
+        response.json.return_value = {"items": [
+            {
+                "type": "coupon", "id": "ml-10", "store": "Mercado Livre",
+                "title": "10% em eletrônicos", "code": "ML10",
+                "deeplink": "https://afiliado.example/ml?ref=123",
+                "discount_type": "percentual", "discount_percent": 10,
+                "minimum_purchase": "R$ 100,00", "category": "Eletrônicos",
+                "valid_until": "2099-12-31", "network": "Rede Teste",
+            },
+            {
+                "kind": "voucher", "coupon_id": "az-20", "merchant": "Amazon.com.br",
+                "description": "R$ 20 de desconto", "voucher_code": "AMAZON20",
+                "affiliate_url": "https://afiliado.example/amazon?tag=partner",
+                "discount_type": "fixo", "discount_value": "R$ 20",
+                "expires_at": "2099-12-31T23:00:00Z",
+            },
+            {
+                "type": "coupon", "id": "other-1", "store": "Outra Loja",
+                "code": "OUTRA10", "url": "https://afiliado.example/outra",
+            },
+            {
+                "type": "coupon", "id": "expired", "store": "Amazon",
+                "code": "VELHO", "url": "https://afiliado.example/velho",
+                "valid_until": "2020-01-01",
+            },
+        ]}
+
+        from apps.scrapers.sources.external_feed import LicensedFeedSource
+        coupons = list(LicensedFeedSource().discover_coupons())
+
+        self.assertEqual([coupon.marketplace for coupon in coupons], ["mercadolivre", "amazon"])
+        self.assertEqual(coupons[0].external_id, "licensed:mercadolivre:ml-10")
+        self.assertEqual(coupons[0].coupon_rules["tipo_desconto"], "porcentagem")
+        self.assertEqual(coupons[0].coupon_rules["valor_desconto"], 10.0)
+        self.assertEqual(coupons[0].coupon_rules["valor_minimo"], 100.0)
+        self.assertEqual(coupons[0].coupon_rules["escopo"], "Eletrônicos")
+        self.assertEqual(coupons[1].canonical_url,
+                         "https://afiliado.example/amazon?tag=partner")
+        get.assert_called_once_with(
+            "https://feed.example/coupons.json",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Spreading/1.0 (+affiliate-feed)",
+                "Authorization": "Bearer secret-token",
+            },
+            timeout=20,
+        )
+
+    @override_settings(AFFILIATE_FEED_URL="https://feed.example/coupons.json")
+    @patch("apps.scrapers.sources.external_feed.requests.get")
+    def test_licensed_coupon_requires_code_and_http_deeplink(self, get):
+        get.return_value.json.return_value = [
+            {"type": "coupon", "store": "Amazon", "code": "", "url": "https://ok.example"},
+            {"type": "coupon", "store": "Amazon", "code": "TESTE", "url": "javascript:alert(1)"},
+        ]
+        from apps.scrapers.sources.external_feed import LicensedFeedSource
+        self.assertEqual(list(LicensedFeedSource().discover_coupons()), [])
+
+    @override_settings(AFFILIATE_FEED_URL="https://feed.example/coupons.json")
+    @patch("apps.scrapers.sources.persistence.persist_items")
+    @patch("apps.scrapers.sources.run_source")
+    def test_configured_feed_is_enabled_and_persists_coupons(self, run_source, persist):
+        source = FonteIngestao.objects.get(slug="licensed-affiliate-feed")
+        self.assertFalse(source.habilitada)
+        coupon = IngestedItem(
+            external_id="licensed:amazon:1", marketplace="amazon",
+            source="licensed-affiliate-feed", kind="coupon",
+            canonical_url="https://affiliate.example/amazon", title="Cupom Amazon",
+            coupon_code="AMAZON10",
+        )
+        run_source.return_value = {"offers": [], "coupons": [coupon], "status": "ok"}
+        persist.return_value = {"offers": 0, "coupons": 1}
+
+        from apps.scrapers.management.commands.automacao import _rodar_feed_afiliados
+        result = _rodar_feed_afiliados()
+
+        source.refresh_from_db()
+        self.assertTrue(source.habilitada)
+        persist.assert_called_once_with([coupon])
+        self.assertEqual(result, {"offers": 0, "coupons": 1})
+
     @override_settings(AMAZON_PARTNER_TAG="globaltag-20", AMAZON_PUBLIC_FALLBACK=True)
     @patch("apps.scrapers.sources.persistence.persist_items")
     @patch("apps.scrapers.sources.run_source")

@@ -304,15 +304,44 @@
 </details>{% endif %}
 
 {% if tipo == 'cupom' %}
+  <details class="card" style="margin-bottom:1rem;" id="cupom-manual">
+    <summary style="cursor:pointer;font-weight:700;"><i data-lucide="plus-circle"></i> Adicionar cupom privado</summary>
+    <p class="muted" style="font-size:.8rem;">Visível somente na sua conta. O link afiliado é preparado antes da publicação.</p>
+    <form method="post" action="{% url 'scraper-cupom-manual' %}">{% csrf_token %}
+      <div class="form-grid">
+        <div><label>Loja</label><select name="marketplace" id="manual-marketplace" onchange="document.getElementById('manual-awin').style.display=this.value==='awin'?'block':'none'" required>
+          <option value="mercadolivre">Mercado Livre</option><option value="amazon">Amazon</option>
+          {% if awin_programas %}<option value="awin">Awin</option>{% endif %}
+        </select></div>
+        <div id="manual-awin" style="display:none"><label>Anunciante Awin</label><select name="programa"><option value="">Selecione</option>{% for p in awin_programas %}<option value="{{ p.id }}">{{ p.nome }}</option>{% endfor %}</select></div>
+        <div><label>Título</label><input name="titulo" maxlength="255" required placeholder="15% OFF em eletrônicos"></div>
+        <div><label>Código (opcional)</label><input name="codigo" maxlength="120" placeholder="CUPOM15"></div>
+        <div style="grid-column:1/-1"><label>URL da campanha ou produto</label><input name="url" type="url" required placeholder="https://..."></div>
+        <div><label>Tipo de desconto</label><select name="tipo_desconto"><option value="porcentagem">Porcentagem</option><option value="fixo">Valor em reais</option><option value="">Não calculável</option></select></div>
+        <div><label>Desconto</label><input name="valor_desconto" inputmode="decimal" placeholder="15"></div>
+        <div><label>Compra mínima</label><input name="valor_minimo" inputmode="decimal" placeholder="100"></div>
+        <div><label>Desconto máximo</label><input name="desconto_maximo" inputmode="decimal" placeholder="60"></div>
+        <div><label>Início</label><input name="inicio" type="datetime-local"></div>
+        <div><label>Validade</label><input name="validade" type="datetime-local"></div>
+        <div style="grid-column:1/-1"><label>Condições</label><textarea name="condicoes" rows="2" placeholder="Somente no app, novos clientes, cartão específico..."></textarea></div>
+      </div>
+      <div style="display:flex;gap:1rem;flex-wrap:wrap;margin:.8rem 0;">
+        <label class="field-check"><input type="checkbox" name="restrito"> Público restrito</label>
+        <label class="field-check"><input type="checkbox" name="relampago"> Oferta-relâmpago</label>
+      </div>
+      <button class="btn btn-blue" type="submit"><i data-lucide="save"></i> Salvar cupom privado</button>
+    </form>
+  </details>
   {% if cupons_catalogo %}
   <div class="table-wrap"><table><thead><tr><th>Como usar</th><th class="cell-grow">Cupom</th><th>Loja</th><th>Validade</th><th>Ação</th></tr></thead><tbody>
   {% for c in cupons_catalogo %}<tr>
     <td data-label="Como usar" class="cell-code"><div class="td-val" style="white-space:normal;overflow-wrap:anywhere;"><strong>{% if c.codigo_publico %}{{ c.codigo_publico }}{% else %}Ativar no link{% endif %}</strong></div></td>
-    <td data-label="Cupom"><div class="td-val"><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div class="muted" style="font-size:.76rem;">Cupom genérico; confirme a aplicação no checkout.</div></div></td>
-    <td data-label="Loja"><div class="td-val">{{ c.marketplace|title }}</div></td>
+    <td data-label="Cupom"><div class="td-val"><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.3rem;">{% if c.relampago %}<span class="badge badge-warn">Relâmpago</span>{% endif %}{% if c.restrito %}<span class="badge badge-muted">Restrito</span>{% endif %}{% if c.marketplace == 'awin' %}<span class="badge badge-accent">Awin</span>{% endif %}{% if c.fonte.slug == 'manual-private' %}<span class="badge badge-green">Privado</span>{% endif %}{% if not c.codigo_publico %}<span class="badge badge-muted">Ativação no link</span>{% endif %}</div><div class="muted" style="font-size:.76rem;">{% if c.restrito %}Confira as condições antes de publicar.{% else %}Confirme a aplicação no checkout.{% endif %}</div></div></td>
+    <td data-label="Loja"><div class="td-val">{% if c.anunciante_nome %}{{ c.anunciante_nome }}{% elif c.marketplace == 'mercadolivre' %}Mercado Livre{% else %}{{ c.marketplace|title }}{% endif %}</div></td>
     <td data-label="Validade"><div class="td-val">{% if c.validade %}{{ c.validade|date:"d/m/Y H:i" }}{% else %}Não informada{% endif %}</div></td>
     <td data-label="Ação" class="col-actions"><div class="td-val" style="display:flex;justify-content:flex-end;">
       <button class="btn btn-green btn-sm" onclick="abrirEnvioCupom({{ c.id }}, '{{ c.codigo_publico|escapejs }}')"><i data-lucide="send"></i> Enviar</button>
+      {% if c.fonte.slug == 'manual-private' %}<form method="post" action="{% url 'scraper-cupom-manual-desativar' c.id %}" style="display:inline">{% csrf_token %}<button class="icon-btn danger" title="Desativar cupom"><i data-lucide="x"></i></button></form>{% endif %}
     </div></td>
   </tr>{% endfor %}</tbody></table></div>
   {% include "scrapers/_paginacao.html" with page=cupons_page %}

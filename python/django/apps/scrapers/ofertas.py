@@ -344,11 +344,13 @@ def _frase_marketing(produto):
     return frase
 
 
-def _nome_loja(marketplace) -> str:
+def _nome_loja(marketplace, cupom=None) -> str:
     """Nome de exibição da loja (espelha o rótulo da tela de Promoções)."""
     m = str(marketplace or "").strip().lower()
     if m in ("mercadolivre", "mercado livre", "meli"):
         return "Mercado Livre"
+    if m == "awin":
+        return str(getattr(cupom, "anunciante_nome", "") or "Awin")
     return str(marketplace or "Loja").title()
 
 
@@ -375,7 +377,7 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
     regras = regras_do_cupom(cupom)
     is_meli = str(getattr(cupom, "marketplace", "") or "").strip().lower() in (
         "mercadolivre", "mercado livre", "meli")
-    loja = _nome_loja(getattr(cupom, "marketplace", ""))
+    loja = _nome_loja(getattr(cupom, "marketplace", ""), cupom=cupom)
 
     linhas = [m.bold(f"Novo cupom ⚡️ {esc(loja)}"), ""]
 
@@ -405,6 +407,10 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
         linhas.append(f"🎟 Use o cupom {m.bold(esc(codigo))}")
     else:
         linhas.append(f"🎟 {m.bold('Ative o cupom no link')}")
+
+    if getattr(cupom, "restrito", False):
+        condicao = str(regras.get("escopo") or "Consulte quem pode usar antes de comprar")
+        linhas.extend(["", f"⚠️ {m.bold('Condição:')} {esc(condicao[:220])}"])
 
     link = str(link_afiliado or getattr(cupom, "link", "") or "").strip()
     if link:
@@ -450,12 +456,36 @@ def resolver_link_afiliado_cupom(cupom, usuario):
 
     if usuario is None:
         return {"sucesso": False, "motivo": "Usuário ausente para gerar o link afiliado."}
+    if getattr(cupom, "owner_id", None) and cupom.owner_id != usuario.id:
+        return {"sucesso": False, "motivo": "Este cupom pertence a outra conta."}
     marketplace = str(getattr(cupom, "marketplace", "") or "").strip().lower()
+    origem = str(getattr(cupom, "link", "") or "").strip()
+    if marketplace == "awin":
+        integracao = getattr(cupom, "integracao", None)
+        programa = getattr(cupom, "programa", None)
+        if (integracao and integracao.owner_id == usuario.id
+                and integracao.habilitada and integracao.status == "conectada"
+                and programa and programa.habilitado and programa.status_vinculo == "joined"
+                and programa.link_status == "online" and origem.startswith(("http://", "https://"))):
+            return {"sucesso": True, "link": origem, "cache": True}
+        return {"sucesso": False, "motivo": "A conta ou o anunciante Awin não está ativo."}
+    if marketplace == "amazon":
+        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+        from apps.scrapers.afiliado import tag_amazon
+        tag = tag_amazon(usuario)
+        if not tag or not origem.startswith(("http://", "https://")):
+            return {"sucesso": False, "motivo": "Cadastre sua tag Amazon para usar este cupom."}
+        parts = urlsplit(origem)
+        if not (parts.hostname or "").lower().endswith("amazon.com.br"):
+            return {"sucesso": False, "motivo": "O link informado não pertence à Amazon Brasil."}
+        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+        query["tag"] = tag
+        return {"sucesso": True,
+                "link": urlunsplit((parts.scheme, parts.netloc, parts.path,
+                                     urlencode(query), parts.fragment))}
     if marketplace != "mercadolivre":
         return {"sucesso": False,
                 "motivo": "Esta loja ainda não oferece link afiliado para cupons."}
-
-    origem = str(getattr(cupom, "link", "") or "").strip()
     cache = LinkAfiliadoCupomUsuario.objects.filter(
         usuario=usuario, cupom=cupom, afiliado_ok=True,
     ).first()
@@ -521,7 +551,7 @@ def resolver_link_afiliado_cupom(cupom, usuario):
 
 
 def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nome="",
-                 imagem_b64_custom=None):
+                 imagem_b64_custom=None, configuracao=None, score=0, motivos_score=None):
     """Nucleo auditavel do envio manual de CupomNormalizado.
 
     `imagem_b64_custom` (opcional): foto escolhida no envio. Cupom não tem foto de
@@ -583,10 +613,12 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                     "classe": "permanente"}
         publicacao = Publicacao.objects.create(
             usuario=usuario, origem="cupom", cupom_normalizado=cupom,
+            configuracao=configuracao,
             canal=canal, destino_id=str(grupo_id)[:100],
             destino_nome=str(destino_nome or "")[:255],
             cupom=str(codigo_publicavel(cupom) or cupom.titulo or "")[:255],
-            categoria="Cupom",
+            categoria="Cupom", score=float(score or 0),
+            motivos_score=list(motivos_score or []),
         )
 
     def falhar(motivo, **extra):
@@ -1219,16 +1251,20 @@ def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
     que passa na verificação. Devolve o resultado do envio bem-sucedido, ou o último
     erro / 'sem item elegível'. Evita abortar por causa de um único item que reprova.
     """
-    pool = selecionar_item_para_grupo(
-        macros_selecionadas=macros,
-        limite_envio=max_tentativas,
-        horas_cooldown=horas_cooldown,
-        min_desconto_percent=min_desconto_percent,
-        termo=termo,
-        marketplace=marketplace,
-        usuario=usuario,
-        grupo_id=grupo_id,
-    )
+    if configuracao is not None:
+        from apps.scrapers.content_ranking import selecionar_conteudo_para_grupo
+        pool = selecionar_conteudo_para_grupo(configuracao, limit=max_tentativas)
+    else:
+        pool = selecionar_item_para_grupo(
+            macros_selecionadas=macros,
+            limite_envio=max_tentativas,
+            horas_cooldown=horas_cooldown,
+            min_desconto_percent=min_desconto_percent,
+            termo=termo,
+            marketplace=marketplace,
+            usuario=usuario,
+            grupo_id=grupo_id,
+        )
     if not pool:
         # Estoque vazio não é defeito da regra: resolve sozinho quando o scrape
         # traz produto novo. Marcar como transitório é o que impede a config de
@@ -1236,15 +1272,26 @@ def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
         return {"sucesso": False, "motivo": "sem item elegível", "classe": TRANSITORIO}
 
     ultimo = None
-    for prod in pool:
+    for entry in pool:
+        candidate = entry if hasattr(entry, "kind") else None
+        prod = candidate.obj if candidate else entry
         logger.debug(
-            "Tentando enviar produto id=%s origem=%s marketplace=%s",
+            "Tentando enviar conteúdo id=%s origem=%s marketplace=%s",
             getattr(prod, "id", None), getattr(prod, "origem", "cupom"),
             getattr(prod, "marketplace", "?"),
         )
-        r = enviar_oferta_de_produto(
-            prod, grupo_id, verificar=verificar, dry_run=dry_run, canal=canal,
-            usuario=usuario, configuracao=configuracao, destino_nome=destino_nome)
+        if candidate and candidate.kind == "coupon":
+            r = enviar_cupom(
+                prod, grupo_id, canal=canal, usuario=usuario,
+                configuracao=configuracao, destino_nome=destino_nome,
+                score=candidate.score, motivos_score=candidate.reasons)
+        else:
+            if candidate:
+                prod.score_oferta = candidate.score
+                prod.motivos_score = candidate.reasons
+            r = enviar_oferta_de_produto(
+                prod, grupo_id, verificar=verificar, dry_run=dry_run, canal=canal,
+                usuario=usuario, configuracao=configuracao, destino_nome=destino_nome)
         if r.get("sucesso"):
             return r
         logger.debug("Produto id=%s reprovado no envio: %s", getattr(prod, "id", None), r.get("motivo"))

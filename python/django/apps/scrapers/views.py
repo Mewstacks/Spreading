@@ -24,6 +24,7 @@ from django.views.decorators.http import require_GET, require_POST
 from apps.scrapers.models import (
     CliquePublicacao, ConfiguracaoEnvio, Cupom, LinkAfiliadoUsuario, Produto,
     Publicacao, ReceitaAfiliado, RelatorioSync, FonteIngestao, CupomNormalizado,
+    IntegracaoAfiliado, ProgramaAfiliado,
 )
 from apps.scrapers.progresso import emitir_fase
 from apps.scrapers.scraper_mercadolivre.scraper import main as scrapper_main
@@ -406,6 +407,8 @@ def configurar_conta(request):
         return redirect("scraper-conta")
 
     from apps.scrapers.conexoes import estado_amazon_relatorios, estado_ml_relatorios
+    awin_integracao = IntegracaoAfiliado.objects.filter(
+        owner=request.user, provedor="awin").first()
     return render(request, "scrapers/conta.html", {
         "perfil": perfil,
         "tem_secret": bool(perfil and perfil.amazon_credential_secret),
@@ -418,7 +421,248 @@ def configurar_conta(request):
         "ml_relatorio_conectado": bool(estado_ml_relatorios(request.user).conectado),
         "billing_checkout_url": settings.BILLING_CHECKOUT_URL,
         "billing_portal_url": settings.BILLING_PORTAL_URL,
+        "awin_enabled": getattr(settings, "AWIN_INTEGRATION_ENABLED", False),
+        "awin_integracao": awin_integracao,
+        "awin_programas": list(awin_integracao.programas.order_by("nome"))
+        if awin_integracao else [],
+        # Mantém a escolha disponível após refresh/erro de formulário; ela é
+        # removida somente quando uma conta é efetivamente selecionada.
+        "awin_contas": request.session.get("awin_contas", []),
     })
+
+
+@require_POST
+def awin_conectar(request):
+    if not getattr(settings, "AWIN_INTEGRATION_ENABLED", False):
+        return JsonResponse({"erro": "Integração Awin indisponível."}, status=404)
+    from apps.scrapers.awin import AwinError, listar_contas, sincronizar_integracao
+    token = (request.POST.get("token") or "").strip()
+    if len(token) < 20:
+        messages.error(request, "Cole um token Awin válido.")
+        return redirect("scraper-conta")
+    try:
+        contas = listar_contas(token)
+    except AwinError as exc:
+        messages.error(request, exc.public_message)
+        return redirect("scraper-conta")
+    integracao, _ = IntegracaoAfiliado.objects.get_or_create(
+        owner=request.user, provedor="awin")
+    integracao.token = token
+    integracao.habilitada = True
+    integracao.status = "pendente"
+    integracao.erro_publico = ""
+    integracao.save(update_fields=["token", "habilitada", "status", "erro_publico"])
+    if len(contas) > 1:
+        request.session["awin_contas"] = contas
+        messages.info(request, "Token validado. Escolha qual conta Publisher usar.")
+        return redirect("scraper-conta")
+    conta = contas[0]
+    integracao.identificador_conta = conta["id"]
+    integracao.nome_conta = conta["nome"]
+    integracao.status = "conectada"
+    integracao.save(update_fields=["identificador_conta", "nome_conta", "status"])
+    try:
+        sincronizar_integracao(integracao, forcar_programas=True)
+        messages.success(request, "Awin conectada e sincronizada.")
+    except AwinError as exc:
+        messages.warning(request, exc.public_message)
+    return redirect("scraper-conta")
+
+
+@require_POST
+def awin_selecionar_conta(request):
+    from apps.scrapers.awin import AwinError, listar_contas, sincronizar_integracao
+    integracao = IntegracaoAfiliado.objects.filter(
+        owner=request.user, provedor="awin").first()
+    if not integracao or not integracao.token:
+        messages.error(request, "Conecte a Awin novamente.")
+        return redirect("scraper-conta")
+    selected = (request.POST.get("publisher_id") or "").strip()
+    try:
+        conta = next((c for c in listar_contas(integracao.token) if c["id"] == selected), None)
+        if not conta:
+            raise AwinError("A conta escolhida não pertence a este token.")
+        integracao.identificador_conta = conta["id"]
+        integracao.nome_conta = conta["nome"]
+        integracao.status = "conectada"
+        integracao.habilitada = True
+        integracao.save(update_fields=[
+            "identificador_conta", "nome_conta", "status", "habilitada"])
+        request.session.pop("awin_contas", None)
+        sincronizar_integracao(integracao, forcar_programas=True)
+        messages.success(request, "Conta Awin selecionada e sincronizada.")
+    except AwinError as exc:
+        messages.error(request, exc.public_message)
+    return redirect("scraper-conta")
+
+
+@require_POST
+def awin_sincronizar(request):
+    from apps.scrapers.awin import AwinError, sincronizar_integracao
+    integracao = IntegracaoAfiliado.objects.filter(
+        owner=request.user, provedor="awin", habilitada=True).first()
+    if not integracao:
+        messages.error(request, "Awin não conectada.")
+    else:
+        try:
+            result = sincronizar_integracao(integracao, forcar_programas=True)
+            messages.success(request, f"Awin sincronizada: {result['coupons']} campanha(s).")
+        except AwinError as exc:
+            messages.error(request, exc.public_message)
+    return redirect("scraper-conta")
+
+
+@require_POST
+def awin_programa_toggle(request, programa_id):
+    programa = ProgramaAfiliado.objects.filter(
+        pk=programa_id, integracao__owner=request.user,
+        integracao__provedor="awin").first()
+    if not programa:
+        raise PermissionDenied("Programa não pertence a esta conta.")
+    programa.habilitado = not programa.habilitado
+    programa.save(update_fields=["habilitado"])
+    messages.success(request, f"{programa.nome}: {'ativo' if programa.habilitado else 'pausado'}.")
+    return redirect("scraper-conta")
+
+
+@require_POST
+def awin_desconectar(request):
+    integracao = IntegracaoAfiliado.objects.filter(
+        owner=request.user, provedor="awin").first()
+    if integracao:
+        integracao.token = ""
+        integracao.habilitada = False
+        integracao.status = "desativada"
+        integracao.proxima_sincronizacao = None
+        integracao.erro_publico = ""
+        integracao.save(update_fields=[
+            "token", "habilitada", "status", "proxima_sincronizacao", "erro_publico"])
+        CupomNormalizado.objects.filter(owner=request.user, integracao=integracao).update(
+            estado="inativo")
+    messages.success(request, "Awin desconectada. O histórico foi preservado.")
+    return redirect("scraper-conta")
+
+
+def _data_form_aware(value, *, fim=False):
+    from datetime import datetime, time
+    from django.utils.dateparse import parse_date, parse_datetime
+    raw = (value or "").strip()
+    parsed = parse_datetime(raw)
+    if parsed is None:
+        day = parse_date(raw)
+        if day:
+            parsed = datetime.combine(day, time(23, 59, 59) if fim else time.min)
+    if parsed and timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed)
+    return parsed
+
+
+def _url_manual_valida(marketplace, url):
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    host = parsed.hostname.lower()
+    if marketplace == "mercadolivre":
+        return host == "mercadolivre.com.br" or host.endswith(".mercadolivre.com.br")
+    if marketplace == "amazon":
+        return host == "amazon.com.br" or host.endswith(".amazon.com.br")
+    return marketplace == "awin"
+
+
+@require_POST
+def cupom_manual_salvar(request, cupom_id=None):
+    import uuid
+    from apps.scrapers.awin import AwinError, gerar_deeplink, url_permitida
+    from apps.scrapers.coupon_rules import derivar_categoria_cupom, normalizar_regras_cupom
+
+    coupon = None
+    if cupom_id:
+        coupon = CupomNormalizado.objects.filter(
+            pk=cupom_id, owner=request.user, fonte__slug="manual-private").first()
+        if not coupon:
+            raise PermissionDenied("Cupom não pertence a esta conta.")
+    marketplace = (request.POST.get("marketplace") or "").strip().lower()
+    if marketplace not in {"mercadolivre", "amazon", "awin"}:
+        messages.error(request, "Escolha uma loja conectada.")
+        return redirect("scraper-top")
+    original_url = (request.POST.get("url") or "").strip()
+    if not _url_manual_valida(marketplace, original_url):
+        messages.error(request, "Informe uma URL HTTPS válida da loja selecionada.")
+        return redirect("scraper-top")
+    code = (request.POST.get("codigo") or "").strip()[:120]
+    title = (request.POST.get("titulo") or "").strip()[:255]
+    if not title:
+        messages.error(request, "Informe um título para o cupom.")
+        return redirect("scraper-top")
+    integration = program = None
+    affiliate_url = original_url
+    state = "ativo"
+    if marketplace == "awin":
+        try:
+            program_id = int(request.POST.get("programa") or 0)
+        except (TypeError, ValueError):
+            program_id = 0
+        program = ProgramaAfiliado.objects.select_related("integracao").filter(
+            pk=program_id, integracao__owner=request.user,
+            integracao__provedor="awin", habilitado=True,
+            status_vinculo="joined", link_status="online").first()
+        if not program or not url_permitida(program, original_url):
+            messages.error(request, "A URL não pertence ao anunciante Awin escolhido.")
+            return redirect("scraper-top")
+        integration = program.integracao
+        try:
+            affiliate_url = gerar_deeplink(integration, program, original_url)
+        except AwinError as exc:
+            state = "rascunho"
+            messages.warning(request, f"Cupom salvo como rascunho: {exc.public_message}")
+
+    source, _ = FonteIngestao.objects.get_or_create(
+        slug="manual-private",
+        defaults={"marketplace": "multiloja", "nome": "Cupons privados do afiliado",
+                  "status": "ok", "habilitada": True})
+    rules = normalizar_regras_cupom({
+        "tipo_desconto": request.POST.get("tipo_desconto"),
+        "valor_desconto": request.POST.get("valor_desconto"),
+        "valor_minimo": request.POST.get("valor_minimo"),
+        "desconto_maximo": request.POST.get("desconto_maximo"),
+        "modo_resgate": "codigo" if code else "ativacao",
+        "escopo": (request.POST.get("condicoes") or "").strip()[:500],
+        "dia_inicio": request.POST.get("inicio"), "dia_fim": request.POST.get("validade"),
+    }, external_id=coupon.external_id if coupon else "manual", codigo=code)
+    values = {
+        "owner": request.user, "integracao": integration, "programa": program,
+        "marketplace": marketplace, "tipo_conteudo": "voucher" if code else "promotion",
+        "anunciante_nome": program.nome if program else (
+            "Mercado Livre" if marketplace == "mercadolivre" else "Amazon"),
+        "titulo": title, "codigo": code, "regras": rules,
+        "categoria": derivar_categoria_cupom(title, rules), "link": affiliate_url[:1000],
+        "inicio": _data_form_aware(request.POST.get("inicio")),
+        "validade": _data_form_aware(request.POST.get("validade"), fim=True),
+        "restrito": bool(request.POST.get("restrito")),
+        "relampago": bool(request.POST.get("relampago")), "estado": state,
+        "confianca": "media", "evidencia": {"manual": True, "url_original": original_url},
+    }
+    if coupon:
+        for field, value in values.items():
+            setattr(coupon, field, value)
+        coupon.save()
+    else:
+        CupomNormalizado.objects.create(
+            fonte=source, external_id=f"manual:{uuid.uuid4().hex}", **values)
+    if state == "ativo":
+        messages.success(request, "Cupom privado salvo.")
+    return redirect("scraper-top")
+
+
+@require_POST
+def cupom_manual_desativar(request, cupom_id):
+    updated = CupomNormalizado.objects.filter(
+        pk=cupom_id, owner=request.user, fonte__slug="manual-private").update(estado="inativo")
+    if not updated:
+        raise PermissionDenied("Cupom não pertence a esta conta.")
+    messages.success(request, "Cupom privado desativado.")
+    return redirect("scraper-top")
 
 
 def _wa_session(request):
@@ -855,11 +1099,20 @@ def configuracoes(request):
                 divulgacao_afiliado=(request.POST.get("divulgacao_afiliado") or "").strip()[:180],
                 template_a=(request.POST.get("template_a") or "").strip(),
                 template_b=(request.POST.get("template_b") or "").strip(),
+                incluir_restritos=bool(request.POST.get("incluir_restritos")),
+                incluir_sem_desconto=bool(request.POST.get("incluir_sem_desconto")),
                 ativo=bool(request.POST.get("ativo")),
             )
+            program_ids = list(ProgramaAfiliado.objects.filter(
+                id__in=request.POST.getlist("programas"),
+                integracao__owner=request.user, habilitado=True,
+            ).values_list("id", flat=True))
             if cfg_id:
                 # update() não dispara validação, mas o filtro por owner garante posse.
                 ConfiguracaoEnvio.objects.filter(id=cfg_id, owner=request.user).update(**campos)
+                cfg_obj = ConfiguracaoEnvio.objects.filter(id=cfg_id, owner=request.user).first()
+                if cfg_obj:
+                    cfg_obj.programas.set(program_ids)
             else:
                 # Cota de regras por usuário (protege a máquina compartilhada).
                 perfil = getattr(request.user, "perfil", None)
@@ -870,7 +1123,8 @@ def configuracoes(request):
                         request,
                         f"Limite de {limite} regras atingido. Remova uma ou peça mais ao suporte.")
                     return redirect("scraper-configuracoes")
-                ConfiguracaoEnvio.objects.create(owner=request.user, **campos)
+                cfg_obj = ConfiguracaoEnvio.objects.create(owner=request.user, **campos)
+                cfg_obj.programas.set(program_ids)
         return redirect("scraper-configuracoes")
 
     macros = list(
@@ -888,13 +1142,22 @@ def configuracoes(request):
     from apps.scrapers.marketplaces.registry import MARKETPLACES
     from apps.scrapers.senders.registry import SENDERS
 
+    configs_qs = ConfiguracaoEnvio.objects.filter(owner=request.user).prefetch_related(
+        "programas").order_by("macro_categoria")
+    configs = list(configs_qs)
+    from apps.scrapers.content_ranking import previa_melhor_conteudo
+    for config in configs:
+        config.previa_conteudo = previa_melhor_conteudo(config) if config.ativo else None
     return render(request, "scrapers/configuracoes.html", {
-        "configs": ConfiguracaoEnvio.objects.filter(owner=request.user).order_by("macro_categoria"),
+        "configs": configs,
         "macros": macros,
         "subnichos": subnichos,
         "marketplaces": list(MARKETPLACES.keys()),
         "canais": list(SENDERS.keys()),
         "perfil": request.user.perfil,
+        "awin_programas": ProgramaAfiliado.objects.filter(
+            integracao__owner=request.user, integracao__status="conectada",
+            habilitado=True, status_vinculo="joined", link_status="online").order_by("nome"),
     })
 
 
@@ -1065,7 +1328,8 @@ def enviar_cupom_stream(request):
         if not grupo_id:
             print("[ERRO] Nenhum destino informado (grupo/chat).")
             return
-        cupom = CupomNormalizado.objects.filter(id=cupom_id, estado="ativo").first()
+        cupom = CupomNormalizado.objects.filter(
+            Q(owner__isnull=True) | Q(owner=usuario), id=cupom_id, estado="ativo").first()
         if not cupom:
             print("[ERRO] Cupom não encontrado ou inativo.")
             return
@@ -1249,12 +1513,14 @@ def top_promocoes(request):
     # depois a lista é cortada, senão um bloco de pendentes no topo do ranking
     # esvaziava a página inteira.
     candidatos = list(qs.order_by(ordem)[:200])
-    cupons_qs = CupomNormalizado.objects.select_related("fonte").filter(
-        estado="ativo"
+    cupons_visiveis = Q(owner__isnull=True) | Q(owner=request.user)
+    cupons_qs = CupomNormalizado.objects.select_related(
+        "fonte", "integracao", "programa").filter(
+        cupons_visiveis, estado="ativo"
     ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
     # Categorias disponíveis p/ o dropdown da aba Cupons (só cupons vivos).
     cupom_categorias = list(
-        CupomNormalizado.objects.filter(estado="ativo")
+        CupomNormalizado.objects.filter(cupons_visiveis, estado="ativo")
         .filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
         .exclude(categoria="")
         .values_list("categoria", flat=True).distinct().order_by("categoria")
@@ -1287,7 +1553,8 @@ def top_promocoes(request):
     cupons_page = Paginator(cupons_lista, POR_PAGINA).get_page(pagina)
     cupons_catalogo = list(cupons_page)
     perfil = getattr(request.user, "perfil", None)
-    fontes_qs = FonteIngestao.objects.filter(habilitada=True).order_by("marketplace", "nome")
+    fontes_qs = FonteIngestao.objects.filter(habilitada=True).exclude(
+        slug="manual-private").order_by("marketplace", "nome")
     # Fontes Amazon are account-specific. Do not present an adapter that cannot
     # run for this user as an operational incident.
     if not perfil or not perfil.afiliado_tag_amazon:
@@ -1416,7 +1683,9 @@ def top_promocoes(request):
         "macros_selecionados": macros_selecionados,
         "categorias_selecionadas": categorias_selecionadas,
         "loja_selecionada": loja_selecionada,
-        "lojas": list(MARKETPLACES.keys()),
+        "lojas": list(MARKETPLACES.keys()) + (["awin"] if IntegracaoAfiliado.objects.filter(
+            owner=request.user, provedor="awin", status="conectada", habilitada=True).exists()
+            else []),
         "canais": list(SENDERS.keys()),
         "ordenar": ordenar,
         "busca": busca,
@@ -1432,6 +1701,11 @@ def top_promocoes(request):
         "categoria_cupom_selecionada": categoria_cupom_selecionada,
         "como_usar_selecionado": como_usar_selecionado,
         "cupons_catalogo": cupons_catalogo,
+        "awin_programas": ProgramaAfiliado.objects.filter(
+            integracao__owner=request.user, integracao__provedor="awin",
+            integracao__status="conectada", habilitado=True,
+            status_vinculo="joined", link_status="online").order_by("nome"),
+        "manual_coupons_enabled": True,
         "amazon_diagnostico": amazon_diagnostico,
         "so_afiliados": so_afiliados,
         "pendentes_ocultos": pendentes_ocultos,

@@ -15,6 +15,10 @@ class IngestedItem:
     reference_price: float = 0
     coupon_code: str = ""
     coupon_rules: dict[str, Any] = field(default_factory=dict)
+    content_type: str = "voucher"
+    starts_at: datetime | None = None
+    restricted: bool = False
+    flash: bool = False
     valid_until: datetime | None = None
     observed_at: datetime | None = None
     evidence: dict[str, Any] = field(default_factory=dict)

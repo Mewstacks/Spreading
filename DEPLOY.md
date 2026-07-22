@@ -61,6 +61,13 @@ fly open --app spreading-web           # /scrapers/whatsapp/
 # conectar Mercado Livre: /scrapers/ml/ -> "Conectar Mercado Livre" (login web, sem script)
 ```
 
+### Piloto Awin
+
+A integração não usa credencial global: cada afiliado cola seu próprio token na tela
+**Conta**. O piloto está ativo com `AWIN_INTEGRATION_ENABLED = "1"` em
+`python/fly.toml`. Conecte inicialmente uma conta com dois anunciantes e mantenha
+`SECRETS_FERNET_KEY` configurada, pois ela criptografa os tokens no banco.
+
 ### Migrar dados do dev (opcional)
 ```
 # no dev (sqlite):

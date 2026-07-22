@@ -4,6 +4,7 @@ from apps.scrapers.models import (
     Cupom, Produto, HistoricoEnvio, ConfiguracaoEnvio, CupomCodigo, LinkAfiliadoUsuario,
     Publicacao, CliquePublicacao, ReceitaAfiliado, RelatorioSync, EventoOperacional,
     FonteIngestao, ExecucaoIngestao, CupomNormalizado, ProdutoCupom,
+    IntegracaoAfiliado, ProgramaAfiliado,
 )
 
 
@@ -112,3 +113,21 @@ class CupomNormalizadoAdmin(admin.ModelAdmin):
 class ProdutoCupomAdmin(admin.ModelAdmin):
     list_display = ("produto", "cupom", "status", "verificado_em")
     list_filter = ("status",)
+
+
+@admin.register(IntegracaoAfiliado)
+class IntegracaoAfiliadoAdmin(admin.ModelAdmin):
+    list_display = ("owner", "provedor", "nome_conta", "status", "habilitada",
+                    "ultimo_sucesso", "proxima_sincronizacao")
+    list_filter = ("provedor", "status", "habilitada")
+    search_fields = ("owner__username", "nome_conta", "identificador_conta")
+    exclude = ("token",)
+    readonly_fields = ("ultimo_sucesso", "ultima_tentativa", "erro_publico",
+                       "falhas_consecutivas")
+
+
+@admin.register(ProgramaAfiliado)
+class ProgramaAfiliadoAdmin(admin.ModelAdmin):
+    list_display = ("nome", "integracao", "status_vinculo", "link_status", "habilitado")
+    list_filter = ("status_vinculo", "link_status", "habilitado")
+    search_fields = ("nome", "external_id", "integracao__owner__username")
