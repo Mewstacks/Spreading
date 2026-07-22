@@ -8,7 +8,7 @@ from contextlib import contextmanager
 import requests
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada, ua_aleatorio
-from apps.scrapers.coupon_rules import derivar_categoria_cupom
+from apps.scrapers.coupon_rules import derivar_categoria_cupom, extrair_escopo_produtos
 from apps.scrapers.models import Cupom, Produto, CupomNormalizado, FonteIngestao
 from apps.scrapers.progresso import emitir_progresso, emitir_fase
 from apps.scrapers.session_paths import ml_auth_path
@@ -456,6 +456,7 @@ def projetar_catalogo_cupons(faixa=None):
         else:
             resumo = ""
         titulo = c.titulo or (f"Cupom — {resumo}" if resumo else "Cupom Mercado Livre")
+        escopo_produtos = extrair_escopo_produtos(titulo)
         regras = {"tipo_desconto": (
                         "porcentagem" if c.tipo_desconto == "percentual"
                         else c.tipo_desconto),
@@ -463,7 +464,7 @@ def projetar_catalogo_cupons(faixa=None):
                   "valor_minimo": c.valor_minimo,
                   "desconto_maximo": None,
                   "modo_resgate": "ativacao",
-                  "escopo": "",
+                  "escopo": escopo_produtos,
                   "container_url": "",
                   "container_name": "",
                   "is_mar_aberto": False,

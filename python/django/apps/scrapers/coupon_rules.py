@@ -11,6 +11,17 @@ from collections.abc import Mapping
 
 
 _CODIGO_HUMANO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{2,39}$")
+_ESCOPO_GENERICO = {
+    "", "geral", "site inteiro", "todo o site", "toda a loja", "todos os produtos",
+    "qualquer produto", "todas as categorias",
+}
+_CONDICAO_PUBLICO = re.compile(
+    r"\b(?:usu[aá]rios? selecionad|novos? clientes?|primeira compra|somente no app|"
+    r"apenas no app|cart[aã]o|pix)\b", re.I,
+)
+_NAO_PRODUTO = re.compile(
+    r"^(?:compras?|pedidos?|pagamentos?)\b|^(?:acima|a partir)\s+de\s+R\$", re.I,
+)
 
 
 def _texto(valor) -> str:
@@ -95,6 +106,50 @@ def regras_do_cupom(cupom) -> dict:
     )
 
 
+def extrair_escopo_produtos(titulo, escopo="") -> str:
+    """Retorna marca/categoria/produtos contemplados sem inventar informação.
+
+    A fonte de campanhas do ML costuma colocar o alvo somente no título, por
+    exemplo ``R$ 50 OFF em monitores Samsung selecionados``. Condições de público
+    ou pagamento ficam de fora daqui e continuam sendo exibidas como condição.
+    """
+    explicito = _texto(escopo).strip(" .:-")
+    normalizado = explicito.casefold()
+    if (normalizado not in _ESCOPO_GENERICO and explicito
+            and not _CONDICAO_PUBLICO.search(explicito)):
+        return explicito[:220]
+
+    texto = _texto(titulo).strip()
+    if not texto:
+        return ""
+    # O trecho após "em"/"para" é o sinal mais confiável presente no título
+    # oficial. Evita capturar "em compras acima de...", que é compra mínima.
+    matches = list(re.finditer(r"\b(?:em|para)\s+(.+)$", texto, re.I))
+    if matches:
+        candidato = matches[-1].group(1).strip(" .:-")
+        if (candidato and not _NAO_PRODUTO.search(candidato)
+                and not _CONDICAO_PUBLICO.search(candidato)
+                and candidato.casefold() not in _ESCOPO_GENERICO):
+            return candidato[:220]
+
+    # Algumas campanhas omitem a preposição, mas declaram explicitamente que são
+    # produtos/itens selecionados. Remove apenas o prefixo comercial do desconto.
+    if re.search(r"\b(?:produtos?|itens?)?\s*selecionad[oa]s?\b", texto, re.I):
+        candidato = re.sub(
+            r"^(?:cupom\s+)?(?:R\$\s*[\d.,]+|[\d.,]+\s*%)\s*"
+            r"(?:off|de\s+desconto)?\s*", "", texto, flags=re.I,
+        ).strip(" .:-")
+        if candidato and not _CONDICAO_PUBLICO.search(candidato):
+            return candidato[:220]
+    return ""
+
+
+def escopo_produtos_cupom(cupom) -> str:
+    regras = regras_do_cupom(cupom)
+    return extrair_escopo_produtos(
+        getattr(cupom, "titulo", ""), regras.get("escopo", ""))
+
+
 def codigo_publicavel(cupom) -> str:
     regras = regras_do_cupom(cupom)
     if regras["modo_resgate"] != "codigo":
@@ -164,4 +219,3 @@ def score_cupom(cupom) -> float:
     confianca = getattr(cupom, "confianca", "")
     score += {"alta": 15.0, "media": 5.0}.get(confianca, 0.0)
     return round(score, 2)
-

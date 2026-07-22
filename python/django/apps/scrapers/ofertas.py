@@ -371,7 +371,9 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
         ➡️ https://mercadolivre.com/sec/2J8HDRK
     """
     from apps.scrapers.senders.base import WhatsAppMarkup
-    from apps.scrapers.coupon_rules import codigo_publicavel, formatar_numero, regras_do_cupom
+    from apps.scrapers.coupon_rules import (
+        codigo_publicavel, escopo_produtos_cupom, formatar_numero, regras_do_cupom,
+    )
     m = markup or WhatsAppMarkup()
     esc = m.escape
     regras = regras_do_cupom(cupom)
@@ -402,6 +404,10 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
     if linha_desc:
         linhas.append(f"🛒 {m.bold(esc(linha_desc))}")
 
+    escopo_produtos = escopo_produtos_cupom(cupom)
+    if escopo_produtos:
+        linhas.append(f"🏷️ {m.bold('Válido para:')} {esc(escopo_produtos)}")
+
     codigo = codigo_publicavel(cupom)
     if codigo:
         linhas.append(f"🎟 Use o cupom {m.bold(esc(codigo))}")
@@ -410,7 +416,12 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
 
     if getattr(cupom, "restrito", False):
         condicao = str(regras.get("escopo") or "Consulte quem pode usar antes de comprar")
-        linhas.extend(["", f"⚠️ {m.bold('Condição:')} {esc(condicao[:220])}"])
+        # Se o único "restrito" é o conjunto de produtos, a linha acima já
+        # informa a condição com mais clareza. Restrições de público/pagamento
+        # continuam aparecendo obrigatoriamente aqui.
+        if not (escopo_produtos and condicao.strip().casefold()
+                == escopo_produtos.strip().casefold()):
+            linhas.extend(["", f"⚠️ {m.bold('Condição:')} {esc(condicao[:220])}"])
 
     link = str(link_afiliado or getattr(cupom, "link", "") or "").strip()
     if link:

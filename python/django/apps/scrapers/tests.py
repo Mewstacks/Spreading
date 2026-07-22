@@ -3828,6 +3828,39 @@ class CasarCuponsContainerTests(TestCase):
 
 
 class MensagemCupomTests(SimpleTestCase):
+    def test_exibe_produtos_especificos_descritos_no_titulo_oficial(self):
+        from apps.scrapers.ofertas import montar_mensagem_cupom
+        cupom = SimpleNamespace(
+            external_id="campanha:monitor-samsung", marketplace="mercadolivre",
+            titulo="R$ 50 OFF em monitores Samsung selecionados", codigo="",
+            link="https://lista.mercadolivre.com.br/monitores-samsung",
+            regras={"tipo_desconto": "fixo", "valor_desconto": 50,
+                    "valor_minimo": 649, "modo_resgate": "ativacao", "escopo": ""},
+            restrito=False,
+        )
+
+        mensagem = montar_mensagem_cupom(cupom, link_afiliado="https://meli.la/1F4Q5uE")
+
+        self.assertIn("R$ 50 DE DESCONTO acima de R$ 649", mensagem)
+        self.assertIn("Válido para:", mensagem)
+        self.assertIn("monitores Samsung selecionados", mensagem)
+
+    def test_nao_rotula_condicao_de_publico_como_produto(self):
+        from apps.scrapers.ofertas import montar_mensagem_cupom
+        cupom = SimpleNamespace(
+            external_id="awin:restrito", marketplace="awin", anunciante_nome="Loja",
+            titulo="30% OFF", codigo="APP30", link="https://awin.example/x",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 30,
+                    "modo_resgate": "codigo", "escopo": "Somente no app"},
+            restrito=True,
+        )
+
+        mensagem = montar_mensagem_cupom(cupom)
+
+        self.assertNotIn("Válido para:", mensagem)
+        self.assertIn("Condição:", mensagem)
+        self.assertIn("Somente no app", mensagem)
+
     def test_formata_esquema_legado_numerico_sem_expor_token(self):
         from apps.scrapers.ofertas import montar_mensagem_cupom
         token = "CATVgkl4DHYJgqaPQXEQ5VMES_mNsb7UfYtN-EXEMPLO=="
