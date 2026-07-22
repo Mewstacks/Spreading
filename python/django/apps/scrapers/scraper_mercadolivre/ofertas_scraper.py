@@ -76,6 +76,46 @@ def classificar_oferta_por_nome(nome: str):
     return None
 
 
+# Classificação de TÍTULOS DE CUPOM. Diferente das ofertas, o título do cupom traz
+# o TERMO DE CATEGORIA ('produtos de Anadi Ferramentas', 'cupom em Moda'), não o nome
+# do produto — então casa por substantivo de categoria. Ordem: mais específico
+# primeiro (termos ambíguos como 'casa'/'mesa' por último). Sem 'mercado' (pega
+# 'Mercado Livre'). Cobre as 17 macros; None quando o título não denuncia nada.
+_PT_MACRO_CUPOM = [
+    ("Bebês e Maternidade", ["bebê", "bebe", "bebês", "bebes", "maternidade", "infantil", "fralda", "gestante"]),
+    ("Pets e Animais", ["pet ", "pets", "petshop", "animais", "cachorro", "gato ", "ração", "racao", "aquarismo"]),
+    ("Ferramentas e Manutenção", ["ferramenta", "ferramentas", "manutenção", "manutencao", "furadeira", "parafusadeira", "construção", "construcao", "elétrica predial"]),
+    ("Automotivo", ["automotivo", "automotiva", "automóvel", "automovel", "acessórios automotivos", "pneu", "pneus", "carro ", "motocicleta", "capacete"]),
+    ("Games, Brinquedos e Hobbies", ["game", "games", "gamer", "brinquedo", "brinquedos", "hobbies", "geek", "colecionável", "colecionavel", "playstation", "xbox", "nintendo"]),
+    ("Esportes e Fitness", ["esporte", "esportes", "esportivo", "fitness", "academia", "musculação", "musculacao", "suplemento", "suplementos", "camping"]),
+    ("Beleza e Cuidados Pessoais", ["beleza", "cosmético", "cosmetico", "cosméticos", "cosmeticos", "perfumaria", "perfume", "perfumes", "maquiagem", "skincare", "cabelo", "dermocosmético"]),
+    ("Saúde, Ortopedia e Equipamentos Médicos", ["saúde", "saude", "ortopedia", "ortopédico", "ortopedico", "farmácia", "farmacia", "vitamina", "vitaminas", "suplemento alimentar"]),
+    ("Moda, Calçados e Acessórios", ["moda", "vestuário", "vestuario", "calçado", "calcado", "calçados", "calcados", "roupa", "roupas", "acessório", "acessorio", "acessórios", "fashion", "tênis", "tenis", "sapato", "bolsa", "óculos", "oculos", "relógio", "relogio"]),
+    ("Papelaria, Escritório e Escola", ["papelaria", "escritório", "escritorio", "escolar", "material escolar", "escola", "livro", "livros", "caderno"]),
+    ("Alimentos e Bebidas", ["alimento", "alimentos", "bebida", "bebidas", "supermercado", "mercearia", "hortifruti", "café ", "cafe ", "vinho", "vinhos", "cerveja", "adega"]),
+    ("Celulares, Telefonia e Wearables", ["celular", "celulares", "smartphone", "smartphones", "telefonia", "wearable", "smartwatch"]),
+    ("Eletrodomésticos", ["eletrodoméstico", "eletrodomestico", "eletrodomésticos", "eletrodomesticos", "eletroportátil", "eletroportatil", "eletroportáteis", "linha branca"]),
+    ("Eletrônicos e Informática", ["eletrônico", "eletronico", "eletrônicos", "eletronicos", "informática", "informatica", "notebook", "notebooks", "computador", "periférico", "periferico"]),
+    ("Áudio, Vídeo e Fotografia", ["áudio", "audio", "fotografia", "câmera", "camera", "câmeras", "soundbar", "home theater", "televisor", "televisão", "televisao"]),
+    ("Cozinha, Mesa e Bar", ["cozinha", "utensílio", "utensilio", "utensílios", "utensilios", "mesa e bar", "panelas", "louças", "loucas"]),
+    ("Casa, Móveis e Decoração", ["móveis", "moveis", "móvel", "movel", "decoração", "decoracao", "cama, mesa e banho", "cama mesa e banho", "casa e decoração", "casa e construção", "itens para casa", "para o lar", "jardim", "organização", "organizacao"]),
+]
+
+
+def classificar_cupom_por_titulo(titulo: str):
+    """Macro-categoria a partir do TÍTULO do cupom (PT). None se nada bater.
+
+    Casa primeiro por termo de categoria (`_PT_MACRO_CUPOM`); se falhar, tenta os
+    nomes de produto (`classificar_oferta_por_nome`), pois alguns títulos citam o
+    item direto ('cupom em furadeiras').
+    """
+    t = (titulo or "").lower()
+    for macro, kws in _PT_MACRO_CUPOM:
+        if any(k in t for k in kws):
+            return macro
+    return classificar_oferta_por_nome(titulo)
+
+
 # Catálogo de SUB-NICHOS: macro -> [(rótulo, termos separados por vírgula)].
 # O 'value' do option é a própria string de termos (vai pro termo_busca).
 SUBNICHOS = {

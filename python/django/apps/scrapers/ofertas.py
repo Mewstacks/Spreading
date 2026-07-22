@@ -460,14 +460,37 @@ def _produto_para_cupom(cupom):
     return None
 
 
-def produtos_do_cupom(cupom, limite=8):
-    """Produtos afiliáveis cobertos pelo cupom, p/ a mensagem-colagem (multi-item).
+def _macro_do_cupom(cupom) -> str:
+    """Macro-categoria temática do cupom p/ agrupar ofertas. '' se não reconhecer.
 
-    Generaliza `_produto_para_cupom` (que devolve 1): mesma precedência de
-    associação — vínculo `ProdutoCupom` confirmado > campanha (`external_id`
-    "campanha:X") > cupom de site inteiro (`is_mar_aberto`) — mas devolve os
-    melhores por desconto. Só entra item com foto (a colagem precisa dela).
-    Lista vazia => o envio cai no texto puro de sempre.
+    Preferência: a `categoria` do cupom quando já é uma macro real; senão classifica
+    o título (ex.: 'produtos de Anadi Ferramentas' → 'Ferramentas e Manutenção').
+    """
+    cat = (getattr(cupom, "categoria", "") or "").strip()
+    if cat in _EMOJI_MACRO:
+        return cat
+    try:
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import (
+            classificar_cupom_por_titulo)
+        macro = classificar_cupom_por_titulo(getattr(cupom, "titulo", "") or "")
+        if macro in _EMOJI_MACRO:
+            return macro
+    except Exception:
+        pass
+    return ""
+
+
+def produtos_do_cupom(cupom, limite=8):
+    """Produtos p/ a mensagem-colagem do cupom (multi-item), melhores por desconto.
+
+    (1) Ligação real cupom→produto quando existir — vínculo `ProdutoCupom`
+        confirmado > campanha (`external_id` "campanha:X") > cupom de site inteiro
+        (`is_mar_aberto`). Hoje isso é raro em produção (produto não guarda campanha).
+    (2) Fallback (decisão de produto): sem ligação, agrupa as melhores OFERTAS da
+        categoria do cupom — cada uma com o próprio De/por e link verdadeiros; o
+        cupom define só o tema. Sem categoria reconhecível => vazio => texto puro.
+
+    Só entra item com foto (a colagem precisa dela).
     """
     from apps.scrapers.coupon_rules import regras_do_cupom
     from apps.scrapers.models import ProdutoCupom
@@ -477,29 +500,36 @@ def produtos_do_cupom(cupom, limite=8):
         estado__in=["indisponivel", "invalido", "expirado", "stale"]
     ).filter(marketplace=mkt).exclude(imagem_url="")
 
+    def _por_desconto(qs):
+        return qs.filter(preco_com_cupom__gt=0, preco_sem_desconto__gt=0).annotate(
+            _desc=ExpressionWrapper(
+                (F("preco_sem_desconto") - F("preco_com_cupom")) * 100.0
+                / F("preco_sem_desconto"), output_field=FloatField()),
+        ).filter(_desc__lt=90).order_by("-_desc")
+
+    # (1) Ligação real, quando existir.
     conf_ids = list(ProdutoCupom.objects.filter(
         cupom=cupom, status="confirmado", produto__in=ativos,
     ).values_list("produto_id", flat=True))
+    qs = None
     if conf_ids:
         qs = ativos.filter(id__in=conf_ids)
     else:
         external_id = str(getattr(cupom, "external_id", "") or "")
         if external_id.startswith("campanha:"):
             qs = ativos.filter(campanha_id=external_id.split(":", 1)[1])
-        else:
-            regras = regras_do_cupom(cupom)
-            if regras.get("is_mar_aberto"):
-                minimo = regras.get("valor_minimo") or 0
-                qs = ativos.filter(preco_sem_desconto__gte=minimo)
-            else:
-                return []
+        elif regras_do_cupom(cupom).get("is_mar_aberto"):
+            minimo = regras_do_cupom(cupom).get("valor_minimo") or 0
+            qs = ativos.filter(preco_sem_desconto__gte=minimo)
+    itens = list(_por_desconto(qs)[:limite]) if qs is not None else []
+    if itens:
+        return itens
 
-    qs = qs.filter(preco_com_cupom__gt=0, preco_sem_desconto__gt=0).annotate(
-        _desc=ExpressionWrapper(
-            (F("preco_sem_desconto") - F("preco_com_cupom")) * 100.0
-            / F("preco_sem_desconto"), output_field=FloatField()),
-    ).filter(_desc__lt=90).order_by("-_desc")
-    return list(qs[:limite])
+    # (2) Fallback por categoria.
+    macro = _macro_do_cupom(cupom)
+    if not macro:
+        return []
+    return list(_por_desconto(ativos.filter(origem="oferta", macro_categoria=macro))[:limite])
 
 
 def _preparar_itens_cupom(cupom, usuario, limite=8):
