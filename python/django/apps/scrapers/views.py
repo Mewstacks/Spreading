@@ -970,6 +970,25 @@ def enviar_agora_stream(request):
     return response
 
 
+def _imagem_upload_b64(arquivo, max_bytes=5 * 1024 * 1024):
+    """Foto anexada no envio -> base64 JPEG, ou None. Valida decodificando via PIL
+    (rejeita não-imagem) e reconverte p/ JPEG (formato que o worker aceita)."""
+    if not arquivo:
+        return None
+    try:
+        if getattr(arquivo, "size", 0) and arquivo.size > max_bytes:
+            return None
+        import base64
+        from io import BytesIO
+        from PIL import Image
+        img = Image.open(arquivo).convert("RGB")
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return None
+
+
 @require_POST
 @throttle_sse(6)
 def enviar_produto_stream(request):
@@ -986,6 +1005,8 @@ def enviar_produto_stream(request):
     grupo_id = (request.POST.get("grupo") or "").strip()[:100]
     grupo_nome = (request.POST.get("grupo_nome") or "").strip()[:255]
     canal = (request.POST.get("canal") or "whatsapp").strip().lower()
+    # Foto opcional: lida AQUI (presa ao request), fora da thread _job.
+    imagem_custom = _imagem_upload_b64(request.FILES.get("foto"))
     uid = request.user.id  # capturado fora da thread
 
     def _job():
@@ -1007,7 +1028,7 @@ def enviar_produto_stream(request):
         print(f"Enviando '{prod.nome[:60]}' → {grupo_nome or grupo_id} ({canal})...")
         r = enviar_oferta_de_produto(
             prod, grupo_id, verificar=True, canal=canal, usuario=usuario,
-            destino_nome=grupo_nome)
+            destino_nome=grupo_nome, imagem_b64_custom=imagem_custom)
         if r.get("sucesso"):
             print(f"__SENT__ OK Enviado (via {r.get('via')}). Link: {r.get('link')}")
         else:
@@ -1031,6 +1052,7 @@ def enviar_cupom_stream(request):
     grupo_id = (request.POST.get("grupo") or "").strip()[:100]
     grupo_nome = (request.POST.get("grupo_nome") or "").strip()[:255]
     canal = (request.POST.get("canal") or "whatsapp").strip().lower()
+    imagem_custom = _imagem_upload_b64(request.FILES.get("foto"))
     uid = request.user.id  # capturado fora da thread
 
     def _job():
@@ -1050,7 +1072,8 @@ def enviar_cupom_stream(request):
         rotulo = codigo_publicavel(cupom) or "Ativar no link"
         print(f"Enviando cupom '{rotulo}' → {grupo_nome or grupo_id} ({canal})...")
         resultado = enviar_cupom(
-            cupom, grupo_id, canal=canal, usuario=usuario, destino_nome=grupo_nome)
+            cupom, grupo_id, canal=canal, usuario=usuario, destino_nome=grupo_nome,
+            imagem_b64_custom=imagem_custom)
         if resultado.get("sucesso"):
             print(f"__SENT__ OK Cupom enviado (via {resultado.get('via', canal)}).")
         else:
@@ -1240,8 +1263,8 @@ def top_promocoes(request):
         cupons_qs = cupons_qs.filter(marketplace=loja_selecionada)
     if fonte_selecionada:
         cupons_qs = cupons_qs.filter(fonte__slug=fonte_selecionada)
-    if confianca_selecionada:
-        cupons_qs = cupons_qs.filter(confianca=confianca_selecionada)
+    # Confiança não é mais filtrável na aba Cupons (todos são "media"); ignora um
+    # valor herdado da aba Ofertas para não zerar a lista sem querer.
     if categoria_cupom_selecionada:
         cupons_qs = cupons_qs.filter(categoria=categoria_cupom_selecionada)
     if busca:
@@ -1249,11 +1272,14 @@ def top_promocoes(request):
     # "Como usar" (código vs. ativar no link) vem da normalização de `regras`, não
     # de coluna — então materializa, calcula por cupom e filtra em Python, igual ao
     # corte de afiliação das ofertas. O conjunto de cupons ativos é pequeno.
-    from apps.scrapers.coupon_rules import codigo_publicavel, regras_do_cupom
+    from apps.scrapers.coupon_rules import codigo_publicavel, regras_do_cupom, score_cupom
+    # Base por recência (desempate estável); depois ordena por qualidade do cupom —
+    # feedback da cliente: bons cupons vendem mais, então os melhores vêm primeiro.
     cupons_lista = list(cupons_qs.order_by("-ultima_observacao"))
     for cupom_catalogo in cupons_lista:
         cupom_catalogo.codigo_publico = codigo_publicavel(cupom_catalogo)
         cupom_catalogo.modo_resgate = regras_do_cupom(cupom_catalogo)["modo_resgate"]
+    cupons_lista.sort(key=score_cupom, reverse=True)
     if como_usar_selecionado == "codigo":
         cupons_lista = [c for c in cupons_lista if c.codigo_publico]
     elif como_usar_selecionado == "ativacao":

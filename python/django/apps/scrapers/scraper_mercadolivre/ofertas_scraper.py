@@ -251,6 +251,12 @@ def _coletar_cards(page):
             except Exception:
                 pass
 
+            relampago = False
+            try:
+                relampago = card.get_by_text(re.compile(r"rel[âa]mpago", re.I)).count() > 0
+            except Exception:
+                pass
+
             out.append({
                 "nome": nome[:255],
                 "link_produto": link.split("#")[0],
@@ -258,6 +264,7 @@ def _coletar_cards(page):
                 "preco_com_cupom": por,
                 "imagem_url": imagem[:1000],
                 "frete_full": full,
+                "relampago": relampago,
             })
         except Exception as e:
             descartes["erro_no_card"] += 1
@@ -307,7 +314,8 @@ def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):
                       "confianca": "media", "evidencia": {"transport": "public-web"},
                       "categoria": "DESCONHECIDO",
                       "macro_categoria": macro_fixa or classificar_oferta_por_nome(o["nome"]),
-                      "imagem_url": o["imagem_url"], "frete_full": o["frete_full"]})
+                      "imagem_url": o["imagem_url"], "frete_full": o["frete_full"],
+                      "relampago": o.get("relampago", False)})
         if catalogo:
             # Falhas terminais antigas não devem continuar ocupando a tela nem a
             # fila quando a regra agora é global: catálogo universal não publica.
@@ -349,6 +357,7 @@ def _upsert_ofertas(coletados):
                 "macro_categoria": classificar_oferta_por_nome(o["nome"]),
                 "imagem_url": o["imagem_url"],
                 "frete_full": o["frete_full"],
+                "relampago": o.get("relampago", False),
             },
         )
         if catalogo:

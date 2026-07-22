@@ -211,10 +211,12 @@
     </select>
 
     {% if tipo == 'cupom' %}
+    {% if cupom_categorias %}
     <select name="categoria_cupom" aria-label="Categoria do cupom" style="width:auto;min-width:160px;">
       <option value="">Todas as categorias</option>
       {% for cat in cupom_categorias %}<option value="{{ cat }}" {% if categoria_cupom_selecionada == cat %}selected{% endif %}>{{ cat }}</option>{% endfor %}
     </select>
+    {% endif %}
     <select name="como_usar" aria-label="Como usar" style="width:auto;min-width:150px;">
       <option value="">Como usar: qualquer</option>
       <option value="codigo" {% if como_usar_selecionado == 'codigo' %}selected{% endif %}>Com código</option>
@@ -259,12 +261,14 @@
     <option value="">Todas as fontes</option>
     {% for f in fontes %}<option value="{{ f.slug }}" {% if fonte_selecionada == f.slug %}selected{% endif %}>{{ f.nome }}</option>{% endfor %}
   </select>
+  {% if tipo != 'cupom' %}
   <select name="confianca" aria-label="Confiança" style="width:auto;min-width:130px;">
     <option value="">Toda confiança</option>
     <option value="alta" {% if confianca_selecionada == 'alta' %}selected{% endif %}>Alta</option>
     <option value="media" {% if confianca_selecionada == 'media' %}selected{% endif %}>Média</option>
     <option value="baixa" {% if confianca_selecionada == 'baixa' %}selected{% endif %}>Baixa</option>
   </select>
+  {% endif %}
   <select name="atualizado_desde" aria-label="Atualização" style="width:auto;min-width:140px;">
     <option value="">Qualquer idade</option>
     <option value="6" {% if atualizado_desde == 6 %}selected{% endif %}>Últimas 6h</option>
@@ -301,12 +305,11 @@
 
 {% if tipo == 'cupom' %}
   {% if cupons_catalogo %}
-  <div class="table-wrap"><table><thead><tr><th>Como usar</th><th class="cell-grow">Cupom</th><th>Loja</th><th>Confiança</th><th>Validade</th><th>Ação</th></tr></thead><tbody>
+  <div class="table-wrap"><table><thead><tr><th>Como usar</th><th class="cell-grow">Cupom</th><th>Loja</th><th>Validade</th><th>Ação</th></tr></thead><tbody>
   {% for c in cupons_catalogo %}<tr>
     <td data-label="Como usar" class="cell-code"><div class="td-val" style="white-space:normal;overflow-wrap:anywhere;"><strong>{% if c.codigo_publico %}{{ c.codigo_publico }}{% else %}Ativar no link{% endif %}</strong></div></td>
     <td data-label="Cupom"><div class="td-val"><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div class="muted" style="font-size:.76rem;">Cupom genérico; confirme a aplicação no checkout.</div></div></td>
     <td data-label="Loja"><div class="td-val">{{ c.marketplace|title }}</div></td>
-    <td data-label="Confiança"><div class="td-val"><span class="badge {% if c.confianca == 'alta' %}badge-green{% else %}badge-yellow{% endif %}">{{ c.confianca }}</span></div></td>
     <td data-label="Validade"><div class="td-val">{% if c.validade %}{{ c.validade|date:"d/m/Y H:i" }}{% else %}Não informada{% endif %}</div></td>
     <td data-label="Ação" class="col-actions"><div class="td-val" style="display:flex;justify-content:flex-end;">
       <button class="btn btn-green btn-sm" onclick="abrirEnvioCupom({{ c.id }}, '{{ c.codigo_publico|escapejs }}')"><i data-lucide="send"></i> Enviar</button>
@@ -421,6 +424,11 @@ que era exatamente o que não resolvia.
         <label>Canal do Telegram</label>
         <input id="env-tg-input" placeholder="@meucanal">
         <span class="muted" style="font-size:.74rem;">Use @nomedocanal ou o ID numérico (começa com -100).</span>
+      </div>
+      <div>
+        <label>Foto (opcional)</label>
+        <input type="file" id="env-foto" accept="image/*">
+        <span class="muted" style="font-size:.74rem;">Anexe uma foto para ir acima da mensagem. Sem foto, vai a imagem do produto (no WhatsApp).</span>
       </div>
       <div class="modal-log" id="env-log"></div>
     </div>
@@ -550,6 +558,7 @@ function abrirEnvio(id, nome) {
   document.getElementById('env-prod').textContent = nome;
   document.getElementById('env-titulo').innerHTML = '<i data-lucide="send"></i> Enviar oferta';
   document.getElementById('env-log').textContent = '';
+  document.getElementById('env-foto').value = '';
   document.getElementById('env-go').disabled = false;
   document.getElementById('modal-envio').classList.add('open');
   // Abrir o modal recarrega a lista: antes um flag de "já carregou" a congelava
@@ -565,6 +574,7 @@ function abrirEnvioCupom(id, codigo) {
   document.getElementById('env-prod').textContent = codigo ? ('Cupom ' + codigo) : 'Cupom para ativar no link';
   document.getElementById('env-titulo').innerHTML = '<i data-lucide="ticket-percent"></i> Enviar cupom';
   document.getElementById('env-log').textContent = '';
+  document.getElementById('env-foto').value = '';
   document.getElementById('env-go').disabled = false;
   document.getElementById('modal-envio').classList.add('open');
   envGruposParar();
@@ -686,9 +696,23 @@ async function dispararEnvio() {
   document.getElementById('env-go').disabled = true;
   log.textContent = '';
   var url = envTipo === 'cupom' ? '/scrapers/enviar-cupom/' : '/scrapers/enviar-produto/';
-  var form = new URLSearchParams();
-  form.set(envTipo === 'cupom' ? 'cupom' : 'produto', envProdId);
-  form.set('canal', canal); form.set('grupo', grupo); form.set('grupo_nome', nome);
+  var fotoEl = document.getElementById('env-foto');
+  var foto = fotoEl && fotoEl.files && fotoEl.files[0];
+  // Sem foto: form-urlencoded (fluxo de sempre). Com foto: multipart p/ subir o arquivo.
+  var form, headers;
+  if (foto) {
+    form = new FormData();
+    form.set(envTipo === 'cupom' ? 'cupom' : 'produto', envProdId);
+    form.set('canal', canal); form.set('grupo', grupo); form.set('grupo_nome', nome);
+    form.set('foto', foto);
+    headers = {'X-CSRFToken': getCookie('csrftoken')};  // browser define o boundary
+  } else {
+    form = new URLSearchParams();
+    form.set(envTipo === 'cupom' ? 'cupom' : 'produto', envProdId);
+    form.set('canal', canal); form.set('grupo', grupo); form.set('grupo_nome', nome);
+    headers = {'X-CSRFToken': getCookie('csrftoken'),
+               'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'};
+  }
   envAbort = new AbortController();
   function receber(data) {
     if (data === '__DONE__') { envAbort = null; return; }
@@ -701,9 +725,7 @@ async function dispararEnvio() {
   }
   try {
     var resposta = await fetch(url, {
-      method: 'POST', body: form, signal: envAbort.signal,
-      headers: {'X-CSRFToken': getCookie('csrftoken'),
-                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'}
+      method: 'POST', body: form, signal: envAbort.signal, headers: headers
     });
     if (!resposta.ok || !resposta.body) throw new Error('HTTP ' + resposta.status);
     var leitor = resposta.body.getReader(), decoder = new TextDecoder(), buffer = '';

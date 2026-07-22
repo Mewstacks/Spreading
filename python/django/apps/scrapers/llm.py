@@ -1,31 +1,35 @@
+import logging
+
 from django.conf import settings
 
+logger = logging.getLogger(__name__)
+
 _PROMPT = """Você é um vendedor brasileiro especialista em grupos de WhatsApp. Seu estilo é direto, malandro e muito bem-humorado.
-Escreva UMA frase curta e apelativa para vender o produto abaixo.
+Escreva só o TÍTULO da promoção — aquela chamada curta que vem em CIMA da mensagem, como nos grupos de oferta.
 
 REGRAS OBRIGATÓRIAS:
-1. Seja 100% brasileiro na fala.
-2. PROIBIDO usar traduções literais ou robóticas (NÃO use "bate a concorrência", "a melhor escolha", "não precisa de despesas").
-3. USE termos como: "bota no chinelo", "amassa", "tá de graça", "preço de banana", "pra parar de passar raiva".
-4. Máximo de 20 palavras. Sem aspas.
-5. Use os dados extras (desconto, categoria) como gancho quando ajudarem, mas NUNCA repita o preço em números na frase — a mensagem já mostra o preço, e a frase é reaproveitada em envios futuros com preço diferente.
-6. NÃO invente característica que não esteja no nome do produto.
+1. TUDO EM CAIXA ALTA. Máximo de 6 palavras. Sem aspas, sem emoji, sem ponto final.
+2. Seja 100% brasileiro e descontraído. Uma chamada engraçada/apelativa, não uma descrição do produto.
+3. PROIBIDO citar preço, porcentagem ou a palavra "cupom" — a mensagem já mostra isso embaixo.
+4. NÃO invente característica que não esteja no nome do produto. Use desconto/categoria só como gancho de humor.
+5. Devolva UMA linha só: o título.
 
 Exemplos de como responder:
-Produto: Fritadeira Airfryer Midea
-Frase: Frita até o vento e te salva do cheiro de óleo na casa toda. Preço de banana!
+Produto: Multivitamínico 120 Cáps. Growth Supplements
+Título: PRA TU QUE NÃO COME SALADA
 
-Produto: Liquidificador Oster 1400W
-Desconto: 45%
-Frase: Bate até cimento e não engasga. Quase metade do preço — bota qualquer outro no chinelo.
+Produto: Cadeira Gamer Wells Preta Healer
+Título: PARA VOCÊ SE SENTIR UM PROPLAYER
 
-Produto: Notebook Samsung Galaxy
-Categoria: Informática
-Frase: Pra você parar de passar raiva com aquela sua carroça que trava no Excel. Leva logo!
+Produto: Achocolatado Nescau 2,01kg
+Título: 2 QUILÃO DE NESCAU É SONHO
+
+Produto: Moletom Adidas Essentials
+Título: MOLETONZIN TOP DA ADIDAS
 
 Agora faça o seu, no mesmo estilo:
 {contexto}
-Frase:"""
+Título:"""
 
 
 def _bloco_contexto(nome, preco=None, desconto_percent=None, categoria=None) -> str:
@@ -56,6 +60,9 @@ def gerar_descricao(nome: str, timeout: int = 30, preco=None,
         return ""
     api_key = getattr(settings, "ANTHROPIC_API_KEY", "")
     if not api_key:
+        # Sem título por IA na mensagem = quase sempre isto. Loga uma vez p/ o
+        # painel de saúde mostrar o motivo em vez de "sumiu o título".
+        logger.warning("LLM sem ANTHROPIC_API_KEY: título por IA não será gerado")
         return ""
 
     try:
@@ -71,7 +78,15 @@ def gerar_descricao(nome: str, timeout: int = 30, preco=None,
         texto = "".join(
             bloco.text for bloco in resposta.content if getattr(bloco, "type", "") == "text"
         ).strip()
-        texto = texto.replace('"', "").replace("\n", " ").strip().strip("'").strip()
-        return texto[:200]
-    except Exception:
+        # Título é uma linha só, em caixa alta; corta prefixos que o modelo às vezes
+        # devolve ("Título:") e limita o tamanho da chamada.
+        texto = texto.splitlines()[0] if texto else ""
+        texto = texto.replace('"', "").strip().strip("'").strip()
+        if texto.lower().startswith("título:"):
+            texto = texto.split(":", 1)[1].strip()
+        return texto.upper()[:80]
+    except Exception as exc:
+        # Antes engolia tudo em silêncio — por isso "o título sumiu" não deixava
+        # rastro. Agora o motivo real (import, auth, timeout, modelo) fica no log.
+        logger.warning("Falha ao gerar título por IA: %s: %s", type(exc).__name__, exc)
         return ""

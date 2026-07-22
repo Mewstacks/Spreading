@@ -8,6 +8,7 @@ from contextlib import contextmanager
 import requests
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada, ua_aleatorio
+from apps.scrapers.coupon_rules import derivar_categoria_cupom
 from apps.scrapers.models import Cupom, Produto, CupomNormalizado, FonteIngestao
 from apps.scrapers.progresso import emitir_progresso, emitir_fase
 from apps.scrapers.session_paths import ml_auth_path
@@ -455,6 +456,18 @@ def projetar_catalogo_cupons(faixa=None):
         else:
             resumo = ""
         titulo = c.titulo or (f"Cupom — {resumo}" if resumo else "Cupom Mercado Livre")
+        regras = {"tipo_desconto": (
+                        "porcentagem" if c.tipo_desconto == "percentual"
+                        else c.tipo_desconto),
+                  "valor_desconto": c.valor_desconto,
+                  "valor_minimo": c.valor_minimo,
+                  "desconto_maximo": None,
+                  "modo_resgate": "ativacao",
+                  "escopo": "",
+                  "container_url": "",
+                  "container_name": "",
+                  "is_mar_aberto": False,
+                  "dia_inicio": "", "dia_fim": ""}
         CupomNormalizado.objects.update_or_create(
             fonte=fonte, external_id=ext,
             defaults={
@@ -463,22 +476,13 @@ def projetar_catalogo_cupons(faixa=None):
                 # `code`/`inputCode` desta API e um token opaco de ativacao, nao
                 # um codigo digitavel. Mantemos como evidencia e nunca o exibimos.
                 "codigo": "",
+                # Campanha nao traz escopo; deriva categoria p/ o filtro nao ficar vazio.
+                "categoria": derivar_categoria_cupom(titulo, regras),
                 "link": c.link_original or "https://www.mercadolivre.com.br/cupons",
                 "validade": c.validade,
                 "confianca": "media",
                 "estado": "ativo",
-                "regras": {"tipo_desconto": (
-                                "porcentagem" if c.tipo_desconto == "percentual"
-                                else c.tipo_desconto),
-                           "valor_desconto": c.valor_desconto,
-                           "valor_minimo": c.valor_minimo,
-                           "desconto_maximo": None,
-                           "modo_resgate": "ativacao",
-                           "escopo": "",
-                           "container_url": "",
-                           "container_name": "",
-                           "is_mar_aberto": False,
-                           "dia_inicio": "", "dia_fim": ""},
+                "regras": regras,
                 "evidencia": {"transport": "public-web", "association": "campaign",
                               "token_ativacao": c.codigo or ""},
             },

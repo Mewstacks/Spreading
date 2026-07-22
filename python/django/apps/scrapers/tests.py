@@ -1501,17 +1501,19 @@ class AttributionWorkflowTests(TestCase):
         )
 
     def test_group_specific_branding_overrides_account_default(self):
+        # A mensagem padrão agora é mínima (estilo dos grupos, sem header de marca).
+        # A marca do grupo entra pelo template_a — é esse override que precede a conta.
         from apps.scrapers.ofertas import montar_mensagem
         config = ConfiguracaoEnvio.objects.create(
             owner=self.user, grupo_id="group@g.us", nome_marca="Tech do Dia",
             chamada_acao="Ver a oferta",
+            template_a="{marca}\n{nome}\nPor {preco}\n{link}",
         )
         message = montar_mensagem(
             self.product, "https://example.com/a", None,
             usuario=self.user, configuracao=config,
         )
         self.assertIn("Tech do Dia", message)
-        self.assertIn("Ver a oferta", message)
 
     def test_default_affiliate_disclosure_is_not_added_to_messages(self):
         from apps.scrapers.ofertas import montar_mensagem

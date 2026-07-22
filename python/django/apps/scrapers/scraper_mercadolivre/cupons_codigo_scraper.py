@@ -15,6 +15,7 @@ import re
 import logging
 
 from apps.scrapers.auxiliar import iniciar_browser
+from apps.scrapers.coupon_rules import derivar_categoria_cupom
 from apps.scrapers.models import Produto, CupomCodigo, FonteIngestao, CupomNormalizado
 from apps.scrapers.progresso import emitir_fase, emitir_progresso
 from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _coletar_cards, _salvar
@@ -116,15 +117,17 @@ def mapear_cupons_codigo(faixa=None):
         fonte, _ = FonteIngestao.objects.get_or_create(
             slug="mercadolivre-web", defaults={
                 "marketplace": "mercadolivre", "nome": "Mercado Livre — páginas públicas"})
+        regras_cod = {"tipo_desconto": "", "valor_desconto": None,
+                      "valor_minimo": None, "desconto_maximo": None,
+                      "modo_resgate": "codigo", "escopo": "",
+                      "container_url": "", "container_name": "",
+                      "is_mar_aberto": False, "dia_inicio": "", "dia_fim": ""}
         CupomNormalizado.objects.update_or_create(
             fonte=fonte, external_id=f"checkout:{cod}",
             defaults={"marketplace": "mercadolivre", "titulo": f"Cupom {cod}",
                       "codigo": cod, "link": "https://www.mercadolivre.com.br/ofertas/cupons",
-                      "regras": {"tipo_desconto": "", "valor_desconto": None,
-                                 "valor_minimo": None, "desconto_maximo": None,
-                                 "modo_resgate": "codigo", "escopo": "",
-                                 "container_url": "", "container_name": "",
-                                 "is_mar_aberto": False, "dia_inicio": "", "dia_fim": ""},
+                      "categoria": derivar_categoria_cupom(f"Cupom {cod}", regras_cod),
+                      "regras": regras_cod,
                       "confianca": "baixa", "estado": "ativo",
                       "evidencia": {"transport": "public-web", "association": "unverified"}},
         )

@@ -110,3 +110,58 @@ def formatar_numero(valor) -> str:
         return str(int(numero))
     return f"{numero:.2f}".rstrip("0").rstrip(".").replace(".", ",")
 
+
+def derivar_categoria_cupom(titulo, regras) -> str:
+    """Categoria para o filtro da aba Cupons, nunca vazia.
+
+    Precedência: (1) escopo/acao vindo da fonte oficial; (2) classificacao por
+    palavra-chave do titulo; (3) faixa de desconto. Cupons de campanha do ML
+    gravam escopo vazio, entao sem isto o dropdown de categoria fica vazio em
+    producao (era o sintoma relatado).
+    """
+    raw = regras if isinstance(regras, Mapping) else {}
+    escopo = _texto(raw.get("escopo") or raw.get("acao"))
+    if escopo:
+        return escopo[:100]
+
+    try:
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import classificar_oferta_por_nome
+        macro = classificar_oferta_por_nome(titulo or "")
+        if macro:
+            return macro[:100]
+    except Exception:
+        pass
+
+    valor = _numero(raw.get("valor_desconto") or raw.get("discount_num"))
+    tipo = _texto(raw.get("tipo_desconto")).lower()
+    if tipo in ("porcentagem", "percentual") and valor is not None:
+        return "Até 20%" if valor <= 20 else "Acima de 20%"
+    if tipo == "fixo" and valor is not None:
+        return "Desconto em reais"
+    return "Geral"
+
+
+def score_cupom(cupom) -> float:
+    """Ranking de qualidade de um cupom p/ ordenar a aba Cupons (maior = melhor).
+
+    Combina codigo publicavel (peso alto), valor do desconto, validade futura e
+    confianca. A recencia fica como desempate no `order_by`, nao aqui.
+    """
+    from django.utils import timezone
+    regras = regras_do_cupom(cupom)
+    score = 0.0
+    if codigo_publicavel(cupom):
+        score += 50.0
+    valor = _numero(regras.get("valor_desconto"))
+    if valor is not None:
+        if regras.get("tipo_desconto") == "porcentagem":
+            score += min(valor, 60.0)
+        else:  # desconto fixo em R$
+            score += min(valor / 2.0, 40.0)
+    validade = getattr(cupom, "validade", None)
+    if validade and validade >= timezone.now():
+        score += 10.0
+    confianca = getattr(cupom, "confianca", "")
+    score += {"alta": 15.0, "media": 5.0}.get(confianca, 0.0)
+    return round(score, 2)
+

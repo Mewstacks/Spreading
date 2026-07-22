@@ -12,11 +12,12 @@ def persist_items(items, owner=None):
             defaults={"marketplace": item.marketplace, "nome": item.source},
         )
         if item.kind == "coupon":
+            from apps.scrapers.coupon_rules import derivar_categoria_cupom
             CupomNormalizado.objects.update_or_create(
                 fonte=fonte, external_id=item.external_id,
                 defaults={"marketplace": item.marketplace, "titulo": item.title,
                           "codigo": item.coupon_code, "regras": item.coupon_rules,
-                          "categoria": (item.coupon_rules.get("escopo") or "").strip()[:100],
+                          "categoria": derivar_categoria_cupom(item.title, item.coupon_rules),
                           "link": item.canonical_url, "validade": item.valid_until,
                           "estado": "ativo", "confianca": "media",
                           "evidencia": item.evidence},

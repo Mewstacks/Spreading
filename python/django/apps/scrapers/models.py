@@ -54,6 +54,9 @@ class Produto(models.Model):
     link_afiliado = models.URLField(max_length=1000, blank=True, default="")
     imagem_url = models.URLField(max_length=1000, blank=True, default="")
     frete_full = models.BooleanField(default=False)
+    # Marcado quando o card do ML traz o selo "Oferta relâmpago". Feedback da cliente:
+    # ofertas relâmpago vendem muito; o ranking dá boost a elas (selecionar_item_para_grupo).
+    relampago = models.BooleanField(default=False, db_index=True)
     # Código digitável no checkout, quando o item vem de um cupom de código (ex: CASINHA)
     codigo_checkout = models.CharField(max_length=60, blank=True, default="")
     # True quando o link_afiliado foi verificado e carrega a tag de afiliado (A3).

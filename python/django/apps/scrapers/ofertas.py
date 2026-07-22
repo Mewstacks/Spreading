@@ -275,9 +275,16 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
         if produto.preco_com_cupom < 30:
             score += 20
             motivos.append("ticket acessível")
+        # Feedback da cliente: cupom e oferta relâmpago vendem muito mais.
         if cupom and cupom.data_criacao >= timezone.now() - timedelta(hours=12):
             score *= 1.5
             motivos.append("cupom recente")
+        elif cupom or getattr(produto, "codigo_checkout", ""):
+            score *= 1.2
+            motivos.append("tem cupom")
+        if getattr(produto, "relampago", False):
+            score *= 1.4
+            motivos.append("oferta relâmpago")
         historico = _stats_preco(produto, dias=30)
         if historico and historico["n"] >= 3:
             if produto.preco_com_cupom >= historico["mediana"] * .98:
@@ -513,8 +520,13 @@ def resolver_link_afiliado_cupom(cupom, usuario):
             "Nenhum produto aplicável permitiu gerar um link afiliado para este cupom."}
 
 
-def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nome=""):
-    """Nucleo auditavel do envio manual de CupomNormalizado."""
+def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nome="",
+                 imagem_b64_custom=None):
+    """Nucleo auditavel do envio manual de CupomNormalizado.
+
+    `imagem_b64_custom` (opcional): foto escolhida no envio. Cupom não tem foto de
+    produto, então sem ela sai como texto puro (comportamento de sempre); com ela,
+    a foto vira a imagem acima da mensagem (só no transporte base64/WhatsApp)."""
     from django.contrib.auth import get_user_model
     from apps.scrapers.coupon_rules import codigo_publicavel
     from apps.scrapers.eventos import log_event
@@ -602,9 +614,13 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         Publicacao.objects.filter(pk=publicacao.pk).update(
             mensagem=mensagem, link_afiliado=afiliado["link"],
             link_rastreado=afiliado["link"])
+        img_kwargs = {}
+        # Só o transporte base64/WhatsApp aceita a foto custom; Telegram segue texto.
+        if imagem_b64_custom and getattr(sender, "prefers_image", "") != "url":
+            img_kwargs = {"imagem_b64": imagem_b64_custom, "mimetype": "image/jpeg"}
         resultado = sender.enviar_oferta(
             grupo_id, mensagem, legenda=mensagem, usuario=usuario,
-            session=wa_session_de(usuario))
+            session=wa_session_de(usuario), **img_kwargs)
         if resultado.get("sucesso"):
             Publicacao.objects.filter(pk=publicacao.pk).update(
                 status="enviado", enviada_em=timezone.now())
@@ -635,11 +651,52 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                       causa=type(exc).__name__)
 
 
+# Emoji por macro-categoria p/ a linha do produto na mensagem curta. Fallback 🛍️.
+_EMOJI_MACRO = {
+    "Celulares, Telefonia e Wearables": "📱",
+    "Eletrônicos e Informática": "💻",
+    "Áudio, Vídeo e Fotografia": "🎧",
+    "Eletrodomésticos": "🔌",
+    "Cozinha, Mesa e Bar": "🍽️",
+    "Casa, Móveis e Decoração": "🛋️",
+    "Beleza e Cuidados Pessoais": "💄",
+    "Moda, Calçados e Acessórios": "👕",
+    "Esportes e Fitness": "🏋️",
+    "Games, Brinquedos e Hobbies": "🎮",
+    "Ferramentas e Manutenção": "🔧",
+    "Automotivo": "🚗",
+    "Pets e Animais": "🐾",
+    "Bebês e Maternidade": "🍼",
+    "Alimentos e Bebidas": "🍫",
+    "Saúde, Ortopedia e Equipamentos Médicos": "💊",
+    "Papelaria, Escritório e Escola": "✏️",
+}
+
+
+def _emoji_produto(produto) -> str:
+    macro = getattr(produto, "macro_categoria", "") or ""
+    return _EMOJI_MACRO.get(macro, "🛍️")
+
+
+def _preco_br(valor) -> str:
+    """R$ no formato brasileiro sem 'R$' e sem centavos zerados: 49,90 / 352."""
+    try:
+        numero = float(valor)
+    except (TypeError, ValueError):
+        return ""
+    if numero.is_integer():
+        return str(int(numero))
+    return f"{numero:.2f}".replace(".", ",")
+
+
 def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
                     usuario=None, configuracao=None, variante="A") -> str:
     """
     Monta o texto da oferta usando o `Markup` do canal (WhatsApp *neg*, Telegram <b>).
     Conteúdo dinâmico passa por markup.escape p/ não quebrar HTML do Telegram.
+
+    Formato curto (modelo dos grupos): título da IA em caixa alta, produto, preço
+    DE|POR, cupom (quando há código publicável) e link.
     """
     from apps.scrapers.senders.base import WhatsAppMarkup
     m = markup or WhatsAppMarkup()
@@ -674,70 +731,57 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         except (KeyError, ValueError):
             pass
 
-    linhas = [
-        m.bold(f"🔥 {esc(marca)}"),
-        f"📱 {esc(produto.nome.strip())}",
-    ]
+    # Blocos separados por linha em branco, no estilo dos grupos:
+    #   TÍTULO
+    #   (blank)
+    #   {emoji} Produto
+    #   (blank)
+    #   🔥 DE X | POR Y     [+ 🎟️ CUPOM: ... colado embaixo]
+    #   🔗 link
+    linhas = []
+    # Título da IA (frase_llm) em caixa alta, no topo — a "chamada" do grupo.
+    titulo = _frase_marketing(produto)
+    if titulo:
+        linhas += [m.bold(esc(titulo)), ""]
 
-    frase = _frase_marketing(produto)
-    if frase:
-        linhas += ["", m.italic(esc(frase))]
+    linhas += [f"{_emoji_produto(produto)} {m.bold(esc(produto.nome.strip()))}", ""]
 
     # Guarda final: desconto >= 90% (ou "De:" <= "Por:") indica preço corrompido
     # (ex.: savingBasis em escala errada). Em vez de imprimir "100% OFF" absurdo,
-    # esconde a linha "De:"/% OFF e mostra só o "Por:".
+    # esconde a parte "DE" e mostra só o "POR".
     desconto_valido = 0 < desconto_percent < 90 and produto.preco_sem_desconto > produto.preco_com_cupom
+    por = _preco_br(produto.preco_com_cupom)
     if desconto_valido:
-        linhas += [
-            "",
-            f"❌ De: {m.strike(f'R$ {produto.preco_sem_desconto:.2f}')}",
-            f"✅ {m.bold(f'Por: R$ {produto.preco_com_cupom:.2f}')} ({desconto_percent:.0f}% OFF)",
-        ]
+        de = _preco_br(produto.preco_sem_desconto)
+        linhas.append(f"🔥 DE {m.strike(de)} | {m.bold(f'POR {por}')}")
     else:
-        linhas += [
-            "",
-            f"✅ {m.bold(f'Por: R$ {produto.preco_com_cupom:.2f}')}",
-        ]
+        linhas.append(f"🔥 {m.bold(f'POR {por}')}")
 
     # REGRA: cupons NÃO acumulam no ML. Cada item anuncia no máximo UM cupom.
     # Prioridade: cupom do link (cupom_pai) > código do próprio item (codigo_checkout)
     # > melhor código genérico VÁLIDO para este item. Nunca os três juntos.
     cod_item = getattr(produto, "codigo_checkout", "")
+    linha_cupom = None
     if cupom_pai is not None:
-        linhas += [
-            m.italic(f"(Cupom: {esc(cupom_pai.titulo)})"),
-            "",
-            f"⚠️ {m.bold('ATIVE O CUPOM:')} abra o link, toque em {m.bold('Ativar cupom')} e o desconto entra no checkout.",
-        ]
+        linha_cupom = f"🎟️ {m.bold('CUPOM: ative no link')}"
     elif cod_item:
-        linhas += ["", f"🎟️ Use o cupom {m.bold(esc(cod_item))} no checkout"]
+        linha_cupom = f"🎟️ {m.bold(f'CUPOM: {esc(cod_item)}')}"
     elif (getattr(produto, "marketplace", "") == "amazon"
           and (getattr(produto, "evidencia", {}) or {}).get("promotion", {}).get("coupon_confirmed")):
-        linhas += ["", f"🎟️ {m.bold('ATIVE O CUPOM:')} marque o cupom na página da Amazon antes de finalizar a compra."]
+        linha_cupom = f"🎟️ {m.bold('CUPOM: ative na página da Amazon')}"
     else:
-        # Códigos genéricos (CupomCodigo) são de checkout do ML — NÃO valem na Amazon
-        # (lá cupom é de clipar, sem código). Só aplica p/ ML/legado.
+        # Códigos genéricos (CupomCodigo) são de checkout do ML — NÃO valem na Amazon.
         mkt = getattr(produto, "marketplace", "mercadolivre")
-        # Preferência: cupom do catálogo normalizado (fonte oficial de afiliados) com
-        # aplicação SEGURA a este item; senão, o melhor CupomCodigo curado.
         codigo = None
         if mkt in ("mercadolivre", ""):
             codigo = _melhor_cupom_normalizado(produto) or _melhor_codigo(produto)
         if codigo:
-            linhas += ["", f"🎟️ Use o cupom {m.code(esc(codigo))} no checkout"]
-        else:
-            linhas += ["", "✅ Desconto já aplicado no preço."]
+            linha_cupom = f"🎟️ {m.bold(f'CUPOM: {esc(codigo)}')}"
 
-    if getattr(produto, "frete_full", False):
-        linhas.append(f"🚚 {m.bold('Full')} — frete grátis e entrega rápida")
-
-    linhas += [
-        "",
-        m.bold(f"🛒 {esc(cta)}:"),
-        f"👉 {esc(link_afiliado)}",
-    ]
-    if disclosure:
-        linhas += ["", m.italic(esc(disclosure))]
+    if linha_cupom:
+        # Com cupom: cola embaixo do preço e separa o link com uma linha em branco.
+        linhas += [linha_cupom, ""]
+    linhas.append(f"🔗 {esc(link_afiliado)}")
     return "\n".join(linhas)
 
 
@@ -855,7 +899,7 @@ def _link_publicado(publicacao, link_afiliado: str) -> str:
 
 def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                              canal="whatsapp", usuario=None, configuracao=None,
-                             destino_nome=""):
+                             destino_nome="", imagem_b64_custom=None):
     """
     Núcleo de envio reutilizável e AGNÓSTICO de loja/canal:
       resolve marketplace (link afiliado + verificação) e sender (transporte) via registry.
@@ -1076,12 +1120,17 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         wa_session = wa_session_de(usuario)
 
         # Imagem conforme o canal: Telegram aceita URL direto; WhatsApp precisa de base64.
-        if sender.prefers_image == "url":
+        # Foto custom (opcional, escolhida no envio) só entra no caminho base64/WhatsApp;
+        # sem ela, mantém a foto do produto como sempre.
+        if sender.prefers_image == "url" and not imagem_b64_custom:
             resultado = sender.enviar_oferta(grupo_id, mensagem,
                                              imagem_url=getattr(produto, "imagem_url", "") or None,
                                              legenda=mensagem, usuario=usuario, session=wa_session)
         else:
-            imagem_b64, img_mime = _baixar_imagem_b64(getattr(produto, "imagem_url", ""))
+            if imagem_b64_custom:
+                imagem_b64, img_mime = imagem_b64_custom, "image/jpeg"
+            else:
+                imagem_b64, img_mime = _baixar_imagem_b64(getattr(produto, "imagem_url", ""))
             resultado = sender.enviar_oferta(grupo_id, mensagem, imagem_b64=imagem_b64 or None,
                                              mimetype=img_mime or "image/jpeg", legenda=mensagem,
                                              usuario=usuario, session=wa_session)
