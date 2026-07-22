@@ -3,8 +3,11 @@ import json
 import re
 import time
 import logging
+from contextlib import contextmanager
+
+import requests
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
-from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada
+from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada, ua_aleatorio
 from apps.scrapers.models import Cupom, Produto, CupomNormalizado, FonteIngestao
 from apps.scrapers.progresso import emitir_progresso, emitir_fase
 from apps.scrapers.session_paths import ml_auth_path
@@ -14,29 +17,27 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
-def _extrair_payload_cupons(page):
-    """Lê o payload de cupom sem acoplar a um único bundle Nordic.
+_SCRIPT_RE = re.compile(r"<script[^>]*>(.*?)</script>", re.S | re.I)
 
+
+def _parse_payload_cupons(html_text):
+    """Extrai o ``filteredCouponsData`` (JÁ DESEMBRULHADO) de um HTML/string de script.
+
+    Serve os dois transportes: o texto do GET HTTP e o ``page.content()`` do browser.
     O ML alterna entre script com id, script JSON e bundle inline. Todos carregam a
     mesma chave ``filteredCouponsData``; a validação é por estrutura, não por uma
     substring fixa que some a cada deploy do site.
 
-    Devolve o ``filteredCouponsData`` JÁ DESEMBRULHADO. Antes devolvia a raiz: esta
-    função tolerava as duas formas do payload (com e sem ``appProps.pageProps``) mas
-    quem consumia só sabia descer por ``appProps``. No formato achatado a extração
-    dava certo, o consumidor via lista vazia, gastava as 3 tentativas por página e
-    a raspagem terminava em zero cupom sem uma linha dizendo por quê.
+    Devolve o payload já desembrulhado. Antes devolvia a raiz: quem consumia só sabia
+    descer por ``appProps``, então no formato achatado a extração dava certo mas o
+    consumidor via lista vazia e a raspagem terminava em zero cupom sem dizer por quê.
     """
-    candidatos = []
-    for selector in ("#__NORDIC_RENDERING_CTX__", "script[type='application/json']", "script"):
-        try:
-            loc = page.locator(selector)
-            direct = loc.text_content()
-            if direct:
-                candidatos.append(direct)
-            candidatos.extend(loc.nth(i).text_content() or "" for i in range(loc.count()))
-        except Exception:
-            continue
+    if not html_text or "filteredCouponsData" not in html_text:
+        return None
+    # Sem BeautifulSoup no projeto: pega os corpos de <script> por regex e, como
+    # rede de segurança, tenta também a string inteira (caminho browser/script cru).
+    candidatos = _SCRIPT_RE.findall(html_text)
+    candidatos.append(html_text)
     for text in candidatos:
         if "filteredCouponsData" not in text:
             continue
@@ -55,6 +56,88 @@ def _extrair_payload_cupons(page):
                 return current["filteredCouponsData"]
     return None
 
+
+def _extrair_payload_cupons(page):
+    """Adapter do caminho browser: serializa o DOM e reusa o parser de string."""
+    return _parse_payload_cupons(page.content())
+
+
+_CUPONS_URL = ("https://www.mercadolivre.com.br/cupons/filter"
+               "?all=true&source_page=int_view_all&page={n}")
+
+
+def _ml_http_session(caminho_auth):
+    """`requests.Session` com os cookies do storage_state do Playwright + headers de
+    browser. Reusa a sessão já salva SEM subir Chromium — o payload de cupons é SSR,
+    então um GET autenticado traz o mesmo `filteredCouponsData`. Cookies ausentes ou
+    inválidos => o GET cai na página de login (sem payload) e o transporte alterna
+    para o browser, que é quem sabe distinguir challenge de sessão expirada.
+    """
+    sess = requests.Session()
+    try:
+        with open(caminho_auth, encoding="utf-8") as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        state = {}
+    for c in state.get("cookies", []):
+        try:
+            # Preserva o domínio como salvo (inclusive o ponto inicial): é ele que diz
+            # ao jar para mandar o cookie também nos subdomínios (www., lista., ...).
+            sess.cookies.set(c["name"], c["value"],
+                             domain=c.get("domain") or "",
+                             path=c.get("path") or "/")
+        except Exception:
+            continue
+    sess.headers.update({
+        "User-Agent": ua_aleatorio(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+        "Upgrade-Insecure-Requests": "1",
+    })
+    return sess
+
+
+@contextmanager
+def _transporte_cupons(caminho_auth):
+    """Fornece `fetch(n) -> str|None` para /cupons/filter, agnóstico ao transporte.
+
+    Tenta HTTP primeiro (rápido, sem Chromium). O caller liga `estado['forcar_browser']`
+    quando a 1ª página não traz payload (challenge do ML ou sessão morta); a partir daí
+    o fetch serve via browser headless — que valida a sessão e levanta SessaoExpirada
+    se o login caiu. O Chromium só é aberto se/quando o fallback ligar o flag.
+    """
+    session = _ml_http_session(caminho_auth)
+    estado = {"forcar_browser": False, "usou_browser": False, "_cm": None, "_page": None}
+
+    def fetch(n):
+        if not estado["forcar_browser"]:
+            try:
+                resp = session.get(_CUPONS_URL.format(n=n), timeout=20)
+                resp.raise_for_status()
+                return resp.text
+            except requests.RequestException as e:
+                logger.debug("Falha HTTP na pagina %s de cupons: %s", n, e)
+                return None
+        if estado["_page"] is None:
+            cm = iniciar_browser(auth_path=caminho_auth, headless=True)
+            page, _ctx = cm.__enter__()  # valida a sessão; SessaoExpirada propaga
+            estado["_cm"] = cm
+            estado["_page"] = page
+            estado["usou_browser"] = True
+        page = estado["_page"]
+        try:
+            page.goto(_CUPONS_URL.format(n=n))
+            page.wait_for_load_state("domcontentloaded")
+        except Exception as e:
+            raise BrowserError(f"Nao foi possivel acessar a pagina de cupons: {e}")
+        return page.content()
+
+    try:
+        yield fetch, estado
+    finally:
+        if estado["_cm"] is not None:
+            estado["_cm"].__exit__(None, None, None)
+
 def mapear_cupons(n=1, faixa=None):
     """Raspa /cupons/filter e popula a tabela Cupom. Retorna quantos foram salvos.
 
@@ -63,12 +146,21 @@ def mapear_cupons(n=1, faixa=None):
     Cupom correspondente no banco. Ficou anos fora do loop automático, rodando só
     no clique manual da tela de Scraper — ver marketplaces/mercadolivre.scrape_all.
 
+    Caminho rápido: GET HTTP autenticado (o payload é SSR no HTML), sem Chromium —
+    derruba a raspagem de ~40 min para segundos. Só alterna para o browser (lento)
+    quando o HTTP não traz payload na 1ª página (challenge do ML ou sessão expirada),
+    pois é o browser que valida a sessão e levanta SessaoExpirada -> "reconecte".
+
     `faixa` (ini, fim) liga o progresso na tela; sem ela, o comportamento silencioso
     de antes (o ciclo automático não tem barra para alimentar).
     """
     todos_os_cupons_limpos = []
-    MAX_RETRIES = 3
-    RETRY_WAIT = 5  # segundos entre tentativas
+    MAX_RETRIES = 2
+    RETRY_WAIT = 1.5  # s entre tentativas; sem browser não há corrida de render a esperar
+    # Trava anti-runaway: o fim natural é `pagination.total` (ou a 1ª página vazia);
+    # este teto só protege se ambos sumirem (formato mudou). Fica bem acima do catálogo
+    # real (~72 páginas) para nunca cortar uma varredura legítima.
+    MAX_PAGINAS = 200
     # O total de páginas é desconhecido (o laço vai até vir uma vazia), então a barra
     # não pode ser i/total: a fração se aproxima do fim da faixa sem nunca chegar.
     PAGINAS_TIPICAS = 8
@@ -78,21 +170,21 @@ def mapear_cupons(n=1, faixa=None):
     caminho_auth = ml_auth_path()
     logger.info("Iniciando raspagem e limpeza de cupons")
 
-    with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
+    with _transporte_cupons(caminho_auth) as (fetch_html, _estado):
         while True:
+            if n > MAX_PAGINAS:
+                logger.warning("Limite de %s páginas atingido na varredura de cupons; encerrando", MAX_PAGINAS)
+                motivo_parada = f"o limite de {MAX_PAGINAS} páginas foi atingido"
+                break
+
             tentativa = 0
             dados = None
             emitir_fase(f"Cupons de campanha — página {n}",
                         min(n / PAGINAS_TIPICAS, 0.95), faixa)
 
             while tentativa < MAX_RETRIES:
-                try:
-                    page.goto(f"https://www.mercadolivre.com.br/cupons/filter?all=true&source_page=int_view_all&page={n}")
-                    page.wait_for_load_state("domcontentloaded")
-                except Exception as e:
-                    raise BrowserError(f"Nao foi possivel acessar a pagina de cupons: {e}")
-
-                dados = _extrair_payload_cupons(page)
+                html = fetch_html(n)
+                dados = _parse_payload_cupons(html) if html else None
                 if dados is None:
                     logger.debug("Payload de cupons ausente na pagina %s, tentativa %s/%s", n, tentativa + 1, MAX_RETRIES)
                     tentativa += 1
@@ -109,6 +201,13 @@ def mapear_cupons(n=1, faixa=None):
                 break  # sucesso
 
             if dados is None:
+                if n == 1 and not _estado["forcar_browser"]:
+                    # HTTP não trouxe payload logo na 1ª página: challenge do ML ou
+                    # sessão morta. Liga o browser (que valida o login) e refaz a
+                    # varredura do zero. Nada foi salvo ainda nesta página.
+                    logger.info("HTTP sem payload na página 1; alternando para o browser")
+                    _estado["forcar_browser"] = True
+                    continue
                 logger.warning("Pagina %s falhou apos %s tentativas; encerrando", n, MAX_RETRIES)
                 motivo_parada = (
                     f"o payload de cupons não foi encontrado na página {n} "
@@ -237,6 +336,15 @@ def mapear_cupons(n=1, faixa=None):
                 todos_os_cupons_limpos.append(cupom_limpo)
 
             logger.debug("Pagina %s processada: %s cupons limpos; total=%s", n, len(lista_da_pagina), len(todos_os_cupons_limpos))
+
+            # O próprio payload diz quantas páginas existem: parar em `total` é o fim
+            # natural (varredura completa) e evita depender da página vazia seguinte.
+            total_paginas = dados.get("pagination", {}).get("total")
+            if isinstance(total_paginas, int) and total_paginas > 0 and n >= total_paginas:
+                logger.info("Última página (%s de %s) processada; varredura completa", n, total_paginas)
+                varredura_completa = True
+                break
+
             n += 1
 
     if todos_os_cupons_limpos:

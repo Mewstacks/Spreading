@@ -1,6 +1,6 @@
-import itertools
 import json
 import os
+import re
 import tempfile
 import uuid
 from types import SimpleNamespace
@@ -1858,33 +1858,56 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         sono.start()
         self.addCleanup(sono.stop)
 
-    def _page_falsa(self, dados):
-        """Um `page` do Playwright só no que mapear_cupons usa, servindo o dump real."""
-        envelope = "_n.ctx.r=" + json.dumps(dados) + ";_n.ctx.r.assets={}"
+    def _envelope(self, d):
+        """Serializa um payload no formato Nordic que o parser espera, ou devolve a
+        string crua (para simular uma página bloqueada / sem payload)."""
+        if isinstance(d, str):
+            return d
+        return "_n.ctx.r=" + json.dumps(d) + ";_n.ctx.r.assets={}"
+
+    def _conteudo_por_pagina(self, paginas):
+        """paginas[i] serve a página i+1; a última se repete (o fim do laço relê a
+        página vazia por causa das retries)."""
+        textos = [self._envelope(p) for p in paginas]
+
+        def conteudo(pag):
+            idx = pag - 1
+            return textos[idx] if idx < len(textos) else textos[-1]
+
+        return conteudo
+
+    def _http_falsa(self, paginas):
+        """Mock de requests.Session servindo o HTML pelo número de página da URL."""
+        conteudo = self._conteudo_por_pagina(paginas)
+
+        def _get(url, **kw):
+            pag = int(re.search(r"page=(\d+)", url).group(1))
+            resp = Mock()
+            resp.text = conteudo(pag)
+            resp.raise_for_status = Mock()
+            return resp
+
+        sess = Mock()
+        sess.get.side_effect = _get
+        return sess
+
+    def _browser_page(self, paginas):
+        """Mock de um `page` do Playwright: goto guarda a página, content() serve o
+        HTML dela — é o que o transporte usa no fallback."""
+        conteudo = self._conteudo_por_pagina(paginas)
+        estado = {"pag": 1}
         page = Mock()
-        page.locator.return_value.text_content.return_value = envelope
-        return page
 
-    def _page_paginada(self, primeira, resto):
-        """Página 1 com conteúdo, da 2ª em diante `resto` — sem fim.
+        def _goto(url, *a, **kw):
+            estado["pag"] = int(re.search(r"page=(\d+)", url).group(1))
 
-        `side_effect` de lista fixa não serve: o extractor varre 3 seletores e
-        consome várias leituras por tentativa, então a lista acabava no meio e o
-        StopIteration virava "payload ausente" — falsificando justamente o cenário
-        que estes testes separam (varredura completa × parcial).
-        """
-        def _envelope(d):
-            return d if isinstance(d, str) else "_n.ctx.r=" + json.dumps(d) + ";_n.ctx.r.assets={}"
-
-        page = Mock()
-        page.locator.return_value.text_content.side_effect = itertools.chain(
-            [_envelope(primeira)], itertools.repeat(_envelope(resto)))
+        page.goto.side_effect = _goto
+        page.content.side_effect = lambda: conteudo(estado["pag"])
         return page
 
     @contextmanager
-    def _browser_com(self, dados):
-        page = self._page_falsa(dados)
-
+    def _browser_fake(self, page):
+        """Patcha iniciar_browser para ceder `page` — usado nos testes de fallback."""
         @contextmanager
         def _fake(*a, **kw):
             yield (page, Mock())
@@ -1893,40 +1916,36 @@ class ParserDeCupomDeCampanhaTests(TestCase):
             yield
 
     def test_le_os_cupons_do_dom_real_do_ml(self):
+        """Caminho feliz: o HTTP traz o payload SSR e o browser nem é aberto."""
         from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
 
         with open(self.DUMP, encoding="utf-8") as f:
             dados = json.load(f)
         # A 2ª página vem vazia: encerra o laço (o dump é de uma página só).
         vazio = {"appProps": {"pageProps": {"filteredCouponsData": {"coupons": []}}}}
-        paginas = [dados, vazio, vazio, vazio]
-        page = Mock()
-        page.locator.return_value.text_content.side_effect = [
-            "_n.ctx.r=" + json.dumps(p) + ";_n.ctx.r.assets={}" for p in paginas
-        ]
+        sess = self._http_falsa([dados, vazio])
 
-        @contextmanager
-        def _fake(*a, **kw):
-            yield (page, Mock())
-
-        with patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser", _fake):
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session", return_value=sess), \
+                patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser") as browser:
             salvos = mapear_cupons()
 
         self.assertEqual(salvos, 30)                       # o dump tem 30 cupons
         self.assertEqual(Cupom.objects.count(), 30)
+        browser.assert_not_called()                        # HTTP resolveu; sem Chromium
         cupom = Cupom.objects.get(campanha_id="13642210")
         self.assertIn("esquenta copa", cupom.titulo.lower())
         self.assertEqual(cupom.estado, "ativo")
 
     def test_pagina_vazia_nao_apaga_os_cupons_existentes(self):
-        """Guarda anti-wipe: ML bloqueando não pode zerar o catálogo."""
+        """Guarda anti-wipe: ML sem cupons não pode zerar o catálogo."""
         from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
 
         Cupom.objects.create(campanha_id="999", titulo="Cupom antigo", estado="ativo",
                              valor_desconto=10.0, valor_minimo=0.0)
         vazio = {"appProps": {"pageProps": {"filteredCouponsData": {"coupons": []}}}}
+        sess = self._http_falsa([vazio])
 
-        with self._browser_com(vazio):
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session", return_value=sess):
             salvos = mapear_cupons()
 
         self.assertEqual(salvos, 0)
@@ -1945,13 +1964,9 @@ class ParserDeCupomDeCampanhaTests(TestCase):
             dump = json.load(f)
         achatado = {"filteredCouponsData":
                     dump["appProps"]["pageProps"]["filteredCouponsData"]}
-        page = self._page_paginada(achatado, {"filteredCouponsData": {"coupons": []}})
+        sess = self._http_falsa([achatado, {"filteredCouponsData": {"coupons": []}}])
 
-        @contextmanager
-        def _fake(*a, **kw):
-            yield (page, Mock())
-
-        with patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser", _fake):
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session", return_value=sess):
             salvos = mapear_cupons()
 
         self.assertEqual(salvos, 30)
@@ -1969,14 +1984,10 @@ class ParserDeCupomDeCampanhaTests(TestCase):
                              estado="ativo", valor_desconto=10.0, valor_minimo=0.0)
         with open(self.DUMP, encoding="utf-8") as f:
             dump = json.load(f)
-        # Página 1 ok; da 2ª em diante o payload some (as 3 tentativas falham).
-        page = self._page_paginada(dump, "<html>bloqueado</html>")
+        # Página 1 ok; da 2ª em diante o payload some (as tentativas falham).
+        sess = self._http_falsa([dump, "<html>bloqueado</html>"])
 
-        @contextmanager
-        def _fake(*a, **kw):
-            yield (page, Mock())
-
-        with patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser", _fake):
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session", return_value=sess):
             salvos = mapear_cupons()
 
         self.assertEqual(salvos, 30)
@@ -1991,15 +2002,108 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         with open(self.DUMP, encoding="utf-8") as f:
             dump = json.load(f)
         vazio = {"appProps": {"pageProps": {"filteredCouponsData": {"coupons": []}}}}
-        page = self._page_paginada(dump, vazio)
+        sess = self._http_falsa([dump, vazio])
+
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session", return_value=sess):
+            mapear_cupons()
+
+        self.assertEqual(Cupom.objects.get(campanha_id="saiu-do-ar").estado, "expirado")
+
+    def test_fallback_para_o_browser_quando_http_nao_traz_payload(self):
+        """HTTP sem payload na 1ª página (challenge do ML) => abre o browser e conclui."""
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        with open(self.DUMP, encoding="utf-8") as f:
+            dump = json.load(f)
+        vazio = {"appProps": {"pageProps": {"filteredCouponsData": {"coupons": []}}}}
+        # HTTP devolve sempre uma página de login (sem filteredCouponsData).
+        sess = self._http_falsa(["<html>login</html>"])
+        page = self._browser_page([dump, vazio])
+
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session", return_value=sess), \
+                self._browser_fake(page):
+            salvos = mapear_cupons()
+
+        self.assertEqual(salvos, 30)
+        self.assertEqual(Cupom.objects.count(), 30)
+
+    def test_sessao_expirada_no_fallback_propaga(self):
+        """Se o fallback abre o browser e a sessão caiu, SessaoExpirada sobe — é o que
+        o SSE transforma no aviso de reconexão."""
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+        from apps.scrapers.auxiliar import SessaoExpirada
+
+        sess = self._http_falsa(["<html>login</html>"])
 
         @contextmanager
         def _fake(*a, **kw):
-            yield (page, Mock())
+            raise SessaoExpirada("sessão caiu")
+            yield  # pragma: no cover
 
-        with patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser", _fake):
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session", return_value=sess), \
+                patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser", _fake):
+            with self.assertRaises(SessaoExpirada):
+                mapear_cupons()
+
+    def test_trava_de_max_paginas_para_o_laco_sem_expirar(self):
+        """Payload que nunca esvazia não pode rodar para sempre nem expirar o resto."""
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        Cupom.objects.create(campanha_id="de-outra-pagina", titulo="Não visto",
+                             estado="ativo", valor_desconto=10.0, valor_minimo=0.0)
+
+        def _get(url, **kw):
+            # Cada página traz um cupom NOVO e nunca vem vazia -> força a trava.
+            pag = int(re.search(r"page=(\d+)", url).group(1))
+            payload = {"appProps": {"pageProps": {"filteredCouponsData": {
+                "coupons": [{"campaignId": f"inf-{pag}",
+                             "title": {"text": f"Cupom {pag}"},
+                             "action": {"type": "button"}}]}}}}
+            resp = Mock()
+            resp.text = self._envelope(payload)
+            resp.raise_for_status = Mock()
+            return resp
+
+        sess = Mock()
+        sess.get.side_effect = _get
+
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session", return_value=sess):
             mapear_cupons()
 
+        # Parou na trava (MAX_PAGINAS=200), sem varredura completa: nada é expirado.
+        self.assertEqual(Cupom.objects.filter(campanha_id__startswith="inf-").count(), 200)
+        self.assertEqual(Cupom.objects.get(campanha_id="de-outra-pagina").estado, "ativo")
+
+    def test_para_na_ultima_pagina_via_pagination_total(self):
+        """O payload traz `pagination.total`: a varredura para nele (fim natural) sem
+        depender da página vazia seguinte, e expira o que saiu do ar."""
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        Cupom.objects.create(campanha_id="saiu-do-ar", titulo="Cupom morto",
+                             estado="ativo", valor_desconto=10.0, valor_minimo=0.0)
+
+        def _get(url, **kw):
+            pag = int(re.search(r"page=(\d+)", url).group(1))
+            payload = {"appProps": {"pageProps": {"filteredCouponsData": {
+                "coupons": [{"campaignId": f"p{pag}",
+                             "title": {"text": f"Cupom {pag}"},
+                             "action": {"type": "button"}}],
+                "pagination": {"total": 3}}}}}
+            resp = Mock()
+            resp.text = self._envelope(payload)
+            resp.raise_for_status = Mock()
+            return resp
+
+        sess = Mock()
+        sess.get.side_effect = _get
+
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session", return_value=sess):
+            salvos = mapear_cupons()
+
+        # Exatamente 3 páginas (p1..p3) e nada além; varredura completa -> expira.
+        self.assertEqual(salvos, 3)
+        self.assertEqual(Cupom.objects.filter(campanha_id__startswith="p").count(), 3)
+        self.assertFalse(Cupom.objects.filter(campanha_id="p4").exists())
         self.assertEqual(Cupom.objects.get(campanha_id="saiu-do-ar").estado, "expirado")
 
 
