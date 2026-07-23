@@ -194,11 +194,30 @@ class CouponMessageTests(SimpleTestCase):
         cupom, itens = self._data()
         mensagem = montar_mensagem_cupom_produtos(cupom, itens)
 
-        self.assertTrue(mensagem.startswith("*Cupom ⚡️ Mercado Livre*"))
+        self.assertTrue(mensagem.startswith("*Cupom Mercado Livre*"))
         self.assertIn("📖 Livro Chama de Ferro Capa Dura Edição Especial", mensagem)
         self.assertIn("🛒 De R$197,90 por R$83,54", mensagem)
         self.assertIn("➡️ https://meli.la/1GWNQCg", mensagem)
         self.assertTrue(mensagem.endswith("🎟 Use o cupom *PRESENTE*"))
+        self.assertEqual(mensagem.count("*"), 4)
+
+    def test_cupom_inclui_chamada_ia_sem_negrito_e_nome_resumido(self):
+        from apps.scrapers.ofertas import montar_mensagem_cupom_produtos
+
+        cupom, itens = self._data()
+        produto = itens[0]["produto"]
+        # Caches antigos podiam guardar os próprios asteriscos da IA.
+        produto.frase_llm = "*BORA RENOVAR ESSE SETUP*"
+        produto.nome_llm = "Livro Chama de Ferro Capa Dura"
+
+        mensagem = montar_mensagem_cupom_produtos(cupom, itens)
+
+        self.assertTrue(mensagem.startswith(
+            "BORA RENOVAR ESSE SETUP\n\n*Cupom Mercado Livre*"
+        ))
+        self.assertNotIn("*BORA RENOVAR ESSE SETUP*", mensagem)
+        self.assertIn("📖 Livro Chama de Ferro Capa Dura", mensagem)
+        self.assertNotIn("Brinde Exclusivo", mensagem)
         self.assertEqual(mensagem.count("*"), 4)
 
     def test_telegram_escapa_html_e_tem_dois_negritos(self):
@@ -213,6 +232,72 @@ class CouponMessageTests(SimpleTestCase):
         self.assertEqual(mensagem.count("<b>"), 2)
         self.assertEqual(mensagem.count("</b>"), 2)
         self.assertIn("Livro &lt;Especial&gt; &amp; Capa dura", mensagem)
+
+
+class ProductMessageAITests(SimpleTestCase):
+    @patch("apps.scrapers.ofertas._conteudo_marketing")
+    def test_chamada_ia_nao_recebe_negrito_e_nome_curto_substitui_original(
+        self, conteudo
+    ):
+        from apps.scrapers.ofertas import montar_mensagem
+
+        conteudo.return_value = {
+            "titulo": "TELA BRABA PRA JOGAR BONITO",
+            "nome_curto": "Monitor Gamer Samsung Odyssey G5 27 QHD 165Hz",
+        }
+        produto = SimpleNamespace(
+            nome=("Monitor Gamer Samsung Odyssey G5 27, Resolução QHD, Taxa de "
+                  "atualização de 165Hz & 1ms de tempo de resposta (MPRT), "
+                  "Curvatura com 1000R, HDR 10, AMD FreeSync"),
+            macro_categoria="Eletrônicos e Informática",
+            preco_sem_desconto=2200,
+            preco_com_cupom=1799,
+            codigo_checkout="",
+            marketplace="amazon",
+            evidencia={},
+        )
+
+        mensagem = montar_mensagem(
+            produto, "https://amazon.com.br/dp/ABC?tag=teste", None
+        )
+
+        self.assertTrue(mensagem.startswith(
+            "TELA BRABA PRA JOGAR BONITO\n\n"
+            "💻 *Monitor Gamer Samsung Odyssey G5 27 QHD 165Hz*"
+        ))
+        self.assertNotIn("*TELA BRABA PRA JOGAR BONITO*", mensagem)
+        self.assertNotIn("Curvatura com 1000R", mensagem)
+
+
+class ProductAICacheTests(TestCase):
+    @patch("apps.scrapers.llm.gerar_conteudo")
+    def test_chamada_e_nome_curto_sao_gerados_juntos_e_cacheados(self, gerar):
+        from apps.scrapers.ofertas import _conteudo_marketing
+
+        gerar.return_value = {
+            "titulo": "TELA BRABA PRA JOGAR BONITO",
+            "nome_curto": "Monitor Gamer Samsung Odyssey G5 27 QHD 165Hz",
+        }
+        produto = Produto.objects.create(
+            marketplace="amazon",
+            nome=("Monitor Gamer Samsung Odyssey G5 27, Resolução QHD, Taxa de "
+                  "atualização de 165Hz, HDR 10 e AMD FreeSync"),
+            preco_sem_desconto=2200,
+            preco_com_cupom=1799,
+            link_produto="https://amazon.com.br/dp/ABC",
+        )
+
+        primeiro = _conteudo_marketing(produto)
+        produto.refresh_from_db()
+        segundo = _conteudo_marketing(produto)
+
+        self.assertEqual(primeiro, segundo)
+        self.assertEqual(
+            produto.nome_llm,
+            "Monitor Gamer Samsung Odyssey G5 27 QHD 165Hz",
+        )
+        self.assertEqual(produto.frase_llm, "TELA BRABA PRA JOGAR BONITO")
+        gerar.assert_called_once()
 
 
 class MercadoLivreCouponHTMLTests(SimpleTestCase):

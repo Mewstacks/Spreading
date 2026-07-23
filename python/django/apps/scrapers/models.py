@@ -66,6 +66,8 @@ class Produto(models.Model):
     afiliado_ok = models.BooleanField(default=False)
     # Frase de marketing gerada por LLM, cacheada na raspagem (evita bloquear o envio).
     frase_llm = models.CharField(max_length=255, blank=True, default="")
+    # Nome enxuto para a mensagem, sem a cauda de especificações do marketplace.
+    nome_llm = models.CharField(max_length=120, blank=True, default="")
     # Proveniência e confiança: a UI e o seletor nunca precisam adivinhar se o
     # dado ainda é publicável.
     fonte = models.CharField(max_length=80, blank=True, default="", db_index=True)

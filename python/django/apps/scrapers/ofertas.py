@@ -321,28 +321,88 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
     return escolhidos
 
 
-def _frase_marketing(produto):
-    """Frase de marketing: usa o cache (frase_llm); só chama a API do Claude ao vivo
-    como último recurso, com timeout curto (10s, não os 120s antigos que travavam o
-    envio), e GRAVA no cache p/ o próximo envio ser instantâneo."""
-    cache = getattr(produto, "frase_llm", "") or ""
-    if cache:
-        return cache
-    from apps.scrapers.llm import gerar_descricao
+def _texto_ia_sem_formatacao(texto, limite=120):
+    """Neutraliza marcação que possa existir em caches gerados anteriormente."""
+    limpo = re.sub(r"[*_`~]+", "", str(texto or ""))
+    limpo = re.sub(r"\s+", " ", limpo).strip().strip("\"'")
+    return limpo[:limite].rstrip(" -–—,;|/")
+
+
+def _salvar_cache_ia(produto, *, titulo="", nome_curto=""):
+    """Atualiza somente os campos realmente gerados e tolera objetos sem ORM."""
+    campos = []
+    if titulo and titulo != (getattr(produto, "frase_llm", "") or ""):
+        produto.frase_llm = titulo
+        campos.append("frase_llm")
+    if nome_curto and nome_curto != (getattr(produto, "nome_llm", "") or ""):
+        produto.nome_llm = nome_curto
+        campos.append("nome_llm")
+    if not campos or not hasattr(produto, "save") or not getattr(produto, "pk", None):
+        return
+    try:
+        produto.save(update_fields=campos)
+    except Exception:
+        pass
+
+
+def _conteudo_marketing(produto):
+    """Chamada e nome curto, com uma única ida à IA e cache por produto."""
+    titulo_cache = _texto_ia_sem_formatacao(
+        getattr(produto, "frase_llm", ""), 80
+    )
+    nome_cache = _texto_ia_sem_formatacao(
+        getattr(produto, "nome_llm", ""), 70
+    )
+    nome_fallback = _nome_principal_produto(getattr(produto, "nome", ""))
+    nome_longo = len(str(getattr(produto, "nome", "") or "").strip()) > 70
+    if titulo_cache and (nome_cache or not nome_longo):
+        return {"titulo": titulo_cache, "nome_curto": nome_cache or nome_fallback}
+
+    from apps.scrapers.llm import gerar_conteudo
     preco = getattr(produto, "preco_com_cupom", None)
     de = getattr(produto, "preco_sem_desconto", 0) or 0
     desconto = ((de - preco) / de) * 100 if preco and de and de > preco else None
-    frase = gerar_descricao(
-        produto.nome, timeout=10, preco=preco, desconto_percent=desconto,
+    gerado = gerar_conteudo(
+        getattr(produto, "nome", ""), timeout=10, preco=preco,
+        desconto_percent=desconto,
         categoria=getattr(produto, "macro_categoria", "") or getattr(produto, "categoria", ""),
     )
-    if frase and hasattr(produto, "save") and getattr(produto, "pk", None):
-        try:
-            produto.frase_llm = frase
-            produto.save(update_fields=["frase_llm"])
-        except Exception:
-            pass
-    return frase
+    titulo = titulo_cache or gerado.get("titulo", "")
+    nome_gerado = gerado.get("nome_curto", "")
+    nome_curto = nome_cache or nome_gerado or nome_fallback
+    # O fallback mecânico mantém a mensagem bonita quando a API oscila, mas não
+    # ocupa o cache da IA: uma tentativa futura ainda poderá produzir nome melhor.
+    _salvar_cache_ia(produto, titulo=titulo, nome_curto=nome_gerado)
+    return {"titulo": titulo, "nome_curto": nome_curto}
+
+
+def _frase_marketing(produto):
+    """Compatibilidade com os chamadores que precisam apenas da chamada."""
+    return _conteudo_marketing(produto)["titulo"]
+
+
+def _preparar_conteudo_ia_cupom(itens):
+    """Prepara uma chamada e resume em lote os nomes longos da colagem."""
+    if not itens:
+        return
+    # A chamada do cupom acompanha o principal produto exibido na colagem.
+    _conteudo_marketing(itens[0]["produto"])
+
+    pendentes = []
+    for item in itens:
+        produto = item["produto"]
+        if getattr(produto, "nome_llm", ""):
+            continue
+        if len(str(getattr(produto, "nome", "") or "").strip()) > 70:
+            pendentes.append(produto)
+    if not pendentes:
+        return
+
+    from apps.scrapers.llm import gerar_nomes_curtos
+    resumidos = gerar_nomes_curtos([produto.nome for produto in pendentes], timeout=10)
+    for produto, nome_curto in zip(pendentes, resumidos):
+        if nome_curto:
+            _salvar_cache_ia(produto, nome_curto=nome_curto)
 
 
 def _nome_loja(marketplace, cupom=None) -> str:
@@ -603,13 +663,25 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
     esc = m.escape
 
     loja = _nome_loja(getattr(cupom, "marketplace", ""), cupom=cupom)
-    linhas = [m.bold(f"Cupom ⚡️ {esc(loja)}"), ""]
+    linhas = []
+    titulo_ia = (
+        _texto_ia_sem_formatacao(
+            getattr(itens[0]["produto"], "frase_llm", ""), 80
+        )
+        if itens else ""
+    )
+    if titulo_ia:
+        # A chamada da IA é propositalmente texto puro; cabeçalho/código mantêm
+        # o destaque próprio da mensagem de cupom.
+        linhas += [esc(titulo_ia), ""]
+    linhas += [m.bold(f"Cupom {esc(loja)}"), ""]
     for it in itens:
         p = it["produto"]
         relacao = it.get("relacao")
         de_val = getattr(relacao, "preco_original", None) or p.preco_sem_desconto
         por_val = getattr(relacao, "preco_final", None) or p.preco_com_cupom
-        linhas.append(f"{_emoji_produto(p)} {esc(_nome_principal_produto(p.nome))}")
+        nome = getattr(p, "nome_llm", "") or _nome_principal_produto(p.nome)
+        linhas.append(f"{_emoji_produto(p)} {esc(_nome_principal_produto(nome))}")
         de = _preco_br(de_val)
         por = _preco_br(por_val)
         linhas.append(f"🛒 De R${de} por R${por}")
@@ -815,6 +887,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         itens_cupom = _preparar_itens_cupom(cupom, usuario)
         img_kwargs = {}
         if itens_cupom:
+            _preparar_conteudo_ia_cupom(itens_cupom)
             # Telegram limita legendas de foto a 1024 caracteres. Como a regra e
             # "ate 9", remove os itens de menor prioridade ate a mensagem caber.
             if canal == "telegram":
@@ -960,10 +1033,14 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         getattr(configuracao, "template_b" if variante == "B" else "template_a", "")
         or getattr(perfil, "template_b" if variante == "B" else "template_a", "")
     )
+    conteudo_ia = _conteudo_marketing(produto)
+    nome_exibicao = (
+        conteudo_ia.get("nome_curto") or _nome_principal_produto(produto.nome)
+    )
     if template:
         try:
             return template.format(
-                marca=marca, nome=produto.nome,
+                marca=marca, nome=nome_exibicao,
                 preco=f"R$ {produto.preco_com_cupom:.2f}",
                 desconto=f"{desconto_percent:.0f}%", link=link_afiliado,
             )
@@ -979,11 +1056,11 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     #   🔗 link
     linhas = []
     # Título da IA (frase_llm) em caixa alta, no topo — a "chamada" do grupo.
-    titulo = _frase_marketing(produto)
+    titulo = conteudo_ia.get("titulo", "")
     if titulo:
-        linhas += [m.bold(esc(titulo)), ""]
+        linhas += [esc(titulo), ""]
 
-    linhas += [f"{_emoji_produto(produto)} {m.bold(esc(produto.nome.strip()))}", ""]
+    linhas += [f"{_emoji_produto(produto)} {m.bold(esc(nome_exibicao))}", ""]
 
     # Guarda final: desconto >= 90% (ou "De:" <= "Por:") indica preço corrompido
     # (ex.: savingBasis em escala errada). Em vez de imprimir "100% OFF" absurdo,
