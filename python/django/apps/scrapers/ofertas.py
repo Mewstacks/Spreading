@@ -480,7 +480,7 @@ def _macro_do_cupom(cupom) -> str:
     return ""
 
 
-def produtos_do_cupom(cupom, limite=8, macro=None):
+def produtos_do_cupom(cupom, limite=9, macro=None):
     """Produtos p/ a mensagem-colagem do cupom (multi-item), melhores por desconto.
 
     (1) Ligação real cupom→produto quando existir — vínculo `ProdutoCupom`
@@ -536,7 +536,7 @@ def produtos_do_cupom(cupom, limite=8, macro=None):
     return list(_por_desconto(ativos.filter(origem="oferta", macro_categoria=macro))[:limite])
 
 
-def _preparar_itens_cupom(cupom, usuario, limite=8, macro=None):
+def _preparar_itens_cupom(cupom, usuario, limite=9, macro=None):
     """[{produto, link}] com link de afiliado válido + foto, p/ a mensagem-colagem.
 
     Cada produto leva o PRÓPRIO link comissionado (como na imagem-modelo). Usa o
@@ -587,36 +587,47 @@ def _preparar_itens_cupom(cupom, usuario, limite=8, macro=None):
 
 
 def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
-    """Mensagem de cupom no formato da imagem-modelo: cabeçalho + lista de produtos.
+    """Mensagem de cupom no formato pedido pela cliente: cabeçalho + lista de produtos.
 
-        Cupom ⚡ Mercado Livre
+        *Cupom ⚡️ Mercado Livre*
 
         📖 Chama de Ferro | Capa dura
-        🛒 De ~R$197,90~ por R$83,54
+        🛒 De R$197,90 por R$83,54
         ➡️ https://meli.la/...
 
-    Cada produto leva nome, preço De/por e o próprio link. A foto vai na colagem
-    (imagem única acima da mensagem), montada em `colagem.montar_colagem_b64`.
+        🎟 Use o cupom *PRESENTE*
+
+    Negrito APENAS no cabeçalho e no código do cupom (pedido explícito). Nome e
+    preço de cada produto vão em texto puro. Cada produto leva o próprio link; a
+    foto vai na colagem (imagem única acima da mensagem), via `montar_colagem_b64`.
     """
     from apps.scrapers.senders.base import WhatsAppMarkup
+    from apps.scrapers.coupon_rules import codigo_publicavel
     m = markup or WhatsAppMarkup()
     esc = m.escape
 
     loja = _nome_loja(getattr(cupom, "marketplace", ""), cupom=cupom)
-    linhas = [m.bold(f"Cupom ⚡ {esc(loja)}"), ""]
+    linhas = [m.bold(f"Cupom ⚡️ {esc(loja)}"), ""]
     for it in itens:
         p = it["produto"]
-        linhas.append(f"📖 {m.bold(esc(p.nome.strip()))}")
+        linhas.append(f"📖 {esc(p.nome.strip())}")
         por = _preco_br(p.preco_com_cupom)
         de_val = p.preco_sem_desconto or 0
         pct = ((de_val - p.preco_com_cupom) / de_val * 100) if de_val else 0
         if 0 < pct < 90 and de_val > p.preco_com_cupom:
             de = _preco_br(de_val)
-            linhas.append(f"🛒 De {m.strike(f'R${de}')} por {m.bold(f'R${por}')}")
+            linhas.append(f"🛒 De R${de} por R${por}")
         else:
-            linhas.append(f"🛒 {m.bold(f'R${por}')}")
+            linhas.append(f"🛒 R${por}")
         linhas.append(f"➡️ {esc(it['link'])}")
         linhas.append("")
+
+    # Linha do cupom no fim (mesmo formato do texto puro): só o código em negrito.
+    codigo = codigo_publicavel(cupom)
+    if codigo:
+        linhas.append(f"🎟 Use o cupom {m.bold(esc(codigo))}")
+    else:
+        linhas.append(f"🎟 {m.bold('Ative o cupom no link')}")
     return "\n".join(linhas).strip()
 
 
@@ -722,8 +733,7 @@ def resolver_link_afiliado_cupom(cupom, usuario):
 
 
 def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nome="",
-                 imagem_b64_custom=None, configuracao=None, score=0, motivos_score=None,
-                 categoria=None):
+                 imagem_b64_custom=None, configuracao=None, score=0, motivos_score=None):
     """Nucleo auditavel do envio manual de CupomNormalizado.
 
     `imagem_b64_custom` (opcional): foto escolhida no envio. Cupom não tem foto de
@@ -810,7 +820,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         # lista com De/por e link próprio por item. Sem produtos afiliáveis (ou com
         # foto custom escolhida no envio), cai no texto puro de sempre.
         itens_cupom = ([] if imagem_b64_custom
-                       else _preparar_itens_cupom(cupom, usuario, macro=categoria))
+                       else _preparar_itens_cupom(cupom, usuario))
         img_kwargs = {}
         if itens_cupom:
             mensagem = montar_mensagem_cupom_produtos(
