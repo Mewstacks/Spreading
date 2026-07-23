@@ -14,7 +14,7 @@ const fs = require('fs');
 const { spawn, execFileSync } = require('child_process');
 const {
     reconnectDelay, shouldPurgeAuth, reconnectAction, isRevokedReason, ocupaSlot,
-    groupRetryDelay, qrBootstrapOutcome,
+    groupRetryDelay, qrBootstrapOutcome, preAuthEventIsStale,
 } = require('./session_policy');
 const {
     resetSessionForQr, markResetFailure, markQrBootstrap, finalizeQrBootstrapFailure,
@@ -123,31 +123,18 @@ const MAX_WHATSAPP_SESSIONS = parseInt(process.env.MAX_WHATSAPP_SESSIONS, 10) ||
 // com WA_TAKEOVER_ON_CONFLICT=1 so se o worker precisar mesmo assumir de um web
 // aberto por engano.
 const WA_TAKEOVER_ON_CONFLICT = process.env.WA_TAKEOVER_ON_CONFLICT === '1';
-// Bundle do WhatsApp Web FIXADO. A whatsapp-web.js 1.34.7 injeta funcoes proprias
-// (WWebJS.sendMessage) escritas para um layout de modulos especifico. Quando o
-// WhatsApp serve um bundle novo demais (visto em producao: 2.3000.1043584437), o
-// sendMessage estoura DENTRO da pagina com o throw minificado "r" e o envio falha
-// como "desconhecido" — a sessao aparece conectada, mas nenhuma mensagem sai.
-// O default 'local' da lib segue a versao ao vivo, que e justamente a que quebra.
-// Fixamos um bundle mais antigo, ainda aceito pelos servidores do WhatsApp.
+// O WhatsApp recusa QR produzido por bundles antigos com redirect post_logout=1.
+// Em producao, 2.3000.1041442250-alpha passou a fazer exatamente isso: o celular
+// mostrava erro e o worker recebia LOGOUT antes de `authenticated`. Usamos um
+// build recente do arquivo público do wppconnect. strict=false é intencional:
+// se o arquivo for podado ou o GitHub estiver indisponível, carrega a versão ao
+// vivo do WhatsApp em vez de manter um QR sabidamente vencido.
 //
-// ATENCAO: o repo upstream wa-version PODA builds antigos. Os defaults anteriores
-// (2.3000.1039963358 e 2.3000.1040037709) viraram 404; com strict=false a lib caiu
-// no bundle ao vivo e o "r" voltou. Por isso agora o HTML do bundle e VENDORIZADO
-// no repo (node.js/wa_web_cache/<versao>.html) e servido por um LocalWebCache
-// strict=true — poda upstream nunca mais derruba os envios, e um arquivo faltando
-// falha ALTO no log em vez de cair silenciosamente no bundle ao vivo.
-//
-// Para trocar de build: baixe o novo HTML de
-//   https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/<versao>.html
-// para node.js/wa_web_cache/, e aponte WA_WEB_VERSION (Fly secret + restart, sem
-// deploy) para essa versao. Escolha um build que ainda exista upstream e seja
-// antigo o bastante p/ o layout da 1.34.7. Mantenha o sufixo -alpha na versao.
-const WA_WEB_VERSION = process.env.WA_WEB_VERSION || '2.3000.1041442250-alpha';
-// Diretorio do bundle vendorizado. path.join(__dirname, ...) e robusto a cwd
-// (o worker independe do cwd). LocalWebCache le `${path}/${WA_WEB_VERSION}.html`.
-const WA_WEB_VERSION_CACHE_PATH = process.env.WA_WEB_VERSION_CACHE_PATH
-    || path.join(__dirname, 'wa_web_cache');
+// WA_WEB_VERSION continua configurável por Fly secret + restart, sem deploy.
+// Mantenha o sufixo -alpha no nome das versões arquivadas.
+const WA_WEB_VERSION = process.env.WA_WEB_VERSION || '2.3000.1043690208-alpha';
+const WA_WEB_VERSION_REMOTE_PATH = process.env.WA_WEB_VERSION_REMOTE_PATH
+    || 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html';
 const SESSION_INIT_TIMEOUT_MS = parseInt(process.env.SESSION_INIT_TIMEOUT_MS, 10) || 90000;
 // O watchdog mede o heartbeat do event loop; uma inicializacao async longa nao
 // o aciona. O bootstrap frio recebe a mesma janela da inicializacao normal.
@@ -375,6 +362,7 @@ const createSessionState = (instanceId) => ({
     qrBootstrapAtivo: false, // reset pediu QR: nunca cair no recovery generico
     qrBootstrapAttempts: 0,
     authenticatedInAttempt: false,
+    readyReceived: false,    // trava QR/loading tardios antes do gate WWebJS
     preparando: false,
     preparationTimer: null,
     pairedAt: null,
@@ -464,6 +452,7 @@ const purgeAuthDirPorId = (instanceId, reason) => authStore.purgeAuthDir(
     authRootPath, authPathDe(instanceId), reason
 );
 const markPaired = (session) => authStore.markPaired(authRootPath, session.authPath);
+const clearPaired = (session) => authStore.clearPaired(authRootPath, session.authPath);
 const hasStoredAuth = (instanceId) => authStore.hasStoredAuth(authRootPath, authPathDe(instanceId));
 
 const withTimeout = (promise, timeoutMs, label) => {
@@ -494,6 +483,7 @@ const destroySessionRuntime = async (session, reason, removeFromMap = false) => 
     session.client = null;
     session.initialized = false;
     session.isConnected = false;
+    session.readyReceived = false;
     session.whatsappId = null;
     session.gruposSincronizando = false;
     session.syncPedidoDurante = false; // sem Chromium nao ha o que repicar
@@ -870,6 +860,7 @@ const reviveSession = (session) => {
     session.initFailures = 0;
     session.encerrandoManual = false;
     session.preparando = false;
+    session.readyReceived = false;
     session.estabilizandoAte = 0;
     session.fase = 'iniciando';
     session.progresso = 0;
@@ -897,6 +888,7 @@ const recycleSession = async (session, reason, purgeAuth = false, msgOverride = 
     limparRetryGrupos(session);
     session.syncPedidoDurante = false; // sem Chromium nao ha o que repicar
     session.authenticatedInAttempt = false;
+    session.readyReceived = false;
     if (session.initTimer) clearTimeout(session.initTimer);
     session.initTimer = null;
     try { await withTimeout(client.destroy(), 10000, 'client.destroy'); } catch (err) {
@@ -947,15 +939,13 @@ const initializeSession = (session) => {
         authStrategy: new LocalAuth({ dataPath: session.authPath }),
         takeoverOnConflict: WA_TAKEOVER_ON_CONFLICT,
         takeoverTimeoutMs: 10000,
-        // Fixa o bundle do WA Web (ver WA_WEB_VERSION): impede que um bundle novo
-        // demais quebre a injecao do sendMessage. Servido do HTML vendorizado no
-        // repo (LocalWebCache), entao poda upstream nao afeta. strict=true: se o
-        // arquivo nao existir, FALHA e loga em vez de cair no bundle ao vivo (o "r").
+        // Usa um bundle recente para o QR ser aceito. O fallback para o WhatsApp
+        // ao vivo evita que um pin podado/indisponível volte a bloquear pareamento.
         webVersion: WA_WEB_VERSION,
         webVersionCache: {
-            type: 'local',
-            path: WA_WEB_VERSION_CACHE_PATH,
-            strict: true,
+            type: 'remote',
+            remotePath: WA_WEB_VERSION_REMOTE_PATH,
+            strict: false,
         },
         puppeteer: {
             protocolTimeout: 300000,
@@ -1008,6 +998,12 @@ const initializeSession = (session) => {
 
     client.on('qr', (qr) => {
         if (session.client !== client) return;
+        if (preAuthEventIsStale(session)) {
+            console.warn(
+                `[${session.id}] QR tardio ignorado; sessão já avançou para ${session.fase}.`
+            );
+            return;
+        }
         if (session.initTimer) clearTimeout(session.initTimer);
         session.initTimer = null;
         session.ultimoQR = qr;
@@ -1021,9 +1017,10 @@ const initializeSession = (session) => {
 
     client.on('loading_screen', (percent, message) => {
         if (session.client !== client) return;
-        // This event can arrive late, even after ready. Do not downgrade a
-        // session that was already proven connected.
-        if (session.isConnected) return;
+        // Pode chegar depois de authenticated/ready. Durante a preparação e o
+        // primeiro sync isConnected=false de propósito; a trava considera toda
+        // a progressão pós-auth para a UI nunca voltar a "preparando o leitor".
+        if (preAuthEventIsStale(session)) return;
         session.progresso = parseInt(percent, 10) || 0;
         if (session.qrBootstrapAtivo) {
             session.fase = 'reiniciando_qr';
@@ -1038,6 +1035,7 @@ const initializeSession = (session) => {
 
     client.on('authenticated', () => {
         if (session.client !== client) return;
+        const faseJaAvancada = preAuthEventIsStale(session);
         session.qrBootstrapAtivo = false;
         session.qrBootstrapAttempts = 0;
         if (session.qrBootstrapTimer) clearTimeout(session.qrBootstrapTimer);
@@ -1051,11 +1049,13 @@ const initializeSession = (session) => {
         markPaired(session);
         session.pairedAt = Date.now();
         session.ultimoQR = null;
-        session.fase = 'autenticado';
-        session.faseMsg = 'Autenticado — preparando sessão…';
+        if (!faseJaAvancada) {
+            session.fase = 'autenticado';
+            session.faseMsg = 'Autenticado — preparando sessão…';
+        }
         // "authenticated" can be followed by a permanent loading hang without
         // a "ready" event. Keep recovery armed through the post-login phase.
-        armInitializationTimeout('pos-autenticacao');
+        if (!session.readyReceived) armInitializationTimeout('pos-autenticacao');
         console.log(`[${session.id}] 🔑 Autenticado.`);
     });
 
@@ -1075,6 +1075,9 @@ const initializeSession = (session) => {
 
     client.on('ready', async () => {
         if (session.client !== client) return;
+        // Marcar antes do primeiro await fecha a janela em que loading_screen ou
+        // QR tardio rebaixava a fase enquanto WWebJS ainda era sondado.
+        session.readyReceived = true;
         // `ready` pode anteceder a injeção de WWebJS. Nesse caso a sessão fica
         // em preparação e nenhum envio ou sync concorre com o Chromium.
         const storePronto = await aguardarStorePronto({
@@ -1119,6 +1122,7 @@ const initializeSession = (session) => {
         session.initTimer = null;
         session.isConnected = false;
         session.preparando = false;
+        session.readyReceived = false;
         limparPreparationTimer(session);
         session.gruposCarregados = false;
         session.gruposSincronizando = false;
@@ -1139,6 +1143,27 @@ const initializeSession = (session) => {
             `[${session.id}] ❌ WhatsApp foi desconectado. Motivo: ${reason}. `
             + `Fase anterior=${faseAnterior}; idade do pareamento=${idadePareamento}.${contextoRecuperacao}`
         );
+
+        // No redirect post_logout=1, o whatsapp-web.js emite LOGOUT e, no mesmo
+        // handler interno, apaga o LocalAuth, recria o perfil e injeta outro QR.
+        // Destruir o client aqui concorria com esse handler: "Execution context
+        // was destroyed", vários Chromiums órfãos e uma sequência de QR inválidos.
+        // Mantemos o client e apenas removemos o nosso marcador; o próximo evento
+        // `qr` atualiza a UI sem abrir um segundo navegador.
+        if (String(reason).trim().toUpperCase() === 'LOGOUT' && !session.encerrandoManual) {
+            clearPaired(session);
+            session.authenticatedInAttempt = false;
+            session.pairedAt = null;
+            session.whatsappId = null;
+            session.ultimoQR = null;
+            session.gruposCache = [];
+            session.fase = 'qr';
+            session.faseMsg = faseAnterior === 'qr'
+                ? 'O WhatsApp renovou o leitor. Aguarde o novo QR e tente novamente.'
+                : 'Aparelho desvinculado — aguardando novo QR para reconectar.';
+            armInitializationTimeout('renovacao do QR');
+            return;
+        }
 
         // Fecha o Chromium antigo para liberar memória antes de reconectar.
         session.client = null;

@@ -5,7 +5,9 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { hasStoredAuth, markPaired, purgeAuthDir } = require('../auth_store');
+const {
+    hasStoredAuth, markPaired, clearPaired, purgeAuthDir,
+} = require('../auth_store');
 
 const comRaizTemp = (fn) => {
     const raiz = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-auth-'));
@@ -36,6 +38,21 @@ test('a paired session is restorable', () => {
         fs.mkdirSync(path.join(authPath, 'session'), { recursive: true });
         assert.equal(markPaired(raiz, authPath), true);
         assert.equal(hasStoredAuth(raiz, authPath), true);
+    });
+});
+
+test('clearPaired removes only the marker and preserves the browser profile', () => {
+    comRaizTemp((raiz) => {
+        const authPath = path.join(raiz, 'u1');
+        const profileFile = path.join(authPath, 'session', 'Default', 'Preferences');
+        fs.mkdirSync(path.dirname(profileFile), { recursive: true });
+        fs.writeFileSync(profileFile, '{}');
+        markPaired(raiz, authPath);
+
+        assert.equal(clearPaired(raiz, authPath), true);
+        assert.equal(fs.existsSync(profileFile), true);
+        assert.equal(fs.existsSync(path.join(authPath, '.paired')), false);
+        assert.equal(clearPaired(raiz, authPath), true, 'idempotente');
     });
 });
 
@@ -78,6 +95,7 @@ test('purge never escapes the auth root', () => {
 
             assert.equal(hasStoredAuth(raiz, '/etc'), false);
             assert.equal(markPaired(raiz, path.join(raiz, '..', 'fora')), false);
+            assert.equal(clearPaired(raiz, path.join(raiz, '..', 'fora')), false);
         } finally {
             fs.rmSync(vitima, { recursive: true, force: true });
         }

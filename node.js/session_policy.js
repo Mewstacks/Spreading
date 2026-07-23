@@ -38,6 +38,30 @@ function qrBootstrapOutcome(attempt, maxAttempts = 2) {
     return safeAttempt < safeMax ? 'retry' : 'fail';
 }
 
+// QR e loading_screen pertencem somente ao trecho anterior à autenticação.
+// A biblioteca pode entregar ambos atrasados enquanto o handler de `ready`
+// ainda sonda WWebJS ou enquanto o primeiro sync de grupos está em voo. Nesse
+// intervalo isConnected=false de propósito, portanto ele sozinho não serve
+// como trava: aceitar o evento rebaixa a UI para "preparando o leitor" mesmo
+// depois de o celular já ter concluído o pareamento.
+const POST_AUTH_PHASES = new Set([
+    'autenticado',
+    'preparando',
+    'sincronizando',
+    'conectado',
+]);
+
+function preAuthEventIsStale(session) {
+    if (!session) return false;
+    return Boolean(
+        session.authenticatedInAttempt
+        || session.readyReceived
+        || session.preparando
+        || session.isConnected
+        || POST_AUTH_PHASES.has(session.fase)
+    );
+}
+
 const REVOKED_REASONS = new Set(['LOGOUT', 'UNPAIRED', 'UNPAIRED_IDLE']);
 
 // Motivos de 'disconnected' que significam credencial revogada no celular:
@@ -103,6 +127,7 @@ module.exports = {
     reconnectOutcome,
     reconnectAction,
     qrBootstrapOutcome,
+    preAuthEventIsStale,
     isRevokedReason,
     syncGroupsOutcome,
     groupRetryDelay,

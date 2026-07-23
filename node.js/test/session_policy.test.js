@@ -8,6 +8,7 @@ const {
     reconnectOutcome,
     reconnectAction,
     qrBootstrapOutcome,
+    preAuthEventIsStale,
     isRevokedReason,
     syncGroupsOutcome,
     groupRetryDelay,
@@ -61,6 +62,35 @@ test('novo QR retenta ate o teto e nunca escolhe a escada de reconnect', () => {
         assert.equal(qrBootstrapOutcome(3, 3), 'fail', motivo);
         assert.notEqual(qrBootstrapOutcome(1, 3), 'reconnect', motivo);
     }
+});
+
+test('QR e loading tardios nao rebaixam uma sessao que ja passou da autenticacao', () => {
+    assert.equal(preAuthEventIsStale({
+        fase: 'reiniciando_qr',
+        qrBootstrapAtivo: true,
+        authenticatedInAttempt: false,
+        readyReceived: false,
+        preparando: false,
+        isConnected: false,
+    }), false, 'antes da autenticacao, loading e QR ainda sao validos');
+
+    for (const state of [
+        { fase: 'reiniciando_qr', authenticatedInAttempt: true },
+        { fase: 'carregando', readyReceived: true },
+        { fase: 'preparando', preparando: true },
+        { fase: 'sincronizando' },
+        { fase: 'conectado', isConnected: true },
+    ]) {
+        assert.equal(preAuthEventIsStale(state), true, JSON.stringify(state));
+    }
+
+    assert.equal(preAuthEventIsStale({
+        fase: 'desconectado',
+        authenticatedInAttempt: false,
+        readyReceived: false,
+        preparando: false,
+        isConnected: false,
+    }), false, 'depois de uma desconexao real, eventos pre-auth voltam a valer');
 });
 
 // Regressao do bug em producao: 'Recuperando sessao (tentativa 38)...'.

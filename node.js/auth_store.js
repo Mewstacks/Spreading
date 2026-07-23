@@ -59,6 +59,22 @@ const markPaired = (authRootPath, authPath) => {
     }
 };
 
+// Remove apenas o nosso marcador de pareamento, sem tocar no perfil que o
+// whatsapp-web.js ainda está limpando/recriando. Isso é necessário no redirect
+// post_logout=1: a própria biblioteca apaga session/ e injeta um QR novo. Apagar
+// authPath inteiro em paralelo interrompe essa reinjeção e deixa frames órfãos.
+const clearPaired = (authRootPath, authPath) => {
+    if (!dentroDaRaiz(authRootPath, authPath)) return false;
+    try {
+        fs.unlinkSync(path.join(authPath, PAIRED_MARKER));
+        return true;
+    } catch (err) {
+        if (err.code === 'ENOENT') return true;
+        console.error(`Falha ao desmarcar sessao pareada em ${authPath}:`, err.message);
+        return false;
+    }
+};
+
 // Apaga o perfil LocalAuth inteiro (credencial + marcador). Idempotente.
 const purgeAuthDir = (authRootPath, authPath, reason) => {
     if (!dentroDaRaiz(authRootPath, authPath)) {
@@ -75,4 +91,4 @@ const purgeAuthDir = (authRootPath, authPath, reason) => {
     }
 };
 
-module.exports = { hasStoredAuth, markPaired, purgeAuthDir, PAIRED_MARKER };
+module.exports = { hasStoredAuth, markPaired, clearPaired, purgeAuthDir, PAIRED_MARKER };
