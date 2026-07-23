@@ -17,7 +17,7 @@ const {
     groupRetryDelay, qrBootstrapOutcome,
 } = require('./session_policy');
 const {
-    resetSessionForQr, markResetFailure, markQrBootstrap,
+    resetSessionForQr, markResetFailure, markQrBootstrap, finalizeQrBootstrapFailure,
     decidirRestauracao, MOTIVO_FALHA_RESET,
 } = require('./session_reset');
 const { iniciarSync } = require('./group_sync');
@@ -715,7 +715,17 @@ const scheduleQrBootstrapRetry = async (session, reason) => {
     ) === 'fail') {
         const mensagem = `Não foi possível gerar o QR após ${session.qrBootstrapAttempts} `
             + 'tentativa(s) — o leitor não respondeu a tempo. Clique para tentar novamente.';
-        markResetFailure(session, mensagem, MOTIVO_FALHA_RESET.QR_NAO_GERADO);
+        await finalizeQrBootstrapFailure(session, {
+            destroyRuntime: (current) => destroySessionRuntime(
+                current, 'tentativas de gerar QR esgotadas', false
+            ),
+            cleanupProfile: (current) => encerrarChromiumsDoPerfil(current.authPath),
+            purgeAuth: (current) => purgeAuthDir(
+                current, 'tentativas de gerar QR esgotadas'
+            ),
+            message: mensagem,
+            motivo: MOTIVO_FALHA_RESET.QR_NAO_GERADO,
+        });
         finalizarFalhaReset(session, reason);
         return true;
     }
@@ -733,10 +743,17 @@ const scheduleQrBootstrapRetry = async (session, reason) => {
     const runtimeClean = await encerrarChromiumsDoPerfil(session.authPath);
     if (sessions.get(session.id) !== session || !session.qrBootstrapAtivo) return true;
     if (!runtimeClean) {
-        markResetFailure(
-            session, 'Não foi possível limpar o leitor anterior. Clique para tentar novamente.',
-            MOTIVO_FALHA_RESET.LIMPEZA_RETRY_FALHOU
-        );
+        await finalizeQrBootstrapFailure(session, {
+            destroyRuntime: (current) => destroySessionRuntime(
+                current, 'falha ao limpar leitor antes de repetir QR', false
+            ),
+            cleanupProfile: (current) => encerrarChromiumsDoPerfil(current.authPath),
+            purgeAuth: (current) => purgeAuthDir(
+                current, 'falha ao limpar leitor antes de repetir QR'
+            ),
+            message: 'Não foi possível limpar o leitor anterior. Clique para tentar novamente.',
+            motivo: MOTIVO_FALHA_RESET.LIMPEZA_RETRY_FALHOU,
+        });
         finalizarFalhaReset(session, reason);
         return true;
     }
@@ -764,11 +781,18 @@ const scheduleQrBootstrapRetry = async (session, reason) => {
 // faseMsg e via a mensagem ser sobrescrita aqui na linha seguinte.
 const scheduleReconnect = (session, reason, msgOverride = null) => {
     if (session.qrBootstrapAtivo) {
-        scheduleQrBootstrapRetry(session, reason).catch((err) => {
-            markResetFailure(
-                session, 'Não foi possível preparar o novo QR. Clique para tentar novamente.',
-                MOTIVO_FALHA_RESET.RETRY_FALHOU
-            );
+        scheduleQrBootstrapRetry(session, reason).catch(async (err) => {
+            await finalizeQrBootstrapFailure(session, {
+                destroyRuntime: (current) => destroySessionRuntime(
+                    current, 'falha inesperada ao repetir geração de QR', false
+                ),
+                cleanupProfile: (current) => encerrarChromiumsDoPerfil(current.authPath),
+                purgeAuth: (current) => purgeAuthDir(
+                    current, 'falha inesperada ao repetir geração de QR'
+                ),
+                message: 'Não foi possível preparar o novo QR. Clique para tentar novamente.',
+                motivo: MOTIVO_FALHA_RESET.RETRY_FALHOU,
+            });
             finalizarFalhaReset(session, err.message);
         });
         return;

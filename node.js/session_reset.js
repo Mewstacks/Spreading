@@ -70,6 +70,64 @@ const markQrBootstrap = (session) => {
     return session;
 };
 
+// Fecha por completo um ciclo de QR que esgotou as tentativas.
+//
+// `markResetFailure` sozinho apenas publica o estado terminal. Se ele zerar
+// `session.client` antes do destroy, perde-se a referência para o Chromium que
+// travou e o próximo clique tenta gerar um QR sobre o mesmo perfil ainda em uso.
+// A ordem aqui é deliberada:
+//   1. bloqueia handlers/reconexões;
+//   2. destrói o client conhecido;
+//   3. elimina órfãos do perfil;
+//   4. apaga o LocalAuth parcial;
+//   5. só então publica `falha_reset`.
+//
+// O retorno permite registrar exatamente qual etapa impediu a limpeza total.
+const finalizeQrBootstrapFailure = async (session, {
+    destroyRuntime,
+    cleanupProfile = async () => true,
+    purgeAuth = () => true,
+    message,
+    motivo = MOTIVO_FALHA_RESET.QR_NAO_GERADO,
+}) => {
+    session.encerrandoManual = true;
+    session.qrBootstrapAtivo = false;
+
+    await destroyRuntime(session);
+
+    const runtimeClean = await cleanupProfile(session);
+    if (!runtimeClean) {
+        const mensagem = 'Não foi possível encerrar o leitor anterior. Clique para tentar novamente.';
+        markResetFailure(session, mensagem, MOTIVO_FALHA_RESET.CHROMIUM_NAO_ENCERROU);
+        return {
+            runtime_limpo: false,
+            auth_removido: false,
+            mensagem,
+            motivo: session.motivoFalhaReset,
+        };
+    }
+
+    const authRemoved = purgeAuth(session);
+    if (!authRemoved) {
+        const mensagem = 'Não foi possível descartar a sessão anterior. Clique para tentar novamente.';
+        markResetFailure(session, mensagem, MOTIVO_FALHA_RESET.PURGE_FALHOU);
+        return {
+            runtime_limpo: true,
+            auth_removido: false,
+            mensagem,
+            motivo: session.motivoFalhaReset,
+        };
+    }
+
+    markResetFailure(session, message, motivo);
+    return {
+        runtime_limpo: true,
+        auth_removido: true,
+        mensagem: message,
+        motivo: session.motivoFalhaReset,
+    };
+};
+
 const resetSessionForQr = (session, {
     destroyRuntime,
     cleanupProfile = async () => true,
@@ -181,6 +239,7 @@ module.exports = {
     beginQrReset,
     markResetFailure,
     markQrBootstrap,
+    finalizeQrBootstrapFailure,
     resetSessionForQr,
     decidirRestauracao,
     MOTIVO_FALHA_RESET,

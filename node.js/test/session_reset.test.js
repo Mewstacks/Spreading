@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
     resetSessionForQr, markResetFailure, markQrBootstrap,
-    decidirRestauracao, MOTIVO_FALHA_RESET,
+    finalizeQrBootstrapFailure, decidirRestauracao, MOTIVO_FALHA_RESET,
 } = require('../session_reset');
 
 const sessionState = (id = 'u1') => ({
@@ -174,6 +174,96 @@ test('markQrBootstrap arma o bootstrap com contadores zerados', () => {
     assert.equal(fresh.qrBootstrapAttempts, 1);
     assert.equal(fresh.encerrandoManual, false);
     assert.equal(fresh.fase, 'reiniciando_qr');
+});
+
+test('falha final do QR encerra runtime e apaga auth antes de liberar nova tentativa', async () => {
+    const session = {
+        ...sessionState(),
+        qrBootstrapAtivo: true,
+        qrBootstrapAttempts: 2,
+    };
+    const eventos = [];
+
+    const resultado = await finalizeQrBootstrapFailure(session, {
+        destroyRuntime: async (current) => {
+            eventos.push('destroy');
+            assert.equal(current.encerrandoManual, true);
+            assert.equal(current.qrBootstrapAtivo, false);
+            current.client = null;
+            current.initialized = false;
+        },
+        cleanupProfile: async () => {
+            eventos.push('cleanup');
+            return true;
+        },
+        purgeAuth: () => {
+            eventos.push('purge');
+            return true;
+        },
+        message: 'Não foi possível gerar o QR após 2 tentativas.',
+        motivo: MOTIVO_FALHA_RESET.QR_NAO_GERADO,
+    });
+
+    assert.deepEqual(eventos, ['destroy', 'cleanup', 'purge']);
+    assert.equal(resultado.runtime_limpo, true);
+    assert.equal(resultado.auth_removido, true);
+    assert.equal(session.client, null);
+    assert.equal(session.initialized, false);
+    assert.equal(session.qrBootstrapAtivo, false);
+    assert.equal(session.fase, 'falha_reset');
+    assert.equal(session.motivoFalhaReset, MOTIVO_FALHA_RESET.QR_NAO_GERADO);
+
+    let atual = session;
+    let inicializacoes = 0;
+    const novaTentativa = await resetSessionForQr(session, {
+        clearTimer: () => {},
+        destroyRuntime: async (current) => {
+            current.client = null;
+            current.initialized = false;
+        },
+        cleanupProfile: async () => true,
+        purgeAuth: () => true,
+        createState: freshState,
+        replaceSession: (fresh) => { atual = fresh; },
+        initialize: (fresh) => {
+            inicializacoes += 1;
+            fresh.initialized = true;
+        },
+    });
+
+    assert.equal(novaTentativa.sucesso, true);
+    assert.equal(inicializacoes, 1);
+    assert.notEqual(atual, session);
+    assert.equal(atual.qrBootstrapAtivo, true);
+    assert.equal(atual.qrBootstrapAttempts, 1);
+});
+
+test('falha final do QR nao apaga auth enquanto Chromium continua vivo', async () => {
+    const session = {
+        ...sessionState(),
+        qrBootstrapAtivo: true,
+        qrBootstrapAttempts: 2,
+    };
+    let purges = 0;
+
+    const resultado = await finalizeQrBootstrapFailure(session, {
+        destroyRuntime: async (current) => {
+            current.client = null;
+            current.initialized = false;
+        },
+        cleanupProfile: async () => false,
+        purgeAuth: () => {
+            purges += 1;
+            return true;
+        },
+        message: 'Não foi possível gerar o QR.',
+    });
+
+    assert.equal(purges, 0);
+    assert.equal(resultado.runtime_limpo, false);
+    assert.equal(resultado.auth_removido, false);
+    assert.equal(session.fase, 'falha_reset');
+    assert.equal(session.motivoFalhaReset, MOTIVO_FALHA_RESET.CHROMIUM_NAO_ENCERROU);
 });
 
 test('decidirRestauracao: pareado restaura, QR em preparo re-arma, logout ignora', () => {
