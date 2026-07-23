@@ -129,16 +129,25 @@ const WA_TAKEOVER_ON_CONFLICT = process.env.WA_TAKEOVER_ON_CONFLICT === '1';
 // sendMessage estoura DENTRO da pagina com o throw minificado "r" e o envio falha
 // como "desconhecido" — a sessao aparece conectada, mas nenhuma mensagem sai.
 // O default 'local' da lib segue a versao ao vivo, que e justamente a que quebra.
-// Fixamos um bundle mais antigo, ainda aceito pelos servidores do WhatsApp, via o
-// cache remoto do wppconnect (repo wa-version). WA_WEB_VERSION permite trocar o
-// build por um Fly secret + restart, SEM deploy de codigo: se este for recusado
-// por antigo ou continuar quebrando, basta apontar para outro build do repo
-// (https://github.com/wppconnect-team/wa-version/tree/main/html). O nome do
-// arquivo carrega o sufixo -alpha; mantenha-o na versao. strict=false: se o pin
-// nao carregar, a lib cai para a versao ao vivo em vez de derrubar o worker.
-const WA_WEB_VERSION = process.env.WA_WEB_VERSION || '2.3000.1039963358-alpha';
-const WA_WEB_VERSION_REMOTE_PATH = process.env.WA_WEB_VERSION_REMOTE_PATH
-    || 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html';
+// Fixamos um bundle mais antigo, ainda aceito pelos servidores do WhatsApp.
+//
+// ATENCAO: o repo upstream wa-version PODA builds antigos. Os defaults anteriores
+// (2.3000.1039963358 e 2.3000.1040037709) viraram 404; com strict=false a lib caiu
+// no bundle ao vivo e o "r" voltou. Por isso agora o HTML do bundle e VENDORIZADO
+// no repo (node.js/wa_web_cache/<versao>.html) e servido por um LocalWebCache
+// strict=true — poda upstream nunca mais derruba os envios, e um arquivo faltando
+// falha ALTO no log em vez de cair silenciosamente no bundle ao vivo.
+//
+// Para trocar de build: baixe o novo HTML de
+//   https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/<versao>.html
+// para node.js/wa_web_cache/, e aponte WA_WEB_VERSION (Fly secret + restart, sem
+// deploy) para essa versao. Escolha um build que ainda exista upstream e seja
+// antigo o bastante p/ o layout da 1.34.7. Mantenha o sufixo -alpha na versao.
+const WA_WEB_VERSION = process.env.WA_WEB_VERSION || '2.3000.1041442250-alpha';
+// Diretorio do bundle vendorizado. path.join(__dirname, ...) e robusto a cwd
+// (o worker independe do cwd). LocalWebCache le `${path}/${WA_WEB_VERSION}.html`.
+const WA_WEB_VERSION_CACHE_PATH = process.env.WA_WEB_VERSION_CACHE_PATH
+    || path.join(__dirname, 'wa_web_cache');
 const SESSION_INIT_TIMEOUT_MS = parseInt(process.env.SESSION_INIT_TIMEOUT_MS, 10) || 90000;
 // O watchdog mede o heartbeat do event loop; uma inicializacao async longa nao
 // o aciona. O bootstrap frio recebe a mesma janela da inicializacao normal.
@@ -915,13 +924,14 @@ const initializeSession = (session) => {
         takeoverOnConflict: WA_TAKEOVER_ON_CONFLICT,
         takeoverTimeoutMs: 10000,
         // Fixa o bundle do WA Web (ver WA_WEB_VERSION): impede que um bundle novo
-        // demais quebre a injecao do sendMessage. strict=false cai para a versao
-        // ao vivo se o pin nao carregar, em vez de derrubar a sessao.
+        // demais quebre a injecao do sendMessage. Servido do HTML vendorizado no
+        // repo (LocalWebCache), entao poda upstream nao afeta. strict=true: se o
+        // arquivo nao existir, FALHA e loga em vez de cair no bundle ao vivo (o "r").
         webVersion: WA_WEB_VERSION,
         webVersionCache: {
-            type: 'remote',
-            remotePath: WA_WEB_VERSION_REMOTE_PATH,
-            strict: false,
+            type: 'local',
+            path: WA_WEB_VERSION_CACHE_PATH,
+            strict: true,
         },
         puppeteer: {
             protocolTimeout: 300000,
