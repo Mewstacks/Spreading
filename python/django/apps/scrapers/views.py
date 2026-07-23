@@ -1315,6 +1315,8 @@ def enviar_cupom_stream(request):
     grupo_id = (request.POST.get("grupo") or "").strip()[:100]
     grupo_nome = (request.POST.get("grupo_nome") or "").strip()[:255]
     canal = (request.POST.get("canal") or "whatsapp").strip().lower()
+    # Categoria escolhida no envio: tema das ofertas que entram na colagem do cupom.
+    categoria = (request.POST.get("categoria") or "").strip()[:100]
     imagem_custom = _imagem_upload_b64(request.FILES.get("foto"))
     uid = request.user.id  # capturado fora da thread
 
@@ -1337,7 +1339,7 @@ def enviar_cupom_stream(request):
         print(f"Enviando cupom '{rotulo}' → {grupo_nome or grupo_id} ({canal})...")
         resultado = enviar_cupom(
             cupom, grupo_id, canal=canal, usuario=usuario, destino_nome=grupo_nome,
-            imagem_b64_custom=imagem_custom)
+            imagem_b64_custom=imagem_custom, categoria=categoria)
         if resultado.get("sucesso"):
             print(f"__SENT__ OK Cupom enviado (via {resultado.get('via', canal)}).")
         else:
@@ -1564,6 +1566,11 @@ def top_promocoes(request):
         cupons_lista = [c for c in cupons_lista if not c.codigo_publico]
     cupons_page = Paginator(cupons_lista, POR_PAGINA).get_page(pagina)
     cupons_catalogo = list(cupons_page)
+    # Palpite de categoria por cupom (só a página exibida): pré-seleciona o seletor
+    # de categoria do modal de envio, que a cliente ajusta p/ cupons de marca/loja.
+    from apps.scrapers.ofertas import _macro_do_cupom
+    for cupom_catalogo in cupons_catalogo:
+        cupom_catalogo.macro_sugerida = _macro_do_cupom(cupom_catalogo)
     perfil = getattr(request.user, "perfil", None)
     fontes_qs = FonteIngestao.objects.filter(habilitada=True).exclude(
         slug="manual-private").order_by("marketplace", "nome")

@@ -346,7 +346,7 @@
     <td data-label="Loja"><div class="td-val">{% if c.anunciante_nome %}{{ c.anunciante_nome }}<div class="muted" style="font-size:.72rem;">{% if c.marketplace == 'mercadolivre' %}Mercado Livre{% else %}{{ c.marketplace|title }}{% endif %}</div>{% elif c.marketplace == 'mercadolivre' %}Mercado Livre{% else %}{{ c.marketplace|title }}{% endif %}</div></td>
     <td data-label="Validade"><div class="td-val">{% if c.validade %}{{ c.validade|date:"d/m/Y H:i" }}{% else %}Não informada{% endif %}</div></td>
     <td data-label="Ação" class="col-actions"><div class="td-val" style="display:flex;justify-content:flex-end;">
-      <button class="btn btn-green btn-sm" onclick="abrirEnvioCupom({{ c.id }}, '{{ c.codigo_publico|escapejs }}')"><i data-lucide="send"></i> Enviar</button>
+      <button class="btn btn-green btn-sm" onclick="abrirEnvioCupom({{ c.id }}, '{{ c.codigo_publico|escapejs }}', '{{ c.macro_sugerida|escapejs }}')"><i data-lucide="send"></i> Enviar</button>
       {% if c.fonte.slug == 'manual-private' %}<form method="post" action="{% url 'scraper-cupom-manual-desativar' c.id %}" style="display:inline">{% csrf_token %}<button class="icon-btn danger" title="Desativar cupom"><i data-lucide="x"></i></button></form>{% endif %}
     </div></td>
   </tr>{% endfor %}</tbody></table></div>
@@ -459,6 +459,14 @@ que era exatamente o que não resolvia.
         <label>Canal do Telegram</label>
         <input id="env-tg-input" placeholder="@meucanal">
         <span class="muted" style="font-size:.74rem;">Use @nomedocanal ou o ID numérico (começa com -100).</span>
+      </div>
+      <div id="env-cupom-cat" style="display:none;">
+        <label>Categoria das ofertas na colagem</label>
+        <select id="env-categoria">
+          <option value="">— sem colagem (só o texto do cupom) —</option>
+          {% for mc in macro_categorias %}<option value="{{ mc }}">{{ mc }}</option>{% endfor %}
+        </select>
+        <span class="muted" style="font-size:.74rem;">A colagem junta as melhores ofertas desta categoria, cada uma com seu preço e link. Deixe em branco para enviar só o texto do cupom.</span>
       </div>
       <div>
         <label>Foto (opcional)</label>
@@ -594,6 +602,7 @@ function abrirEnvio(id, nome) {
   document.getElementById('env-titulo').innerHTML = '<i data-lucide="send"></i> Enviar oferta';
   document.getElementById('env-log').textContent = '';
   document.getElementById('env-foto').value = '';
+  document.getElementById('env-cupom-cat').style.display = 'none';
   document.getElementById('env-go').disabled = false;
   document.getElementById('modal-envio').classList.add('open');
   // Abrir o modal recarrega a lista: antes um flag de "já carregou" a congelava
@@ -603,13 +612,18 @@ function abrirEnvio(id, nome) {
   renderIcons();
 }
 // Mesmo popup dos produtos, mas envia um cupom: só troca a origem do conteúdo.
-function abrirEnvioCupom(id, codigo) {
+// `macro` é o palpite de categoria do título (pode vir vazio) — pré-seleciona o
+// seletor da colagem, que a cliente ajusta p/ cupons de marca/loja.
+function abrirEnvioCupom(id, codigo, macro) {
   envTipo = 'cupom';
   envProdId = id;
   document.getElementById('env-prod').textContent = codigo ? ('Cupom ' + codigo) : 'Cupom para ativar no link';
   document.getElementById('env-titulo').innerHTML = '<i data-lucide="ticket-percent"></i> Enviar cupom';
   document.getElementById('env-log').textContent = '';
   document.getElementById('env-foto').value = '';
+  document.getElementById('env-cupom-cat').style.display = '';
+  var catSel = document.getElementById('env-categoria');
+  if (catSel) catSel.value = macro || '';
   document.getElementById('env-go').disabled = false;
   document.getElementById('modal-envio').classList.add('open');
   envGruposParar();
@@ -739,12 +753,14 @@ async function dispararEnvio() {
     form = new FormData();
     form.set(envTipo === 'cupom' ? 'cupom' : 'produto', envProdId);
     form.set('canal', canal); form.set('grupo', grupo); form.set('grupo_nome', nome);
+    if (envTipo === 'cupom') form.set('categoria', (document.getElementById('env-categoria')||{}).value || '');
     form.set('foto', foto);
     headers = {'X-CSRFToken': getCookie('csrftoken')};  // browser define o boundary
   } else {
     form = new URLSearchParams();
     form.set(envTipo === 'cupom' ? 'cupom' : 'produto', envProdId);
     form.set('canal', canal); form.set('grupo', grupo); form.set('grupo_nome', nome);
+    if (envTipo === 'cupom') form.set('categoria', (document.getElementById('env-categoria')||{}).value || '');
     headers = {'X-CSRFToken': getCookie('csrftoken'),
                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'};
   }

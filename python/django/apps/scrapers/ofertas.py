@@ -480,15 +480,17 @@ def _macro_do_cupom(cupom) -> str:
     return ""
 
 
-def produtos_do_cupom(cupom, limite=8):
+def produtos_do_cupom(cupom, limite=8, macro=None):
     """Produtos p/ a mensagem-colagem do cupom (multi-item), melhores por desconto.
 
     (1) Ligação real cupom→produto quando existir — vínculo `ProdutoCupom`
         confirmado > campanha (`external_id` "campanha:X") > cupom de site inteiro
         (`is_mar_aberto`). Hoje isso é raro em produção (produto não guarda campanha).
     (2) Fallback (decisão de produto): sem ligação, agrupa as melhores OFERTAS da
-        categoria do cupom — cada uma com o próprio De/por e link verdadeiros; o
-        cupom define só o tema. Sem categoria reconhecível => vazio => texto puro.
+        categoria — cada uma com o próprio De/por e link verdadeiros; o cupom define
+        só o tema. A categoria vem do `macro` escolhido no envio (prioridade) ou,
+        na falta, do palpite do título (`_macro_do_cupom`). Sem categoria válida =>
+        vazio => texto puro.
 
     Só entra item com foto (a colagem precisa dela).
     """
@@ -525,27 +527,30 @@ def produtos_do_cupom(cupom, limite=8):
     if itens:
         return itens
 
-    # (2) Fallback por categoria.
-    macro = _macro_do_cupom(cupom)
-    if not macro:
+    # (2) Fallback por categoria. `macro` explícito (escolha no envio) tem prioridade
+    #     sobre o palpite do título — resolve os cupons de marca/loja que o título
+    #     não classifica (ex.: "Elseve", "Anadi").
+    macro = (macro or "").strip() or _macro_do_cupom(cupom)
+    if macro not in _EMOJI_MACRO:
         return []
     return list(_por_desconto(ativos.filter(origem="oferta", macro_categoria=macro))[:limite])
 
 
-def _preparar_itens_cupom(cupom, usuario, limite=8):
+def _preparar_itens_cupom(cupom, usuario, limite=8, macro=None):
     """[{produto, link}] com link de afiliado válido + foto, p/ a mensagem-colagem.
 
     Cada produto leva o PRÓPRIO link comissionado (como na imagem-modelo). Usa o
     cache em lote (`situacao_dos_links`) e, só p/ quem não tem, gera via Link
     Builder. Se a sessão do ML cair, para de tentar (evita N falhas lentas) e
     devolve o que houver — o chamador cai no texto puro, que reporta a reconexão.
+    `macro`: categoria escolhida no envio (repassada a `produtos_do_cupom`).
     """
     from apps.scrapers.marketplaces.registry import get_marketplace
     from apps.scrapers.afiliado import situacao_dos_links, salvar_cache
     from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
     from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
 
-    produtos = produtos_do_cupom(cupom, limite=limite * 2)
+    produtos = produtos_do_cupom(cupom, limite=limite * 2, macro=macro)
     if not produtos:
         return []
     mkt = str(getattr(cupom, "marketplace", "mercadolivre") or "mercadolivre").lower()
@@ -717,7 +722,8 @@ def resolver_link_afiliado_cupom(cupom, usuario):
 
 
 def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nome="",
-                 imagem_b64_custom=None, configuracao=None, score=0, motivos_score=None):
+                 imagem_b64_custom=None, configuracao=None, score=0, motivos_score=None,
+                 categoria=None):
     """Nucleo auditavel do envio manual de CupomNormalizado.
 
     `imagem_b64_custom` (opcional): foto escolhida no envio. Cupom não tem foto de
@@ -803,7 +809,8 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         # Caminho preferido (imagem-modelo): produtos do cupom viram uma colagem +
         # lista com De/por e link próprio por item. Sem produtos afiliáveis (ou com
         # foto custom escolhida no envio), cai no texto puro de sempre.
-        itens_cupom = [] if imagem_b64_custom else _preparar_itens_cupom(cupom, usuario)
+        itens_cupom = ([] if imagem_b64_custom
+                       else _preparar_itens_cupom(cupom, usuario, macro=categoria))
         img_kwargs = {}
         if itens_cupom:
             mensagem = montar_mensagem_cupom_produtos(

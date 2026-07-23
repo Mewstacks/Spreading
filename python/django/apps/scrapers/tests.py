@@ -1581,6 +1581,24 @@ class EnviarCupomColagemTests(TestCase):
         self.assertEqual(
             Publicacao.objects.get(cupom_normalizado=self.cupom).status, "enviado")
 
+    def test_categoria_escolhida_agrupa_ofertas_daquela_categoria(self):
+        # Cupom de marca ("Elseve") não classifica sozinho — sem categoria = sem
+        # colagem. A categoria escolhida no envio resolve, agrupando ofertas reais.
+        from apps.scrapers.ofertas import produtos_do_cupom
+        Produto.objects.create(
+            marketplace="mercadolivre", nome="Shampoo X", origem="oferta",
+            preco_sem_desconto=50, preco_com_cupom=30, imagem_url="https://i/1.jpg",
+            macro_categoria="Beleza e Cuidados Pessoais",
+            link_produto="https://e.com/1")
+        marca = CupomNormalizado.objects.create(
+            fonte=self.cupom.fonte, external_id="campanha:777",
+            marketplace="mercadolivre", titulo="25% OFF em Elseve", estado="ativo")
+
+        self.assertEqual(produtos_do_cupom(marca), [])
+        itens = produtos_do_cupom(marca, macro="Beleza e Cuidados Pessoais")
+        self.assertEqual(
+            [p.macro_categoria for p in itens], ["Beleza e Cuidados Pessoais"])
+
 
 class RankingAndCooldownTests(TestCase):
     def setUp(self):
