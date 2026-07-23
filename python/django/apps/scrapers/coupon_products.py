@@ -500,8 +500,14 @@ def ids_cupons_prontos(usuario, cupons):
     if not cupons:
         return set()
     ids = [c.id for c in cupons]
+    # Só conta preparação FRESCA (dentro da mesma janela que o envio usa para
+    # reaproveitar o cache). Sem isto, a tela mostrava cupons cujo preparo "pronto"
+    # era antigo: o envio então repreparava, não achava mais produtos e devolvia
+    # "cupom sem produtos" para algo que a tela prometia enviável. Ao exigir
+    # frescor, a tela deixa de anunciar cupons que o envio não conseguiria montar.
+    fresco_desde = timezone.now() - timedelta(hours=CACHE_HORAS)
     rows = CupomPreparacao.objects.filter(
-        cupom_id__in=ids, status="pronto",
+        cupom_id__in=ids, status="pronto", verificado_em__gte=fresco_desde,
     ).filter(Q(usuario__isnull=True) | Q(usuario=usuario)).values_list(
         "cupom_id", "usuario_id", "produtos_chave")
     por_contexto = {(cid, uid): chave for cid, uid, chave in rows}

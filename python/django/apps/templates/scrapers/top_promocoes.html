@@ -377,9 +377,11 @@
                 Quatro estados, não dois: "pendente" para tudo fazia o usuário esperar
                 por um link que, para item de catálogo/perfil, nunca ia existir.
                 {% endcomment %}
-                {% if p.afiliado_pronto %}<span class="badge badge-green" title="Link de afiliado pronto"><i data-lucide="check"></i> afiliado</span>
+                {% if p.afiliado_pronto %}<span class="badge badge-green" title="Link verificado: abre o anúncio certo e está pronto para envio"><i data-lucide="check"></i> afiliado</span>
                 {% elif p.marketplace == "amazon" %}<span class="badge badge-yellow" title="Cadastre sua tag de afiliado Amazon na tela Conta para comissionar este item"><i data-lucide="alert-triangle"></i> pendente</span>
                 {% elif p.afiliado_estado == "nao_afiliavel" %}<span class="badge badge-muted" title="{{ p.afiliado_motivo|default:'O Programa de Afiliados não aceita este item.' }}"><i data-lucide="slash"></i> não afiliável</span>
+                {% elif p.afiliado_estado == "link_invalido" %}<span class="badge badge-red" title="{{ p.afiliado_motivo|default:'O link não abre o anúncio certo; não pode ser enviado.' }}"><i data-lucide="link-2-off"></i> link inválido</span>
+                {% elif p.afiliado_estado == "verificando" %}<span class="badge badge-muted" title="Conferindo se o link abre o anúncio certo antes de liberar o envio."><i data-lucide="loader"></i> verificando</span>
                 {% elif p.afiliado_estado == "erro" %}<span class="badge badge-red" title="{{ p.afiliado_motivo|default:'A geração do link falhou.' }}"><i data-lucide="alert-circle"></i> erro</span>
                 {% else %}<span class="badge badge-yellow" title="{% if p.afiliado_motivo %}{{ p.afiliado_motivo }} — nova tentativa em instantes.{% else %}Na fila para gerar o link de afiliado.{% endif %}"><i data-lucide="clock"></i> pendente</span>{% endif %}
               </div>
@@ -407,8 +409,22 @@
         </td>
         <td data-label="Ação" class="col-actions">
           <div class="td-val" style="display:flex;justify-content:flex-end;">
+            {% comment %}
+            O botão de enviar só aparece para itens com link já VERIFICADO
+            (afiliado_pronto). Antes, o botão vinha para qualquer item e o usuário
+            só descobria "link reprovado na verificação" depois de clicar. Itens
+            sem veredito mostram o status/motivo no lugar do botão.
+            {% endcomment %}
+            {% if p.afiliado_pronto %}
             <button class="btn btn-green btn-sm"
                     onclick="abrirEnvio({{ p.id }}, '{{ p.nome|escapejs }}')"><i data-lucide="send"></i> Enviar</button>
+            {% elif p.afiliado_estado == "link_invalido" %}
+            <span class="muted" style="font-size:.76rem;" title="{{ p.afiliado_motivo|default:'O link não abre o anúncio certo.' }}"><i data-lucide="link-2-off"></i> link inválido</span>
+            {% elif p.afiliado_estado == "verificando" %}
+            <span class="muted" style="font-size:.76rem;" title="Conferindo o link antes de liberar o envio."><i data-lucide="loader"></i> verificando…</span>
+            {% else %}
+            <span class="muted" style="font-size:.76rem;" title="{{ p.afiliado_motivo|default:'Sem link de afiliado pronto para envio.' }}">indisponível</span>
+            {% endif %}
           </div>
         </td>
       </tr>
@@ -758,6 +774,7 @@ async function dispararEnvio() {
     var ln = document.createElement('div');
     if (data.indexOf('__SENT__') !== -1) { ln.className = 'ok'; ln.textContent = data.replace('__SENT__ ', ''); setTimeout(function(){ location.reload(); }, 1200); }
     else if (data.indexOf('__ML_LOGIN__') !== -1) { ln.className = 'err'; ln.innerHTML = '&rarr; <a href="/scrapers/ml/" style="color:inherit;font-weight:600;text-decoration:underline">Reconectar Mercado Livre</a>'; document.getElementById('env-go').disabled = false; }
+    else if (data.indexOf('__WA_LOGIN__') !== -1) { ln.className = 'err'; ln.innerHTML = '&rarr; <a href="/scrapers/whatsapp/" style="color:inherit;font-weight:600;text-decoration:underline">Reconectar WhatsApp</a>'; document.getElementById('env-go').disabled = false; }
     else if (data.startsWith('[ERRO]')) { ln.className = 'err'; ln.textContent = data; document.getElementById('env-go').disabled = false; }
     else ln.textContent = data;
     log.appendChild(ln); log.scrollTop = log.scrollHeight;

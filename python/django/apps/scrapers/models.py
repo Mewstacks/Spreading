@@ -525,6 +525,22 @@ class LinkAfiliadoUsuario(models.Model):
     afiliado_ok = models.BooleanField(default=False)
     criado_em = models.DateTimeField(auto_now_add=True)
 
+    # ── Veredito de verificação do DESTINO (fonte única: link_validacao) ──
+    # Separa "o Link Builder devolveu uma URL" (afiliado_ok) de "o link abre mesmo
+    # o anúncio certo" (verificado_ok). A listagem só oferece envio quando
+    # verificado_ok is True; o envio confia neste veredito e usa a url_canonica,
+    # em vez de reconferir com uma segunda implementação que poderia divergir.
+    #   None  = ainda não verificado (não enviável até verificar)
+    #   True  = destino aprovado (enviável)
+    #   False = reprovado (link inválido; mostra motivo, não oferece envio)
+    verificado_ok = models.BooleanField(null=True, blank=True, default=None,
+                                        db_index=True)
+    verificado_em = models.DateTimeField(null=True, blank=True)
+    # URL exata aprovada que o envio deve usar (o próprio link de afiliado que
+    # passou na verificação) — para não reconstruir o link em outra camada.
+    url_canonica = models.URLField(max_length=1000, blank=True, default="")
+    verificacao_motivo = models.CharField(max_length=300, blank=True, default="")
+
     # ── Por que este item ainda não tem link ──
     # Sem isto, um produto que nunca afilia fica "pendente" para sempre e não há um
     # único registro do motivo: o gerador contava a falha e seguia (falhas += 1;

@@ -1100,10 +1100,13 @@ class TopPromocoesFilterTests(TestCase):
         return produto
 
     def _afiliar(self, produto):
+        link = f"https://meli.la/{produto.id}"
         LinkAfiliadoUsuario.objects.create(
             usuario=self.user, produto=produto,
-            link_afiliado=f"https://meli.la/{produto.id}",
-            url_isca=produto.link_produto, afiliado_ok=True, estado="pronto",
+            link_afiliado=link, url_isca=produto.link_produto,
+            afiliado_ok=True, estado="pronto",
+            # Enviável = destino já verificado. A fixture representa um item pronto.
+            verificado_ok=True, url_canonica=link,
         )
         return produto
 
@@ -1559,15 +1562,16 @@ class EnviarCupomColagemTests(TestCase):
             link_produto="https://example.com/p", imagem_url="https://img/x.jpg",
         )
 
+    @patch("apps.scrapers.ofertas._canal_pronto_ou_erro", return_value=None)
     @patch("apps.scrapers.colagem.montar_colagem_itens")
     @patch("apps.scrapers.ofertas._preparar_itens_cupom")
     @patch("apps.scrapers.senders.registry.get_sender")
     def test_caminho_colagem_retorna_link_do_item_sem_unbound(
-        self, get_sender, prep, colagem
+        self, get_sender, prep, colagem, _canal
     ):
         from apps.scrapers.senders.base import WhatsAppMarkup
         itens = [{"produto": self.produto, "link": "https://meli.la/abc"}]
-        prep.return_value = itens
+        prep.return_value = (itens, False)
         colagem.return_value = ("b64", "image/jpeg", itens)
         sender = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
         sender.enviar_oferta.return_value = {"sucesso": True, "via": "test"}
@@ -2352,6 +2356,7 @@ class AfiliacaoPorMarketplaceTests(TestCase):
         LinkAfiliadoUsuario.objects.create(
             usuario=self.user, produto=produto, afiliado_ok=True,
             link_afiliado="https://mercadolivre.com/sec/meu-link",
+            verificado_ok=True, url_canonica="https://mercadolivre.com/sec/meu-link",
         )
         self.client.force_login(self.user)
 
@@ -2364,7 +2369,8 @@ class AfiliacaoPorMarketplaceTests(TestCase):
         pronto = self._produto_ml("Fone pronto")
         LinkAfiliadoUsuario.objects.create(
             usuario=self.user, produto=pronto, estado="pronto",
-            link_afiliado="https://meli.la/pronto", afiliado_ok=True)
+            link_afiliado="https://meli.la/pronto", afiliado_ok=True,
+            verificado_ok=True, url_canonica="https://meli.la/pronto")
         falhou = self._produto_ml("Fone falhou")
         LinkAfiliadoUsuario.objects.create(
             usuario=self.user, produto=falhou, estado="erro",
@@ -2388,6 +2394,7 @@ class AfiliacaoPorMarketplaceTests(TestCase):
             LinkAfiliadoUsuario.objects.create(
                 usuario=self.user, produto=self._produto_ml(f"Fone {i}"),
                 link_afiliado=f"https://mercadolivre.com/sec/l{i}", afiliado_ok=True,
+                verificado_ok=True, url_canonica=f"https://mercadolivre.com/sec/l{i}",
             )
         self.client.force_login(self.user)
 
@@ -2424,6 +2431,7 @@ class AfiliacaoPorMarketplaceTests(TestCase):
         LinkAfiliadoUsuario.objects.create(
             usuario=self.user, produto=pronto, estado="pronto",
             link_afiliado="https://meli.la/fora-do-corte", afiliado_ok=True,
+            verificado_ok=True, url_canonica="https://meli.la/fora-do-corte",
         )
         self.client.force_login(self.user)
 
@@ -2443,6 +2451,250 @@ class AfiliacaoPorMarketplaceTests(TestCase):
         # A visita é um GET: nada de escrita no campo persistido.
         produto.refresh_from_db()
         self.assertFalse(produto.afiliado_ok)
+
+
+class LinkValidacaoSoTTests(SimpleTestCase):
+    """Fonte única de normalização + decisão de aprovação (link_validacao).
+
+    Uma decisão só: a MESMA que a listagem, a geração e o envio aplicam. Cobre a
+    regressão do produto que caía na vitrine /social/ do afiliado.
+    """
+
+    def test_normaliza_barra_final_preservando_parametros(self):
+        from apps.scrapers.link_validacao import normalizar_url
+        self.assertEqual(normalizar_url("https://meli.la/abc/"), "https://meli.la/abc")
+        # Query string (parâmetros de afiliação) é preservada intacta.
+        u = "https://produto.mercadolivre.com.br/MLB-123?matt_tool=1&x=2"
+        self.assertEqual(normalizar_url(u), u)
+        self.assertEqual(normalizar_url("  https://meli.la/x  "), "https://meli.la/x")
+
+    def test_classifica_pagina_de_produto_e_vitrine_social(self):
+        from apps.scrapers.link_validacao import eh_pagina_produto, eh_vitrine_social
+        self.assertTrue(eh_pagina_produto("https://produto.mercadolivre.com.br/MLB-123456"))
+        self.assertTrue(eh_pagina_produto("https://www.mercadolivre.com.br/p/MLB123"))
+        self.assertFalse(eh_pagina_produto(
+            "https://www.mercadolivre.com.br/social/loja/lists"))
+        self.assertTrue(eh_vitrine_social(
+            "https://www.mercadolivre.com.br/social/loja/lists"))
+
+    def test_oferta_na_vitrine_social_sem_nome_e_reprovada(self):
+        # Regressão do caso reportado: meli.la -> /social/.../lists. is_landing=True,
+        # mas o nome do produto não aparece (nome_confere=False) -> NÃO aprovado.
+        from apps.scrapers.link_validacao import aprovado_por_relatorio, motivo_reprovacao
+        relatorio = {
+            "url_final": "https://www.mercadolivre.com.br/social/loja/lists",
+            "is_pagina_produto": False, "is_landing_afiliado": True,
+            "nome_confere": False, "preco_visivel": None,
+            "cupom_detectado": False, "preco_riscado": False, "erros": [],
+        }
+        self.assertFalse(aprovado_por_relatorio(relatorio, confiar_desconto=True))
+        self.assertIn("vitrine", motivo_reprovacao(relatorio, True).lower())
+
+    def test_oferta_na_pagina_do_produto_com_nome_e_aprovada(self):
+        from apps.scrapers.link_validacao import aprovado_por_relatorio
+        relatorio = {
+            "url_final": "https://produto.mercadolivre.com.br/MLB-123456",
+            "is_pagina_produto": True, "is_landing_afiliado": False,
+            "nome_confere": True, "preco_visivel": "R$ 100",
+            "cupom_detectado": False, "preco_riscado": False, "erros": [],
+        }
+        self.assertTrue(aprovado_por_relatorio(relatorio, confiar_desconto=True))
+
+    def test_cupom_exige_desconto_confirmado_na_pagina_do_produto(self):
+        from apps.scrapers.link_validacao import aprovado_por_relatorio
+        base = {
+            "url_final": "https://produto.mercadolivre.com.br/MLB-123456",
+            "is_pagina_produto": True, "is_landing_afiliado": False,
+            "nome_confere": True, "preco_visivel": "R$ 100", "erros": [],
+        }
+        sem_desconto = {**base, "cupom_detectado": False, "preco_riscado": False}
+        com_desconto = {**base, "cupom_detectado": True, "preco_riscado": False}
+        self.assertFalse(aprovado_por_relatorio(sem_desconto, confiar_desconto=False))
+        self.assertTrue(aprovado_por_relatorio(com_desconto, confiar_desconto=False))
+
+
+class EnviabilidadeConsistenteTests(TestCase):
+    """Invariante central: item exibido como enviável ⇔ link já verificado, e o
+    envio usa exatamente a URL canônica aprovada, sem reprová-la de novo."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("consistencia", password="test")
+        self.user.perfil.marcar_verificado()
+        self.client.force_login(self.user)
+
+    def _produto(self, nome="Máquina de Solda Inversora 250a"):
+        return Produto.objects.create(
+            marketplace="mercadolivre", nome=nome, origem="oferta",
+            preco_sem_desconto=300, preco_com_cupom=200,
+            link_produto="https://www.mercadolivre.com.br/maquina-solda-250a",
+        )
+
+    def _link(self, produto, **extra):
+        defaults = dict(usuario=self.user, produto=produto, afiliado_ok=True,
+                        estado="pronto", link_afiliado="https://meli.la/canonica",
+                        url_isca=produto.link_produto)
+        defaults.update(extra)
+        return LinkAfiliadoUsuario.objects.create(**defaults)
+
+    def test_link_verificado_aparece_como_enviavel(self):
+        produto = self._produto("Fone verificado")
+        self._link(produto, verificado_ok=True, url_canonica="https://meli.la/canonica")
+
+        response = self.client.get(reverse("scraper-top"), {"loja": "mercadolivre"})
+        listados = {p.id: p for p in response.context["produtos"]}
+        self.assertIn(produto.id, listados)
+        self.assertTrue(listados[produto.id].afiliado_pronto)
+
+    def test_link_reprovado_nao_chega_a_tela_de_envio(self):
+        # verificado_ok=False: o link existe mas não abre o anúncio certo. NÃO pode
+        # ser enviável e não aparece na lista padrão (só afiliados prontos).
+        produto = self._produto("Solda vitrine social")
+        self._link(produto, verificado_ok=False,
+                   verificacao_motivo="O link abre a vitrine do afiliado, não o anúncio.")
+
+        response = self.client.get(reverse("scraper-top"), {"loja": "mercadolivre"})
+        self.assertNotIn(
+            produto.id, {p.id for p in response.context["produtos"]})
+
+        # Na visão "todos", aparece com status link_invalido e motivo — sem botão.
+        response = self.client.get(
+            reverse("scraper-top"), {"loja": "mercadolivre", "afiliado": "todos"})
+        listados = {p.id: p for p in response.context["produtos"]}
+        self.assertIn(produto.id, listados)
+        self.assertFalse(listados[produto.id].afiliado_pronto)
+        self.assertEqual(listados[produto.id].afiliado_estado, "link_invalido")
+        self.assertIn("vitrine", listados[produto.id].afiliado_motivo.lower())
+
+    def test_link_sem_veredito_fica_verificando_nao_enviavel(self):
+        produto = self._produto("Aguardando verificação")
+        self._link(produto, verificado_ok=None)
+
+        response = self.client.get(
+            reverse("scraper-top"), {"loja": "mercadolivre", "afiliado": "todos"})
+        listados = {p.id: p for p in response.context["produtos"]}
+        self.assertFalse(listados[produto.id].afiliado_pronto)
+        self.assertEqual(listados[produto.id].afiliado_estado, "verificando")
+
+    @patch("apps.scrapers.ofertas._baixar_imagem_b64", return_value=(None, None))
+    @patch("apps.scrapers.senders.whatsapp.WhatsAppSender.enviar_oferta")
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.verify_link")
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.build_affiliate_link")
+    def test_envio_confia_no_veredito_e_usa_url_canonica_sem_reverificar(
+        self, build_link, verify_link, send, _img
+    ):
+        from apps.scrapers.ofertas import enviar_oferta_de_produto
+        produto = self._produto()
+        # Link já APROVADO: o build devolve o veredito + a URL canônica aprovada.
+        build_link.return_value = {
+            "link_afiliado": "https://meli.la/canonica", "afiliado_ok": True,
+            "verificado_ok": True, "url_canonica": "https://meli.la/canonica",
+        }
+        send.return_value = {"sucesso": True, "via": "whatsapp-test"}
+
+        result = enviar_oferta_de_produto(
+            produto, "grupo@g.us", usuario=self.user, destino_nome="Teste ofertas")
+
+        self.assertTrue(result["sucesso"])
+        # Não reverifica ao vivo (sem segunda implementação divergente)...
+        verify_link.assert_not_called()
+        # ...e envia EXATAMENTE a URL canônica aprovada.
+        self.assertEqual(result["link"], "https://meli.la/canonica")
+
+    @patch("apps.scrapers.ofertas._baixar_imagem_b64", return_value=(None, None))
+    @patch("apps.scrapers.senders.whatsapp.WhatsAppSender.enviar_oferta")
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.verify_link")
+    @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.build_affiliate_link")
+    def test_envio_de_link_nao_verificado_reprovado_persiste_e_some_da_tela(
+        self, build_link, verify_link, send, _img
+    ):
+        from apps.scrapers.ofertas import enviar_oferta_de_produto
+        produto = self._produto("Solda sem veredito")
+        linha = self._link(produto, verificado_ok=None)
+        # build sem veredito (ex.: envio automático); a verificação ao vivo reprova.
+        build_link.return_value = {
+            "link_afiliado": "https://meli.la/canonica", "afiliado_ok": True,
+            "verificado_ok": None, "url_canonica": "https://meli.la/canonica",
+        }
+        verify_link.return_value = {
+            "ok": False,
+            "url_final": "https://www.mercadolivre.com.br/social/loja/lists",
+            "is_pagina_produto": False, "is_landing_afiliado": True,
+            "nome_confere": False, "preco_visivel": None, "erros": [],
+        }
+
+        result = enviar_oferta_de_produto(
+            produto, "grupo@g.us", usuario=self.user, destino_nome="Teste ofertas")
+
+        self.assertFalse(result["sucesso"])
+        self.assertEqual(result["motivo"], "link reprovado na verificação")
+        send.assert_not_called()
+        # Self-heal: o veredito é persistido; da próxima vez o item já não é enviável.
+        linha.refresh_from_db()
+        self.assertIs(linha.verificado_ok, False)
+        self.assertTrue(linha.verificacao_motivo)
+
+
+class VerificarLinksPendentesTests(TestCase):
+    """A passada que APROVA o destino antes de o item virar enviável."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("aprovador", password="test")
+
+    def _produto(self, nome):
+        return Produto.objects.create(
+            marketplace="mercadolivre", nome=nome, origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=60,
+            link_produto="https://www.mercadolivre.com.br/item",
+        )
+
+    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_link_afiliado")
+    def test_aprova_link_que_abre_o_produto(self, verify):
+        produto = self._produto("Fone bom")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",
+            link_afiliado="https://meli.la/bom", verificado_ok=None)
+        verify.return_value = {"ok": True, "url_final": "https://produto.mercadolivre.com.br/MLB-1"}
+
+        r = ml_link.verificar_links_pendentes(self.user, limite=10)
+
+        self.assertEqual(r["aprovados"], 1)
+        linha = LinkAfiliadoUsuario.objects.get(usuario=self.user, produto=produto)
+        self.assertIs(linha.verificado_ok, True)
+        self.assertEqual(linha.url_canonica, "https://meli.la/bom")
+
+    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_link_afiliado")
+    def test_reprova_link_que_cai_na_vitrine_social(self, verify):
+        produto = self._produto("Solda vitrine")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",
+            link_afiliado="https://meli.la/ruim", verificado_ok=None)
+        verify.return_value = {
+            "ok": False, "url_final": "https://www.mercadolivre.com.br/social/loja/lists",
+            "is_pagina_produto": False, "is_landing_afiliado": True,
+            "nome_confere": False, "preco_visivel": None, "erros": [],
+        }
+
+        r = ml_link.verificar_links_pendentes(self.user, limite=10)
+
+        self.assertEqual(r["reprovados"], 1)
+        linha = LinkAfiliadoUsuario.objects.get(usuario=self.user, produto=produto)
+        self.assertIs(linha.verificado_ok, False)
+        self.assertTrue(linha.verificacao_motivo)
+
+    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_link_afiliado")
+    def test_falha_de_rede_e_transitoria_nao_reprova(self, verify):
+        produto = self._produto("Fone rede caiu")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",
+            link_afiliado="https://meli.la/rede", verificado_ok=None)
+        verify.return_value = {"ok": False, "erros": ["Falha ao abrir link: timeout"]}
+
+        r = ml_link.verificar_links_pendentes(self.user, limite=10)
+
+        self.assertEqual(r["transitorios"], 1)
+        linha = LinkAfiliadoUsuario.objects.get(usuario=self.user, produto=produto)
+        # Segue None: nem aprovado nem reprovado — será retentado, não some da fila.
+        self.assertIsNone(linha.verificado_ok)
 
 
 class ParserDeNumeroDeRelatorioTests(SimpleTestCase):
@@ -4039,6 +4291,15 @@ class EnvioCupomTests(TestCase):
         self.colagem.side_effect = lambda itens, **_kwargs: (
             "b64", "image/jpeg", list(itens))
         self.addCleanup(self._colagem_patcher.stop)
+        # O envio agora pré-checa a conexão do WhatsApp; nestes testes de lógica de
+        # cupom o canal é considerado conectado (o transporte é mockado à parte).
+        # Testes específicos sobrepõem este patch com um estado desconectado.
+        from apps.scrapers.conexoes import Estado
+        self._wa_patcher = patch(
+            "apps.scrapers.conexoes.estado_whatsapp",
+            return_value=Estado(True, "WhatsApp", "worker", "", "", None))
+        self._wa_patcher.start()
+        self.addCleanup(self._wa_patcher.stop)
 
     def _sender(self, resultado):
         from apps.scrapers.senders.base import WhatsAppMarkup
@@ -4093,6 +4354,44 @@ class EnvioCupomTests(TestCase):
         self.assertFalse(primeiro["sucesso"])
         self.assertFalse(segundo.get("duplicado", False))
         self.assertEqual(Publicacao.objects.filter(status="falhou").count(), 2)
+
+    def test_whatsapp_desconectado_pede_reconexao_antes_de_enviar(self):
+        # WhatsApp fora do ar: o envio não pode criar Publicacao nem tentar montar a
+        # mensagem — precisa pedir a reconexão com o flag que a UI usa.
+        from apps.scrapers.ofertas import enviar_cupom
+        from apps.scrapers.conexoes import Estado
+
+        desconectado = Estado(False, "WhatsApp", "worker",
+                              "WhatsApp desconectado. Reconecte sua conta.",
+                              "sem_pareamento")
+        with patch("apps.scrapers.conexoes.estado_whatsapp",
+                   return_value=desconectado), \
+             patch("apps.scrapers.whatsapp_client.status",
+                   return_value={"conectado": False, "fase": "sem_pareamento"}):
+            resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertTrue(resultado["precisa_login_wa"])
+        self.assertEqual(resultado["classe"], "transitorio")
+        self.assertFalse(Publicacao.objects.filter(usuario=self.user).exists())
+
+    def test_sessao_ml_caida_reporta_reconexao_e_nao_sem_produtos(self):
+        # Havia produtos, mas a sessão do ML caiu ao afiliar: o motivo tem de ser a
+        # reconexão do Mercado Livre, não o enganoso "cupom sem produtos".
+        from apps.scrapers import ofertas
+        from apps.scrapers.ofertas import enviar_cupom
+
+        sender = self._sender({"sucesso": True})
+        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender), \
+             patch("apps.scrapers.ofertas._preparar_itens_cupom",
+                   return_value=([], True)):
+            resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertTrue(resultado["precisa_login_ml"])
+        self.assertIn("Mercado Livre", resultado["motivo"])
+        self.assertEqual(
+            Publicacao.objects.get(cupom_normalizado=self.cupom).status, "falhou")
 
 
 class LinkAfiliadoCupomTests(TestCase):

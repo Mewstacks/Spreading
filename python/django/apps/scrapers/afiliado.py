@@ -63,7 +63,8 @@ def situacao_dos_links(usuario, produtos) -> dict:
         linha["produto_id"]: linha
         for linha in LinkAfiliadoUsuario.objects
         .filter(usuario=usuario, produto__in=produtos)
-        .values("produto_id", "estado", "ultimo_erro", "tentativas", "link_afiliado")
+        .values("produto_id", "estado", "ultimo_erro", "tentativas", "link_afiliado",
+                "verificado_ok", "url_canonica", "verificacao_motivo")
     }
 
 
@@ -81,8 +82,11 @@ def resumo_afiliacao(usuario) -> dict:
     escopo = Produto.objects.filter(Q(owner__isnull=True) | Q(owner=usuario))
     total = escopo.count()
     linhas = LinkAfiliadoUsuario.objects.filter(usuario=usuario, produto__in=escopo)
+    # "Pronto" = enviável de verdade: tem link E o destino já foi aprovado
+    # (verificado_ok=True). Contar só a existência do link era o que fazia a tela
+    # prometer envio para links que só reprovavam no clique de enviar.
     contagens = linhas.aggregate(
-        prontos=Count("id", filter=~Q(link_afiliado="")),
+        prontos=Count("id", filter=~Q(link_afiliado="") & Q(verificado_ok=True)),
         nao_afiliavel=Count("id", filter=Q(estado="nao_afiliavel")),
         erro=Count("id", filter=Q(estado="erro")),
     )
@@ -110,7 +114,15 @@ def frase_resumo_afiliacao(usuario) -> str:
     return "Afiliação: " + " · ".join(partes) + "."
 
 
-def salvar_cache(usuario, produto, link_afiliado, url_isca, afiliado_ok) -> None:
+def salvar_cache(usuario, produto, link_afiliado, url_isca, afiliado_ok,
+                 verificado_ok=None, url_canonica="", verificacao_motivo="") -> None:
+    """Persiste o link gerado e, quando disponível, o veredito de verificação.
+
+    `estado='pronto'` significa apenas "o link foi gerado". A ENVIABILIDADE mora em
+    `verificado_ok`: só quando ele é True a listagem oferece o envio. Gerar (ou
+    regerar) um link sem veredito recente deixa `verificado_ok=None` — o item fica
+    "verificando" até a checagem de destino aprovar, nunca enviável no escuro.
+    """
     if usuario is None or not link_afiliado:
         return
     from apps.scrapers.models import LinkAfiliadoUsuario
@@ -119,8 +131,42 @@ def salvar_cache(usuario, produto, link_afiliado, url_isca, afiliado_ok) -> None
         defaults={"link_afiliado": link_afiliado, "url_isca": url_isca,
                   "afiliado_ok": afiliado_ok, "estado": "pronto",
                   "ultimo_erro": "", "proxima_tentativa": None,
-                  "ultima_tentativa": timezone.now()},
+                  "ultima_tentativa": timezone.now(),
+                  "verificado_ok": verificado_ok,
+                  "verificado_em": timezone.now() if verificado_ok is not None else None,
+                  "url_canonica": url_canonica or (link_afiliado if verificado_ok else ""),
+                  "verificacao_motivo": verificacao_motivo},
     )
+
+
+def registrar_aprovacao(usuario, produto, link_afiliado, url_canonica="") -> None:
+    """Marca um link JÁ cacheado como verificado e enviável (veredito=True).
+
+    Usado quando a verificação de destino roda separada da geração (ex.: backfill
+    ou reverificação): não regera o link, só carimba o veredito e a URL canônica
+    que o envio deve usar.
+    """
+    if usuario is None or produto is None:
+        return
+    from apps.scrapers.models import LinkAfiliadoUsuario
+    LinkAfiliadoUsuario.objects.filter(usuario=usuario, produto=produto).update(
+        verificado_ok=True, verificado_em=timezone.now(),
+        url_canonica=url_canonica or "", verificacao_motivo="", estado="pronto")
+
+
+def registrar_reprovacao(usuario, produto, motivo: str) -> None:
+    """Marca o link como reprovado na verificação de destino (veredito=False).
+
+    O item deixa de ser enviável na tela e passa a exibir o motivo — em vez de o
+    usuário só descobrir depois de clicar em enviar. Não apaga o link_afiliado: a
+    próxima regeração pode substituí-lo e voltar a verificar.
+    """
+    if usuario is None or produto is None:
+        return
+    from apps.scrapers.models import LinkAfiliadoUsuario
+    LinkAfiliadoUsuario.objects.filter(usuario=usuario, produto=produto).update(
+        verificado_ok=False, verificado_em=timezone.now(),
+        url_canonica="", verificacao_motivo=(motivo or "")[:300])
 
 
 # Backoff entre tentativas de afiliar o mesmo produto. Antes não havia nenhum: o

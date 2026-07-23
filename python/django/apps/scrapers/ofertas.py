@@ -32,6 +32,50 @@ def _motivo_publico_transporte(resultado) -> str:
         return "O canal rejeitou o envio. Revise as credenciais e o destino."
     return "Não foi possível confirmar o envio pelo canal selecionado."
 
+
+def _canal_pronto_ou_erro(canal, usuario) -> dict | None:
+    """Confere a conexão do canal ANTES de tentar enviar.
+
+    O envio para um WhatsApp desconectado só falhava lá no transporte, com uma
+    mensagem genérica ("não foi possível confirmar o envio"). O usuário precisa
+    saber que o problema é a conexão e ser levado a reconectar — não descobrir
+    um erro opaco depois de montar a mensagem. Devolve None quando o canal está
+    pronto; senão um dict de falha com o motivo e o flag de reconexão que a UI
+    usa para oferecer o botão de reconectar.
+    """
+    if str(canal or "").lower() != "whatsapp":
+        return None
+    from apps.scrapers import whatsapp_client
+    from apps.scrapers.conexoes import estado_whatsapp
+
+    sessao = wa_session_de(usuario)
+    if not sessao:
+        return {"sucesso": False,
+                "motivo": "Conecte o WhatsApp antes de enviar.",
+                "classe": TRANSITORIO, "precisa_login_wa": True}
+    estado = estado_whatsapp(usuario, session=sessao)
+    if estado.conectado:
+        return None
+    # 'inativo': o worker tem a credencial mas ela saiu do Map (restore pulado no
+    # boot, runtime destruído). Religar é seguro e não precisa de QR — este clique
+    # não envia, mas o próximo já encontra a sessão de pé.
+    if estado.detalhe in ("conectando", "capacidade"):
+        return {"sucesso": False,
+                "motivo": estado.motivo
+                or "WhatsApp reativando a conexão — tente novamente em instantes.",
+                "classe": TRANSITORIO}
+    try:
+        bruto = whatsapp_client.status(sessao)
+        if not bruto.get("conectado") and bruto.get("fase") == "inativo":
+            whatsapp_client.iniciar_sessao(sessao)
+    except Exception:
+        pass
+    return {"sucesso": False,
+            "motivo": estado.motivo
+            or "WhatsApp desconectado. Reconecte sua conta para enviar.",
+            "classe": TRANSITORIO, "precisa_login_wa": True}
+
+
 def esta_vivo(produto):
     """
     Estado da oferta no ML, em TRÊS valores (A1 — seleção não destrutiva):
@@ -589,12 +633,13 @@ def produtos_do_cupom(cupom, limite=9, macro=None):
 
 
 def _preparar_itens_cupom(cupom, usuario, limite=9, macro=None):
-    """[{produto, link}] com link de afiliado válido + foto, p/ a mensagem-colagem.
+    """([{produto, link}], sessao_caiu) com link afiliado válido + foto p/ a colagem.
 
     Cada produto leva o PRÓPRIO link comissionado (como na imagem-modelo). Usa o
     cache em lote (`situacao_dos_links`) e, só p/ quem não tem, gera via Link
     Builder. Se a sessão do ML cair, para de tentar (evita N falhas lentas) e
-    devolve o que houver — o chamador cai no texto puro, que reporta a reconexão.
+    devolve o que houver mais `sessao_caiu=True` — o chamador transforma isso na
+    mensagem de reconexão em vez de "cupom sem produtos".
     `macro`: categoria escolhida no envio (repassada a `produtos_do_cupom`).
     """
     from apps.scrapers.marketplaces.registry import get_marketplace
@@ -605,7 +650,7 @@ def _preparar_itens_cupom(cupom, usuario, limite=9, macro=None):
     from apps.scrapers.coupon_products import preparar_cupom
     relacoes = preparar_cupom(cupom, usuario=usuario)
     if not relacoes:
-        return []
+        return [], False
     produtos = [r.produto for r in relacoes]
     mkt = str(getattr(cupom, "marketplace", "mercadolivre") or "mercadolivre").lower()
     mp = get_marketplace(mkt)
@@ -639,7 +684,7 @@ def _preparar_itens_cupom(cupom, usuario, limite=9, macro=None):
         if link:
             itens.append({"produto": p, "link": link,
                           "relacao": relacao_por_produto[p.id]})
-    return itens
+    return itens, sessao_caiu
 
 
 def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
@@ -817,6 +862,11 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     if not usuario or not grupo_id:
         return {"sucesso": False, "motivo": "Usuário ou destino ausente.",
                 "classe": "permanente"}
+    # Pré-checa a conexão do canal ANTES de criar a Publicacao ou preparar a
+    # mensagem: sem WhatsApp conectado nada sai, e o usuário precisa reconectar.
+    erro_canal = _canal_pronto_ou_erro(canal, usuario)
+    if erro_canal:
+        return erro_canal
     agora = timezone.now()
     if cupom.estado != "ativo" or (cupom.validade and cupom.validade < agora):
         return {"sucesso": False, "motivo": "Cupom não encontrado, inativo ou vencido.",
@@ -884,7 +934,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     try:
         # Cupom publicavel exige produtos comprovados. Nao existe mais fallback de
         # texto puro nem foto manual que burle a associacao cupom-produto.
-        itens_cupom = _preparar_itens_cupom(cupom, usuario)
+        itens_cupom, sessao_ml_caiu = _preparar_itens_cupom(cupom, usuario)
         img_kwargs = {}
         if itens_cupom:
             _preparar_conteudo_ia_cupom(itens_cupom)
@@ -903,6 +953,13 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 cupom, itens_cupom, markup=sender.markup)
             link_registro = itens_cupom[0]["link"]
             img_kwargs = {"imagem_b64": colagem_b64, "mimetype": colagem_mime}
+        elif sessao_ml_caiu:
+            # Havia produtos comprovados, mas a sessão do Mercado Livre caiu na
+            # hora de gerar os links afiliados. Não é "cupom sem produtos": é
+            # reconexão. Transitório para não pausar a automação por queda de
+            # sessão, e com o flag que a UI usa para oferecer o botão de reconectar.
+            return falhar("Sessão do Mercado Livre expirada. Reconecte sua conta.",
+                          classe="transitorio", precisa_login_ml=True)
         else:
             return falhar("Cupom sem produtos comprovadamente aplicáveis, com foto e link afiliado.",
                           classe="permanente")
@@ -1362,6 +1419,15 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                           "(URL não afiliável ou o Link Builder recusou)")
         link = info["link_afiliado"]
 
+        # Fonte única do veredito: quando o link já foi APROVADO na verificação de
+        # destino (na geração/reverificação), o envio confia nele e usa EXATAMENTE a
+        # url_canonica aprovada — sem reconstruir o link nem reconferir com uma
+        # segunda regra que poderia divergir. É isto que garante que "exibido como
+        # enviável" e "aceito no envio" sejam a mesma coisa.
+        verificado_ok = info.get("verificado_ok")
+        if verificado_ok is True and info.get("url_canonica"):
+            link = info["url_canonica"]
+
         # A3 — sem tag de afiliado o clique não gera comissão. Recusa (ou avisa).
         afiliado_ok = info.get("afiliado_ok")
         if afiliado_ok is None:
@@ -1372,11 +1438,18 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             logger.warning("Link sem tag de afiliado; envio permitido por configuracao")
 
         verificacao = None
-        if verificar:
+        origem = getattr(produto, "origem", "cupom")
+        confiar = origem in ("oferta", "busca")
+        if verificar and verificado_ok is True:
+            # Já aprovado pela fonte única: não reverifica ao vivo (evita a segunda
+            # implementação divergente) e envia a url_canonica.
+            verificacao = {"ok": True, "cache": True, "url_final": link}
+        elif verificar:
+            # Link ainda sem veredito (ex.: envio automático que não passou pela
+            # tela): confere ao vivo com a MESMA regra e PERSISTE o resultado, para
+            # o item nunca mais aparecer enviável se for reprovado.
             # 'oferta'/'busca' têm de/por confirmado na raspagem; 'cupom_codigo' precisa
             # confirmar o desconto/badge na PDP (confiar_desconto=False).
-            origem = getattr(produto, "origem", "cupom")
-            confiar = origem in ("oferta", "busca")
             try:
                 verificacao = mp.verify_link(link, nome_esperado=produto.nome,
                                              confiar_desconto=confiar, usuario=usuario)
@@ -1394,7 +1467,16 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                     "Sessão do Mercado Livre expirada. Reconecte sua conta."
                     if precisa_login else "Não foi possível verificar a oferta.",
                     precisa_login_ml=precisa_login, _erro_tecnico=texto)
-            if not verificacao.get("ok"):
+            # Persiste o veredito na fonte única (self-heal): um link que reprova ao
+            # vivo é marcado como inválido e some da tela de envio; um que aprova
+            # fixa a url_canonica, para não reverificar da próxima vez.
+            from apps.scrapers.afiliado import registrar_aprovacao, registrar_reprovacao
+            from apps.scrapers.link_validacao import motivo_reprovacao
+            if verificacao.get("ok"):
+                registrar_aprovacao(usuario, produto, link, url_canonica=link)
+            else:
+                registrar_reprovacao(
+                    usuario, produto, motivo_reprovacao(verificacao, confiar))
                 return falhar("link reprovado na verificação",
                               link=link, verificacao=verificacao)
 

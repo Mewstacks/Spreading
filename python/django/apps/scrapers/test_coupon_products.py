@@ -124,6 +124,26 @@ class CouponPreparationTests(TestCase):
         cupom.save(update_fields=["regras"])
         self.assertEqual(ids_cupons_prontos(self.user, [cupom]), set())
 
+    def test_preparacao_vencida_nao_aparece_como_pronta(self):
+        # Preparo "pronto" mas antigo (fora da janela de cache) não pode aparecer na
+        # tela: o envio o repreparia e poderia não achar mais produtos. A tela só
+        # promete o que o envio consegue montar agora.
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from apps.scrapers.coupon_products import (
+            CACHE_HORAS, ids_cupons_prontos, preparar_cupom)
+
+        cupom = self._coupon()
+        self._product(self.user, evidencia={"promotion_text": "LIVRO20"})
+        preparar_cupom(cupom, self.user, force=True, permitir_rede=False)
+        self.assertEqual(ids_cupons_prontos(self.user, [cupom]), {cupom.id})
+
+        vencido = timezone.now() - timedelta(hours=CACHE_HORAS, minutes=1)
+        CupomPreparacao.objects.filter(cupom=cupom).update(verificado_em=vencido)
+        self.assertEqual(ids_cupons_prontos(self.user, [cupom]), set())
+
     def test_calculo_decimal_respeita_minimo_teto_e_arredondamento(self):
         from apps.scrapers.coupon_products import calcular_precos
 

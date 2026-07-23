@@ -6,7 +6,13 @@ from contextlib import contextmanager
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 caminho_django = os.path.dirname(os.path.dirname(os.path.dirname(caminho_atual)))
 sys.path.append(caminho_django)
-from apps.scrapers.afiliado import ids_com_link, registrar_falha, salvar_cache
+from apps.scrapers.afiliado import (
+    ids_com_link, registrar_aprovacao, registrar_falha, registrar_reprovacao,
+    salvar_cache,
+)
+from apps.scrapers.link_validacao import (
+    aprovado_por_relatorio, eh_pagina_produto, eh_vitrine_social, motivo_reprovacao,
+)
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
 from apps.scrapers.progresso import emitir_fase
 from apps.scrapers.session_paths import ml_auth_path as _auth_path
@@ -460,13 +466,11 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
             url_final = page.url
             relatorio["url_final"] = url_final
 
-            relatorio["is_pagina_produto"] = (
-                "produto.mercadolivre" in url_final
-                or "/p/MLB" in url_final
-                or bool(re.search(r"/MLB-?\d{6,}", url_final))
-            )
+            # Classificação do destino: fonte ÚNICA (link_validacao), a mesma usada
+            # pela aprovação na geração e pela conferência do envio.
+            relatorio["is_pagina_produto"] = eh_pagina_produto(url_final)
             # Landing de afiliado que destaca o produto (storefront /social/)
-            relatorio["is_landing_afiliado"] = "/social/" in url_final
+            relatorio["is_landing_afiliado"] = eh_vitrine_social(url_final)
 
             corpo = page.content().lower()
 
@@ -505,32 +509,87 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
                 except Exception as e:
                     relatorio["erros"].append(f"screenshot falhou: {e}")
 
-            inativo = any("inativo" in e or "inexistente" in e for e in relatorio["erros"])
-            nome_ok = relatorio["nome_confere"] is not False  # None (não checado) ou True
-            destino_valido = relatorio["is_pagina_produto"] or relatorio["is_landing_afiliado"]
-            desconto_real = relatorio["cupom_detectado"] or relatorio.get("preco_riscado")
-
-            if confiar_desconto:
-                # Ofertas: desconto já confirmado na raspagem (de/por). Basta afiliado
-                # válido (produto OU vitrine /social/), produto certo e ativo.
-                relatorio["ok"] = destino_valido and nome_ok and not inativo
-            else:
-                # Cupom: exige confirmar o desconto NA página do produto (não /social/).
-                relatorio["ok"] = (
-                    relatorio["is_pagina_produto"]
-                    and bool(relatorio["preco_visivel"])
-                    and nome_ok
-                    and desconto_real
-                    and not inativo
+            # Decisão ÚNICA de aprovação (link_validacao.aprovado_por_relatorio):
+            # a MESMA regra aplicada na aprovação (geração) e no envio.
+            relatorio["ok"] = aprovado_por_relatorio(relatorio, confiar_desconto)
+            if (not confiar_desconto and relatorio["is_landing_afiliado"]
+                    and not relatorio["is_pagina_produto"]):
+                relatorio["erros"].append(
+                    "Caiu na vitrine /social/ (afiliado ok, mas não dá pra confirmar o cupom do item)."
                 )
-                if relatorio["is_landing_afiliado"] and not relatorio["is_pagina_produto"]:
-                    relatorio["erros"].append(
-                        "Caiu na vitrine /social/ (afiliado ok, mas não dá pra confirmar o cupom do item)."
-                    )
         except Exception as e:
             relatorio["erros"].append(f"Falha ao abrir link: {e}")
 
     return relatorio
+
+
+def _confiar_desconto(produto) -> bool:
+    """Ofertas/buscas têm de/por confirmado na raspagem; cupons precisam da PDP."""
+    return getattr(produto, "origem", "cupom") in ("oferta", "busca")
+
+
+def verificar_e_aprovar(usuario, produto, link_afiliado, url_isca="") -> str:
+    """Roda a verificação de DESTINO e PERSISTE o veredito. Fonte única de aprovação.
+
+    Retorna 'aprovado' | 'reprovado' | 'transitorio'. Só 'aprovado' torna o item
+    enviável (verificado_ok=True + url_canonica). Uma falha de rede é transitória:
+    NÃO reprova o link (não some da tela por causa de um erro passageiro) — fica
+    verificado_ok=None para a próxima passada tentar de novo.
+    """
+    if not link_afiliado:
+        return "transitorio"
+    confiar = _confiar_desconto(produto)
+    relatorio = verificar_link_afiliado(
+        link_afiliado, nome_esperado=getattr(produto, "nome", None),
+        confiar_desconto=confiar, usuario=usuario)
+    if relatorio.get("ok"):
+        registrar_aprovacao(usuario, produto, link_afiliado, url_canonica=link_afiliado)
+        return "aprovado"
+    # Não abriu o link (rede/timeout) => transitório: mantém o veredito pendente.
+    if any("Falha ao abrir link" in str(e) for e in relatorio.get("erros", [])):
+        return "transitorio"
+    registrar_reprovacao(usuario, produto, motivo_reprovacao(relatorio, confiar))
+    return "reprovado"
+
+
+def verificar_links_pendentes(usuario, limite=20) -> dict:
+    """Verifica o destino dos links gerados mas ainda sem veredito (verificado_ok
+    IS NULL) e persiste o resultado. É o passo que torna um link enviável ANTES de
+    a promoção aparecer na tela de envio — antes disto, o veredito só era calculado
+    no clique de enviar (a inconsistência que este módulo corrige).
+    """
+    if usuario is None:
+        return {"aprovados": 0, "reprovados": 0, "transitorios": 0}
+    from apps.scrapers.models import LinkAfiliadoUsuario
+
+    linhas = list(
+        LinkAfiliadoUsuario.objects
+        .filter(usuario=usuario, verificado_ok__isnull=True)
+        .exclude(link_afiliado="")
+        .select_related("produto")
+        .order_by("-ultima_tentativa", "-id")[:limite]
+    )
+    aprovados = reprovados = transitorios = 0
+    with _orm_permitido_no_playwright():
+        for linha in linhas:
+            try:
+                r = verificar_e_aprovar(
+                    usuario, linha.produto, linha.link_afiliado, linha.url_isca)
+            except Exception as e:
+                logger.warning("Verificação de destino falhou p/ produto %s: %s",
+                               getattr(linha.produto, "id", None), e)
+                transitorios += 1
+                continue
+            if r == "aprovado":
+                aprovados += 1
+            elif r == "reprovado":
+                reprovados += 1
+            else:
+                transitorios += 1
+    logger.info("Verificação de destino ML p/ %s: %s aprovado(s), %s reprovado(s), "
+                "%s transitório(s)", usuario, aprovados, reprovados, transitorios)
+    return {"aprovados": aprovados, "reprovados": reprovados,
+            "transitorios": transitorios}
 
 
 def produto_vencedor_do_cupom(campanha_id: str):
@@ -607,6 +666,11 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
             return {
                 "link_afiliado": cacheado.link_afiliado,
                 "afiliado_ok": bool(cacheado.afiliado_ok),
+                # Veredito persistido (fonte única): o envio confia nele e usa a
+                # url_canonica em vez de reconferir com uma regra divergente.
+                "verificado_ok": cacheado.verificado_ok,
+                "url_canonica": cacheado.url_canonica or cacheado.link_afiliado,
+                "verificacao_motivo": cacheado.verificacao_motivo,
                 "produto_nome": getattr(produto, "nome", ""),
                 "preco_vitrine": getattr(produto, "preco_sem_desconto", 0),
                 "preco_com_cupom": getattr(produto, "preco_com_cupom", 0),

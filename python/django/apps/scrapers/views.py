@@ -1300,6 +1300,8 @@ def enviar_produto_stream(request):
             print(f"[ERRO] {r.get('motivo')}")
             if r.get("precisa_login_ml"):
                 print("__ML_LOGIN__")  # a UI troca por um botão "Reconectar Mercado Livre"
+            elif r.get("precisa_login_wa"):
+                print("__WA_LOGIN__")  # a UI troca por "Reconectar WhatsApp"
 
     return _sse_runner(_job)
 
@@ -1344,6 +1346,10 @@ def enviar_cupom_stream(request):
             print(f"__SENT__ OK Cupom enviado (via {resultado.get('via', canal)}).")
         else:
             print(f"[ERRO] {resultado.get('motivo') or 'falha ao enviar o cupom'}")
+            if resultado.get("precisa_login_ml"):
+                print("__ML_LOGIN__")  # a UI troca por "Reconectar Mercado Livre"
+            elif resultado.get("precisa_login_wa"):
+                print("__WA_LOGIN__")  # a UI troca por "Reconectar WhatsApp"
 
     return _sse_runner(_job)
 

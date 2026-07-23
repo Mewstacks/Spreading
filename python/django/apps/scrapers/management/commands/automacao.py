@@ -292,6 +292,15 @@ def _rodar_links(lote=40):
         falhas += f
         logger.info("Links ML p/ %s: %s gerado(s), %s falha(s) de %s pendente(s)",
                     user, g, f, len(pendentes))
+        # Aprova o DESTINO dos links recém-gerados ANTES de a oferta poder aparecer
+        # como enviável. Sem este passo, o veredito só era calculado no clique de
+        # enviar — e um link que caía na vitrine /social/ passava por enviável e só
+        # reprovava depois. Limitado ao lote para não estourar o tick.
+        try:
+            from apps.scrapers.scraper_mercadolivre.link import verificar_links_pendentes
+            verificar_links_pendentes(user, limite=lote)
+        except Exception as e:
+            logger.warning("Verificação de destino ML falhou para %s: %s", user, e)
     return {"gerados": gerados, "falhas": falhas, "pulados": pulados}
 
 

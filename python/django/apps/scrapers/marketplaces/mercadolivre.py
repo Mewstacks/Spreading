@@ -142,11 +142,29 @@ class MercadoLivre(Marketplace):
         situacao = situacao_dos_links(usuario, produtos)
         for p in produtos:
             info = situacao.get(p.id) or {}
-            # O link_afiliado do Produto é o fallback legado (pré-multi-tenant).
-            p.afiliado_pronto = bool(info.get("link_afiliado")
-                                     or getattr(p, "link_afiliado", ""))
+            tem_link_usuario = bool(info.get("link_afiliado"))
+            verificado = info.get("verificado_ok") if info else None
+            # O link_afiliado do Produto é o fallback legado (pré-multi-tenant): não
+            # há linha por usuário, então mantém o comportamento antigo (enviável).
+            legado = (not info) and bool(getattr(p, "link_afiliado", ""))
+
+            # ENVIÁVEL só quando o destino já foi aprovado (verificado_ok is True).
+            # Ter um link cacheado NÃO basta: era exatamente isso que deixava um link
+            # que caía na vitrine /social/ aparecer como enviável e só reprovar no
+            # clique de enviar.
+            p.afiliado_pronto = bool(
+                (tem_link_usuario and verificado is True) or legado)
+
             if p.afiliado_pronto:
                 p.afiliado_estado, p.afiliado_motivo = "pronto", ""
+            elif tem_link_usuario and verificado is False:
+                # Link existe mas o destino foi reprovado: mostra o motivo técnico
+                # e NÃO oferece envio.
+                p.afiliado_estado = "link_invalido"
+                p.afiliado_motivo = info.get("verificacao_motivo") or info.get("ultimo_erro") or ""
+            elif tem_link_usuario:
+                # Link gerado, aguardando a conferência de destino (verificado_ok=None).
+                p.afiliado_estado, p.afiliado_motivo = "verificando", ""
             elif info:
                 p.afiliado_estado = info["estado"]
                 p.afiliado_motivo = info["ultimo_erro"]
