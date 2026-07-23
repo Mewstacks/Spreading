@@ -1245,7 +1245,9 @@ class TopPromocoesFilterTests(TestCase):
 
     @patch("apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
            return_value=12)
-    def test_flash_scrape_marks_mercado_livre_source_healthy(self, _mapear):
+    @patch("apps.scrapers.coupon_products.preparar_lote",
+           return_value={"processados": 0, "prontos": 0})
+    def test_flash_scrape_marks_mercado_livre_source_healthy(self, _preparo, _mapear):
         source = FonteIngestao.objects.get(slug="mercadolivre-web")
         source.status = "degraded"
         source.falhas_consecutivas = 2
@@ -1557,14 +1559,16 @@ class EnviarCupomColagemTests(TestCase):
             link_produto="https://example.com/p", imagem_url="https://img/x.jpg",
         )
 
-    @patch("apps.scrapers.colagem.montar_colagem_b64", return_value=("b64", "image/jpeg"))
+    @patch("apps.scrapers.colagem.montar_colagem_itens")
     @patch("apps.scrapers.ofertas._preparar_itens_cupom")
     @patch("apps.scrapers.senders.registry.get_sender")
     def test_caminho_colagem_retorna_link_do_item_sem_unbound(
-        self, get_sender, prep, _colagem
+        self, get_sender, prep, colagem
     ):
         from apps.scrapers.senders.base import WhatsAppMarkup
-        prep.return_value = [{"produto": self.produto, "link": "https://meli.la/abc"}]
+        itens = [{"produto": self.produto, "link": "https://meli.la/abc"}]
+        prep.return_value = itens
+        colagem.return_value = ("b64", "image/jpeg", itens)
         sender = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
         sender.enviar_oferta.return_value = {"sucesso": True, "via": "test"}
         get_sender.return_value = sender
@@ -1581,9 +1585,9 @@ class EnviarCupomColagemTests(TestCase):
         self.assertEqual(
             Publicacao.objects.get(cupom_normalizado=self.cupom).status, "enviado")
 
-    def test_categoria_escolhida_agrupa_ofertas_daquela_categoria(self):
-        # Cupom de marca ("Elseve") não classifica sozinho — sem categoria = sem
-        # colagem. A categoria escolhida no envio resolve, agrupando ofertas reais.
+    def test_categoria_escolhida_nao_prova_aplicabilidade(self):
+        # Nem mesmo uma categoria escolhida pode substituir a evidência de que o
+        # código é aceito pelo produto.
         from apps.scrapers.ofertas import produtos_do_cupom
         Produto.objects.create(
             marketplace="mercadolivre", nome="Shampoo X", origem="oferta",
@@ -1595,9 +1599,8 @@ class EnviarCupomColagemTests(TestCase):
             marketplace="mercadolivre", titulo="25% OFF em Elseve", estado="ativo")
 
         self.assertEqual(produtos_do_cupom(marca), [])
-        itens = produtos_do_cupom(marca, macro="Beleza e Cuidados Pessoais")
         self.assertEqual(
-            [p.macro_categoria for p in itens], ["Beleza e Cuidados Pessoais"])
+            produtos_do_cupom(marca, macro="Beleza e Cuidados Pessoais"), [])
 
 
 class RankingAndCooldownTests(TestCase):
@@ -1838,7 +1841,8 @@ class RaspagemDeCuponsTests(TestCase):
     campanha_id sem Cupom no banco: cupom faltando também virava link pendente.
     """
 
-    def _patches(self, ofertas=10, cupons_codigo=3, cupons_campanha=5, campanha_erro=None):
+    def _patches(self, ofertas=10, cupons_codigo=3, cupons_campanha=5,
+                 cupons_oficiais=4, campanha_erro=None):
         return (
             patch("apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
                   return_value=ofertas),
@@ -1848,18 +1852,25 @@ class RaspagemDeCuponsTests(TestCase):
                   side_effect=campanha_erro) if campanha_erro else
             patch("apps.scrapers.scraper_mercadolivre.scraper.mapear_cupons",
                   return_value=cupons_campanha),
+            patch("apps.scrapers.sources.run_source",
+                  return_value={"status": "ok", "offers": [], "coupons": []}),
+            patch("apps.scrapers.sources.persistence.persist_items",
+                  return_value={"offers": 0, "coupons": cupons_oficiais}),
+            patch("apps.scrapers.coupon_products.preparar_lote",
+                  return_value={"processados": cupons_oficiais,
+                                "prontos": cupons_oficiais}),
         )
 
     def test_scrape_all_raspa_os_cupons_de_campanha(self):
         from apps.scrapers.models import ExecucaoIngestao
 
-        p1, p2, p3 = self._patches()
-        with p1, p2, p3 as campanha:
+        p1, p2, p3, p4, p5, p6 = self._patches()
+        with p1, p2, p3 as campanha, p4, p5, p6:
             get_marketplace("mercadolivre").scrape_all()
 
         campanha.assert_called_once()
         run = ExecucaoIngestao.objects.latest("id")
-        self.assertEqual(run.total_cupons, 8)      # 3 de código + 5 de campanha
+        self.assertEqual(run.total_cupons, 4)      # somente códigos públicos oficiais
         self.assertEqual(run.status, "ok")
 
     def test_falha_nos_cupons_de_campanha_nao_derruba_ofertas(self):
@@ -1867,22 +1878,24 @@ class RaspagemDeCuponsTests(TestCase):
         mais frágil daqui. Se ele cair, ofertas e códigos ainda têm de entrar."""
         from apps.scrapers.models import ExecucaoIngestao
 
-        p1, p2, p3 = self._patches(campanha_erro=RuntimeError("NORDIC sumiu"))
-        with p1, p2, p3:
+        p1, p2, p3, p4, p5, p6 = self._patches(
+            campanha_erro=RuntimeError("NORDIC sumiu"))
+        with p1, p2, p3, p4, p5, p6:
             get_marketplace("mercadolivre").scrape_all()
 
         run = ExecucaoIngestao.objects.latest("id")
         self.assertEqual(run.status, "ok")
         self.assertEqual(run.total_ofertas, 10)
-        self.assertEqual(run.total_cupons, 3)      # só os de código
+        self.assertEqual(run.total_cupons, 4)
         self.assertTrue(EventoOperacional.objects.filter(
             evento="cupons_campanha_erro", level="warning").exists())
 
     def test_ofertas_sem_nenhum_cupom_vira_alerta(self):
         """800 ofertas e zero cupons era reportado como sucesso: o único sinal era o
         total zerado, e as ofertas sozinhas o mantinham positivo."""
-        p1, p2, p3 = self._patches(ofertas=800, cupons_codigo=0, cupons_campanha=0)
-        with p1, p2, p3:
+        p1, p2, p3, p4, p5, p6 = self._patches(
+            ofertas=800, cupons_codigo=0, cupons_campanha=0, cupons_oficiais=0)
+        with p1, p2, p3, p4, p5, p6:
             get_marketplace("mercadolivre").scrape_all()
 
         evento = EventoOperacional.objects.get(evento="cupons_vazios")
@@ -1890,8 +1903,8 @@ class RaspagemDeCuponsTests(TestCase):
         self.assertEqual(evento.contexto["ofertas"], 800)
 
     def test_coleta_normal_nao_alerta(self):
-        p1, p2, p3 = self._patches()
-        with p1, p2, p3:
+        p1, p2, p3, p4, p5, p6 = self._patches()
+        with p1, p2, p3, p4, p5, p6:
             get_marketplace("mercadolivre").scrape_all()
 
         self.assertFalse(EventoOperacional.objects.filter(evento="cupons_vazios").exists())
@@ -2391,6 +2404,33 @@ class AfiliacaoPorMarketplaceTests(TestCase):
             )
         ]
         self.assertEqual(len(consultas_dos_badges), 1, consultas_dos_badges)
+
+    def test_paginacao_inclui_afiliados_fora_dos_200_maiores_descontos(self):
+        # Regressão: a view cortava os 200 maiores descontos antes de filtrar quem
+        # tinha link. Um afiliado com desconto menor nunca aparecia em página alguma.
+        Produto.objects.bulk_create([
+            Produto(
+                marketplace="mercadolivre", nome=f"Sem link {i}", origem="oferta",
+                preco_sem_desconto=100, preco_com_cupom=1,
+                link_produto=f"https://example.com/sem-link-{i}",
+            )
+            for i in range(205)
+        ])
+        pronto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Afiliado fora do corte", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=90,
+            link_produto="https://example.com/afiliado-fora-do-corte",
+        )
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=pronto, estado="pronto",
+            link_afiliado="https://meli.la/fora-do-corte", afiliado_ok=True,
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("scraper-top"), {"loja": "mercadolivre"})
+
+        self.assertEqual(response.context["page_obj"].paginator.count, 1)
+        self.assertEqual([p.id for p in response.context["produtos"]], [pronto.id])
 
     def test_tela_promocoes_marca_item_amazon_como_pronto_sem_gravar_no_banco(self):
         produto = self._produto_amazon()
@@ -3978,6 +4018,27 @@ class EnvioCupomTests(TestCase):
             regras={"tipo_desconto": "porcentagem", "valor_desconto": 20,
                     "modo_resgate": "codigo", "is_mar_aberto": True},
             link="https://www.mercadolivre.com.br/cupons", estado="ativo")
+        self.produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Produto comprovado", origem="cupom",
+            preco_sem_desconto=150, preco_com_cupom=100,
+            link_produto="https://produto.mercadolivre.com.br/MLB-123-produto",
+            link_afiliado="https://meli.la/produto", imagem_url="https://img.example/p.jpg",
+        )
+        from apps.scrapers.coupon_products import atualizar_chave_cupom
+        from apps.scrapers.models import CupomPreparacao, ProdutoCupom
+        chave = atualizar_chave_cupom(self.cupom)
+        ProdutoCupom.objects.create(
+            produto=self.produto, cupom=self.cupom, status="confirmado",
+            preco_original=150, preco_atual=100, preco_final=80,
+            verificado_em=timezone.now())
+        CupomPreparacao.objects.create(
+            cupom=self.cupom, usuario=None, status="pronto", produtos_chave=chave,
+            verificado_em=timezone.now())
+        self._colagem_patcher = patch("apps.scrapers.colagem.montar_colagem_itens")
+        self.colagem = self._colagem_patcher.start()
+        self.colagem.side_effect = lambda itens, **_kwargs: (
+            "b64", "image/jpeg", list(itens))
+        self.addCleanup(self._colagem_patcher.stop)
 
     def _sender(self, resultado):
         from apps.scrapers.senders.base import WhatsAppMarkup
@@ -4017,10 +4078,14 @@ class EnvioCupomTests(TestCase):
         self.assertTrue(segundo["duplicado"])
         self.assertEqual(Publicacao.objects.get(usuario=self.user).status, "incerto")
 
-    @patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom",
-           return_value={"sucesso": False, "motivo": "sem link"})
-    def test_falha_de_afiliacao_fecha_publicacao_e_permite_retentativa(self, _link):
+    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
+    def test_produto_sem_link_afiliado_fecha_publicacao_e_permite_retentativa(
+        self, marketplace
+    ):
         from apps.scrapers.ofertas import enviar_cupom
+        self.produto.link_afiliado = ""
+        self.produto.save(update_fields=["link_afiliado"])
+        marketplace.return_value.build_affiliate_link.return_value = {}
         sender = self._sender({"sucesso": True})
         with patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
             primeiro = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
@@ -4142,7 +4207,7 @@ class EndpointsEnvioPostTests(TransactionTestCase):
         self.assertIn("Cupom não encontrado", corpo)
         self.assertNotIn("DROP TABLE", corpo)
 
-    def test_html_escapa_campos_e_oculta_token_tecnico(self):
+    def test_cupom_sem_codigo_publico_e_produto_pronto_fica_oculto(self):
         fonte = FonteIngestao.objects.create(
             slug="xss-coupon-source", marketplace="mercadolivre", nome="Fonte")
         token = "CATVgkl4DHYJgqaPQXEQ5VMES_mNsb7UfYtN-SEGREDO=="
@@ -4156,7 +4221,7 @@ class EndpointsEnvioPostTests(TransactionTestCase):
         corpo = response.content.decode()
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("&lt;script&gt;", corpo)
+        self.assertNotIn("&lt;script&gt;", corpo)
         self.assertNotIn('<script>alert("xss")</script>', corpo)
         self.assertNotIn(token, corpo)
-        self.assertIn("Ativar no link", corpo)
+        self.assertIn("Nenhum cupom ativo encontrado", corpo)

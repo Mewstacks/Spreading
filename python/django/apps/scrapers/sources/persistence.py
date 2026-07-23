@@ -20,7 +20,7 @@ def persist_items(items, owner=None, integration=None):
             if integration and advertiser_id:
                 programa = ProgramaAfiliado.objects.filter(
                     integracao=integration, external_id=advertiser_id).first()
-            CupomNormalizado.objects.update_or_create(
+            cupom_obj, _ = CupomNormalizado.objects.update_or_create(
                 fonte=fonte, external_id=item.external_id, owner=owner,
                 defaults={"marketplace": item.marketplace, "titulo": item.title,
                           "codigo": item.coupon_code, "regras": item.coupon_rules,
@@ -35,22 +35,31 @@ def persist_items(items, owner=None, integration=None):
                           "estado": "ativo", "confianca": "media",
                           "evidencia": item.evidence},
             )
+            from apps.scrapers.coupon_products import atualizar_chave_cupom
+            atualizar_chave_cupom(cupom_obj)
             coupons += 1
             continue
         lookup = {"marketplace": item.marketplace, "owner": owner}
         lookup["asin" if item.marketplace == "amazon" else "link_produto"] = (
             item.external_id if item.marketplace == "amazon" else item.canonical_url)
+        defaults = {
+            "origem": "oferta", "nome": item.title,
+            "preco_sem_desconto": item.reference_price,
+            "preco_com_cupom": item.current_price,
+            "preco_fonte": item.reference_price, "preco_efetivo": item.current_price,
+            "link_produto": item.canonical_url, "fonte": item.source,
+            "estado": "ativo", "confianca": "media", "evidencia": item.evidence,
+            "valido_ate": item.valid_until, "falha_verificacao": "",
+            "falhas_consecutivas": 0, "categoria": "DESCONHECIDO",
+            "macro_categoria": classificar_oferta_por_nome(item.title),
+        }
+        # Fontes legadas nem sempre fornecem imagem. Ausência não deve apagar uma
+        # foto válida já observada por outra coleta do mesmo produto.
+        if item.image_url:
+            defaults["imagem_url"] = item.image_url[:1000]
         Produto.objects.update_or_create(
             **lookup,
-            defaults={"origem": "oferta", "nome": item.title,
-                      "preco_sem_desconto": item.reference_price,
-                      "preco_com_cupom": item.current_price,
-                      "preco_fonte": item.reference_price, "preco_efetivo": item.current_price,
-                      "link_produto": item.canonical_url, "fonte": item.source,
-                      "estado": "ativo", "confianca": "media", "evidencia": item.evidence,
-                      "valido_ate": item.valid_until, "falha_verificacao": "",
-                      "falhas_consecutivas": 0, "categoria": "DESCONHECIDO",
-                      "macro_categoria": classificar_oferta_por_nome(item.title)},
+            defaults=defaults,
         )
         offers += 1
     return {"offers": offers, "coupons": coupons, "at": timezone.now()}

@@ -9,8 +9,8 @@ from django.utils import timezone
 
 from apps.scrapers.awin import AwinError, listar_contas, sincronizar_integracao
 from apps.scrapers.models import (
-    ConfiguracaoEnvio, CupomNormalizado, FonteIngestao, IntegracaoAfiliado,
-    ProgramaAfiliado,
+    ConfiguracaoEnvio, CupomNormalizado, CupomPreparacao, FonteIngestao,
+    IntegracaoAfiliado, Produto, ProdutoCupom, ProgramaAfiliado,
 )
 
 
@@ -42,6 +42,28 @@ class AwinCatalogTests(TestCase):
             integracao=self.integration, external_id="77", nome="Loja Boa",
             dominio="loja.example", dominios_validos=["loja.example"],
             status_vinculo="joined", link_status="online", comissao_max=2)
+
+    def _marcar_pronto(self, cupom):
+        """Fixture fiel ao contrato: produto Awin comprovado e preparo por dono."""
+        from apps.scrapers.coupon_products import atualizar_chave_cupom
+        produto = Produto.objects.create(
+            owner=cupom.owner, marketplace="awin", asin=f"AWIN-{cupom.pk}",
+            nome=f"Produto {cupom.codigo}", origem="awin-feed", estado="ativo",
+            preco_sem_desconto=100, preco_com_cupom=80,
+            link_produto=f"https://www.awin1.com/produto/{cupom.pk}",
+            link_afiliado=f"https://www.awin1.com/produto/{cupom.pk}",
+            imagem_url=f"https://img.example/{cupom.pk}.jpg",
+            evidencia={"promotional_text": cupom.codigo},
+        )
+        ProdutoCupom.objects.create(
+            produto=produto, cupom=cupom, status="confirmado",
+            preco_original=100, preco_atual=80, preco_final=60,
+            verificado_em=timezone.now())
+        chave = atualizar_chave_cupom(cupom)
+        CupomPreparacao.objects.create(
+            cupom=cupom, usuario=cupom.owner, status="pronto",
+            produtos_chave=chave, verificado_em=timezone.now())
+        return produto
 
     @patch("apps.scrapers.awin.requests.request")
     def test_token_lists_publishers_and_is_encrypted_at_rest(self, request):
@@ -151,7 +173,7 @@ class AwinCatalogTests(TestCase):
         self.assertRedirects(response_unsafe, reverse("scraper-top"))
         self.assertFalse(CupomNormalizado.objects.filter(titulo="SSRF").exists())
 
-    def test_secret_is_never_rendered_and_coupon_title_is_escaped(self):
+    def test_secret_is_never_rendered_and_coupon_without_code_is_hidden(self):
         CupomNormalizado.objects.create(
             owner=self.user, fonte=self.source, external_id="xss", marketplace="awin",
             titulo='<script>alert("x")</script>', link="https://www.awin1.com/xss",
@@ -161,7 +183,7 @@ class AwinCatalogTests(TestCase):
         self.assertNotContains(account, "secret-token-that-is-long-enough")
         page = self.client.get(reverse("scraper-top") + "?tipo=cupom")
         self.assertNotContains(page, '<script>alert("x")</script>')
-        self.assertContains(page, "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;")
+        self.assertNotContains(page, "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;")
 
     def test_mutating_routes_require_login_and_csrf(self):
         anonymous = Client()
@@ -190,6 +212,8 @@ class AwinCatalogTests(TestCase):
             codigo="BEST40", link="https://www.awin1.com/strong", restrito=True,
             regras={"tipo_desconto": "porcentagem", "valor_desconto": 40,
                     "modo_resgate": "codigo", "escopo": "Somente no app"})
+        self._marcar_pronto(weak)
+        self._marcar_pronto(strong)
         config = ConfiguracaoEnvio.objects.create(
             owner=self.user, grupo_id="group", min_desconto_percent=0,
             incluir_restritos=True, incluir_sem_desconto=True)
@@ -208,6 +232,7 @@ class AwinCatalogTests(TestCase):
             codigo="ROUTE50", link="https://www.awin1.com/route",
             regras={"tipo_desconto": "porcentagem", "valor_desconto": 50,
                     "modo_resgate": "codigo"})
+        self._marcar_pronto(coupon)
         config = ConfiguracaoEnvio.objects.create(
             owner=self.user, grupo_id="group", min_desconto_percent=0)
         send_coupon.return_value = {"sucesso": True}

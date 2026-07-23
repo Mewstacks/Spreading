@@ -211,6 +211,10 @@ class CupomNormalizado(models.Model):
     estado = models.CharField(max_length=20, default="ativo", db_index=True)
     confianca = models.CharField(max_length=20, default="baixa", db_index=True)
     evidencia = models.JSONField(default=dict, blank=True)
+    # Fingerprint apenas dos dados que mudam a aplicabilidade/preco dos produtos.
+    # A preparacao guarda a mesma chave; divergencia invalida o cache sem escrever
+    # durante o GET da tela de cupons.
+    produtos_chave = models.CharField(max_length=64, blank=True, default="", db_index=True)
     primeira_observacao = models.DateTimeField(auto_now_add=True)
     ultima_observacao = models.DateTimeField(auto_now=True, db_index=True)
 
@@ -238,9 +242,43 @@ class ProdutoCupom(models.Model):
     status = models.CharField(max_length=20, choices=STATUS, default="provavel")
     verificado_em = models.DateTimeField(null=True, blank=True)
     evidencia = models.JSONField(default=dict, blank=True)
+    # Snapshot monetario especifico deste cupom. O mesmo Produto pode participar de
+    # campanhas diferentes; por isso o preco final nao pode morar apenas em Produto.
+    preco_original = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    preco_atual = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    preco_final = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
 
     class Meta:
         unique_together = ("produto", "cupom")
+
+
+class CupomPreparacao(models.Model):
+    STATUS = [
+        ("pendente", "Pendente"), ("pronto", "Pronto"),
+        ("vazio", "Sem produtos"), ("erro", "Erro"),
+    ]
+    cupom = models.ForeignKey(CupomNormalizado, on_delete=models.CASCADE,
+                              related_name="preparacoes")
+    # null = preparacao compartilhada (catalogo publico do Mercado Livre).
+    # Demais lojas e cupons privados sao preparados no contexto do usuario.
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                null=True, blank=True, related_name="cupons_preparados")
+    status = models.CharField(max_length=20, choices=STATUS, default="pendente",
+                              db_index=True)
+    produtos_chave = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    verificado_em = models.DateTimeField(null=True, blank=True, db_index=True)
+    proxima_tentativa = models.DateTimeField(null=True, blank=True, db_index=True)
+    erro = models.CharField(max_length=500, blank=True, default="")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["cupom"], condition=models.Q(usuario__isnull=True),
+                name="uniq_preparo_cupom_compartilhado"),
+            models.UniqueConstraint(
+                fields=["cupom", "usuario"], condition=models.Q(usuario__isnull=False),
+                name="uniq_preparo_cupom_usuario"),
+        ]
 
 class PrecoHistorico(models.Model):
     """Uma observação de preço por raspagem — base p/ detectar QUEDA REAL e derrubar

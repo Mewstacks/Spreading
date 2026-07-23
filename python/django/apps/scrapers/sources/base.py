@@ -13,6 +13,7 @@ class IngestedItem:
     title: str
     current_price: float = 0
     reference_price: float = 0
+    image_url: str = ""
     coupon_code: str = ""
     coupon_rules: dict[str, Any] = field(default_factory=dict)
     content_type: str = "voucher"

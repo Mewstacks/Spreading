@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import requests
 from datetime import timedelta
 from django.conf import settings
@@ -486,11 +487,8 @@ def produtos_do_cupom(cupom, limite=9, macro=None):
     (1) Ligação real cupom→produto quando existir — vínculo `ProdutoCupom`
         confirmado > campanha (`external_id` "campanha:X") > cupom de site inteiro
         (`is_mar_aberto`). Hoje isso é raro em produção (produto não guarda campanha).
-    (2) Fallback (decisão de produto): sem ligação, agrupa as melhores OFERTAS da
-        categoria — cada uma com o próprio De/por e link verdadeiros; o cupom define
-        só o tema. A categoria vem do `macro` escolhido no envio (prioridade) ou,
-        na falta, do palpite do título (`_macro_do_cupom`). Sem categoria válida =>
-        vazio => texto puro.
+    Nao ha fallback por categoria: proximidade tematica nao prova que o codigo sera
+    aceito no checkout.
 
     Só entra item com foto (a colagem precisa dela).
     """
@@ -527,13 +525,7 @@ def produtos_do_cupom(cupom, limite=9, macro=None):
     if itens:
         return itens
 
-    # (2) Fallback por categoria. `macro` explícito (escolha no envio) tem prioridade
-    #     sobre o palpite do título — resolve os cupons de marca/loja que o título
-    #     não classifica (ex.: "Elseve", "Anadi").
-    macro = (macro or "").strip() or _macro_do_cupom(cupom)
-    if macro not in _EMOJI_MACRO:
-        return []
-    return list(_por_desconto(ativos.filter(origem="oferta", macro_categoria=macro))[:limite])
+    return []
 
 
 def _preparar_itens_cupom(cupom, usuario, limite=9, macro=None):
@@ -550,14 +542,17 @@ def _preparar_itens_cupom(cupom, usuario, limite=9, macro=None):
     from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
     from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
 
-    produtos = produtos_do_cupom(cupom, limite=limite * 2, macro=macro)
-    if not produtos:
+    from apps.scrapers.coupon_products import preparar_cupom
+    relacoes = preparar_cupom(cupom, usuario=usuario)
+    if not relacoes:
         return []
+    produtos = [r.produto for r in relacoes]
     mkt = str(getattr(cupom, "marketplace", "mercadolivre") or "mercadolivre").lower()
     mp = get_marketplace(mkt)
     situacao = situacao_dos_links(usuario, produtos)
 
     itens, sessao_caiu = [], False
+    relacao_por_produto = {r.produto_id: r for r in relacoes}
     for p in produtos:
         if len(itens) >= limite:
             break
@@ -582,7 +577,8 @@ def _preparar_itens_cupom(cupom, usuario, limite=9, macro=None):
                 except Exception:
                     pass
         if link:
-            itens.append({"produto": p, "link": link})
+            itens.append({"produto": p, "link": link,
+                          "relacao": relacao_por_produto[p.id]})
     return itens
 
 
@@ -610,15 +606,13 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
     linhas = [m.bold(f"Cupom ⚡️ {esc(loja)}"), ""]
     for it in itens:
         p = it["produto"]
-        linhas.append(f"📖 {esc(p.nome.strip())}")
-        por = _preco_br(p.preco_com_cupom)
-        de_val = p.preco_sem_desconto or 0
-        pct = ((de_val - p.preco_com_cupom) / de_val * 100) if de_val else 0
-        if 0 < pct < 90 and de_val > p.preco_com_cupom:
-            de = _preco_br(de_val)
-            linhas.append(f"🛒 De R${de} por R${por}")
-        else:
-            linhas.append(f"🛒 R${por}")
+        relacao = it.get("relacao")
+        de_val = getattr(relacao, "preco_original", None) or p.preco_sem_desconto
+        por_val = getattr(relacao, "preco_final", None) or p.preco_com_cupom
+        linhas.append(f"{_emoji_produto(p)} {esc(_nome_principal_produto(p.nome))}")
+        de = _preco_br(de_val)
+        por = _preco_br(por_val)
+        linhas.append(f"🛒 De R${de} por R${por}")
         linhas.append(f"➡️ {esc(it['link'])}")
         linhas.append("")
 
@@ -816,35 +810,29 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         return {"sucesso": False, "motivo": str(motivo), **extra}
 
     try:
-        # Caminho preferido (imagem-modelo): produtos do cupom viram uma colagem +
-        # lista com De/por e link próprio por item. Sem produtos afiliáveis (ou com
-        # foto custom escolhida no envio), cai no texto puro de sempre.
-        itens_cupom = ([] if imagem_b64_custom
-                       else _preparar_itens_cupom(cupom, usuario))
+        # Cupom publicavel exige produtos comprovados. Nao existe mais fallback de
+        # texto puro nem foto manual que burle a associacao cupom-produto.
+        itens_cupom = _preparar_itens_cupom(cupom, usuario)
         img_kwargs = {}
         if itens_cupom:
+            # Telegram limita legendas de foto a 1024 caracteres. Como a regra e
+            # "ate 9", remove os itens de menor prioridade ate a mensagem caber.
+            if canal == "telegram":
+                while len(itens_cupom) > 1 and len(montar_mensagem_cupom_produtos(
+                        cupom, itens_cupom, markup=sender.markup)) > 1024:
+                    itens_cupom.pop()
+            from apps.scrapers.colagem import montar_colagem_itens
+            colagem_b64, colagem_mime, itens_cupom = montar_colagem_itens(itens_cupom)
+            if not colagem_b64 or not itens_cupom:
+                return falhar("Nenhuma foto válida foi encontrada para os produtos do cupom.",
+                              classe="transitorio")
             mensagem = montar_mensagem_cupom_produtos(
                 cupom, itens_cupom, markup=sender.markup)
             link_registro = itens_cupom[0]["link"]
-            # Colagem só no transporte base64/WhatsApp; Telegram (url) segue a lista em texto.
-            if getattr(sender, "prefers_image", "") != "url":
-                from apps.scrapers.colagem import montar_colagem_b64
-                colagem_b64, colagem_mime = montar_colagem_b64(
-                    [it["produto"].imagem_url for it in itens_cupom])
-                if colagem_b64:
-                    img_kwargs = {"imagem_b64": colagem_b64, "mimetype": colagem_mime}
+            img_kwargs = {"imagem_b64": colagem_b64, "mimetype": colagem_mime}
         else:
-            afiliado = resolver_link_afiliado_cupom(cupom, usuario)
-            if not afiliado.get("sucesso"):
-                return falhar(afiliado.get("motivo") or "Link afiliado indisponível.",
-                              precisa_login_ml=afiliado.get("precisa_login_ml", False),
-                              classe="permanente")
-            mensagem = montar_mensagem_cupom(
-                cupom, markup=sender.markup, link_afiliado=afiliado["link"])
-            link_registro = afiliado["link"]
-            # Só o transporte base64/WhatsApp aceita a foto custom; Telegram segue texto.
-            if imagem_b64_custom and getattr(sender, "prefers_image", "") != "url":
-                img_kwargs = {"imagem_b64": imagem_b64_custom, "mimetype": "image/jpeg"}
+            return falhar("Cupom sem produtos comprovadamente aplicáveis, com foto e link afiliado.",
+                          classe="permanente")
         if not mensagem.strip():
             return falhar("Não foi possível montar uma mensagem válida.", classe="permanente")
         Publicacao.objects.filter(pk=publicacao.pk).update(
@@ -902,12 +890,31 @@ _EMOJI_MACRO = {
     "Alimentos e Bebidas": "🍫",
     "Saúde, Ortopedia e Equipamentos Médicos": "💊",
     "Papelaria, Escritório e Escola": "✏️",
+    "Livros, Mídia e Conteúdo": "📖",
 }
 
 
 def _emoji_produto(produto) -> str:
     macro = getattr(produto, "macro_categoria", "") or ""
     return _EMOJI_MACRO.get(macro, "🛍️")
+
+
+_RUIDO_NOME_PRODUTO = re.compile(
+    r"\b(?:frete\s+gr[aá]tis|envio\s+imediato|pronta\s+entrega|loja\s+oficial|"
+    r"produto\s+original|oferta|promo[cç][aã]o|imperd[ií]vel|mercado\s+livre)\b",
+    re.I,
+)
+
+
+def _nome_principal_produto(nome, limite=70) -> str:
+    """Limpa ruido comercial e corta em palavra, sem depender de IA externa."""
+    texto = re.sub(r"\s+", " ", str(nome or "")).strip(" -–—,;")
+    texto = _RUIDO_NOME_PRODUTO.sub("", texto)
+    texto = re.sub(r"\s{2,}", " ", texto).strip(" -–—,;")
+    if len(texto) <= limite:
+        return texto
+    cortado = texto[:limite + 1].rsplit(" ", 1)[0].rstrip(" -–—,;|/")
+    return cortado or texto[:limite]
 
 
 def _preco_br(valor) -> str:

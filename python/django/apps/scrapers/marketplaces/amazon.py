@@ -34,6 +34,12 @@ class Amazon(Marketplace):
             self._scrape_publico([p.user for p in fallback], termos=termos)
         elif not conectados:
             logger.info("Nenhum usuario com tag Amazon; pulando")
+        # Os cupons de ativação não fazem parte do schema OffersV2 da Creators API.
+        # A página oficial de Ofertas, porém, publica um filtro de cupons com ASIN,
+        # promoção e preço final. A coleta é única e o catálogo é copiado por usuário
+        # para que cada link continue usando a tag Associates correta.
+        if candidatos:
+            self._scrape_cupons_publicos([p.user for p in candidatos])
 
     def _scrape_usuario(self, usuario) -> bool:
         from apps.scrapers.models import ConfiguracaoEnvio
@@ -73,6 +79,23 @@ class Amazon(Marketplace):
         resultado = run_source("amazon-public-web", terms=termos)
         for usuario in usuarios:
             persist_items(resultado.get("offers", []), owner=usuario)
+
+    @staticmethod
+    def _scrape_cupons_publicos(usuarios):
+        from apps.scrapers.sources import run_source
+        from apps.scrapers.sources.persistence import persist_items
+
+        resultado = run_source("amazon-public-coupons")
+        itens = resultado.get("offers", []) + resultado.get("coupons", [])
+        if not itens:
+            return
+        for usuario in usuarios:
+            persist_items(itens, owner=usuario)
+        try:
+            from apps.scrapers.coupon_products import preparar_lote
+            preparar_lote(limite=max(8, len(resultado.get("coupons", []))))
+        except Exception:
+            logger.exception("Preparação dos cupons públicos Amazon falhou")
 
     @staticmethod
     def _marcar_elegibilidade(usuario, elegivel, msg):

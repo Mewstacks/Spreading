@@ -648,10 +648,12 @@ def cupom_manual_salvar(request, cupom_id=None):
             setattr(coupon, field, value)
         coupon.save()
     else:
-        CupomNormalizado.objects.create(
+        coupon = CupomNormalizado.objects.create(
             fonte=source, external_id=f"manual:{uuid.uuid4().hex}", **values)
+    from apps.scrapers.coupon_products import atualizar_chave_cupom
+    atualizar_chave_cupom(coupon)
     if state == "ativo":
-        messages.success(request, "Cupom privado salvo.")
+        messages.success(request, "Cupom salvo e enviado para validação automática de produtos.")
     return redirect("scraper-top")
 
 
@@ -1381,8 +1383,7 @@ def buscar_promocoes_stream(request):
     return _sse_runner(_job)
 
 
-# Itens por tela em Promoções (ofertas e cupons). O teto de 200 candidatos do
-# ranking (ver `candidatos` abaixo) limita a lista de ofertas a ~10 páginas.
+# Itens por tela em Promoções (ofertas e cupons).
 POR_PAGINA = 20
 
 
@@ -1511,30 +1512,17 @@ def top_promocoes(request):
         qs = qs.filter(ultima_observacao__gte=timezone.now() - timezone.timedelta(hours=atualizado_desde))
 
     ordem = "-economia" if ordenar == "valor" else "-percent"
-    # Candidatos além dos 20 exibidos: a afiliação é resolvida por loja (abaixo) e só
-    # depois a lista é cortada, senão um bloco de pendentes no topo do ranking
-    # esvaziava a página inteira.
-    candidatos = list(qs.order_by(ordem)[:200])
+    # A afiliação é resolvida antes da paginação. Não pode haver um corte de ranking
+    # aqui: ele fazia a tela anunciar centenas de links prontos no resumo, mas
+    # paginava somente os afiliados que por acaso estivessem entre os 200 maiores
+    # descontos. O conjunto cabe em memória e cada marketplace resolve os links em
+    # lote, portanto todos os produtos afiliados podem entrar na paginação.
+    candidatos = list(qs.order_by(ordem))
     cupons_visiveis = Q(owner__isnull=True) | Q(owner=request.user)
     cupons_qs = CupomNormalizado.objects.select_related(
         "fonte", "integracao", "programa").filter(
         cupons_visiveis, estado="ativo"
     ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
-    # Categorias disponíveis p/ o dropdown da aba Cupons (só cupons vivos).
-    cupom_categorias = list(
-        CupomNormalizado.objects.filter(cupons_visiveis, estado="ativo")
-        .filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
-        .exclude(categoria="")
-        .values_list("categoria", flat=True).distinct().order_by("categoria")
-    )
-    # Anunciantes/'sobre o que é' disponíveis p/ o filtro da aba Cupons. Preenchido
-    # pela projeção (rotulo_anunciante) — antes a coluna Loja só ecoava "Mercado Livre".
-    cupom_anunciantes = list(
-        CupomNormalizado.objects.filter(cupons_visiveis, estado="ativo")
-        .filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
-        .exclude(anunciante_nome="")
-        .values_list("anunciante_nome", flat=True).distinct().order_by("anunciante_nome")
-    )
     if loja_selecionada:
         cupons_qs = cupons_qs.filter(marketplace=loja_selecionada)
     if fonte_selecionada:
@@ -1550,13 +1538,24 @@ def top_promocoes(request):
     # "Como usar" (código vs. ativar no link) vem da normalização de `regras`, não
     # de coluna — então materializa, calcula por cupom e filtra em Python, igual ao
     # corte de afiliação das ofertas. O conjunto de cupons ativos é pequeno.
-    from apps.scrapers.coupon_rules import codigo_publicavel, regras_do_cupom, score_cupom
+    from apps.scrapers.coupon_rules import (
+        codigo_publicavel, cupom_publicavel, regras_do_cupom, score_cupom,
+    )
     # Base por recência (desempate estável); depois ordena por qualidade do cupom —
     # feedback da cliente: bons cupons vendem mais, então os melhores vêm primeiro.
     cupons_lista = list(cupons_qs.order_by("-ultima_observacao"))
     for cupom_catalogo in cupons_lista:
         cupom_catalogo.codigo_publico = codigo_publicavel(cupom_catalogo)
         cupom_catalogo.modo_resgate = regras_do_cupom(cupom_catalogo)["modo_resgate"]
+    from apps.scrapers.coupon_products import ids_cupons_prontos
+    ids_prontos = ids_cupons_prontos(request.user, cupons_lista)
+    cupons_lista = [
+        c for c in cupons_lista if c.id in ids_prontos and cupom_publicavel(c)
+    ]
+    # Os filtros tambem devem refletir somente o catalogo realmente publicavel.
+    cupom_categorias = sorted({c.categoria for c in cupons_lista if c.categoria})
+    cupom_anunciantes = sorted({c.anunciante_nome for c in cupons_lista
+                                if c.anunciante_nome})
     cupons_lista.sort(key=score_cupom, reverse=True)
     if como_usar_selecionado == "codigo":
         cupons_lista = [c for c in cupons_lista if c.codigo_publico]
@@ -1987,18 +1986,31 @@ def scrape_cupons_codigo_stream(request):
         except Exception as exc:
             print(f"Aviso: raspagem de códigos de checkout falhou ({exc}).")
 
-        n_proj = projetar_catalogo_cupons(faixa=(75, 85))
-        print(f"{n_proj} cupom(ns) publicados na aba Cupons.")
-        if not n_proj:
-            # Antes esta etapa zerava em silêncio e a aba Cupons vazia não tinha
-            # explicação em lugar nenhum. Agora o motivo fica na Saúde também.
-            print("Aviso: nenhum cupom ativo para publicar — a aba Cupons segue "
-                  "com o conteúdo anterior.")
+        n_proj = projetar_catalogo_cupons(faixa=(75, 82))
+        print(
+            f"{n_proj} campanha(s) personalizada(s) catalogada(s) como dados "
+            "internos; elas não são códigos públicos."
+        )
+        from apps.scrapers.sources import run_source
+        from apps.scrapers.sources.persistence import persist_items
+        fonte_oficial = run_source("ml-cupons-afiliados")
+        persistidos = persist_items(fonte_oficial.get("coupons", []))
+        n_oficiais = persistidos["coupons"]
+        print(f"{n_oficiais} cupom(ns) público(s) oficial(is) encontrado(s).")
+        from apps.scrapers.coupon_products import preparar_lote
+        preparo = preparar_lote(limite=max(12, n_oficiais))
+        print(
+            f"{preparo['prontos']} cupom(ns) novo(s) preparado(s) com produtos; "
+            f"{preparo['processados']} verificado(s) neste ciclo."
+        )
+        if not n_oficiais:
+            print("Aviso: a fonte oficial não trouxe códigos públicos ativos; "
+                  "campanhas de ativação pessoais não serão divulgadas.")
             log_event("scraper", "cupons_vazios",
-                      "A raspagem manual de cupons não publicou nenhum cupom.",
+                      "A fonte oficial não trouxe códigos públicos ativos.",
                       level="warning", usuario=usuario,
                       contexto={"marketplace": "mercadolivre",
-                                "campanhas": n_campanha, "etapa": "projecao"})
+                                "campanhas": n_campanha, "etapa": "fonte_oficial"})
 
         # Produto de cupom sem link de afiliado não aparece na tela de envio (ver
         # top_promocoes): raspar sem afiliar deixava a raspagem "sem efeito visível".

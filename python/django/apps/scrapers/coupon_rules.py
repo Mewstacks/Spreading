@@ -157,6 +157,32 @@ def codigo_publicavel(cupom) -> str:
     return codigo_humano(getattr(cupom, "codigo", ""))
 
 
+def ativacao_publicavel(cupom) -> bool:
+    """Aceita ativação somente quando a própria loja prova promoção + produtos.
+
+    Não libera as milhares de campanhas personalizadas do ML: elas carregam token
+    de sessão e não podem ser reproduzidas pelo público. A exceção atual é a página
+    oficial de cupons da Amazon, que fornece identificador da promoção, ASINs e
+    preço final depois da ativação.
+    """
+    if regras_do_cupom(cupom)["modo_resgate"] != "ativacao":
+        return False
+    if str(getattr(cupom, "marketplace", "") or "").casefold() != "amazon":
+        return False
+    evidence = getattr(cupom, "evidencia", {}) or {}
+    source = getattr(getattr(cupom, "fonte", None), "slug", "")
+    return bool(
+        source == "amazon-public-coupons"
+        and evidence.get("association") == "amazon-official-coupon-page"
+        and evidence.get("promotion_id")
+        and evidence.get("asins")
+    )
+
+
+def cupom_publicavel(cupom) -> bool:
+    return bool(codigo_publicavel(cupom) or ativacao_publicavel(cupom))
+
+
 def formatar_numero(valor) -> str:
     numero = _numero(valor)
     if numero is None:
@@ -227,6 +253,8 @@ def score_cupom(cupom) -> float:
     score = 0.0
     if codigo_publicavel(cupom):
         score += 50.0
+    elif ativacao_publicavel(cupom):
+        score += 25.0
     valor = _numero(regras.get("valor_desconto"))
     if valor is not None:
         if regras.get("tipo_desconto") == "porcentagem":

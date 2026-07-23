@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone as dt_timezone
 from urllib.parse import urlparse
 
@@ -297,6 +298,92 @@ def coletar_ofertas(integracao):
     return result
 
 
+def _preco_feed(value):
+    """Aceita numero ou strings Google Feed como '129.90 BRL'."""
+    match = re.search(r"\d+(?:[.,]\d+)?", str(value or ""))
+    return float(match.group(0).replace(",", ".")) if match else 0.0
+
+
+def sincronizar_feeds_produtos(integracao, max_programas=3, max_produtos=5000):
+    """Importa feeds Enhanced somente dos anunciantes com voucher ativo.
+
+    O feed e evidência de catalogo, nao de aplicabilidade. A associacao posterior
+    exige codigo no promotional_text, link/id direto ou cupom explicitamente
+    site-wide (coupon_products.py).
+    """
+    from apps.scrapers.models import CupomNormalizado, Produto, ProgramaAfiliado
+
+    programa_ids = list(CupomNormalizado.objects.filter(
+        owner=integracao.owner, integracao=integracao, estado="ativo"
+    ).exclude(codigo="").exclude(programa__isnull=True).values_list(
+        "programa_id", flat=True).distinct()[:max_programas])
+    programas = ProgramaAfiliado.objects.filter(
+        id__in=programa_ids, habilitado=True, status_vinculo="joined",
+        link_status="online")
+    total = 0
+    for programa in programas:
+        response = None
+        for locale in ("pt_BR", "en_BR"):
+            url = (f"{API_BASE}/publishers/{integracao.identificador_conta}/awinfeeds/"
+                   f"download/{programa.external_id}-retail-{locale}.jsonl")
+            try:
+                candidate = requests.get(url, headers=_headers(integracao.token),
+                                         timeout=30, stream=True)
+            except requests.RequestException:
+                continue
+            if candidate.status_code == 200:
+                response = candidate
+                break
+            candidate.close()
+        if response is None:
+            continue
+        try:
+            for raw in response.iter_lines(decode_unicode=True):
+                if total >= max_produtos:
+                    break
+                try:
+                    row = json.loads(raw) if raw else {}
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                product_id = str(row.get("id") or row.get("product_id") or "").strip()
+                nome = str(row.get("title") or row.get("product_name") or "").strip()
+                link = str(row.get("link") or row.get("aw_deep_link") or "").strip()
+                imagem = str(row.get("image_link") or row.get("image_url")
+                             or row.get("merchant_image_url") or "").strip()
+                atual = _preco_feed(row.get("sale_price") or row.get("price")
+                                    or row.get("search_price"))
+                original = _preco_feed(row.get("price") or row.get("rrp_price")
+                                       or row.get("product_price_old"))
+                if not (product_id and nome and link and imagem and atual > 0):
+                    continue
+                if original < atual or original > atual * 10:
+                    original = atual
+                Produto.objects.update_or_create(
+                    marketplace="awin", owner=integracao.owner,
+                    asin=("AW" + hashlib.sha1(
+                        f"{programa.external_id}:{product_id}".encode()).hexdigest()[:18]),
+                    defaults={
+                        "origem": "oferta", "nome": nome[:255],
+                        "preco_sem_desconto": original, "preco_com_cupom": atual,
+                        "preco_fonte": original, "preco_efetivo": atual,
+                        "link_produto": link[:1000], "imagem_url": imagem[:1000],
+                        "fonte": "awin-product-feed", "estado": "ativo",
+                        "evidencia": {
+                            "advertiser_id": str(programa.external_id),
+                            "product_id": product_id,
+                            "promotional_text": str(row.get("promotional_text") or
+                                                     row.get("promotion_text") or "")[:1000],
+                        },
+                    },
+                )
+                total += 1
+        finally:
+            response.close()
+    return total
+
+
 def gerar_deeplink(integracao, programa, destination_url):
     payload = _request(
         "POST", f"/publishers/{integracao.identificador_conta}/linkbuilder/generate",
@@ -337,6 +424,13 @@ def sincronizar_integracao(integracao, *, forcar_programas=False):
             integracao.programas_sincronizados_em = now
         items = coletar_ofertas(integracao)
         persist_items(items, owner=integracao.owner, integration=integracao)
+        try:
+            sincronizar_feeds_produtos(integracao)
+        except Exception as feed_error:
+            # Produto e enriquecimento: uma loja sem feed nao invalida seus cupons;
+            # eles apenas continuam ocultos ate haver prova suficiente.
+            logger.warning("Feed de produtos Awin indisponivel para %s: %s",
+                           integracao.pk, feed_error)
         source, _ = FonteIngestao.objects.get_or_create(
             slug="awin-offers-api",
             defaults={"marketplace": "awin", "nome": "Awin — cupons e promoções"},

@@ -107,8 +107,14 @@ def _coupon_candidates(config, limit):
         "cupom_normalizado_id", flat=True)
     query = query.exclude(id__in=sent_ids)
 
+    pool = list(query.order_by("-ultima_observacao")[:max(80, limit * 10)])
+    from apps.scrapers.coupon_products import ids_cupons_prontos
+    from apps.scrapers.coupon_rules import cupom_publicavel
+    prontos = ids_cupons_prontos(config.owner, pool)
     candidates = []
-    for coupon in query.order_by("-ultima_observacao")[:max(80, limit * 10)]:
+    for coupon in pool:
+        if coupon.id not in prontos or not cupom_publicavel(coupon):
+            continue
         if coupon.programa and not (
             coupon.programa.habilitado and coupon.programa.status_vinculo == "joined"
             and coupon.programa.link_status == "online"):

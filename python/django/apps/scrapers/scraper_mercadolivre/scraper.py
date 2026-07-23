@@ -446,16 +446,13 @@ def _categoria_dominante_por_campanha(campanha_ids):
 
 
 def projetar_catalogo_cupons(faixa=None):
-    """Projeta os cupons de campanha (tabela `Cupom`) para o catálogo público
-    (`CupomNormalizado`) — a aba "Cupons" do site lê SÓ o `CupomNormalizado`.
+    """Projeta campanhas personalizadas em dados internos (`CupomNormalizado`).
 
-    Sem isto, milhares de cupons de campanha válidos ficavam presos na tabela
-    `Cupom` e a aba Cupons aparecia vazia: o único caminho que escrevia
-    `CupomNormalizado` era o dos códigos digitáveis (`cupons_codigo_scraper`), e o
-    ML parou de expor esses códigos em texto. Roda a cada scrape, lendo o banco —
-    independe de a raspagem deste ciclo ter trazido cupom novo.
+    O `code` dessa página é um token ligado à sessão, não um código divulgável.
+    Portanto estes registros servem para auditoria/associação, mas não contam como
+    publicados. A aba usa os códigos oficiais de afiliados preparados com produtos.
     """
-    emitir_fase("Publicando os cupons na aba Cupons", 0.0, faixa)
+    emitir_fase("Catalogando campanhas personalizadas do ML", 0.0, faixa)
     fonte, _ = FonteIngestao.objects.get_or_create(
         slug="mercadolivre-web", defaults={
             "marketplace": "mercadolivre", "nome": "Mercado Livre — páginas públicas"})
@@ -476,7 +473,7 @@ def projetar_catalogo_cupons(faixa=None):
         # São milhares de update_or_create: sem um pulso aqui a barra congelava na
         # última linha da etapa anterior por minutos.
         if faixa and (i % 50 == 0 or i == 1):
-            emitir_fase(f"Publicando cupons {i}/{len(ativos)}", i / len(ativos), faixa)
+            emitir_fase(f"Catalogando campanhas {i}/{len(ativos)}", i / len(ativos), faixa)
         ext = f"campanha:{c.campanha_id}"
         externos_vistos.add(ext)
         if c.tipo_desconto == "fixo":
@@ -499,7 +496,7 @@ def projetar_catalogo_cupons(faixa=None):
                   "container_name": "",
                   "is_mar_aberto": False,
                   "dia_inicio": "", "dia_fim": ""}
-        CupomNormalizado.objects.update_or_create(
+        cupom_normalizado, _ = CupomNormalizado.objects.update_or_create(
             fonte=fonte, external_id=ext,
             defaults={
                 "marketplace": "mercadolivre",
@@ -524,6 +521,8 @@ def projetar_catalogo_cupons(faixa=None):
                               "token_ativacao": c.codigo or ""},
             },
         )
+        from apps.scrapers.coupon_products import atualizar_chave_cupom
+        atualizar_chave_cupom(cupom_normalizado)
 
     # Sincroniza o catálogo com o estado do `Cupom`: campanhas que saíram do ar
     # deixam de aparecer. Só mexe nas projeções de campanha (external_id
@@ -534,7 +533,9 @@ def projetar_catalogo_cupons(faixa=None):
     n_obsoletos = obsoletos.update(estado="expirado")
     if n_obsoletos:
         logger.info("%s cupom(ns) de campanha expirado(s) no catálogo", n_obsoletos)
-    logger.info("Catálogo de cupons: %s cupom(ns) de campanha projetado(s)", len(ativos))
+    logger.info(
+        "Catálogo interno: %s campanha(s) personalizada(s), não contadas como "
+        "cupom público", len(ativos))
     return len(ativos)
 
 
@@ -548,7 +549,11 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
     produtos_raspados = []
     
     try:
-        page.goto(link)
+        # A página de lista mantém recursos/telemetria pendentes por muito tempo;
+        # esperar o evento "load" estoura 30s mesmo quando os cards já estão na
+        # tela. `commit` confirma a navegação e o wait_for_selector abaixo aguarda
+        # exatamente o conteúdo necessário.
+        page.goto(link, wait_until="commit", timeout=30000)
     except Exception as e:
         logger.warning("Erro ao carregar a pagina do cupom: %s", e)
         return None
@@ -618,6 +623,16 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
                 loc_link = card.locator("a.ui-search-link, h2 a, h3 a").first
                 link_prod = loc_link.get_attribute("href", timeout=2000)
 
+                imagem_url = ""
+                try:
+                    img = card.locator("img").first
+                    imagem_url = (img.get_attribute("data-src", timeout=500)
+                                  or img.get_attribute("src", timeout=500) or "")
+                    if imagem_url.startswith("data:"):
+                        imagem_url = img.get_attribute("data-src", timeout=500) or ""
+                except Exception:
+                    pass
+
                 categoria = "DESCONHECIDO"
 
                 # Plano A: data-id do card (padrão)
@@ -681,6 +696,14 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
                         if valor_desc >= preco_atual_float:
                             continue
                         preco_com_cupom = preco_atual_float - valor_desc
+                    teto = cupom.get("desconto_maximo")
+                    try:
+                        teto = float(teto or 0)
+                    except (TypeError, ValueError):
+                        teto = 0
+                    if teto > 0:
+                        preco_com_cupom = max(preco_com_cupom,
+                                             preco_atual_float - teto)
 
                 # Sanidade: preço final tem que ser positivo e desconto < 90%
                 if preco_com_cupom <= 0 or preco_com_cupom >= preco_atual_float:
@@ -697,13 +720,22 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
                     "nome_produto": nome,
                     "categoria": categoria,
                     "link_produto": link_prod,
+                    "imagem_url": imagem_url,
                     "preco_original_sem_desconto": f"{preco_antigo_float:.2f}",
                     "preco_vitrine_atual": f"{preco_atual_float:.2f}",
                     "preco_final_com_cupom": f"{preco_com_cupom:.2f}"
                 })
+                # A publicação usa no máximo nove itens. Continuar varrendo dezenas
+                # de cards/páginas só aumenta o tempo do worker e pode segurar um
+                # lote inteiro por vários minutos.
+                if len(produtos_raspados) >= 9:
+                    break
 
             except Exception as e:
                 logger.debug("Erro isolado num produto: %s", e)
+
+        if len(produtos_raspados) >= 9:
+            break
         
         seletores_prox = [
             ".andes-pagination__button--next:not(.andes-pagination__button--disabled) a",
@@ -717,7 +749,7 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
                 if botao.count() > 0 and botao.first.is_visible(timeout=2000):
                     href = botao.first.get_attribute("href")
                     if href:
-                        page.goto(href)
+                        page.goto(href, wait_until="commit", timeout=30000)
                     else:
                         botao.first.click()
                         page.wait_for_load_state("domcontentloaded")
@@ -762,6 +794,7 @@ def _sincronizar_produtos_no_banco(cupons_com_produtos):
                     preco_fonte=float(p["preco_vitrine_atual"]),
                     preco_efetivo=float(p["preco_final_com_cupom"]),
                     link_produto=p.get("link_produto") or "",
+                    imagem_url=p.get("imagem_url") or "",
                     categoria=p.get("categoria", "DESCONHECIDO"),
                     marketplace="mercadolivre",
                     origem="cupom",

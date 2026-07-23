@@ -11,6 +11,7 @@ Setup: o usuário cria um bot no @BotFather e cola o token na tela Conexão Tele
 import requests
 import time
 import re
+import base64
 from django.conf import settings
 
 from apps.scrapers.senders.base import Sender, TelegramHTMLMarkup, padronizar_resultado
@@ -58,7 +59,19 @@ class TelegramSender(Sender):
                     "classe": "permanente", "via": "telegram"})
 
         # Telegram: legenda de foto tem limite de 1024 chars; texto puro até 4096.
-        if imagem_url:
+        arquivos = None
+        if imagem_b64:
+            try:
+                conteudo = base64.b64decode(imagem_b64, validate=True)
+            except (ValueError, TypeError):
+                return self._resultado({"sucesso": False,
+                        "erro": "Imagem base64 inválida.", "classe": "permanente",
+                        "via": "telegram"})
+            url = self._api("sendPhoto", token)
+            payload = {"chat_id": destino, "caption": (legenda or mensagem)[:1024],
+                       "parse_mode": "HTML"}
+            arquivos = {"photo": ("cupom.jpg", conteudo, mimetype or "image/jpeg")}
+        elif imagem_url:
             url = self._api("sendPhoto", token)
             payload = {"chat_id": destino, "photo": imagem_url,
                        "caption": (legenda or mensagem)[:1024], "parse_mode": "HTML"}
@@ -69,7 +82,8 @@ class TelegramSender(Sender):
 
         try:
             inicio = time.monotonic()
-            r = requests.post(url, json=payload, timeout=30)
+            r = (requests.post(url, data=payload, files=arquivos, timeout=30)
+                 if arquivos else requests.post(url, json=payload, timeout=30))
             corpo = r.json()
             if corpo.get("ok"):
                 msg = corpo.get("result") if isinstance(corpo.get("result"), dict) else {}

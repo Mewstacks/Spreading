@@ -38,6 +38,36 @@ class SessaoExpirada(BrowserError):
     pass
 
 
+def _iniciar_chromium(playwright, *, headless):
+    """Abre o Chromium do Playwright, com fallback seguro para Chrome instalado.
+
+    Em desenvolvimento é comum instalar o pacote Python sem baixar o binário de
+    ~centenas de MB do Playwright. Nesse caso, usar o Chrome já instalado mantém os
+    workers de cupons e links funcionais. Outros erros continuam sendo propagados.
+    """
+    args = ["--disable-blink-features=AutomationControlled"]
+    try:
+        return playwright.chromium.launch(headless=headless, args=args)
+    except Exception as erro:
+        texto = str(erro)
+        if "Executable doesn't exist" not in texto and "playwright install" not in texto:
+            raise
+        candidatos = [
+            os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", ""),
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium", "/usr/bin/chromium-browser",
+        ]
+        executavel = next((p for p in candidatos if p and os.path.isfile(p)
+                           and os.access(p, os.X_OK)), "")
+        if not executavel:
+            raise
+        logger.info("Chromium do Playwright ausente; usando navegador do sistema.")
+        return playwright.chromium.launch(
+            headless=headless, executable_path=executavel, args=args)
+
+
 def _redirecionou_login(url: str) -> bool:
     """True se o ML mandou a navegação p/ a tela de login (sessão caída)."""
     u = (url or "").lower()
@@ -63,7 +93,7 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
     if validar_sessao:
         with sync_playwright() as p:
             try:
-                browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+                browser = _iniciar_chromium(p, headless=True)
                 context = browser.new_context(storage_state=auth_path, **context_kwargs) if os.path.exists(auth_path) else browser.new_context(**context_kwargs)
                 page = context.new_page()
             except Exception as e:
@@ -114,10 +144,7 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
 
     with sync_playwright() as p:
         try:
-            browser = p.chromium.launch(
-                headless=headless, 
-                args=["--disable-blink-features=AutomationControlled"]
-            )
+            browser = _iniciar_chromium(p, headless=headless)
             
             if os.path.exists(auth_path):
                 context = browser.new_context(storage_state=auth_path, **context_kwargs)
@@ -141,6 +168,5 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
                     pass
             context.close()
             browser.close()
-
 
 

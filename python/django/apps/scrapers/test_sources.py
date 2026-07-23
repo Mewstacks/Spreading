@@ -48,6 +48,38 @@ class SourcePipelineTests(TestCase):
         persist_items([item], owner=self.user)
         self.assertEqual(Produto.objects.filter(owner=self.user, asin=item.external_id).count(), 1)
 
+    def test_amazon_coupon_source_groups_asins_and_preserves_final_price(self):
+        from apps.scrapers.sources.amazon_coupons import AmazonCouponsSource
+
+        source = AmazonCouponsSource()
+        source._cache_at = __import__("time").monotonic()
+        source._cache = [
+            {
+                "asin": "B012345678", "promo_id": "PROMO1", "title": "Cafeteira",
+                "url": "https://www.amazon.com.br/dp/B012345678",
+                "image_url": "https://m.media-amazon.com/a.jpg",
+                "current": 100.0, "reference": 120.0, "final": 90.0,
+                "discount": 10.0,
+            },
+            {
+                "asin": "B087654321", "promo_id": "PROMO1", "title": "Coifa",
+                "url": "https://www.amazon.com.br/dp/B087654321",
+                "image_url": "https://m.media-amazon.com/b.jpg",
+                "current": 200.0, "reference": 200.0, "final": 180.0,
+                "discount": 10.0,
+            },
+        ]
+
+        offers = list(source.discover_offers())
+        coupons = list(source.discover_coupons())
+
+        self.assertEqual(len(offers), 2)
+        self.assertEqual(offers[0].image_url, "https://m.media-amazon.com/a.jpg")
+        self.assertEqual(offers[0].evidence["coupon_final_price"], 90.0)
+        self.assertEqual(len(coupons), 1)
+        self.assertEqual(coupons[0].evidence["asins"], ["B012345678", "B087654321"])
+        self.assertEqual(coupons[0].coupon_rules["modo_resgate"], "ativacao")
+
     def test_empty_source_preserves_existing_catalog(self):
         item = list(FakeSource().discover_offers())[0]
         persist_items([item], owner=self.user)
@@ -266,9 +298,15 @@ class SourcePipelineTests(TestCase):
         self.assertEqual(channel.ultimo_id, 0)
 
     @override_settings(AFFILIATE_FEED_URL="")
+    @patch("apps.scrapers.coupon_products.preparar_lote",
+           return_value={"processados": 0, "prontos": 0})
+    @patch("apps.scrapers.scraper_mercadolivre.cupons_container.casar_cupons_container",
+           return_value=0)
     @patch("apps.scrapers.maintenance.expire_stale")
     @patch("apps.scrapers.management.commands.automacao.st.write_state")
-    def test_full_cycle_degrades_gracefully_when_one_marketplace_fails(self, _state, expire):
+    def test_full_cycle_degrades_gracefully_when_one_marketplace_fails(
+        self, _state, expire, _containers, _preparo
+    ):
         class Good:
             def scrape_all(self, **kwargs):
                 return None

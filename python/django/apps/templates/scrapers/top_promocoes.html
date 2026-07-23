@@ -460,7 +460,7 @@ que era exatamente o que não resolvia.
         <input id="env-tg-input" placeholder="@meucanal">
         <span class="muted" style="font-size:.74rem;">Use @nomedocanal ou o ID numérico (começa com -100).</span>
       </div>
-      <div>
+      <div id="env-foto-bloco">
         <label>Foto (opcional)</label>
         <input type="file" id="env-foto" accept="image/*">
         <span class="muted" style="font-size:.74rem;">Anexe uma foto para ir acima da mensagem. Sem foto, vai a imagem do produto (no WhatsApp).</span>
@@ -594,6 +594,7 @@ function abrirEnvio(id, nome) {
   document.getElementById('env-titulo').innerHTML = '<i data-lucide="send"></i> Enviar oferta';
   document.getElementById('env-log').textContent = '';
   document.getElementById('env-foto').value = '';
+  document.getElementById('env-foto-bloco').style.display = '';
   document.getElementById('env-go').disabled = false;
   document.getElementById('modal-envio').classList.add('open');
   // Abrir o modal recarrega a lista: antes um flag de "já carregou" a congelava
@@ -612,6 +613,7 @@ function abrirEnvioCupom(id, codigo) {
   document.getElementById('env-titulo').innerHTML = '<i data-lucide="ticket-percent"></i> Enviar cupom';
   document.getElementById('env-log').textContent = '';
   document.getElementById('env-foto').value = '';
+  document.getElementById('env-foto-bloco').style.display = 'none';
   document.getElementById('env-go').disabled = false;
   document.getElementById('modal-envio').classList.add('open');
   envGruposParar();
@@ -734,7 +736,7 @@ async function dispararEnvio() {
   log.textContent = '';
   var url = envTipo === 'cupom' ? '/scrapers/enviar-cupom/' : '/scrapers/enviar-produto/';
   var fotoEl = document.getElementById('env-foto');
-  var foto = fotoEl && fotoEl.files && fotoEl.files[0];
+  var foto = envTipo === 'produto' && fotoEl && fotoEl.files && fotoEl.files[0];
   // Sem foto: form-urlencoded (fluxo de sempre). Com foto: multipart p/ subir o arquivo.
   var form, headers;
   if (foto) {

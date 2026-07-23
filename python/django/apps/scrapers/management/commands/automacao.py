@@ -126,6 +126,11 @@ def _rodar_scrape():
         casar_cupons_container()
     except Exception:
         logger.exception("Casamento cupom-container falhou")
+    try:
+        from apps.scrapers.coupon_products import preparar_lote
+        preparar_lote(limite=3)
+    except Exception:
+        logger.exception("Preparacao automatica de produtos dos cupons falhou")
     if not sucessos:
         raise RuntimeError(f"Todas as fontes falharam: {', '.join(falhas)}")
     if falhas:
@@ -180,6 +185,10 @@ def _rodar_scrape_rapido(paginas=8):
     cupons_ml = run_source("ml-cupons-afiliados")
     persist_items(cupons_ml.get("coupons", []))
     _rodar_awin_integracoes()
+    from apps.scrapers.coupon_products import preparar_lote
+    preparo = preparar_lote(limite=3)
+    logger.info("Cupons preparados: %s processado(s), %s pronto(s)",
+                preparo["processados"], preparo["prontos"])
     now = timezone.now()
     fonte, _ = FonteIngestao.objects.get_or_create(
         slug="mercadolivre-web",
