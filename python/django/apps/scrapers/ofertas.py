@@ -846,7 +846,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                                                  "via": resultado.get("via")})
             return {"sucesso": True, "via": resultado.get("via", canal),
                     "canal": resultado.get("canal", canal),
-                    "link": afiliado["link"], "mensagem": mensagem,
+                    "link": link_registro, "mensagem": mensagem,
                     "publicacao": publicacao,
                     "mensagem_id": resultado.get("mensagem_id"),
                     "classe": resultado.get("classe", ""),

@@ -1536,6 +1536,52 @@ class AttributionWorkflowTests(TestCase):
         self.assertEqual(_link_publicado(None, affiliate), affiliate)
 
 
+class EnviarCupomColagemTests(TestCase):
+    """Regressão: no caminho da colagem (itens_cupom) o retorno de sucesso do
+    `enviar_cupom` não pode referenciar `afiliado` — era um UnboundLocalError que
+    estourava DEPOIS do envio, marcando como falha uma mensagem já entregue."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("lojista", password="test")
+        self.user.perfil.marcar_verificado()
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML web"})
+        self.cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:999", marketplace="mercadolivre",
+            titulo="20% OFF em Moda", estado="ativo",
+        )
+        self.produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Tênis de corrida", origem="oferta",
+            preco_sem_desconto=200, preco_com_cupom=120,
+            link_produto="https://example.com/p", imagem_url="https://img/x.jpg",
+        )
+
+    @patch("apps.scrapers.colagem.montar_colagem_b64", return_value=("b64", "image/jpeg"))
+    @patch("apps.scrapers.ofertas._preparar_itens_cupom")
+    @patch("apps.scrapers.senders.registry.get_sender")
+    def test_caminho_colagem_retorna_link_do_item_sem_unbound(
+        self, get_sender, prep, _colagem
+    ):
+        from apps.scrapers.senders.base import WhatsAppMarkup
+        prep.return_value = [{"produto": self.produto, "link": "https://meli.la/abc"}]
+        sender = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
+        sender.enviar_oferta.return_value = {"sucesso": True, "via": "test"}
+        get_sender.return_value = sender
+
+        result = ofertas.enviar_cupom(
+            self.cupom, "group@g.us", usuario=self.user, destino_nome="Grupo")
+
+        # Sem o fix, isto levantava UnboundLocalError e caía em "Falha inesperada".
+        self.assertTrue(result["sucesso"])
+        self.assertEqual(result["link"], "https://meli.la/abc")
+        _, kwargs = sender.enviar_oferta.call_args
+        self.assertEqual(kwargs.get("imagem_b64"), "b64")
+        self.assertIn("Tênis de corrida", kwargs.get("legenda", ""))
+        self.assertEqual(
+            Publicacao.objects.get(cupom_normalizado=self.cupom).status, "enviado")
+
+
 class RankingAndCooldownTests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user("ranker", password="test")
