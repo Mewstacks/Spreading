@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import logging
 import os
 from pathlib import Path
 
@@ -504,13 +505,19 @@ if SENTRY_DSN:
     try:
         import sentry_sdk
         from sentry_sdk.integrations.django import DjangoIntegration
+        from sentry_sdk.integrations.logging import LoggingIntegration
 
+        sentry_logging = LoggingIntegration(
+            level=logging.INFO,         # breadcrumbs a partir de INFO
+            event_level=logging.ERROR,  # ERROR+ vira evento Sentry
+        )
         sentry_sdk.init(
             dsn=SENTRY_DSN,
-            integrations=[DjangoIntegration()],
+            integrations=[DjangoIntegration(), sentry_logging],
             traces_sample_rate=float(os.getenv("SENTRY_TRACES_RATE", "0.0")),
             send_default_pii=False,
             environment=os.getenv("SENTRY_ENV", "prod" if not DEBUG else "dev"),
+            release=os.getenv("SENTRY_RELEASE") or None,
         )
     except Exception:  # sentry-sdk ausente ou DSN inválido — não derruba o boot
         pass
