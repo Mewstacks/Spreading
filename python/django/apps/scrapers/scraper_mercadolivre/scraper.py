@@ -105,8 +105,17 @@ def _transporte_cupons(caminho_auth):
 
     Tenta HTTP primeiro (rápido, sem Chromium). O caller liga `estado['forcar_browser']`
     quando a 1ª página não traz payload (challenge do ML ou sessão morta); a partir daí
-    o fetch serve via browser headless — que valida a sessão e levanta SessaoExpirada
-    se o login caiu. O Chromium só é aberto se/quando o fallback ligar o flag.
+    o fetch serve via browser headless. O Chromium só é aberto se/quando o fallback
+    ligar o flag.
+
+    `validar_sessao=False` de propósito: no IP de datacenter da Fly o gateway anti-bot
+    do ML costuma redirecionar QUALQUER navegação (inclusive com cookie válido) para uma
+    tela de challenge/login. A validação por redirect lia isso como logout e APAGAVA o
+    auth_{id}.json — a mesma sessão que a tela do dashboard (sondar_sessao_ml) considera
+    viva. Era a origem do "conectado na tela, desconectado ao raspar". Aqui a raspagem
+    só navega; se a sessão de fato caiu, a página vem sem payload e a varredura termina
+    vazia (o anti-wipe preserva o catálogo). Quem decide "expirou/reconecte" é a sonda
+    HTTP única de conexoes.sondar_sessao_ml, não este browser.
     """
     session = _ml_http_session(caminho_auth)
     estado = {"forcar_browser": False, "usou_browser": False, "_cm": None, "_page": None}
@@ -121,8 +130,9 @@ def _transporte_cupons(caminho_auth):
                 logger.debug("Falha HTTP na pagina %s de cupons: %s", n, e)
                 return None
         if estado["_page"] is None:
-            cm = iniciar_browser(auth_path=caminho_auth, headless=True)
-            page, _ctx = cm.__enter__()  # valida a sessão; SessaoExpirada propaga
+            cm = iniciar_browser(auth_path=caminho_auth, headless=True,
+                                 validar_sessao=False)
+            page, _ctx = cm.__enter__()
             estado["_cm"] = cm
             estado["_page"] = page
             estado["usou_browser"] = True

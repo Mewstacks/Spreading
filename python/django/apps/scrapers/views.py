@@ -1970,7 +1970,20 @@ def scrape_cupons_codigo_stream(request):
         from apps.scrapers.afiliado import frase_resumo_afiliacao
         from apps.scrapers.eventos import log_event
         from apps.scrapers.marketplaces.registry import get_marketplace
+        from apps.scrapers.conexoes import estado_ml
         usuario = get_user_model().objects.filter(id=uid).first()
+
+        # Portão único de conexão: a MESMA sonda que a tela usa (conexoes.estado_ml →
+        # sondar_sessao_ml). Antes o "reconecte" da raspagem vinha do browser abrindo a
+        # página de cupons e lendo um redirect de challenge como logout — divergindo do
+        # dashboard, que via a sessão viva. Agora tela e raspagem leem a mesma verdade:
+        # se aqui está conectado, seguimos; a raspagem nunca mais grita "desconectado"
+        # sozinha (o fallback de browser já não valida/apaga a sessão).
+        est_ml = estado_ml(usuario)
+        if not est_ml.conectado:
+            print(f"[ERRO] {est_ml.motivo or 'Sessão do Mercado Livre indisponível.'}")
+            print("__ML_LOGIN__")
+            return
 
         # O trabalho é dividido em faixas da barra porque nenhuma etapa sozinha
         # conhece o total: sem isso a barra ou zerava a cada etapa, ou (o que

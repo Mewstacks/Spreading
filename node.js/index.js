@@ -139,8 +139,12 @@ const SESSION_INIT_TIMEOUT_MS = parseInt(process.env.SESSION_INIT_TIMEOUT_MS, 10
 // O watchdog mede o heartbeat do event loop; uma inicializacao async longa nao
 // o aciona. O bootstrap frio recebe a mesma janela da inicializacao normal.
 const QR_BOOTSTRAP_TIMEOUT_MS = parseInt(process.env.QR_BOOTSTRAP_TIMEOUT_MS, 10) || 90000;
+// 4 (era 2): em prod o Chromium sobe frio e o primeiro carregamento do WhatsApp Web
+// às vezes não emite o QR na 1ª/2ª tentativa (rede + hidratação do bundle). Desistir
+// em 2 fazia a tela cair em "não foi possível gerar um QR novo" cedo demais. Cada
+// tentativa recicla só o Chromium (não repurga a credencial), então o custo é baixo.
 const QR_BOOTSTRAP_MAX_ATTEMPTS =
-    parseInt(process.env.QR_BOOTSTRAP_MAX_ATTEMPTS, 10) || 2;
+    parseInt(process.env.QR_BOOTSTRAP_MAX_ATTEMPTS, 10) || 4;
 const QR_BOOTSTRAP_RETRY_MS = parseInt(process.env.QR_BOOTSTRAP_RETRY_MS, 10) || 2000;
 // 15s e folgado: a leitura so percorre a collection em memoria da pagina, sem
 // round-trip de rede. Estourar aqui significa pagina morta, nao lentidao — por

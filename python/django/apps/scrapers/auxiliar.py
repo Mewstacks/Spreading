@@ -121,13 +121,14 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
                 browser.close()
 
             if deslogado:
-                # Sessão morta CONFIRMADA (redirect p/ login): apaga o arquivo (o monitor
-                # passa a reportar 'desconectado' e dispara o alerta) e aborta esta fonte.
-                if os.path.exists(auth_path):
-                    try:
-                        os.remove(auth_path)
-                    except OSError:
-                        pass
+                # Redirect p/ login: aborta esta operação, mas NÃO apaga o auth_{id}.json.
+                # No IP de datacenter da Fly o anti-bot do ML redireciona navegações
+                # legítimas (cookie válido) para challenge/login, e apagar o arquivo aqui
+                # desconectava o usuário por um falso-positivo — divergindo da tela, que
+                # via a mesma sessão como viva. A decisão de remover uma sessão morta é
+                # de uma fonte ÚNICA: conexoes.sondar_sessao_ml (GET com allow_redirects
+                # =False, só declara 'expirado' em 302→login/401/403), chamada por
+                # conexoes.estado_ml. Aqui apenas sinalizamos p/ abortar o fluxo atual.
                 raise SessaoExpirada("Sessão ML expirada — reconecte em Conexão Mercado Livre.")
             elif checagem_inconclusiva is not None:
                 logger.warning("Checagem de sessão ML inconclusiva (%s); seguindo — "

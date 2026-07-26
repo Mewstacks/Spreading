@@ -184,8 +184,20 @@
     } catch (e) { /* o próximo poll mostra o estado real */ }
   }
 
-  qrImg.onerror = function () { qrImg.removeAttribute('src'); qrImg.alt = 'Gerando QR code…'; };
-  function refreshQr() { qrImg.src = '/scrapers/whatsapp/qr.png?t=' + Date.now(); }
+  qrImg.onerror = function () { qrImg.removeAttribute('src'); qrImg.alt = 'Gerando QR code…'; ultimoQrMostrado = null; };
+  // O QR só é recarregado quando o VALOR muda. Antes o poll de 5s trocava o `?t=` a
+  // cada volta, então a imagem apagava e recarregava a cada 5s mesmo com o QR idêntico
+  // — era o "QR piscando". `s.qr` (status do worker) é a própria string do QR: enquanto
+  // ela não muda, a imagem fica parada.
+  var ultimoQrMostrado = null;
+  function refreshQr(valorQr) {
+    // Sem valor de QR no status: o /qr.png também devolveria 204. Não recarrega —
+    // o placeholder "Gerando QR code…" já aparece pelo CSS quando o img está sem src.
+    if (!valorQr) return;
+    if (valorQr === ultimoQrMostrado) return;              // mesmo QR: não pisca
+    ultimoQrMostrado = valorQr;
+    qrImg.src = '/scrapers/whatsapp/qr.png?t=' + Date.now();
+  }
 
   function showOffline() {
     pill.className = 'conn-pill is-off';
@@ -252,8 +264,8 @@
       // fase que não previa mostrá-lo (ex.: reconectando após purgar a
       // credencial) — sem isto o usuário ficava preso na barra de progresso
       // com um QR válido escondido do outro lado.
-      if (f.qr || s.qr) { qrArea.style.display = 'block'; refreshQr(); }
-      else qrArea.style.display = 'none';
+      if (f.qr || s.qr) { qrArea.style.display = 'block'; refreshQr(s.qr); }
+      else { qrArea.style.display = 'none'; ultimoQrMostrado = null; }
 
       // Barra
       if (f.bar) {
