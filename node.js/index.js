@@ -8,7 +8,6 @@ const qrcode = require('qrcode-terminal');
 const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const { spawn, execFileSync } = require('child_process');
@@ -45,12 +44,13 @@ const {
     mensagemEstabilizacao, deveReciclarTimeoutPreflight, iniciarRecuperacaoPreflight,
 } = require('./preflight_recovery');
 const { aguardarStorePronto } = require('./store_ready');
+const { capabilityAuth, idempotencyGuard } = require('./capability_auth');
 
 const app = express();
 
 app.use(helmet());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(express.json({ limit: '12mb' }));
+app.use(express.urlencoded({ limit: '12mb', extended: true }));
 
 // Path-scoped de proposito: montado global, alcancaria /api/status e /api/grupos
 // e injetaria `erro` neles — a chave que o Django le como "Node inalcancavel"
@@ -67,21 +67,6 @@ const limiter = rateLimit({
     },
 });
 app.use('/api/enviar', limiter);
-
-const apiKeyAuth = (req, res, next) => {
-    const key = req.headers['x-api-key'];
-    const expected = process.env.API_KEY;
-    const keyValid =
-        key &&
-        expected &&
-        key.length === expected.length &&
-        crypto.timingSafeEqual(Buffer.from(key), Buffer.from(expected));
-
-    if (!keyValid) {
-        return res.status(401).json({ erro: 'Acesso não autorizado. API Key inválida ou ausente.' });
-    }
-    next();
-};
 
 const MIMETYPES_PERMITIDOS = new Set([
     'image/jpeg', 'image/png', 'image/gif', 'image/webp',
@@ -1596,7 +1581,8 @@ app.get('/health', (req, res) => {
 // Nunca usar ensureSession aqui: o monitor_conexao do Django chama esta rota
 // para TODO perfil a cada tick, e o dashboard chama no render. Seria um Chromium
 // por perfil por tick. Quem ressuscita sessao e POST /api/sessoes e o restore do boot.
-app.get(['/api/status', '/api/status/:instance'], apiKeyAuth, (req, res) => {
+app.get(['/api/status', '/api/status/:instance'],
+    capabilityAuth('status', resolveInstanceId), (req, res) => {
     const instanceId = resolveInstanceId(req);
     const session = findSession(instanceId);
     if (!session) {
@@ -1616,19 +1602,17 @@ app.get(['/api/status', '/api/status/:instance'], apiKeyAuth, (req, res) => {
     res.status(status).json(buildSessionPayload(session));
 });
 
-app.get(['/api/sessoes', '/api/sessoes/:instance'], apiKeyAuth, (req, res) => {
+app.get(['/api/sessoes', '/api/sessoes/:instance'],
+    capabilityAuth('status', resolveInstanceId), (req, res) => {
     const requestedId = resolveInstanceId(req);
     if (requestedId && sessions.has(requestedId)) {
         return res.json({ sessao: buildSessionPayload(sessions.get(requestedId)) });
     }
-
-    const list = Array.from(sessions.values())
-        .sort((a, b) => a.id.localeCompare(b.id))
-        .map((session) => buildSessionPayload(session));
-    res.json({ sessoes: list });
+    return res.status(404).json({ sessao: buildInativoPayload(requestedId) });
 });
 
-app.post('/api/sessoes', apiKeyAuth, (req, res) => {
+app.post('/api/sessoes',
+    capabilityAuth('provision', resolveInstanceId, { singleUse: true }), (req, res) => {
     const instanceId = sanitizeInstanceId(req.body?.instance || req.body?.session || req.body?.userId);
     const session = ensureSession(instanceId);
     // Pedido explicito do usuario (abrir a aba WhatsApp) e o unico caminho que
@@ -1647,7 +1631,8 @@ app.post('/api/sessoes', apiKeyAuth, (req, res) => {
 
 // Transição atômica para um novo QR. Manter logout + POST /api/sessoes como
 // duas requests deixava uma janela em que o polling revivia a credencial antiga.
-app.post('/api/sessoes/reset', apiKeyAuth, async (req, res) => {
+app.post('/api/sessoes/reset',
+    capabilityAuth('reset', resolveInstanceId, { singleUse: true }), async (req, res) => {
     const instanceId = sanitizeInstanceId(req.body?.instance || req.body?.session || req.body?.userId);
     let session = findSession(instanceId, false);
     if (!session) {
@@ -1688,7 +1673,8 @@ app.post('/api/sessoes/reset', apiKeyAuth, async (req, res) => {
 // Desfaz o pareamento: revoga no celular (quando da) e apaga a credencial do
 // volume. Escape manual do usuario — antes so o proprio worker decidia purgar,
 // e nao havia como trocar de numero nem forcar um QR novo pela UI.
-app.post('/api/sessoes/logout', apiKeyAuth, async (req, res) => {
+app.post('/api/sessoes/logout',
+    capabilityAuth('logout', resolveInstanceId, { singleUse: true }), async (req, res) => {
     const instanceId = sanitizeInstanceId(req.body?.instance || req.body?.session || req.body?.userId);
     const session = findSession(instanceId, false);
 
@@ -1745,7 +1731,8 @@ const resolveSessionParaGrupos = (instanceId) => {
     return ensureSession(normalizedId);
 };
 
-app.get(['/api/grupos', '/api/grupos/:instance'], apiKeyAuth, async (req, res) => {
+app.get(['/api/grupos', '/api/grupos/:instance'],
+    capabilityAuth('groups', resolveInstanceId), async (req, res) => {
     const instanceId = resolveInstanceId(req);
     const session = resolveSessionParaGrupos(instanceId);
     if (!session) return res.json(buildInativoPayload(sanitizeInstanceId(instanceId)));
@@ -1761,7 +1748,8 @@ app.get(['/api/grupos', '/api/grupos/:instance'], apiKeyAuth, async (req, res) =
     return res.json(buildGruposPayload(session));
 });
 
-app.post(['/api/grupos/refresh', '/api/grupos/refresh/:instance'], apiKeyAuth, async (req, res) => {
+app.post(['/api/grupos/refresh', '/api/grupos/refresh/:instance'],
+    capabilityAuth('groups', resolveInstanceId), async (req, res) => {
     const instanceId = resolveInstanceId(req);
     const session = resolveSessionParaGrupos(instanceId);
     if (!session) {
@@ -1785,7 +1773,8 @@ app.post(['/api/grupos/refresh', '/api/grupos/refresh/:instance'], apiKeyAuth, a
 
 // Diagnóstico sem publicação. O painel de Saúde usa esta rota para comprovar que
 // a sessão e o grupo voltaram a responder sem repetir uma oferta.
-app.post(['/api/diagnostico', '/api/diagnostico/:instance'], apiKeyAuth, async (req, res) => {
+app.post(['/api/diagnostico', '/api/diagnostico/:instance'],
+    capabilityAuth('status', resolveInstanceId), async (req, res) => {
     const instanceId = resolveInstanceId(req);
     const chatId = String(req.body?.grupoid || '').trim();
     const session = resolveSessionParaGrupos(instanceId);
@@ -1823,7 +1812,8 @@ app.post(['/api/diagnostico', '/api/diagnostico/:instance'], apiKeyAuth, async (
     }
 });
 
-app.get(['/api/qrcode', '/api/qrcode/:instance'], apiKeyAuth, (req, res) => {
+app.get(['/api/qrcode', '/api/qrcode/:instance'],
+    capabilityAuth('status', resolveInstanceId), (req, res) => {
     const instanceId = resolveInstanceId(req);
     const session = findSession(instanceId);
     if (!session) {
@@ -1838,7 +1828,8 @@ app.get(['/api/qrcode', '/api/qrcode/:instance'], apiKeyAuth, (req, res) => {
     res.json({ conectado: false, instancia: session.id, qr: session.ultimoQR });
 });
 
-app.post(['/api/enviar', '/api/enviar/:instance'], apiKeyAuth, async (req, res) => {
+app.post(['/api/enviar', '/api/enviar/:instance'],
+    capabilityAuth('send', resolveInstanceId), idempotencyGuard, async (req, res) => {
     const instanceId = resolveInstanceId(req);
     const { numero, grupoid, mensagem, base64, mimetype, nomeArquivo, legenda } = req.body;
 

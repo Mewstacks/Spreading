@@ -24,6 +24,7 @@ from apps.scrapers.ml_conexao import (
     SCREENCAST, VIEW_H, VIEW_W, _SPECIAL_KEYS, _despachar_input,
 )
 from apps.scrapers.report_sessions import has_report_session, save_report_state
+from apps.accounts.tenant import organization_job
 
 # Portal de afiliados. O usuário loga aqui dentro do live view.
 LOGIN_URL = "https://www.mercadolivre.com.br/afiliados/"
@@ -76,6 +77,7 @@ def _logado(page) -> bool:
     return page.locator("input[type='password'], input[name*='password' i]").count() == 0
 
 
+@organization_job
 def _worker(user):
     from playwright.sync_api import sync_playwright
     from apps.scrapers.auxiliar import ua_aleatorio
@@ -146,6 +148,13 @@ def _worker(user):
 
 
 def criar_sessao(user):
+    from apps.accounts.feature_flags import enabled_for_user
+    if not enabled_for_user("ML_BROWSER_REPORTS_ENABLED", user):
+        return {
+            "fase": "indisponivel",
+            "erro": "Login do portal de relatórios está desativado para esta organização.",
+            "auth_valido": False,
+        }
     with _lock:
         running = _threads.get(user.id)
         if running and running.is_alive():

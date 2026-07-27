@@ -110,12 +110,13 @@ def _transporte_cupons(caminho_auth):
 
     `validar_sessao=False` de propósito: no IP de datacenter da Fly o gateway anti-bot
     do ML costuma redirecionar QUALQUER navegação (inclusive com cookie válido) para uma
-    tela de challenge/login. A validação por redirect lia isso como logout e APAGAVA o
-    auth_{id}.json — a mesma sessão que a tela do dashboard (sondar_sessao_ml) considera
-    viva. Era a origem do "conectado na tela, desconectado ao raspar". Aqui a raspagem
-    só navega; se a sessão de fato caiu, a página vem sem payload e a varredura termina
-    vazia (o anti-wipe preserva o catálogo). Quem decide "expirou/reconecte" é a sonda
-    HTTP única de conexoes.sondar_sessao_ml, não este browser.
+    tela de challenge/login. A validação por redirect lia isso como logout e apagava a
+    MercadoLivreSession da organização — a mesma sessão que a tela do dashboard
+    (sondar_sessao_ml) considera viva. Era a origem do "conectado na tela, desconectado
+    ao raspar". Aqui a raspagem só navega; se a sessão de fato caiu, a página vem sem
+    payload e a varredura termina vazia (o anti-wipe preserva o catálogo). Quem decide
+    "expirou/reconecte" é a sonda HTTP única de conexoes.sondar_sessao_ml, não este
+    browser.
     """
     session = _ml_http_session(caminho_auth)
     estado = {"forcar_browser": False, "usou_browser": False, "_cm": None, "_page": None}

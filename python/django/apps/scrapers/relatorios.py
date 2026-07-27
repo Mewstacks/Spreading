@@ -165,7 +165,12 @@ class MercadoLivreReportAdapter(BaseReportAdapter):
 
     def fetch(self, usuario, desde, ate) -> list[ReportRow]:
         from django.conf import settings
+        from apps.accounts.feature_flags import enabled_for_user
         from apps.scrapers.report_sessions import has_report_session
+        if not enabled_for_user("ML_BROWSER_REPORTS_ENABLED", usuario):
+            raise ReportSyncNaoConfigurado(
+                "Relatórios ML por navegador estão desativados para esta organização."
+            )
         # A sessão de relatório é a do PORTAL DE AFILIADOS (SSO próprio), não a do
         # site principal. Antes o gate sondava o site principal (my_purchases) e
         # mandava "reconectar" uma conta que já estava conectada — para sempre.
@@ -205,21 +210,15 @@ def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> li
     # Tanto ML quanto Amazon leem o relatório da SESSÃO DE RELATÓRIO cifrada
     # (report_sessions), não da sessão do site principal. Para o ML isso separa a
     # sessão do portal de afiliados (comissão) da sessão do Link Builder.
-    from apps.scrapers.report_sessions import decrypted_state_file
-    state_path = None
-    cleanup = decrypted_state_file(usuario, marketplace)
+    from apps.scrapers.report_sessions import load_report_state
+    storage_state = load_report_state(usuario, marketplace)
 
     try:
-        if cleanup:
-            state_path = cleanup.__enter__()
-        if not state_path:
+        if not storage_state:
             raise ReportSyncActionRequired(f"Conecte o portal de relatórios {marketplace}.")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            context_kwargs = {}
-            if state_path:
-                context_kwargs["storage_state"] = state_path
-            context = browser.new_context(**context_kwargs)
+            context = browser.new_context(storage_state=storage_state)
             page = context.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
             exported = _download_delimited_report(page)
@@ -231,9 +230,6 @@ def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> li
         raise
     except Exception as exc:
         raise ReportSyncError(f"{marketplace}: falha ao ler relatório automático: {exc}")
-    finally:
-        if cleanup:
-            cleanup.__exit__(None, None, None)
 
 
 def _header_key(texto: str) -> str:

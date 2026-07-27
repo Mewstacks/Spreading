@@ -15,6 +15,7 @@ Nada aqui é permanente: se uma config voltar a falhar por motivo real, o
 orquestrador a desliga de novo — agora com razão.
 """
 from django.core.management.base import BaseCommand
+from apps.accounts.tenant import system_job
 
 from apps.scrapers.models import ConfiguracaoEnvio
 
@@ -56,6 +57,7 @@ class Command(BaseCommand):
                             help="Religa TODA config inativa, não só as de motivo "
                                  "transitório. Use com --dry-run antes.")
 
+    @system_job
     def handle(self, *args, **opts):
         dry_run = opts["dry_run"]
         todas = opts["all"]

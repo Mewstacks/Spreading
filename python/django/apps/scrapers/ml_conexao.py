@@ -86,7 +86,7 @@ def _set_estado(user_id: int, **campos):
 
 
 def _auth_path(user_id: int) -> str:
-    """Onde salvar a sessão do ML deste usuário (o que link.py/auxiliar.py leem)."""
+    """Caminho legado exato, mantido somente para o migrador da Fase 0."""
     return os.path.join(settings.ML_AUTH_DIR, f"auth_{user_id}.json")
 
 
@@ -107,7 +107,9 @@ def status(user_id: int) -> dict:
         estado["auth_valido"] = bool(est and est.conectado)
         estado["motivo_desconexao"] = est.motivo if est and not est.conectado else ""
     except Exception:
-        estado["auth_valido"] = os.path.exists(_auth_path(user_id))
+        from apps.accounts.ml_sessions import has_storage_state
+        user = get_user_model().objects.filter(id=user_id).first()
+        estado["auth_valido"] = bool(user and has_storage_state(user))
         estado["motivo_desconexao"] = ""
     return estado
 
@@ -199,6 +201,10 @@ def _ir_para_login(page):
     ) from ultimo_erro
 
 
+from apps.accounts.tenant import organization_job
+
+
+@organization_job
 def _worker(user_id: int):
     """Sobe o Chromium local, transmite a tela e espera o usuário concluir o login."""
     from playwright.sync_api import sync_playwright
@@ -304,7 +310,10 @@ def _worker(user_id: int):
                     cdp.send("Page.stopScreencast")
                 except Exception:
                     pass
-                context.storage_state(path=_auth_path(user_id))
+                from django.contrib.auth import get_user_model
+                from apps.accounts.ml_sessions import save_storage_state
+                user = get_user_model().objects.get(pk=user_id)
+                save_storage_state(user, context.storage_state())
                 # A sonda de sessão é cacheada por 5min; sem invalidar, quem acabou
                 # de conectar continuaria vendo "desconectado" na tela até o cache
                 # vencer — logo depois de fazer exatamente o que pedimos.
@@ -330,6 +339,12 @@ def _worker(user_id: int):
 
 def criar_sessao(user) -> dict:
     """Inicia (ou reaproveita) a sessão de login web do ML pro usuário."""
+    from apps.accounts.feature_flags import enabled_for_user
+    if not enabled_for_user("ML_BROWSER_LOGIN_ENABLED", user):
+        return {
+            "fase": "indisponivel",
+            "erro": "Login por navegador está desativado para esta organização.",
+        }
     user_id = user.id
     with _lock:
         viva = _threads.get(user_id)
@@ -455,20 +470,12 @@ def salvar_sessao_manual(user_id: int, raw_json: str) -> dict:
                            erro="Nenhum cookie do Mercado Livre no arquivo. "
                                 "Faça login no ML antes de salvar o auth.json.")
 
-    destino = _auth_path(user_id)
-    os.makedirs(os.path.dirname(destino), exist_ok=True)
-    # Escrita atômica: grava num temporário e renomeia, pra nunca deixar um
-    # auth.json truncado se algo falhar no meio.
-    tmp = destino + ".tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(dados, fh)
-        os.replace(tmp, destino)
-    except OSError as exc:
-        try:
-            os.path.exists(tmp) and os.remove(tmp)
-        except OSError:
-            pass
+        from django.contrib.auth import get_user_model
+        from apps.accounts.ml_sessions import save_storage_state
+        user = get_user_model().objects.get(pk=user_id)
+        save_storage_state(user, dados)
+    except Exception as exc:
         return _set_estado(user_id, fase="erro", erro=f"Não foi possível salvar a sessão: {exc}")
 
     return _set_estado(user_id, fase="conectado", erro="", salvar_agora=False, cancelar=False)

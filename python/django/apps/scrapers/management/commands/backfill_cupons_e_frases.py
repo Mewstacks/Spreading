@@ -10,6 +10,7 @@ Idempotente: rodar de novo não faz mal. Rode após aplicar as migrations.
 from django.core.management.base import BaseCommand
 from django.db.models import Q
 from django.utils import timezone
+from apps.accounts.tenant import system_job
 
 from apps.scrapers.coupon_rules import (
     derivar_categoria_cupom, regras_do_cupom, rotulo_anunciante)
@@ -25,6 +26,7 @@ class Command(BaseCommand):
         parser.add_argument("--so-frases", action="store_true",
                             help="Só limpa o cache frase_llm.")
 
+    @system_job
     def handle(self, *args, **opts):
         so_cupons = opts.get("so_cupons")
         so_frases = opts.get("so_frases")

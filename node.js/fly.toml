@@ -1,5 +1,5 @@
-# Fly.io — serviço WhatsApp (whatsapp-web.js + Chromium). Só rede privada.
-# Secret: fly secrets set API_KEY=<mesma-chave-do-WHATSAPP_API_KEY-do-web>
+# Fly.io — serviço WhatsApp (whatsapp-web.js + Chromium). Somente 6PN/.internal.
+# Secret: WA_CAPABILITY_PUBLIC_KEYS_JSON (somente chaves públicas Ed25519).
 app = "spreading-wa"
 primary_region = "gru"
 
@@ -11,6 +11,8 @@ primary_region = "gru"
 
 [env]
   PORT = "3000"
+  WA_CAPABILITY_ISSUER = "spreading-web"
+  WA_CAPABILITY_AUDIENCE = "spreading-wa"
   MAX_WHATSAPP_SESSIONS = "4"
   SESSION_START_STAGGER_MS = "12000"
   SESSION_INIT_TIMEOUT_MS = "90000"
@@ -31,29 +33,16 @@ primary_region = "gru"
   source = "wa_data"
   destination = "/app/.wwebjs_auth"
 
-# Sem [http_service] público: o Django alcança via spreading-wa.internal:3000
-# (rede privada Fly). O painel expõe QR/status pelo próprio Django.
-[[services]]
-  internal_port = 3000
-  protocol = "tcp"
-  auto_stop_machines = false
-  auto_start_machines = true
-  min_machines_running = 1
-
-  [[services.ports]]
-    port = 80
-    handlers = ["http"]
-    force_https = true
-
-  [[services.ports]]
-    port = 443
-    handlers = ["tls", "http"]
-
-  [[services.http_checks]]
+# Sem services/http_service: não há rota no Fly Proxy público. O processo escuta
+# IPv6 para o DNS spreading-wa.internal; o check abaixo não publica a porta.
+[checks]
+  [checks.health]
+    type = "http"
+    port = 3000
     interval = "15s"
     timeout = "10s"
     grace_period = "60s"
-    method = "GET"
+    method = "get"
     path = "/health"
 
 # Cada WhatsApp conectado = 1 Chromium (~350MB). Dimensione a memória pela

@@ -16,6 +16,7 @@ from datetime import timedelta
 from django.core.management.base import BaseCommand
 from django.db import DatabaseError, connections
 from django.utils import timezone
+from apps.accounts.tenant import system_job
 
 from apps.scrapers import automacao_state as st
 from apps.scrapers.eventos import log_event
@@ -337,6 +338,7 @@ class Command(BaseCommand):
         parser.add_argument("--lote", type=int, default=40, help="Links gerados por ciclo, por usuário.")
         parser.add_argument("--scrape-horas", type=float, default=3.0, help="Horas entre raspagens completas.")
 
+    @system_job
     def handle(self, *args, **opts):
         if opts["modo"] == "scrape":
             self._loop_scrape(opts)

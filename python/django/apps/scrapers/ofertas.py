@@ -792,8 +792,7 @@ def resolver_link_afiliado_cupom(cupom, usuario):
     if origem:
         try:
             from apps.scrapers.scraper_mercadolivre.link import afiliate_link_builder
-            from apps.scrapers.session_paths import ml_auth_path
-            link = afiliate_link_builder(origem, auth_path=ml_auth_path(usuario))
+            link = afiliate_link_builder(origem, usuario=usuario)
             if link and get_marketplace(marketplace).verify_affiliate_tag(
                     link, usuario=usuario):
                 LinkAfiliadoCupomUsuario.objects.update_or_create(
@@ -970,7 +969,8 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
             link_rastreado=link_registro)
         resultado = sender.enviar_oferta(
             grupo_id, mensagem, legenda=mensagem, usuario=usuario,
-            session=wa_session_de(usuario), **img_kwargs)
+            session=wa_session_de(usuario),
+            operation_id=f"publicacao:{publicacao.pk}", **img_kwargs)
         if resultado.get("sucesso"):
             Publicacao.objects.filter(pk=publicacao.pk).update(
                 status="enviado", enviada_em=timezone.now())
@@ -1523,7 +1523,10 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         if sender.prefers_image == "url" and not imagem_b64_custom:
             resultado = sender.enviar_oferta(grupo_id, mensagem,
                                              imagem_url=getattr(produto, "imagem_url", "") or None,
-                                             legenda=mensagem, usuario=usuario, session=wa_session)
+                                             legenda=mensagem, usuario=usuario, session=wa_session,
+                                             operation_id=(
+                                                 f"publicacao:{publicacao.pk}"
+                                                 if publicacao else None))
         else:
             if imagem_b64_custom:
                 imagem_b64, img_mime = imagem_b64_custom, "image/jpeg"
@@ -1531,7 +1534,10 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                 imagem_b64, img_mime = _baixar_imagem_b64(getattr(produto, "imagem_url", ""))
             resultado = sender.enviar_oferta(grupo_id, mensagem, imagem_b64=imagem_b64 or None,
                                              mimetype=img_mime or "image/jpeg", legenda=mensagem,
-                                             usuario=usuario, session=wa_session)
+                                             usuario=usuario, session=wa_session,
+                                             operation_id=(
+                                                 f"publicacao:{publicacao.pk}"
+                                                 if publicacao else None))
 
         if resultado.get("sucesso"):
             HistoricoEnvio.objects.create(produto=produto, usuario=usuario)  # só após sucesso

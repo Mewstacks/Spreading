@@ -15,7 +15,7 @@ from apps.scrapers.link_validacao import (
 )
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
 from apps.scrapers.progresso import emitir_fase
-from apps.scrapers.session_paths import ml_auth_path as _auth_path
+from apps.accounts.ml_sessions import has_storage_state
 
 logger = logging.getLogger(__name__)
 
@@ -201,9 +201,15 @@ def link_tem_tag_afiliado(link_curto: str, usuario=None) -> bool:
     return any(p in baixo for p in ("matt_word=", "matt_tool=", "tracking_id=", "forceinapp"))
 
 
-def afiliate_link_builder(link_base, auth_path=None):
+def afiliate_link_builder(link_base, auth_path=None, usuario=None):
+    from apps.accounts.feature_flags import enabled_for_user
+    if not enabled_for_user("ML_LINK_BUILDER_ENABLED", usuario):
+        raise BrowserError(
+            "Link Builder por navegador está desativado para esta organização."
+        )
     with iniciar_browser(
-        auth_path=auth_path or _auth_path(),
+        auth_path=auth_path,
+        session_user=usuario,
         headless=True,
     ) as (page, context):
         _abrir_link_builder(page)
@@ -346,7 +352,7 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
     ultimo_erro = None
     with _orm_permitido_no_playwright():
         with iniciar_browser(
-            auth_path=_auth_path(usuario),
+            session_user=usuario,
             headless=True,
         ) as (page, context):
             _abrir_link_builder(page)
@@ -443,16 +449,10 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
         relatorio["erros"].append("link_afiliado vazio.")
         return relatorio
 
-    # Sessão do USUÁRIO quando existe (multi-tenant); senão o auth.json global legado.
     # validar_sessao=False: o destino é página pública — verificar não exige login e
     # não pode derrubar/apagar sessão (era a causa do falso 'Sessão ML expirada'
     # logo após o link ser gerado com sucesso).
-    auth_path = _auth_path(usuario)
-    if not os.path.exists(auth_path):
-        auth_path = _auth_path()
-
     with iniciar_browser(
-        auth_path=auth_path,
         headless=True,
         validar_sessao=False,
     ) as (page, context):
@@ -679,8 +679,7 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
                     url_produto, camp_id),
             }
 
-        auth_path = _auth_path(usuario)
-        if not os.path.exists(auth_path):
+        if not has_storage_state(usuario):
             raise LoginError(MSG_SESSAO_EXPIRADA)
         url_isca = _montar_url_isca(url_produto, camp_id)
         if not url_isca:
@@ -688,7 +687,7 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
             logger.info("URL de produto invalida para afiliacao ML: %s", motivo)
             registrar_falha(usuario, produto, motivo, terminal=True)
             return None
-        link_afiliado = afiliate_link_builder(url_isca, auth_path=auth_path)
+        link_afiliado = afiliate_link_builder(url_isca, usuario=usuario)
         if not link_afiliado:
             # afiliate_link_builder já logou a causa; aqui garantimos que ela também
             # fique gravada no item, senão a tela só sabe dizer "pendente".

@@ -37,6 +37,20 @@ from apps.scrapers.scraper_amazon import ofertas_scraper as amazon_ofertas
 from apps.scrapers.scraper_mercadolivre.scraper import _sincronizar_produtos_no_banco
 from apps.scrapers.scraper_mercadolivre import link as ml_link
 
+_TEST_WA_HEADERS = {
+    "Authorization": "Bearer test-capability",
+    "Content-Type": "application/json",
+}
+
+
+def _mock_wa_capability(testcase):
+    patcher = patch(
+        "apps.scrapers.whatsapp_client._headers",
+        return_value=_TEST_WA_HEADERS,
+    )
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+
 
 class AutomationStatusSecurityTests(TestCase):
     def setUp(self):
@@ -89,7 +103,7 @@ class AffiliateIdentityTests(TestCase):
         self.user.perfil.afiliado_tag_ml = "manual-que-nao-deve-ser-usada"
         self.assertEqual(tag_ml(self.user), "")
 
-    def test_ml_link_uses_only_the_users_auth_file(self):
+    def test_ml_link_uses_only_the_users_encrypted_session(self):
         with tempfile.TemporaryDirectory() as auth_dir:
             user_auth = os.path.join(auth_dir, f"auth_{self.user.id}.json")
             with open(user_auth, "w", encoding="utf-8") as auth_file:
@@ -109,7 +123,8 @@ class AffiliateIdentityTests(TestCase):
                 )
 
             self.assertEqual(result["link_afiliado"], "https://meli.la/user-link")
-            self.assertEqual(builder.call_args.kwargs["auth_path"], user_auth)
+            self.assertIs(builder.call_args.kwargs["usuario"], self.user)
+            self.assertNotIn("auth_path", builder.call_args.kwargs)
             save_cache.assert_called_once()
 
     def test_ml_link_reuses_user_cache_without_session_or_link_builder(self):
@@ -219,31 +234,30 @@ class MLAuthPathTests(SimpleTestCase):
             self._tocar(os.path.join(d, "auth_99.json"))
             self.assertEqual(ml_auth_path(Mock(id=7)), os.path.join(d, "auth_7.json"))
 
-    def test_job_sem_usuario_prefere_o_auth_global_legado(self):
+    def test_job_sem_usuario_recusa_auth_global_legado(self):
         from apps.scrapers.session_paths import ml_auth_path
 
         with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
             self._tocar(os.path.join(d, "auth.json"))
             self._tocar(os.path.join(d, "auth_7.json"))
-            self.assertEqual(ml_auth_path(), os.path.join(d, "auth.json"))
+            self.assertEqual(ml_auth_path(), "")
 
-    def test_job_sem_usuario_cai_na_sessao_mais_recente(self):
+    def test_job_sem_usuario_nunca_escolhe_sessao_mais_recente(self):
         """O que conserta cron/cupons: sem auth.json, usar a sessão real que existe."""
         from apps.scrapers.session_paths import ml_auth_path
 
         with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
             self._tocar(os.path.join(d, "auth_1.json"), quando=1_000_000)
             self._tocar(os.path.join(d, "auth_2.json"), quando=2_000_000)
-            self.assertEqual(ml_auth_path(), os.path.join(d, "auth_2.json"))
+            self.assertEqual(ml_auth_path(), "")
 
-    def test_sem_nenhuma_sessao_devolve_o_caminho_legado(self):
+    def test_sem_usuario_devolve_vazio(self):
         """Não estoura aqui: quem chama reporta 'reconecte' com a mensagem certa."""
         from apps.scrapers.session_paths import ml_auth_path
 
         with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
             caminho = ml_auth_path()
-            self.assertEqual(caminho, os.path.join(d, "auth.json"))
-            self.assertFalse(os.path.exists(caminho))
+            self.assertEqual(caminho, "")
 
     def test_arquivo_alheio_no_diretorio_nao_vira_sessao(self):
         from apps.scrapers.session_paths import ml_auth_path
@@ -251,7 +265,7 @@ class MLAuthPathTests(SimpleTestCase):
         with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
             self._tocar(os.path.join(d, "auth_1.json.bak"))
             self._tocar(os.path.join(d, "outra_coisa.json"))
-            self.assertEqual(ml_auth_path(), os.path.join(d, "auth.json"))
+            self.assertEqual(ml_auth_path(), "")
 
 
 class SondaSessaoMLTests(SimpleTestCase):
@@ -326,38 +340,46 @@ class EstadoMLTests(SimpleTestCase):
     def test_sem_arquivo_e_desconectado_com_motivo(self):
         from apps.scrapers.conexoes import estado_ml
 
-        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
+        with patch(
+            "apps.accounts.ml_sessions.load_storage_state", return_value=None,
+        ):
             est = estado_ml(Mock(id=7))
         self.assertFalse(est.conectado)
         self.assertEqual(est.detalhe, "sem_sessao")
         self.assertTrue(est.motivo)
 
-    def test_sessao_expirada_apaga_o_arquivo(self):
+    def test_sessao_expirada_apaga_o_registro_cifrado(self):
         """Confirmado o logout, some com a sessão morta: a tela passa a oferecer
         'Reconectar' em vez de insistir que está tudo bem."""
         from apps.scrapers.conexoes import estado_ml
 
-        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
-            caminho = self._auth(d)
-            with patch("apps.scrapers.conexoes.sondar_sessao_ml",
-                       return_value=("expirado", "redirect")):
-                est = estado_ml(Mock(id=7))
-            self.assertFalse(os.path.exists(caminho))
+        state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
+        with (
+            patch("apps.accounts.ml_sessions.load_storage_state", return_value=state),
+            patch("apps.accounts.ml_sessions.delete_storage_state") as delete,
+            patch("apps.scrapers.conexoes.sondar_sessao_ml",
+                  return_value=("expirado", "redirect")),
+        ):
+            est = estado_ml(Mock(id=7))
+        delete.assert_called_once()
         self.assertEqual(est.detalhe, "expirado")
 
-    def test_inconclusivo_preserva_o_ultimo_estado_e_nao_apaga(self):
+    def test_inconclusivo_preserva_o_ultimo_estado_e_o_ciphertext(self):
         from apps.scrapers.conexoes import estado_ml
 
-        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
-            caminho = self._auth(d)
-            user = Mock(id=7)
+        state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
+        user = Mock(id=7)
+        with (
+            patch("apps.accounts.ml_sessions.load_storage_state", return_value=state),
+            patch("apps.accounts.ml_sessions.delete_storage_state") as delete,
+        ):
             with patch("apps.scrapers.conexoes.sondar_sessao_ml",
                        return_value=("conectado", "")):
                 self.assertTrue(estado_ml(user).conectado)      # popula o cache
             with patch("apps.scrapers.conexoes.sondar_sessao_ml",
                        return_value=("inconclusivo", "timeout")):
                 est = estado_ml(user, usar_cache=False)
-            self.assertTrue(os.path.exists(caminho))            # não apagou
+        delete.assert_not_called()
         self.assertTrue(est.conectado)                          # manteve o que sabia
 
     def test_conectado_e_cacheado(self):
@@ -365,9 +387,11 @@ class EstadoMLTests(SimpleTestCase):
         aberta viraria uma ida ao ML."""
         from apps.scrapers.conexoes import estado_ml
 
-        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
-            self._auth(d)
-            user = Mock(id=7)
+        state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
+        user = Mock(id=7)
+        with patch(
+            "apps.accounts.ml_sessions.load_storage_state", return_value=state,
+        ):
             with patch("apps.scrapers.conexoes.sondar_sessao_ml",
                        return_value=("conectado", "")) as sonda:
                 estado_ml(user)
@@ -378,7 +402,6 @@ class EstadoMLTests(SimpleTestCase):
 
 @override_settings(
     WHATSAPP_API_URL="http://whatsapp.internal:3000",
-    WHATSAPP_API_KEY="secret",
 )
 class WhatsAppStatusCacheTests(SimpleTestCase):
     """O status do WhatsApp é cacheado por poucos segundos.
@@ -393,6 +416,7 @@ class WhatsAppStatusCacheTests(SimpleTestCase):
         # de execução decidiria o resultado.
         cache.clear()
         self.addCleanup(cache.clear)
+        _mock_wa_capability(self)
 
     @patch("apps.scrapers.whatsapp_client.requests.request")
     def test_status_repetido_bate_uma_vez_so_no_node(self, request):
@@ -467,12 +491,15 @@ class WhatsAppStatusCacheTests(SimpleTestCase):
         self.assertTrue(resultado["sucesso"])
         request.assert_called_once_with(
             "POST", "http://whatsapp.internal:3000/api/sessoes/reset",
-            headers={"x-api-key": "secret", "Content-Type": "application/json"},
+            headers=_TEST_WA_HEADERS,
             params=None, json={"session": "user-42"}, timeout=25,
         )
 
 
 class WhatsAppIsolationTests(SimpleTestCase):
+    def setUp(self):
+        _mock_wa_capability(self)
+
     @patch("apps.scrapers.whatsapp_client.status")
     def test_connection_monitor_checks_the_requested_session(self, status):
         status.return_value = {"conectado": True}
@@ -481,7 +508,6 @@ class WhatsAppIsolationTests(SimpleTestCase):
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.request")
     def test_session_start_is_an_explicit_post_for_one_session(self, request):
@@ -499,13 +525,12 @@ class WhatsAppIsolationTests(SimpleTestCase):
         self.assertTrue(result["sucesso"])
         request.assert_called_once_with(
             "POST", "http://whatsapp.internal:3000/api/sessoes",
-            headers={"x-api-key": "secret", "Content-Type": "application/json"},
+            headers=_TEST_WA_HEADERS,
             params=None, json={"session": "user-42"}, timeout=10,
         )
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.post")
     def test_send_routes_to_the_users_session(self, post):
@@ -514,17 +539,21 @@ class WhatsAppIsolationTests(SimpleTestCase):
         post.return_value = response
 
         result = whatsapp_client.enviar_oferta(
-            "123@g.us", "mensagem", session="user-42"
+            "123@g.us", "mensagem", session="user-42",
+            idempotency_key="publicacao:123",
         )
 
         self.assertTrue(result["sucesso"])
         self.assertEqual(post.call_args.kwargs["json"]["session"], "user-42")
         self.assertEqual(post.call_args.kwargs["json"]["grupoid"], "123@g.us")
+        self.assertEqual(
+            post.call_args.kwargs["headers"]["Idempotency-Key"],
+            "publicacao:123",
+        )
         self.assertEqual(post.call_args.kwargs["timeout"], 65)
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.post")
     def test_send_rejects_success_without_message_confirmation(self, post):
@@ -541,7 +570,6 @@ class WhatsAppIsolationTests(SimpleTestCase):
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.post")
     def test_send_preserva_resultado_incerto_do_node(self, post):
@@ -663,9 +691,11 @@ class WhatsAppTransportContractTests(SimpleTestCase):
     """O front distingue "Node fora do ar" de "WhatsApp desconectado" pela
     presença da chave `erro`. Ela só pode aparecer por falha de transporte."""
 
+    def setUp(self):
+        _mock_wa_capability(self)
+
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.request")
     def test_unreachable_worker_is_reported_as_erro(self, request):
@@ -674,7 +704,6 @@ class WhatsAppTransportContractTests(SimpleTestCase):
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.request")
     def test_refresh_never_retries_a_non_idempotent_post(self, request):
@@ -690,7 +719,6 @@ class WhatsAppTransportContractTests(SimpleTestCase):
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.request")
     def test_a_healthy_worker_reply_is_passed_through_untouched(self, request):
@@ -708,7 +736,6 @@ class WhatsAppTransportContractTests(SimpleTestCase):
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.request")
     def test_logout_does_not_retry(self, request):
@@ -720,7 +747,7 @@ class WhatsAppTransportContractTests(SimpleTestCase):
 
         request.assert_called_once_with(
             "POST", "http://whatsapp.internal:3000/api/sessoes/logout",
-            headers={"x-api-key": "secret", "Content-Type": "application/json"},
+            headers=_TEST_WA_HEADERS,
             params=None, json={"session": "user-42"}, timeout=25,
         )
 
@@ -729,10 +756,13 @@ class WhatsAppErrorTaxonomyTests(SimpleTestCase):
     """Toda falha de envio carrega `classe`. O orquestrador decide por ela se
     conta a falha contra a regra do usuário — ver EnvioResilienciaTests."""
 
+    def setUp(self):
+        _mock_wa_capability(self)
+
     def _post(self, **kwargs):
         return patch("apps.scrapers.whatsapp_client.requests.post", **kwargs)
 
-    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000", WHATSAPP_API_KEY="k")
+    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000")
     def test_node_classification_wins_over_the_status_code(self):
         # O Node responde 503 para toda falha de envio, inclusive as permanentes
         # (grupo apagado). Sem ler o corpo, o status sozinho diria "transitório"
@@ -747,7 +777,7 @@ class WhatsAppErrorTaxonomyTests(SimpleTestCase):
             r = whatsapp_client.enviar_oferta("123@g.us", "m", session="u")
         self.assertEqual(r["classe"], "permanente")
 
-    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000", WHATSAPP_API_KEY="k")
+    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000")
     def test_timeout_and_refused_connection_are_transient(self):
         # Os dois piores casos nunca chegam classificados pelo Node — ele não
         # chegou a responder. São exatamente os que desligavam a automação.
@@ -758,7 +788,7 @@ class WhatsAppErrorTaxonomyTests(SimpleTestCase):
             self.assertFalse(r["sucesso"])
             self.assertEqual(r["classe"], "transitorio")
 
-    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000", WHATSAPP_API_KEY="k")
+    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000")
     def test_rate_limit_is_transient_and_bad_request_is_permanent(self):
         casos = [(429, "transitorio"), (500, "transitorio"), (400, "permanente")]
         for status, esperado in casos:
@@ -768,7 +798,7 @@ class WhatsAppErrorTaxonomyTests(SimpleTestCase):
                 r = whatsapp_client.enviar_oferta("123@g.us", "m", session="u")
             self.assertEqual(r["classe"], esperado)
 
-    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000", WHATSAPP_API_KEY="k")
+    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000")
     def test_node_regression_does_not_punish_the_user(self):
         # sucesso sem mensagem_id é bug nosso, não da configuração dele.
         response = Mock(status_code=200)
@@ -3250,13 +3280,6 @@ class RelatorioSaudeTests(TestCase):
         )
         self.assertTrue(all(a["exemplo"] is not None for a in problema["afetados"]))
 
-        self.client.force_login(self.admin)
-        with patch("apps.scrapers.saude._workers", return_value=[]):
-            resposta = self.client.get(reverse("superadmin-saude"))
-        self.assertContains(resposta, "outra-conta")
-        self.assertContains(
-            resposta, reverse("superadmin-usuario", args=[outra_conta.id]))
-
     def test_saude_filtra_por_username(self):
         from apps.scrapers.saude import resumo
 
@@ -3268,12 +3291,6 @@ class RelatorioSaudeTests(TestCase):
             r = resumo(horas=24, usuario=outra_conta)
         self.assertEqual([(p["pipeline"], p["evento"]) for p in r["problemas"]],
                          [("whatsapp", "send_timeout")])
-
-        self.client.force_login(self.admin)
-        with patch("apps.scrapers.saude._workers", return_value=[]):
-            resposta = self.client.get(reverse("superadmin-saude"), {"usuario": "LuLeS"})
-        self.assertContains(resposta, "Eventos de lules")
-        self.assertNotContains(resposta, "saude-user")
 
     def test_evento_global_sem_conta_aparece_no_bucket_sistema(self):
         """`fonte_falhou` ("uma loja parou de responder") não tem usuário: é do sistema
@@ -3288,12 +3305,6 @@ class RelatorioSaudeTests(TestCase):
         self.assertEqual(problema["afetados"], [])
         self.assertIsNotNone(problema["sistema"])
         self.assertEqual(problema["sistema"].evento, "fonte_falhou")
-
-        self.client.force_login(self.admin)
-        with patch("apps.scrapers.saude._workers", return_value=[]):
-            resposta = self.client.get(reverse("superadmin-saude"))
-        self.assertContains(resposta, "Sistema (todas as contas)")
-        self.assertContains(resposta, "A coleta da loja mercadolivre falhou.")
 
     def test_erro_vem_antes_de_aviso_mesmo_sendo_menos_frequente(self):
         from apps.scrapers.saude import resumo
@@ -3385,9 +3396,8 @@ class RelatorioSaudeTests(TestCase):
         self.client.force_login(self.admin)
         with patch("apps.scrapers.saude._workers", return_value=[]):
             resposta = self.client.get(reverse("superadmin-saude"))
-        self.assertEqual(resposta.status_code, 200)
-        self.assertContains(resposta, "Automação pausada sozinha")
-        self.assertContains(resposta, "Visão geral: avisos e erros de todas as contas")
+        self.assertEqual(resposta.status_code, 503)
+        self.assertEqual(resposta["Retry-After"], "3600")
 
 
 class RetesteDaSaudeTests(TestCase):
@@ -3417,6 +3427,7 @@ class RetesteDaSaudeTests(TestCase):
         )
 
     def test_reteste_fecha_o_grupo_inteiro_nao_so_um(self):
+        from apps.scrapers.health_retest import retest_incident_group
         from apps.scrapers.models import IncidenteSaude
 
         a = self._incidente(self.u1)
@@ -3424,39 +3435,41 @@ class RetesteDaSaudeTests(TestCase):
 
         with patch("apps.scrapers.conexoes.estado_whatsapp",
                    return_value=_estado_conectado("WhatsApp")):
-            self.client.post(reverse("superadmin-saude-retestar", args=[a.pk]))
+            retest_incident_group(a.pk)
 
         self.assertEqual(IncidenteSaude.objects.filter(status="aberto").count(), 0)
         self.assertEqual(IncidenteSaude.objects.filter(status="concluido").count(), 2)
 
     def test_conexao_de_pe_agora_conclui_o_incidente(self):
         """A causa nº1 de 'Saúde vermelha, dashboard verde'."""
+        from apps.scrapers.health_retest import retest_incident_group
         from apps.scrapers.models import IncidenteSaude
 
         inc = self._incidente(self.u1)
 
         with patch("apps.scrapers.conexoes.estado_whatsapp",
                    return_value=_estado_conectado("WhatsApp")):
-            self.client.post(reverse("superadmin-saude-retestar", args=[inc.pk]))
+            retest_incident_group(inc.pk)
 
         inc.refresh_from_db()
         self.assertEqual(inc.status, "concluido")
         self.assertIn("conectado", inc.confirmacao.lower())
 
     def test_conexao_ainda_caida_mantem_aberto_com_o_motivo(self):
+        from apps.scrapers.health_retest import retest_incident_group
         inc = self._incidente(self.u1)
 
         with patch("apps.scrapers.conexoes.estado_whatsapp",
                    return_value=_estado_caido("WhatsApp", "WhatsApp não está pareado.")):
-            r = self.client.post(reverse("superadmin-saude-retestar", args=[inc.pk]),
-                                 follow=True)
+            result = retest_incident_group(inc.pk)
 
         inc.refresh_from_db()
         self.assertEqual(inc.status, "aberto")
-        self.assertIn("não está pareado", " ".join(str(m) for m in get_messages(r.wsgi_request)))
+        self.assertIn("não está pareado", result["message"])
 
     def test_grupo_parcial_avisa_quantas_faltam(self):
         """Uma conta voltar não pode dar 'tudo certo' quando a outra segue caída."""
+        from apps.scrapers.health_retest import retest_incident_group
         from apps.scrapers.models import IncidenteSaude
 
         a = self._incidente(self.u1)
@@ -3466,23 +3479,20 @@ class RetesteDaSaudeTests(TestCase):
 
         with patch("apps.scrapers.conexoes.estado_whatsapp",
                    side_effect=lambda u, **k: estados[u]):
-            self.client.post(reverse("superadmin-saude-retestar", args=[a.pk]))
+            retest_incident_group(a.pk)
 
         self.assertEqual(IncidenteSaude.objects.filter(status="aberto").count(), 1)
         self.assertEqual(IncidenteSaude.objects.filter(status="concluido").count(), 1)
 
     def test_reteste_preserva_o_filtro(self):
-        """O redirect nu devolvia o superadmin para 24h/global, perdendo a conta que
-        ele estava investigando."""
+        """O processo web jamais recebe bypass cross-tenant."""
         inc = self._incidente(self.u1)
 
-        with patch("apps.scrapers.conexoes.estado_whatsapp",
-                   return_value=_estado_conectado("WhatsApp")):
-            r = self.client.post(reverse("superadmin-saude-retestar", args=[inc.pk]),
-                                 {"horas": "168", "usuario": "conta-1"})
+        r = self.client.post(reverse("superadmin-saude-retestar", args=[inc.pk]))
 
-        self.assertIn("horas=168", r.url)
-        self.assertIn("usuario=conta-1", r.url)
+        self.assertEqual(r.status_code, 503)
+        inc.refresh_from_db()
+        self.assertEqual(inc.status, "aberto")
 
     def test_conta_sem_perfil_nao_vira_reteste_falhou_generico(self):
         """Perfil.DoesNotExist era capturado pelo except genérico e virava
@@ -3530,11 +3540,7 @@ class AutoRefreshDaSaudeTests(TestCase):
     def test_json_responde_o_resumo(self):
         r = self.client.get(reverse("superadmin-saude-json"))
 
-        self.assertEqual(r.status_code, 200)
-        d = r.json()
-        self.assertIn(d["estado"], ("ok", "atencao", "critico"))
-        self.assertIn("assinatura", d)
-        self.assertTrue(d["workers"])
+        self.assertEqual(r.status_code, 503)
 
     def test_polling_nao_infla_ocorrencias(self):
         """A regressão que o auto-refresh podia introduzir: resumo() escrevendo no

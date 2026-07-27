@@ -141,6 +141,8 @@ def spawn_worker(job: str):
 
     Ligar 'scrape' também sobe a LANE FLASH (scrape_rapido) — em prod o Procfile já a
     roda; em dev ela não existiria sem isto (era o gap de paridade dev/prod)."""
+    if settings.APP_ENV in {"staging", "production"}:
+        return
     _spawn_one(job)
     if job == "scrape":
         _spawn_one("scrape_rapido")

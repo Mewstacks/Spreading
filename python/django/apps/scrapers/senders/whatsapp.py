@@ -14,7 +14,8 @@ class WhatsAppSender(Sender):
         return padronizar_resultado(dados, self.slug)
 
     def enviar_oferta(self, destino, mensagem, *, imagem_url=None, imagem_b64=None,
-                      mimetype="image/jpeg", legenda=None, usuario=None, session=None):
+                      mimetype="image/jpeg", legenda=None, usuario=None, session=None,
+                      operation_id=None):
         if not session and usuario is not None:
             perfil = getattr(usuario, "perfil", None)
             session = perfil.sessao_whatsapp() if perfil else str(usuario.id)
@@ -35,6 +36,6 @@ class WhatsAppSender(Sender):
             return self._resultado(whatsapp_client.enviar_oferta(
                 destino, mensagem, imagem_base64=imagem_b64,
                 mimetype=mimetype or "image/jpeg", legenda=legenda or mensagem,
-                session=session))
+                session=session, idempotency_key=operation_id))
         return self._resultado(whatsapp_client.enviar_oferta(
-            destino, mensagem, session=session))
+            destino, mensagem, session=session, idempotency_key=operation_id))

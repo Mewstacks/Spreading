@@ -13,6 +13,34 @@ SENSITIVE_KEYS = {
     "credential_secret", "amazon_credential_secret", "telegram_bot_token",
 }
 
+# Mapeia o level do log_event para a severidade do Sentry.
+_SENTRY_LEVEL = {
+    "debug": "debug", "info": "info", "warning": "warning",
+    "error": "error", "critical": "fatal",
+}
+
+
+def _report_sentry(exc, *, pipeline, evento, level, usuario, contexto):
+    """Envia a exceção ao Sentry se disponível. Nunca derruba o fluxo principal."""
+    try:
+        import sentry_sdk
+    except Exception:
+        return
+    try:
+        with sentry_sdk.push_scope() as scope:
+            scope.set_level(_SENTRY_LEVEL.get(level, "error"))
+            scope.set_tag("pipeline", pipeline)
+            scope.set_tag("evento", (evento or "")[:80])
+            scope.set_context("evento_operacional", _clean(contexto or {}))
+            if usuario is not None:
+                scope.set_user({
+                    "id": getattr(usuario, "pk", None),
+                    "username": getattr(usuario, "username", str(usuario)),
+                })
+            sentry_sdk.capture_exception(exc)
+    except Exception:
+        pass  # observabilidade nunca pode virar outra fonte de falha
+
 
 def _clean(value):
     if isinstance(value, dict):
@@ -34,6 +62,9 @@ def _clean(value):
 
 def log_event(pipeline: str, evento: str, mensagem: str, *, level="info",
               usuario=None, contexto=None, exc=None):
+    if exc is not None:
+        _report_sentry(exc, pipeline=pipeline, evento=evento, level=level,
+                       usuario=usuario, contexto=contexto)
     try:
         from apps.scrapers.models import EventoOperacional
         erro = ""

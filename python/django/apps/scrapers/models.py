@@ -40,6 +40,14 @@ class Produto(models.Model):
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                               null=True, blank=True, db_index=True,
                               related_name="produtos")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="produtos",
+    )
+    data_scope = models.CharField(
+        max_length=16, choices=[("public", "Público"), ("organization", "Organização")],
+        default="public", db_index=True,
+    )
     # ASIN da Amazon (vazio p/ outros marketplaces). Usado p/ link canônico /dp/{ASIN},
     # dedup por (marketplace, asin) e refresh de preço/liveness via getItems.
     asin = models.CharField(max_length=20, blank=True, default="", db_index=True)
@@ -116,6 +124,10 @@ class IntegracaoAfiliado(models.Model):
     ]
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                               related_name="integracoes_afiliado")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="integracoes_afiliado",
+    )
     provedor = models.CharField(max_length=30, default="awin", db_index=True)
     identificador_conta = models.CharField(max_length=120, blank=True, default="")
     nome_conta = models.CharField(max_length=160, blank=True, default="")
@@ -145,6 +157,10 @@ class ProgramaAfiliado(models.Model):
 
     integracao = models.ForeignKey(IntegracaoAfiliado, on_delete=models.CASCADE,
                                    related_name="programas")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="programas_afiliado",
+    )
     external_id = models.CharField(max_length=80)
     nome = models.CharField(max_length=180)
     dominio = models.CharField(max_length=255, blank=True, default="")
@@ -176,6 +192,10 @@ class ExecucaoIngestao(models.Model):
                               related_name="execucoes")
     integracao = models.ForeignKey(IntegracaoAfiliado, on_delete=models.SET_NULL,
                                    null=True, blank=True, related_name="execucoes")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="execucoes_ingestao",
+    )
     iniciada_em = models.DateTimeField(auto_now_add=True, db_index=True)
     finalizada_em = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS, default="running")
@@ -191,6 +211,14 @@ class CupomNormalizado(models.Model):
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                               null=True, blank=True, db_index=True,
                               related_name="cupons_normalizados")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="cupons_normalizados",
+    )
+    data_scope = models.CharField(
+        max_length=16, choices=[("public", "Público"), ("organization", "Organização")],
+        default="public", db_index=True,
+    )
     integracao = models.ForeignKey(IntegracaoAfiliado, on_delete=models.SET_NULL,
                                    null=True, blank=True, related_name="cupons")
     programa = models.ForeignKey(ProgramaAfiliado, on_delete=models.SET_NULL,
@@ -241,6 +269,10 @@ class ProdutoCupom(models.Model):
                                 related_name="cupons_normalizados")
     cupom = models.ForeignKey(CupomNormalizado, on_delete=models.CASCADE,
                               related_name="produtos")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="produto_cupons",
+    )
     status = models.CharField(max_length=20, choices=STATUS, default="provavel")
     verificado_em = models.DateTimeField(null=True, blank=True)
     evidencia = models.JSONField(default=dict, blank=True)
@@ -265,6 +297,10 @@ class CupomPreparacao(models.Model):
     # Demais lojas e cupons privados sao preparados no contexto do usuario.
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                                 null=True, blank=True, related_name="cupons_preparados")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="cupons_preparados",
+    )
     status = models.CharField(max_length=20, choices=STATUS, default="pendente",
                               db_index=True)
     produtos_chave = models.CharField(max_length=64, blank=True, default="", db_index=True)
@@ -303,6 +339,10 @@ class HistoricoEnvio(models.Model):
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                                 null=True, blank=True, db_index=True,
                                 related_name="envios")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="envios",
+    )
     data_envio = models.DateTimeField(auto_now_add=True, db_index=True)
 
     def __str__(self):
@@ -324,6 +364,10 @@ class Publicacao(models.Model):
                                   default=gerar_slug_curto, editable=False)
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                                 related_name="publicacoes")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="publicacoes",
+    )
     produto = models.ForeignKey(Produto, on_delete=models.SET_NULL, null=True,
                                 related_name="publicacoes")
     cupom_normalizado = models.ForeignKey(
@@ -359,6 +403,10 @@ class Publicacao(models.Model):
 class CliquePublicacao(models.Model):
     """Clique sem IP, cookie ou identificador pessoal."""
     publicacao = models.ForeignKey(Publicacao, on_delete=models.CASCADE, related_name="cliques")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="cliques_publicacao",
+    )
     clicado_em = models.DateTimeField(auto_now_add=True, db_index=True)
 
 
@@ -366,6 +414,10 @@ class LinkAfiliadoCupomUsuario(models.Model):
     """Cache de link afiliado de um cupom por usuario e URL de origem."""
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                                 related_name="links_cupons")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="links_cupons",
+    )
     cupom = models.ForeignKey(CupomNormalizado, on_delete=models.CASCADE,
                               related_name="links_usuarios")
     url_origem = models.URLField(max_length=1000)
@@ -384,6 +436,10 @@ class ReceitaAfiliado(models.Model):
     """Linha normalizada de relatório sincronizado do marketplace."""
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                                 related_name="receitas_afiliado")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="receitas_afiliado",
+    )
     marketplace = models.CharField(max_length=20, db_index=True)
     data = models.DateField(db_index=True)
     etiqueta = models.CharField(max_length=120, blank=True, default="")
@@ -419,6 +475,10 @@ class RelatorioSync(models.Model):
     ]
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                                 related_name="syncs_relatorio")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="syncs_relatorio",
+    )
     marketplace = models.CharField(max_length=20, db_index=True)
     status = models.CharField(max_length=20, choices=STATUS, default="nunca", db_index=True)
     ultimo_inicio = models.DateTimeField(null=True, blank=True)
@@ -474,6 +534,10 @@ class EventoOperacional(models.Model):
     mensagem = models.CharField(max_length=500)
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
                                 null=True, blank=True, related_name="eventos_operacionais")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.SET_NULL, null=True, blank=True,
+        db_index=True, related_name="eventos_operacionais",
+    )
     contexto = models.JSONField(default=dict, blank=True)
     erro = models.TextField(blank=True, default="")
     # Evita que a leitura do painel reprocese o mesmo log histórico como uma
@@ -493,6 +557,10 @@ class IncidenteSaude(models.Model):
     escopo = models.CharField(max_length=255, default="sistema", db_index=True)
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
                                 null=True, blank=True, related_name="incidentes_saude")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.SET_NULL, null=True, blank=True,
+        db_index=True, related_name="incidentes_saude",
+    )
     level = models.CharField(max_length=10, default="warning")
     status = models.CharField(max_length=12, choices=STATUS, default="aberto", db_index=True)
     ocorrencias = models.PositiveIntegerField(default=1)
@@ -518,6 +586,10 @@ class LinkAfiliadoUsuario(models.Model):
     """
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                                 related_name="links_afiliado")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="links_afiliado",
+    )
     produto = models.ForeignKey(Produto, on_delete=models.CASCADE,
                                 related_name="links_usuario")
     url_isca = models.URLField(max_length=1000, blank=True, default="")
@@ -608,6 +680,10 @@ class CanalMonitorado(models.Model):
     Opt-in por usuário; trocar tag de afiliado é padrão no nicho."""
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                               related_name="canais_monitorados")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="canais_monitorados",
+    )
     # Canal-fonte no Telegram: @username público ou id numérico (-100...).
     handle = models.CharField(max_length=120)
     # Destino da re-divulgação (grupo do próprio usuário).
@@ -626,6 +702,10 @@ class EnvioCanal(models.Model):
     Chave = hash da URL-fonte do produto (HistoricoEnvio exige Produto; aqui não há)."""
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                               related_name="envios_canal")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="envios_canal",
+    )
     chave = models.CharField(max_length=64, db_index=True)  # sha1 da url-fonte
     data = models.DateTimeField(auto_now_add=True, db_index=True)
 
@@ -639,6 +719,10 @@ class ConfiguracaoEnvio(models.Model):
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                               null=True, blank=True, db_index=True,
                               related_name="configuracoes")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="configuracoes",
+    )
     macro_categoria = models.CharField(max_length=100, blank=True, default="")
     # Sub-nicho opcional: só envia itens cujo nome casa com algum destes termos
     # (separados por vírgula). Ex: "aspirador robo, robot vacuum, robô aspirador".

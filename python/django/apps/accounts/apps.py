@@ -6,5 +6,6 @@ class AccountsConfig(AppConfig):
     verbose_name = "Contas"
 
     def ready(self):
-        # Registra o signal post_save que cria o Perfil de cada User.
+        # Registra signals e checks de segurança no carregamento do app.
+        from . import checks  # noqa: F401
         from . import models  # noqa: F401

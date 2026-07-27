@@ -8,13 +8,179 @@ from django.db import models
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.utils import timezone
+from django.utils.text import slugify
+import uuid
 
 from apps.accounts.fields import EncryptedCharField
+
+
+class Organization(models.Model):
+    """Fronteira de dados e autorização do SaaS."""
+
+    STATUS = [
+        ("active", "Ativa"),
+        ("suspended", "Suspensa"),
+        ("migration_blocked", "Migração bloqueada"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=120)
+    slug = models.SlugField(max_length=140, unique=True)
+    status = models.CharField(max_length=24, choices=STATUS, default="active",
+                              db_index=True)
+    personal_owner = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="personal_organization",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
+
+
+class Membership(models.Model):
+    """Permissão explícita de uma pessoa dentro de uma organização."""
+
+    ROLES = [
+        ("owner", "Owner"),
+        ("operator", "Operador"),
+        ("viewer", "Leitura"),
+    ]
+
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name="memberships",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="organization_memberships",
+    )
+    role = models.CharField(max_length=16, choices=ROLES, default="viewer")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "user"], name="uniq_membership_org_user",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["user", "is_active"]),
+            models.Index(fields=["organization", "is_active"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id}@{self.organization_id}:{self.role}"
+
+
+class MercadoLivreSession(models.Model):
+    """Storage state Playwright cifrado e autenticado por organização."""
+
+    STATUS = [
+        ("active", "Ativa"),
+        ("expired", "Expirada"),
+        ("decrypt_error", "Erro de criptografia"),
+        ("rotation_required", "Rotação necessária"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.OneToOneField(
+        Organization, on_delete=models.CASCADE, related_name="mercadolivre_session",
+    )
+    connection_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    cipher_version = models.CharField(max_length=24, default="aes-256-gcm-v1")
+    key_version = models.CharField(max_length=32)
+    wrapped_dek = models.BinaryField()
+    wrap_nonce = models.BinaryField()
+    data_nonce = models.BinaryField()
+    ciphertext = models.BinaryField()
+    status = models.CharField(max_length=24, choices=STATUS, default="active",
+                              db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    rotated_at = models.DateTimeField(null=True, blank=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"MLSession<{self.organization_id}>"
+
+
+class WhatsAppConnection(models.Model):
+    """Mapeia uma única instância Node a uma organização."""
+
+    organization = models.OneToOneField(
+        Organization, on_delete=models.CASCADE, related_name="whatsapp_connection",
+    )
+    instance_id = models.CharField(max_length=64, unique=True)
+    status = models.CharField(max_length=24, default="inactive", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"WA<{self.organization_id}:{self.instance_id}>"
+
+
+def ensure_personal_organization(user) -> Organization:
+    """Retorna/cria o tenant pessoal de um usuário de forma idempotente."""
+    existing = Organization.objects.filter(personal_owner=user).first()
+    if existing:
+        Membership.objects.get_or_create(
+            organization=existing, user=user,
+            defaults={"role": "owner", "is_active": True},
+        )
+        WhatsAppConnection.objects.get_or_create(
+            organization=existing,
+            defaults={
+                "instance_id": (
+                    getattr(getattr(user, "perfil", None), "wa_session", "")
+                    or str(user.pk)
+                ),
+            },
+        )
+        return existing
+
+    base = slugify(user.get_username())[:80] or "conta"
+    organization = Organization.objects.create(
+        name=user.get_full_name() or user.get_username() or f"Conta {user.pk}",
+        slug=f"{base}-{uuid.uuid4().hex[:10]}",
+        personal_owner=user,
+    )
+    Membership.objects.create(
+        organization=organization, user=user, role="owner", is_active=True,
+    )
+    WhatsAppConnection.objects.create(
+        organization=organization, instance_id=str(user.pk),
+    )
+    return organization
+
+
+def organization_for_user(user) -> Organization | None:
+    """Resolve o tenant ativo sem confiar em um id vindo do cliente."""
+    if not user or not getattr(user, "is_authenticated", False):
+        return None
+    personal = Organization.objects.filter(
+        personal_owner=user, status="active",
+    ).first()
+    if personal:
+        return personal
+    membership = (
+        Membership.objects.select_related("organization")
+        .filter(user=user, is_active=True, organization__status="active")
+        .order_by("created_at")
+        .first()
+    )
+    return membership.organization if membership else None
 
 
 class Perfil(models.Model):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                                 related_name="perfil")
+    organization = models.OneToOneField(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="profile_settings",
+    )
 
     # ── Verificação de e-mail ──
     email_verificado = models.BooleanField(default=False)
@@ -146,6 +312,13 @@ class Perfil(models.Model):
 
     def sessao_whatsapp(self) -> str:
         """Sessão WA do usuário (default = id do usuário em string)."""
+        organization = organization_for_user(self.user)
+        if organization is not None:
+            connection = WhatsAppConnection.objects.filter(
+                organization=organization,
+            ).first()
+            if connection:
+                return connection.instance_id
         return self.wa_session or str(self.user_id)
 
     def __str__(self):
@@ -155,12 +328,20 @@ class Perfil(models.Model):
 @receiver(post_save, sender=settings.AUTH_USER_MODEL)
 def criar_perfil(sender, instance, created, **kwargs):
     """Todo User ganha um Perfil. Superusuário (createsuperuser) já nasce verificado."""
+    organization = ensure_personal_organization(instance)
     if created:
         Perfil.objects.create(
             user=instance,
+            organization=organization,
             email_verificado=bool(instance.is_superuser),
             verificado_em=timezone.now() if instance.is_superuser else None,
         )
     else:
         # Garante perfil p/ usuários antigos criados antes do model existir.
-        Perfil.objects.get_or_create(user=instance)
+        profile, _ = Perfil.objects.get_or_create(
+            user=instance,
+            defaults={"organization": organization},
+        )
+        if profile.organization_id != organization.pk:
+            profile.organization = organization
+            profile.save(update_fields=["organization"])

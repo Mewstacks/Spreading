@@ -10,9 +10,11 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import logging
 import os
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -33,6 +35,13 @@ SECRET_KEY = os.getenv("DJANGO_SECRET_KEY") or "django-insecure-dev-only-CHANGE-
 # Default seguro: em produção (Fly injeta FLY_APP_NAME) começa DESLIGADO mesmo se
 # alguém esquecer de setar a var; em dev local (sem FLY_APP_NAME) começa ligado.
 DEBUG = os.getenv("DJANGO_DEBUG", "0" if os.getenv("FLY_APP_NAME") else "1") == "1"
+APP_ENV = os.getenv(
+    "APP_ENV", "production" if os.getenv("FLY_APP_NAME") else "development",
+).strip().lower()
+if APP_ENV not in {"development", "test", "staging", "production"}:
+    raise ImproperlyConfigured(
+        "APP_ENV deve ser development, test, staging ou production."
+    )
 
 if not DEBUG and SECRET_KEY.startswith("django-insecure"):
     raise RuntimeError("Defina DJANGO_SECRET_KEY no .env antes de rodar com DEBUG=0.")
@@ -50,6 +59,30 @@ BILLING_PORTAL_URL = os.getenv("BILLING_PORTAL_URL", "")
 # controlado — o superadmin cria as contas pelo painel (/scrapers/painel-admin/).
 # Reabra o self-service só se quiser, com PERMITIR_CADASTRO_PUBLICO=1 no .env.
 PERMITIR_CADASTRO_PUBLICO = os.getenv("PERMITIR_CADASTRO_PUBLICO", "0") == "1"
+SECURITY_FREEZE_NEW_TENANTS = os.getenv(
+    "SECURITY_FREEZE_NEW_TENANTS",
+    "1" if APP_ENV in {"staging", "production"} else "0",
+) == "1"
+_AUTOMATION_DEFAULT = "0" if APP_ENV in {"staging", "production"} else "1"
+ML_BROWSER_LOGIN_ENABLED = os.getenv(
+    "ML_BROWSER_LOGIN_ENABLED", _AUTOMATION_DEFAULT,
+) == "1"
+ML_LINK_BUILDER_ENABLED = os.getenv(
+    "ML_LINK_BUILDER_ENABLED", _AUTOMATION_DEFAULT,
+) == "1"
+ML_BROWSER_REPORTS_ENABLED = os.getenv(
+    "ML_BROWSER_REPORTS_ENABLED", _AUTOMATION_DEFAULT,
+) == "1"
+TELETHON_RELINK_ENABLED = os.getenv(
+    "TELETHON_RELINK_ENABLED", "0",
+) == "1"
+WHATSAPP_WEB_ENABLED = os.getenv(
+    "WHATSAPP_WEB_ENABLED", _AUTOMATION_DEFAULT,
+) == "1"
+PILOT_ORGANIZATION_IDS = {
+    value.strip() for value in os.getenv("PILOT_ORGANIZATION_IDS", "").split(",")
+    if value.strip()
+}
 # Sem default: o antigo apontava pra landing de afiliados (não um relatório), então o
 # sync raspava uma página sem tabela e reportava "erro" pra sempre. Vazio = a tela diz
 # "sincronização automática indisponível", que é a verdade, em vez de erro recorrente.
@@ -114,6 +147,10 @@ MIDDLEWARE.insert(
     MIDDLEWARE.index('django.contrib.auth.middleware.AuthenticationMiddleware') + 1,
     'django.contrib.auth.middleware.LoginRequiredMiddleware',
 )
+MIDDLEWARE.insert(
+    MIDDLEWARE.index('django.contrib.auth.middleware.LoginRequiredMiddleware') + 1,
+    'apps.accounts.organization_middleware.OrganizationContextMiddleware',
+)
 
 # DEV: auto-login local (dispensa a tela de login). Roda ANTES do LoginRequired
 # para já entregar um request.user autenticado. Só em DEBUG; no-op em produção.
@@ -149,7 +186,48 @@ WSGI_APPLICATION = 'core.wsgi.application'
 # Produção (Fly.io): defina DATABASE_URL (postgres://...). Dev local cai no SQLite.
 import dj_database_url  # noqa: E402
 
-_DATABASE_URL = os.getenv("DATABASE_URL", "")
+_RUNTIME_DATABASE_URL = os.getenv("DATABASE_URL", "")
+_MIGRATION_DATABASE_URL = os.getenv("MIGRATION_DATABASE_URL", "")
+_SYSTEM_DATABASE_URL = os.getenv("SYSTEM_DATABASE_URL", "")
+MIGRATION_DATABASE_CONFIGURED = bool(_MIGRATION_DATABASE_URL)
+SYSTEM_DATABASE_CONFIGURED = bool(_SYSTEM_DATABASE_URL)
+TENANT_SYSTEM_PROCESS = os.getenv("TENANT_SYSTEM_PROCESS", "0") == "1"
+RELEASE_COMMAND_PROCESS = os.getenv("RELEASE_COMMAND") == "1"
+TENANT_RUNTIME_DB_ROLE = os.getenv("TENANT_RUNTIME_DB_ROLE", "spreading_runtime")
+TENANT_SYSTEM_DB_ROLE = os.getenv("TENANT_SYSTEM_DB_ROLE", "spreading_system")
+TENANT_MIGRATION_DB_ROLE = os.getenv(
+    "TENANT_MIGRATION_DB_ROLE", "spreading_migration",
+)
+TENANT_CONTEXT_SIGNING_KEY = os.getenv("TENANT_CONTEXT_SIGNING_KEY", "")
+PHASE0_EXPAND_ONLY = os.getenv("PHASE0_EXPAND_ONLY", "0") == "1"
+# O release command pode usar uma role dona das tabelas para DDL. As máquinas da
+# aplicação continuam usando exclusivamente DATABASE_URL, com uma role sem
+# SUPERUSER/BYPASSRLS e sem ownership.
+_DATABASE_URL = (
+    _MIGRATION_DATABASE_URL
+    if RELEASE_COMMAND_PROCESS and _MIGRATION_DATABASE_URL
+    else (
+        _SYSTEM_DATABASE_URL
+        if TENANT_SYSTEM_PROCESS and _SYSTEM_DATABASE_URL
+        else _RUNTIME_DATABASE_URL
+    )
+)
+if (
+    APP_ENV in {"staging", "production"}
+    and RELEASE_COMMAND_PROCESS
+    and not _MIGRATION_DATABASE_URL
+):
+    raise ImproperlyConfigured(
+        "MIGRATION_DATABASE_URL é obrigatória no release command."
+    )
+if (
+    APP_ENV in {"staging", "production"}
+    and TENANT_SYSTEM_PROCESS
+    and not _SYSTEM_DATABASE_URL
+):
+    raise ImproperlyConfigured(
+        "SYSTEM_DATABASE_URL é obrigatória nos workers cross-tenant."
+    )
 if _DATABASE_URL:
     import dj_database_url
     # ssl_require=False: o Postgres interno do Fly (.flycast/.internal) NÃO usa TLS;
@@ -165,7 +243,18 @@ if _DATABASE_URL:
     # Falha do proxy/VM não pode manter uma request (especialmente /healthz) presa
     # no timeout TCP do sistema. O valor também protege reconexões dos workers.
     DATABASES["default"].setdefault("OPTIONS", {}).setdefault("connect_timeout", 3)
+    if (
+        APP_ENV in {"staging", "production"}
+        and DATABASES["default"].get("ENGINE") != "django.db.backends.postgresql"
+    ):
+        raise ImproperlyConfigured(
+            f"{APP_ENV} exige PostgreSQL; DATABASE_URL configurou outro backend."
+        )
 else:
+    if APP_ENV in {"staging", "production"}:
+        raise ImproperlyConfigured(
+            f"DATABASE_URL é obrigatória em {APP_ENV}; SQLite não é permitido."
+        )
     # Sem DATABASE_URL cai no SQLite. Em prod (Fly) fica no volume /data (se montado)
     # para sobreviver a deploys; em dev fica ao lado do projeto.
     _sqlite_dir = Path("/data") if Path("/data").is_dir() else BASE_DIR
@@ -231,8 +320,13 @@ STORAGES = {
 # WhatsApp sender (serviço Node em node.js/index.js)
 # ─────────────────────────────────────────────────────────────
 WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:3000")
-# Reutiliza a API_KEY do .env (mesma chave do serviço Node).
-WHATSAPP_API_KEY = os.getenv("WHATSAPP_API_KEY") or os.getenv("API_KEY", "")
+WA_CAPABILITY_PRIVATE_KEY = os.getenv("WA_CAPABILITY_PRIVATE_KEY", "")
+WA_CAPABILITY_KEY_ID = os.getenv("WA_CAPABILITY_KEY_ID", "wa-ed25519-v1")
+WA_CAPABILITY_ISSUER = os.getenv("WA_CAPABILITY_ISSUER", "spreading-web")
+WA_CAPABILITY_AUDIENCE = os.getenv("WA_CAPABILITY_AUDIENCE", "spreading-wa")
+WA_CAPABILITY_TTL_SECONDS = min(
+    60, max(10, int(os.getenv("WA_CAPABILITY_TTL_SECONDS", "45")))
+)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -452,6 +546,22 @@ os.makedirs(ML_AUTH_DIR, exist_ok=True)
 # Gere com: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 SECRETS_FERNET_KEY = os.getenv("SECRETS_FERNET_KEY", "")
 
+# Sessões do Mercado Livre usam envelope encryption separado dos campos Fernet.
+# JSON: {"v1":"<base64 de 32 bytes>", "v2":"..."}. A versão corrente permite
+# rotacionar sem perder a leitura de blobs anteriores.
+ML_SESSION_KEKS_JSON = os.getenv("ML_SESSION_KEKS_JSON", "")
+if not ML_SESSION_KEKS_JSON and os.getenv("ML_SESSION_KEKS_JSON_B64"):
+    import base64
+    _ml_keyring_b64 = os.environ["ML_SESSION_KEKS_JSON_B64"]
+    ML_SESSION_KEKS_JSON = base64.urlsafe_b64decode(
+        _ml_keyring_b64 + ("=" * (-len(_ml_keyring_b64) % 4))
+    ).decode("utf-8")
+ML_SESSION_CURRENT_KEY_VERSION = os.getenv("ML_SESSION_CURRENT_KEY_VERSION", "v1")
+ML_LEGACY_SESSION_READ_ENABLED = os.getenv(
+    "ML_LEGACY_SESSION_READ_ENABLED",
+    "0" if APP_ENV in {"staging", "production"} else "1",
+) == "1"
+
 # ─────────────────────────────────────────────────────────────
 # Cotas por usuário (default global; Perfil pode sobrescrever por usuário).
 # Protegem a máquina compartilhada — um usuário não estoura o recurso comum.
@@ -504,13 +614,19 @@ if SENTRY_DSN:
     try:
         import sentry_sdk
         from sentry_sdk.integrations.django import DjangoIntegration
+        from sentry_sdk.integrations.logging import LoggingIntegration
 
+        sentry_logging = LoggingIntegration(
+            level=logging.INFO,         # breadcrumbs a partir de INFO
+            event_level=logging.ERROR,  # ERROR+ vira evento Sentry
+        )
         sentry_sdk.init(
             dsn=SENTRY_DSN,
-            integrations=[DjangoIntegration()],
+            integrations=[DjangoIntegration(), sentry_logging],
             traces_sample_rate=float(os.getenv("SENTRY_TRACES_RATE", "0.0")),
             send_default_pii=False,
             environment=os.getenv("SENTRY_ENV", "prod" if not DEBUG else "dev"),
+            release=os.getenv("SENTRY_RELEASE") or None,
         )
     except Exception:  # sentry-sdk ausente ou DSN inválido — não derruba o boot
         pass
