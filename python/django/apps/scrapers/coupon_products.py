@@ -331,8 +331,13 @@ def calcular_precos(cupom, produto):
     return original, atual, final
 
 
-def _coletar_ml_remoto(cupom):
-    """Materializa a listagem oficial do ML quando ela ainda nao esta no banco."""
+def _coletar_ml_remoto(cupom, usuario=None):
+    """Materializa a listagem oficial do ML quando ela ainda nao esta no banco.
+
+    `usuario` é o contexto do preparo (None em cupom global, que cai na
+    organização de sistema — ver scrapers/ml_auth.py). O container do ML é SSR e
+    só rende a listagem completa com sessão.
+    """
     link = str((cupom.regras or {}).get("container_url") or cupom.link or "").strip()
     try:
         host = (urlsplit(link).hostname or "").casefold().rstrip(".")
@@ -344,10 +349,14 @@ def _coletar_ml_remoto(cupom):
                         or host.endswith(".mercadolivre.com.br")):
         return 0
     from apps.scrapers.auxiliar import iniciar_browser
-    from apps.scrapers.session_paths import ml_auth_path
+    from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
     from apps.scrapers.scraper_mercadolivre.scraper import (
         _ml_http_session, listar_itens_por_cupom,
     )
+
+    state = storage_state(usuario)
+    if state is None:
+        avisar_sem_sessao(f"Coleta do container do cupom {cupom.pk}", usuario)
 
     payload = {
         "campaignId": (str(cupom.external_id).split(":", 1)[1]
@@ -363,7 +372,7 @@ def _coletar_ml_remoto(cupom):
     # Chromium aberto por vários minutos. Browser fica como fallback para challenge.
     resultado = None
     try:
-        response = _ml_http_session(ml_auth_path()).get(link, timeout=25)
+        response = _ml_http_session(state).get(link, timeout=25)
         response.raise_for_status()
         rows = _produtos_ml_do_html(response.text, limite=9)
         if rows:
@@ -372,7 +381,7 @@ def _coletar_ml_remoto(cupom):
         logger.info("Container ML via HTTP falhou para %s: %s", cupom.pk, exc)
     if resultado is None:
         with iniciar_browser(
-            auth_path=ml_auth_path(), headless=True, validar_sessao=False,
+            storage_state=state, headless=True, validar_sessao=False,
         ) as (page, _context):
             resultado = listar_itens_por_cupom(payload, page, max_paginas=2)
     total = 0
@@ -439,7 +448,7 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
         candidatos = _base_produtos(cupom, contexto)
         if (not candidatos and permitir_rede
                 and str(cupom.marketplace).lower() == "mercadolivre"):
-            _coletar_ml_remoto(cupom)
+            _coletar_ml_remoto(cupom, usuario=contexto)
             candidatos = _base_produtos(cupom, contexto)
 
         validos = []

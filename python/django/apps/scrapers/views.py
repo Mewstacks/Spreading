@@ -911,6 +911,32 @@ def ml_conexao_cancelar(request):
     return JsonResponse({"ok": True})
 
 
+@require_POST
+def ml_conexao_desconectar(request):
+    """Apaga a sessão salva do ML (espelha whatsapp_desconectar).
+
+    Faltava a contraparte do "Desconectar" do WhatsApp: quando a sessão ficava
+    presa em "conectado" — a sonda aceitando um cookie que os fluxos reais já não
+    conseguiam usar — não havia nenhuma saída manual. Apagar aqui é a única forma
+    de forçar um login novo de verdade, já que `criar_sessao` reaproveita o que
+    estiver no banco.
+    """
+    from apps.accounts.ml_sessions import delete_storage_state
+    from apps.scrapers import conexoes, ml_conexao
+
+    ml_conexao.cancelar(request.user.id)
+    apagou = delete_storage_state(request.user)
+    conexoes.invalidar_ml(request.user)
+    ml_conexao.esquecer(request.user.id)
+    return JsonResponse({
+        "ok": True,
+        "apagou": bool(apagou),
+        "mensagem": ("Sessão do Mercado Livre apagada. Clique em Conectar para "
+                     "entrar de novo." if apagou
+                     else "Não havia sessão salva do Mercado Livre."),
+    })
+
+
 @require_GET
 def ml_conexao_frames(request):
     """SSE — transmite os frames (JPEG base64) do Chromium local pro <canvas> do front.
@@ -1818,7 +1844,7 @@ def scrape_ofertas_stream(request):
             asyncio.set_event_loop(asyncio.new_event_loop())
             try:
                 with redirect_stdout(writer):
-                    mapear_ofertas(max_paginas=paginas)
+                    mapear_ofertas(max_paginas=paginas, usuario=usuario)
                     if links_limite > 0:
                         # Pool ML compartilhado (owner=None). Amazon não entra aqui.
                         pend_qs = Produto.objects.filter(link_afiliado="", owner__isnull=True)
@@ -2002,7 +2028,7 @@ def scrape_cupons_codigo_stream(request):
         # conhece o total: sem isso a barra ou zerava a cada etapa, ou (o que
         # acontecia) nunca aparecia e o botão ficava cinza sem explicação.
         try:
-            n_campanha = mapear_cupons(faixa=(0, 45))
+            n_campanha = mapear_cupons(faixa=(0, 45), usuario=usuario)
         except (LoginError, AuthError, SessaoExpirada) as exc:
             print(f"[ERRO] Sessão do Mercado Livre expirada: {exc}")
             print("__ML_LOGIN__")
@@ -2013,7 +2039,7 @@ def scrape_cupons_codigo_stream(request):
         print(f"{n_campanha} cupom(ns) de campanha raspados.")
 
         try:
-            n_codigo = mapear_cupons_codigo(faixa=(45, 75))
+            n_codigo = mapear_cupons_codigo(faixa=(45, 75), usuario=usuario)
             print(f"{n_codigo} produto(s) de cupom de checkout raspados.")
         except Exception as exc:
             print(f"Aviso: raspagem de códigos de checkout falhou ({exc}).")

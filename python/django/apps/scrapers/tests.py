@@ -331,6 +331,17 @@ class EstadoMLTests(SimpleTestCase):
     def setUp(self):
         cache.clear()
 
+    @staticmethod
+    def _org(pk="11111111-1111-1111-1111-111111111111"):
+        """Organização fake para a chave de cache.
+
+        `_chave_ml` chaveia por ORGANIZAÇÃO (a sessão ML é OneToOne com ela), então
+        estes testes sem banco precisam dizer qual é — antes a chave saía do
+        `user.id` e o Mock bastava.
+        """
+        return patch("apps.accounts.models.organization_for_user",
+                     return_value=Mock(pk=pk))
+
     def _auth(self, d, nome="auth_7.json"):
         caminho = os.path.join(d, nome)
         with open(caminho, "w", encoding="utf-8") as f:
@@ -355,6 +366,7 @@ class EstadoMLTests(SimpleTestCase):
 
         state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
         with (
+            self._org(),
             patch("apps.accounts.ml_sessions.load_storage_state", return_value=state),
             patch("apps.accounts.ml_sessions.delete_storage_state") as delete,
             patch("apps.scrapers.conexoes.sondar_sessao_ml",
@@ -370,6 +382,7 @@ class EstadoMLTests(SimpleTestCase):
         state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
         user = Mock(id=7)
         with (
+            self._org(),
             patch("apps.accounts.ml_sessions.load_storage_state", return_value=state),
             patch("apps.accounts.ml_sessions.delete_storage_state") as delete,
         ):
@@ -389,7 +402,7 @@ class EstadoMLTests(SimpleTestCase):
 
         state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
         user = Mock(id=7)
-        with patch(
+        with self._org(), patch(
             "apps.accounts.ml_sessions.load_storage_state", return_value=state,
         ):
             with patch("apps.scrapers.conexoes.sondar_sessao_ml",
@@ -2218,6 +2231,129 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         self.assertEqual(Cupom.objects.filter(campanha_id__startswith="p").count(), 3)
         self.assertFalse(Cupom.objects.filter(campanha_id="p4").exists())
         self.assertEqual(Cupom.objects.get(campanha_id="saiu-do-ar").estado, "expirado")
+
+
+class CredencialDaRaspagemTests(TestCase):
+    """A raspagem tem de usar a sessão ML CIFRADA, não um arquivo que não existe.
+
+    Regressão do bug "ML conectado na tela, mas a raspagem não traz nada": os
+    scrapers chamavam `ml_auth_path()` sem usuário, que devolve "" desde a
+    migração multi-tenant. O `open("")` falhava calado, o cookie jar saía vazio e
+    o GET em /cupons/filter voltava sem payload — indistinguível de "não há
+    cupons". O portão da tela, que sonda a sessão do banco, deixava passar.
+    """
+
+    def setUp(self):
+        from apps.accounts.models import ensure_personal_organization
+
+        self.user = get_user_model().objects.create_user("dono-cupom", password="x")
+        self.organization = ensure_personal_organization(self.user)
+        self.state = {"cookies": [{"name": "ssid", "value": "segredo",
+                                   "domain": ".mercadolivre.com.br", "path": "/"}],
+                      "origins": []}
+
+    def test_sessao_do_usuario_vira_cookie_no_get(self):
+        from apps.accounts.ml_sessions import save_storage_state
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        save_storage_state(self.user, self.state)
+        vazio = {"appProps": {"pageProps": {"filteredCouponsData": {"coupons": []}}}}
+        capturadas = []
+
+        def _sessao_falsa(state):
+            capturadas.append(state)
+            sess = Mock()
+            sess.get.return_value = Mock(
+                text=f"<script>{json.dumps(vazio)}</script>",
+                raise_for_status=Mock(),
+            )
+            return sess
+
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session",
+                   side_effect=_sessao_falsa):
+            mapear_cupons(usuario=self.user)
+
+        self.assertEqual(len(capturadas), 1)
+        self.assertEqual([c["name"] for c in capturadas[0]["cookies"]], ["ssid"])
+
+    def test_sem_usuario_cai_na_organizacao_de_sistema(self):
+        """O loop automático (@system_job) não tem usuário: usa a org designada."""
+        from apps.accounts.ml_sessions import save_storage_state
+        from apps.scrapers.ml_auth import storage_state
+
+        save_storage_state(self.user, self.state)
+        with self.settings(ML_SYSTEM_ORGANIZATION_ID=str(self.organization.pk)):
+            self.assertEqual(storage_state(None), self.state)
+
+    def test_sem_organizacao_de_sistema_devolve_none(self):
+        from apps.scrapers.ml_auth import storage_state
+
+        with self.settings(ML_SYSTEM_ORGANIZATION_ID=""):
+            self.assertIsNone(storage_state(None))
+
+    def test_http_session_monta_o_jar_a_partir_do_dict(self):
+        """Antes recebia um caminho de arquivo; agora, o storage_state já resolvido."""
+        from apps.scrapers.scraper_mercadolivre.scraper import _ml_http_session
+
+        sess = _ml_http_session(self.state)
+        self.assertEqual(sess.cookies.get("ssid", domain=".mercadolivre.com.br"),
+                         "segredo")
+        # None é entrada válida (não há sessão): jar vazio, sem estourar.
+        self.assertEqual(len(_ml_http_session(None).cookies), 0)
+
+
+class LoginMLDesativadoTests(TestCase):
+    """Com a flag off, a tela precisa DIZER isso.
+
+    Regressão do "Reconectar não faz nada": `criar_sessao` devolvia
+    fase='indisponivel' sem gravar no cache, então o poll de 5s relia 'idle' +
+    auth_valido=True (a sessão antiga seguia no banco) e repintava "Conectado" —
+    a sessão parecia presa.
+    """
+
+    def setUp(self):
+        from apps.accounts.models import ensure_personal_organization
+
+        cache.clear()
+        self.user = get_user_model().objects.create_user("sem-login-ml", password="x")
+        self.user.perfil.marcar_verificado()
+        ensure_personal_organization(self.user)
+        self.url = reverse("scraper-ml-desconectar")
+
+    def test_recusa_fica_no_cache_e_o_status_seguinte_nao_diz_conectado(self):
+        from apps.scrapers import ml_conexao
+
+        with self.settings(ML_BROWSER_LOGIN_ENABLED=False):
+            recusa = ml_conexao.criar_sessao(self.user)
+            self.assertEqual(recusa["fase"], "indisponivel")
+            self.assertTrue(recusa["erro"])
+            # O poll seguinte NÃO pode voltar para 'idle' (que a tela converte em
+            # "Conectado" quando há sessão salva).
+            self.assertEqual(ml_conexao.status(self.user.id)["fase"], "indisponivel")
+
+    def test_desconectar_apaga_a_sessao_e_limpa_o_estado(self):
+        from apps.accounts.ml_sessions import has_storage_state, save_storage_state
+        from apps.scrapers import ml_conexao
+
+        save_storage_state(self.user, {"cookies": [], "origins": []})
+        ml_conexao._set_estado(self.user.id, fase="conectado")
+        self.client.force_login(self.user)
+
+        resposta = self.client.post(self.url)
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertTrue(resposta.json()["apagou"])
+        self.assertFalse(has_storage_state(self.user))
+        self.assertEqual(ml_conexao.status(self.user.id)["fase"], "idle")
+
+    def test_desconectar_exige_post(self):
+        # Apagar credencial é efeito colateral: GET deixaria a rota sem CSRF.
+        self.client.force_login(self.user)
+        self.assertEqual(self.client.get(self.url).status_code, 405)
+
+    def test_desconectar_exige_login(self):
+        self.client.logout()
+        self.assertIn(self.client.post(self.url).status_code, (302, 403))
 
 
 class ProjecaoCatalogoCuponsTests(TestCase):

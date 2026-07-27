@@ -183,9 +183,12 @@ class MercadoLivre(Marketplace):
         return esta_vivo(produto)
 
     def buscar_por_termo(self, termo_busca, min_desconto=15, macro=None, usuario=None):
-        # ML = pool COMPARTILHADO (owner=None p/ todos). Ignora usuario de propósito.
+        # ML = pool COMPARTILHADO (owner=None p/ todos): o RESULTADO não é do
+        # usuário. `usuario` serve só para escolher a CREDENCIAL da navegação —
+        # sem ele, a organização de sistema (ver scrapers/ml_auth.py).
         from apps.scrapers.scraper_mercadolivre.ofertas_scraper import buscar_por_termo
-        return buscar_por_termo(termo_busca, min_desconto=min_desconto, macro=macro)
+        return buscar_por_termo(termo_busca, min_desconto=min_desconto, macro=macro,
+                                usuario=usuario)
 
     def prefetch_links(self, produtos, usuario=None, faixa=None):
         """Pré-gera links em lote (uma sessão Playwright). Retorna (gerados, falhas).

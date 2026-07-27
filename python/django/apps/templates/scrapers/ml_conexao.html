@@ -84,8 +84,14 @@
   <div id="ok-area" style="display:none;">
     <p class="hint" style="color:var(--green);"><i data-lucide="check-circle"></i> Conta conectada. Seus links de afiliado são gerados automaticamente.</p>
     <div class="actions">
-      <button id="reconectar-btn" class="btn btn-ghost"><i data-lucide="refresh-cw"></i> Reconectar</button>
+      <button id="reconectar-btn" class="btn btn-ghost" style="min-height:44px;"><i data-lucide="refresh-cw"></i> Reconectar</button>
+      {% comment %}
+        Saída manual quando a sessão fica presa em "conectado": Reconectar
+        reaproveita o que está salvo, então só apagar força um login novo.
+      {% endcomment %}
+      <button id="desconectar-btn" class="btn btn-ghost" style="min-height:44px;"><i data-lucide="unplug"></i> Desconectar</button>
     </div>
+    <div id="desconectar-msg" style="font-size:.82rem;margin-top:.5rem;min-height:1em;"></div>
   </div>
 </div>
 {% endblock %}
@@ -108,6 +114,8 @@
   const salvarBtn = document.getElementById('salvar-btn');
   const cancelarBtn = document.getElementById('cancelar-btn');
   const reconectarBtn = document.getElementById('reconectar-btn');
+  const desconectarBtn = document.getElementById('desconectar-btn');
+  const desconectarMsg = document.getElementById('desconectar-msg');
 
   function getCookie(nome) {
     const m = document.cookie.match('(^|;)\\s*' + nome + '\\s*=\\s*([^;]+)');
@@ -126,6 +134,10 @@
     salvando:          { txt:'Salvando sessão…',         cls:'is-mid', bar:true  },
     conectado:         { txt:'Conectado',                cls:'is-on',  bar:false },
     erro:              { txt:'Erro na conexão',          cls:'is-off', bar:false },
+    // Sem esta entrada, `indisponivel` caía no fallback `idle`, o botão sumia e o
+    // poll seguinte repintava "Conectado" — a tela dizia que estava tudo bem
+    // enquanto o login jamais abriria. Ver ml_conexao.criar_sessao.
+    indisponivel:      { txt:'Login desativado',         cls:'is-off', bar:false },
   };
 
   // ───────────────────── Live view (canvas + input) ─────────────────────
@@ -234,7 +246,10 @@
     if (f.bar) { mostra(progArea, true); progBar.style.width = '60%'; progMsg.textContent = f.txt; }
     else mostra(progArea, false);
 
-    if (fase === 'erro' && s.erro) { errBox.textContent = s.erro; mostra(errBox, true); }
+    // Qualquer fase que traga `erro` mostra o motivo. Antes só a fase 'erro'
+    // exibia, então a recusa de 'indisponivel' chegava ao browser e era descartada
+    // em silêncio — o usuário clicava e não acontecia absolutamente nada.
+    if (s.erro) { errBox.textContent = s.erro; mostra(errBox, true); }
     else mostra(errBox, false);
 
     // Live view aberto durante as fases de conexão; o SSE começa a mandar frames
@@ -255,10 +270,32 @@
     } catch (e) { /* mantém último estado; próximo tick tenta de novo */ }
   }
 
+  // `this` (o botão realmente clicado), não startBtn: em "Reconectar" o startBtn
+  // está escondido, então desabilitá-lo não dava feedback nenhum — clicar parecia
+  // não fazer nada enquanto o POST corria.
   startBtn.onclick = reconectarBtn.onclick = async function () {
-    startBtn.disabled = true;
-    pintar(await post('{{ conexao_prefix|default:"/scrapers/ml" }}/start/'));
-    startBtn.disabled = false;
+    const btn = this;
+    btn.disabled = true;
+    try {
+      pintar(await post('{{ conexao_prefix|default:"/scrapers/ml" }}/start/'));
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  desconectarBtn.onclick = async function () {
+    desconectarBtn.disabled = true;
+    desconectarMsg.style.color = 'var(--muted)';
+    desconectarMsg.textContent = 'Apagando a sessão…';
+    try {
+      const r = await post('{{ conexao_prefix|default:"/scrapers/ml" }}/desconectar/');
+      desconectarMsg.textContent = r.mensagem || 'Sessão apagada.';
+      await poll();
+    } catch (e) {
+      desconectarMsg.style.color = 'var(--red)';
+      desconectarMsg.textContent = 'Não foi possível apagar a sessão. Tente de novo.';
+    } finally {
+      desconectarBtn.disabled = false;
+    }
   };
   salvarBtn.onclick = async function () {
     salvarBtn.disabled = true;

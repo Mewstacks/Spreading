@@ -75,25 +75,30 @@ def _redirecionou_login(url: str) -> bool:
 
 @contextmanager
 def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
-                    validar_sessao=True, session_user=None, **context_kwargs):
+                    validar_sessao=True, session_user=None, storage_state=None,
+                    **context_kwargs):
     """Servidor é headless: o login do ML é sempre pela web (Conexão Mercado Livre,
     browser remoto com live view). Aqui só validamos/usamos a sessão já salva; se
     ela caiu, sinalizamos SessaoExpirada p/ o monitor reportar 'desconectado'.
 
     validar_sessao=False: pula a checagem de login (e a possível remoção do auth).
     Use para navegar páginas PÚBLICAS (ex: verificar link de afiliado) onde sessão
-    é opcional — evita falso 'Sessão ML expirada' quando o auth do fluxo não existe."""
+    é opcional — evita falso 'Sessão ML expirada' quando o auth do fluxo não existe.
+
+    A credencial vem de UM destes, nesta ordem: `storage_state` já resolvido (o
+    caso do loop de automação, que usa a organização de sistema e não tem
+    usuário — ver scrapers/ml_auth.py), `session_user` (o repositório cifrado
+    resolve pela organização dele) ou `auth_path` (só o arquivo legado)."""
     from apps.accounts.ml_session_crypto import MLSessionCryptoError
     from apps.accounts.ml_sessions import load_storage_state, save_storage_state
 
     context_kwargs.setdefault("user_agent", ua_aleatorio())
-    storage_state = None
-    if session_user is not None:
+    if storage_state is None and session_user is not None:
         try:
             storage_state = load_storage_state(session_user)
         except MLSessionCryptoError as exc:
             raise BrowserError("Sessão ML cifrada inválida; reconecte a conta.") from exc
-    elif auth_path and os.path.isfile(auth_path):
+    elif storage_state is None and auth_path and os.path.isfile(auth_path):
         # Compatibilidade local durante a migração; nunca resolve outro usuário.
         storage_state = auth_path
     tinha_auth = storage_state is not None

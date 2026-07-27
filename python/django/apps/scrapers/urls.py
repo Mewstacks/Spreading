@@ -40,6 +40,7 @@ urlpatterns = [
     path("ml/start/", views.ml_conexao_start, name="scraper-ml-start"),
     path("ml/salvar/", views.ml_conexao_salvar, name="scraper-ml-salvar"),
     path("ml/cancelar/", views.ml_conexao_cancelar, name="scraper-ml-cancelar"),
+    path("ml/desconectar/", views.ml_conexao_desconectar, name="scraper-ml-desconectar"),
     path("ml/frames/", views.ml_conexao_frames, name="scraper-ml-frames"),
     path("ml/input/", views.ml_conexao_input, name="scraper-ml-input"),
     path("ml-relatorio/", views.ml_relatorio_conexao_painel, name="scraper-ml-relatorio-conexao"),

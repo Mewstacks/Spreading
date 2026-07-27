@@ -10,9 +10,9 @@ caminho_atual = os.path.dirname(os.path.abspath(__file__))
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada, ua_aleatorio
 from apps.scrapers.coupon_rules import (
     derivar_categoria_cupom, extrair_escopo_produtos, rotulo_anunciante)
+from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
 from apps.scrapers.models import Cupom, Produto, CupomNormalizado, FonteIngestao
 from apps.scrapers.progresso import emitir_progresso, emitir_fase
-from apps.scrapers.session_paths import ml_auth_path
 from django.db import close_old_connections
 from django.utils import timezone
 
@@ -68,19 +68,19 @@ _CUPONS_URL = ("https://www.mercadolivre.com.br/cupons/filter"
                "?all=true&source_page=int_view_all&page={n}")
 
 
-def _ml_http_session(caminho_auth):
+def _ml_http_session(state):
     """`requests.Session` com os cookies do storage_state do Playwright + headers de
     browser. Reusa a sessão já salva SEM subir Chromium — o payload de cupons é SSR,
     então um GET autenticado traz o mesmo `filteredCouponsData`. Cookies ausentes ou
     inválidos => o GET cai na página de login (sem payload) e o transporte alterna
     para o browser, que é quem sabe distinguir challenge de sessão expirada.
+
+    `state` é o dict do storage_state vindo de scrapers/ml_auth.py (repositório
+    cifrado), não mais um caminho de arquivo: o arquivo legado sumiu na migração
+    multi-tenant e o `open()` falhava calado, deixando o jar vazio.
     """
     sess = requests.Session()
-    try:
-        with open(caminho_auth, encoding="utf-8") as fh:
-            state = json.load(fh)
-    except (OSError, ValueError):
-        state = {}
+    state = state or {}
     for c in state.get("cookies", []):
         try:
             # Preserva o domínio como salvo (inclusive o ponto inicial): é ele que diz
@@ -100,7 +100,7 @@ def _ml_http_session(caminho_auth):
 
 
 @contextmanager
-def _transporte_cupons(caminho_auth):
+def _transporte_cupons(state):
     """Fornece `fetch(n) -> str|None` para /cupons/filter, agnóstico ao transporte.
 
     Tenta HTTP primeiro (rápido, sem Chromium). O caller liga `estado['forcar_browser']`
@@ -118,7 +118,7 @@ def _transporte_cupons(caminho_auth):
     "expirou/reconecte" é a sonda HTTP única de conexoes.sondar_sessao_ml, não este
     browser.
     """
-    session = _ml_http_session(caminho_auth)
+    session = _ml_http_session(state)
     estado = {"forcar_browser": False, "usou_browser": False, "_cm": None, "_page": None}
 
     def fetch(n):
@@ -131,7 +131,7 @@ def _transporte_cupons(caminho_auth):
                 logger.debug("Falha HTTP na pagina %s de cupons: %s", n, e)
                 return None
         if estado["_page"] is None:
-            cm = iniciar_browser(auth_path=caminho_auth, headless=True,
+            cm = iniciar_browser(storage_state=state, headless=True,
                                  validar_sessao=False)
             page, _ctx = cm.__enter__()
             estado["_cm"] = cm
@@ -151,7 +151,7 @@ def _transporte_cupons(caminho_auth):
         if estado["_cm"] is not None:
             estado["_cm"].__exit__(None, None, None)
 
-def mapear_cupons(n=1, faixa=None):
+def mapear_cupons(n=1, faixa=None, usuario=None):
     """Raspa /cupons/filter e popula a tabela Cupom. Retorna quantos foram salvos.
 
     Único caminho que preenche `Cupom`, e é dele que depende a geração de link de
@@ -163,6 +163,10 @@ def mapear_cupons(n=1, faixa=None):
     derruba a raspagem de ~40 min para segundos. Só alterna para o browser (lento)
     quando o HTTP não traz payload na 1ª página (challenge do ML ou sessão expirada),
     pois é o browser que valida a sessão e levanta SessaoExpirada -> "reconecte".
+
+    `usuario` define de quem é a credencial: no clique da tela é o usuário logado;
+    no loop automático (sem usuário) cai na organização de sistema. /cupons/filter
+    NÃO é público — sem sessão o payload não vem e a varredura termina vazia.
 
     `faixa` (ini, fim) liga o progresso na tela; sem ela, o comportamento silencioso
     de antes (o ciclo automático não tem barra para alimentar).
@@ -180,10 +184,12 @@ def mapear_cupons(n=1, faixa=None):
     varredura_completa = False
     motivo_parada = ""
 
-    caminho_auth = ml_auth_path()
+    state = storage_state(usuario)
+    if state is None:
+        avisar_sem_sessao("Raspagem de cupons de campanha", usuario)
     logger.info("Iniciando raspagem e limpeza de cupons")
 
-    with _transporte_cupons(caminho_auth) as (fetch_html, _estado):
+    with _transporte_cupons(state) as (fetch_html, _estado):
         while True:
             if n > MAX_PAGINAS:
                 logger.warning("Limite de %s páginas atingido na varredura de cupons; encerrando", MAX_PAGINAS)
@@ -818,8 +824,8 @@ def _sincronizar_produtos_no_banco(cupons_com_produtos):
     return processados
 
 
-def main():
-    mapear_cupons()
+def main(usuario=None):
+    mapear_cupons(usuario=usuario)
     # A aba Cupons lê o CupomNormalizado: projeta já aqui para os cupons aparecerem
     # mesmo quando este fluxo roda fora do ciclo automático (scrape_all).
     try:
@@ -862,11 +868,13 @@ def main():
         logger.info("Nada a fazer; todos os cupons ja tem produtos")
         return
 
-    caminho_auth = ml_auth_path()
+    state = storage_state(usuario)
+    if state is None:
+        avisar_sem_sessao("Listagem de produtos por cupom", usuario)
 
     resultados_pendentes = []
     total = len(cupons_pendentes)
-    with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
+    with iniciar_browser(storage_state=state, headless=True) as (page, context):
         for i, cupom in enumerate(cupons_pendentes, 1):
             emitir_progresso(f"[PROGRESSO] Cupom {i}/{total} ({i*100//total}%)")
             resultado = listar_itens_por_cupom(cupom, page)

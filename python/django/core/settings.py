@@ -562,6 +562,14 @@ ML_LEGACY_SESSION_READ_ENABLED = os.getenv(
     "0" if APP_ENV in {"staging", "production"} else "1",
 ) == "1"
 
+# Organização cuja sessão ML alimenta a raspagem do CATÁLOGO COMPARTILHADO
+# (Produto/Cupom têm owner=None; ver MIXED_TENANT_TABLES em accounts/rls.py).
+# O loop de automação roda como @system_job, sem usuário — sem isto ele raspava
+# anônimo e a tabela Cupom ficava vazia, o que travava a geração de link em
+# link.py. Escolha explícita e auditável: nunca varremos tenants atrás de uma
+# credencial. Vazio = a raspagem automática não usa sessão e avisa no log.
+ML_SYSTEM_ORGANIZATION_ID = os.getenv("ML_SYSTEM_ORGANIZATION_ID", "").strip()
+
 # ─────────────────────────────────────────────────────────────
 # Cotas por usuário (default global; Perfil pode sobrescrever por usuário).
 # Protegem a máquina compartilhada — um usuário não estoura o recurso comum.

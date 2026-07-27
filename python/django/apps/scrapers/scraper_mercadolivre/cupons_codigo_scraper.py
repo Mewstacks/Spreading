@@ -18,8 +18,8 @@ from apps.scrapers.auxiliar import iniciar_browser
 from apps.scrapers.coupon_rules import derivar_categoria_cupom
 from apps.scrapers.models import Produto, CupomCodigo, FonteIngestao, CupomNormalizado
 from apps.scrapers.progresso import emitir_fase, emitir_progresso
+from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
 from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _coletar_cards, _salvar
-from apps.scrapers.session_paths import ml_auth_path
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 logger = logging.getLogger(__name__)
@@ -43,18 +43,23 @@ def _extrair_codigos(texto):
     return [c for c in cands if c not in _NAO_CODIGO]
 
 
-def mapear_cupons_codigo(faixa=None):
+def mapear_cupons_codigo(faixa=None, usuario=None):
     """Raspa /ofertas/cupons: produtos -> origem='cupom_codigo'; códigos -> CupomCodigo.
 
     `faixa` (ini, fim) liga o progresso na tela; sem ela a linha sai sem % (é o que
     o ciclo automático faz — não há barra para alimentar).
+
+    `usuario` define de quem é a credencial (sem ele, a organização de sistema —
+    ver scrapers/ml_auth.py). A página mostra menos cupons deslogada.
     """
     logger.info("Iniciando raspagem de cupons de codigo ML")
-    caminho_auth = ml_auth_path()
+    state = storage_state(usuario)
+    if state is None:
+        avisar_sem_sessao("Raspagem de cupons de checkout", usuario)
     coletados, codigos = [], set()
     paginas_sem_codigo = 0
 
-    with iniciar_browser(auth_path=caminho_auth, headless=True,
+    with iniciar_browser(storage_state=state, headless=True,
                          validar_sessao=False) as (page, context):
         for n in range(1, 6):  # algumas páginas
             emitir_fase(f"Cupons de checkout — página {n}/5", n / 5, faixa)

@@ -27,22 +27,37 @@ def legacy_path(user) -> str:
     return os.path.join(directory, f"auth_{user.pk}.json") if directory else ""
 
 
+def load_storage_state_for_organization(organization) -> dict | None:
+    """Sessão cifrada de UMA organização, sem passar por um usuário.
+
+    Existe para o loop de automação (@system_job), que alimenta o catálogo
+    compartilhado e não tem usuário na mão — ver settings.ML_SYSTEM_ORGANIZATION_ID.
+    Nunca escolhe organização sozinha: quem chama já decidiu qual é.
+    """
+    if organization is None:
+        return None
+    record = MercadoLivreSession.objects.filter(organization=organization).first()
+    if record is None:
+        return None
+    try:
+        state = decrypt_storage_state(record)
+    except MLSessionCryptoError:
+        MercadoLivreSession.objects.filter(pk=record.pk).update(
+            status="decrypt_error",
+        )
+        raise
+    MercadoLivreSession.objects.filter(pk=record.pk).update(
+        last_used_at=timezone.now(),
+    )
+    return state
+
+
 def load_storage_state(user, *, allow_legacy=None) -> dict | None:
     organization = organization_for_user(user)
     if organization is None:
         return None
-    record = MercadoLivreSession.objects.filter(organization=organization).first()
-    if record is not None:
-        try:
-            state = decrypt_storage_state(record)
-        except MLSessionCryptoError:
-            MercadoLivreSession.objects.filter(pk=record.pk).update(
-                status="decrypt_error",
-            )
-            raise
-        MercadoLivreSession.objects.filter(pk=record.pk).update(
-            last_used_at=timezone.now(),
-        )
+    state = load_storage_state_for_organization(organization)
+    if state is not None:
         return state
 
     if allow_legacy is None:

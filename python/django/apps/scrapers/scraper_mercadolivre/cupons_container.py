@@ -18,8 +18,8 @@ from django.db.models import Q
 from django.utils import timezone
 
 from apps.scrapers.auxiliar import iniciar_browser, pausa_humana
+from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
 from apps.scrapers.models import CupomNormalizado, Produto, ProdutoCupom
-from apps.scrapers.session_paths import ml_auth_path
 from .link import _extrair_item_id
 
 logger = logging.getLogger(__name__)
@@ -119,7 +119,7 @@ def _rodar(cupons, idx, agora, coletor, max_paginas):
     return total
 
 
-def casar_cupons_container(coletor=None, max_paginas=2):
+def casar_cupons_container(coletor=None, max_paginas=2, usuario=None):
     """Confirma quais produtos rastreados participam de cada cupom de container.
 
     `coletor(url, max_paginas) -> set[item_id]` pode ser injetado (testes). Sem ele,
@@ -136,7 +136,11 @@ def casar_cupons_container(coletor=None, max_paginas=2):
     if coletor is not None:
         return _rodar(cupons, idx, agora, coletor, max_paginas)
 
-    with iniciar_browser(auth_path=ml_auth_path(), headless=True,
+    state = storage_state(usuario)
+    if state is None:
+        avisar_sem_sessao("Casamento cupom-container", usuario)
+
+    with iniciar_browser(storage_state=state, headless=True,
                          validar_sessao=False) as (page, _context):
         return _rodar(cupons, idx, agora,
                       lambda url, paginas: _ids_do_container(page, url, paginas),

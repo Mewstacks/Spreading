@@ -74,6 +74,15 @@
     <p id="prog-msg" class="muted"></p>
   </div>
 
+  {% comment %}
+    Recusa do próprio Django (flag/allowlist), antes de qualquer worker: precisa de
+    caixa própria porque #cancelar-msg vive dentro do botão de cancelar, que aqui
+    não faz sentido mostrar. Sem isto a tela ficava muda.
+    ({# #} não pode ter várias linhas — vira texto visível.)
+  {% endcomment %}
+  <div id="wa-aviso" class="muted" style="display:none;font-size:.88rem;margin:1.2rem 0;
+       padding:.9rem 1rem;border-radius:12px;border:1px solid var(--red);color:var(--red);"></div>
+
   <div id="qr-area" style="display:none;">
     <div id="qr-box"><img id="qr-img" alt="QR code para conectar o WhatsApp"></div>
     <p class="muted" style="font-size:.85rem;">Abra o WhatsApp → <b>Aparelhos conectados</b> → <b>Conectar aparelho</b> e escaneie. O QR atualiza sozinho.</p>
@@ -136,6 +145,7 @@
   const logoutArea = document.getElementById('logout-area');
   const cancelArea = document.getElementById('cancelar-area');
   const cancelMsg = document.getElementById('cancelar-msg');
+  const waAviso = document.getElementById('wa-aviso');
 
   // Ordem das fases p/ marcar passos concluídos.
   const ORDEM = ['qr', 'autenticado', 'carregando', 'sincronizando', 'conectado'];
@@ -162,6 +172,11 @@
     desconectado:  { txt:'Desconectado',               cls:'is-off', qr:true,  bar:false, step:'qr', err:true },
     // Terminal com credencial preservada: o revive abaixo resolve sem QR novo.
     recuperacao_pausada: { txt:'Reconexão pausada — reativando…', cls:'is-mid', qr:false, bar:true, step:'qr' },
+    // A flag WHATSAPP_WEB_ENABLED (ou a allowlist do piloto) recusou: o Django
+    // devolve esta fase SEM nunca falar com o worker. Sem esta entrada caía no
+    // fallback `desconectado`, que tem qr:true — a caixa de QR abria vazia e o
+    // CSS pintava "Gerando QR code…" para sempre, sobre um QR que jamais viria.
+    indisponivel:  { txt:'WhatsApp Web desativado para esta conta', cls:'is-off', qr:false, bar:false, step:'qr', err:true },
   };
 
   // O GET da tela não revive mais a sessão (efeito colateral que divergia da
@@ -204,6 +219,7 @@
     pillTxt.textContent = 'Serviço indisponível';
     stepsEl.style.display = 'none';
     qrArea.style.display = 'none';
+    waAviso.style.display = 'none';
     progArea.style.display = 'none';
     grpChip.style.display = 'none';
     grpAviso.style.display = 'none';
@@ -253,6 +269,12 @@
         cancelMsg.textContent = s.mensagem || 'Não foi possível gerar o QR. Clique para tentar novamente.';
       }
 
+      if (fase === 'indisponivel') {
+        waAviso.textContent = s.mensagem
+          || 'WhatsApp Web está desativado para esta organização.';
+        waAviso.style.display = 'block';
+      } else waAviso.style.display = 'none';
+
       // Pill
       pill.className = 'conn-pill ' + f.cls;
       pillTxt.textContent = f.txt;
@@ -282,8 +304,10 @@
 
       logoutArea.style.display = (fase === 'conectado') ? 'block' : 'none';
       // Em qualquer fase não conectada — inclusive durante as tentativas de
-      // reconexão — o usuário precisa poder abortar e pedir um QR novo.
-      cancelArea.style.display = (fase === 'conectado') ? 'none' : 'block';
+      // reconexão — o usuário precisa poder abortar e pedir um QR novo. Exceto em
+      // 'indisponivel': o botão só produziria a mesma recusa, sem worker envolvido.
+      cancelArea.style.display =
+        (fase === 'conectado' || fase === 'indisponivel') ? 'none' : 'block';
       renderIcons();
 
     } catch (e) { showOffline(); }

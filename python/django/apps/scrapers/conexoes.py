@@ -230,8 +230,21 @@ def _estado_ml_por_mtime(path: str, agora) -> Estado:
 
 
 def _chave_ml(user) -> str:
-    uid = getattr(user, "id", None) or "_global"
-    return f"ml_sessao:{uid}"
+    """Chave por ORGANIZAÇÃO, não por usuário.
+
+    A sessão ML é OneToOne com Organization, então `delete_storage_state` apaga a
+    credencial da organização inteira — mas a chave antiga (`user.id`) só invalidava
+    o cache de UM membro. Numa org com mais de uma pessoa, os outros continuavam
+    vendo "conectado" por até 5 min sobre uma sessão que já não existia.
+    """
+    from apps.accounts.models import organization_for_user
+
+    organization = organization_for_user(user) if user is not None else None
+    if organization is not None:
+        return f"ml_sessao:org:{organization.pk}"
+    # Sem organização não há sessão para cachear (estado_ml sai antes, em
+    # storage_state is None); a chave só existe para não quebrar chamadas soltas.
+    return f"ml_sessao:user:{getattr(user, 'id', None) or '_global'}"
 
 
 def invalidar_ml(user=None) -> None:

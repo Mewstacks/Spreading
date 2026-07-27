@@ -14,9 +14,9 @@ import logging
 from django.db import OperationalError, connections
 
 from apps.scrapers.auxiliar import iniciar_browser, pausa_humana
+from apps.scrapers.ml_auth import storage_state
 from apps.scrapers.models import Produto
 from apps.scrapers.progresso import emitir_progresso
-from apps.scrapers.session_paths import ml_auth_path
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 logger = logging.getLogger(__name__)
@@ -408,14 +408,17 @@ def _upsert_ofertas(coletados):
     return n
 
 
-def mapear_ofertas(max_paginas=40, substituir=True):
+def mapear_ofertas(max_paginas=40, substituir=True, usuario=None):
     """Raspa N páginas de /ofertas. substituir=True (lane LENTA): regrava todo o feed.
-    substituir=False (lane RÁPIDA/flash, B3): upsert por link, sem zerar o feed."""
+    substituir=False (lane RÁPIDA/flash, B3): upsert por link, sem zerar o feed.
+
+    /ofertas é público: a sessão aqui é opcional (melhora preço/frete
+    personalizado quando existe), não requisito — por isso não avisamos quando
+    falta, ao contrário da raspagem de cupons."""
     logger.info("Iniciando raspagem de ofertas ML (%s)", "full" if substituir else "flash")
     coletados = []
-    caminho_auth = ml_auth_path()
 
-    with iniciar_browser(auth_path=caminho_auth, headless=True,
+    with iniciar_browser(storage_state=storage_state(usuario), headless=True,
                          validar_sessao=False) as (page, context):
         for n in range(1, max_paginas + 1):
             emitir_progresso(f"[PROGRESSO] Ofertas página {n}/{max_paginas} ({n*100//max_paginas}%)")
@@ -451,19 +454,21 @@ def _slug_busca(termo):
     return re.sub(r"[^a-z0-9]+", "-", t).strip("-")
 
 
-def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None):
+def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None,
+                     usuario=None):
     """
     Para cada termo (lista separada por vírgula) raspa a BUSCA do ML com filtro de
     desconto e salva como origem='busca'. Atualiza só os itens 'busca' que casam com
     estes termos (não mexe no feed nem nos cupons-código).
+
+    A busca é pública; a sessão é opcional (ver mapear_ofertas).
     """
     termos = [t.strip() for t in (termo_busca or "").split(",") if t.strip()]
     if not termos:
         return 0
-    caminho_auth = ml_auth_path()
     coletados = []
 
-    with iniciar_browser(auth_path=caminho_auth, headless=True,
+    with iniciar_browser(storage_state=storage_state(usuario), headless=True,
                          validar_sessao=False) as (page, context):
         for termo in termos:
             slug = _slug_busca(termo)

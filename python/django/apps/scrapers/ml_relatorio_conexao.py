@@ -150,9 +150,12 @@ def _worker(user):
 def criar_sessao(user):
     from apps.accounts.feature_flags import enabled_for_user
     if not enabled_for_user("ML_BROWSER_REPORTS_ENABLED", user):
+        # Persistido, e não só retornado: o poll de 5s do front relê o cache e um
+        # estado efêmero seria imediatamente apagado pela fase antiga (ver a mesma
+        # correção em ml_conexao.criar_sessao).
         return {
-            "fase": "indisponivel",
-            "erro": "Login do portal de relatórios está desativado para esta organização.",
+            **_set(user.id, fase="indisponivel", cancelar=False, salvar_agora=False,
+                   erro="Login do portal de relatórios está desativado para esta organização."),
             "auth_valido": False,
         }
     with _lock:

@@ -340,12 +340,17 @@ def _worker(user_id: int):
 def criar_sessao(user) -> dict:
     """Inicia (ou reaproveita) a sessão de login web do ML pro usuário."""
     from apps.accounts.feature_flags import enabled_for_user
-    if not enabled_for_user("ML_BROWSER_LOGIN_ENABLED", user):
-        return {
-            "fase": "indisponivel",
-            "erro": "Login por navegador está desativado para esta organização.",
-        }
     user_id = user.id
+    if not enabled_for_user("ML_BROWSER_LOGIN_ENABLED", user):
+        # GRAVA no cache em vez de só retornar: o front faz poll a cada 5s, e um
+        # estado que não persiste é sobrescrito pelo `status()` seguinte — que lê
+        # `fase='idle'` + `auth_valido=True` (a sessão antiga segue no banco) e
+        # repinta "Conectado". Era exatamente o "Reconectar não faz nada, volta a
+        # ficar conectado como se a sessão estivesse presa".
+        return _set_estado(
+            user_id, fase="indisponivel", cancelar=False, salvar_agora=False,
+            erro="Login por navegador está desativado para esta organização.",
+        )
     with _lock:
         viva = _threads.get(user_id)
         if viva and viva.is_alive():
@@ -488,3 +493,13 @@ def salvar_agora(user_id: int):
 
 def cancelar(user_id: int):
     _set_estado(user_id, cancelar=True)
+
+
+def esquecer(user_id: int) -> None:
+    """Zera o estado do login deste usuário.
+
+    Sem isto, o "Desconectar" apagava a sessão no banco mas o poll seguinte ainda
+    lia a fase antiga do cache — e a tela voltava a se pintar de verde por até 14
+    minutos sobre uma sessão que já não existia.
+    """
+    cache.delete(_cache_key(user_id))
