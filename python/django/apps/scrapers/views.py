@@ -759,6 +759,7 @@ def ml_conexao_painel(request):
     return render(request, "scrapers/ml_conexao.html", {
         "status": ml_conexao.status(request.user.id),
         "marketplace_nome": "Mercado Livre", "conexao_prefix": "/scrapers/ml",
+        "live_v2": True,
     })
 
 
@@ -835,7 +836,7 @@ def ml_relatorio_conexao_painel(request):
         "status": ml_relatorio_conexao.status(request.user.id),
         "marketplace_nome": "Relatórios Mercado Livre",
         "conexao_prefix": "/scrapers/ml-relatorio",
-        "relatorio": True,
+        "relatorio": True, "live_v2": True,
     })
 
 
@@ -848,7 +849,14 @@ def ml_relatorio_conexao_status_json(request):
 @require_POST
 def ml_relatorio_conexao_start(request):
     from apps.scrapers import ml_relatorio_conexao
-    return JsonResponse(ml_relatorio_conexao.criar_sessao(request.user))
+    import json
+    if len(request.body or b"") > 4096:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        client = json.loads((request.body or b"{}").decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(ml_relatorio_conexao.criar_sessao(request.user, client))
 
 
 @require_POST
@@ -869,8 +877,13 @@ def ml_relatorio_conexao_cancelar(request):
 def ml_relatorio_conexao_frames(request):
     from apps.scrapers import ml_relatorio_conexao
     def _stream():
-        yield from (f"data: {frame}\n\n" for frame in ml_relatorio_conexao.frames(request.user.id))
-        yield "data: __DONE__\n\n"
+        for event in ml_relatorio_conexao.frames(
+            request.user.id, request.GET.get("session_id"),
+        ):
+            if event.get("id") is not None:
+                yield f"id: {event['id']}\n"
+            yield f"event: {event['event']}\ndata: {event['data']}\n\n"
+        yield "event: done\ndata: __DONE__\n\n"
     return StreamingHttpResponse(_stream(), content_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -879,23 +892,34 @@ def ml_relatorio_conexao_frames(request):
 def ml_relatorio_conexao_input(request):
     import json
     from apps.scrapers import ml_relatorio_conexao
+    if len(request.body or b"") > 65536:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
     try:
-        events = json.loads((request.body or b"").decode() or "{}").get("events")
+        payload = json.loads((request.body or b"").decode() or "{}")
     except (ValueError, UnicodeDecodeError):
         return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
-    return JsonResponse(ml_relatorio_conexao.enfileirar_input(request.user.id, events))
+    return JsonResponse(ml_relatorio_conexao.enfileirar_input(
+        request.user.id, payload.get("session_id"), payload.get("events"),
+    ))
 
 
 @require_POST
 def ml_conexao_start(request):
     """Abre (ou reaproveita) a sessão remota de login do ML e devolve o estado."""
+    import json
     from apps.scrapers import ml_conexao
-    return JsonResponse(ml_conexao.criar_sessao(request.user))
+    if len(request.body or b"") > 4096:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        client = json.loads((request.body or b"{}").decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(ml_conexao.criar_sessao(request.user, client))
 
 
 @require_POST
 def ml_conexao_salvar(request):
-    """'Já entrei' — força a captura da sessão sem esperar o auto-detect."""
+    """Dispara a sonda autenticada; nunca força a gravação de cookies incompletos."""
     from apps.scrapers import ml_conexao
     ml_conexao.salvar_agora(request.user.id)
     return JsonResponse(ml_conexao.status(request.user.id))
@@ -939,15 +963,19 @@ def ml_conexao_desconectar(request):
 def ml_conexao_frames(request):
     """SSE — transmite os frames (JPEG base64) do Chromium local pro <canvas> do front.
 
-    Live view self-hosted: o worker (ml_conexao) roda o browser e captura a tela via
-    CDP screencast; aqui só empurramos o último frame de CADA usuário (fila isolada por
-    request.user.id — um tenant nunca vê a tela do outro)."""
+    Live view self-hosted: o worker publica capturas JPEG determinísticas e numeradas;
+    aqui só empurramos o frame atual de CADA usuário (isolado por request.user.id e
+    pelo session_id opaco — um tenant nunca vê a tela do outro)."""
     from apps.scrapers import ml_conexao
 
     def _stream():
-        for frame in ml_conexao.frames(request.user.id):
-            yield f"data: {frame}\n\n"
-        yield "data: __DONE__\n\n"
+        for event in ml_conexao.frames(
+            request.user.id, request.GET.get("session_id"),
+        ):
+            if event.get("id") is not None:
+                yield f"id: {event['id']}\n"
+            yield f"event: {event['event']}\ndata: {event['data']}\n\n"
+        yield "event: done\ndata: __DONE__\n\n"
 
     resp = StreamingHttpResponse(_stream(), content_type="text/event-stream")
     resp["Cache-Control"] = "no-cache"
@@ -959,15 +987,19 @@ def ml_conexao_frames(request):
 def ml_conexao_input(request):
     """Recebe eventos de mouse/teclado do front e encaminha pro browser de login.
 
-    Body JSON: {"events": [{"t":"down","x":..,"y":..}, {"t":"char","text":"a"}, ...]}.
-    A validação/limites ficam em ml_conexao.enfileirar_input (dados do cliente)."""
+    Body JSON: {"session_id":"...", "events":[{"seq":1,"t":"down",...}]}.
+    A validação, ordenação, deduplicação e os limites ficam no transporte compartilhado."""
     import json
     from apps.scrapers import ml_conexao
+    if len(request.body or b"") > 65536:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
     try:
         payload = json.loads((request.body or b"").decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError):
         return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
-    return JsonResponse(ml_conexao.enfileirar_input(request.user.id, payload.get("events")))
+    return JsonResponse(ml_conexao.enfileirar_input(
+        request.user.id, payload.get("session_id"), payload.get("events"),
+    ))
 
 
 @require_GET

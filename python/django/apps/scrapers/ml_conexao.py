@@ -3,22 +3,21 @@
 Substitui a gambiarra de "rode connect_ml.py no seu PC e cole o auth.json". Num
 servidor headless não dá pra abrir um browser pro usuário clicar, então rodamos o
 Chromium NA PRÓPRIA MÁQUINA (o mesmo que o scraper já usa — Playwright/Chromium já
-está na imagem) e transmitimos a tela pro navegador do usuário via *live view*: um
-screencast do CDP (`Page.startScreencast`) desenhado num <canvas>, com o mouse e o
-teclado dele encaminhados de volta (`Input.dispatch*`). Ele loga no ML ali dentro —
-no celular ou no desktop — e quando a sessão fica válida capturamos o storage_state
-e salvamos no mesmo `auth_{id}.json` que o resto do scraper já espera.
+está na imagem) e transmitimos capturas nítidas pro navegador do usuário via *live
+view*, desenhadas num <canvas>, com mouse e teclado encaminhados de volta. Ele loga
+no ML ali dentro — no celular ou no desktop — e quando a sessão fica válida capturamos
+o storage_state e o salvamos cifrado por organização.
 
 Isso troca o antigo Browserbase (browser hospedado pago; o free plan estourava com
-402 Payment Required). Custo zero, sem colar nada, e a senha é digitada direto na
-página REAL do ML — não passa pelo nosso backend.
+402 Payment Required). Custo zero e sem colar nada. Cliques e teclas são retransmitidos
+ao Chromium somente em memória; o conteúdo não é persistido nem incluído nos logs.
 
 Fluxo (espelha o QR do WhatsApp):
-  1. criar_sessao(user)  -> sobe o Chromium local, navega pro login do ML, começa o
-     screencast numa thread que fica observando o login.
+  1. criar_sessao(user)  -> sobe o Chromium local, navega pro login do ML e começa
+     a publicar capturas numeradas numa thread que observa o login.
   2. front abre um EventSource em frames() e desenha cada frame no <canvas>; captura
      mouse/teclado e faz POST em enfileirar_input().
-  3. thread detecta o redirect pós-login -> salva auth_{id}.json -> fase 'conectado'.
+  3. thread valida a sessão com uma sonda autenticada -> salva cifrada -> 'conectado'.
 
 Estado compartilhado (fase/erro) vai pro cache (Redis/DB em prod) pra funcionar entre
 threads do gunicorn; a thread que segura o browser vive em um worker só, e os frames
@@ -29,30 +28,33 @@ import os
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 
 from django.conf import settings
 from django.core.cache import cache
 
 from apps.scrapers.erros_conexao import mensagem_de_erro, novo_codigo
+from apps.scrapers.ml_live_transport import (
+    ActivePage,
+    LiveTransport,
+    despachar_input as despachar_input_v2,
+)
 
 logger = logging.getLogger(__name__)
 
 LOGIN_URL = "https://www.mercadolivre.com/jms/mlb/lgz/msl/login/"
-HOME_HOST = "mercadolivre.com.br"
 
 LOGIN_DEADLINE_S = 600           # tempo máx. esperando o usuário logar
 LOOP_MS = 50                     # granularidade do worker (bombeia CDP + drena input)
 GOTO_TIMEOUT_MS = 60000          # em prod (IP de datacenter) o gateway de login demora
 GOTO_TENTATIVAS = 2              # timeout na 1ª tenta de novo antes de desistir
 
-# Viewport remoto. O front escala o <canvas> pra caber na tela mantendo a proporção.
+# Compatibilidade da conexão Amazon, que ainda importa estes valores e o despachante
+# CDP legado. Os dois fluxos do ML usam viewport adaptativo + LiveTransport.
 VIEW_W, VIEW_H = 1280, 800
 
-# O frame transmitido é MENOR que o viewport de propósito: cada JPEG é encodado pelo
-# Chromium na mesma CPU do gunicorn, e o SSE lê a 20fps. A 1280x800/everyNthFrame:1
-# isso dava ~2MB/s e CPU saturada por espectador — numa tela de login, que é quase
-# toda estática. 960x600 + 1 frame a cada 2 mantém o login perfeitamente legível
-# (o front escala pro tamanho do canvas de qualquer jeito) por ~1/3 do custo.
+# Parâmetros do screencast legado da Amazon. O ML captura JPEG 78 no viewport efetivo.
 SCREENCAST = {"format": "jpeg", "quality": 55,
               "maxWidth": 960, "maxHeight": 600, "everyNthFrame": 2}
 
@@ -63,6 +65,7 @@ _threads: dict[int, threading.Thread] = {}
 _frames: dict[int, str] = {}                     # último frame base64 por usuário
 _inputs: dict[int, "queue.Queue"] = {}           # eventos de input pendentes por usuário
 _lock = threading.Lock()
+_transport = LiveTransport("mercado_livre")
 
 # Teclas não-imprimíveis que o front manda como {t:'key', key:'Enter'}; imprimíveis vêm
 # como {t:'char', text:'a'}. Os dois casos vão pro page.keyboard do Playwright, que já
@@ -113,16 +116,22 @@ def status(user_id: int) -> dict:
         user = get_user_model().objects.filter(id=user_id).first()
         estado["auth_valido"] = bool(user and has_storage_state(user))
         estado["motivo_desconexao"] = ""
+    estado.update(_transport.status(user_id))
     return estado
 
 
-def _url_logada(url: str) -> bool:
-    if not url:
-        return False
-    u = url.lower()
-    if "login" in u or "/jms/" in u or "hub.mercadolibre" in u:
-        return False
-    return HOME_HOST in u or "mercadolibre.com" in u
+def _storage_fingerprint(storage_state: dict) -> str:
+    """Assinatura somente em memória para detectar mudança de cookies.
+
+    O valor nunca é registrado nem devolvido ao frontend. Ele evita consultar a sonda
+    autenticada continuamente enquanto o usuário ainda está parado na mesma etapa.
+    """
+    cookies = storage_state.get("cookies", []) if isinstance(storage_state, dict) else []
+    material = "\n".join(sorted(
+        f"{cookie.get('domain', '')}|{cookie.get('name', '')}|{cookie.get('value', '')}"
+        for cookie in cookies if isinstance(cookie, dict)
+    ))
+    return sha256(material.encode("utf-8")).hexdigest()
 
 
 def _despachar_input(cdp, page, ev: dict):
@@ -246,18 +255,19 @@ def _persistir_sessao(user_id: int, storage_state: dict, tentativas: int = 3) ->
 
 @organization_job_sem_transacao
 def _worker(user_id: int):
-    """Sobe o Chromium local, transmite a tela e espera o usuário concluir o login."""
+    """Sobe o Chromium, publica capturas nítidas e valida a sessão de verdade."""
     from playwright.sync_api import sync_playwright
     from apps.scrapers.auxiliar import ua_aleatorio
+    from apps.scrapers.conexoes import sondar_sessao_ml
 
-    # Fila limitada: um cliente que floode input só enche a PRÓPRIA fila; o excesso é
-    # descartado (enfileirar_input trata queue.Full) sem estourar memória do processo.
-    fila = queue.Queue(maxsize=2000)
-    with _lock:
-        _inputs[user_id] = fila
-        _frames.pop(user_id, None)
+    runtime = _transport.get(user_id) or _transport.create(user_id)
 
     estado_capturado = None
+    validator = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ml-auth-probe")
+    pending_validation = None
+    pending_state = None
+    last_fingerprint = ""
+    manual_validation = False
     try:
         _set_estado(user_id, fase="iniciando", erro="")
         with sync_playwright() as p:
@@ -270,40 +280,25 @@ def _worker(user_id: int):
             )
             try:
                 context = browser.new_context(
-                    viewport={"width": VIEW_W, "height": VIEW_H},
+                    viewport={
+                        "width": runtime.viewport["width"],
+                        "height": runtime.viewport["height"],
+                    },
+                    device_scale_factor=runtime.viewport["device_pixel_ratio"],
+                    is_mobile=runtime.viewport["device_class"] == "mobile",
+                    has_touch=runtime.viewport["pointer"] == "coarse",
                     user_agent=ua_aleatorio(),
                     permissions=["clipboard-read", "clipboard-write"],
                 )
                 page = context.pages[0] if context.pages else context.new_page()
-                cdp = context.new_cdp_session(page)
-
-                def _on_frame(params):
-                    # Guarda só o último frame (coalesce): o SSE lê o mais recente.
-                    _frames[user_id] = params.get("data", "")
-                    try:
-                        cdp.send("Page.screencastFrameAck",
-                                 {"sessionId": params.get("sessionId")})
-                    except Exception:
-                        # O Chromium só manda o próximo frame depois do ack: perder um ack
-                        # congela a transmissão de vez. Não dá pra reagir aqui (o worker
-                        # segue vivo e o front reabre o EventSource), mas tem que aparecer
-                        # no log — congelado-e-silencioso é indepurável.
-                        logger.warning("screencastFrameAck falhou (user %s); a transmissão "
-                                       "pode congelar até o próximo start.", user_id,
-                                       exc_info=True)
-
-                cdp.send("Page.enable")
-                # Headless não tem janela, então o Chromium trata o documento como sem foco
-                # e JS de login costuma ignorar input nesse estado. Isso força "focado".
-                try:
-                    cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
-                except Exception:
-                    logger.warning("setFocusEmulationEnabled falhou; seguindo sem ele.")
-                cdp.on("Page.screencastFrame", _on_frame)
+                active_page = ActivePage(context, page, runtime)
 
                 _ir_para_login(page)
-                cdp.send("Page.startScreencast", SCREENCAST)
-                _set_estado(user_id, fase="aguardando_login", erro="")
+                _transport.capture(runtime, page, active=True)
+                _set_estado(
+                    user_id, fase="aguardando_login", erro="", aviso="",
+                    session_id=runtime.session_id, viewport=runtime.viewport,
+                )
 
                 deadline = time.time() + LOGIN_DEADLINE_S
                 logado = False
@@ -323,41 +318,90 @@ def _worker(user_id: int):
                         _set_estado(user_id, fase="idle", erro="")
                         break
 
-                    # Drena e aplica os eventos de input acumulados desde a última volta.
+                    current_page = active_page.current()
+                    if current_page is None:
+                        raise RuntimeError("A janela de login do Mercado Livre foi fechada.")
+
+                    # Drena e aplica os eventos confirmados pelo protocolo sequencial.
+                    houve_input = False
                     for _ in range(MAX_EVENTOS_POR_POST * 4):
                         try:
-                            ev = fila.get_nowait()
+                            ev = runtime.input_queue.get_nowait()
                         except queue.Empty:
                             break
-                        _despachar_input(cdp, page, ev)
+                        despachar_input_v2(current_page, ev)
+                        houve_input = True
+                    _transport.capture(runtime, current_page, active=houve_input)
 
-                    url_atual = page.url
-                    # 'salvar_agora' = usuário clicou "já entrei"; força a captura.
-                    if _url_logada(url_atual) or estado.get("salvar_agora"):
-                        logado = True
-                        break
+                    # Alterações de cookie disparam uma sonda assíncrona. A URL sozinha
+                    # nunca representa sucesso: SMS, QR, ajuda e recuperação também
+                    # navegam dentro de mercadolivre.com.br.
+                    verificar_agora = bool(
+                        estado.get("validar_agora") or estado.get("salvar_agora")
+                    )
+                    if verificar_agora:
+                        manual_validation = True
+                        _set_estado(
+                            user_id, fase="validando", validar_agora=False,
+                            salvar_agora=False, aviso="",
+                        )
+
+                    snapshot = context.storage_state()
+                    fingerprint = _storage_fingerprint(snapshot)
+                    changed = fingerprint != last_fingerprint
+                    if changed:
+                        last_fingerprint = fingerprint
+                    if (
+                        pending_validation is None
+                        and (changed or manual_validation)
+                    ):
+                        pending_state = snapshot
+                        pending_validation = validator.submit(
+                            sondar_sessao_ml, pending_state,
+                        )
+
+                    if pending_validation is not None and pending_validation.done():
+                        verdict, _reason = pending_validation.result()
+                        pending_validation = None
+                        logger.info(
+                            "ml_login_metric transport=mercado_livre user=%s "
+                            "validation=%s",
+                            user_id, verdict,
+                        )
+                        if verdict == "conectado":
+                            logado = True
+                            estado_capturado = context.storage_state()
+                            break
+                        if manual_validation:
+                            message = (
+                                "Ainda não foi possível confirmar o login. "
+                                "Conclua a etapa aberta no Mercado Livre e tente novamente."
+                            )
+                            if verdict == "inconclusivo":
+                                message = (
+                                    "O Mercado Livre demorou para confirmar a sessão. "
+                                    "A janela continua aberta; tente verificar novamente."
+                                )
+                            _set_estado(
+                                user_id, fase="aguardando_login", aviso=message,
+                                erro="",
+                            )
+                            manual_validation = False
 
                     # Heartbeat: renova TTL + atualizado_em sem trocar de fase (o front
-                    # segue desenhando os frames pelo EventSource).
+                    # segue desenhando as capturas pelo EventSource).
                     if time.time() - last_beat > 8:
-                        _set_estado(user_id, fase="aguardando_login")
+                        current = cache.get(_cache_key(user_id)) or {}
+                        if current.get("fase") != "validando":
+                            _set_estado(user_id, fase="aguardando_login")
                         last_beat = time.time()
 
-                    # wait_for_timeout bombeia os eventos CDP (o screencastFrame chega aqui).
-                    page.wait_for_timeout(LOOP_MS)
+                    # Bombeia eventos do Playwright, inclusive popup/nova aba.
+                    current_page.wait_for_timeout(LOOP_MS)
 
                 if logado:
                     _set_estado(user_id, fase="salvando")
-                    try:
-                        cdp.send("Page.stopScreencast")
-                    except Exception:
-                        pass
-                    # SÓ a leitura acontece aqui: o storage_state vem do Playwright, mas
-                    # gravá-lo é ORM — e ORM dentro do `with sync_playwright()` levanta
-                    # SynchronousOnlyOperation (a API sync mantém um event loop vivo num
-                    # greenlet desta thread). Era exatamente isto que fazia o login
-                    # concluir e a sessão nunca ser salva.
-                    estado_capturado = context.storage_state()
+                    estado_capturado = estado_capturado or context.storage_state()
                 elif (cache.get(_cache_key(user_id)) or {}).get("fase") != "idle":
                     _set_estado(user_id, fase="erro",
                                 erro="Tempo esgotado esperando o login. Tente de novo.")
@@ -375,20 +419,25 @@ def _worker(user_id: int):
         # deixaria a tela presa em 'salvando' para sempre.
         if estado_capturado is not None:
             _persistir_sessao(user_id, estado_capturado)
-            _set_estado(user_id, fase="conectado", salvar_agora=False, erro="")
+            _set_estado(
+                user_id, fase="conectado", salvar_agora=False,
+                validar_agora=False, aviso="", erro="",
+            )
     except Exception as exc:  # noqa: BLE001 — qualquer falha vira mensagem pro usuário
         codigo = novo_codigo()
         logger.exception("Conexão ML falhou (user=%s codigo=%s)", user_id, codigo)
         _set_estado(user_id, fase="erro", codigo_erro=codigo,
                     erro=mensagem_de_erro(exc, codigo, servico="O Mercado Livre"))
     finally:
+        validator.shutdown(wait=False, cancel_futures=True)
+        _transport.finish(user_id, runtime)
         with _lock:
             _inputs.pop(user_id, None)
             _frames.pop(user_id, None)
             _threads.pop(user_id, None)
 
 
-def criar_sessao(user) -> dict:
+def criar_sessao(user, client: dict | None = None) -> dict:
     """Inicia (ou reaproveita) a sessão de login web do ML pro usuário."""
     from apps.accounts.feature_flags import enabled_for_user
     user_id = user.id
@@ -407,88 +456,26 @@ def criar_sessao(user) -> dict:
         if viva and viva.is_alive():
             # Já tem sessão rolando neste worker — devolve o estado atual.
             return status(user_id)
-        _set_estado(user_id, fase="iniciando", erro="", cancelar=False, salvar_agora=False)
+        runtime = _transport.create(user_id, client)
+        _set_estado(
+            user_id, fase="iniciando", erro="", aviso="", cancelar=False,
+            salvar_agora=False, validar_agora=False, session_id=runtime.session_id,
+            viewport=runtime.viewport,
+        )
         t = threading.Thread(target=_worker, args=(user_id,), daemon=True)
         _threads[user_id] = t
         t.start()
     return status(user_id)
 
 
-def frames(user_id: int):
-    """Generator de frames base64 (JPEG) pro SSE. Liveness = a fila do worker existir
-    (`_inputs[user_id]`): SSE e worker vivem no MESMO processo (1 gunicorn worker), então
-    isso é estado em memória — zero hit no banco no loop de streaming. Encerra quando o
-    worker some (login concluído/cancelado/erro) ou após ~30s sem frame novo (o
-    EventSource do front reabre sozinho enquanto a fase seguir de conexão)."""
-    ultimo = None
-    ocioso = 0
-    espera_inicio = 0
-    while True:
-        if user_id not in _inputs:
-            # Grace no começo: a thread do worker pode ainda não ter registrado a fila.
-            espera_inicio += 1
-            if espera_inicio > 60:        # ~3s sem worker -> encerra
-                break
-            time.sleep(0.05)
-            continue
-        espera_inicio = 0
-        frame = _frames.get(user_id)
-        if frame and frame is not ultimo:
-            ultimo = frame
-            ocioso = 0
-            yield frame
-        else:
-            ocioso += 1
-            if ocioso > 600:              # ~30s sem frame novo -> encerra o stream
-                break
-        time.sleep(0.05)
+def frames(user_id: int, session_id: str | None = None):
+    """Eventos estruturados do transporte v2 para a view SSE."""
+    yield from _transport.frames(user_id, session_id)
 
 
-def enfileirar_input(user_id: int, eventos) -> dict:
-    """Recebe eventos de input do front (mouse/teclado) e empurra pra fila do worker.
-    Valida tipo/coords/limites — dados do cliente não são confiáveis."""
-    fila = _inputs.get(user_id)
-    if fila is None:
-        return {"ok": False, "erro": "sessao_inativa"}
-    if not isinstance(eventos, list):
-        return {"ok": False, "erro": "payload_invalido"}
-    aceitos = 0
-    for ev in eventos[:MAX_EVENTOS_POR_POST]:
-        if not isinstance(ev, dict):
-            continue
-        t = ev.get("t")
-        limpo = {"t": t}
-        if t in ("move", "down", "up", "wheel"):
-            try:
-                limpo["x"] = max(0, min(VIEW_W, int(ev.get("x", 0))))
-                limpo["y"] = max(0, min(VIEW_H, int(ev.get("y", 0))))
-            except (TypeError, ValueError):
-                continue
-            if t in ("down", "up"):
-                limpo["button"] = ev.get("button") if ev.get("button") in (
-                    "left", "right", "middle") else "left"
-                limpo["clickCount"] = ev.get("clickCount", 1)
-            if t == "wheel":
-                limpo["dx"] = ev.get("dx", 0)
-                limpo["dy"] = ev.get("dy", 0)
-            if t == "move":
-                limpo["buttons"] = ev.get("buttons", 0)
-        elif t == "char":
-            limpo["text"] = str(ev.get("text", ""))[:8]
-            if not limpo["text"]:
-                continue
-        elif t == "key":
-            if ev.get("key") not in _SPECIAL_KEYS:
-                continue
-            limpo["key"] = ev.get("key")
-        else:
-            continue
-        try:
-            fila.put_nowait(limpo)
-            aceitos += 1
-        except queue.Full:
-            break
-    return {"ok": True, "aceitos": aceitos}
+def enfileirar_input(user_id: int, session_id: str, eventos) -> dict:
+    """Valida, deduplica e confirma eventos do transporte v2."""
+    return _transport.enqueue(user_id, session_id, eventos)
 
 
 def salvar_sessao_manual(user_id: int, raw_json: str) -> dict:
@@ -538,12 +525,12 @@ def salvar_sessao_manual(user_id: int, raw_json: str) -> dict:
 
 
 def salvar_agora(user_id: int):
-    """Usuário clicou 'já entrei' — pede pra thread capturar a sessão agora."""
-    _set_estado(user_id, salvar_agora=True)
+    """Usuário pediu uma validação; nunca força a persistência de cookies inválidos."""
+    _set_estado(user_id, validar_agora=True, salvar_agora=False, aviso="")
 
 
 def cancelar(user_id: int):
-    _set_estado(user_id, cancelar=True)
+    _set_estado(user_id, cancelar=True, fase="idle", aviso="", erro="")
 
 
 def esquecer(user_id: int) -> None:

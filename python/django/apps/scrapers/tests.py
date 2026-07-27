@@ -4761,6 +4761,8 @@ class SessaoMLGravadaForaDoPlaywrightTests(TestCase):
 
         with patch("playwright.sync_api.sync_playwright", self._playwright_falso(ordem)), \
              patch.object(ml_conexao, "_ir_para_login"), \
+             patch("apps.scrapers.conexoes.sondar_sessao_ml",
+                   return_value=("conectado", "")), \
              patch.object(ml_conexao, "_persistir_sessao", gravar):
             ml_conexao._worker(self.user.id)
 
@@ -4772,6 +4774,8 @@ class SessaoMLGravadaForaDoPlaywrightTests(TestCase):
 
         with patch("playwright.sync_api.sync_playwright", self._playwright_falso([])), \
              patch.object(ml_conexao, "_ir_para_login"), \
+             patch("apps.scrapers.conexoes.sondar_sessao_ml",
+                   return_value=("conectado", "")), \
              patch.object(ml_conexao, "_persistir_sessao",
                           side_effect=RuntimeError("banco fora")):
             ml_conexao._worker(self.user.id)
