@@ -372,8 +372,12 @@ def _texto_ia_sem_formatacao(texto, limite=120):
     return limpo[:limite].rstrip(" -–—,;|/")
 
 
-def _salvar_cache_ia(produto, *, titulo="", nome_curto=""):
-    """Atualiza somente os campos realmente gerados e tolera objetos sem ORM."""
+def _salvar_cache_ia(produto, *, titulo="", nome_curto="", persistir=True):
+    """Atualiza cache de IA sem deixar uma falha de escrita quebrar a transação.
+
+    No envio de cupom público os valores servem apenas para compor a mensagem e
+    ficam em memória; o catálogo compartilhado só é escrito pelo worker.
+    """
     campos = []
     if titulo and titulo != (getattr(produto, "frase_llm", "") or ""):
         produto.frase_llm = titulo
@@ -381,15 +385,20 @@ def _salvar_cache_ia(produto, *, titulo="", nome_curto=""):
     if nome_curto and nome_curto != (getattr(produto, "nome_llm", "") or ""):
         produto.nome_llm = nome_curto
         campos.append("nome_llm")
-    if not campos or not hasattr(produto, "save") or not getattr(produto, "pk", None):
+    if (not campos or not persistir or not hasattr(produto, "save")
+            or not getattr(produto, "pk", None)):
         return
     try:
-        produto.save(update_fields=campos)
+        # Savepoint obrigatório: DatabaseError capturado dentro de um atomic
+        # externo (RLS, timeout etc.) não pode contaminar o envio inteiro.
+        with transaction.atomic():
+            produto.save(update_fields=campos)
     except Exception:
-        pass
+        logger.warning("Cache de IA não foi persistido para o produto %s",
+                       getattr(produto, "pk", "?"), exc_info=True)
 
 
-def _conteudo_marketing(produto):
+def _conteudo_marketing(produto, *, persistir_cache=True):
     """Chamada e nome curto, com uma única ida à IA e cache por produto."""
     titulo_cache = _texto_ia_sem_formatacao(
         getattr(produto, "frase_llm", ""), 80
@@ -416,7 +425,8 @@ def _conteudo_marketing(produto):
     nome_curto = nome_cache or nome_gerado or nome_fallback
     # O fallback mecânico mantém a mensagem bonita quando a API oscila, mas não
     # ocupa o cache da IA: uma tentativa futura ainda poderá produzir nome melhor.
-    _salvar_cache_ia(produto, titulo=titulo, nome_curto=nome_gerado)
+    _salvar_cache_ia(produto, titulo=titulo, nome_curto=nome_gerado,
+                     persistir=persistir_cache)
     return {"titulo": titulo, "nome_curto": nome_curto}
 
 
@@ -430,7 +440,7 @@ def _preparar_conteudo_ia_cupom(itens):
     if not itens:
         return
     # A chamada do cupom acompanha o principal produto exibido na colagem.
-    _conteudo_marketing(itens[0]["produto"])
+    _conteudo_marketing(itens[0]["produto"], persistir_cache=False)
 
     pendentes = []
     for item in itens:
@@ -446,7 +456,7 @@ def _preparar_conteudo_ia_cupom(itens):
     resumidos = gerar_nomes_curtos([produto.nome for produto in pendentes], timeout=10)
     for produto, nome_curto in zip(pendentes, resumidos):
         if nome_curto:
-            _salvar_cache_ia(produto, nome_curto=nome_curto)
+            _salvar_cache_ia(produto, nome_curto=nome_curto, persistir=False)
 
 
 def _nome_loja(marketplace, cupom=None) -> str:
@@ -632,7 +642,7 @@ def produtos_do_cupom(cupom, limite=9, macro=None):
     return []
 
 
-def _preparar_itens_cupom(cupom, usuario, limite=9, macro=None):
+def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
     """([{produto, link}], sessao_caiu) com link afiliado válido + foto p/ a colagem.
 
     Cada produto leva o PRÓPRIO link comissionado (como na imagem-modelo). Usa o
@@ -640,15 +650,15 @@ def _preparar_itens_cupom(cupom, usuario, limite=9, macro=None):
     Builder. Se a sessão do ML cair, para de tentar (evita N falhas lentas) e
     devolve o que houver mais `sessao_caiu=True` — o chamador transforma isso na
     mensagem de reconexão em vez de "cupom sem produtos".
-    `macro`: categoria escolhida no envio (repassada a `produtos_do_cupom`).
+    `relacoes` vem do predicado de leitura de preparo fresco. O envio manual não
+    chama preparar_cupom: esse caminho pode escrever no catálogo público e é
+    reservado ao worker de preparação.
     """
     from apps.scrapers.marketplaces.registry import get_marketplace
     from apps.scrapers.afiliado import situacao_dos_links, salvar_cache
     from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
     from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
 
-    from apps.scrapers.coupon_products import preparar_cupom
-    relacoes = preparar_cupom(cupom, usuario=usuario)
     if not relacoes:
         return [], False
     produtos = [r.produto for r in relacoes]
@@ -868,9 +878,42 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         return erro_canal
     agora = timezone.now()
     cupom_id = getattr(cupom, "pk", None)
+    if not cupom_id:
+        return {"sucesso": False,
+                "motivo": "Este cupom foi atualizado e não está mais disponível. Atualize a tela e tente outro.",
+                "classe": "permanente", "cupom_atualizado": True}
     if cupom.estado != "ativo" or (cupom.validade and cupom.validade < agora):
         return {"sucesso": False, "motivo": "Cupom não encontrado, inativo ou vencido.",
                 "classe": "permanente"}
+
+    # A página só oferece cupons preparados, mas o catálogo pode mudar entre o
+    # render e o clique. Validar novamente é leitura pura: nunca re-prepara nem
+    # escreve em linhas públicas sob o contexto RLS do usuário.
+    from apps.scrapers.coupon_products import (
+        relacoes_preparadas_para_envio, relacoes_prontas_para_envio,
+    )
+    relacoes_preparadas = relacoes_preparadas_para_envio(cupom, usuario)
+    if not relacoes_preparadas:
+        log_event(
+            "publicacao", "coupon_not_ready",
+            "Cupom aguardando preparação ou atualização.", level="warning",
+            usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                       "destino": destino_nome or grupo_id},
+        )
+        return {"sucesso": False,
+                "motivo": "Este cupom está sendo atualizado e ainda não está disponível para envio.",
+                "classe": "transitorio", "cupom_em_preparo": True}
+    relacoes_prontas = relacoes_prontas_para_envio(cupom, usuario)
+    if not relacoes_prontas:
+        log_event(
+            "publicacao", "coupon_link_pending",
+            "Cupom preparado sem link afiliado utilizável.", level="warning",
+            usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                       "destino": destino_nome or grupo_id},
+        )
+        return {"sucesso": False,
+                "motivo": "Os links afiliados deste cupom ainda estão sendo preparados. Aguarde alguns instantes.",
+                "classe": "transitorio", "link_afiliado_pendente": True}
 
     desde = agora - timedelta(hours=24)
     publicacao = None
@@ -957,19 +1000,24 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     def falhar(motivo, **extra):
         erro_tecnico = extra.pop("_erro_tecnico", "")
         incerto = extra.get("resultado") == "incerto"
-        Publicacao.objects.filter(pk=publicacao.pk, status="pendente").update(
-            status="incerto" if incerto else "falhou", erro=str(motivo)[:500])
-        log_event("publicacao", "send_failed", str(motivo), level="warning",
-                  usuario=usuario, contexto={"publicacao_id": publicacao.id,
-                                             "cupom_id": cupom.id, "canal": canal,
-                                             "destino": destino_nome or grupo_id,
-                                             "erro_tecnico": erro_tecnico, **extra})
+        try:
+            with transaction.atomic():
+                Publicacao.objects.filter(pk=publicacao.pk, status="pendente").update(
+                    status="incerto" if incerto else "falhou", erro=str(motivo)[:500])
+            log_event("publicacao", "send_failed", str(motivo), level="warning",
+                      usuario=usuario, contexto={"publicacao_id": publicacao.id,
+                                                 "cupom_id": cupom.id, "canal": canal,
+                                                 "destino": destino_nome or grupo_id,
+                                                 "erro_tecnico": erro_tecnico, **extra})
+        except Exception:
+            logger.exception("Falha ao fechar publicação de cupom %s", publicacao.pk)
         return {"sucesso": False, "motivo": str(motivo), **extra}
 
     try:
         # Cupom publicavel exige produtos comprovados. Nao existe mais fallback de
         # texto puro nem foto manual que burle a associacao cupom-produto.
-        itens_cupom, sessao_ml_caiu = _preparar_itens_cupom(cupom, usuario)
+        itens_cupom, sessao_ml_caiu = _preparar_itens_cupom(
+            cupom, usuario, relacoes_prontas)
         img_kwargs = {}
         if itens_cupom:
             _preparar_conteudo_ia_cupom(itens_cupom)
@@ -1034,7 +1082,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     except Exception as exc:
         logger.exception("Erro inesperado ao enviar cupom %s", cupom.pk)
         return falhar("Falha inesperada ao preparar o cupom.", classe="desconhecido",
-                      causa=type(exc).__name__)
+                      causa=type(exc).__name__, _erro_tecnico=str(exc))
 
 
 # Emoji por macro-categoria p/ a linha do produto na mensagem curta. Fallback 🛍️.

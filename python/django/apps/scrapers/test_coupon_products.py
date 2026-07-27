@@ -41,6 +41,7 @@ class CouponPreparationTests(TestCase):
             "nome": "Livro selecionado", "origem": "oferta", "estado": "ativo",
             "preco_sem_desconto": 120, "preco_com_cupom": 100,
             "link_produto": "https://www.amazon.com.br/dp/ASINTEST",
+            "link_afiliado": "https://amzn.to/coupon-products-test",
             "imagem_url": "https://images.example/livro.jpg", "evidencia": {},
         }
         values.update(overrides)

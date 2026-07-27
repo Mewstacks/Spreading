@@ -1411,13 +1411,17 @@ def enviar_cupom_stream(request):
             # regressão nova atrás do erro genérico do runner.
             logger.exception("Falha não tratada ao enviar cupom %s", cupom_id)
             from apps.scrapers.eventos import log_event
-            log_event(
-                "publicacao", "coupon_sse_failed",
-                "Não foi possível concluir o envio do cupom.", level="error",
-                usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
-                                           "destino": grupo_nome or grupo_id}, exc=exc,
-            )
-            print("[ERRO] Não foi possível concluir o envio do cupom. Atualize a tela e tente novamente.")
+            try:
+                log_event(
+                    "publicacao", "coupon_sse_failed",
+                    "Não foi possível concluir o envio do cupom.", level="error",
+                    usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                               "destino": grupo_nome or grupo_id,
+                                               "causa": type(exc).__name__}, exc=exc,
+                )
+            except Exception:
+                logger.exception("Não foi possível auditar falha SSE do cupom %s", cupom_id)
+            print("[ERRO] O envio encontrou uma falha temporária. Nenhum cupom foi confirmado; tente novamente em instantes.")
             return
         if not isinstance(resultado, dict):
             logger.error("Envio de cupom %s retornou resultado inválido: %r", cupom_id, resultado)
@@ -1634,7 +1638,9 @@ def top_promocoes(request):
     for cupom_catalogo in cupons_lista:
         cupom_catalogo.codigo_publico = codigo_publicavel(cupom_catalogo)
         cupom_catalogo.modo_resgate = regras_do_cupom(cupom_catalogo)["modo_resgate"]
-    from apps.scrapers.coupon_products import ids_cupons_prontos
+    from apps.scrapers.coupon_products import (
+        ids_cupons_prontos, relacoes_preparadas_para_envio,
+    )
     ids_prontos = ids_cupons_prontos(request.user, cupons_lista)
     cupons_publicaveis = [c for c in cupons_lista if cupom_publicavel(c)]
     if como_usar_selecionado == "codigo":
@@ -1642,7 +1648,12 @@ def top_promocoes(request):
     elif como_usar_selecionado == "ativacao":
         cupons_publicaveis = [c for c in cupons_publicaveis if not c.codigo_publico]
     cupons_prontos = sum(c.id in ids_prontos for c in cupons_publicaveis)
-    cupons_aguardando_preparo = len(cupons_publicaveis) - cupons_prontos
+    ids_preparados = {
+        cupom.id for cupom in cupons_publicaveis
+        if relacoes_preparadas_para_envio(cupom, request.user)
+    }
+    cupons_aguardando_preparo = len(cupons_publicaveis) - len(ids_preparados)
+    cupons_aguardando_link = len(ids_preparados - ids_prontos)
     # A lista continua estrita: o contador torna a fila visível sem oferecer um
     # cupom cujo envio ainda não consegue montar produtos, imagem e link afiliado.
     cupons_lista = [c for c in cupons_publicaveis if c.id in ids_prontos]
@@ -1808,6 +1819,7 @@ def top_promocoes(request):
         "cupons_catalogo": cupons_catalogo,
         "cupons_prontos": cupons_prontos,
         "cupons_aguardando_preparo": cupons_aguardando_preparo,
+        "cupons_aguardando_link": cupons_aguardando_link,
         "awin_programas": ProgramaAfiliado.objects.filter(
             integracao__owner=request.user, integracao__provedor="awin",
             integracao__status="conectada", habilitado=True,

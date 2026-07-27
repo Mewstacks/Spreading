@@ -495,42 +495,65 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
         return []
 
 
-def cupom_pronto_para_usuario(cupom, usuario) -> bool:
+def relacoes_preparadas_para_envio(cupom, usuario, limite=9):
+    """Devolve relações preparadas sem alterar o catálogo compartilhado.
+
+    O envio manual roda no contexto RLS do usuário e, por isso, não pode tentar
+    "atualizar" cupom/produto/preparo compartilhados. Este é deliberadamente um
+    predicado de leitura: o worker é o único responsável por materializar e
+    renovar o preparo.
+    """
     contexto = _usuario_do_preparo(cupom, usuario)
-    # Recalcula em vez de confiar no campo denormalizado: uma alteração feita por
-    # admin/script também deve invalidar imediatamente um preparo antigo.
     chave = chave_produtos_cupom(cupom)
-    return CupomPreparacao.objects.filter(
+    fresco_desde = timezone.now() - timedelta(hours=CACHE_HORAS)
+    preparo = CupomPreparacao.objects.filter(
         cupom=cupom, usuario=contexto, status="pronto", produtos_chave=chave,
-    ).exists()
+        verificado_em__gte=fresco_desde,
+    ).first()
+    if not preparo:
+        return []
+    relacoes = list(ProdutoCupom.objects.filter(
+        cupom=cupom, status="confirmado", preco_original__isnull=False,
+        preco_final__isnull=False, produto__imagem_url__gt="",
+    ).exclude(produto__estado__in=["indisponivel", "invalido", "expirado", "stale"])
+      .select_related("produto"))
+    relacoes.sort(key=lambda r: (
+        (r.preco_original - r.preco_final) / r.preco_original
+        if r.preco_original else Decimal("0"),
+        r.preco_original - r.preco_final,
+    ), reverse=True)
+    return relacoes[:limite]
+
+
+def relacoes_prontas_para_envio(cupom, usuario, limite=9):
+    """Relações preparadas que também possuem link afiliado utilizável.
+
+    A aprovação por usuário tem precedência; o campo legado no produto mantém a
+    compatibilidade com os links públicos já verificados antes do cache tenant.
+    """
+    relacoes = relacoes_preparadas_para_envio(cupom, usuario, limite=limite)
+    if not relacoes or usuario is None:
+        return []
+    from apps.scrapers.models import LinkAfiliadoUsuario
+    ids_com_link = set(LinkAfiliadoUsuario.objects.filter(
+        usuario=usuario, produto_id__in=[relacao.produto_id for relacao in relacoes],
+        verificado_ok=True,
+    ).exclude(link_afiliado="").values_list("produto_id", flat=True))
+    return [relacao for relacao in relacoes if (
+        relacao.produto_id in ids_com_link
+        or bool(getattr(relacao.produto, "link_afiliado", ""))
+    )]
+
+
+def cupom_pronto_para_usuario(cupom, usuario) -> bool:
+    return bool(relacoes_prontas_para_envio(cupom, usuario))
 
 
 def ids_cupons_prontos(usuario, cupons):
-    cupons = list(cupons)
-    if not cupons:
-        return set()
-    ids = [c.id for c in cupons]
-    # Só conta preparação FRESCA (dentro da mesma janela que o envio usa para
-    # reaproveitar o cache). Sem isto, a tela mostrava cupons cujo preparo "pronto"
-    # era antigo: o envio então repreparava, não achava mais produtos e devolvia
-    # "cupom sem produtos" para algo que a tela prometia enviável. Ao exigir
-    # frescor, a tela deixa de anunciar cupons que o envio não conseguiria montar.
-    fresco_desde = timezone.now() - timedelta(hours=CACHE_HORAS)
-    rows = CupomPreparacao.objects.filter(
-        cupom_id__in=ids, status="pronto", verificado_em__gte=fresco_desde,
-    ).filter(Q(usuario__isnull=True) | Q(usuario=usuario)).values_list(
-        "cupom_id", "usuario_id", "produtos_chave")
-    por_contexto = {(cid, uid): chave for cid, uid, chave in rows}
-    prontos = set()
-    for cupom in cupons:
-        uid = getattr(usuario, "id", None)
-        if (str(cupom.marketplace).lower() == "mercadolivre"
-                and cupom.owner_id is None):
-            uid = None
-        chave = chave_produtos_cupom(cupom)
-        if por_contexto.get((cupom.id, uid)) == chave:
-            prontos.add(cupom.id)
-    return prontos
+    return {
+        cupom.id for cupom in cupons
+        if relacoes_prontas_para_envio(cupom, usuario)
+    }
 
 
 def preparar_lote(limite=PREPARO_LOTE_POR_CICLO):

@@ -14,7 +14,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.core.management import call_command
-from django.db import connection
+from django.db import DatabaseError, connection, transaction
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase, override_settings
@@ -1156,7 +1156,7 @@ class TopPromocoesFilterTests(TestCase):
 
     def test_catalogo_de_cupons_mostra_so_prontos_e_indica_fila(self):
         from apps.scrapers.coupon_products import atualizar_chave_cupom
-        from apps.scrapers.models import CupomPreparacao
+        from apps.scrapers.models import CupomPreparacao, ProdutoCupom
 
         fonte = FonteIngestao.objects.create(
             slug="coupon-counter-source", marketplace="mercadolivre", nome="Cupons")
@@ -1175,6 +1175,17 @@ class TopPromocoesFilterTests(TestCase):
         CupomPreparacao.objects.create(
             cupom=pronto, usuario=None, status="pronto",
             produtos_chave=atualizar_chave_cupom(pronto), verificado_em=timezone.now(),
+        )
+        produto = self._criar_produto(
+            marketplace="mercadolivre", owner=None, nome="Produto do cupom",
+            preco_sem_desconto=100, preco_com_cupom=80,
+            link_produto="https://example.com/produto-cupom",
+            imagem_url="https://img.example/produto-cupom.jpg",
+        )
+        ProdutoCupom.objects.create(
+            cupom=pronto, produto=produto, status="confirmado",
+            preco_original=100, preco_atual=80, preco_final=60,
+            verificado_em=timezone.now(),
         )
 
         response = self.client.get(self.url, {"tipo": "cupom"})
@@ -1633,7 +1644,20 @@ class EnviarCupomColagemTests(TestCase):
         self.produto = Produto.objects.create(
             marketplace="mercadolivre", nome="Tênis de corrida", origem="oferta",
             preco_sem_desconto=200, preco_com_cupom=120,
-            link_produto="https://example.com/p", imagem_url="https://img/x.jpg",
+            link_produto="https://example.com/p", link_afiliado="https://meli.la/abc",
+            imagem_url="https://img/x.jpg",
+        )
+        from apps.scrapers.coupon_products import atualizar_chave_cupom
+        from apps.scrapers.models import CupomPreparacao, ProdutoCupom
+        ProdutoCupom.objects.create(
+            produto=self.produto, cupom=self.cupom, status="confirmado",
+            preco_original=200, preco_atual=120, preco_final=96,
+            verificado_em=timezone.now(),
+        )
+        CupomPreparacao.objects.create(
+            cupom=self.cupom, usuario=None, status="pronto",
+            produtos_chave=atualizar_chave_cupom(self.cupom),
+            verificado_em=timezone.now(),
         )
 
     @patch("apps.scrapers.ofertas._canal_pronto_ou_erro", return_value=None)
@@ -4536,21 +4560,19 @@ class EnvioCupomTests(TestCase):
         self.assertTrue(segundo["duplicado"])
         self.assertEqual(Publicacao.objects.get(usuario=self.user).status, "incerto")
 
-    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
-    def test_produto_sem_link_afiliado_fecha_publicacao_e_permite_retentativa(
-        self, marketplace
-    ):
+    def test_produto_sem_link_afiliado_nao_reserva_publicacao(self):
         from apps.scrapers.ofertas import enviar_cupom
         self.produto.link_afiliado = ""
         self.produto.save(update_fields=["link_afiliado"])
-        marketplace.return_value.build_affiliate_link.return_value = {}
         sender = self._sender({"sucesso": True})
         with patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
             primeiro = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
             segundo = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
         self.assertFalse(primeiro["sucesso"])
         self.assertFalse(segundo.get("duplicado", False))
-        self.assertEqual(Publicacao.objects.filter(status="falhou").count(), 2)
+        self.assertTrue(primeiro["link_afiliado_pendente"])
+        self.assertTrue(segundo["link_afiliado_pendente"])
+        self.assertFalse(Publicacao.objects.filter(usuario=self.user).exists())
 
     def test_whatsapp_desconectado_pede_reconexao_antes_de_enviar(self):
         # WhatsApp fora do ar: o envio não pode criar Publicacao nem tentar montar a
@@ -4613,6 +4635,58 @@ class EnvioCupomTests(TestCase):
         self.assertTrue(resultado["cupom_atualizado"])
         self.assertIn("Atualize a tela", resultado["motivo"])
         self.assertFalse(Publicacao.objects.filter(usuario=self.user).exists())
+
+    @patch("apps.scrapers.llm.gerar_conteudo",
+           return_value={"titulo": "Oferta especial", "nome_curto": "Produto"})
+    def test_cupom_publico_envia_sem_repreparar_ou_gravar_produto(self, _ia):
+        """O clique usa o cache pronto e não pode escrever no catálogo RLS."""
+        from apps.scrapers.ofertas import enviar_cupom
+
+        sender = self._sender({"sucesso": True, "via": "whatsapp", "mensagem_id": "m1"})
+        with patch("apps.scrapers.coupon_products.preparar_cupom",
+                   side_effect=AssertionError("envio não prepara catálogo")), \
+             patch.object(Produto, "save",
+                          side_effect=AssertionError("envio não grava produto público")), \
+             patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
+            resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertTrue(resultado["sucesso"])
+        sender.enviar_oferta.assert_called_once()
+        self.assertEqual(Publicacao.objects.get().status, "enviado")
+
+    def test_preparo_vencido_nao_reserva_publicacao(self):
+        from apps.scrapers.coupon_products import CACHE_HORAS
+        from apps.scrapers.models import CupomPreparacao
+        from apps.scrapers.ofertas import enviar_cupom
+
+        CupomPreparacao.objects.filter(cupom=self.cupom).update(
+            verificado_em=timezone.now() - timedelta(hours=CACHE_HORAS, minutes=1))
+        resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertTrue(resultado["cupom_em_preparo"])
+        self.assertIn("sendo atualizado", resultado["motivo"])
+        self.assertFalse(Publicacao.objects.filter(usuario=self.user).exists())
+
+    def test_link_afiliado_pendente_nao_reserva_publicacao(self):
+        from apps.scrapers.ofertas import enviar_cupom
+
+        self.produto.link_afiliado = ""
+        self.produto.save(update_fields=["link_afiliado"])
+        resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertTrue(resultado["link_afiliado_pendente"])
+        self.assertIn("links afiliados", resultado["motivo"])
+        self.assertFalse(Publicacao.objects.filter(usuario=self.user).exists())
+
+    def test_falha_no_cache_ia_nao_quebra_transacao_externa(self):
+        from apps.scrapers.ofertas import _salvar_cache_ia
+
+        with patch.object(Produto, "save", side_effect=DatabaseError("RLS bloqueou update")):
+            with transaction.atomic():
+                _salvar_cache_ia(self.produto, titulo="Chamada", nome_curto="Nome")
+                self.assertTrue(Produto.objects.filter(pk=self.produto.pk).exists())
 
 
 class LinkAfiliadoCupomTests(TestCase):
@@ -4742,7 +4816,7 @@ class EndpointsEnvioPostTests(TransactionTestCase):
         })
         corpo = b"".join(response.streaming_content).decode()
 
-        self.assertIn("Não foi possível concluir o envio do cupom", corpo)
+        self.assertIn("O envio encontrou uma falha temporária", corpo)
         self.assertNotIn("Falha inesperada ao processar a solicitação", corpo)
 
     def test_cupom_sem_codigo_publico_e_produto_pronto_fica_oculto(self):

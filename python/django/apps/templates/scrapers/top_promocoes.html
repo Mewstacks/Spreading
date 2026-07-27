@@ -228,6 +228,7 @@
     {% if tipo == 'cupom' %}
       <span class="tech-tag"><i data-lucide="circle-check"></i> {{ cupons_prontos }} pronto(s)</span>
       {% if cupons_aguardando_preparo %}<span class="tech-tag"><i data-lucide="loader-circle"></i> {{ cupons_aguardando_preparo }} aguardando preparo</span>{% endif %}
+      {% if cupons_aguardando_link %}<span class="tech-tag"><i data-lucide="link"></i> {{ cupons_aguardando_link }} aguardando link</span>{% endif %}
     {% endif %}
     {% if tipo != 'cupom' %}
       {% if so_afiliados %}
