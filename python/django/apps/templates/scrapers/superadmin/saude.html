@@ -1,67 +1,93 @@
 {% extends "base.html" %}
 {% block title %}Superadmin — Saúde do sistema{% endblock %}
 
+{% block head_extra %}
+<style>
+  /* veredito: resposta de 2 segundos — as classes ok/atencao/critico são
+     reescritas pelo polling (veredito.className = 'veredito ' + estado) */
+  .veredito { display: flex; align-items: flex-start; gap: .9rem; padding: 1.05rem 1.2rem;
+    margin-bottom: 1rem; background: var(--surface); border: 1px solid var(--border);
+    border-left-width: 3px; border-radius: var(--r-lg); }
+  .veredito .lucide { width: 1.5rem; height: 1.5rem; flex: none; margin-top: .1rem; }
+  .veredito h2 { margin: 0; font-size: 1.05rem; font-weight: 600; letter-spacing: -.015em; line-height: 1.3; }
+  .veredito p { margin: .25rem 0 0; font-size: 12.5px; color: var(--muted); }
+  .veredito.ok      { border-left-color: var(--green); }
+  .veredito.ok .lucide      { color: var(--green); }
+  .veredito.atencao { border-left-color: var(--yellow); }
+  .veredito.atencao .lucide { color: var(--yellow); }
+  .veredito.critico { border-left-color: var(--red); }
+  .veredito.critico .lucide { color: var(--red); }
+  @media (min-width: 900px) { .veredito h2 { font-size: 1.2rem; } }
+
+  /* barra de controles: filtro por conta + janela de tempo */
+  .saude-controls { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center;
+    justify-content: space-between; margin-bottom: .8rem; }
+  .filtro-usuario { display: flex; gap: .45rem; align-items: center; flex-wrap: wrap; }
+  .filtro-usuario input { width: 220px; }
+  .escopo { color: var(--muted); font-size: 12.5px; margin: 0 0 1rem; }
+  .escopo .lucide { width: 1em; height: 1em; }
+
+  /* problema: card com borda lateral semântica */
+  .prob { border: 1px solid var(--border); border-left-width: 3px; border-radius: var(--r-md);
+    padding: .9rem 1rem; background: var(--surface); }
+  .prob + .prob { margin-top: .7rem; }
+  .prob.critico { border-left-color: var(--red); }
+  .prob.aviso   { border-left-color: var(--yellow); }
+  .prob.concluido { border-left-color: var(--green); }
+  .prob-head { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+  .prob-head strong { font-size: 13.5px; }
+  .prob-head .meta { margin-left: auto; }
+  .prob dl { margin: .6rem 0 0; font-size: 12.5px; line-height: 1.5; }
+  .prob dt { font-family: var(--mono); color: var(--muted); font-size: 9.5px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: .13em; margin-top: .55rem; }
+  .prob dd { margin: .15rem 0 0; }
+  .meta { color: var(--muted); font-size: 11.5px; }
+
+  /* workers/conexões: estado textual dentro do stat */
+  .stat .stat-head { display: flex; align-items: center; gap: .45rem; font-weight: 600; font-size: 13px; }
+  .stat .stat-sub { margin-top: .35rem; }
+  .stat .stat-sub + .stat-sub { margin-top: .25rem; }
+  .stat form { margin-top: .6rem; }
+</style>
+{% endblock %}
+
 {% block content %}
 {% comment %}
 Relatório diário legível. A ordem é deliberada: veredito -> o que fazer -> prova de
 vida. Quem abre isto às 8h precisa saber em 2 segundos se tem trabalho hoje.
 {% endcomment %}
-<style>
-  .veredito { border-radius: var(--radius); padding: 1rem 1.1rem; margin-bottom: 1rem;
-    border: 1px solid; display: flex; align-items: center; gap: .8rem; }
-  .veredito .lucide { width: 1.6rem; height: 1.6rem; flex: none; }
-  .veredito h2 { margin: 0; font-size: 1.05rem; line-height: 1.3; }
-  .veredito p { margin: .15rem 0 0; font-size: .8rem; opacity: .85; }
-  .veredito.ok      { background: var(--green-bg);  color: var(--green);  border-color: color-mix(in srgb, var(--green) 30%, transparent); }
-  .veredito.atencao { background: var(--yellow-bg); color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 30%, transparent); }
-  .veredito.critico { background: var(--red-bg);    color: var(--red);    border-color: color-mix(in srgb, var(--red) 30%, transparent); }
-
-  .prob { border: 1px solid var(--border); border-radius: var(--radius-sm);
-    padding: .85rem .9rem; margin-bottom: .7rem; background: var(--surface-2); }
-  .prob.critico { border-left: 3px solid var(--red); }
-  .prob.aviso   { border-left: 3px solid var(--yellow); }
-  .prob.concluido { border-left: 3px solid var(--green); background: var(--green-bg); }
-  .prob-head { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: .45rem; }
-  .prob-head strong { font-size: .95rem; }
-  .prob dl { margin: .5rem 0 0; font-size: .82rem; line-height: 1.45; }
-  .prob dt { color: var(--muted); font-size: .7rem; text-transform: uppercase;
-    letter-spacing: .04em; margin-top: .5rem; }
-  .prob dd { margin: .1rem 0 0; }
-  .prob details { margin-top: .6rem; font-size: .78rem; }
-  /* min-height 44px: alvo de toque confortável no celular (ver CLAUDE.md). */
-  .prob summary { cursor: pointer; color: var(--muted); padding: .4rem 0;
-    min-height: 44px; display: flex; align-items: center; }
-  .prob pre { background: var(--surface-3); border: 1px solid var(--border); border-radius: var(--radius-sm);
-    padding: .6rem; overflow-x: auto; font-size: .72rem; margin: .4rem 0 0; white-space: pre-wrap;
-    word-break: break-word; }
-  .meta { color: var(--muted); font-size: .75rem; }
-  .periodo { display: flex; flex-wrap: wrap; gap: .4rem; }
-  .escopo { color: var(--muted); font-size: .78rem; margin: -.25rem 0 1rem; }
-  .contas-afetadas { display: flex; flex-wrap: wrap; gap: .35rem; }
-  .contas-afetadas a { min-height: 32px; display: inline-flex; align-items: center;
-    padding: .2rem .5rem; border: 1px solid var(--border); border-radius: 999px;
-    color: var(--purple); text-decoration: none; }
-  .contas-afetadas a:hover { background: var(--surface-3); }
-  @media (min-width: 768px) { .veredito h2 { font-size: 1.2rem; } }
-</style>
-
-<div style="display:flex;flex-wrap:wrap;gap:.5rem;justify-content:space-between;align-items:center;margin-bottom:1rem;">
-  <a href="{% url 'superadmin-usuarios' %}" class="btn btn-sm btn-ghost"><i data-lucide="arrow-left"></i> Voltar</a>
-  <div class="periodo">
-    <a href="?horas=24{% if usuario_busca %}&amp;usuario={{ usuario_busca|urlencode }}{% endif %}"  class="btn btn-sm {% if horas == 24 %}btn-purple{% else %}btn-ghost{% endif %}">24 horas</a>
-    <a href="?horas=72{% if usuario_busca %}&amp;usuario={{ usuario_busca|urlencode }}{% endif %}"  class="btn btn-sm {% if horas == 72 %}btn-purple{% else %}btn-ghost{% endif %}">3 dias</a>
-    <a href="?horas=168{% if usuario_busca %}&amp;usuario={{ usuario_busca|urlencode }}{% endif %}" class="btn btn-sm {% if horas == 168 %}btn-purple{% else %}btn-ghost{% endif %}">7 dias</a>
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Administração</span>
+    <h1>Saúde do sistema</h1>
+    <p class="sub">Veredito do período, workers e incidentes que precisam de ação.</p>
+  </div>
+  <div class="head-actions">
+    <nav class="seg" aria-label="Seções da administração">
+      <a href="{% url 'superadmin-usuarios' %}"><i data-lucide="users"></i> Usuários</a>
+      <a href="{% url 'superadmin-saude' %}" class="active" aria-current="page"><i data-lucide="stethoscope"></i> Saúde</a>
+      <a href="{% url 'superadmin-infra' %}"><i data-lucide="server"></i> Infra</a>
+    </nav>
   </div>
 </div>
 
-<form method="get" style="display:flex;gap:.45rem;align-items:center;margin:-.2rem 0 1rem;">
-  <input type="hidden" name="horas" value="{{ horas }}">
-  <input name="usuario" value="{{ usuario_busca }}" placeholder="Filtrar por usuário" aria-label="Filtrar por usuário"
-         style="max-width:240px;padding:.45rem .6rem;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:8px;">
-  <button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="search"></i> Buscar</button>
-  {% if usuario_busca %}<a href="?horas={{ horas }}" class="btn btn-sm btn-ghost">Limpar</a>{% endif %}
-</form>
-<p class="escopo"><i data-lucide="users"></i>{% if usuario_encontrado %} Eventos de {{ usuario_encontrado.get_username }}.{% elif usuario_busca %} Nenhum usuário encontrado para “{{ usuario_busca }}”.{% else %} Visão geral: avisos e erros de todas as contas. Selecione uma conta afetada para abrir seus detalhes.{% endif %}</p>
+<div class="saude-controls">
+  {% if not saude_escopo_tenant %}
+  <form method="get" class="filtro-usuario">
+    <input type="hidden" name="horas" value="{{ horas }}">
+    <input name="usuario" value="{{ usuario_busca }}" placeholder="Filtrar por usuário" aria-label="Filtrar por usuário">
+    <button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="search"></i> Buscar</button>
+    {% if usuario_busca %}<a href="?horas={{ horas }}" class="btn btn-sm btn-quiet">Limpar</a>{% endif %}
+  </form>
+  {% else %}<span></span>{% endif %}
+  <nav class="seg" aria-label="Período">
+    <a href="?horas=24{% if usuario_busca %}&amp;usuario={{ usuario_busca|urlencode }}{% endif %}"  class="{% if horas == 24 %}active{% endif %}" {% if horas == 24 %}aria-current="true"{% endif %}>24 horas</a>
+    <a href="?horas=72{% if usuario_busca %}&amp;usuario={{ usuario_busca|urlencode }}{% endif %}"  class="{% if horas == 72 %}active{% endif %}" {% if horas == 72 %}aria-current="true"{% endif %}>3 dias</a>
+    <a href="?horas=168{% if usuario_busca %}&amp;usuario={{ usuario_busca|urlencode }}{% endif %}" class="{% if horas == 168 %}active{% endif %}" {% if horas == 168 %}aria-current="true"{% endif %}>7 dias</a>
+  </nav>
+</div>
+
+<p class="escopo"><i data-lucide="users"></i>{% if saude_escopo_tenant %} Eventos e incidentes da organização de {{ request.user.get_username }}. O estado dos workers é compartilhado; ações de reteste global permanecem no processo auditável de sistema.{% elif usuario_encontrado %} Eventos de {{ usuario_encontrado.get_username }}.{% elif usuario_busca %} Nenhum usuário encontrado para “{{ usuario_busca }}”.{% else %} Visão geral: avisos e erros de todas as contas. Selecione uma conta afetada para abrir seus detalhes.{% endif %}</p>
 
 <div class="veredito {{ r.estado }}" id="veredito">
   {% if r.estado == 'ok' %}<i data-lucide="check-circle-2"></i>
@@ -83,17 +109,18 @@ divergência que mais confundia. Lendo da fonte única, divergir virou impossív
 Só com uma conta filtrada: sondar todas a cada carregamento (e a cada polling)
 seria uma ida à rede por usuário.
 {% endcomment %}
+<div class="card-stack">
 {% if r.conexoes %}
 <div class="card">
   <div class="card-head"><h2><i data-lucide="plug-zap"></i> Conexões de {{ usuario_encontrado.get_username }} agora</h2></div>
   <div class="stat-grid" id="conexoes">
     {% for c in r.conexoes %}
     <div class="stat">
-      <div style="display:flex;align-items:center;gap:.4rem;">
+      <div class="stat-head">
         <span class="dot {% if c.conectado %}on{% else %}off{% endif %}"></span>
-        <strong style="font-size:.85rem;">{{ c.servico }}</strong>
+        {{ c.servico }}
       </div>
-      <div class="l" style="margin-top:.3rem;">
+      <div class="l stat-sub">
         {% if c.conectado %}Conectado{% elif c.detalhe == 'conectando' or c.detalhe == 'capacidade' %}<span style="color:var(--yellow);">{{ c.motivo }}</span>{% else %}<span style="color:var(--red);">{{ c.motivo }}</span>{% endif %}
       </div>
     </div>
@@ -111,17 +138,17 @@ mentindo por omissão — nada roda, então nada falha.
   <div class="stat-grid" id="workers">
     {% for w in r.workers %}
     <div class="stat">
-      <div style="display:flex;align-items:center;gap:.4rem;">
+      <div class="stat-head">
         <span class="dot {% if w.vivo and w.ligado %}on{% else %}off{% endif %}"></span>
-        <strong style="font-size:.85rem;">{{ w.nome }}</strong>
+        {{ w.nome }}
       </div>
-      <div class="l" style="margin-top:.3rem;">
-        {% if w.alerta %}<span style="color:var(--red);font-weight:600;">Ligado mas não está rodando</span>
-        {% elif not w.controlavel %}{{ w.fase }}
-        {% elif not w.ligado %}Desligado na tela
-        {% else %}{{ w.fase }}{% endif %}
+      <div class="stat-sub">
+        {% if w.alerta %}<span class="badge badge-red"><span class="dot"></span>Ligado mas não está rodando</span>
+        {% elif not w.controlavel %}<span class="badge badge-muted">{{ w.fase }}</span>
+        {% elif not w.ligado %}<span class="badge badge-muted">Desligado</span>
+        {% else %}<span class="badge badge-green"><span class="dot"></span>{{ w.fase }}</span>{% endif %}
       </div>
-      {% if w.ultima_msg %}<div class="l" style="margin-top:.2rem;">{{ w.ultima_msg|truncatechars:80 }}</div>{% endif %}
+      {% if w.ultima_msg %}<div class="l stat-sub">{{ w.ultima_msg|truncatechars:80 }}</div>{% endif %}
       {% comment %}
       Toggle do worker de relatórios: a flag existe em automacao_state.JOBS e o
       endpoint já a aceita, mas NENHUMA tela a expunha — só ligava por SSH
@@ -129,12 +156,12 @@ mentindo por omissão — nada roda, então nada falha.
       é por isso que o sync de comissão nunca rodou em produção.
       {% endcomment %}
       {% if w.job == 'relatorios' %}
-      <form method="post" action="{% url 'scraper-automacao' %}" style="margin-top:.5rem;">
+      <form method="post" action="{% url 'scraper-automacao' %}">
         {% csrf_token %}
         <input type="hidden" name="tipo" value="relatorios">
         <input type="hidden" name="acao" value="{% if w.ligado %}stop{% else %}start{% endif %}">
         <input type="hidden" name="next" value="{{ request.get_full_path }}">
-        <button class="btn btn-sm {% if w.ligado %}btn-ghost{% else %}btn-purple{% endif %}" type="submit">
+        <button class="btn btn-sm {% if w.ligado %}btn-ghost{% else %}btn-accent{% endif %}" type="submit">
           <i data-lucide="{% if w.ligado %}pause{% else %}play{% endif %}"></i>
           {% if w.ligado %}Desligar{% else %}Ligar sync de comissão{% endif %}
         </button>
@@ -148,6 +175,7 @@ mentindo por omissão — nada roda, então nada falha.
 <div class="card">
   <div class="card-head">
     <h2><i data-lucide="stethoscope"></i> Precisa de atenção</h2>
+    {% if r.problemas %}<span class="count">{{ r.problemas|length }}</span>{% endif %}
   </div>
   {% for p in r.problemas %}
   <div class="prob {% if p.critico %}critico{% else %}aviso{% endif %}">
@@ -156,9 +184,9 @@ mentindo por omissão — nada roda, então nada falha.
       <span class="badge {% if p.critico %}badge-red{% else %}badge-yellow{% endif %}">
         {{ p.n }}× {% if p.critico %}erro{% else %}aviso{% endif %}
       </span>
-      <span class="badge badge-muted">{{ p.pipeline }}</span>
-      <span class="badge badge-muted">{{ p.escopo }}</span>
-      <span class="meta" style="margin-left:auto;">último {{ p.ultimo|date:"d/m H:i" }}</span>
+      <span class="tech-tag">{{ p.pipeline }}</span>
+      <span class="tech-tag">{{ p.escopo }}</span>
+      <span class="meta">último {{ p.ultimo|date:"d/m H:i" }}</span>
     </div>
 
     <dl>
@@ -180,7 +208,11 @@ mentindo por omissão — nada roda, então nada falha.
     {% if p.retestavel %}<form method="post" action="{% url 'superadmin-saude-retestar' incidente_id=p.id %}" style="margin-top:.7rem;">{% csrf_token %}<input type="hidden" name="horas" value="{{ horas }}"><input type="hidden" name="usuario" value="{{ usuario_busca }}"><button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="shield-check"></i> Retestar {% if p.usuarios > 1 %}as {{ p.usuarios }} contas {% endif %}sem publicar</button></form>{% endif %}
   </div>
   {% empty %}
-  <div class="msg msg-info">Nenhum erro nem aviso nas últimas {{ r.horas }}h.</div>
+  <div class="empty">
+    <i data-lucide="check-circle-2"></i>
+    <div class="empty-title">Nada precisa de atenção</div>
+    <p>Nenhum erro nem aviso nas últimas {{ r.horas }}h.</p>
+  </div>
   {% endfor %}
 </div>
 
@@ -188,10 +220,10 @@ mentindo por omissão — nada roda, então nada falha.
   <div class="card-head"><h2><i data-lucide="circle-check"></i> Ajustes concluídos</h2></div>
   {% for p in r.concluidos %}
   <div class="prob concluido">
-    <div class="prob-head"><strong>{{ p.titulo }}</strong><span class="badge badge-green">Ajuste concluído</span><span class="badge badge-muted">{{ p.escopo }}</span><span class="meta" style="margin-left:auto;">{{ p.confirmado_em|date:"d/m H:i" }}</span></div>
-    <div class="meta">{{ p.confirmacao }}</div>
+    <div class="prob-head"><strong>{{ p.titulo }}</strong><span class="badge badge-green"><span class="dot"></span>Ajuste concluído</span><span class="tech-tag">{{ p.escopo }}</span><span class="meta">{{ p.confirmado_em|date:"d/m H:i" }}</span></div>
+    <div class="meta" style="margin-top:.4rem;">{{ p.confirmacao }}</div>
   </div>
-  {% empty %}<div class="msg msg-info">Nenhum ajuste confirmado no período.</div>{% endfor %}
+  {% empty %}<p class="muted" style="font-size:12.5px;margin:0;">Nenhum ajuste confirmado no período.</p>{% endfor %}
 </div>
 
 {# Prova de vida: "zero erro" só é boa notícia se algo aconteceu. #}
@@ -199,15 +231,18 @@ mentindo por omissão — nada roda, então nada falha.
   <div class="card-head"><h2><i data-lucide="heart-pulse"></i> Sinais de vida no período</h2></div>
   <div class="stat-grid">
     {% for s in r.sinais %}
-    <div class="stat"><div class="n">{{ s.n }}</div><div class="l">{{ s.nome }}</div></div>
+    <div class="stat"><div class="n tnum">{{ s.n }}</div><div class="l">{{ s.nome }}</div></div>
     {% endfor %}
   </div>
-  <p style="color:var(--muted);font-size:.78rem;margin-top:.8rem;">
+  <p class="help" style="margin:.9rem 0 0;">
     Zero erro com zero atividade não é saúde — confira os workers acima.
-    O log cru de cada evento fica em <a href="{% url 'superadmin-infra' %}">Infra</a> e no Django Admin.
+    O log cru de cada evento fica em <a class="link" href="{% url 'superadmin-infra' %}">Infra</a> e no Django Admin.
   </p>
 </div>
+</div>
+{% endblock %}
 
+{% block scripts %}
 <script>
 /* Auto-refresh. A tela não tinha nenhum: quem consertava um worker ficava olhando
    um vermelho velho até lembrar de dar F5 — e era isso que fazia a Saúde parecer

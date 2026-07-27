@@ -204,6 +204,94 @@ class ExecucaoIngestao(models.Model):
     erro_publico = models.CharField(max_length=255, blank=True, default="")
 
 
+class ExecucaoRaspagem(models.Model):
+    """Pedido manual durável, executado pelo worker de raspagem.
+
+    Diferente de ``ExecucaoIngestao`` (uma execução técnica de uma fonte), este
+    registro representa a ação iniciada na interface e sobrevive a refresh,
+    queda do EventSource, deploy e reinício do processo web.
+    """
+
+    TIPOS = [("ofertas", "Promoções"), ("cupons", "Cupons")]
+    STATUS = [
+        ("queued", "Na fila"),
+        ("running", "Executando"),
+        ("succeeded", "Concluída"),
+        ("partial", "Concluída parcialmente"),
+        ("failed", "Falhou"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE,
+        related_name="execucoes_raspagem",
+    )
+    solicitada_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+        related_name="raspagens_solicitadas",
+    )
+    tipo = models.CharField(max_length=16, choices=TIPOS, db_index=True)
+    status = models.CharField(
+        max_length=16, choices=STATUS, default="queued", db_index=True,
+    )
+    etapa = models.CharField(max_length=80, blank=True, default="")
+    progresso = models.PositiveSmallIntegerField(default=0)
+    contagens = models.JSONField(default=dict, blank=True)
+    codigo_erro = models.CharField(max_length=40, blank=True, default="")
+    erro_publico = models.CharField(max_length=255, blank=True, default="")
+    acao_recomendada = models.CharField(max_length=255, blank=True, default="")
+    tentativas = models.PositiveSmallIntegerField(default=0)
+    criada_em = models.DateTimeField(auto_now_add=True, db_index=True)
+    iniciada_em = models.DateTimeField(null=True, blank=True)
+    heartbeat_em = models.DateTimeField(null=True, blank=True, db_index=True)
+    finalizada_em = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        ordering = ("-criada_em",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization"],
+                condition=models.Q(status__in=("queued", "running")),
+                name="uniq_raspagem_manual_ativa_por_org",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["status", "criada_em"],
+                         name="scrape_job_status_created"),
+        ]
+
+
+class EventoRaspagem(models.Model):
+    """Linha de progresso persistida e paginável por cursor numérico."""
+
+    NIVEIS = [
+        ("info", "Informação"),
+        ("warning", "Aviso"),
+        ("error", "Erro"),
+        ("success", "Sucesso"),
+    ]
+
+    execucao = models.ForeignKey(
+        ExecucaoRaspagem, on_delete=models.CASCADE, related_name="eventos",
+    )
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE,
+        related_name="eventos_raspagem",
+    )
+    nivel = models.CharField(max_length=12, choices=NIVEIS, default="info")
+    etapa = models.CharField(max_length=80, blank=True, default="")
+    mensagem = models.CharField(max_length=500)
+    progresso = models.PositiveSmallIntegerField(null=True, blank=True)
+    criado_em = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ("id",)
+        indexes = [
+            models.Index(fields=["execucao", "id"],
+                         name="scrape_event_job_cursor"),
+        ]
+
+
 class CupomNormalizado(models.Model):
     """Cupom independente de produto; só é publicável via ProdutoCupom confirmado."""
     fonte = models.ForeignKey(FonteIngestao, on_delete=models.CASCADE,

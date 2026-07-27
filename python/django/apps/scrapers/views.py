@@ -11,19 +11,21 @@ from django.core import signing
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.db.models import (
-    F, ExpressionWrapper, Exists, FloatField, OuterRef, Q, Count, Sum,
+    Case, F, ExpressionWrapper, Exists, FloatField, IntegerField, OuterRef, Q,
+    Count, Sum, When,
 )
 from django.http import StreamingHttpResponse, HttpResponse, JsonResponse
 from django.shortcuts import render, redirect
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.accounts.tenant import organization_callable
 from apps.scrapers.models import (
     CliquePublicacao, ConfiguracaoEnvio, Cupom, LinkAfiliadoUsuario, Produto,
     Publicacao, ReceitaAfiliado, RelatorioSync, FonteIngestao, CupomNormalizado,
-    IntegracaoAfiliado, ProgramaAfiliado,
+    IntegracaoAfiliado, ProgramaAfiliado, ExecucaoRaspagem,
 )
 from apps.scrapers.progresso import emitir_fase
 from apps.scrapers.scraper_mercadolivre.scraper import main as scrapper_main
@@ -282,6 +284,7 @@ def sincronizar_receitas(request):
 
 
 @staff_required
+@ensure_csrf_cookie
 def dashboard(request):
     """Painel + checklist de primeiros passos (onboarding orientado a conexões)."""
     from apps.scrapers.monitor_conexao import ml_conectado, wa_conectado
@@ -1843,69 +1846,33 @@ def run_scraper_stream(request):
     return response
 
 
-@staff_required
-@require_GET
-@throttle_sse(10)
-def scrape_ofertas_stream(request):
-    """SSE endpoint — raspa as ofertas (de/por) do ML e já pré-gera os links de afiliado."""
-    from apps.scrapers.scraper_mercadolivre.ofertas_scraper import mapear_ofertas
-    from apps.scrapers.scraper_mercadolivre.link import gerar_links_em_lote
-    try:
-        paginas = int(request.GET.get("paginas", 10))
-    except (TypeError, ValueError):
-        paginas = 10
-    try:
-        links_limite = int(request.GET.get("links", 60))
-    except (TypeError, ValueError):
-        links_limite = 60
+def _criar_raspagem_manual(request, tipo):
+    from apps.scrapers import automacao_state as state
+    from apps.scrapers.manual_scraping import criar_execucao, serializar_execucao
 
-    # Fora da thread de propósito: _run roda noutra thread e não pode tocar request.
-    usuario = request.user
-
-    def _event_stream():
-        q: queue.Queue = queue.Queue()
-        writer = _QueueWriter(q)
-
-        def _run():
-            # Nada de bypass de ORM aqui: quem precisa de query com o Playwright
-            # aberto usa apps.accounts.tenant.executar_no_tenant (o porquê está lá).
-            try:
-                with redirect_stdout(writer):
-                    mapear_ofertas(max_paginas=paginas, usuario=usuario)
-                    if links_limite > 0:
-                        # Pool ML compartilhado (owner=None). Amazon não entra aqui.
-                        pend_qs = Produto.objects.filter(link_afiliado="", owner__isnull=True)
-                        pendentes = list(pend_qs[:links_limite])
-                        if pendentes:
-                            print(f"\nGerando links de afiliado para {len(pendentes)} oferta(s)...")
-                            # O pool é compartilhado, mas a sessão do ML é do usuário:
-                            # sem isto, lia-se um auth.json que a tela nunca grava.
-                            gerar_links_em_lote(pendentes, usuario=usuario)
-                        from apps.scrapers.afiliado import frase_resumo_afiliacao
-                        print(frase_resumo_afiliacao(usuario))
-            except Exception:
-                logger.exception("Falha inesperada na raspagem de ofertas")
-                q.put("[ERRO] Falha inesperada ao processar a solicitação.")
-            finally:
-                writer.flush()
-                q.put(None)
-
-        thread = threading.Thread(
-            target=organization_callable(request.organization.pk, _run),
-            daemon=True,
+    execucao, criada = criar_execucao(
+        organization=request.organization,
+        usuario=request.user,
+        tipo=tipo,
+    )
+    # Em produção o processo já vive no Procfile. Em desenvolvimento, garante o
+    # worker sem ligar o toggle da raspagem automática.
+    state.spawn_worker("scrape")
+    payload = serializar_execucao(execucao)
+    payload["reutilizada"] = not criada
+    if not criada and execucao.tipo != tipo:
+        payload["mensagem"] = (
+            "Já existe outra raspagem em andamento para esta organização."
         )
-        thread.start()
-        while True:
-            line = q.get()
-            if line is None:
-                yield "data: __DONE__\n\n"
-                break
-            yield f"data: {line}\n\n"
+        return JsonResponse(payload, status=409)
+    return JsonResponse(payload, status=202 if criada else 200)
 
-    response = StreamingHttpResponse(_event_stream(), content_type="text/event-stream")
-    response["Cache-Control"] = "no-cache"
-    response["X-Accel-Buffering"] = "no"
-    return response
+
+@staff_required
+@require_POST
+def scrape_ofertas_stream(request):
+    """Enfileira Promoções; o worker persiste progresso e resultado."""
+    return _criar_raspagem_manual(request, "ofertas")
 
 
 def _sse_runner(fn, organization):
@@ -2024,109 +1991,51 @@ def automacao_control(request):
 
 
 @staff_required
-@require_GET
-@throttle_sse(10)
+@require_POST
 def scrape_cupons_codigo_stream(request):
-    """SSE — pipeline completo de cupons: campanhas, códigos e projeção p/ a aba."""
-    from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import mapear_cupons_codigo
-    from apps.scrapers.scraper_mercadolivre.scraper import (
-        mapear_cupons, projetar_catalogo_cupons)
+    """Enfileira Cupons; etapas independentes podem concluir parcialmente."""
+    return _criar_raspagem_manual(request, "cupons")
 
-    from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
-    from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
 
-    uid = request.user.id  # capturado fora da thread
+@staff_required
+@require_GET
+def raspagem_atual(request):
+    from apps.scrapers.manual_scraping import serializar_execucao
 
-    def _job():
-        from django.contrib.auth import get_user_model
-        from apps.scrapers.afiliado import frase_resumo_afiliacao
-        from apps.scrapers.eventos import log_event
-        from apps.scrapers.marketplaces.registry import get_marketplace
-        from apps.scrapers.conexoes import estado_ml
-        usuario = get_user_model().objects.filter(id=uid).first()
-
-        # Portão único de conexão: a MESMA sonda que a tela usa (conexoes.estado_ml →
-        # sondar_sessao_ml). Antes o "reconecte" da raspagem vinha do browser abrindo a
-        # página de cupons e lendo um redirect de challenge como logout — divergindo do
-        # dashboard, que via a sessão viva. Agora tela e raspagem leem a mesma verdade:
-        # se aqui está conectado, seguimos; a raspagem nunca mais grita "desconectado"
-        # sozinha (o fallback de browser já não valida/apaga a sessão).
-        est_ml = estado_ml(usuario)
-        if not est_ml.conectado:
-            print(f"[ERRO] {est_ml.motivo or 'Sessão do Mercado Livre indisponível.'}")
-            print("__ML_LOGIN__")
-            return
-
-        # O trabalho é dividido em faixas da barra porque nenhuma etapa sozinha
-        # conhece o total: sem isso a barra ou zerava a cada etapa, ou (o que
-        # acontecia) nunca aparecia e o botão ficava cinza sem explicação.
-        try:
-            n_campanha = mapear_cupons(faixa=(0, 45), usuario=usuario)
-        except (LoginError, AuthError, SessaoExpirada) as exc:
-            print(f"[ERRO] Sessão do Mercado Livre expirada: {exc}")
-            print("__ML_LOGIN__")
-            return
-        except BrowserError as exc:
-            print(f"[ERRO] Não foi possível abrir a página de cupons: {exc}")
-            return
-        print(f"{n_campanha} cupom(ns) de campanha raspados.")
-
-        try:
-            n_codigo = mapear_cupons_codigo(faixa=(45, 75), usuario=usuario)
-            print(f"{n_codigo} produto(s) de cupom de checkout raspados.")
-        except Exception as exc:
-            print(f"Aviso: raspagem de códigos de checkout falhou ({exc}).")
-
-        n_proj = projetar_catalogo_cupons(faixa=(75, 82))
-        print(
-            f"{n_proj} campanha(s) personalizada(s) catalogada(s) como dados "
-            "internos; elas não são códigos públicos."
+    execucao = (
+        ExecucaoRaspagem.objects
+        .filter(organization=request.organization)
+        .order_by(
+            # jobs ativos primeiro; depois, o resultado mais recente
+            Case(
+                When(status__in=("queued", "running"), then=0),
+                default=1,
+                output_field=IntegerField(),
+            ),
+            "-criada_em",
         )
-        from apps.scrapers.sources import run_source
-        from apps.scrapers.sources.persistence import persist_items
-        fonte_oficial = run_source("ml-cupons-afiliados")
-        persistidos = persist_items(fonte_oficial.get("coupons", []))
-        n_oficiais = persistidos["coupons"]
-        print(f"{n_oficiais} cupom(ns) público(s) oficial(is) encontrado(s).")
-        from apps.scrapers.coupon_products import preparar_lote
-        preparo = preparar_lote(limite=max(12, n_oficiais))
-        print(
-            f"{preparo['prontos']} cupom(ns) novo(s) preparado(s) com produtos; "
-            f"{preparo['processados']} verificado(s) neste ciclo."
-        )
-        if not n_oficiais:
-            print("Aviso: a fonte oficial não trouxe códigos públicos ativos; "
-                  "campanhas de ativação pessoais não serão divulgadas.")
-            log_event("scraper", "cupons_vazios",
-                      "A fonte oficial não trouxe códigos públicos ativos.",
-                      level="warning", usuario=usuario,
-                      contexto={"marketplace": "mercadolivre",
-                                "campanhas": n_campanha, "etapa": "fonte_oficial"})
+        .first()
+    )
+    return JsonResponse(
+        {"execucao": serializar_execucao(execucao) if execucao else None},
+    )
 
-        # Produto de cupom sem link de afiliado não aparece na tela de envio (ver
-        # top_promocoes): raspar sem afiliar deixava a raspagem "sem efeito visível".
-        emitir_fase("Gerando links de afiliado", 0.0, (85, 100))
-        pendentes = _produtos_sem_link(usuario, origens=("cupom", "cupom_codigo"))
-        if not pendentes:
-            print("Todos os produtos de cupom já têm link de afiliado.")
-        else:
-            print(f"\nGerando links de afiliado para {len(pendentes)} produto(s) de cupom...")
-            por_loja = {}
-            for p in pendentes:
-                por_loja.setdefault(p.marketplace or "mercadolivre", []).append(p)
-            for slug, grupo in por_loja.items():
-                try:
-                    get_marketplace(slug).prefetch_links(grupo, usuario=usuario,
-                                                         faixa=(85, 100))
-                except (LoginError, AuthError, SessaoExpirada) as exc:
-                    print(f"[ERRO] Sessão do Mercado Livre expirada: {exc}")
-                    print("__ML_LOGIN__")
-                    break
-                except Exception as exc:
-                    print(f"Aviso: geração de links em {slug} falhou ({exc}).")
-        print(frase_resumo_afiliacao(usuario))
 
-    return _sse_runner(_job, request.organization)
+@staff_required
+@require_GET
+def raspagem_status(request, execucao_id):
+    from apps.scrapers.manual_scraping import serializar_execucao
+
+    execucao = ExecucaoRaspagem.objects.filter(
+        pk=execucao_id, organization=request.organization,
+    ).first()
+    if execucao is None:
+        return JsonResponse({"erro": "Raspagem não encontrada."}, status=404)
+    try:
+        after = max(0, int(request.GET.get("after", 0)))
+    except (TypeError, ValueError):
+        after = 0
+    return JsonResponse(serializar_execucao(execucao, after=after))
 
 
 def _produtos_sem_link(usuario, origens=None, limite=80, macros=None):

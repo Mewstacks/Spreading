@@ -26,6 +26,7 @@ _USER_FIELD_MODELS = {
     models.CanalMonitorado: "owner",
     models.EnvioCanal: "owner",
     models.ConfiguracaoEnvio: "owner",
+    models.ExecucaoRaspagem: "solicitada_por",
 }
 
 
@@ -74,4 +75,8 @@ def assign_organization(sender, instance, **kwargs):
             raise ValidationError("Produto e cupom pertencem a organizações diferentes.")
         instance.organization_id = product_org or coupon_org
         _validate_current_scope(instance)
+        return
 
+    if sender is models.EventoRaspagem:
+        instance.organization_id = instance.execucao.organization_id
+        _validate_current_scope(instance)

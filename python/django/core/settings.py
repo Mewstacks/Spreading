@@ -242,7 +242,10 @@ if _DATABASE_URL:
     DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
     # Falha do proxy/VM não pode manter uma request (especialmente /healthz) presa
     # no timeout TCP do sistema. O valor também protege reconexões dos workers.
-    DATABASES["default"].setdefault("OPTIONS", {}).setdefault("connect_timeout", 3)
+    if DATABASES["default"].get("ENGINE") == "django.db.backends.postgresql":
+        DATABASES["default"].setdefault("OPTIONS", {}).setdefault(
+            "connect_timeout", 3,
+        )
     if (
         APP_ENV in {"staging", "production"}
         and DATABASES["default"].get("ENGINE") != "django.db.backends.postgresql"

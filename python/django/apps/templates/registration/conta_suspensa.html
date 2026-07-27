@@ -1,16 +1,51 @@
 {% extends "base.html" %}
-{% block title %}Conta suspensa{% endblock %}
+{% block title %}Conta suspensa — Spreading{% endblock %}
+
+{% block head_extra %}
+<style>
+  .auth-wrap { max-width: 27rem; margin: 2.5rem auto; }
+  .auth-head { text-align: center; margin-bottom: 1.5rem; }
+  .auth-head h1 { margin: .55rem 0 0; font-size: 1.55rem; font-weight: 600; letter-spacing: -.025em; line-height: 1.15; text-wrap: balance; }
+  .auth-head h1 em { font-family: var(--serif); font-style: italic; font-weight: 400; }
+  .auth-head .sub { color: var(--muted); font-size: 13.5px; margin: .45rem 0 0; line-height: 1.5; text-wrap: pretty; }
+  .auth-card { padding: 1.5rem 1.6rem; }
+  .motivo { margin: 0 0 1rem; padding: .8rem 1rem; border: 1px solid var(--border); border-left-width: 3px;
+    border-left-color: var(--yellow); border-radius: var(--r-md); background: var(--surface-2);
+    font-size: 13px; color: var(--text-2); }
+  .motivo .motivo-label { display: block; font-family: var(--mono); font-size: 10px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: .14em; color: var(--muted); margin-bottom: .25rem; }
+  .auth-actions { display: flex; flex-direction: column; gap: .6rem; }
+  .ic { width: 3rem; height: 3rem; margin: 0 auto 1rem; border-radius: var(--r-lg);
+    display: flex; align-items: center; justify-content: center;
+    background: var(--yellow-bg); color: var(--yellow); border: 1px solid color-mix(in srgb, var(--yellow) 35%, transparent); }
+  .ic .lucide { width: 1.4rem; height: 1.4rem; }
+</style>
+{% endblock %}
 
 {% block content %}
-<div class="card" style="max-width:480px;margin:2rem auto;text-align:center;">
-  <div style="color:var(--red);margin-bottom:.8rem;"><i data-lucide="ban" style="width:2.2rem;height:2.2rem;"></i></div>
-  <h2 style="margin:0 0 .6rem;">Conta suspensa</h2>
-  <p style="color:var(--muted);">Sua conta foi suspensa por um administrador.</p>
-  {% if motivo %}<div class="msg msg-error" style="text-align:left;">Motivo: {{ motivo }}</div>{% endif %}
-  <p style="color:var(--muted);font-size:.85rem;margin-top:1rem;">Fale com o suporte para reativar.</p>
-  <form method="post" action="{% url 'logout' %}" style="margin-top:1rem;">
-    {% csrf_token %}
-    <button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="log-out"></i> Sair</button>
-  </form>
+<div class="auth-wrap">
+  <div class="auth-head">
+    <div class="ic"><i data-lucide="pause-circle"></i></div>
+    <span class="eyebrow">Conta</span>
+    <h1>Acesso <em>suspenso</em></h1>
+    <p class="sub">Sua conta está temporariamente suspensa. Isso pode acontecer por revisão de segurança ou uso fora dos termos.</p>
+  </div>
+
+  <div class="card auth-card">
+    {% if motivo %}
+    <div class="motivo">
+      <span class="motivo-label">Motivo informado</span>
+      {{ motivo }}
+    </div>
+    {% endif %}
+    <p class="muted" style="font-size:13px;margin:0 0 1.2rem;">Se você acha que houve um engano, fale com o suporte para revisar e reativar seu acesso.</p>
+    <div class="auth-actions">
+      <form method="post" action="{% url 'logout' %}" style="margin:0;">
+        {% csrf_token %}
+        <button class="btn btn-ghost" type="submit" style="width:100%;"><i data-lucide="log-out"></i> Sair da conta</button>
+      </form>
+    </div>
+  </div>
 </div>
 {% endblock %}
+{% block scripts %}<script>renderIcons();</script>{% endblock %}

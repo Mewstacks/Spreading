@@ -464,6 +464,39 @@ class Command(BaseCommand):
             # Heartbeat também durante as horas de espera; sem isto o supervisor
             # considera o processo morto após 90s e pode iniciar workers duplicados.
             st.write_state("scrape")
+            # Jobs manuais independem do toggle da automação. O clique apenas enfileira
+            # no banco; este processo os executa sob o mesmo advisory lock dos ciclos
+            # automáticos, portanto fechar/recarregar a aba não interrompe o trabalho.
+            try:
+                from apps.scrapers.manual_scraping import (
+                    existe_job_pendente, processar_proximo_job,
+                )
+                if existe_job_pendente():
+                    _renovar_conexoes_db()
+                    from apps.scrapers.carga import operacao_pesada
+                    with operacao_pesada() as acquired:
+                        if acquired:
+                            st.write_state(
+                                "scrape", fase="raspagem_manual", erro="",
+                                ultima_msg="Executando raspagem solicitada no painel.",
+                            )
+                            with _heartbeat_durante("scrape"):
+                                processar_proximo_job()
+                            falhas_banco = 0
+                            continue
+                        st.write_state(
+                            "scrape", fase="aguardando_capacidade", erro="",
+                            ultima_msg="Raspagem manual aguardando outra tarefa pesada.",
+                        )
+            except DatabaseError as e:
+                falhas_banco += 1
+                _pausar_por_banco("scrape", e, falhas_banco)
+                time.sleep(POLL)
+                continue
+            except Exception:
+                # O executor persiste a falha no próprio job; esta guarda protege o
+                # loop para que um defeito no mecanismo de fila não mate o worker.
+                logger.exception("Falha ao processar fila de raspagem manual")
             if not st.is_enabled("scrape"):
                 st.write_state("scrape", fase="desligado", loja_atual=None,
                                ultima_msg="Desligado — ligue na tela Scraper.")

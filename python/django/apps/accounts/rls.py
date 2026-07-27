@@ -18,6 +18,8 @@ STRICT_TENANT_TABLES = (
     "scrapers_canalmonitorado",
     "scrapers_enviocanal",
     "scrapers_configuracaoenvio",
+    "scrapers_execucaoraspagem",
+    "scrapers_eventoraspagem",
 )
 
 MIXED_TENANT_TABLES = (

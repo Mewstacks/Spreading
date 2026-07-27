@@ -3,115 +3,146 @@
 
 {% block head_extra %}
 <style>
-  .auto-card { display: flex; align-items: center; gap: 1rem; }
-  .auto-main { display: flex; align-items: center; gap: 1rem; flex: 1; min-width: 0; }
-  .auto-icon { width: 2.8rem; height: 2.8rem; display: flex; align-items: center;
-    justify-content: center; color: #fff; background: var(--brand-grad); border-radius: 12px; flex: none; }
-  .auto-icon .lucide { width: 1.5rem; height: 1.5rem; }
-  .auto-title { font-weight: 600; font-size: 1rem; display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
-  .auto-detail { margin-top: .6rem; display: flex; flex-direction: column; gap: .3rem; font-size: .82rem; }
-  .auto-detail .row { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
-  .auto-detail .k { color: var(--muted); min-width: 7.5rem; }
-  .auto-detail .v { color: var(--text); font-weight: 500; }
-  .auto-detail .err { color: var(--red); font-size: .78rem; word-break: break-word; }
+  /* badge clicável no cabeçalho (estado da conexão ML) */
+  .badge-link { text-decoration: none; }
+  .badge-link:hover { filter: brightness(1.1); }
 
-  /* ── Onboarding / checklist de conexões ── */
-  .ob-head { display:flex; align-items:center; gap:.7rem; margin-bottom:1rem; flex-wrap:wrap; }
-  .ob-head h2 { margin:0; font-size:1.05rem; display:flex; align-items:center; gap:.5rem; }
-  .ob-prog { margin-left:auto; display:flex; align-items:center; gap:.6rem; font-size:.82rem; color:var(--muted); }
-  .ob-bar { width:120px; height:7px; border-radius:99px; background:var(--surface-3); overflow:hidden; }
-  .ob-bar > span { display:block; height:100%; background:var(--brand-grad); transition:width .4s ease; }
-  .ob-list { display:flex; flex-direction:column; gap:.55rem; }
-  .ob-step { display:flex; align-items:center; gap:.9rem; padding:.8rem .9rem; border-radius:12px;
-    border:1px solid var(--border); background:var(--surface-2); }
-  .ob-step.done { border-color:color-mix(in srgb,var(--green) 30%,transparent); background:var(--green-bg); }
-  .ob-ball { width:34px; height:34px; border-radius:50%; flex:none; display:flex; align-items:center;
-    justify-content:center; background:var(--surface-3); color:var(--muted); }
-  .ob-step.done .ob-ball { background:var(--green); color:#fff; }
-  .ob-step:not(.done) .ob-ball { color:var(--accent); }
-  .ob-txt { min-width:0; flex:1; }
-  .ob-txt .t { font-weight:600; font-size:.92rem; display:flex; align-items:center; gap:.4rem; }
-  .ob-txt .d { color:var(--muted); font-size:.8rem; margin-top:.1rem; }
-  .ob-step .btn { flex:none; min-height:40px; }
-  .ob-step.done .done-chip { flex:none; color:var(--green); font-size:.82rem; font-weight:600;
-    display:inline-flex; align-items:center; gap:.3rem; }
-  .ob-done-strip { display:flex; align-items:center; gap:.7rem; color:var(--green); font-weight:600; }
-  @media (max-width:600px) {
-    .ob-step { flex-wrap:wrap; }
-    .ob-step .btn, .ob-step .done-chip { margin-left:auto; }
+  /* ── Primeiros passos: fluxo numerado, não cards ── */
+  .steps { list-style: none; margin: 0; padding: 0; }
+  .step { display: flex; align-items: center; gap: 1rem; padding: .95rem 0; border-top: 1px solid var(--border); }
+  .step:first-child { border-top: 0; padding-top: .2rem; }
+  .step:last-child { padding-bottom: .2rem; }
+  .step-num { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: .08em;
+    color: var(--muted); flex: none; width: 1.8rem; }
+  .step-mark { flex: none; width: 22px; height: 22px; border-radius: 50%; display: flex;
+    align-items: center; justify-content: center; border: 1px solid var(--border-strong); color: var(--muted); }
+  .step-mark .lucide { width: .75rem; height: .75rem; }
+  .step-body { flex: 1; min-width: 0; }
+  .step-title { font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+  .step-desc { margin-top: .15rem; font-size: 12.5px; color: var(--muted); }
+  .step-action { flex: none; }
+  /* concluída: recolhida, verde só no indicador */
+  .step.done { padding: .6rem 0; }
+  .step.done .step-num, .step.done .step-title { color: var(--muted); font-weight: 500; }
+  .step.done .step-mark { border-color: color-mix(in srgb, var(--green) 45%, transparent);
+    background: var(--green-bg); color: var(--green); }
+  .step.done .step-desc { display: none; }
+  /* bloqueada: depende da etapa anterior */
+  .step.blocked .step-title { color: var(--muted); font-weight: 500; }
+
+  /* ── Raspagem automática ── */
+  .auto-row { display: flex; align-items: flex-start; gap: 1.25rem; }
+  .auto-info { flex: 1; min-width: 0; }
+  .auto-title { font-weight: 600; font-size: 14.5px; display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+  .auto-sub { margin-top: .3rem; font-size: 12.5px; color: var(--muted); }
+  .auto-detail { margin-top: .8rem; flex-direction: column; gap: .3rem; font-size: 12.5px;
+    padding-top: .8rem; border-top: 1px solid var(--border); }
+  .auto-detail .row { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
+  .auto-detail .k { color: var(--muted); min-width: 7.5rem; font-family: var(--mono); font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: .1em; }
+  .auto-detail .v { color: var(--text); font-weight: 500; }
+  .auto-detail .err { color: var(--red); font-size: 12px; word-break: break-word; }
+  .auto-row .switch { margin-top: .2rem; }
+
+  /* ── Ações manuais: hierarquia primária → ghost → texto ── */
+  .acoes { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
+  .acoes .text-action { margin-left: auto; }
+
+  @media (max-width: 899px) {
+    .acoes .text-action { margin-left: 0; }
+    .step { flex-wrap: wrap; }
+    .step-action { margin-left: calc(1.8rem + 22px + 2rem); }
   }
 </style>
 {% endblock %}
 
 {% block content %}
+{% with ml=passos.0 %}
 <div class="page-head">
-  <h1><i data-lucide="radar"></i> Scraper</h1>
-  <p class="sub">Ofertas e cupons do Mercado Livre. Links de afiliado gerados na hora.</p>
+  <div class="head-main">
+    <span class="eyebrow">Coleta</span>
+    <h1>Scraper</h1>
+    <p class="sub">Ofertas e cupons do Mercado Livre, com links de afiliado gerados na hora.</p>
+  </div>
+  <div class="head-actions">
+    {% if ml.feito %}
+    <span class="badge badge-green"><span class="dot"></span> Mercado Livre conectado</span>
+    {% else %}
+    <a href="{% url 'scraper-ml-conexao' %}" class="badge badge-yellow badge-link"><span class="dot"></span> Mercado Livre não conectado</a>
+    {% endif %}
+  </div>
 </div>
+{% endwith %}
 
-<!-- Primeiros passos: checklist de conexões (some quando tudo está pronto) -->
+<!-- Primeiros passos: fluxo de integração (some quando tudo está pronto) -->
 {% if not onboarding_completo %}
 <div class="card">
-  <div class="ob-head">
+  <div class="card-head">
     <h2><i data-lucide="rocket"></i> Primeiros passos</h2>
-    <div class="ob-prog">
-      <span>{{ passos_feitos }}/{{ passos_total }}</span>
-      <div class="ob-bar"><span style="width:{% widthratio passos_feitos passos_total 100 %}%;"></span></div>
-    </div>
+    <span class="count">{{ passos_feitos }}/{{ passos_total }} concluídos</span>
   </div>
-  <div class="ob-list">
+  <ol class="steps">
+    {% with prox=passos_feitos|add:1 %}
     {% for p in passos %}
-    <div class="ob-step {% if p.feito %}done{% endif %}">
-      <div class="ob-ball"><i data-lucide="{% if p.feito %}check{% else %}{{ p.icon }}{% endif %}"></i></div>
-      <div class="ob-txt">
-        <div class="t">{{ p.titulo }}</div>
-        <div class="d">{{ p.desc }}</div>
+    <li class="step {% if p.feito %}done{% elif forloop.counter == prox %}next{% else %}blocked{% endif %}">
+      <span class="step-num">0{{ forloop.counter }}</span>
+      <span class="step-mark"><i data-lucide="{% if p.feito %}check{% else %}{{ p.icon }}{% endif %}"></i></span>
+      <div class="step-body">
+        <div class="step-title">
+          {{ p.titulo }}
+          {% if p.feito %}<span class="badge badge-green"><span class="dot"></span> pronto</span>{% endif %}
+          {% if not p.feito and forloop.counter != prox %}<span class="tech-tag">aguarda etapa 0{{ prox }}</span>{% endif %}
+        </div>
+        <div class="step-desc">{{ p.desc }}</div>
       </div>
-      {% if p.feito %}
-        <span class="done-chip"><i data-lucide="check-circle-2"></i> pronto</span>
-      {% else %}
-        <a href="{{ p.url }}" class="btn btn-blue">{{ p.cta }} <i data-lucide="arrow-right"></i></a>
+      {% if not p.feito and forloop.counter == prox %}
+      <div class="step-action"><a href="{{ p.url }}" class="btn btn-sm">{{ p.cta }} <i data-lucide="arrow-right"></i></a></div>
       {% endif %}
-    </div>
+    </li>
     {% endfor %}
-  </div>
+    {% endwith %}
+  </ol>
 </div>
 {% else %}
-<div class="card">
-  <div class="ob-done-strip"><i data-lucide="party-popper"></i> Tudo conectado — seu robô está pronto para divulgar e comissionar.</div>
-</div>
+<div class="alert alert-success" style="margin-top:0;"><i data-lucide="check-circle-2"></i><span><strong>Tudo conectado.</strong> O robô está pronto para divulgar e comissionar.</span></div>
 {% endif %}
 
 <!-- Raspagem automática 24/7 (só raspa — envios são controlados na tela Envios) -->
-<div class="card auto-card">
-  <div class="auto-main">
-    <div class="auto-icon"><i data-lucide="radar"></i></div>
-    <div style="min-width:0;flex:1;">
-      <div class="auto-title">Raspagem automática <span id="auto-status"><span class="badge badge-muted"><span class="dot"></span>verificando…</span></span></div>
-      <div class="muted" style="font-size:.82rem;">Coleta completa a cada 3h e ofertas rápidas a cada 5min. Envios ficam em <a class="link" href="/scrapers/config/">Envios</a>.</div>
+<div class="section-head">
+  <h2>Raspagem automática</h2>
+  <span class="hint">Coleta completa a cada 3h · ofertas rápidas a cada 5min</span>
+</div>
+<div class="card">
+  <div class="auto-row">
+    <div class="auto-info">
+      <div class="auto-title">Coleta 24/7 <span id="auto-status"><span class="badge badge-muted"><span class="dot"></span>verificando…</span></span></div>
+      <div class="auto-sub">Ligada, mantém ofertas e cupons atualizados sozinha. Os envios são configurados em <a class="link" href="/scrapers/config/">Envios</a>.</div>
       <div id="auto-detail" class="auto-detail" style="display:none;"></div>
     </div>
+    <label class="switch" title="Ligar/desligar raspagem automática">
+      <input type="checkbox" id="auto-toggle" onchange="toggleAuto(this)">
+      <span class="track"></span>
+    </label>
   </div>
-  <label class="switch" title="Ligar/desligar raspagem automática">
-    <input type="checkbox" id="auto-toggle" onchange="toggleAuto(this)">
-    <span class="track"></span>
-  </label>
 </div>
 
+<!-- Raspagem manual + log ao vivo -->
+<div class="section-head">
+  <h2>Raspagem manual</h2>
+  <span class="hint">Sob demanda — roda agora, sem esperar o ciclo automático.</span>
+</div>
 <div class="card">
-  <div style="display:flex;gap:.6rem;flex-wrap:wrap;align-items:center;">
-    <button id="ofertas-btn" class="btn btn-green" onclick="startOfertas()"><i data-lucide="tag"></i> Raspar Ofertas</button>
-    <button id="cupons-btn" class="btn btn-yellow" onclick="startCuponsCodigo()"><i data-lucide="ticket"></i> Raspar Cupons</button>
-    <a href="{% url 'scraper-ml-conexao' %}" class="btn btn-blue"><i data-lucide="key-round"></i> Conectar Mercado Livre</a>
+  <div class="acoes">
+    <button id="ofertas-btn" class="btn" onclick="startOfertas()"><i data-lucide="tag"></i> Raspar ofertas</button>
+    <button id="cupons-btn" class="btn btn-ghost" onclick="startCuponsCodigo()"><i data-lucide="ticket"></i> Raspar cupons</button>
+    <a href="{% url 'scraper-ml-conexao' %}" class="text-action"><i data-lucide="key-round"></i> Conectar Mercado Livre</a>
   </div>
+  <div id="progress-wrap" class="progress-wrap">
+    <div id="progress-text" class="progress-text">Progresso</div>
+    <div class="progress-bg"><div id="progress-bar" class="progress-bar"></div></div>
+  </div>
+  <div id="log" class="log"></div>
 </div>
-
-<div id="progress-wrap" class="progress-wrap">
-  <div id="progress-text" class="progress-text">Progresso</div>
-  <div class="progress-bg"><div id="progress-bar" class="progress-bar"></div></div>
-</div>
-
-<div id="log" class="log"></div>
 {% endblock %}
 
 {% block scripts %}
@@ -198,7 +229,11 @@
   }
   autoStatus(); setInterval(autoStatus, 10000);
 
-  let es;
+  let activeJobId = null;
+  let eventCursor = 0;
+  let pollTimer = null;
+  let pollFailures = 0;
+  let reconnectNotice = false;
 
   function progressSet(texto, pct, estado) {
     const wrap = document.getElementById('progress-wrap');
@@ -209,6 +244,8 @@
     // de a tela distinguir "etapa longa rodando" de "travou".
     bar.classList.toggle('indeterminate', pct === null);
     bar.classList.toggle('failed', estado === 'falha');
+    bar.classList.toggle('partial', estado === 'parcial');
+    bar.classList.toggle('succeeded', estado === 'sucesso');
     if (pct !== null) bar.style.width = pct + '%';
   }
 
@@ -221,29 +258,136 @@
     progressSet(texto, m ? m[1] : null);
   }
 
-  function runStream(url, btnId) {
-    const btn = document.getElementById(btnId);
-    const log = document.getElementById('log');
-    btn.disabled = true; log.innerHTML = '';
-    // A barra sobe junto com o clique: a primeira etapa (abrir o browser, carregar
-    // a página do ML) pode levar um minuto antes da primeira linha chegar.
-    progressSet('Iniciando…', null);
-    es = new EventSource(url);
-    es.onmessage = function (e) {
-      if (e.data === '__DONE__') {
-        appendLine('--- Finalizado ---', 'line-done');
-        progressSet('Concluído', 100);
-        es.close(); btn.disabled = false; return;
+  function setScrapeBusy(busy) {
+    document.getElementById('ofertas-btn').disabled = busy;
+    document.getElementById('cupons-btn').disabled = busy;
+  }
+
+  function terminal(status) {
+    return ['succeeded', 'partial', 'failed'].includes(status);
+  }
+
+  function appendEvents(events) {
+    (events || []).forEach(function (event) {
+      eventCursor = Math.max(eventCursor, Number(event.id) || 0);
+      const cls = event.nivel === 'error' ? 'line-err'
+        : event.nivel === 'warning' ? 'line-warn'
+        : event.nivel === 'success' ? 'line-done' : '';
+      appendLine(event.mensagem, cls);
+    });
+  }
+
+  function renderJob(job) {
+    if (!job) return;
+    appendEvents(job.eventos);
+    const terminalLabels = {
+      succeeded: 'Concluído',
+      partial: 'Concluído com avisos',
+      failed: 'Falha em ' + (job.etapa || 'processamento'),
+    };
+    const stateStyle = {
+      succeeded: 'sucesso',
+      partial: 'parcial',
+      failed: 'falha',
+    };
+    progressSet(
+      terminalLabels[job.status] || job.etapa || 'Processando…',
+      Number(job.progresso || 0),
+      stateStyle[job.status] || ''
+    );
+    if (!terminal(job.status)) {
+      setScrapeBusy(true);
+      return;
+    }
+    clearTimeout(pollTimer);
+    activeJobId = null;
+    setScrapeBusy(false);
+    if (job.status === 'partial') {
+      appendLine(
+        '--- Concluído com avisos; os dados válidos foram preservados. ---',
+        'line-warn'
+      );
+    }
+    if (job.erro) {
+      appendLine('[ERRO] ' + job.erro.mensagem, 'line-err');
+      if (job.erro.acao) appendLine('Ação: ' + job.erro.acao, 'line-err');
+      if (job.erro.codigo === 'session_expired') appendReconectarML();
+    }
+  }
+
+  function schedulePoll(delay) {
+    clearTimeout(pollTimer);
+    if (activeJobId) pollTimer = setTimeout(pollJob, delay);
+  }
+
+  async function pollJob() {
+    if (!activeJobId) return;
+    try {
+      const response = await fetch(
+        '/scrapers/raspagens/' + activeJobId + '/status/?after=' + eventCursor,
+        {cache: 'no-store'}
+      );
+      if (!response.ok) throw new Error('status ' + response.status);
+      const job = await response.json();
+      if (reconnectNotice) {
+        appendLine('Acompanhamento reconectado.', 'line-done');
+        reconnectNotice = false;
       }
-      if (e.data.indexOf('__ML_LOGIN__') !== -1) { appendReconectarML(); return; }
-      if (e.data.startsWith('[PROGRESSO]')) { updateProgress(e.data); return; }
-      appendLine(e.data, e.data.startsWith('[ERRO]') ? 'line-err' : '');
-    };
-    es.onerror = function () {
-      appendLine('[ERRO] Conexão perdida.', 'line-err');
-      progressSet('Interrompido', 100, 'falha');
-      es.close(); btn.disabled = false;
-    };
+      pollFailures = 0;
+      renderJob(job);
+      if (!terminal(job.status)) schedulePoll(1500);
+    } catch (error) {
+      pollFailures += 1;
+      if (!reconnectNotice) {
+        appendLine(
+          'Conexão de acompanhamento instável; a raspagem continua no servidor.',
+          ''
+        );
+        reconnectNotice = true;
+      }
+      progressSet('Reconectando acompanhamento…', null);
+      schedulePoll(Math.min(10000, 1000 * Math.pow(2, Math.min(4, pollFailures))));
+    }
+  }
+
+  function attachJob(job, resetLog) {
+    if (resetLog) {
+      document.getElementById('log').innerHTML = '';
+      eventCursor = 0;
+    }
+    activeJobId = job.id;
+    setScrapeBusy(!terminal(job.status));
+    renderJob(job);
+    if (!terminal(job.status)) schedulePoll(300);
+  }
+
+  async function startJob(url) {
+    const log = document.getElementById('log');
+    setScrapeBusy(true);
+    log.innerHTML = '';
+    eventCursor = 0;
+    progressSet('Enfileirando raspagem…', null);
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {'X-CSRFToken': getCookie('csrftoken')},
+      });
+      const job = await response.json();
+      if (!response.ok && response.status !== 409) {
+        throw new Error(job.erro || ('status ' + response.status));
+      }
+      if (response.status === 409 && job.mensagem) {
+        appendLine(job.mensagem);
+      }
+      attachJob(job, false);
+    } catch (error) {
+      appendLine(
+        '[ERRO] Não foi possível enfileirar a raspagem. Tente novamente.',
+        'line-err'
+      );
+      progressSet('Não iniciada', 0, 'falha');
+      setScrapeBusy(false);
+    }
   }
 
   function appendReconectarML() {
@@ -254,8 +398,19 @@
     log.appendChild(ln); log.scrollTop = log.scrollHeight;
   }
 
-  function startOfertas() { runStream('/scrapers/ofertas/?paginas=40', 'ofertas-btn'); }
-  function startCuponsCodigo() { runStream('/scrapers/cupons-codigo/', 'cupons-btn'); }
+  function startOfertas() { startJob('/scrapers/ofertas/'); }
+  function startCuponsCodigo() { startJob('/scrapers/cupons-codigo/'); }
+
+  async function resumeJob() {
+    try {
+      const response = await fetch('/scrapers/raspagens/atual/', {cache: 'no-store'});
+      if (!response.ok) return;
+      const payload = await response.json();
+      if (payload.execucao) {
+        attachJob(payload.execucao, true);
+      }
+    } catch (error) {}
+  }
 
   function appendLine(text, cls) {
     const log = document.getElementById('log');
@@ -264,5 +419,7 @@
     span.textContent = text + '\n';
     log.appendChild(span); log.scrollTop = log.scrollHeight;
   }
+
+  resumeJob();
 </script>
 {% endblock %}

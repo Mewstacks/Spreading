@@ -1,85 +1,137 @@
 {% extends "base.html" %}
 {% block title %}Superadmin — Usuários{% endblock %}
 
+{% block head_extra %}
+<style>
+  /* criação de conta: card recolhido — o summary inteiro é a affordance */
+  .create-card { margin-bottom: 1rem; }
+  .create-card summary { cursor: pointer; list-style: none; display: flex; align-items: center;
+    gap: .55rem; font-weight: 600; font-size: 14.5px; }
+  .create-card summary::-webkit-details-marker { display: none; }
+  .create-card summary > .lucide { color: var(--accent); }
+  .create-card summary .hint { font-weight: 400; font-size: 12.5px; color: var(--muted); }
+  .create-card summary .chev { margin-left: auto; color: var(--muted); transition: transform .18s var(--ease); }
+  .create-card[open] summary .chev { transform: rotate(180deg); }
+  .create-body { margin-top: 1rem; padding-top: 1.1rem; border-top: 1px solid var(--border); }
+
+  /* identidade do usuário na tabela */
+  .u-mail { color: var(--muted); font-size: 12px; margin-top: .15rem; }
+
+  /* integrações: dot + sigla mono + estado textual (nunca só cor) */
+  .int-list { display: inline-flex; gap: .7rem; flex-wrap: wrap; }
+  .int { display: inline-flex; align-items: center; gap: .3rem; font-family: var(--mono);
+    font-size: 10.5px; color: var(--text-2); white-space: nowrap; }
+  .int .int-state { color: var(--muted); }
+
+  /* stat com estado textual ao lado do número */
+  .stat .n .dot { margin-right: .15rem; }
+  .stat .n small { font-size: .8rem; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+</style>
+{% endblock %}
+
 {% block content %}
-<details class="card" style="margin-bottom:1.1rem;">
-  <summary style="cursor:pointer;font-weight:600;font-size:.95rem;display:flex;align-items:center;gap:.5rem;">
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Administração</span>
+    <h1>Usuários</h1>
+    <p class="sub">Contas da plataforma, estado das integrações e atividade de envio.</p>
+  </div>
+  <div class="head-actions">
+    <nav class="seg" aria-label="Seções da administração">
+      <a href="{% url 'superadmin-usuarios' %}" class="active" aria-current="page"><i data-lucide="users"></i> Usuários</a>
+      <a href="{% url 'superadmin-saude' %}"><i data-lucide="stethoscope"></i> Saúde</a>
+      <a href="{% url 'superadmin-infra' %}"><i data-lucide="server"></i> Infra</a>
+    </nav>
+  </div>
+</div>
+
+<details class="card create-card" id="criar-usuario">
+  <summary>
     <i data-lucide="user-plus"></i> Criar usuário
+    <span class="hint">nova conta com acesso à plataforma</span>
+    <i data-lucide="chevron-down" class="chev"></i>
   </summary>
-  <form method="post" action="{% url 'superadmin-criar-usuario' %}" style="margin-top:1rem;display:flex;flex-direction:column;gap:.7rem;max-width:420px;">
-    {% csrf_token %}
-    <input name="username" placeholder="Usuário" required
-           style="padding:.55rem .7rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;font-size:.9rem;">
-    <input name="email" type="email" placeholder="E-mail (opcional)"
-           style="padding:.55rem .7rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;font-size:.9rem;">
-    <input name="senha" type="text" placeholder="Senha (mín. 8)" required minlength="8"
-           style="padding:.55rem .7rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;font-size:.9rem;">
-    <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;color:var(--muted);">
-      <input type="checkbox" name="verificado" checked> Pré-verificado (pula o e-mail de confirmação)
-    </label>
-    <button class="btn btn-sm btn-green" type="submit" style="align-self:flex-start;">
-      <i data-lucide="user-plus"></i> Criar
-    </button>
-  </form>
+  <div class="create-body">
+    <form method="post" action="{% url 'superadmin-criar-usuario' %}">
+      {% csrf_token %}
+      <div class="form-grid">
+        <div>
+          <label for="novo-username">Usuário</label>
+          <input id="novo-username" name="username" placeholder="nome de usuário" required>
+        </div>
+        <div>
+          <label for="novo-email">E-mail <span class="muted">(opcional)</span></label>
+          <input id="novo-email" name="email" type="email" placeholder="nome@dominio.com">
+        </div>
+        <div>
+          <label for="novo-senha">Senha</label>
+          <input id="novo-senha" name="senha" type="text" placeholder="mínimo 8 caracteres" required minlength="8">
+        </div>
+      </div>
+      <div class="form-actions">
+        <label class="switch">
+          <input type="checkbox" name="verificado" checked>
+          <span class="track"></span>
+          <span style="font-size:13px;color:var(--text-2);">Pré-verificado — pula o e-mail de confirmação</span>
+        </label>
+        <button class="btn btn-accent btn-sm" type="submit"><i data-lucide="user-plus"></i> Criar usuário</button>
+      </div>
+    </form>
+  </div>
 </details>
 
 <div class="card">
   <div class="card-head">
-    <h2><i data-lucide="users"></i> Usuários</h2>
+    <h2><i data-lucide="users"></i> Contas</h2>
     <span class="count">{{ total_users }}</span>
-    <a href="{% url 'superadmin-saude' %}" class="btn btn-sm btn-ghost" style="margin-left:.6rem;">
-      <i data-lucide="stethoscope"></i> Saúde
-    </a>
-    <a href="{% url 'superadmin-infra' %}" class="btn btn-sm btn-ghost">
-      <i data-lucide="server"></i> Infra Fly
-    </a>
   </div>
 
   <div class="stat-grid" style="margin-bottom:1.1rem;">
     <div class="stat">
-      <div class="n">{% if worker_scrape %}<span class="dot on"></span>{% else %}<span class="dot off"></span>{% endif %} {% if scrape_ligado %}ON{% else %}OFF{% endif %}</div>
+      <div class="n">{% if worker_scrape %}<span class="dot on"></span>{% else %}<span class="dot off"></span>{% endif %}<small>{% if scrape_ligado %}Ligado{% else %}Desligado{% endif %}</small></div>
       <div class="l">Worker scrape (global)</div>
     </div>
     <div class="stat">
-      <div class="n">{% if worker_envio %}<span class="dot on"></span>{% else %}<span class="dot off"></span>{% endif %} {% if envio_ligado %}ON{% else %}OFF{% endif %}</div>
+      <div class="n">{% if worker_envio %}<span class="dot on"></span>{% else %}<span class="dot off"></span>{% endif %}<small>{% if envio_ligado %}Ligado{% else %}Desligado{% endif %}</small></div>
       <div class="l">Worker envio (global)</div>
     </div>
   </div>
 
+  {% if linhas %}
   <div class="tbl-wrap">
     <table class="grid">
       <thead>
         <tr>
-          <th>Usuário</th><th>Status</th><th>WA</th><th>ML</th><th>Amazon</th>
-          <th>Configs</th><th>Envios 7d</th><th>Total</th><th>Última ativ.</th><th></th>
+          <th>Usuário</th><th>Função</th><th>Status</th><th>Integrações</th>
+          <th>Configs</th><th>Envios 7d</th><th>Total</th><th>Última atividade</th><th></th>
         </tr>
       </thead>
       <tbody>
         {% for r in linhas %}
         <tr>
           <td>
-            {{ r.user.get_username }}
-            {% if r.user.is_superuser %}<span class="count">admin</span>{% endif %}
-            <div style="color:var(--muted);font-size:.75rem;">{{ r.user.email }}</div>
+            <b>{{ r.user.get_username }}</b>
+            <div class="u-mail">{{ r.user.email|default:"—" }}</div>
+          </td>
+          <td>{% if r.user.is_superuser %}<span class="badge badge-accent">Admin</span>{% else %}<span class="muted" style="font-size:12px;">Usuário</span>{% endif %}</td>
+          <td>
+            {% if r.bloqueado %}<span class="badge badge-red"><span class="dot"></span>Suspenso</span>
+            {% elif not r.verificado %}<span class="badge badge-yellow"><span class="dot"></span>Não verificado</span>
+            {% else %}<span class="badge badge-green"><span class="dot"></span>Ativo</span>{% endif %}
           </td>
           <td>
-            {% if r.bloqueado %}<span style="color:var(--red);">suspenso</span>
-            {% elif not r.verificado %}<span style="color:var(--yellow);">não verif.</span>
-            {% else %}<span style="color:var(--green);">ativo</span>{% endif %}
+            <span class="int-list">
+              <span class="int" title="WhatsApp">{% if r.wa_estado %}<span class="dot on"></span>WA{% elif r.wa_estado is False %}<span class="dot off"></span>WA <span class="int-state">off</span>{% else %}<span class="dot"></span>WA <span class="int-state">—</span>{% endif %}</span>
+              <span class="int" title="Mercado Livre">{% if r.ml_estado %}<span class="dot on"></span>ML{% elif r.ml_estado is False %}<span class="dot off"></span>ML <span class="int-state">off</span>{% else %}<span class="dot"></span>ML <span class="int-state">—</span>{% endif %}</span>
+              <span class="int" title="Amazon Creators">{% if r.amazon_elegivel %}<span class="dot on"></span>AMZ{% elif r.amazon_elegivel is False %}<span class="dot off"></span>AMZ <span class="int-state">off</span>{% else %}<span class="dot"></span>AMZ <span class="int-state">—</span>{% endif %}</span>
+            </span>
           </td>
-          <td><span class="dot {% if r.wa_estado %}on{% elif r.wa_estado is False %}off{% endif %}"></span></td>
-          <td><span class="dot {% if r.ml_estado %}on{% elif r.ml_estado is False %}off{% endif %}"></span></td>
-          <td>
-            {% if r.amazon_elegivel %}<span class="dot on"></span>
-            {% elif r.amazon_elegivel is False %}<span class="dot off"></span>
-            {% else %}<span class="dot"></span>{% endif %}
-          </td>
-          <td>{{ r.configs_ativas }}</td>
-          <td>{{ r.envios_7d }}</td>
-          <td>{{ r.envios_total }}</td>
-          <td style="color:var(--muted);font-size:.78rem;">{{ r.ultima_atividade|date:"d/m H:i"|default:"—" }}</td>
-          <td>
-            <a href="{% url 'superadmin-usuario' r.user.id %}" class="icon-btn go" title="Detalhe">
+          <td class="tnum">{{ r.configs_ativas }}</td>
+          <td class="tnum">{{ r.envios_7d }}</td>
+          <td class="tnum">{{ r.envios_total }}</td>
+          <td class="muted" style="font-size:12px;">{{ r.ultima_atividade|date:"d/m H:i"|default:"—" }}</td>
+          <td class="col-actions">
+            <a href="{% url 'superadmin-usuario' r.user.id %}" class="icon-btn go" title="Abrir detalhe">
               <i data-lucide="arrow-right"></i>
             </a>
           </td>
@@ -88,5 +140,12 @@
       </tbody>
     </table>
   </div>
+  {% else %}
+  <div class="empty">
+    <i data-lucide="users"></i>
+    <div class="empty-title">Nenhum usuário ainda</div>
+    <p>Crie a primeira conta no formulário acima.</p>
+  </div>
+  {% endif %}
 </div>
 {% endblock %}

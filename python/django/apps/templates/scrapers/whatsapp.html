@@ -3,127 +3,237 @@
 
 {% block head_extra %}
 <style>
-  .conn { max-width: 520px; margin: 0 auto; text-align: center; }
-
-  /* Pill grande de status */
-  .conn-pill { display:inline-flex; align-items:center; gap:.55rem; padding:.55rem 1.1rem;
-    border-radius:999px; font-weight:600; font-size:.95rem; border:1px solid var(--border);
-    background:var(--surface-2); color:var(--muted); transition:all .25s ease; }
-  .conn-pill .dot { width:10px; height:10px; border-radius:50%; background:currentColor; flex:none; }
+  /* ── Pill de status (ids/classes consumidos pelo JS: .conn-pill is-on|is-mid|is-off) ── */
+  .conn-pill { display:inline-flex; align-items:center; gap:.45rem; padding:.32rem .7rem;
+    border-radius:var(--r-sm); font-size:11.5px; font-weight:600; white-space:nowrap;
+    border:1px solid var(--border); background:var(--surface-2); color:var(--muted);
+    transition:background .25s var(--ease), color .25s var(--ease), border-color .25s var(--ease); }
+  .conn-pill .dot { width:.45rem; height:.45rem; border-radius:50%; background:currentColor; flex:none; }
   .conn-pill.is-on  { background:var(--green-bg); color:var(--green); border-color:color-mix(in srgb,var(--green) 35%,transparent); }
   .conn-pill.is-mid { background:var(--yellow-bg); color:var(--yellow); border-color:color-mix(in srgb,var(--yellow) 35%,transparent); }
   .conn-pill.is-off { background:var(--red-bg); color:var(--red); border-color:color-mix(in srgb,var(--red) 35%,transparent); }
   .conn-pill.is-on .dot { animation:pulse 2s ease-in-out infinite; }
 
-  /* Stepper */
-  .steps { display:flex; align-items:flex-start; justify-content:space-between;
-    margin:1.6rem auto .4rem; max-width:440px; position:relative; }
-  .steps::before { content:''; position:absolute; top:13px; left:24px; right:24px; height:2px;
-    background:var(--border); z-index:0; }
-  .step { position:relative; z-index:1; display:flex; flex-direction:column; align-items:center;
-    gap:.4rem; flex:1; }
-  .step .ball { width:28px; height:28px; border-radius:50%; background:var(--surface-2);
-    border:2px solid var(--border); display:flex; align-items:center; justify-content:center;
-    font-size:.8rem; color:var(--muted); transition:all .25s ease; }
-  .step .lbl { font-size:.7rem; color:var(--muted); line-height:1.1; max-width:72px; }
-  .step.done .ball { background:#238636; border-color:#238636; color:#fff; }
-  .step.active .ball { border-color:var(--yellow); color:var(--yellow);
-    box-shadow:0 0 0 4px var(--yellow-bg); animation:pulse 1.4s ease-in-out infinite; }
-  .step.active .lbl { color:var(--yellow); font-weight:600; }
-  .step.done .lbl { color:var(--text); }
+  /* ── Layout em duas colunas (desktop) ── */
+  .conn-grid { display:grid; gap:1rem; }
+  @media (min-width:900px) {
+    .conn-grid { grid-template-columns:minmax(0,7fr) minmax(0,5fr); align-items:start; }
+  }
+
+  /* ── Stepper: vertical com linha-guia no mobile, horizontal no desktop ── */
+  .steps { display:flex; flex-direction:column; gap:1.15rem; position:relative; margin:0; }
+  .steps::before { content:''; position:absolute; left:13px; top:14px; bottom:14px; width:2px;
+    background:var(--border); }
+  .step { position:relative; z-index:1; display:flex; flex-direction:row; align-items:flex-start;
+    gap:.75rem; min-width:0; }
+  .step .ball { width:28px; height:28px; flex:none; border-radius:50%; background:var(--surface);
+    border:2px solid var(--border-strong); display:flex; align-items:center; justify-content:center;
+    font-family:var(--mono); font-size:.72rem; font-weight:500; color:var(--muted);
+    transition:all .25s var(--ease); }
+  .step .step-txt { min-width:0; padding-top:.15rem; }
+  .step .lbl { font-size:.82rem; font-weight:500; color:var(--muted); line-height:1.25; }
+  .step .step-desc { font-size:11.5px; color:var(--muted); line-height:1.35; margin-top:.1rem;
+    opacity:.85; }
+  .step.done .ball { background:var(--green); border-color:var(--green); color:var(--accent-ink); }
+  .step.done .lbl { color:var(--text-2); }
+  .step.active .ball { border-color:var(--accent); color:var(--accent);
+    box-shadow:0 0 0 4px var(--accent-bg); animation:pulse 1.4s ease-in-out infinite; }
+  .step.active .lbl { color:var(--accent); font-weight:600; }
   .step.err .ball { border-color:var(--red); color:var(--red); background:var(--red-bg); }
+  .step.err .lbl { color:var(--red); }
 
-  #prog-area { margin:1.2rem auto .2rem; max-width:380px; }
-  #prog-msg { font-size:.84rem; margin-top:.5rem; min-height:1.1em; }
+  @media (min-width:900px) {
+    .steps { flex-direction:row; gap:.9rem; }
+    .steps::before { left:10%; right:10%; top:14px; bottom:auto; width:auto; height:2px; }
+    .step { flex:1 1 0; flex-direction:column; align-items:center; gap:.55rem; text-align:center; }
+    .step .step-txt { padding-top:0; }
+  }
 
-  #qr-box { margin:1.4rem auto; background:#fff; padding:1rem; border-radius:12px;
-    display:flex; align-items:center; justify-content:center; width:280px; height:280px; }
+  /* ── Progresso (ids consumidos pelo JS) ── */
+  #prog-area { margin-top:1.2rem; }
+  #prog-msg { font-family:var(--mono); font-size:11px; letter-spacing:.04em;
+    color:var(--muted); margin:.45rem 0 0; min-height:1.1em; }
+
+  /* #wa-aviso (recusa do Django: flag/allowlist) usa .alert .alert-error do base;
+     o JS só alterna display e textContent — sem ícone, que o textContent apagaria. */
+  #wa-aviso { margin-bottom:0; }
+
+  /* ── QR: fundo claro fixo é funcional (o QR escuro precisa de contraste em
+     qualquer tema), não estético ── */
+  #qr-area { margin-top:.4rem; }
+  #qr-box { margin:1rem auto .4rem; background:#fff; padding:.9rem; border-radius:var(--r-lg);
+    border:1px solid var(--border); display:flex; align-items:center; justify-content:center;
+    width:280px; height:280px; max-width:100%; }
   #qr-box img { width:248px; height:248px; display:block; }
   /* sem src ainda: esconde o img quebrado e mostra estado de espera */
   #qr-box img:not([src]) { display:none; }
-  #qr-box:has(img:not([src])) { background:var(--surface); border:1px dashed var(--border); }
+  #qr-box:has(img:not([src])) { background:var(--surface); border:1px dashed var(--border-strong); }
   #qr-box:has(img:not([src]))::after { content:'Gerando QR code…'; color:var(--muted); font-size:.85rem; }
-  #qr-box.empty-box { background:var(--surface); border:1px dashed var(--border);
-    color:var(--muted); font-size:.85rem; }
 
-  .grupos-chip { display:inline-flex; align-items:center; gap:.4rem; margin-top:.9rem;
-    padding:.35rem .8rem; border-radius:8px; background:var(--surface-2);
-    border:1px solid var(--border); font-size:.82rem; color:var(--muted); }
+  .empty-box { background:var(--surface); border:1px dashed var(--border-strong);
+    border-radius:var(--r-lg); color:var(--muted); font-size:13px;
+    display:flex; align-items:center; justify-content:center; }
+  #qr-box-off { margin:1rem auto .4rem; width:280px; max-width:100%; height:140px; }
+
+  /* ── Instruções de pareamento ── */
+  .qr-how { margin:.2rem 0 0; padding:0; list-style:none; display:flex; flex-direction:column; gap:.55rem; }
+  .qr-how li { display:flex; gap:.6rem; align-items:flex-start; font-size:13px; color:var(--text-2);
+    line-height:1.45; }
+  .qr-how .n { flex:none; width:1.35rem; height:1.35rem; border-radius:50%; border:1px solid var(--border-strong);
+    display:inline-flex; align-items:center; justify-content:center; font-family:var(--mono);
+    font-size:.65rem; color:var(--muted); margin-top:.05rem; }
+  .qr-how b { color:var(--text); font-weight:600; }
+
+  /* ── KPI discreto de grupos (id consumido pelo JS) ── */
+  .grupos-chip { display:inline-flex; align-items:baseline; gap:.5rem; margin:0;
+    padding:.5rem .85rem; border-radius:var(--r-md); background:var(--surface-2);
+    border:1px solid var(--border); font-size:12px; color:var(--muted); }
+  .grupos-chip .lucide { width:.95rem; height:.95rem; align-self:center; }
+  #grupos-n { font-family:var(--mono); font-size:1.05rem; font-weight:600; color:var(--text);
+    font-feature-settings:"tnum" 1; }
+
+  /* ── Aviso de grupos: .alert .alert-warn do base; JS alterna display none/block,
+     então o conteúdo precisa fluir inline (sem depender do flex do .alert) ── */
+  #grupos-aviso { margin-bottom:0; }
+  #grupos-retry { margin-left:.4rem; }
+  #grupos-retry-msg { font-size:12px; margin-left:.45rem; }
+
+  /* ── Blocos de ação da sessão ── */
+  .sessao-bloco { margin-top:1.15rem; padding-top:1rem; border-top:1px solid var(--border);
+    display:flex; flex-direction:column; gap:.55rem; align-items:flex-start; }
+  .sessao-bloco .acao-msg { font-size:12px; min-height:1em; }
+  .sessao-bloco .help { margin-top:0; }
+  .sessao-acoes { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="conn">
-  <div class="page-head" style="text-align:center;">
-    <h1 style="justify-content:center;"><i data-lucide="message-circle"></i> Conexão WhatsApp</h1>
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Canal · WhatsApp</span>
+    <h1><i data-lucide="message-circle"></i> Conexão WhatsApp</h1>
+    <p class="sub">Pareie um número do WhatsApp para usar os grupos como fonte de ofertas. A sessão fica ativa no servidor e sincroniza sozinha depois do pareamento.</p>
+  </div>
+  <div class="head-actions">
+    <div id="conn-pill" class="conn-pill"><span class="dot"></span><span id="pill-txt">verificando…</span></div>
+  </div>
+</div>
+
+<div class="conn-grid">
+  <!-- Estado da sessão: stepper, progresso, grupos e ações -->
+  <div class="card">
+    <div class="card-head">
+      <h2><i data-lucide="activity"></i> Estado da conexão</h2>
+    </div>
+
+    <!-- Stepper de fases -->
+    <div class="steps" id="steps">
+      <div class="step" data-step="qr">
+        <div class="ball">1</div>
+        <div class="step-txt">
+          <div class="lbl">Escanear QR</div>
+          <div class="step-desc">Aponte a câmera do app</div>
+        </div>
+      </div>
+      <div class="step" data-step="autenticado">
+        <div class="ball">2</div>
+        <div class="step-txt">
+          <div class="lbl">Autenticar</div>
+          <div class="step-desc">Validando a sessão</div>
+        </div>
+      </div>
+      <div class="step" data-step="carregando">
+        <div class="ball">3</div>
+        <div class="step-txt">
+          <div class="lbl">Carregar grupos</div>
+          <div class="step-desc">Buscando conversas</div>
+        </div>
+      </div>
+      <div class="step" data-step="sincronizando">
+        <div class="ball">4</div>
+        <div class="step-txt">
+          <div class="lbl">Sincronizar</div>
+          <div class="step-desc">Gravando a lista</div>
+        </div>
+      </div>
+      <div class="step" data-step="conectado">
+        <div class="ball">✓</div>
+        <div class="step-txt">
+          <div class="lbl">Conectado</div>
+          <div class="step-desc">Sessão ativa</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="prog-area" style="display:none;">
+      <div class="progress-bg"><div id="prog-bar" class="progress-bar" style="width:0%;"></div></div>
+      <p id="prog-msg"></p>
+    </div>
+
+    {% comment %}
+      Recusa do próprio Django (flag/allowlist), antes de qualquer worker: precisa de
+      caixa própria porque #cancelar-msg vive dentro do botão de cancelar, que aqui
+      não faz sentido mostrar. Sem isto a tela ficava muda.
+      ({# #} não pode ter várias linhas — vira texto visível.)
+    {% endcomment %}
+    <div id="wa-aviso" class="alert alert-error" style="display:none;"></div>
+
+    <div id="grupos-chip" class="grupos-chip" style="display:none;"><i data-lucide="folder"></i> <span id="grupos-n">0</span> grupos sincronizados</div>
+
+    {# Conectado mas getChats falhou: antes isto aparecia como "0 grupos sincronizados". #}
+    <div id="grupos-aviso" class="alert alert-warn" style="display:none;">
+      <i data-lucide="alert-triangle"></i>
+      <span>Conectado, mas a lista de grupos não veio.
+        <button id="grupos-retry" class="btn btn-ghost btn-sm">
+          <i data-lucide="refresh-cw"></i> Sincronizar grupos
+        </button><span id="grupos-retry-msg"></span>
+      </span>
+    </div>
+
+    <div id="logout-area" class="sessao-bloco" style="display:none;">
+      <div class="sessao-acoes">
+        <button id="wa-sync" class="btn btn-ghost btn-sm">
+          <i data-lucide="refresh-cw"></i> Sincronizar grupos
+        </button>
+        <button id="wa-desconectar" class="btn btn-danger btn-sm">
+          <i data-lucide="unplug"></i> Desconectar WhatsApp
+        </button>
+      </div>
+      {# Toda ação precisa dizer no que deu: sem isto, uma falha fica idêntica a um sucesso. #}
+      <div id="logout-msg" class="acao-msg"></div>
+      <p class="help">Desconectar desvincula este número e pede um QR novo. As regras de Telegram não são afetadas.</p>
+    </div>
+
+    {# Saída manual do loop: sem isto, cada F5 só reiniciava as 6 tentativas de reconexão. #}
+    <div id="cancelar-area" class="sessao-bloco" style="display:none;">
+      <button id="wa-cancelar" class="btn btn-ghost btn-sm">
+        <i data-lucide="rotate-ccw"></i> Cancelar e ler o QR de novo
+      </button>
+      <div id="cancelar-msg" class="acao-msg"></div>
+      <p class="help">Descarta a sessão atual e recomeça do zero, com um QR code novo.</p>
+    </div>
   </div>
 
-  <div id="conn-pill" class="conn-pill"><span class="dot"></span><span id="pill-txt">verificando…</span></div>
+  <!-- Pareamento: instruções sempre visíveis + QR / indisponibilidade -->
+  <div class="card">
+    <div class="card-head">
+      <h2><i data-lucide="qr-code"></i> Parear aparelho</h2>
+    </div>
 
-  <!-- Stepper de fases -->
-  <div class="steps" id="steps">
-    <div class="step" data-step="qr"><div class="ball">1</div><div class="lbl">Escanear QR</div></div>
-    <div class="step" data-step="autenticado"><div class="ball">2</div><div class="lbl">Autenticado</div></div>
-    <div class="step" data-step="carregando"><div class="ball">3</div><div class="lbl">Carregando</div></div>
-    <div class="step" data-step="sincronizando"><div class="ball">4</div><div class="lbl">Sincronizando</div></div>
-    <div class="step" data-step="conectado"><div class="ball">✓</div><div class="lbl">Conectado</div></div>
-  </div>
+    <ol class="qr-how">
+      <li><span class="n">1</span><span>Abra o <b>WhatsApp</b> no celular.</span></li>
+      <li><span class="n">2</span><span>Toque em <b>Aparelhos conectados</b> → <b>Conectar aparelho</b>.</span></li>
+      <li><span class="n">3</span><span>Escaneie o QR code exibido aqui. Ele <b>atualiza sozinho</b> se expirar.</span></li>
+    </ol>
 
-  <div id="prog-area" style="display:none;">
-    <div class="progress-bg"><div id="prog-bar" class="progress-bar" style="width:0%;"></div></div>
-    <p id="prog-msg" class="muted"></p>
-  </div>
+    <div id="qr-area" style="display:none;">
+      <div id="qr-box"><img id="qr-img" alt="QR code para conectar o WhatsApp"></div>
+    </div>
 
-  {% comment %}
-    Recusa do próprio Django (flag/allowlist), antes de qualquer worker: precisa de
-    caixa própria porque #cancelar-msg vive dentro do botão de cancelar, que aqui
-    não faz sentido mostrar. Sem isto a tela ficava muda.
-    ({# #} não pode ter várias linhas — vira texto visível.)
-  {% endcomment %}
-  <div id="wa-aviso" class="muted" style="display:none;font-size:.88rem;margin:1.2rem 0;
-       padding:.9rem 1rem;border-radius:12px;border:1px solid var(--red);color:var(--red);"></div>
-
-  <div id="qr-area" style="display:none;">
-    <div id="qr-box"><img id="qr-img" alt="QR code para conectar o WhatsApp"></div>
-    <p class="muted" style="font-size:.85rem;">Abra o WhatsApp → <b>Aparelhos conectados</b> → <b>Conectar aparelho</b> e escaneie. O QR atualiza sozinho.</p>
-  </div>
-
-  <div id="grupos-chip" class="grupos-chip" style="display:none;"><i data-lucide="folder"></i> <span id="grupos-n">0</span> grupos sincronizados</div>
-
-  {# Conectado mas getChats falhou: antes isto aparecia como "0 grupos sincronizados". #}
-  <div id="grupos-aviso" class="muted" style="display:none;font-size:.85rem;margin-top:.6rem;">
-    Conectado, mas a lista de grupos não veio.
-    <button id="grupos-retry" class="btn btn-ghost" style="min-height:44px;margin-left:.4rem;">
-      <i data-lucide="refresh-cw"></i> Sincronizar grupos
-    </button>
-    <div id="grupos-retry-msg" style="font-size:.82rem;margin-top:.4rem;min-height:1em;"></div>
-  </div>
-
-  <div id="logout-area" style="display:none;margin-top:1.4rem;">
-    <button id="wa-desconectar" class="btn btn-ghost" style="min-height:44px;">
-      <i data-lucide="unplug"></i> Desconectar WhatsApp
-    </button>
-    {# Toda ação precisa dizer no que deu: sem isto, uma falha fica idêntica a um sucesso. #}
-    <div id="logout-msg" style="font-size:.82rem;margin-top:.5rem;min-height:1em;"></div>
-    <p class="muted" style="font-size:.82rem;margin-top:.5rem;">
-      Desvincula este número e pede um QR novo. As regras de Telegram não são afetadas.
-    </p>
-  </div>
-
-  {# Saída manual do loop: sem isto, cada F5 só reiniciava as 6 tentativas de reconexão. #}
-  <div id="cancelar-area" style="display:none;margin-top:1.4rem;">
-    <button id="wa-cancelar" class="btn btn-ghost" style="min-height:44px;">
-      <i data-lucide="rotate-ccw"></i> Cancelar e ler o QR de novo
-    </button>
-    <div id="cancelar-msg" style="font-size:.82rem;margin-top:.5rem;min-height:1em;"></div>
-    <p class="muted" style="font-size:.82rem;margin-top:.5rem;">
-      Descarta a sessão atual e recomeça do zero, com um QR code novo.
-    </p>
-  </div>
-
-  <div id="offline-area" style="display:none;">
-    <div id="qr-box-off" class="empty-box" style="margin:1.4rem auto; width:280px; height:140px; display:flex; align-items:center; justify-content:center; border-radius:12px;">Serviço indisponível</div>
-    <p class="muted" style="font-size:.85rem;">O serviço de envio está fora do ar no momento. Recarregue a página em instantes; se o problema continuar, fale com o suporte.</p>
+    <div id="offline-area" style="display:none;">
+      <div id="qr-box-off" class="empty-box">Serviço indisponível</div>
+      <p class="help" style="text-align:center;">O serviço de envio está fora do ar no momento. Recarregue a página em instantes; se o problema continuar, fale com o suporte.</p>
+    </div>
   </div>
 </div>
 {% endblock %}
@@ -359,6 +469,33 @@
     this.disabled = true;
     msg.style.color = 'var(--muted)';
     msg.textContent = 'Sincronizando…';
+    try {
+      const { erro, corpo } = await acao('/scrapers/whatsapp/refresh-grupos/', {
+        method: 'POST',
+        headers: { 'X-CSRFToken': getCookie('csrftoken') },
+      });
+      if (erro || corpo.sucesso === false) {
+        msg.style.color = 'var(--red)';
+        msg.textContent = erro || 'Não foi possível sincronizar agora.';
+      } else {
+        msg.textContent = 'Sincronização iniciada…';
+      }
+    } catch (e) {
+      msg.style.color = 'var(--red)';
+      msg.textContent = 'Não foi possível falar com o servidor.';
+    }
+    this.disabled = false;
+    setTimeout(poll, 1500);
+  };
+
+  // Sincronização sob demanda no estado conectado (mesmo endpoint do retry do
+  // aviso): antes só existia ação de sincronizar quando o getChats já tinha
+  // falhado — quem queria apenas atualizar a lista não tinha como.
+  document.getElementById('wa-sync').onclick = async function () {
+    const msg = document.getElementById('logout-msg');
+    this.disabled = true;
+    msg.style.color = 'var(--muted)';
+    msg.textContent = 'Sincronizando grupos…';
     try {
       const { erro, corpo } = await acao('/scrapers/whatsapp/refresh-grupos/', {
         method: 'POST',

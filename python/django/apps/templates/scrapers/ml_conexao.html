@@ -3,189 +3,268 @@
 
 {% block head_extra %}
 <style>
-  .conn-shell { width:min(1180px, 100%); margin:0 auto; }
-  .conn-head { display:grid; gap:.55rem; margin-bottom:1rem; }
-  .conn-head h1 { margin:0; }
-  .conn-head .sub { max-width:720px; margin:0; }
+  /* ── Pill de status (ids/classes consumidos pelo JS: is-on|is-mid|is-off) ── */
+  .conn-pill { display:inline-flex; align-items:center; gap:.45rem; padding:.32rem .7rem;
+    border-radius:var(--r-sm); font-size:11.5px; font-weight:600; white-space:nowrap;
+    border:1px solid var(--border); background:var(--surface-2); color:var(--muted);
+    transition:background .25s var(--ease), color .25s var(--ease), border-color .25s var(--ease); }
+  .conn-pill .dot { width:.45rem; height:.45rem; border-radius:50%; background:currentColor; flex:none; }
+  .conn-pill.is-on  { background:var(--green-bg); color:var(--green); border-color:color-mix(in srgb,var(--green) 35%,transparent); }
+  .conn-pill.is-mid { background:var(--yellow-bg); color:var(--yellow); border-color:color-mix(in srgb,var(--yellow) 35%,transparent); }
+  .conn-pill.is-off { background:var(--red-bg); color:var(--red); border-color:color-mix(in srgb,var(--red) 35%,transparent); }
+  .conn-pill.is-on .dot { animation:pulse 2s ease-in-out infinite; }
 
-  .conn-card { position:relative; overflow:hidden; border:1px solid var(--border);
-    border-radius:18px; background:var(--surface); box-shadow:0 18px 48px rgba(15,23,42,.08); }
-  .conn-card.is-ml::before { content:""; position:absolute; inset:0 0 auto; height:5px;
-    background:linear-gradient(90deg,#ffe600 0 62%,#3483fa 62% 100%); }
-  .conn-summary { display:grid; gap:1rem; padding:1.15rem; border-bottom:1px solid var(--border); }
-  .conn-status-row { display:flex; align-items:center; justify-content:space-between;
-    gap:.75rem; flex-wrap:wrap; }
-  .conn-label { margin:0; font-weight:750; letter-spacing:-.01em; }
-  .conn-pill { display:inline-flex; align-items:center; gap:.5rem; min-height:36px;
-    padding:.42rem .8rem; border-radius:999px; font-weight:700; font-size:.82rem;
-    border:1px solid var(--border); background:var(--surface-2); color:var(--muted); }
-  .conn-pill .dot { width:9px; height:9px; border-radius:50%; background:currentColor; flex:none; }
-  .conn-pill.is-on { background:var(--green-bg); color:var(--green); }
-  .conn-pill.is-mid { background:var(--yellow-bg); color:var(--yellow); }
-  .conn-pill.is-off { background:var(--red-bg); color:var(--red); }
-  .conn-pill.is-on .dot, .stream-badge.is-live .stream-dot { animation:pulse 2s ease-in-out infinite; }
+  /* ── Composição: estado à esquerda, ações/dicas no rail (desktop) ── */
+  .conn-grid { display:grid; gap:1rem; }
+  @media (min-width:900px) {
+    .conn-grid { grid-template-columns:minmax(0,7fr) minmax(0,5fr); align-items:start; }
+  }
+  .rail > * + * { margin-top:1rem; }
 
-  .conn-steps { display:grid; grid-template-columns:repeat(3,1fr); gap:.5rem; margin:0;
+  /* ── Stepper: vertical com linha-guia no mobile, horizontal no desktop.
+     O JS alterna .is-current / .is-done nos <li> #step-1..3. ── */
+  .steps { display:flex; flex-direction:column; gap:1.15rem; position:relative; margin:0;
     padding:0; list-style:none; }
-  .conn-step { display:flex; align-items:center; gap:.5rem; min-width:0; padding:.58rem .65rem;
-    border-radius:10px; background:var(--surface-2); color:var(--muted); font-size:.78rem;
-    font-weight:650; }
-  .conn-step-num { display:grid; place-items:center; width:23px; height:23px; flex:none;
-    border-radius:50%; border:1px solid currentColor; font-size:.7rem; }
-  .conn-step.is-current { color:var(--blue); background:color-mix(in srgb,var(--blue) 10%,transparent); }
-  .conn-step.is-done { color:var(--green); background:var(--green-bg); }
+  .steps::before { content:''; position:absolute; left:13px; top:14px; bottom:14px; width:2px;
+    background:var(--border); }
+  .step { position:relative; z-index:1; display:flex; align-items:flex-start; gap:.75rem; min-width:0; }
+  .step .ball { width:28px; height:28px; flex:none; border-radius:50%; background:var(--surface);
+    border:2px solid var(--border-strong); display:flex; align-items:center; justify-content:center;
+    font-family:var(--mono); font-size:.72rem; font-weight:500; color:var(--muted);
+    transition:all .25s var(--ease); }
+  .step .step-txt { min-width:0; padding-top:.15rem; }
+  .step .lbl { font-size:.82rem; font-weight:500; color:var(--muted); line-height:1.25; }
+  .step .step-desc { font-size:11.5px; color:var(--muted); line-height:1.35; margin-top:.1rem; opacity:.85; }
+  .step.is-done .ball { background:var(--green); border-color:var(--green); color:var(--accent-ink); }
+  .step.is-done .lbl { color:var(--text-2); }
+  .step.is-current .ball { border-color:var(--accent); color:var(--accent);
+    box-shadow:0 0 0 4px var(--accent-bg); animation:pulse 1.4s ease-in-out infinite; }
+  .step.is-current .lbl { color:var(--accent); font-weight:600; }
+  @media (min-width:900px) {
+    .steps { flex-direction:row; gap:.9rem; }
+    .steps::before { left:10%; right:10%; top:14px; bottom:auto; width:auto; height:2px; }
+    .step { flex:1 1 0; flex-direction:column; align-items:center; gap:.55rem; text-align:center; }
+    .step .step-txt { padding-top:0; }
+  }
 
-  .conn-body { padding:1.15rem; }
-  .message-box { display:flex; align-items:flex-start; gap:.6rem; max-width:720px; margin:0 auto 1rem;
-    padding:.78rem .9rem; border-radius:11px; font-size:.86rem; text-align:left; }
-  .message-box svg { width:18px; height:18px; flex:none; margin-top:.05rem; }
-  .message-box.is-error { background:var(--red-bg); color:var(--red); }
-  .message-box.is-warning { background:var(--yellow-bg); color:var(--yellow); }
+  /* alertas de erro/aviso dentro do card de estado (JS alterna display) */
+  #err-box, #warn-box { margin:.9rem 0 0; }
+  #err-box span, #warn-box span { flex:1; min-width:0; }
 
-  .start-panel, .ok-panel { display:grid; justify-items:center; gap:.8rem; padding:1.1rem .2rem .5rem;
-    text-align:center; }
-  .start-orbit { display:grid; place-items:center; width:68px; height:68px; border-radius:20px;
-    background:color-mix(in srgb,#ffe600 28%,var(--surface-2)); color:#2d3277; }
-  .start-orbit svg { width:30px; height:30px; }
-  .hint { max-width:640px; margin:0; color:var(--muted); font-size:.86rem; line-height:1.55; }
-  .actions { display:flex; gap:.65rem; flex-wrap:wrap; justify-content:center; }
-  .actions .btn { min-height:44px; }
+  /* ── Painéis de ação (start / conectado) — JS mostra com display:grid ── */
+  #start-area, #ok-area { gap:1rem; align-content:start; }
+  .panel-head { display:flex; align-items:flex-start; gap:.8rem; }
+  .panel-ico { display:grid; place-items:center; width:40px; height:40px; flex:none;
+    border-radius:var(--r-lg); background:var(--accent-bg); color:var(--accent); }
+  .panel-ico.ok { background:var(--green-bg); color:var(--green); }
+  .panel-ico .lucide { width:1.25rem; height:1.25rem; }
+  .panel-head strong { display:block; font-size:14.5px; font-weight:600; letter-spacing:-.01em; }
+  .panel-head .hint { margin:.25rem 0 0; color:var(--muted); font-size:12.5px; line-height:1.5; }
+  .actions { display:flex; gap:.6rem; flex-wrap:wrap; }
+  .acao-msg { font-size:12px; color:var(--muted); min-height:1em; margin:0; }
 
-  #live-area { display:grid; gap:.8rem; }
+  /* linhas de detalhe da conta conectada (hairlines) */
+  .ok-rows { display:flex; flex-direction:column; border-top:1px solid var(--border); }
+  .ok-row { display:flex; align-items:center; justify-content:space-between; gap:.8rem;
+    padding:.6rem 0; border-bottom:1px solid var(--border); font-size:12.5px; }
+  .ok-row .k { font-family:var(--mono); font-size:10px; font-weight:500; text-transform:uppercase;
+    letter-spacing:.13em; color:var(--muted); }
+  .ok-row .v { color:var(--text-2); font-weight:500; text-align:right; }
+
+  /* ── Live view: peça central. JS mostra com display:grid. ── */
+  #live-area { gap:.9rem; margin-bottom:1rem; }
   .live-toolbar { display:flex; justify-content:space-between; align-items:center; gap:.75rem;
-    flex-wrap:wrap; }
-  .live-title { display:flex; align-items:center; gap:.55rem; font-weight:750; font-size:.9rem; }
-  .stream-badge { display:inline-flex; align-items:center; gap:.42rem; min-height:32px;
-    padding:.35rem .65rem; border-radius:999px; background:var(--surface-2);
-    color:var(--muted); font-size:.75rem; font-weight:700; }
-  .stream-dot { width:8px; height:8px; border-radius:50%; background:currentColor; }
-  .stream-badge.is-live { color:var(--green); background:var(--green-bg); }
-  .stream-badge.is-wait { color:var(--yellow); background:var(--yellow-bg); }
-  .stream-badge.is-down { color:var(--red); background:var(--red-bg); }
+    flex-wrap:wrap; padding-bottom:.85rem; border-bottom:1px solid var(--border); }
+  .live-title { display:flex; align-items:center; gap:.5rem; font-family:var(--mono);
+    font-size:10.5px; font-weight:500; text-transform:uppercase; letter-spacing:.16em;
+    color:var(--muted); }
+  .live-title .lucide { color:var(--accent); }
+  .stream-badge { display:inline-flex; align-items:center; gap:.42rem; padding:.28rem .6rem;
+    border-radius:var(--r-sm); border:1px solid var(--border); background:var(--surface-2);
+    color:var(--muted); font-size:11px; font-weight:600; white-space:nowrap; }
+  .stream-dot { width:.45rem; height:.45rem; border-radius:50%; background:currentColor; flex:none; }
+  .stream-badge.is-live { background:var(--green-bg); color:var(--green);
+    border-color:color-mix(in srgb,var(--green) 35%,transparent); }
+  .stream-badge.is-wait { background:var(--yellow-bg); color:var(--yellow);
+    border-color:color-mix(in srgb,var(--yellow) 35%,transparent); }
+  .stream-badge.is-down { background:var(--red-bg); color:var(--red);
+    border-color:color-mix(in srgb,var(--red) 35%,transparent); }
+  .stream-badge.is-live .stream-dot { animation:pulse 2s ease-in-out infinite; }
 
   #live-frame-wrap { position:relative; width:100%; max-width:1120px; margin:0 auto;
-    aspect-ratio:1280 / 800; overflow:hidden; border:1px solid color-mix(in srgb,var(--border) 70%,#111827);
-    border-radius:14px; background:#fff; box-shadow:0 10px 30px rgba(15,23,42,.14); }
+    aspect-ratio:1280 / 800; overflow:hidden; border:1px solid var(--border-strong);
+    border-radius:var(--r-lg); background:var(--bg-inset); }
   #live-canvas { position:absolute; inset:0; display:block; width:100%; height:100%;
-    border:0; background:#fff; cursor:default; touch-action:none; outline:none; }
-  #live-canvas:focus-visible { box-shadow:inset 0 0 0 3px var(--blue); }
+    border:0; background:var(--bg-inset); cursor:default; touch-action:none; outline:none; }
+  #live-canvas:focus-visible { box-shadow:inset 0 0 0 3px var(--accent); }
   #live-kbd { position:fixed; left:-200vw; top:0; width:2px; height:2px; opacity:0;
     border:0; padding:0; }
   .stream-overlay { position:absolute; inset:0; display:none; place-items:center; padding:1rem;
-    background:rgba(255,255,255,.86); color:#334155; text-align:center; z-index:2; }
+    background:color-mix(in srgb,var(--bg-inset) 84%,transparent); color:var(--text-2);
+    text-align:center; z-index:2; }
   .stream-overlay.is-visible { display:grid; }
   .stream-overlay-card { display:grid; justify-items:center; gap:.55rem; max-width:330px; }
-  .stream-overlay-card svg { color:#3483fa; }
+  .stream-overlay-card .lucide { color:var(--accent); }
+  .stream-overlay-card .hint { color:var(--muted); font-size:12.5px; }
 
-  .device-tip { display:flex; align-items:flex-start; gap:.55rem; max-width:760px; margin:0 auto;
-    padding:.65rem .75rem; border-radius:10px; background:var(--surface-2); color:var(--muted);
-    font-size:.8rem; line-height:1.45; }
-  .device-tip svg { width:17px; height:17px; flex:none; margin-top:.08rem; }
+  .device-tip { display:flex; align-items:flex-start; gap:.55rem; padding:.65rem .8rem;
+    border-radius:var(--r-md); background:var(--surface-2); border:1px solid var(--border);
+    color:var(--muted); font-size:12.5px; line-height:1.45; }
+  .device-tip .lucide { width:1rem; height:1rem; flex:none; margin-top:.1rem; color:var(--yellow); }
   .live-controls { position:sticky; bottom:.5rem; z-index:3; display:flex; justify-content:center;
     gap:.6rem; flex-wrap:wrap; width:max-content; max-width:100%; margin:0 auto;
-    padding:.5rem; border:1px solid var(--border); border-radius:13px;
-    background:color-mix(in srgb,var(--surface) 92%,transparent); backdrop-filter:blur(10px); }
-  .security-note { max-width:760px; margin:0 auto; color:var(--muted); font-size:.75rem;
-    line-height:1.5; text-align:center; }
+    padding:.5rem; border:1px solid var(--border); border-radius:var(--r-lg);
+    background:color-mix(in srgb,var(--surface) 92%,transparent); backdrop-filter:blur(10px);
+    box-shadow:var(--shadow-pop); }
+  .security-note { margin:0; color:var(--muted); font-size:11.5px; line-height:1.5; text-align:center; }
 
-  @media (max-width:767px) {
-    .conn-head { margin-bottom:.8rem; }
-    .conn-card { margin-inline:-.25rem; border-radius:14px; }
-    .conn-summary, .conn-body { padding:.9rem; }
-    .conn-steps { grid-template-columns:1fr; }
-    .conn-step { padding:.46rem .58rem; }
-    #live-frame-wrap { width:100%; max-height:none; border-radius:11px; }
+  /* ── Dicas de segurança (rail) ── */
+  .tips-list { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:.6rem; }
+  .tips-list li { display:flex; gap:.6rem; align-items:flex-start; font-size:12.5px;
+    color:var(--text-2); line-height:1.45; }
+  .tips-list .lucide { width:1rem; height:1rem; flex:none; margin-top:.1rem; color:var(--accent); }
+
+  @media (max-width:899px) {
     .live-controls { width:100%; bottom:.25rem; }
     .live-controls .btn { flex:1 1 145px; }
-  }
-  @media (prefers-reduced-motion:reduce) {
-    .conn-pill.is-on .dot, .stream-badge.is-live .stream-dot { animation:none; }
   }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="conn-shell">
-  <header class="conn-head">
-    <h1><i data-lucide="shopping-bag"></i> Conexão {{ marketplace_nome|default:"Mercado Livre" }}</h1>
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">{% if live_v2 %}Fonte · Mercado Livre{% else %}Fonte · Amazon{% endif %}</span>
+    <h1><i data-lucide="{% if live_v2 %}shopping-bag{% else %}package{% endif %}"></i> Conexão {{ marketplace_nome|default:"Mercado Livre" }}</h1>
     <p class="sub">{% if relatorio %}Autorize o portal usado para sincronizar suas métricas e comissões.{% else %}Conecte sua conta para gerar links e usar suas integrações do Mercado Livre.{% endif %}</p>
-  </header>
-
-  <section class="conn-card {% if live_v2 %}is-ml{% endif %}" aria-labelledby="connection-state-title">
-    <div class="conn-summary">
-      <div class="conn-status-row">
-        <p id="connection-state-title" class="conn-label">Estado da conexão</p>
-        <div id="conn-pill" class="conn-pill" role="status" aria-live="polite">
-          <span class="dot"></span><span id="pill-txt">Verificando…</span>
-        </div>
-      </div>
-      <ol class="conn-steps" aria-label="Etapas da conexão">
-        <li id="step-1" class="conn-step"><span class="conn-step-num">1</span><span>Abrir {% if live_v2 %}o Mercado Livre{% else %}a Amazon{% endif %}</span></li>
-        <li id="step-2" class="conn-step"><span class="conn-step-num">2</span><span>Confirmar sua identidade</span></li>
-        <li id="step-3" class="conn-step"><span class="conn-step-num">3</span><span>{% if live_v2 %}Validar a conexão{% else %}Salvar a sessão{% endif %}</span></li>
-      </ol>
+  </div>
+  <div class="head-actions">
+    <div id="conn-pill" class="conn-pill" role="status" aria-live="polite">
+      <span class="dot"></span><span id="pill-txt">Verificando…</span>
     </div>
+  </div>
+</div>
 
-    <div class="conn-body">
-      <div id="err-box" class="message-box is-error" role="alert" style="display:none;">
-        <i data-lucide="circle-alert"></i><span id="err-text"></span>
-      </div>
-      <div id="warn-box" class="message-box is-warning" role="status" style="display:none;">
-        <i data-lucide="info"></i><span id="warn-text"></span>
-      </div>
-
-      <div id="start-area" class="start-panel" style="display:none;">
-        <div class="start-orbit"><i data-lucide="shield-check"></i></div>
-        <p class="hint">O login {% if live_v2 %}do Mercado Livre será aberto aqui, no formato correto para este dispositivo{% else %}da Amazon será aberto nesta janela{% endif %}.</p>
-        <div class="actions">
-          <button id="start-btn" class="btn btn-blue"><i data-lucide="log-in"></i> Conectar {{ marketplace_nome|default:"Mercado Livre" }}</button>
-        </div>
-      </div>
-
-      <div id="live-area" style="display:none;">
-        <div class="live-toolbar">
-          <div class="live-title"><i data-lucide="monitor-smartphone"></i> Janela {% if live_v2 %}do Mercado Livre{% else %}da Amazon{% endif %}</div>
-          <div id="stream-badge" class="stream-badge is-wait" role="status" aria-live="polite">
-            <span class="stream-dot"></span><span id="stream-txt">Preparando imagem…</span>
-          </div>
-        </div>
-        <div id="live-frame-wrap">
-          <canvas id="live-canvas" width="1280" height="800" tabindex="0" aria-label="Janela interativa de login {% if live_v2 %}do Mercado Livre{% else %}da Amazon{% endif %}"></canvas>
-          <input id="live-kbd" type="text" inputmode="text" autocomplete="off" autocapitalize="off"
-            autocorrect="off" spellcheck="false" aria-hidden="true" tabindex="-1">
-          <div id="stream-overlay" class="stream-overlay" aria-hidden="true">
-            <div class="stream-overlay-card">
-              <i data-lucide="refresh-cw"></i>
-              <strong>Reconectando a imagem</strong>
-              <span class="hint">Seu login continua aberto. A tela volta automaticamente.</span>
-            </div>
-          </div>
-        </div>
-        <div class="device-tip">
-          <i data-lucide="lightbulb"></i>
-          <span id="device-tip-text">{% if live_v2 %}No celular, prefira SMS ou o aplicativo do Mercado Livre. No computador, você também pode escanear o QR Code com o telefone.{% else %}Conclua o login acima. Assim que a Amazon confirmar a conta, salve a sessão.{% endif %}</span>
-        </div>
-        <div class="live-controls">
-          <button id="salvar-btn" class="btn btn-green"><i data-lucide="badge-check"></i> {% if live_v2 %}Verificar conexão{% else %}Já entrei{% endif %}</button>
-          <button id="cancelar-btn" class="btn btn-ghost"><i data-lucide="x"></i> Cancelar</button>
-        </div>
-        <p class="security-note">{% if live_v2 %}Seus cliques e teclas são retransmitidos somente para esta janela remota. O conteúdo digitado não é armazenado nem incluído nos logs.{% else %}Use esta janela somente para concluir a autenticação no site exibido.{% endif %}</p>
-      </div>
-
-      <div id="ok-area" class="ok-panel" style="display:none;">
-        <div class="start-orbit" style="background:var(--green-bg);color:var(--green);"><i data-lucide="badge-check"></i></div>
-        <strong>Conexão confirmada</strong>
-        <p class="hint">{% if relatorio %}O Spreading já pode acessar os relatórios autorizados desta conta.{% else %}Sua sessão foi validada e já pode ser usada para gerar links.{% endif %}</p>
-        <div class="actions">
-          <button id="reconectar-btn" class="btn btn-ghost"><i data-lucide="refresh-cw"></i> Reconectar</button>
-          {% if not relatorio %}
-          <button id="desconectar-btn" class="btn btn-ghost"><i data-lucide="unplug"></i> Desconectar</button>
-          {% endif %}
-        </div>
-        <div id="desconectar-msg" class="hint" aria-live="polite"></div>
+<!-- Live view remota: peça central enquanto a conexão está em andamento -->
+<div id="live-area" class="card" style="display:none;">
+  <div class="live-toolbar">
+    <div class="live-title"><i data-lucide="monitor-smartphone"></i> Sessão remota · {% if live_v2 %}Mercado Livre{% else %}Amazon{% endif %}</div>
+    <div id="stream-badge" class="stream-badge is-wait" role="status" aria-live="polite">
+      <span class="stream-dot"></span><span id="stream-txt">Preparando imagem…</span>
+    </div>
+  </div>
+  <div id="live-frame-wrap">
+    <canvas id="live-canvas" width="1280" height="800" tabindex="0" aria-label="Janela interativa de login {% if live_v2 %}do Mercado Livre{% else %}da Amazon{% endif %}"></canvas>
+    <input id="live-kbd" type="text" inputmode="text" autocomplete="off" autocapitalize="off"
+      autocorrect="off" spellcheck="false" aria-hidden="true" tabindex="-1">
+    <div id="stream-overlay" class="stream-overlay" aria-hidden="true">
+      <div class="stream-overlay-card">
+        <i data-lucide="refresh-cw"></i>
+        <strong>Reconectando a imagem</strong>
+        <span class="hint">Seu login continua aberto. A tela volta automaticamente.</span>
       </div>
     </div>
-  </section>
+  </div>
+  <div class="device-tip">
+    <i data-lucide="lightbulb"></i>
+    <span id="device-tip-text">{% if live_v2 %}No celular, prefira SMS ou o aplicativo do Mercado Livre. No computador, você também pode escanear o QR Code com o telefone.{% else %}Conclua o login acima. Assim que a Amazon confirmar a conta, salve a sessão.{% endif %}</span>
+  </div>
+  <div class="live-controls">
+    <button id="salvar-btn" class="btn btn-accent"><i data-lucide="badge-check"></i> {% if live_v2 %}Verificar conexão{% else %}Já entrei{% endif %}</button>
+    <button id="cancelar-btn" class="btn btn-ghost"><i data-lucide="x"></i> Cancelar</button>
+  </div>
+  <p class="security-note">{% if live_v2 %}Seus cliques e teclas são retransmitidos somente para esta janela remota. O conteúdo digitado não é armazenado nem incluído nos logs.{% else %}Use esta janela somente para concluir a autenticação no site exibido.{% endif %}</p>
+</div>
+
+<div class="conn-grid">
+  <!-- Estado da conexão: stepper + alertas -->
+  <div class="card">
+    <div class="card-head">
+      <h2><i data-lucide="activity"></i> Estado da conexão</h2>
+    </div>
+    <ol class="steps" aria-label="Etapas da conexão">
+      <li id="step-1" class="step">
+        <span class="ball">1</span>
+        <span class="step-txt">
+          <span class="lbl">Abrir {% if live_v2 %}o Mercado Livre{% else %}a Amazon{% endif %}</span>
+          <span class="step-desc">Janela oficial de login</span>
+        </span>
+      </li>
+      <li id="step-2" class="step">
+        <span class="ball">2</span>
+        <span class="step-txt">
+          <span class="lbl">Confirmar sua identidade</span>
+          <span class="step-desc">{% if live_v2 %}Senha, SMS ou aplicativo{% else %}Senha e verificação{% endif %}</span>
+        </span>
+      </li>
+      <li id="step-3" class="step">
+        <span class="ball">3</span>
+        <span class="step-txt">
+          <span class="lbl">{% if live_v2 %}Validar a conexão{% else %}Salvar a sessão{% endif %}</span>
+          <span class="step-desc">Sessão pronta para uso</span>
+        </span>
+      </li>
+    </ol>
+
+    <div id="err-box" class="alert alert-error" role="alert" style="display:none;">
+      <i data-lucide="circle-alert"></i><span id="err-text"></span>
+    </div>
+    <div id="warn-box" class="alert alert-warn" role="status" style="display:none;">
+      <i data-lucide="info"></i><span id="warn-text"></span>
+    </div>
+  </div>
+
+  <!-- Rail: ação do momento + segurança -->
+  <div class="rail">
+    <div id="start-area" class="card" style="display:none;">
+      <div class="panel-head">
+        <span class="panel-ico"><i data-lucide="shield-check"></i></span>
+        <div>
+          <strong>Conectar {% if live_v2 %}ao Mercado Livre{% else %}à Amazon{% endif %}</strong>
+          <p class="hint">O login {% if live_v2 %}do Mercado Livre será aberto aqui, no formato correto para este dispositivo{% else %}da Amazon será aberto nesta janela{% endif %}.</p>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="start-btn" class="btn btn-accent"><i data-lucide="log-in"></i> Conectar {{ marketplace_nome|default:"Mercado Livre" }}</button>
+      </div>
+    </div>
+
+    <div id="ok-area" class="card" style="display:none;">
+      <div class="panel-head">
+        <span class="panel-ico ok"><i data-lucide="badge-check"></i></span>
+        <div>
+          <strong>Conexão confirmada</strong>
+          <p class="hint">{% if relatorio %}O Spreading já pode acessar os relatórios autorizados desta conta.{% else %}Sua sessão foi validada e já pode ser usada para gerar links.{% endif %}</p>
+        </div>
+      </div>
+      <div class="ok-rows">
+        <div class="ok-row"><span class="k">Conta</span><span class="v">{{ marketplace_nome|default:"Mercado Livre" }}</span></div>
+        <div class="ok-row"><span class="k">Sessão</span><span class="badge badge-green"><span class="dot"></span>Ativa</span></div>
+        <div class="ok-row"><span class="k">{% if relatorio %}Relatórios{% else %}Link de afiliado{% endif %}</span><span class="v">{% if relatorio %}Acesso autorizado{% else %}Pronto para gerar{% endif %}</span></div>
+      </div>
+      <div class="actions">
+        <button id="reconectar-btn" class="btn btn-ghost btn-sm"><i data-lucide="refresh-cw"></i> Reconectar</button>
+        {% if not relatorio %}
+        <button id="desconectar-btn" class="btn btn-danger btn-sm"><i data-lucide="unplug"></i> Desconectar</button>
+        {% endif %}
+      </div>
+      <p id="desconectar-msg" class="acao-msg" aria-live="polite"></p>
+      {% if not relatorio %}
+      <p class="help" style="margin:0;">Desconectar apaga a sessão salva no servidor. Você precisará fazer login de novo para gerar links.</p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2><i data-lucide="lock"></i> Conexão segura</h2>
+      </div>
+      <ul class="tips-list">
+        <li><i data-lucide="globe"></i><span>A janela remota mostra somente o site oficial {% if live_v2 %}do Mercado Livre{% else %}da Amazon{% endif %} — nunca um formulário do Spreading.</span></li>
+        <li><i data-lucide="keyboard"></i><span>Teclas e cliques são retransmitidos apenas para essa janela e não ficam registrados.</span></li>
+        <li><i data-lucide="unplug"></i><span>Você pode desconectar quando quiser — a sessão é apagada do servidor.</span></li>
+      </ul>
+    </div>
+  </div>
 </div>
 {% endblock %}
 

@@ -3,47 +3,65 @@
 
 {% block head_extra %}
 <style>
-  .step { display: flex; align-items: flex-start; gap: .9rem; padding: 1rem 0; border-bottom: 1px solid var(--border); }
-  .step:last-child { border-bottom: 0; }
-  .step-ico { flex: none; width: 2rem; height: 2rem; border-radius: 50%; display: flex; align-items: center;
-    justify-content: center; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); }
-  .step-ico.done { background: var(--green-bg); border-color: var(--green); color: var(--green); }
-  .step-ico .lucide { width: 1.1rem; height: 1.1rem; }
+  /* fluxo de passos: índice mono + hairlines, concluído com check verde */
+  .steps { display: flex; flex-direction: column; }
+  .step { display: flex; align-items: flex-start; gap: 1rem; padding: 1.05rem 0;
+    border-top: 1px solid var(--border); }
+  .step:first-child { border-top: 0; padding-top: .2rem; }
+  .step:last-child { padding-bottom: .2rem; }
+  .step-n { flex: none; width: 1.9rem; height: 1.9rem; display: inline-flex; align-items: center;
+    justify-content: center; font-family: var(--mono); font-size: 11px; color: var(--muted);
+    border: 1px solid var(--border-strong); border-radius: 50%; margin-top: .1rem; }
+  .step.done .step-n { background: var(--green-bg); border-color: var(--green); color: var(--green); }
+  .step-n .lucide { width: 1rem; height: 1rem; }
   .step-body { flex: 1; min-width: 0; }
-  .step-body h3 { margin: 0 0 .2rem; font-size: .95rem; }
-  .step-body p { margin: 0 0 .5rem; font-size: .84rem; color: var(--muted); }
-  .step.done .step-body h3 { color: var(--muted); text-decoration: line-through; }
-  .progress { height: .5rem; border-radius: 999px; background: var(--surface-2); overflow: hidden; margin: .6rem 0 1.2rem; }
-  .progress > span { display: block; height: 100%; background: var(--green); }
+  .step-body h3 { margin: 0 0 .2rem; font-size: 14.5px; font-weight: 600; letter-spacing: -.01em;
+    display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+  .step-body p { margin: 0 0 .6rem; font-size: 13px; color: var(--muted); max-width: 60ch; }
+  .step.done .step-body h3 { color: var(--muted); }
+
+  .setup-progress { display: flex; align-items: center; gap: .9rem; margin-bottom: .4rem; }
+  .setup-progress .progress-bg { flex: 1; margin: 0; }
 </style>
 {% endblock %}
 
 {% block content %}
 <div class="page-head">
-  <h1><i data-lucide="rocket"></i> Começar</h1>
-  <p class="sub">Siga os passos para deixar sua conta operacional. {{ feitos }} de {{ total }} concluídos.</p>
+  <div class="head-main">
+    <span class="eyebrow">Onboarding</span>
+    <h1><i data-lucide="rocket"></i> Começar</h1>
+    <p class="sub">Siga os passos para deixar sua conta operacional. {{ feitos }} de {{ total }} concluídos.</p>
+  </div>
+  <div class="head-actions">
+    <span class="tech-tag">{{ feitos }}/{{ total }} passos</span>
+  </div>
 </div>
 
-<div class="card">
-  <div class="progress"><span style="width: {% widthratio feitos total 100 %}%;"></span></div>
+<div class="card" style="max-width:760px;">
+  <div class="setup-progress">
+    <div class="progress-bg"><div class="progress-bar {% if completo %}succeeded{% endif %}" style="width: {% widthratio feitos total 100 %}%;"></div></div>
+  </div>
 
   {% if completo %}
-  <div class="msg msg-success" style="margin-bottom:1rem;">Tudo pronto. Suas ofertas já podem ser enviadas automaticamente.</div>
+  <div class="alert alert-success">
+    <i data-lucide="check-circle-2"></i>
+    <div><strong>Tudo pronto.</strong> Suas ofertas já podem ser enviadas automaticamente.</div>
+  </div>
   {% endif %}
 
-  {% for p in passos %}
-  <div class="step {% if p.feito %}done{% endif %}">
-    <div class="step-ico {% if p.feito %}done{% endif %}">
-      {% if p.feito %}<i data-lucide="check"></i>{% else %}<i data-lucide="circle"></i>{% endif %}
+  <div class="steps">
+    {% for p in passos %}
+    <div class="step {% if p.feito %}done{% endif %}">
+      <span class="step-n">{% if p.feito %}<i data-lucide="check"></i>{% else %}{{ forloop.counter|stringformat:"02d" }}{% endif %}</span>
+      <div class="step-body">
+        <h3>{{ p.titulo }}{% if p.feito %}<span class="badge badge-green"><span class="dot"></span>concluído</span>{% endif %}</h3>
+        <p>{{ p.desc }}</p>
+        {% if not p.feito %}
+        <a href="{% url p.url %}" class="btn btn-sm btn-accent">{{ p.cta }} <i data-lucide="arrow-right"></i></a>
+        {% endif %}
+      </div>
     </div>
-    <div class="step-body">
-      <h3>{{ p.titulo }}</h3>
-      <p>{{ p.desc }}</p>
-      {% if not p.feito %}
-      <a href="{% url p.url %}" class="btn btn-sm btn-blue">{{ p.cta }} <i data-lucide="arrow-right"></i></a>
-      {% endif %}
-    </div>
+    {% endfor %}
   </div>
-  {% endfor %}
 </div>
 {% endblock %}

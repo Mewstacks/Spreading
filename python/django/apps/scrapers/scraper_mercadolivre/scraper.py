@@ -13,7 +13,7 @@ from apps.scrapers.coupon_rules import (
 from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
 from apps.scrapers.models import Cupom, Produto, CupomNormalizado, FonteIngestao
 from apps.scrapers.progresso import emitir_progresso, emitir_fase
-from django.db import close_old_connections
+from django.db import connections
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -371,7 +371,11 @@ def mapear_cupons(n=1, faixa=None, usuario=None):
         # conexão persistente (conn_max_age=600) morre ociosa e o proxy do Fly a
         # derruba. CONN_HEALTH_CHECKS só revalida no início de cada request, não no
         # meio deste. Descarta a conexão stale para o bulk_create abrir uma nova.
-        close_old_connections()
+        # O fechamento precisa ser incondicional. ``close_old_connections`` só olha
+        # idade/flags locais e não percebe um socket que o proxy encerrou enquanto o
+        # browser trabalhava. Fora da transação longa da request, ``close_all`` faz a
+        # próxima query abrir uma conexão nova e reinstalar o contexto RLS pelo signal.
+        connections.close_all()
         cupons_db = [
             Cupom(
                 campanha_id=c["campaignId"],

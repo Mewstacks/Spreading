@@ -3538,12 +3538,18 @@ class RelatorioSaudeTests(TestCase):
         self.assertNotEqual(resposta.status_code, 200)
 
     def test_pagina_renderiza_para_superadmin(self):
-        self._evento("config_pausada")
+        self._evento("config_pausada", usuario=self.admin)
         self.client.force_login(self.admin)
-        with patch("apps.scrapers.saude._workers", return_value=[]):
+        with (
+            patch("apps.scrapers.saude._workers", return_value=[]),
+            patch("apps.scrapers.saude._conexoes_ao_vivo", return_value=[]),
+        ):
             resposta = self.client.get(reverse("superadmin-saude"))
-        self.assertEqual(resposta.status_code, 503)
-        self.assertEqual(resposta["Retry-After"], "3600")
+        self.assertEqual(resposta.status_code, 200)
+        self.assertContains(
+            resposta, "Eventos e incidentes da organização de saude-admin",
+        )
+        self.assertContains(resposta, "Automação pausada sozinha")
 
 
 class RetesteDaSaudeTests(TestCase):
@@ -3684,9 +3690,14 @@ class AutoRefreshDaSaudeTests(TestCase):
         self.client.force_login(self.admin)
 
     def test_json_responde_o_resumo(self):
-        r = self.client.get(reverse("superadmin-saude-json"))
+        with (
+            patch("apps.scrapers.saude._workers", return_value=[]),
+            patch("apps.scrapers.saude._conexoes_ao_vivo", return_value=[]),
+        ):
+            r = self.client.get(reverse("superadmin-saude-json"))
 
-        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["estado"], "ok")
 
     def test_polling_nao_infla_ocorrencias(self):
         """A regressão que o auto-refresh podia introduzir: resumo() escrevendo no

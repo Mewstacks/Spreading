@@ -1,102 +1,131 @@
 {% extends "base.html" %}
 {% block title %}Superadmin — {{ u.user.get_username }}{% endblock %}
 
+{% block head_extra %}
+<style>
+  /* identidade e metadados do cabeçalho */
+  .page-head h1 .badge { font-size: 11px; letter-spacing: 0; }
+
+  /* conexões: estado textual ao lado do dot */
+  .conn .n { display: flex; align-items: center; gap: .45rem; font-size: 1rem; font-weight: 600; letter-spacing: 0; }
+
+  /* ações administrativas */
+  .admin-actions { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
+  .admin-actions form { margin: 0; display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  .admin-actions input[name="motivo"] { width: auto; min-width: 220px; }
+  .admin-note { font-size: 12px; color: var(--muted); }
+</style>
+{% endblock %}
+
 {% block content %}
-<div style="margin-bottom:1rem;">
-  <a href="{% url 'superadmin-usuarios' %}" class="btn btn-sm btn-ghost"><i data-lucide="arrow-left"></i> Voltar</a>
-  <a href="{% url 'superadmin-saude' %}?usuario={{ u.user.get_username|urlencode }}" class="btn btn-sm btn-ghost"><i data-lucide="stethoscope"></i> Ver eventos na Saúde</a>
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Administração · Usuários</span>
+    <h1>{{ u.user.get_username }}
+      {% if u.bloqueado %}<span class="badge badge-red"><span class="dot"></span>Suspenso</span>
+      {% elif u.verificado %}<span class="badge badge-green"><span class="dot"></span>Ativo</span>
+      {% else %}<span class="badge badge-yellow"><span class="dot"></span>Não verificado</span>{% endif %}
+    </h1>
+    <p class="sub">{{ u.user.email|default:"Sem e-mail" }} · entrou em {{ u.user.date_joined|date:"d/m/Y" }}</p>
+  </div>
+  <div class="head-actions">
+    <a href="{% url 'superadmin-usuarios' %}" class="btn btn-ghost btn-sm"><i data-lucide="arrow-left"></i> Usuários</a>
+    <a href="{% url 'superadmin-saude' %}?usuario={{ u.user.get_username|urlencode }}" class="btn btn-ghost btn-sm"><i data-lucide="stethoscope"></i> Eventos na Saúde</a>
+  </div>
 </div>
 
+<div class="card-stack">
 <div class="card">
-  <div class="card-head">
-    <h2><i data-lucide="user"></i> {{ u.user.get_username }}</h2>
-    {% if u.bloqueado %}<span class="count" style="color:var(--red);">suspenso</span>
-    {% elif u.verificado %}<span class="count" style="color:var(--green);">ativo</span>
-    {% else %}<span class="count" style="color:var(--yellow);">não verificado</span>{% endif %}
-  </div>
-  <div style="color:var(--muted);font-size:.85rem;margin-bottom:1rem;">{{ u.user.email }} · entrou {{ u.user.date_joined|date:"d/m/Y" }}</div>
-
+  <div class="card-head"><h2><i data-lucide="bar-chart-3"></i> Atividade</h2></div>
   <div class="stat-grid">
-    <div class="stat"><div class="n">{{ u.envios_total }}</div><div class="l">Envios (total)</div></div>
-    <div class="stat"><div class="n">{{ u.envios_7d }}</div><div class="l">Envios (7 dias)</div></div>
-    <div class="stat"><div class="n">{{ u.envios_hoje }}</div><div class="l">Envios (hoje)</div></div>
-    <div class="stat"><div class="n">{{ u.configs_ativas }}</div><div class="l">Configs ativas</div></div>
-    <div class="stat"><div class="n">{{ u.canais }}</div><div class="l">Canais monitorados</div></div>
-    <div class="stat"><div class="n">{{ u.ultima_atividade|date:"d/m H:i"|default:"—" }}</div><div class="l">Última atividade</div></div>
+    <div class="stat"><div class="n tnum">{{ u.envios_total }}</div><div class="l">Envios (total)</div></div>
+    <div class="stat"><div class="n tnum">{{ u.envios_7d }}</div><div class="l">Envios (7 dias)</div></div>
+    <div class="stat"><div class="n tnum">{{ u.envios_hoje }}</div><div class="l">Envios (hoje)</div></div>
+    <div class="stat"><div class="n tnum">{{ u.configs_ativas }}</div><div class="l">Configs ativas</div></div>
+    <div class="stat"><div class="n tnum">{{ u.canais }}</div><div class="l">Canais monitorados</div></div>
+    <div class="stat"><div class="n tnum" style="font-size:1.05rem;">{{ u.ultima_atividade|date:"d/m H:i"|default:"—" }}</div><div class="l">Última atividade</div></div>
   </div>
 </div>
 
 <div class="card">
   <div class="card-head"><h2><i data-lucide="activity"></i> Conexões</h2></div>
   <div class="stat-grid">
-    <div class="stat">
-      <div class="n"><span class="dot {% if u.wa_estado %}on{% elif u.wa_estado is False %}off{% endif %}"></span></div>
+    <div class="stat conn">
+      <div class="n">
+        {% if u.wa_estado %}<span class="dot on"></span> Conectado
+        {% elif u.wa_estado is False %}<span class="dot off"></span> Desconectado
+        {% else %}<span class="dot"></span> <span class="muted">—</span>{% endif %}
+      </div>
       <div class="l">WhatsApp</div>
     </div>
-    <div class="stat">
-      <div class="n"><span class="dot {% if u.ml_estado %}on{% elif u.ml_estado is False %}off{% endif %}"></span></div>
+    <div class="stat conn">
+      <div class="n">
+        {% if u.ml_estado %}<span class="dot on"></span> Conectado
+        {% elif u.ml_estado is False %}<span class="dot off"></span> Desconectado
+        {% else %}<span class="dot"></span> <span class="muted">—</span>{% endif %}
+      </div>
       <div class="l">Mercado Livre</div>
     </div>
-    <div class="stat">
+    <div class="stat conn">
       <div class="n">
-        {% if u.amazon_elegivel %}<span class="dot on"></span> elegível
-        {% elif u.amazon_elegivel is False %}<span class="dot off"></span> não
-        {% else %}<span class="dot"></span> —{% endif %}
+        {% if u.amazon_elegivel %}<span class="dot on"></span> Elegível
+        {% elif u.amazon_elegivel is False %}<span class="dot off"></span> Não elegível
+        {% else %}<span class="dot"></span> <span class="muted">—</span>{% endif %}
       </div>
       <div class="l">Amazon Creators</div>
     </div>
   </div>
-  {% if u.amazon_erro %}<div class="msg msg-error" style="margin-top:.9rem;">Amazon: {{ u.amazon_erro }}</div>{% endif %}
+  {% if u.amazon_erro %}<div class="alert alert-error" style="margin-bottom:0;"><i data-lucide="alert-circle"></i><div><strong>Amazon:</strong> {{ u.amazon_erro }}</div></div>{% endif %}
 </div>
 
 <div class="card">
   <div class="card-head"><h2><i data-lucide="gauge"></i> Cotas</h2></div>
   <form method="post" action="{% url 'superadmin-cotas' u.user.id %}">
     {% csrf_token %}
-    <div class="stat-grid">
-      <label class="stat">
-        <div class="l">Máx. configs</div>
-        <input class="n" name="max_configs" type="number" min="0" value="{{ u.perfil.max_configs }}"
-               style="width:100%;background:transparent;border:0;color:var(--text);font-size:1.35rem;">
-        <div class="l">efetivo: {{ u.cota_configs }}</div>
-      </label>
-      <label class="stat">
-        <div class="l">Máx. envios/dia</div>
-        <input class="n" name="max_envios_dia" type="number" min="0" value="{{ u.perfil.max_envios_dia }}"
-               style="width:100%;background:transparent;border:0;color:var(--text);font-size:1.35rem;">
-        <div class="l">efetivo: {{ u.cota_envios_dia }}</div>
-      </label>
-      <label class="stat">
-        <div class="l">Máx. sessões WA</div>
-        <input class="n" name="max_wa_sessions" type="number" min="0" value="{{ u.perfil.max_wa_sessions }}"
-               style="width:100%;background:transparent;border:0;color:var(--text);font-size:1.35rem;">
-        <div class="l">efetivo: {{ u.cota_wa }}</div>
-      </label>
+    <div class="form-grid">
+      <div>
+        <label for="cota-configs">Máx. configs</label>
+        <input id="cota-configs" name="max_configs" type="number" min="0" value="{{ u.perfil.max_configs }}">
+        <span class="help">efetivo: {{ u.cota_configs }}</span>
+      </div>
+      <div>
+        <label for="cota-envios">Máx. envios/dia</label>
+        <input id="cota-envios" name="max_envios_dia" type="number" min="0" value="{{ u.perfil.max_envios_dia }}">
+        <span class="help">efetivo: {{ u.cota_envios_dia }}</span>
+      </div>
+      <div>
+        <label for="cota-wa">Máx. sessões WA</label>
+        <input id="cota-wa" name="max_wa_sessions" type="number" min="0" value="{{ u.perfil.max_wa_sessions }}">
+        <span class="help">efetivo: {{ u.cota_wa }}</span>
+      </div>
     </div>
-    <p style="color:var(--muted);font-size:.78rem;margin:.8rem 0;">0 = usa o default global de settings.</p>
-    <button class="btn btn-sm btn-blue" type="submit"><i data-lucide="save"></i> Salvar cotas</button>
+    <div class="form-actions">
+      <button class="btn btn-accent btn-sm" type="submit"><i data-lucide="save"></i> Salvar cotas</button>
+      <span class="help" style="margin:0;">0 = usa o default global de settings.</span>
+    </div>
   </form>
 </div>
 
 {% if not u.user.is_superuser %}
 <div class="card">
-  <div class="card-head"><h2><i data-lucide="shield-alert"></i> Ações</h2></div>
-  <div style="display:flex;gap:.6rem;flex-wrap:wrap;">
-    <form method="post" action="{% url 'superadmin-impersonar' u.user.id %}" style="margin:0;">
+  <div class="card-head"><h2><i data-lucide="shield-alert"></i> Ações administrativas</h2></div>
+  <div class="admin-actions">
+    <form method="post" action="{% url 'superadmin-impersonar' u.user.id %}">
       {% csrf_token %}
       <button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="venetian-mask"></i> Impersonar</button>
     </form>
-    <form method="post" action="{% url 'superadmin-suspender' u.user.id %}" style="margin:0;display:flex;gap:.5rem;">
+    <form method="post" action="{% url 'superadmin-suspender' u.user.id %}">
       {% csrf_token %}
       {% if u.bloqueado %}
-        <button class="btn btn-sm btn-green" type="submit"><i data-lucide="check"></i> Reativar</button>
-        {% if u.perfil.bloqueado_motivo %}<span style="color:var(--muted);font-size:.8rem;align-self:center;">motivo: {{ u.perfil.bloqueado_motivo }}</span>{% endif %}
+        <button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="check"></i> Reativar conta</button>
+        {% if u.perfil.bloqueado_motivo %}<span class="admin-note">motivo da suspensão: {{ u.perfil.bloqueado_motivo }}</span>{% endif %}
       {% else %}
-        <input name="motivo" placeholder="Motivo (opcional)" style="padding:.4rem .6rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;font-size:.85rem;">
-        <button class="btn btn-sm btn-red" type="submit"><i data-lucide="ban"></i> Suspender</button>
+        <input name="motivo" placeholder="Motivo (opcional)" aria-label="Motivo da suspensão">
+        <button class="btn btn-sm btn-danger" type="submit"><i data-lucide="ban"></i> Suspender</button>
       {% endif %}
     </form>
   </div>
 </div>
 {% endif %}
+</div>
 {% endblock %}
