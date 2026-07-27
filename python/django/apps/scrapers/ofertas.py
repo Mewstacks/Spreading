@@ -867,56 +867,92 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     if erro_canal:
         return erro_canal
     agora = timezone.now()
+    cupom_id = getattr(cupom, "pk", None)
     if cupom.estado != "ativo" or (cupom.validade and cupom.validade < agora):
         return {"sucesso": False, "motivo": "Cupom não encontrado, inativo ou vencido.",
                 "classe": "permanente"}
 
     desde = agora - timedelta(hours=24)
-    with transaction.atomic():
-        get_user_model().objects.select_for_update().get(pk=usuario.pk)
-        cupom = type(cupom).objects.select_for_update().get(pk=cupom.pk)
-        if cupom.estado != "ativo" or (cupom.validade and cupom.validade < agora):
-            return {"sucesso": False,
-                    "motivo": "Cupom não encontrado, inativo ou vencido.",
-                    "classe": "permanente"}
-        recente = Publicacao.objects.filter(
-            usuario=usuario, origem="cupom", cupom_normalizado=cupom,
-            canal=canal, destino_id=grupo_id,
-        ).filter(
-            Q(status="pendente", criada_em__gte=agora - timedelta(minutes=30))
-            | Q(status="enviado", enviada_em__gte=desde)
-            | Q(status="incerto", criada_em__gte=desde)
-        ).order_by("-criada_em").first()
-        if recente:
-            motivo = ("Este cupom já está sendo enviado para o destino."
-                      if recente.status == "pendente"
-                      else "Este destino já recebeu o cupom nas últimas 24h.")
-            return {"sucesso": False, "motivo": motivo, "duplicado": True,
-                    "classe": "permanente"}
+    publicacao = None
+    try:
+        with transaction.atomic():
+            # O lock do usuário serializa cota e deduplicação por destino. Um cupom
+            # público, porém, só é legível pelo tenant: `FOR UPDATE` exige a policy
+            # de escrita e o PostgreSQL o esconde como se não existisse. Não há
+            # escrita no cupom neste fluxo, portanto buscá-lo sem lock é suficiente.
+            get_user_model().objects.select_for_update().get(pk=usuario.pk)
+            cupom_qs = type(cupom).objects.filter(
+                pk=cupom_id, estado="ativo",
+            ).filter(Q(validade__isnull=True) | Q(validade__gte=agora))
+            if getattr(cupom, "owner_id", None) is None:
+                cupom = cupom_qs.filter(owner__isnull=True).first()
+            else:
+                cupom = cupom_qs.filter(owner=usuario).select_for_update().first()
+            if not cupom:
+                log_event(
+                    "publicacao", "coupon_unavailable",
+                    "Cupom atualizado antes da reserva do envio.", level="warning",
+                    usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                               "destino": destino_nome or grupo_id},
+                )
+                return {"sucesso": False,
+                        "motivo": "Este cupom foi atualizado e não está mais disponível. Atualize a tela e tente outro.",
+                        "classe": "permanente", "cupom_atualizado": True}
+            recente = Publicacao.objects.filter(
+                usuario=usuario, origem="cupom", cupom_normalizado=cupom,
+                canal=canal, destino_id=grupo_id,
+            ).filter(
+                Q(status="pendente", criada_em__gte=agora - timedelta(minutes=30))
+                | Q(status="enviado", enviada_em__gte=desde)
+                | Q(status="incerto", criada_em__gte=desde)
+            ).order_by("-criada_em").first()
+            if recente:
+                motivo = ("Este cupom já está sendo enviado para o destino."
+                          if recente.status == "pendente"
+                          else "Este destino já recebeu o cupom nas últimas 24h.")
+                return {"sucesso": False, "motivo": motivo, "duplicado": True,
+                        "classe": "permanente"}
 
-        perfil = getattr(usuario, "perfil", None)
-        if perfil and perfil.bloqueado:
-            return {"sucesso": False, "motivo": "Conta bloqueada para envios.",
-                    "classe": "permanente"}
-        inicio_dia = timezone.localtime(agora).replace(hour=0, minute=0, second=0,
-                                                       microsecond=0)
-        limite = perfil.cota_max_envios_dia() if perfil else 0
-        usados = Publicacao.objects.filter(
-            usuario=usuario, criada_em__gte=inicio_dia,
-            status__in=("pendente", "enviado", "incerto"),
-        ).count()
-        if limite and usados >= limite:
-            return {"sucesso": False, "motivo": "Limite diário de envios atingido.",
-                    "classe": "permanente"}
-        publicacao = Publicacao.objects.create(
-            usuario=usuario, origem="cupom", cupom_normalizado=cupom,
-            configuracao=configuracao,
-            canal=canal, destino_id=str(grupo_id)[:100],
-            destino_nome=str(destino_nome or "")[:255],
-            cupom=str(codigo_publicavel(cupom) or cupom.titulo or "")[:255],
-            categoria="Cupom", score=float(score or 0),
-            motivos_score=list(motivos_score or []),
+            perfil = getattr(usuario, "perfil", None)
+            if perfil and perfil.bloqueado:
+                return {"sucesso": False, "motivo": "Conta bloqueada para envios.",
+                        "classe": "permanente"}
+            inicio_dia = timezone.localtime(agora).replace(hour=0, minute=0, second=0,
+                                                           microsecond=0)
+            limite = perfil.cota_max_envios_dia() if perfil else 0
+            usados = Publicacao.objects.filter(
+                usuario=usuario, criada_em__gte=inicio_dia,
+                status__in=("pendente", "enviado", "incerto"),
+            ).count()
+            if limite and usados >= limite:
+                return {"sucesso": False, "motivo": "Limite diário de envios atingido.",
+                        "classe": "permanente"}
+            publicacao = Publicacao.objects.create(
+                usuario=usuario, origem="cupom", cupom_normalizado=cupom,
+                configuracao=configuracao,
+                canal=canal, destino_id=str(grupo_id)[:100],
+                destino_nome=str(destino_nome or "")[:255],
+                cupom=str(codigo_publicavel(cupom) or cupom.titulo or "")[:255],
+                categoria="Cupom", score=float(score or 0),
+                motivos_score=list(motivos_score or []),
+            )
+    except Exception as exc:
+        logger.exception("Falha ao reservar envio do cupom %s", cupom_id)
+        log_event(
+            "publicacao", "coupon_reservation_failed",
+            "Não foi possível reservar o envio do cupom.", level="error",
+            usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                       "destino": destino_nome or grupo_id}, exc=exc,
         )
+        return {"sucesso": False,
+                "motivo": "Não foi possível reservar este cupom para envio. Atualize a tela e tente novamente.",
+                "classe": "transitorio", "causa": type(exc).__name__}
+
+    log_event(
+        "publicacao", "send_started", "Preparando envio do cupom.",
+        usuario=usuario, contexto={"publicacao_id": publicacao.id, "cupom_id": cupom.id,
+                                   "canal": canal, "destino": destino_nome or grupo_id},
+    )
 
     def falhar(motivo, **extra):
         erro_tecnico = extra.pop("_erro_tecnico", "")

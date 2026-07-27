@@ -1402,9 +1402,27 @@ def enviar_cupom_stream(request):
             return
         rotulo = codigo_publicavel(cupom) or "Ativar no link"
         print(f"Enviando cupom '{rotulo}' → {grupo_nome or grupo_id} ({canal})...")
-        resultado = enviar_cupom(
-            cupom, grupo_id, canal=canal, usuario=usuario, destino_nome=grupo_nome,
-            imagem_b64_custom=imagem_custom)
+        try:
+            resultado = enviar_cupom(
+                cupom, grupo_id, canal=canal, usuario=usuario, destino_nome=grupo_nome,
+                imagem_b64_custom=imagem_custom)
+        except Exception as exc:
+            # O núcleo deve devolver um dict, mas o SSE não pode esconder uma
+            # regressão nova atrás do erro genérico do runner.
+            logger.exception("Falha não tratada ao enviar cupom %s", cupom_id)
+            from apps.scrapers.eventos import log_event
+            log_event(
+                "publicacao", "coupon_sse_failed",
+                "Não foi possível concluir o envio do cupom.", level="error",
+                usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                           "destino": grupo_nome or grupo_id}, exc=exc,
+            )
+            print("[ERRO] Não foi possível concluir o envio do cupom. Atualize a tela e tente novamente.")
+            return
+        if not isinstance(resultado, dict):
+            logger.error("Envio de cupom %s retornou resultado inválido: %r", cupom_id, resultado)
+            print("[ERRO] Não foi possível concluir o envio do cupom. Atualize a tela e tente novamente.")
+            return
         if resultado.get("sucesso"):
             print(f"__SENT__ OK Cupom enviado (via {resultado.get('via', canal)}).")
         else:
@@ -1618,18 +1636,21 @@ def top_promocoes(request):
         cupom_catalogo.modo_resgate = regras_do_cupom(cupom_catalogo)["modo_resgate"]
     from apps.scrapers.coupon_products import ids_cupons_prontos
     ids_prontos = ids_cupons_prontos(request.user, cupons_lista)
-    cupons_lista = [
-        c for c in cupons_lista if c.id in ids_prontos and cupom_publicavel(c)
-    ]
+    cupons_publicaveis = [c for c in cupons_lista if cupom_publicavel(c)]
+    if como_usar_selecionado == "codigo":
+        cupons_publicaveis = [c for c in cupons_publicaveis if c.codigo_publico]
+    elif como_usar_selecionado == "ativacao":
+        cupons_publicaveis = [c for c in cupons_publicaveis if not c.codigo_publico]
+    cupons_prontos = sum(c.id in ids_prontos for c in cupons_publicaveis)
+    cupons_aguardando_preparo = len(cupons_publicaveis) - cupons_prontos
+    # A lista continua estrita: o contador torna a fila visível sem oferecer um
+    # cupom cujo envio ainda não consegue montar produtos, imagem e link afiliado.
+    cupons_lista = [c for c in cupons_publicaveis if c.id in ids_prontos]
     # Os filtros tambem devem refletir somente o catalogo realmente publicavel.
     cupom_categorias = sorted({c.categoria for c in cupons_lista if c.categoria})
     cupom_anunciantes = sorted({c.anunciante_nome for c in cupons_lista
                                 if c.anunciante_nome})
     cupons_lista.sort(key=score_cupom, reverse=True)
-    if como_usar_selecionado == "codigo":
-        cupons_lista = [c for c in cupons_lista if c.codigo_publico]
-    elif como_usar_selecionado == "ativacao":
-        cupons_lista = [c for c in cupons_lista if not c.codigo_publico]
     cupons_page = Paginator(cupons_lista, POR_PAGINA).get_page(pagina)
     cupons_catalogo = list(cupons_page)
     perfil = getattr(request.user, "perfil", None)
@@ -1785,6 +1806,8 @@ def top_promocoes(request):
         "anunciante_selecionado": anunciante_selecionado,
         "como_usar_selecionado": como_usar_selecionado,
         "cupons_catalogo": cupons_catalogo,
+        "cupons_prontos": cupons_prontos,
+        "cupons_aguardando_preparo": cupons_aguardando_preparo,
         "awin_programas": ProgramaAfiliado.objects.filter(
             integracao__owner=request.user, integracao__provedor="awin",
             integracao__status="conectada", habilitado=True,

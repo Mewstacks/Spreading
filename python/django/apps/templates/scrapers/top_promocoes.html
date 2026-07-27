@@ -225,6 +225,10 @@
   </div>
   <div class="head-actions">
     <span class="tech-tag"><i data-lucide="list"></i> {% if tipo == 'cupom' %}{{ cupons_page.paginator.count }}{% else %}{{ page_obj.paginator.count }}{% endif %} resultado(s)</span>
+    {% if tipo == 'cupom' %}
+      <span class="tech-tag"><i data-lucide="circle-check"></i> {{ cupons_prontos }} pronto(s)</span>
+      {% if cupons_aguardando_preparo %}<span class="tech-tag"><i data-lucide="loader-circle"></i> {{ cupons_aguardando_preparo }} aguardando preparo</span>{% endif %}
+    {% endif %}
     {% if tipo != 'cupom' %}
       {% if so_afiliados %}
       <a class="btn btn-ghost btn-sm" href="?{{ qs_base_sem_afiliado }}afiliado=todos"><i data-lucide="eye"></i> Mostrar também os pendentes</a>

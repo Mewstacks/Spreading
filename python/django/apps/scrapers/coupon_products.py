@@ -11,7 +11,7 @@ import html
 import json
 import logging
 import re
-from datetime import timedelta
+from datetime import timedelta, timezone as datetime_timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html.parser import HTMLParser
 from urllib.parse import urlsplit, urlunsplit
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 CACHE_HORAS = 3
 MAX_CANDIDATOS = 36
+PREPARO_LOTE_POR_CICLO = 12
 _CENT = Decimal("0.01")
 
 
@@ -532,7 +533,7 @@ def ids_cupons_prontos(usuario, cupons):
     return prontos
 
 
-def preparar_lote(limite=8):
+def preparar_lote(limite=PREPARO_LOTE_POR_CICLO):
     """Prepara cupons ativos em pequenos lotes; chamado pelo worker de catalogo."""
     from django.contrib.auth import get_user_model
     from apps.scrapers.coupon_rules import cupom_publicavel
@@ -546,7 +547,30 @@ def preparar_lote(limite=8):
         Q(codigo__gt="") | Q(fonte__slug="amazon-public-coupons")
     ).filter(
         Q(validade__isnull=True) | Q(validade__gte=agora)
-    ).order_by("-ultima_observacao")[:200])
+    ).order_by("-ultima_observacao")[:500])
+    fresco_desde = agora - timedelta(hours=CACHE_HORAS)
+    preparos_publicos = {
+        prep.cupom_id: prep
+        for prep in CupomPreparacao.objects.filter(
+            cupom_id__in=[cupom.id for cupom in cupons], usuario__isnull=True,
+        )
+    }
+
+    def prioridade(cupom):
+        """Evita que cupons já frescos ocupem sempre o começo do lote."""
+        prep = preparos_publicos.get(cupom.id)
+        if prep is None:
+            estado = 0  # nunca preparado
+        elif prep.proxima_tentativa and prep.proxima_tentativa > agora:
+            estado = 3  # respeita backoff; fica por último e será pulado abaixo
+        elif prep.status == "pronto" and prep.verificado_em and prep.verificado_em >= fresco_desde:
+            estado = 4  # já está visível na tela
+        else:
+            estado = 1  # preparação vencida, vazia ou com erro retomável
+        validade = cupom.validade or timezone.datetime.max.replace(tzinfo=datetime_timezone.utc)
+        return (estado, 0 if cupom.relampago else 1, validade, cupom.id)
+
+    cupons.sort(key=prioridade)
     feitos = prontos = 0
     usuarios = list(get_user_model().objects.filter(is_active=True))
     for cupom in cupons:
@@ -561,7 +585,7 @@ def preparar_lote(limite=8):
             chave = atualizar_chave_cupom(cupom)
             prep = CupomPreparacao.objects.filter(cupom=cupom, usuario=contexto).first()
             if prep and prep.produtos_chave == chave and prep.verificado_em:
-                if prep.status == "pronto" and prep.verificado_em >= agora - timedelta(hours=CACHE_HORAS):
+                if prep.status == "pronto" and prep.verificado_em >= fresco_desde:
                     continue
                 if prep.proxima_tentativa and prep.proxima_tentativa > agora:
                     continue

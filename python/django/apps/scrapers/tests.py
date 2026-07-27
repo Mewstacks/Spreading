@@ -1154,6 +1154,36 @@ class TopPromocoesFilterTests(TestCase):
         )
         return produto
 
+    def test_catalogo_de_cupons_mostra_so_prontos_e_indica_fila(self):
+        from apps.scrapers.coupon_products import atualizar_chave_cupom
+        from apps.scrapers.models import CupomPreparacao
+
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-counter-source", marketplace="mercadolivre", nome="Cupons")
+        pronto = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="counter-ready", marketplace="mercadolivre",
+            titulo="Cupom pronto", codigo="PRONTO20",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20}, estado="ativo",
+        )
+        aguardando = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="counter-pending", marketplace="mercadolivre",
+            titulo="Cupom aguardando", codigo="AGUARDA20",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20}, estado="ativo",
+        )
+        CupomPreparacao.objects.create(
+            cupom=pronto, usuario=None, status="pronto",
+            produtos_chave=atualizar_chave_cupom(pronto), verificado_em=timezone.now(),
+        )
+
+        response = self.client.get(self.url, {"tipo": "cupom"})
+
+        self.assertEqual(response.context["cupons_prontos"], 1)
+        self.assertEqual(response.context["cupons_aguardando_preparo"], 1)
+        self.assertEqual([c.id for c in response.context["cupons_catalogo"]], [pronto.id])
+        self.assertNotIn(aguardando.id, [c.id for c in response.context["cupons_catalogo"]])
+
     def test_search_and_minimum_discount_are_applied(self):
         response = self.client.get(self.url, {"q": "fone", "min_desconto": "40"})
 
@@ -4560,6 +4590,30 @@ class EnvioCupomTests(TestCase):
         self.assertEqual(
             Publicacao.objects.get(cupom_normalizado=self.cupom).status, "falhou")
 
+    def test_cupom_publico_nao_tenta_lock_de_escrita(self):
+        """RLS deixa o catálogo público legível, mas não permite FOR UPDATE nele."""
+        from apps.scrapers.ofertas import enviar_cupom
+
+        sender = self._sender({"sucesso": True, "via": "whatsapp", "mensagem_id": "m1"})
+        with patch.object(CupomNormalizado.objects, "select_for_update",
+                          side_effect=AssertionError("cupom público não pode ser bloqueado")), \
+             patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
+            resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertTrue(resultado["sucesso"])
+
+    def test_cupom_removido_entre_tela_e_reserva_tem_erro_claro(self):
+        from apps.scrapers.ofertas import enviar_cupom
+
+        cupom_exibido = self.cupom
+        self.cupom.delete()
+        resultado = enviar_cupom(cupom_exibido, "123@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertTrue(resultado["cupom_atualizado"])
+        self.assertIn("Atualize a tela", resultado["motivo"])
+        self.assertFalse(Publicacao.objects.filter(usuario=self.user).exists())
+
 
 class LinkAfiliadoCupomTests(TestCase):
     def setUp(self):
@@ -4672,6 +4726,24 @@ class EndpointsEnvioPostTests(TransactionTestCase):
         corpo = b"".join(response.streaming_content).decode()
         self.assertIn("Cupom não encontrado", corpo)
         self.assertNotIn("DROP TABLE", corpo)
+
+    @patch("apps.scrapers.ofertas.enviar_cupom", side_effect=RuntimeError("falha de teste"))
+    def test_sse_de_envio_cupom_nao_esconde_excecao_do_nucleo(self, _enviar):
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-sse-source", marketplace="mercadolivre", nome="Fonte")
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="sse-coupon", marketplace="mercadolivre",
+            titulo="Cupom SSE", codigo="SSE20",
+            regras={"modo_resgate": "codigo"}, estado="ativo",
+        )
+
+        response = self.client.post(reverse("scraper-enviar-cupom"), {
+            "cupom": cupom.id, "grupo": "123@g.us", "canal": "whatsapp",
+        })
+        corpo = b"".join(response.streaming_content).decode()
+
+        self.assertIn("Não foi possível concluir o envio do cupom", corpo)
+        self.assertNotIn("Falha inesperada ao processar a solicitação", corpo)
 
     def test_cupom_sem_codigo_publico_e_produto_pronto_fica_oculto(self):
         fonte = FonteIngestao.objects.create(

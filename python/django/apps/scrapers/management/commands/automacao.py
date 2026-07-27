@@ -128,8 +128,8 @@ def _rodar_scrape():
     except Exception:
         logger.exception("Casamento cupom-container falhou")
     try:
-        from apps.scrapers.coupon_products import preparar_lote
-        preparar_lote(limite=3)
+        from apps.scrapers.coupon_products import PREPARO_LOTE_POR_CICLO, preparar_lote
+        preparar_lote(limite=PREPARO_LOTE_POR_CICLO)
     except Exception:
         logger.exception("Preparacao automatica de produtos dos cupons falhou")
     if not sucessos:
@@ -186,8 +186,8 @@ def _rodar_scrape_rapido(paginas=8):
     cupons_ml = run_source("ml-cupons-afiliados")
     persist_items(cupons_ml.get("coupons", []))
     _rodar_awin_integracoes()
-    from apps.scrapers.coupon_products import preparar_lote
-    preparo = preparar_lote(limite=3)
+    from apps.scrapers.coupon_products import PREPARO_LOTE_POR_CICLO, preparar_lote
+    preparo = preparar_lote(limite=PREPARO_LOTE_POR_CICLO)
     logger.info("Cupons preparados: %s processado(s), %s pronto(s)",
                 preparo["processados"], preparo["prontos"])
     now = timezone.now()
