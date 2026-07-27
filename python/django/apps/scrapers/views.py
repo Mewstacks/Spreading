@@ -168,7 +168,12 @@ def operations_dashboard(request):
     )
     from apps.scrapers.conexoes import estado_ml, estado_whatsapp
 
-    perfil = request.user.perfil
+    perfil = getattr(request.user, 'perfil', None)
+    if not perfil:
+        # Usuário sem perfil — criar de forma segura pra evitar 500 de novo.
+        from apps.accounts.models import Perfil
+        perfil, _ = Perfil.objects.get_or_create(user=request.user)
+
     configs = ConfiguracaoEnvio.objects.filter(owner=request.user)
     alertas = []
     est_ml = estado_ml(request.user)
@@ -1010,7 +1015,8 @@ def telegram_conectar(request):
     res = _telegram_getme(token)
     if not res.get("ok"):
         return JsonResponse({"ok": False, "erro": res.get("erro") or "Token inválido."}, status=400)
-    perfil = request.user.perfil
+    from apps.accounts.models import Perfil
+    perfil, _ = Perfil.objects.get_or_create(user=request.user)
     perfil.telegram_bot_token = token
     perfil.save(update_fields=["telegram_bot_token"])
     return JsonResponse({"ok": True, **res})
@@ -1019,7 +1025,8 @@ def telegram_conectar(request):
 @require_POST
 def telegram_desconectar(request):
     """Remove o token do bot do usuário."""
-    perfil = request.user.perfil
+    from apps.accounts.models import Perfil
+    perfil, _ = Perfil.objects.get_or_create(user=request.user)
     perfil.telegram_bot_token = ""
     perfil.save(update_fields=["telegram_bot_token"])
     return JsonResponse({"ok": True})
@@ -1035,7 +1042,8 @@ def configuracoes(request):
                 id=request.POST.get("id"), owner=request.user).delete()
         elif acao == "perfil":
             # Identidade de afiliado + credenciais Amazon por-usuário (via web, não .env).
-            perfil = request.user.perfil
+            from apps.accounts.models import Perfil
+            perfil, _ = Perfil.objects.get_or_create(user=request.user)
             perfil.afiliado_tag_ml = (request.POST.get("afiliado_tag_ml") or "").strip()
             perfil.afiliado_tag_amazon = (request.POST.get("afiliado_tag_amazon") or "").strip()
             perfil.amazon_credential_id = (request.POST.get("amazon_credential_id") or "").strip()
@@ -1148,6 +1156,8 @@ def configuracoes(request):
         "programas").order_by("macro_categoria")
     configs = list(configs_qs)
     from apps.scrapers.content_ranking import previa_melhor_conteudo
+    from apps.accounts.models import Perfil
+    perfil, _ = Perfil.objects.get_or_create(user=request.user)
     for config in configs:
         config.previa_conteudo = previa_melhor_conteudo(config) if config.ativo else None
     return render(request, "scrapers/configuracoes.html", {
@@ -1156,7 +1166,7 @@ def configuracoes(request):
         "subnichos": subnichos,
         "marketplaces": list(MARKETPLACES.keys()),
         "canais": list(SENDERS.keys()),
-        "perfil": request.user.perfil,
+        "perfil": perfil,
         "awin_programas": ProgramaAfiliado.objects.filter(
             integracao__owner=request.user, integracao__status="conectada",
             habilitado=True, status_vinculo="joined", link_status="online").order_by("nome"),
