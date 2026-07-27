@@ -1,6 +1,4 @@
-import asyncio
 import logging
-import os
 import queue
 import threading
 from contextlib import redirect_stdout
@@ -1207,8 +1205,8 @@ def enviar_agora_stream(request):
         writer = _QueueWriter(q)
 
         def _run():
-            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-            asyncio.set_event_loop(asyncio.new_event_loop())
+            # Nada de bypass de ORM aqui: quem precisa de query com o Playwright
+            # aberto usa apps.accounts.tenant.executar_no_tenant (o porquê está lá).
             try:
                 with redirect_stdout(writer):
                     # Só a própria regra do usuário (isolamento multi-tenant).
@@ -1782,11 +1780,8 @@ def run_scraper_stream(request):
         writer = _QueueWriter(q)
 
         def _run():
-            # Playwright's sync API leaves asyncio's event loop in a running state
-            # on the calling thread, which trips Django's ORM async-safety check.
-            # DJANGO_ALLOW_ASYNC_UNSAFE is the documented bypass for this scenario.
-            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-            asyncio.set_event_loop(asyncio.new_event_loop())
+            # Nada de bypass de ORM aqui: quem precisa de query com o Playwright
+            # aberto usa apps.accounts.tenant.executar_no_tenant (o porquê está lá).
             try:
                 with redirect_stdout(writer):
                     scrapper_main()
@@ -1840,8 +1835,8 @@ def scrape_ofertas_stream(request):
         writer = _QueueWriter(q)
 
         def _run():
-            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-            asyncio.set_event_loop(asyncio.new_event_loop())
+            # Nada de bypass de ORM aqui: quem precisa de query com o Playwright
+            # aberto usa apps.accounts.tenant.executar_no_tenant (o porquê está lá).
             try:
                 with redirect_stdout(writer):
                     mapear_ofertas(max_paginas=paginas, usuario=usuario)
@@ -1888,8 +1883,14 @@ def _sse_runner(fn, organization):
         writer = _QueueWriter(q)
 
         def _run():
-            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-            asyncio.set_event_loop(asyncio.new_event_loop())
+            # Sem bypass de ORM aqui: o Playwright agora é sempre fechado antes de
+            # qualquer query (ver auxiliar.iniciar_browser) ou a query vai por
+            # apps.accounts.tenant.executar_no_tenant. DJANGO_ALLOW_ASYNC_UNSAFE era
+            # setada no os.environ do PROCESSO e nunca restaurada — com 8 threads no
+            # gunicorn, o `finally` de outro fluxo a removia no meio deste.
+            # O set_event_loop também saiu: o Playwright cria o próprio loop e
+            # get_running_loop() ignora o loop "setado" — isso só vazava um epoll por
+            # request SSE.
             try:
                 with redirect_stdout(writer):
                     fn()

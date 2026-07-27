@@ -183,14 +183,29 @@
   // Saúde). Abrir a tela continua sendo a intenção explícita de conectar: ao ver
   // uma fase terminal, dispara UM revive via POST e deixa o poll acompanhar.
   const FASES_REVIVIVEIS = ['inativo', 'expirado', 'desconectado', 'falha_auth', 'recuperacao_pausada'];
+  // UM revive por EPISÓDIO terminal, não por page-load. O worker destrói o runtime
+  // depois de 3 min de QR ocioso (QR_IDLE_DESTROY_MS) e a tela volta para 'inativo';
+  // com um único revive por carregamento, esse já tinha sido gasto ao abrir a página
+  // e quem deixava a aba aberta sem escanear ficava preso em "Desconectado" até dar
+  // F5. `reviveTentado` é rearmado ao ver uma fase saudável (ver poll), então cada
+  // queda nova ganha o seu revive.
   let reviveTentado = false;
+  // Piso entre revives: um worker permanentemente quebrado alterna terminal/erro e
+  // seria martelado a cada poll de 5s sem isto.
+  const REVIVE_COOLDOWN_MS = 60000;
+  let ultimoReviveEm = 0;
   // O reset já cria a sessão nova no worker. Enquanto o QR não chegar, nenhum
   // status terminal (inclusive um cache antigo) pode disparar outro /iniciar/.
   let suprimirReviveAteQr = false;
 
   async function reviverSeTerminal(fase) {
     if (suprimirReviveAteQr || reviveTentado || FASES_REVIVIVEIS.indexOf(fase) === -1) return;
+    // Aba em segundo plano não sobe Chromium no worker: cada sessão custa ~350MB e
+    // o limite é MAX_WHATSAPP_SESSIONS. Quando o usuário voltar, o poll revive.
+    if (document.visibilityState !== 'visible') return;
+    if (Date.now() - ultimoReviveEm < REVIVE_COOLDOWN_MS) return;
     reviveTentado = true;
+    ultimoReviveEm = Date.now();
     try {
       await acao('/scrapers/whatsapp/iniciar/', {
         method: 'POST',
@@ -251,9 +266,14 @@
 
       const fase = s.fase || (s.conectado ? 'conectado' : 'desconectado');
       const f = FASES[fase] || FASES.desconectado;
-      if (suprimirReviveAteQr && ((fase === 'qr' && s.qr) || fase === 'conectado')) {
+      const faseSaudavel = (fase === 'qr' && s.qr) || fase === 'conectado';
+      if (suprimirReviveAteQr && faseSaudavel) {
         suprimirReviveAteQr = false;
       }
+      // Rearma o revive ao sair de um estado terminal: o próximo colapso (ex.: o
+      // worker destruindo o runtime após 3 min de QR ocioso) ganha o seu próprio
+      // revive, em vez de a tela ficar morta até um F5.
+      if (faseSaudavel) reviveTentado = false;
       reviverSeTerminal(fase);
 
       // A mensagem da ação acompanha o estado real. Antes o texto de sucesso
@@ -414,5 +434,11 @@
   // 5s, não 2,5s: o status é servido de um cache de 5s no backend, então polling mais
   // rápido que isso só gasta thread de gunicorn sem trazer informação nova.
   setInterval(poll, 5000);
+  // Voltar para a aba é a hora certa de reagir: o revive é suprimido enquanto ela
+  // está oculta, então sem isto o usuário esperaria mais um ciclo de poll olhando
+  // para um "Desconectado" que já poderia estar sendo resolvido.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') poll();
+  });
 </script>
 {% endblock %}

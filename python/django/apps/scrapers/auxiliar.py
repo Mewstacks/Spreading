@@ -2,6 +2,7 @@ import os
 import random
 import logging
 from contextlib import contextmanager
+from django.db import close_old_connections
 from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger(__name__)
@@ -161,36 +162,53 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
             "Reconecte em Conexão Mercado Livre para continuar."
         )
 
-    with sync_playwright() as p:
-        try:
-            browser = _iniciar_chromium(p, headless=headless)
-            
-            if storage_state is not None:
-                context = browser.new_context(storage_state=storage_state, **context_kwargs)
-            else:
-                context = browser.new_context(**context_kwargs)
-    
-            page = context.new_page()
-        except Exception as e:
-            raise BrowserError(f"Falha crítica ao abrir o navegador: {e}")
-        
-        try:
-            yield page, context # yield serve para passar o controle para o bloco de código que usa o contexto, coisa fofa
-            
-        finally:
-            # Persiste cookies renovados SÓ se já havia sessão salva — contexto anônimo
-            # (validar_sessao=False sem auth) não pode criar um auth.json fantasma.
-            if tinha_auth:
-                try:
-                    refreshed_state = context.storage_state()
-                    if session_user is not None:
-                        save_storage_state(session_user, refreshed_state)
-                    elif auth_path:
-                        # Apenas compatibilidade de dev/migração.
-                        context.storage_state(path=auth_path)
-                except Exception:
-                    logger.exception("Falha ao persistir renovação da sessão ML.")
-            context.close()
-            browser.close()
+    # A gravação no banco NÃO pode acontecer dentro do `with sync_playwright()`: a API
+    # sync mantém um event loop vivo num greenlet desta mesma thread, e o @async_unsafe
+    # do Django levanta SynchronousOnlyOperation em qualquer query. O `except Exception`
+    # que existia aqui engolia esse erro, então NENHUM fluxo renovava cookies — a sessão
+    # envelhecia em silêncio até o ML revogá-la. Capturamos o estado aqui dentro (só o
+    # Playwright sabe produzi-lo) e gravamos no `finally` de fora, com o loop já morto.
+    estado_renovado = None
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = _iniciar_chromium(p, headless=headless)
+
+                if storage_state is not None:
+                    context = browser.new_context(storage_state=storage_state, **context_kwargs)
+                else:
+                    context = browser.new_context(**context_kwargs)
+
+                page = context.new_page()
+            except Exception as e:
+                raise BrowserError(f"Falha crítica ao abrir o navegador: {e}")
+
+            try:
+                yield page, context # yield serve para passar o controle para o bloco de código que usa o contexto, coisa fofa
+
+            finally:
+                # Persiste cookies renovados SÓ se já havia sessão salva — contexto anônimo
+                # (validar_sessao=False sem auth) não pode criar um auth.json fantasma.
+                if tinha_auth:
+                    try:
+                        estado_renovado = context.storage_state()
+                        if session_user is None and auth_path:
+                            # Arquivo (compatibilidade de dev/migração): não é ORM, pode
+                            # ser gravado aqui mesmo.
+                            context.storage_state(path=auth_path)
+                    except Exception:
+                        logger.exception("Não foi possível capturar a renovação da sessão ML.")
+                context.close()
+                browser.close()
+    finally:
+        # Aqui o loop do Playwright já morreu: o ORM está liberado. Roda mesmo quando o
+        # corpo levantou (LoginError, SessaoExpirada) — a sessão renovada até ali continua
+        # valendo, e era assim que o `finally` de dentro se comportava.
+        if estado_renovado is not None and session_user is not None:
+            try:
+                close_old_connections()   # minutos de browser matam o socket ocioso
+                save_storage_state(session_user, estado_renovado)
+            except Exception:
+                logger.exception("Falha ao persistir renovação da sessão ML.")
 
 

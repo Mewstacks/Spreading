@@ -20,6 +20,7 @@ from django.urls import reverse
 from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
+from apps.accounts.tenant import organization_context
 from apps.scrapers import ofertas, whatsapp_client
 from apps.scrapers.afiliado import tag_ml
 from apps.scrapers.maintenance import reconciliar_publicacoes_orfas
@@ -3113,7 +3114,15 @@ class GeracaoDeLinksEmLoteTests(TestCase):
         enviados, _ = prefetch.call_args
         self.assertEqual(len(enviados[0]), 2)
 
-    def test_lote_permite_orm_so_durante_o_playwright_e_restaura_o_ambiente(self):
+    def test_lote_grava_o_link_sem_nenhum_bypass_de_async(self):
+        """O lote persiste item a item sem tocar em DJANGO_ALLOW_ASYNC_UNSAFE.
+
+        Antes, o lote inteiro rodava dentro de um contextmanager que setava essa
+        variável no os.environ do PROCESSO. Como ela é global às 8 threads do
+        gunicorn, o `finally` de um fluxo a removia no meio de outro — a origem do
+        "às vezes funciona, às vezes não". Agora cada gravação vai por
+        executar_no_tenant, e o ambiente não é tocado em momento nenhum.
+        """
         produto = self._produto()
         anterior = os.environ.pop("DJANGO_ALLOW_ASYNC_UNSAFE", None)
 
@@ -3122,7 +3131,8 @@ class GeracaoDeLinksEmLoteTests(TestCase):
             yield Mock(), Mock()
 
         try:
-            with patch("apps.scrapers.scraper_mercadolivre.link.iniciar_browser", browser_falso), \
+            with organization_context(self.user.personal_organization), \
+                 patch("apps.scrapers.scraper_mercadolivre.link.iniciar_browser", browser_falso), \
                  patch("apps.scrapers.scraper_mercadolivre.link._abrir_link_builder"), \
                  patch("apps.scrapers.scraper_mercadolivre.link._afiliar_url_na_pagina",
                        return_value="https://meli.la/link"):
@@ -4130,9 +4140,13 @@ class WhatsAppPainelSemEfeitoColateralTests(TestCase):
             "suprimirReviveAteQr || reviveTentado || FASES_REVIVIVEIS",
             html,
         )
-        # Uma ocorrência é a declaração inicial. O handler do reset não pode
-        # mais recolocar reviveTentado=false depois de descartar a sessão.
-        self.assertEqual(html.count("reviveTentado = false"), 1)
+        # O handler do reset não pode recolocar reviveTentado=false depois de
+        # descartar a sessão: ele arma os DOIS guardas.
+        self.assertIn("suprimirReviveAteQr = true;\n    reviveTentado = true;", html)
+        # O único rearme permitido é o do poll, e só numa fase saudável — é ele que
+        # devolve um revive a cada novo episódio terminal (ver o teste abaixo).
+        self.assertEqual(html.count("reviveTentado = false"), 2)
+        self.assertIn("if (faseSaudavel) reviveTentado = false;", html)
         self.assertIn("fase === 'reiniciando_qr'", html)
         self.assertIn("fase === 'qr' && s.qr", html)
         self.assertIn("fase === 'falha_reset'", html)
@@ -4666,3 +4680,235 @@ class EndpointsEnvioPostTests(TransactionTestCase):
         self.assertNotIn('<script>alert("xss")</script>', corpo)
         self.assertNotIn(token, corpo)
         self.assertIn("Nenhum cupom ativo encontrado", corpo)
+
+
+class SemBypassAsyncUnsafeTests(SimpleTestCase):
+    """Trava permanente: DJANGO_ALLOW_ASYNC_UNSAFE não pode voltar ao código.
+
+    Ela era usada para chamar o ORM de dentro de `with sync_playwright()`. Como é uma
+    variável de ambiente do PROCESSO e o gunicorn roda 8 threads, um fluxo removia a
+    permissão debaixo de outro — em produção isso apareceu como
+    "Falha na conexão: You cannot call this from an async context". A saída correta é
+    tirar a query do bloco do Playwright ou passá-la por
+    apps.accounts.tenant.executar_no_tenant.
+    """
+
+    def test_nenhum_modulo_de_producao_seta_a_variavel(self):
+        # Pela AST, e não por texto: comentários explicando POR QUE o bypass saiu são
+        # documentação valiosa e não podem fazer a trava disparar. Só um literal de
+        # verdade no código conta.
+        import ast
+        import pathlib
+
+        raiz = pathlib.Path(__file__).resolve().parent.parent   # apps/
+        culpados = []
+        for arquivo in raiz.rglob("*.py"):
+            if arquivo.name == "tests.py":
+                continue          # os testes citam o nome só para provar a ausência
+            arvore = ast.parse(arquivo.read_text(encoding="utf-8"))
+            for no in ast.walk(arvore):
+                if isinstance(no, ast.Constant) and no.value == "DJANGO_ALLOW_ASYNC_UNSAFE":
+                    culpados.append(str(arquivo.relative_to(raiz)))
+                    break
+        self.assertEqual(
+            sorted(culpados), [],
+            "Use executar_no_tenant ou mova o ORM para fora do `with sync_playwright()` "
+            f"em vez de reintroduzir o bypass: {sorted(culpados)}",
+        )
+
+
+class SessaoMLGravadaForaDoPlaywrightTests(TestCase):
+    """Regressão central: a sessão só pode ser gravada com o Playwright já fechado.
+
+    O login concluía, `save_storage_state` levantava SynchronousOnlyOperation dentro do
+    `with sync_playwright()`, o except genérico jogava o texto cru na tela e a sessão
+    NUNCA era salva. É este teste que teria pego o bug em produção.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("ml-live", password="test")
+        cache.clear()
+
+    def _playwright_falso(self, ordem):
+        """sync_playwright() de mentira que registra quando o bloco fecha."""
+        contexto = Mock()
+        contexto.storage_state.return_value = {"cookies": [{"domain": ".mercadolivre.com.br"}]}
+        pagina = Mock()
+        pagina.url = "https://www.mercadolivre.com.br/"
+        contexto.pages = [pagina]
+        contexto.new_cdp_session.return_value = Mock()
+        navegador = Mock()
+        navegador.new_context.return_value = contexto
+
+        @contextmanager
+        def fake():
+            p = Mock()
+            p.chromium.launch.return_value = navegador
+            try:
+                yield p
+            finally:
+                ordem.append("playwright_fechado")
+
+        return fake
+
+    def test_ml_grava_a_sessao_depois_de_fechar_o_browser(self):
+        from apps.scrapers import ml_conexao
+
+        ordem = []
+
+        def gravar(user_id, estado):
+            ordem.append("sessao_gravada")
+
+        with patch("playwright.sync_api.sync_playwright", self._playwright_falso(ordem)), \
+             patch.object(ml_conexao, "_ir_para_login"), \
+             patch.object(ml_conexao, "_persistir_sessao", gravar):
+            ml_conexao._worker(self.user.id)
+
+        self.assertEqual(ordem, ["playwright_fechado", "sessao_gravada"])
+        self.assertEqual(ml_conexao.status(self.user.id)["fase"], "conectado")
+
+    def test_falha_ao_gravar_nao_deixa_a_tela_presa_em_salvando(self):
+        from apps.scrapers import ml_conexao
+
+        with patch("playwright.sync_api.sync_playwright", self._playwright_falso([])), \
+             patch.object(ml_conexao, "_ir_para_login"), \
+             patch.object(ml_conexao, "_persistir_sessao",
+                          side_effect=RuntimeError("banco fora")):
+            ml_conexao._worker(self.user.id)
+
+        estado = ml_conexao.status(self.user.id)
+        self.assertEqual(estado["fase"], "erro")
+        self.assertNotEqual(estado["fase"], "salvando")
+
+
+class MensagemDeErroDaConexaoTests(SimpleTestCase):
+    """A tela recebe uma ação, não o texto interno da exceção.
+
+    O usuário lia literalmente "Falha na conexão: You cannot call this from an async
+    context - use a thread or sync_to_async" — sem nenhuma pista do que fazer.
+    """
+
+    def test_erro_generico_esconde_o_detalhe_e_mostra_o_codigo(self):
+        from apps.scrapers.erros_conexao import mensagem_de_erro
+
+        msg = mensagem_de_erro(Exception("detalhe interno cru"), "ab12")
+
+        self.assertNotIn("detalhe interno cru", msg)
+        self.assertIn("ab12", msg)
+
+    def test_regressao_do_bug_async_e_registrada_como_erro(self):
+        from django.core.exceptions import SynchronousOnlyOperation
+        from apps.scrapers.erros_conexao import mensagem_de_erro
+
+        with self.assertLogs("apps.scrapers.erros_conexao", level="ERROR") as log:
+            msg = mensagem_de_erro(SynchronousOnlyOperation("..."), "cd34")
+
+        self.assertIn("cd34", msg)
+        self.assertNotIn("async context", msg)
+        self.assertIn("executar_no_tenant", "\n".join(log.output))
+
+    def test_mensagem_acionavel_do_goto_e_preservada(self):
+        from apps.scrapers.erros_conexao import mensagem_de_erro
+
+        texto = "O Mercado Livre demorou demais a responder a partir do servidor."
+        self.assertEqual(mensagem_de_erro(RuntimeError(texto), "ef56"), texto)
+
+
+class RetryDaGravacaoDaSessaoTests(TestCase):
+    """10 minutos de browser ocioso matam o socket do Postgres; uma tentativa só perdia
+    o login inteiro por causa disso."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("ml-retry", password="test")
+
+    def test_retenta_apos_falha_de_conexao(self):
+        from django.db import OperationalError
+        from apps.scrapers import ml_conexao
+
+        chamadas = []
+
+        def instavel(fn, *args, **kwargs):
+            chamadas.append(1)
+            if len(chamadas) == 1:
+                raise OperationalError("server closed the connection unexpectedly")
+
+        with patch.object(ml_conexao, "executar_no_tenant", instavel):
+            ml_conexao._persistir_sessao(self.user.id, {"cookies": []})
+
+        self.assertEqual(len(chamadas), 2)
+
+    def test_falha_persistente_propaga(self):
+        from django.db import OperationalError
+        from apps.scrapers import ml_conexao
+
+        with patch.object(ml_conexao, "executar_no_tenant",
+                          side_effect=OperationalError("morto")):
+            with self.assertRaises(OperationalError):
+                ml_conexao._persistir_sessao(self.user.id, {"cookies": []}, tentativas=2)
+
+
+class RenovacaoDeSessaoPersistidaTests(TestCase):
+    """`iniciar_browser` voltou a renovar cookies.
+
+    O `save_storage_state` do finally rodava DENTRO do `with sync_playwright()` e o
+    `except Exception` engolia o SynchronousOnlyOperation — nenhum fluxo renovava
+    sessão, e ela envelhecia até o ML revogá-la.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("renova", password="test")
+
+    @contextmanager
+    def _cenario(self, ordem, storage_state):
+        contexto = Mock()
+        contexto.storage_state.return_value = {"cookies": [{"name": "novo"}]}
+        navegador = Mock()
+        navegador.new_context.return_value = contexto
+
+        @contextmanager
+        def playwright_falso():
+            p = Mock()
+            p.chromium.launch.return_value = navegador
+            try:
+                yield p
+            finally:
+                ordem.append("playwright_fechado")
+
+        with patch("apps.scrapers.auxiliar.sync_playwright", playwright_falso), \
+             patch("apps.scrapers.auxiliar._iniciar_chromium", return_value=navegador), \
+             patch("apps.accounts.ml_sessions.load_storage_state", return_value=storage_state), \
+             patch("apps.accounts.ml_sessions.save_storage_state",
+                   side_effect=lambda *a, **k: ordem.append("sessao_gravada")):
+            yield
+
+    def test_grava_depois_de_fechar_o_playwright(self):
+        from apps.scrapers.auxiliar import iniciar_browser
+
+        ordem = []
+        with self._cenario(ordem, {"cookies": [{"name": "velho"}]}):
+            with iniciar_browser(session_user=self.user, validar_sessao=False) as (_p, _c):
+                pass
+
+        self.assertEqual(ordem, ["playwright_fechado", "sessao_gravada"])
+
+    def test_grava_mesmo_quando_o_corpo_levanta(self):
+        from apps.scrapers.auxiliar import iniciar_browser
+
+        ordem = []
+        with self._cenario(ordem, {"cookies": [{"name": "velho"}]}):
+            with self.assertRaises(ValueError):
+                with iniciar_browser(session_user=self.user, validar_sessao=False):
+                    raise ValueError("o Link Builder falhou no meio")
+
+        self.assertIn("sessao_gravada", ordem)
+        self.assertLess(ordem.index("playwright_fechado"), ordem.index("sessao_gravada"))
+
+    def test_contexto_anonimo_nao_cria_sessao_fantasma(self):
+        from apps.scrapers.auxiliar import iniciar_browser
+
+        ordem = []
+        with self._cenario(ordem, None):
+            with iniciar_browser(validar_sessao=False) as (_p, _c):
+                pass
+
+        self.assertNotIn("sessao_gravada", ordem)

@@ -105,18 +105,33 @@ def _ids_do_container(page, url, max_paginas):
     return ids
 
 
-def _rodar(cupons, idx, agora, coletor, max_paginas):
-    total = 0
+def _coletar(cupons, coletor, max_paginas):
+    """Só navegação: [(cupom, ids)]. Roda DENTRO do Playwright.
+
+    Separado de `_confirmar_todos` porque o ORM não pode ser chamado de dentro de
+    `with sync_playwright()`: a API sync mantém um event loop vivo num greenlet da
+    mesma thread e o @async_unsafe do Django levanta SynchronousOnlyOperation.
+    """
+    pares = []
     for cupom in cupons:
         url = (cupom.regras or {}).get("container_url")
         try:
-            ids = coletor(url, max_paginas)
+            pares.append((cupom, coletor(url, max_paginas)))
         except Exception as e:
             logger.warning("Coleta do container do cupom %s falhou: %s", cupom.codigo, e)
-            continue
-        total += _confirmar(cupom, ids, idx, agora)
+    return pares
+
+
+def _confirmar_todos(pares, idx, agora):
+    """Só ORM: grava os ProdutoCupom. Roda FORA do Playwright."""
+    total = sum(_confirmar(cupom, ids, idx, agora) for cupom, ids in pares)
     logger.info("Casamento cupom-container: %s vinculo(s) confirmado(s)", total)
     return total
+
+
+def _rodar(cupons, idx, agora, coletor, max_paginas):
+    """Coleta + confirmação em sequência (sem browser em voo)."""
+    return _confirmar_todos(_coletar(cupons, coletor, max_paginas), idx, agora)
 
 
 def casar_cupons_container(coletor=None, max_paginas=2, usuario=None):
@@ -140,8 +155,11 @@ def casar_cupons_container(coletor=None, max_paginas=2, usuario=None):
     if state is None:
         avisar_sem_sessao("Casamento cupom-container", usuario)
 
+    # A gravação fica FORA do `with`: dentro dele o ORM levanta
+    # SynchronousOnlyOperation (event loop do Playwright vivo nesta thread).
     with iniciar_browser(storage_state=state, headless=True,
                          validar_sessao=False) as (page, _context):
-        return _rodar(cupons, idx, agora,
-                      lambda url, paginas: _ids_do_container(page, url, paginas),
-                      max_paginas)
+        pares = _coletar(cupons,
+                         lambda url, paginas: _ids_do_container(page, url, paginas),
+                         max_paginas)
+    return _confirmar_todos(pares, idx, agora)

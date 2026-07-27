@@ -2,7 +2,6 @@ import sys
 import os
 import re
 import logging
-from contextlib import contextmanager
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 caminho_django = os.path.dirname(os.path.dirname(os.path.dirname(caminho_atual)))
 sys.path.append(caminho_django)
@@ -16,27 +15,17 @@ from apps.scrapers.link_validacao import (
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
 from apps.scrapers.progresso import emitir_fase
 from apps.accounts.ml_sessions import has_storage_state
+from apps.accounts.tenant import executar_no_tenant
 
 logger = logging.getLogger(__name__)
 
 
-@contextmanager
-def _orm_permitido_no_playwright():
-    """Permite a gravação síncrona do cache só no trecho do Playwright sync.
-
-    A API sync do Playwright mantém um loop interno ativo enquanto executa ações;
-    Django 6 bloqueia ORM nesse ponto, embora este worker seja serial e dedicado.
-    Restaurar a variável ao sair evita afrouxar a proteção no processo inteiro.
-    """
-    anterior = os.environ.get("DJANGO_ALLOW_ASYNC_UNSAFE")
-    os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-    try:
-        yield
-    finally:
-        if anterior is None:
-            os.environ.pop("DJANGO_ALLOW_ASYNC_UNSAFE", None)
-        else:
-            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = anterior
+def _salvar_link_global(prod, url_isca, link):
+    """Grava o link no catálogo compartilhado (worker de sistema, sem usuário)."""
+    prod.url_isca = url_isca
+    prod.link_afiliado = link
+    prod.afiliado_ok = True
+    prod.save(update_fields=["url_isca", "link_afiliado", "afiliado_ok"])
 
 
 class LoginError(Exception):
@@ -350,54 +339,57 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
     gerados = 0
     falhas = 0
     ultimo_erro = None
-    with _orm_permitido_no_playwright():
-        with iniciar_browser(
-            session_user=usuario,
-            headless=True,
-        ) as (page, context):
-            _abrir_link_builder(page)
+    # Sem guarda global de ORM: cada gravação vai por executar_no_tenant, que a
+    # desvia para uma thread sem event loop. O `with` que existia aqui setava
+    # DJANGO_ALLOW_ASYNC_UNSAFE no os.environ do PROCESSO — global às 8 threads do
+    # gunicorn — e o `finally` dele removia a permissão debaixo de outro fluxo que
+    # ainda estava usando. Era a origem do "às vezes funciona".
+    with iniciar_browser(
+        session_user=usuario,
+        headless=True,
+    ) as (page, context):
+        _abrir_link_builder(page)
 
-            total_lote = len(pendentes)
-            logger.info("Gerando links afiliados ML em lote para %s produtos", total_lote)
-            for i, prod in enumerate(pendentes, 1):
-                emitir_fase(f"Link {i}/{total_lote}", i / total_lote,
-                            faixa or (0, 100))
-                # Ofertas do feed têm campanha_id vazio: _montar_url_isca trata isso e só
-                # injeta coupon_campaign_id quando há campanha. Só pulamos quando a URL
-                # não é afiliável (catálogo/perfil) -> None.
-                url_isca = _montar_url_isca(prod.link_produto, prod.campanha_id)
-                if not url_isca:
-                    # Este era o ponto cego central: contava a falha e seguia, sem
-                    # log nem registro. O produto ficava "pendente" para sempre e
-                    # não havia como saber por quê.
-                    motivo = _motivo_url_recusada(prod.link_produto)
-                    logger.info("Produto %s não é afiliável: %s", getattr(prod, "id", None), motivo)
-                    registrar_falha(usuario, prod, motivo, terminal=True)
-                    falhas += 1
-                    continue
-                try:
-                    link = _afiliar_url_na_pagina(page, url_isca)
-                    if usuario is not None:
-                        salvar_cache(usuario, prod, link, url_isca, True)
-                    else:
-                        prod.url_isca = url_isca
-                        prod.link_afiliado = link
-                        prod.afiliado_ok = True
-                        prod.save(update_fields=["url_isca", "link_afiliado", "afiliado_ok"])
-                    gerados += 1
-                except UrlNaoPermitidaError as e:
-                    # O Programa recusou explicitamente: retentar não muda nada.
-                    logger.info("Link Builder recusou o produto %s: %s",
-                                getattr(prod, "id", None), e)
-                    registrar_falha(usuario, prod, str(e), terminal=True)
-                    falhas += 1
-                except Exception as e:
-                    if _pagina_de_login(page):
-                        raise LoginError(MSG_SESSAO_EXPIRADA)
-                    ultimo_erro = e
-                    logger.warning("Falha ao gerar link afiliado ML em lote para produto %s: %s", getattr(prod, "id", None), e)
-                    registrar_falha(usuario, prod, str(e))
-                    falhas += 1
+        total_lote = len(pendentes)
+        logger.info("Gerando links afiliados ML em lote para %s produtos", total_lote)
+        for i, prod in enumerate(pendentes, 1):
+            emitir_fase(f"Link {i}/{total_lote}", i / total_lote,
+                        faixa or (0, 100))
+            # Ofertas do feed têm campanha_id vazio: _montar_url_isca trata isso e só
+            # injeta coupon_campaign_id quando há campanha. Só pulamos quando a URL
+            # não é afiliável (catálogo/perfil) -> None.
+            url_isca = _montar_url_isca(prod.link_produto, prod.campanha_id)
+            if not url_isca:
+                # Este era o ponto cego central: contava a falha e seguia, sem
+                # log nem registro. O produto ficava "pendente" para sempre e
+                # não havia como saber por quê.
+                motivo = _motivo_url_recusada(prod.link_produto)
+                logger.info("Produto %s não é afiliável: %s", getattr(prod, "id", None), motivo)
+                executar_no_tenant(registrar_falha, usuario, prod, motivo, terminal=True)
+                falhas += 1
+                continue
+            try:
+                link = _afiliar_url_na_pagina(page, url_isca)
+                # Persistir item a item (e não em lote no fim) é deliberado: se o ML
+                # derrubar a sessão no produto 30 de 80, os 29 anteriores ficam salvos.
+                if usuario is not None:
+                    executar_no_tenant(salvar_cache, usuario, prod, link, url_isca, True)
+                else:
+                    executar_no_tenant(_salvar_link_global, prod, url_isca, link)
+                gerados += 1
+            except UrlNaoPermitidaError as e:
+                # O Programa recusou explicitamente: retentar não muda nada.
+                logger.info("Link Builder recusou o produto %s: %s",
+                            getattr(prod, "id", None), e)
+                executar_no_tenant(registrar_falha, usuario, prod, str(e), terminal=True)
+                falhas += 1
+            except Exception as e:
+                if _pagina_de_login(page):
+                    raise LoginError(MSG_SESSAO_EXPIRADA)
+                ultimo_erro = e
+                logger.warning("Falha ao gerar link afiliado ML em lote para produto %s: %s", getattr(prod, "id", None), e)
+                executar_no_tenant(registrar_falha, usuario, prod, str(e))
+                falhas += 1
 
     logger.info("Links afiliados ML em lote: %s gerados, %s falhas", gerados, falhas)
     if falhas and usuario is not None:
@@ -570,22 +562,23 @@ def verificar_links_pendentes(usuario, limite=20) -> dict:
         .order_by("-ultima_tentativa", "-id")[:limite]
     )
     aprovados = reprovados = transitorios = 0
-    with _orm_permitido_no_playwright():
-        for linha in linhas:
-            try:
-                r = verificar_e_aprovar(
-                    usuario, linha.produto, linha.link_afiliado, linha.url_isca)
-            except Exception as e:
-                logger.warning("Verificação de destino falhou p/ produto %s: %s",
-                               getattr(linha.produto, "id", None), e)
-                transitorios += 1
-                continue
-            if r == "aprovado":
-                aprovados += 1
-            elif r == "reprovado":
-                reprovados += 1
-            else:
-                transitorios += 1
+    # Sem guarda de ORM: `verificar_e_aprovar` fecha o browser antes de retornar, e
+    # registrar_aprovacao/registrar_reprovacao já rodam com o Playwright encerrado.
+    for linha in linhas:
+        try:
+            r = verificar_e_aprovar(
+                usuario, linha.produto, linha.link_afiliado, linha.url_isca)
+        except Exception as e:
+            logger.warning("Verificação de destino falhou p/ produto %s: %s",
+                           getattr(linha.produto, "id", None), e)
+            transitorios += 1
+            continue
+        if r == "aprovado":
+            aprovados += 1
+        elif r == "reprovado":
+            reprovados += 1
+        else:
+            transitorios += 1
     logger.info("Verificação de destino ML p/ %s: %s aprovado(s), %s reprovado(s), "
                 "%s transitório(s)", usuario, aprovados, reprovados, transitorios)
     return {"aprovados": aprovados, "reprovados": reprovados,

@@ -33,6 +33,8 @@ import time
 from django.conf import settings
 from django.core.cache import cache
 
+from apps.scrapers.erros_conexao import mensagem_de_erro, novo_codigo
+
 logger = logging.getLogger(__name__)
 
 LOGIN_URL = "https://www.mercadolivre.com/jms/mlb/lgz/msl/login/"
@@ -201,10 +203,48 @@ def _ir_para_login(page):
     ) from ultimo_erro
 
 
-from apps.accounts.tenant import organization_job
+from apps.accounts.tenant import executar_no_tenant, organization_job_sem_transacao
 
 
-@organization_job
+def _gravar_sessao(user_id: int, storage_state: dict) -> None:
+    """Grava a sessão capturada e derruba o cache da sonda. Roda no tenant, fora do loop."""
+    from django.contrib.auth import get_user_model
+    from apps.accounts.ml_sessions import save_storage_state
+    from apps.scrapers.conexoes import invalidar_ml
+
+    user = get_user_model().objects.get(pk=user_id)
+    save_storage_state(user, storage_state)
+    # A sonda de sessão é cacheada por 5 min; sem invalidar, quem acabou de conectar
+    # continuaria vendo "desconectado" até o cache vencer — logo depois de fazer
+    # exatamente o que pedimos. `invalidar_ml` é só cache.delete (não toca o banco),
+    # então o try aqui é rede de segurança para Redis fora do ar. O `except: pass` que
+    # existia escondia justamente esse sintoma.
+    try:
+        invalidar_ml(user)
+    except Exception:
+        logger.warning(
+            "Sessão ML salva, mas a sonda cacheada não foi invalidada — a tela pode "
+            "levar até 5 min para mostrar 'conectado' (user %s).", user_id, exc_info=True)
+
+
+def _persistir_sessao(user_id: int, storage_state: dict, tentativas: int = 3) -> None:
+    """Grava a sessão, tolerante a socket morto depois de minutos de browser ocioso."""
+    from django.db import InterfaceError, OperationalError, close_old_connections
+
+    for tentativa in range(1, tentativas + 1):
+        try:
+            executar_no_tenant(_gravar_sessao, user_id, storage_state)
+            return
+        except (OperationalError, InterfaceError) as exc:
+            if tentativa == tentativas:
+                raise
+            logger.warning("Gravação da sessão ML falhou (%s/%s): %s",
+                           tentativa, tentativas, exc)
+            close_old_connections()
+            time.sleep(0.5 * tentativa)
+
+
+@organization_job_sem_transacao
 def _worker(user_id: int):
     """Sobe o Chromium local, transmite a tela e espera o usuário concluir o login."""
     from playwright.sync_api import sync_playwright
@@ -217,6 +257,7 @@ def _worker(user_id: int):
         _inputs[user_id] = fila
         _frames.pop(user_id, None)
 
+    estado_capturado = None
     try:
         _set_estado(user_id, fase="iniciando", erro="")
         with sync_playwright() as p:
@@ -227,109 +268,119 @@ def _worker(user_id: int):
                 args=["--disable-blink-features=AutomationControlled",
                       "--disable-dev-shm-usage"],
             )
-            context = browser.new_context(
-                viewport={"width": VIEW_W, "height": VIEW_H},
-                user_agent=ua_aleatorio(),
-                permissions=["clipboard-read", "clipboard-write"],
-            )
-            page = context.pages[0] if context.pages else context.new_page()
-            cdp = context.new_cdp_session(page)
-
-            def _on_frame(params):
-                # Guarda só o último frame (coalesce): o SSE lê o mais recente.
-                _frames[user_id] = params.get("data", "")
-                try:
-                    cdp.send("Page.screencastFrameAck",
-                             {"sessionId": params.get("sessionId")})
-                except Exception:
-                    # O Chromium só manda o próximo frame depois do ack: perder um ack
-                    # congela a transmissão de vez. Não dá pra reagir aqui (o worker
-                    # segue vivo e o front reabre o EventSource), mas tem que aparecer
-                    # no log — congelado-e-silencioso é indepurável.
-                    logger.warning("screencastFrameAck falhou (user %s); a transmissão "
-                                   "pode congelar até o próximo start.", user_id,
-                                   exc_info=True)
-
-            cdp.send("Page.enable")
-            # Headless não tem janela, então o Chromium trata o documento como sem foco
-            # e JS de login costuma ignorar input nesse estado. Isso força "focado".
             try:
-                cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
-            except Exception:
-                logger.warning("setFocusEmulationEnabled falhou; seguindo sem ele.")
-            cdp.on("Page.screencastFrame", _on_frame)
+                context = browser.new_context(
+                    viewport={"width": VIEW_W, "height": VIEW_H},
+                    user_agent=ua_aleatorio(),
+                    permissions=["clipboard-read", "clipboard-write"],
+                )
+                page = context.pages[0] if context.pages else context.new_page()
+                cdp = context.new_cdp_session(page)
 
-            _ir_para_login(page)
-            cdp.send("Page.startScreencast", SCREENCAST)
-            _set_estado(user_id, fase="aguardando_login", erro="")
-
-            deadline = time.time() + LOGIN_DEADLINE_S
-            logado = False
-            last_beat = time.time()
-            last_check = 0.0
-            estado = {}
-            while time.time() < deadline:
-                # O loop gira a cada 50ms para bombear os frames e drenar o input, mas
-                # os flags do usuário (cancelar / "já entrei") não mudam nessa escala:
-                # ler o cache 20x/s só gastava CPU. 500ms de latência num clique de
-                # cancelar ninguém percebe.
-                agora = time.time()
-                if agora - last_check > 0.5:
-                    estado = cache.get(_cache_key(user_id)) or {}
-                    last_check = agora
-                if estado.get("cancelar"):
-                    _set_estado(user_id, fase="idle", erro="")
-                    break
-
-                # Drena e aplica os eventos de input acumulados desde a última volta.
-                for _ in range(MAX_EVENTOS_POR_POST * 4):
+                def _on_frame(params):
+                    # Guarda só o último frame (coalesce): o SSE lê o mais recente.
+                    _frames[user_id] = params.get("data", "")
                     try:
-                        ev = fila.get_nowait()
-                    except queue.Empty:
+                        cdp.send("Page.screencastFrameAck",
+                                 {"sessionId": params.get("sessionId")})
+                    except Exception:
+                        # O Chromium só manda o próximo frame depois do ack: perder um ack
+                        # congela a transmissão de vez. Não dá pra reagir aqui (o worker
+                        # segue vivo e o front reabre o EventSource), mas tem que aparecer
+                        # no log — congelado-e-silencioso é indepurável.
+                        logger.warning("screencastFrameAck falhou (user %s); a transmissão "
+                                       "pode congelar até o próximo start.", user_id,
+                                       exc_info=True)
+
+                cdp.send("Page.enable")
+                # Headless não tem janela, então o Chromium trata o documento como sem foco
+                # e JS de login costuma ignorar input nesse estado. Isso força "focado".
+                try:
+                    cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
+                except Exception:
+                    logger.warning("setFocusEmulationEnabled falhou; seguindo sem ele.")
+                cdp.on("Page.screencastFrame", _on_frame)
+
+                _ir_para_login(page)
+                cdp.send("Page.startScreencast", SCREENCAST)
+                _set_estado(user_id, fase="aguardando_login", erro="")
+
+                deadline = time.time() + LOGIN_DEADLINE_S
+                logado = False
+                last_beat = time.time()
+                last_check = 0.0
+                estado = {}
+                while time.time() < deadline:
+                    # O loop gira a cada 50ms para bombear os frames e drenar o input, mas
+                    # os flags do usuário (cancelar / "já entrei") não mudam nessa escala:
+                    # ler o cache 20x/s só gastava CPU. 500ms de latência num clique de
+                    # cancelar ninguém percebe.
+                    agora = time.time()
+                    if agora - last_check > 0.5:
+                        estado = cache.get(_cache_key(user_id)) or {}
+                        last_check = agora
+                    if estado.get("cancelar"):
+                        _set_estado(user_id, fase="idle", erro="")
                         break
-                    _despachar_input(cdp, page, ev)
 
-                url_atual = page.url
-                # 'salvar_agora' = usuário clicou "já entrei"; força a captura.
-                if _url_logada(url_atual) or estado.get("salvar_agora"):
-                    logado = True
-                    break
+                    # Drena e aplica os eventos de input acumulados desde a última volta.
+                    for _ in range(MAX_EVENTOS_POR_POST * 4):
+                        try:
+                            ev = fila.get_nowait()
+                        except queue.Empty:
+                            break
+                        _despachar_input(cdp, page, ev)
 
-                # Heartbeat: renova TTL + atualizado_em sem trocar de fase (o front
-                # segue desenhando os frames pelo EventSource).
-                if time.time() - last_beat > 8:
-                    _set_estado(user_id, fase="aguardando_login")
-                    last_beat = time.time()
+                    url_atual = page.url
+                    # 'salvar_agora' = usuário clicou "já entrei"; força a captura.
+                    if _url_logada(url_atual) or estado.get("salvar_agora"):
+                        logado = True
+                        break
 
-                # wait_for_timeout bombeia os eventos CDP (o screencastFrame chega aqui).
-                page.wait_for_timeout(LOOP_MS)
+                    # Heartbeat: renova TTL + atualizado_em sem trocar de fase (o front
+                    # segue desenhando os frames pelo EventSource).
+                    if time.time() - last_beat > 8:
+                        _set_estado(user_id, fase="aguardando_login")
+                        last_beat = time.time()
 
-            if logado:
-                _set_estado(user_id, fase="salvando")
+                    # wait_for_timeout bombeia os eventos CDP (o screencastFrame chega aqui).
+                    page.wait_for_timeout(LOOP_MS)
+
+                if logado:
+                    _set_estado(user_id, fase="salvando")
+                    try:
+                        cdp.send("Page.stopScreencast")
+                    except Exception:
+                        pass
+                    # SÓ a leitura acontece aqui: o storage_state vem do Playwright, mas
+                    # gravá-lo é ORM — e ORM dentro do `with sync_playwright()` levanta
+                    # SynchronousOnlyOperation (a API sync mantém um event loop vivo num
+                    # greenlet desta thread). Era exatamente isto que fazia o login
+                    # concluir e a sessão nunca ser salva.
+                    estado_capturado = context.storage_state()
+                elif (cache.get(_cache_key(user_id)) or {}).get("fase") != "idle":
+                    _set_estado(user_id, fase="erro",
+                                erro="Tempo esgotado esperando o login. Tente de novo.")
+            finally:
+                # Sem isto o Chromium ficava órfão em qualquer exceção: o close
+                # estava solto no fim do bloco e simplesmente não era alcançado.
                 try:
-                    cdp.send("Page.stopScreencast")
+                    browser.close()
                 except Exception:
-                    pass
-                from django.contrib.auth import get_user_model
-                from apps.accounts.ml_sessions import save_storage_state
-                user = get_user_model().objects.get(pk=user_id)
-                save_storage_state(user, context.storage_state())
-                # A sonda de sessão é cacheada por 5min; sem invalidar, quem acabou
-                # de conectar continuaria vendo "desconectado" na tela até o cache
-                # vencer — logo depois de fazer exatamente o que pedimos.
-                try:
-                    from apps.scrapers.conexoes import invalidar_ml
-                    from django.contrib.auth import get_user_model
-                    invalidar_ml(get_user_model().objects.filter(id=user_id).first())
-                except Exception:
-                    pass
-                _set_estado(user_id, fase="conectado", salvar_agora=False, erro="")
-            elif (cache.get(_cache_key(user_id)) or {}).get("fase") != "idle":
-                _set_estado(user_id, fase="erro",
-                            erro="Tempo esgotado esperando o login. Tente de novo.")
-            browser.close()
+                    logger.warning("Chromium do login ML não fechou limpo (user %s).",
+                                   user_id, exc_info=True)
+
+        # Fora do `with`: o loop do Playwright morreu, o ORM está liberado. A fase só
+        # vira 'conectado' DEPOIS de a gravação confirmar — senão uma falha aqui
+        # deixaria a tela presa em 'salvando' para sempre.
+        if estado_capturado is not None:
+            _persistir_sessao(user_id, estado_capturado)
+            _set_estado(user_id, fase="conectado", salvar_agora=False, erro="")
     except Exception as exc:  # noqa: BLE001 — qualquer falha vira mensagem pro usuário
-        _set_estado(user_id, fase="erro", erro=f"Falha na conexão: {exc}")
+        codigo = novo_codigo()
+        logger.exception("Conexão ML falhou (user=%s codigo=%s)", user_id, codigo)
+        _set_estado(user_id, fase="erro", codigo_erro=codigo,
+                    erro=mensagem_de_erro(exc, codigo, servico="O Mercado Livre"))
     finally:
         with _lock:
             _inputs.pop(user_id, None)

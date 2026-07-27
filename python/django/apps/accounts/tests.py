@@ -4,6 +4,8 @@ import hmac
 import json
 import os
 import tempfile
+import threading
+from unittest.mock import patch
 
 import jwt
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -13,7 +15,9 @@ from django.core.exceptions import (
     PermissionDenied,
     ValidationError,
 )
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.test import (
+    SimpleTestCase, TestCase, TransactionTestCase, override_settings,
+)
 from django.urls import reverse
 
 from apps.accounts.ml_session_crypto import MLSessionCryptoError
@@ -24,7 +28,10 @@ from apps.accounts.models import (
     WhatsAppConnection,
 )
 from apps.accounts.rls import STRICT_TENANT_TABLES, policy_statements
-from apps.accounts.tenant import _context_signature, organization_context
+from apps.accounts.tenant import (
+    _context_signature, current_organization_id, executar_no_tenant,
+    organization_context,
+)
 from apps.accounts.wa_capabilities import issue_capability, public_key_base64url
 from apps.scrapers.models import Produto
 
@@ -293,3 +300,66 @@ class TenantContextSigningTests(SimpleTestCase):
     def test_production_context_without_key_fails_closed(self):
         with self.assertRaises(ImproperlyConfigured):
             _context_signature("system")
+
+
+class PonteORMForaDoLoopTests(TransactionTestCase):
+    """`executar_no_tenant`: a ponte que substituiu DJANGO_ALLOW_ASYNC_UNSAFE.
+
+    A API sync do Playwright deixa um event loop rodando num greenlet desta mesma
+    thread, e o @async_unsafe do Django derruba qualquer query enquanto isso durar.
+    O bypass antigo era uma variável de ambiente GLOBAL AO PROCESSO: com 8 threads no
+    gunicorn, o `finally` de um fluxo removia a permissão no meio de outro. Aqui a
+    query é desviada para uma thread sem loop — e o tenant precisa ser reinstalado
+    lá, porque contextvars não cruzam threads de executor.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("ponte-orm", password="test")
+        self.organization = self.user.personal_organization
+
+    def test_fora_do_playwright_roda_na_mesma_thread(self):
+        # É isto que mantém `TestCase` (transação revertida no fim) enxergando as
+        # escritas do resto da suíte: sem loop rodando, não há desvio nenhum.
+        with organization_context(self.organization):
+            thread = executar_no_tenant(threading.get_ident)
+        self.assertEqual(thread, threading.get_ident())
+
+    def test_dentro_do_playwright_desvia_para_outra_thread_e_persiste(self):
+        with organization_context(self.organization), \
+             patch("apps.accounts.tenant._dentro_de_loop", return_value=True):
+            thread = executar_no_tenant(threading.get_ident)
+            executar_no_tenant(
+                Produto.objects.create, owner=self.user, nome="Gravado pela ponte",
+                preco_sem_desconto=100, preco_com_cupom=80,
+                marketplace="mercadolivre", origem="oferta",
+            )
+
+        self.assertNotEqual(thread, threading.get_ident())
+        self.assertTrue(
+            Produto.objects.filter(nome="Gravado pela ponte").exists(),
+            "a escrita feita na thread da ponte tem de estar commitada",
+        )
+
+    def test_o_escopo_de_organizacao_e_reinstalado_na_thread(self):
+        # Sem reinstalar, a organização da chamada anterior sobreviveria na conexão
+        # persistente do executor e vazaria para o tenant seguinte.
+        vistos = []
+        with organization_context(self.organization), \
+             patch("apps.accounts.tenant._dentro_de_loop", return_value=True):
+            executar_no_tenant(lambda: vistos.append(current_organization_id()))
+        self.assertEqual(vistos, [str(self.organization.pk)])
+
+    def test_excecao_propaga_em_vez_de_ficar_presa_no_future(self):
+        def explode():
+            raise ZeroDivisionError("falha real")
+
+        with organization_context(self.organization), \
+             patch("apps.accounts.tenant._dentro_de_loop", return_value=True):
+            with self.assertRaises(ZeroDivisionError):
+                executar_no_tenant(explode)
+
+    def test_sem_tenant_falha_fechado(self):
+        # Falhar aqui é melhor que falhar na RLS minutos depois, com o browser já
+        # fechado e o dado capturado perdido.
+        with self.assertRaises(ValueError):
+            executar_no_tenant(lambda: None)

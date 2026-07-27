@@ -12,6 +12,7 @@ o site principal não tocava na sessão que o relatório de fato precisa.
 A senha é digitada na página REAL do ML dentro do Chromium remoto e nunca passa
 pelo Django. O storage_state é salvo cifrado via report_sessions.save_report_state.
 """
+import logging
 import queue
 import threading
 import time
@@ -19,12 +20,15 @@ import time
 from django.conf import settings
 from django.core.cache import cache
 
+from apps.scrapers.erros_conexao import mensagem_de_erro, novo_codigo
 from apps.scrapers.ml_conexao import (
     GOTO_TIMEOUT_MS, LOGIN_DEADLINE_S, LOOP_MS, MAX_EVENTOS_POR_POST,
     SCREENCAST, VIEW_H, VIEW_W, _SPECIAL_KEYS, _despachar_input,
 )
 from apps.scrapers.report_sessions import has_report_session, save_report_state
-from apps.accounts.tenant import organization_job
+from apps.accounts.tenant import organization_job_sem_transacao
+
+logger = logging.getLogger(__name__)
 
 # Portal de afiliados. O usuário loga aqui dentro do live view.
 LOGIN_URL = "https://www.mercadolivre.com.br/afiliados/"
@@ -77,7 +81,10 @@ def _logado(page) -> bool:
     return page.locator("input[type='password'], input[name*='password' i]").count() == 0
 
 
-@organization_job
+# Sem transação: organization_job envolveria os até 10 min do live view num
+# transaction.atomic(), deixando uma conexão `idle in transaction` enquanto o
+# usuário digita a senha.
+@organization_job_sem_transacao
 def _worker(user):
     from playwright.sync_api import sync_playwright
     from apps.scrapers.auxiliar import ua_aleatorio
@@ -87,59 +94,79 @@ def _worker(user):
     with _lock:
         _inputs[uid] = fila
         _frames.pop(uid, None)
+    estado_capturado = None
     try:
         _set(uid, fase="iniciando", erro="")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"])
-            context = browser.new_context(viewport={"width": VIEW_W, "height": VIEW_H}, user_agent=ua_aleatorio())
-            page = context.new_page()
-            cdp = context.new_cdp_session(page)
+            try:
+                context = browser.new_context(viewport={"width": VIEW_W, "height": VIEW_H}, user_agent=ua_aleatorio())
+                page = context.new_page()
+                cdp = context.new_cdp_session(page)
 
-            def on_frame(params):
-                _frames[uid] = params.get("data", "")
+                def on_frame(params):
+                    _frames[uid] = params.get("data", "")
+                    try:
+                        cdp.send("Page.screencastFrameAck", {"sessionId": params.get("sessionId")})
+                    except Exception:
+                        pass
+
+                cdp.send("Page.enable")
+                cdp.on("Page.screencastFrame", on_frame)
                 try:
-                    cdp.send("Page.screencastFrameAck", {"sessionId": params.get("sessionId")})
+                    cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
                 except Exception:
                     pass
-
-            cdp.send("Page.enable")
-            cdp.on("Page.screencastFrame", on_frame)
-            try:
-                cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
-            except Exception:
-                pass
-            page.goto(LOGIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
-            cdp.send("Page.startScreencast", SCREENCAST)
-            _set(uid, fase="aguardando_login", erro="")
-            deadline, logged = time.time() + LOGIN_DEADLINE_S, False
-            while time.time() < deadline:
-                state = cache.get(_key(uid)) or {}
-                if state.get("cancelar"):
-                    _set(uid, fase="idle", erro="")
-                    break
-                for _ in range(MAX_EVENTOS_POR_POST * 4):
-                    try:
-                        _despachar_input(cdp, page, fila.get_nowait())
-                    except queue.Empty:
+                page.goto(LOGIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+                cdp.send("Page.startScreencast", SCREENCAST)
+                _set(uid, fase="aguardando_login", erro="")
+                deadline, logged = time.time() + LOGIN_DEADLINE_S, False
+                while time.time() < deadline:
+                    state = cache.get(_key(uid)) or {}
+                    if state.get("cancelar"):
+                        _set(uid, fase="idle", erro="")
                         break
-                if state.get("salvar_agora"):
-                    # O botão "Já entrei" valida a sessão na página que o
-                    # sincronizador vai usar, sem depender da URL da landing.
-                    page.goto(_report_url(), wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
-                    _set(uid, salvar_agora=False)
-                if _logado(page):
-                    logged = True
-                    break
-                page.wait_for_timeout(LOOP_MS)
-            if logged:
-                _set(uid, fase="salvando")
-                save_report_state(user, "mercadolivre", context.storage_state())
-                _set(uid, fase="conectado", erro="", salvar_agora=False)
-            elif (cache.get(_key(uid)) or {}).get("fase") != "idle":
-                _set(uid, fase="erro", erro="Tempo esgotado esperando o login do portal de afiliados.")
-            browser.close()
+                    for _ in range(MAX_EVENTOS_POR_POST * 4):
+                        try:
+                            _despachar_input(cdp, page, fila.get_nowait())
+                        except queue.Empty:
+                            break
+                    if state.get("salvar_agora"):
+                        # O botão "Já entrei" valida a sessão na página que o
+                        # sincronizador vai usar, sem depender da URL da landing.
+                        page.goto(_report_url(), wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
+                        _set(uid, salvar_agora=False)
+                    if _logado(page):
+                        logged = True
+                        break
+                    page.wait_for_timeout(LOOP_MS)
+                if logged:
+                    _set(uid, fase="salvando")
+                    # Só a leitura fica aqui. Gravar depois do bloco mantém o mesmo
+                    # formato dos outros workers e garante que a fase só vire
+                    # 'conectado' quando a sessão estiver de fato no disco.
+                    estado_capturado = context.storage_state()
+                elif (cache.get(_key(uid)) or {}).get("fase") != "idle":
+                    _set(uid, fase="erro", erro="Tempo esgotado esperando o login do portal de afiliados.")
+            finally:
+                # Em finally: solto no fim do bloco, o close não era alcançado
+                # em nenhuma exceção e o Chromium ficava órfão.
+                try:
+                    browser.close()
+                except Exception:
+                    logger.warning("Chromium do login do portal de afiliados ML não fechou "
+                                   "limpo (user %s).", uid, exc_info=True)
+
+        if estado_capturado is not None:
+            save_report_state(user, "mercadolivre", estado_capturado)
+            _set(uid, fase="conectado", erro="", salvar_agora=False)
     except Exception as exc:
-        _set(uid, fase="erro", erro=f"Falha na conexão do portal de afiliados ML: {exc}")
+        codigo = novo_codigo()
+        logger.exception("Conexão do portal de afiliados ML falhou (user=%s codigo=%s)",
+                         uid, codigo)
+        _set(uid, fase="erro", codigo_erro=codigo,
+             erro=mensagem_de_erro(exc, codigo,
+                                   servico="O portal de afiliados do Mercado Livre"))
     finally:
         with _lock:
             _threads.pop(uid, None)
