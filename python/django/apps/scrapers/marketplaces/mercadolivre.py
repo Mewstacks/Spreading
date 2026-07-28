@@ -57,20 +57,10 @@ class MercadoLivre(Marketplace):
                 log_event("scraper", "cupons_projecao_erro",
                           "Não foi possível publicar os cupons no catálogo.",
                           level="warning", contexto={"marketplace": "mercadolivre"}, exc=e)
-            # Códigos realmente divulgáveis vêm da fonte oficial de afiliados.
-            # Campanhas personalizadas/tokenizadas permanecem internas e não entram
-            # no total exibido como "cupons encontrados".
-            from apps.scrapers.sources import run_source
-            from apps.scrapers.sources.persistence import persist_items
-            oficiais = run_source("ml-cupons-afiliados")
-            persistidos = persist_items(oficiais.get("coupons", []))
-            cupons_oficiais = persistidos["coupons"]
-            try:
-                from apps.scrapers.coupon_products import preparar_lote
-                preparar_lote(limite=max(12, cupons_oficiais))
-            except Exception:
-                logger.exception("Preparação dos cupons oficiais ML falhou")
-            cupons = cupons_oficiais
+            # Coleta oficial, preparo e afiliação pertencem ao pipeline central
+            # ``automacao --modo cupons``. Este scraper mantém apenas as fontes
+            # autenticadas do ML e o catálogo interno de campanhas.
+            cupons = cupons_codigo
             for t in (termos or []):
                 try:
                     buscar_por_termo(t)
@@ -99,8 +89,8 @@ class MercadoLivre(Marketplace):
         fonte.save()
         logger.info(
             "Raspagem ML: %s oferta(s), %s produto(s) na vitrine de cupons, "
-            "%s código(s) público(s), %s campanha(s) personalizada(s) interna(s)",
-            ofertas, cupons_codigo, cupons, cupons_campanha)
+            "%s campanha(s) personalizada(s) interna(s)",
+            ofertas, cupons_codigo, cupons_campanha)
         # Trazer 800 ofertas e ZERO cupons era reportado como sucesso: o único sinal
         # era o total zerado, e as ofertas sozinhas o mantinham positivo. Foi assim
         # que os cupons puderam sumir sem ninguém notar.

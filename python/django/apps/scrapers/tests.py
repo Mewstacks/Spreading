@@ -1190,6 +1190,7 @@ class TopPromocoesFilterTests(TestCase):
 
         response = self.client.get(self.url, {"tipo": "cupom"})
 
+        self.assertEqual(response.context["cupons_coletados"], 2)
         self.assertEqual(response.context["cupons_prontos"], 1)
         self.assertEqual(response.context["cupons_aguardando_preparo"], 1)
         self.assertEqual([c.id for c in response.context["cupons_catalogo"]], [pronto.id])
@@ -1659,6 +1660,12 @@ class EnviarCupomColagemTests(TestCase):
             produtos_chave=atualizar_chave_cupom(self.cupom),
             verificado_em=timezone.now(),
         )
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=self.produto, afiliado_ok=True,
+            estado="pronto", link_afiliado="https://meli.la/abc",
+            verificado_ok=True, verificado_em=timezone.now(),
+            url_canonica="https://meli.la/abc",
+        )
 
     @patch("apps.scrapers.ofertas._canal_pronto_ou_erro", return_value=None)
     @patch("apps.scrapers.colagem.montar_colagem_itens")
@@ -1972,7 +1979,9 @@ class RaspagemDeCuponsTests(TestCase):
 
         campanha.assert_called_once()
         run = ExecucaoIngestao.objects.latest("id")
-        self.assertEqual(run.total_cupons, 4)      # somente códigos públicos oficiais
+        # O scrape geral registra apenas a vitrine autenticada; códigos públicos,
+        # preparo e links pertencem ao worker central de cupons.
+        self.assertEqual(run.total_cupons, 3)
         self.assertEqual(run.status, "ok")
 
     def test_falha_nos_cupons_de_campanha_nao_derruba_ofertas(self):
@@ -1988,7 +1997,7 @@ class RaspagemDeCuponsTests(TestCase):
         run = ExecucaoIngestao.objects.latest("id")
         self.assertEqual(run.status, "ok")
         self.assertEqual(run.total_ofertas, 10)
-        self.assertEqual(run.total_cupons, 4)
+        self.assertEqual(run.total_cupons, 3)
         self.assertTrue(EventoOperacional.objects.filter(
             evento="cupons_campanha_erro", level="warning").exists())
 
@@ -2916,6 +2925,7 @@ class VerificarLinksPendentesTests(TestCase):
         linha = LinkAfiliadoUsuario.objects.get(usuario=self.user, produto=produto)
         # Segue None: nem aprovado nem reprovado — será retentado, não some da fila.
         self.assertIsNone(linha.verificado_ok)
+        self.assertGreater(linha.proxima_tentativa, timezone.now())
 
 
 class ParserDeNumeroDeRelatorioTests(SimpleTestCase):
@@ -4507,6 +4517,12 @@ class EnvioCupomTests(TestCase):
         CupomPreparacao.objects.create(
             cupom=self.cupom, usuario=None, status="pronto", produtos_chave=chave,
             verificado_em=timezone.now())
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=self.produto, afiliado_ok=True,
+            estado="pronto", link_afiliado="https://meli.la/produto",
+            verificado_ok=True, verificado_em=timezone.now(),
+            url_canonica="https://meli.la/produto",
+        )
         self._colagem_patcher = patch("apps.scrapers.colagem.montar_colagem_itens")
         self.colagem = self._colagem_patcher.start()
         self.colagem.side_effect = lambda itens, **_kwargs: (
@@ -4564,6 +4580,9 @@ class EnvioCupomTests(TestCase):
         from apps.scrapers.ofertas import enviar_cupom
         self.produto.link_afiliado = ""
         self.produto.save(update_fields=["link_afiliado"])
+        LinkAfiliadoUsuario.objects.filter(
+            usuario=self.user, produto=self.produto,
+        ).delete()
         sender = self._sender({"sucesso": True})
         with patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
             primeiro = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
@@ -4673,6 +4692,9 @@ class EnvioCupomTests(TestCase):
 
         self.produto.link_afiliado = ""
         self.produto.save(update_fields=["link_afiliado"])
+        LinkAfiliadoUsuario.objects.filter(
+            usuario=self.user, produto=self.produto,
+        ).delete()
         resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
 
         self.assertFalse(resultado["sucesso"])
@@ -4836,7 +4858,7 @@ class EndpointsEnvioPostTests(TransactionTestCase):
         self.assertNotIn("&lt;script&gt;", corpo)
         self.assertNotIn('<script>alert("xss")</script>', corpo)
         self.assertNotIn(token, corpo)
-        self.assertIn("Nenhum cupom ativo encontrado", corpo)
+        self.assertIn("Nenhum cupom pronto para envio", corpo)
 
 
 class SemBypassAsyncUnsafeTests(SimpleTestCase):

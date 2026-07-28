@@ -10,7 +10,8 @@ from django.utils import timezone
 from apps.scrapers.awin import AwinError, listar_contas, sincronizar_integracao
 from apps.scrapers.models import (
     ConfiguracaoEnvio, CupomNormalizado, CupomPreparacao, FonteIngestao,
-    IntegracaoAfiliado, Produto, ProdutoCupom, ProgramaAfiliado,
+    IntegracaoAfiliado, LinkAfiliadoUsuario, Produto, ProdutoCupom,
+    ProgramaAfiliado,
 )
 
 
@@ -63,6 +64,12 @@ class AwinCatalogTests(TestCase):
         CupomPreparacao.objects.create(
             cupom=cupom, usuario=cupom.owner, status="pronto",
             produtos_chave=chave, verificado_em=timezone.now())
+        LinkAfiliadoUsuario.objects.create(
+            usuario=cupom.owner, produto=produto, afiliado_ok=True,
+            estado="pronto", link_afiliado=produto.link_produto,
+            verificado_ok=True, verificado_em=timezone.now(),
+            url_canonica=produto.link_produto,
+        )
         return produto
 
     @patch("apps.scrapers.awin.requests.request")

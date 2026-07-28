@@ -254,6 +254,9 @@ WORKERS = (
     ("scrape", "scrape", "Raspagem de ofertas"),
     ("scrape_rapido", "scrape", "Feed rápido de ofertas"),
     ("links", "scrape", "Links de afiliado"),
+    # O pipeline de cupons mantém a janela de preparo mesmo com a raspagem geral
+    # desligada, portanto sua saúde não pode herdar a flag de ``scrape``.
+    ("cupons", None, "Manutenção de cupons"),
     ("envio", "envio", "Envio de ofertas"),
     ("relatorios", "relatorios", "Relatórios de comissão"),
     # Sem flag de propósito: monitorar conexão não pode depender de a automação

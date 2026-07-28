@@ -13,7 +13,7 @@ from apps.scrapers.coupon_rules import (
 from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
 from apps.scrapers.models import Cupom, Produto, CupomNormalizado, FonteIngestao
 from apps.scrapers.progresso import emitir_progresso, emitir_fase
-from django.db import connections
+from django.db import DatabaseError, OperationalError, connections, transaction
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -150,6 +150,90 @@ def _transporte_cupons(state):
     finally:
         if estado["_cm"] is not None:
             estado["_cm"].__exit__(None, None, None)
+
+
+def _persistir_campanhas_cupons(
+    rows, *, varredura_completa, motivo_parada="", pagina_final=0, tentativas=3,
+):
+    """Persiste uma varredura já concluída, reabrindo DB/RLS sem repetir a rede."""
+    ids_ativos = {row["campaignId"] for row in rows}
+    ultimo_erro = None
+    for tentativa in range(1, tentativas + 1):
+        connections.close_all()
+        try:
+            with transaction.atomic():
+                agora = timezone.now()
+                cupons_db = [
+                    Cupom(
+                        campanha_id=c["campaignId"],
+                        titulo=c["title"],
+                        tipo_desconto=(c.get("desconto") or {}).get("tipo", ""),
+                        valor_desconto=(c.get("desconto") or {}).get("valor", 0.0),
+                        valor_minimo=c.get("valor_minimo") or 0.0,
+                        link_original=c.get("link_produtos") or "",
+                        codigo=c.get("codigo") or "",
+                        fonte="mercadolivre-cupom",
+                        ultima_verificacao=agora,
+                        estado="ativo",
+                    )
+                    for c in rows
+                ]
+                Cupom.objects.bulk_create(
+                    cupons_db,
+                    update_conflicts=True,
+                    unique_fields=["campanha_id"],
+                    update_fields=[
+                        "titulo", "tipo_desconto", "valor_desconto", "valor_minimo",
+                        "link_original", "codigo", "fonte", "ultima_verificacao", "estado",
+                    ],
+                )
+                expirados = prods_expirados = 0
+                if varredura_completa:
+                    expirados = Cupom.objects.exclude(
+                        campanha_id__in=ids_ativos,
+                    ).update(estado="expirado", ultima_verificacao=agora)
+                    prods_expirados = (
+                        Produto.objects
+                        .filter(
+                            marketplace="mercadolivre", owner__isnull=True,
+                            origem="cupom",
+                        )
+                        .exclude(campanha_id__in=ids_ativos)
+                        .update(
+                            estado="expirado",
+                            falha_verificacao=(
+                                "Cupom não observado na última sincronização"
+                            ),
+                            ultima_verificacao=agora,
+                        )
+                    )
+            if not varredura_completa:
+                logger.warning(
+                    "Varredura de cupons parcial (%s cupom(ns) até a página %s): %s. "
+                    "Nada foi expirado.",
+                    len(rows), pagina_final, motivo_parada or "interrompida",
+                )
+            else:
+                if expirados:
+                    logger.info("%s cupom(ns) marcado(s) como expirado(s)", expirados)
+                if prods_expirados:
+                    logger.info(
+                        "%s produto(s) de cupons marcados como expirados",
+                        prods_expirados,
+                    )
+            return len(rows)
+        except (OperationalError, DatabaseError) as exc:
+            ultimo_erro = exc
+            logger.warning(
+                "Persistência das campanhas falhou (%s/%s); reconectando sem "
+                "repetir a raspagem: %s",
+                tentativa, tentativas, exc,
+            )
+            connections.close_all()
+            if tentativa < tentativas:
+                time.sleep(0.5 * tentativa)
+    raise ultimo_erro
+
 
 def mapear_cupons(n=1, faixa=None, usuario=None):
     """Raspa /cupons/filter e popula a tabela Cupom. Retorna quantos foram salvos.
@@ -375,60 +459,12 @@ def mapear_cupons(n=1, faixa=None, usuario=None):
         # idade/flags locais e não percebe um socket que o proxy encerrou enquanto o
         # browser trabalhava. Fora da transação longa da request, ``close_all`` faz a
         # próxima query abrir uma conexão nova e reinstalar o contexto RLS pelo signal.
-        connections.close_all()
-        cupons_db = [
-            Cupom(
-                campanha_id=c["campaignId"],
-                titulo=c["title"],
-                tipo_desconto=(c.get("desconto") or {}).get("tipo", ""),
-                valor_desconto=(c.get("desconto") or {}).get("valor", 0.0),
-                valor_minimo=c.get("valor_minimo") or 0.0,
-                link_original=c.get("link_produtos") or "",
-                codigo=c.get("codigo") or "",
-                fonte="mercadolivre-cupom",
-                ultima_verificacao=timezone.now(),
-                estado="ativo",
-            )
-            for c in todos_os_cupons_limpos
-        ]
-        Cupom.objects.bulk_create(
-            cupons_db,
-            update_conflicts=True,
-            unique_fields=["campanha_id"],
-            update_fields=[
-                "titulo", "tipo_desconto", "valor_desconto", "valor_minimo",
-                "link_original", "codigo", "fonte", "ultima_verificacao", "estado",
-            ],
+        _persistir_campanhas_cupons(
+            todos_os_cupons_limpos,
+            varredura_completa=varredura_completa,
+            motivo_parada=motivo_parada,
+            pagina_final=n,
         )
-        ids_ativos = {c["campaignId"] for c in todos_os_cupons_limpos}
-        # Expirar o que não apareceu só é válido se a varredura chegou ao fim. Quando
-        # ela para no meio (payload some na página 3), o que veio é uma FATIA do
-        # catálogo — e expirar "todo o resto" apagava a aba Cupons inteira por causa
-        # de uma falha de rede. A guarda anti-wipe antiga só cobria o caso 100% vazio.
-        if not varredura_completa:
-            logger.warning(
-                "Varredura de cupons parcial (%s cupom(ns) em %s página(s)): %s. "
-                "Nada foi expirado.", len(todos_os_cupons_limpos), n - 1,
-                motivo_parada or "interrompida")
-        else:
-            expirados = Cupom.objects.exclude(campanha_id__in=ids_ativos).update(
-                estado="expirado", ultima_verificacao=timezone.now())
-            if expirados:
-                logger.info("%s cupom(ns) marcado(s) como expirado(s)", expirados)
-            # Limpa apenas a lane de cupons do pool compartilhado do ML. Um exclude()
-            # global aqui apagava também ofertas, buscas e produtos privados da Amazon.
-            prods_expirados = (
-                Produto.objects
-                .filter(marketplace="mercadolivre", owner__isnull=True, origem="cupom")
-                .exclude(campanha_id__in=ids_ativos)
-                .update(
-                    estado="expirado",
-                    falha_verificacao="Cupom não observado na última sincronização",
-                    ultima_verificacao=timezone.now(),
-                )
-            )
-            if prods_expirados:
-                logger.info("%s produto(s) de cupons marcados como expirados", prods_expirados)
         logger.info("%s cupons salvos/atualizados", len(todos_os_cupons_limpos))
     else:
         # Guarda anti-wipe: coleta vazia não expira nada (o bloco acima nem roda).

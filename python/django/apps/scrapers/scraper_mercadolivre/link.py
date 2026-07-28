@@ -2,6 +2,11 @@ import sys
 import os
 import re
 import logging
+from datetime import timedelta
+
+from django.db.models import Q
+from django.utils import timezone
+
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 caminho_django = os.path.dirname(os.path.dirname(os.path.dirname(caminho_atual)))
 sys.path.append(caminho_django)
@@ -544,7 +549,7 @@ def verificar_e_aprovar(usuario, produto, link_afiliado, url_isca="") -> str:
     return "reprovado"
 
 
-def verificar_links_pendentes(usuario, limite=20) -> dict:
+def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
     """Verifica o destino dos links gerados mas ainda sem veredito (verificado_ok
     IS NULL) e persiste o resultado. É o passo que torna um link enviável ANTES de
     a promoção aparecer na tela de envio — antes disto, o veredito só era calculado
@@ -554,13 +559,17 @@ def verificar_links_pendentes(usuario, limite=20) -> dict:
         return {"aprovados": 0, "reprovados": 0, "transitorios": 0}
     from apps.scrapers.models import LinkAfiliadoUsuario
 
-    linhas = list(
+    agora = timezone.now()
+    queryset = (
         LinkAfiliadoUsuario.objects
         .filter(usuario=usuario, verificado_ok__isnull=True)
+        .filter(Q(proxima_tentativa__isnull=True) | Q(proxima_tentativa__lte=agora))
         .exclude(link_afiliado="")
         .select_related("produto")
-        .order_by("-ultima_tentativa", "-id")[:limite]
     )
+    if produto_ids is not None:
+        queryset = queryset.filter(produto_id__in=list(produto_ids))
+    linhas = list(queryset.order_by("-ultima_tentativa", "-id")[:limite])
     aprovados = reprovados = transitorios = 0
     # Sem guarda de ORM: `verificar_e_aprovar` fecha o browser antes de retornar, e
     # registrar_aprovacao/registrar_reprovacao já rodam com o Playwright encerrado.
@@ -571,6 +580,10 @@ def verificar_links_pendentes(usuario, limite=20) -> dict:
         except Exception as e:
             logger.warning("Verificação de destino falhou p/ produto %s: %s",
                            getattr(linha.produto, "id", None), e)
+            LinkAfiliadoUsuario.objects.filter(pk=linha.pk).update(
+                proxima_tentativa=timezone.now() + timedelta(minutes=15),
+                verificacao_motivo="Verificação temporariamente indisponível.",
+            )
             transitorios += 1
             continue
         if r == "aprovado":
@@ -578,6 +591,10 @@ def verificar_links_pendentes(usuario, limite=20) -> dict:
         elif r == "reprovado":
             reprovados += 1
         else:
+            LinkAfiliadoUsuario.objects.filter(pk=linha.pk).update(
+                proxima_tentativa=timezone.now() + timedelta(minutes=15),
+                verificacao_motivo="Verificação temporariamente indisponível.",
+            )
             transitorios += 1
     logger.info("Verificação de destino ML p/ %s: %s aprovado(s), %s reprovado(s), "
                 "%s transitório(s)", usuario, aprovados, reprovados, transitorios)

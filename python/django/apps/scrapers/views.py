@@ -1648,12 +1648,55 @@ def top_promocoes(request):
     elif como_usar_selecionado == "ativacao":
         cupons_publicaveis = [c for c in cupons_publicaveis if not c.codigo_publico]
     cupons_prontos = sum(c.id in ids_prontos for c in cupons_publicaveis)
+    relacoes_por_cupom = {
+        cupom.id: relacoes_preparadas_para_envio(cupom, request.user)
+        for cupom in cupons_publicaveis
+    }
     ids_preparados = {
-        cupom.id for cupom in cupons_publicaveis
-        if relacoes_preparadas_para_envio(cupom, request.user)
+        cupom_id for cupom_id, relacoes in relacoes_por_cupom.items() if relacoes
     }
     cupons_aguardando_preparo = len(cupons_publicaveis) - len(ids_preparados)
-    cupons_aguardando_link = len(ids_preparados - ids_prontos)
+    ids_produtos_preparados = {
+        relacao.produto_id
+        for relacoes in relacoes_por_cupom.values()
+        for relacao in relacoes
+    }
+    links_por_produto = {
+        link.produto_id: link
+        for link in LinkAfiliadoUsuario.objects.filter(
+            usuario=request.user, produto_id__in=ids_produtos_preparados,
+        )
+    }
+    cupons_aguardando_verificacao = 0
+    cupons_aguardando_conexao = 0
+    cupons_aguardando_link = 0
+    try:
+        from apps.scrapers.conexoes import estado_ml
+        ml_conectado = estado_ml(request.user).conectado
+    except Exception:
+        ml_conectado = False
+    for cupom in cupons_publicaveis:
+        if cupom.id not in ids_preparados or cupom.id in ids_prontos:
+            continue
+        relacoes = relacoes_por_cupom[cupom.id]
+        links = [links_por_produto.get(relacao.produto_id) for relacao in relacoes]
+        if any(link and link.link_afiliado and link.verificado_ok is None for link in links):
+            cupons_aguardando_verificacao += 1
+        elif cupom.marketplace == "mercadolivre" and not ml_conectado:
+            cupons_aguardando_conexao += 1
+        elif (
+            cupom.marketplace == "awin"
+            and cupom.integracao_id
+            and getattr(cupom.integracao, "status", "") in ("reconectar", "erro")
+        ):
+            cupons_aguardando_conexao += 1
+        else:
+            cupons_aguardando_link += 1
+    cupons_coletados = len(cupons_publicaveis)
+    cupons_fontes_sem_resultado = FonteIngestao.objects.filter(
+        habilitada=True, ultimo_total=0,
+        status__in=("degraded", "blocked"),
+    ).count()
     # A lista continua estrita: o contador torna a fila visível sem oferecer um
     # cupom cujo envio ainda não consegue montar produtos, imagem e link afiliado.
     cupons_lista = [c for c in cupons_publicaveis if c.id in ids_prontos]
@@ -1817,9 +1860,13 @@ def top_promocoes(request):
         "anunciante_selecionado": anunciante_selecionado,
         "como_usar_selecionado": como_usar_selecionado,
         "cupons_catalogo": cupons_catalogo,
+        "cupons_coletados": cupons_coletados,
         "cupons_prontos": cupons_prontos,
         "cupons_aguardando_preparo": cupons_aguardando_preparo,
         "cupons_aguardando_link": cupons_aguardando_link,
+        "cupons_aguardando_verificacao": cupons_aguardando_verificacao,
+        "cupons_aguardando_conexao": cupons_aguardando_conexao,
+        "cupons_fontes_sem_resultado": cupons_fontes_sem_resultado,
         "awin_programas": ProgramaAfiliado.objects.filter(
             integracao__owner=request.user, integracao__provedor="awin",
             integracao__status="conectada", habilitado=True,
