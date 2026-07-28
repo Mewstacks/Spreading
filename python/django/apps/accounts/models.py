@@ -11,7 +11,12 @@ from django.utils import timezone
 from django.utils.text import slugify
 import uuid
 
+from contextlib import nullcontext
+
 from apps.accounts.fields import EncryptedCharField
+from apps.accounts.tenant import (
+    actor_context, current_actor_id, in_system_context, organization_context,
+)
 
 
 class Organization(models.Model):
@@ -122,22 +127,28 @@ class WhatsAppConnection(models.Model):
 
 
 def ensure_personal_organization(user) -> Organization:
-    """Retorna/cria o tenant pessoal de um usuário de forma idempotente."""
+    """Retorna/cria o tenant pessoal de um usuário de forma idempotente.
+
+    Membership e WhatsAppConnection são STRICT_TENANT_TABLES: exigem app.organization_id
+    (não basta o actor_context usado para achar `existing`). Fora de system_context —
+    ex.: chamado a partir do login — abre organization_context explicitamente.
+    """
     existing = Organization.objects.filter(personal_owner=user).first()
     if existing:
-        Membership.objects.get_or_create(
-            organization=existing, user=user,
-            defaults={"role": "owner", "is_active": True},
-        )
-        WhatsAppConnection.objects.get_or_create(
-            organization=existing,
-            defaults={
-                "instance_id": (
-                    getattr(getattr(user, "perfil", None), "wa_session", "")
-                    or str(user.pk)
-                ),
-            },
-        )
+        with nullcontext() if in_system_context() else organization_context(existing):
+            Membership.objects.get_or_create(
+                organization=existing, user=user,
+                defaults={"role": "owner", "is_active": True},
+            )
+            WhatsAppConnection.objects.get_or_create(
+                organization=existing,
+                defaults={
+                    "instance_id": (
+                        getattr(getattr(user, "perfil", None), "wa_session", "")
+                        or str(user.pk)
+                    ),
+                },
+            )
         return existing
 
     base = slugify(user.get_username())[:80] or "conta"
@@ -325,10 +336,7 @@ class Perfil(models.Model):
         return f"Perfil<{self.user.get_username()}>"
 
 
-@receiver(post_save, sender=settings.AUTH_USER_MODEL)
-def criar_perfil(sender, instance, created, **kwargs):
-    """Todo User ganha um Perfil. Superusuário (createsuperuser) já nasce verificado."""
-    organization = ensure_personal_organization(instance)
+def _criar_ou_atualizar_perfil(instance, organization, created):
     if created:
         Perfil.objects.create(
             user=instance,
@@ -345,3 +353,27 @@ def criar_perfil(sender, instance, created, **kwargs):
         if profile.organization_id != organization.pk:
             profile.organization = organization
             profile.save(update_fields=["organization"])
+
+
+@receiver(post_save, sender=settings.AUTH_USER_MODEL)
+def criar_perfil(sender, instance, created, **kwargs):
+    """Todo User ganha um Perfil. Superusuário (createsuperuser) já nasce verificado.
+
+    Este signal dispara em QUALQUER save do User — inclusive o `update_last_login` do
+    login, que roda antes de qualquer middleware abrir o escopo do tenant. Sem
+    contexto nenhum a RLS esconde a organização (e o perfil) já existentes e a leitura
+    cai no caminho de criação, que a RLS barra. `actor_context`/`organization_context`
+    resolvem isso com o mesmo privilégio de um usuário comum (só autoriza achar a
+    PRÓPRIA organização); pulados quando já há um escopo aberto (ex.: bootstrap sob
+    system_context, ou este signal disparando de dentro de um request já escopado).
+    """
+    if in_system_context():
+        organization = ensure_personal_organization(instance)
+        _criar_ou_atualizar_perfil(instance, organization, created)
+        return
+
+    already_scoped = current_actor_id() == str(instance.pk)
+    with actor_context(instance.pk) if not already_scoped else nullcontext():
+        organization = ensure_personal_organization(instance)
+        with organization_context(organization):
+            _criar_ou_atualizar_perfil(instance, organization, created)

@@ -5,16 +5,26 @@ primary_region = "gru"
 [build]
   dockerfile = "Dockerfile"
 
+[[restart]]
+  policy = "always"
+
 [env]
+  APP_ENV = "staging"
+  SENTRY_ENV = "staging"
   DJANGO_DEBUG = "0"
   DJANGO_ALLOWED_HOSTS = "spreading-web-staging.fly.dev"
   DJANGO_CSRF_TRUSTED_ORIGINS = "https://spreading-web-staging.fly.dev"
   PUBLIC_BASE_URL = "https://spreading-web-staging.fly.dev"
   ML_AUTH_DIR = "/data/ml_sessions"
   WHATSAPP_API_URL = "http://spreading-wa-staging.internal:3000"
+  AWIN_INTEGRATION_ENABLED = "1"
+  ML_BROWSER_LOGIN_ENABLED = "1"
+  ML_BROWSER_REPORTS_ENABLED = "1"
+  ML_LINK_BUILDER_ENABLED = "1"
+  WHATSAPP_WEB_ENABLED = "1"
 
 [deploy]
-  release_command = "sh -c 'python django/manage.py migrate --noinput && python django/manage.py bootstrap_superuser'"
+  release_command = "sh -c 'python django/manage.py migrate --noinput && env TENANT_SYSTEM_PROCESS=1 python django/manage.py bootstrap_superuser'"
 
 [[mounts]]
   source = "ml_data_staging"
@@ -26,6 +36,14 @@ primary_region = "gru"
   auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/healthz"
+    headers = { Host = "spreading-web-staging.fly.dev", X-Forwarded-Proto = "https" }
 
 [[vm]]
   size = "performance-2x"
