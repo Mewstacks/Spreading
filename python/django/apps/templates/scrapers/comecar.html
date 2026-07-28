@@ -1,27 +1,18 @@
 {% extends "base.html" %}
 {% block title %}Começar — Configuração da conta{% endblock %}
+{% block page_class %}page-narrow{% endblock %}
+{% block topbar_context %}<strong>Começar</strong><span>Onboarding</span>{% endblock %}
 
 {% block head_extra %}
 <style>
-  /* fluxo de passos: índice mono + hairlines, concluído com check verde */
-  .steps { display: flex; flex-direction: column; }
-  .step { display: flex; align-items: flex-start; gap: 1rem; padding: 1.05rem 0;
-    border-top: 1px solid var(--border); }
-  .step:first-child { border-top: 0; padding-top: .2rem; }
-  .step:last-child { padding-bottom: .2rem; }
-  .step-n { flex: none; width: 1.9rem; height: 1.9rem; display: inline-flex; align-items: center;
-    justify-content: center; font-family: var(--mono); font-size: 11px; color: var(--muted);
-    border: 1px solid var(--border-strong); border-radius: 50%; margin-top: .1rem; }
-  .step.done .step-n { background: var(--green-bg); border-color: var(--green); color: var(--green); }
-  .step-n .lucide { width: 1rem; height: 1rem; }
-  .step-body { flex: 1; min-width: 0; }
-  .step-body h3 { margin: 0 0 .2rem; font-size: 14.5px; font-weight: 600; letter-spacing: -.01em;
-    display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
-  .step-body p { margin: 0 0 .6rem; font-size: 13px; color: var(--muted); max-width: 60ch; }
-  .step.done .step-body h3 { color: var(--muted); }
-
-  .setup-progress { display: flex; align-items: center; gap: .9rem; margin-bottom: .4rem; }
+  .setup-progress { display: flex; align-items: center; gap: .9rem; }
   .setup-progress .progress-bg { flex: 1; margin: 0; }
+
+  /* stepper: CTA cai para linha própria no mobile */
+  @media (max-width: 639px) {
+    .step { flex-wrap: wrap; }
+    .step .step-cta { margin-left: calc(26px + .9rem); }
+  }
 </style>
 {% endblock %}
 
@@ -29,7 +20,7 @@
 <div class="page-head">
   <div class="head-main">
     <span class="eyebrow">Onboarding</span>
-    <h1><i data-lucide="rocket"></i> Começar</h1>
+    <h1>Começar</h1>
     <p class="sub">Siga os passos para deixar sua conta operacional. {{ feitos }} de {{ total }} concluídos.</p>
   </div>
   <div class="head-actions">
@@ -37,7 +28,7 @@
   </div>
 </div>
 
-<div class="card" style="max-width:760px;">
+<section class="section">
   <div class="setup-progress">
     <div class="progress-bg"><div class="progress-bar {% if completo %}succeeded{% endif %}" style="width: {% widthratio feitos total 100 %}%;"></div></div>
   </div>
@@ -49,19 +40,24 @@
   </div>
   {% endif %}
 
-  <div class="steps">
+  <div class="stepper" style="margin-top:1.2rem;">
+    {% with prox=feitos|add:1 %}
     {% for p in passos %}
-    <div class="step {% if p.feito %}done{% endif %}">
-      <span class="step-n">{% if p.feito %}<i data-lucide="check"></i>{% else %}{{ forloop.counter|stringformat:"02d" }}{% endif %}</span>
-      <div class="step-body">
-        <h3>{{ p.titulo }}{% if p.feito %}<span class="badge badge-green"><span class="dot"></span>concluído</span>{% endif %}</h3>
-        <p>{{ p.desc }}</p>
-        {% if not p.feito %}
-        <a href="{% url p.url %}" class="btn btn-sm btn-accent">{{ p.cta }} <i data-lucide="arrow-right"></i></a>
-        {% endif %}
+    <div class="step {% if p.feito %}done{% elif forloop.counter == prox %}next{% endif %}">
+      <span class="step-marker">{% if p.feito %}<i data-lucide="check"></i>{% else %}{{ forloop.counter|stringformat:"02d" }}{% endif %}</span>
+      <div class="step-main">
+        <div class="step-title">
+          {{ p.titulo }}
+          {% if p.feito %}<span class="badge badge-green"><span class="dot"></span>concluído</span>{% endif %}
+        </div>
+        <div class="step-desc">{{ p.desc }}</div>
       </div>
+      {% if not p.feito %}
+      <div class="step-cta"><a href="{% url p.url %}" class="btn btn-sm {% if forloop.counter == prox %}btn-accent{% endif %}">{{ p.cta }} <i data-lucide="arrow-right"></i></a></div>
+      {% endif %}
     </div>
     {% endfor %}
+    {% endwith %}
   </div>
-</div>
+</section>
 {% endblock %}

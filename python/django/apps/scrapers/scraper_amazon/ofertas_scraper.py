@@ -73,14 +73,30 @@ def _mapear_item(item: dict) -> dict | None:
     preco_de = _num(_primeiro(listing, ("price", "savingBasis", "money", "amount")))
     if preco_atual <= 0:
         return None
-    # savingBasis às vezes vem em unidade/escala diferente do price (ex.: milhares),
-    # inflando o "De:" ~1000x e gerando "100% OFF" absurdo (R$ 64,99 de R$ 64990,00).
-    # Se o desconto implícito for implausível (>= 90%, i.e. de > 10x o atual), o dado
-    # está corrompido: descarta o "De:" e trata como sem desconto de/por.
-    if preco_de > preco_atual * 10:
-        preco_de = preco_atual
     if preco_de <= preco_atual:
         preco_de = preco_atual  # sem desconto de/por; pode ainda ter promoção (dealDetails)
+    elif preco_de > preco_atual:
+        # savingBasis às vezes vem em unidade/escala diferente do price, inflando o
+        # "De:" e gerando desconto falso. A própria API informa a porcentagem; quando
+        # ela discorda do par (de, atual), o item está corrompido e é descartado —
+        # silenciar o "De:" deixaria o produto entrar no catálogo com desconto zero
+        # e poluiria o ranking com dado que sabemos estar errado.
+        pct_api = _primeiro(listing, ("price", "savings", "percentage"))
+        if pct_api is not None:
+            pct_calc = (preco_de - preco_atual) / preco_de * 100
+            if abs(_num(pct_api) - pct_calc) > 2:
+                logger.warning(
+                    "amazon_preco_incoerente asin=%s de=%.2f atual=%.2f api=%.2f%% calc=%.2f%%",
+                    asin, preco_de, preco_atual, _num(pct_api), pct_calc,
+                )
+                return None
+        elif preco_de > preco_atual * 10:
+            # Sem a porcentagem da API, resta a guarda de escala.
+            logger.warning(
+                "amazon_preco_incoerente asin=%s de=%.2f atual=%.2f (sem percentage)",
+                asin, preco_de, preco_atual,
+            )
+            return None
 
     # Promoção/cupom de clipar agora vem em dealDetails (null quando não há).
     deal = _primeiro(listing, ("dealDetails",))

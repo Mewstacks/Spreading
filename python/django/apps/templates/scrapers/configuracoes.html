@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Configurações de Envio{% endblock %}
+{% block page_class %}page-narrow{% endblock %}
+{% block topbar_context %}<strong>Envios</strong><span>Operação</span>{% endblock %}
 
 {% block head_extra %}
 <style>
-  /* ── Barra de estado do envio automático (bloco distinto, não card genérico) ── */
-  .auto-bar { display: flex; align-items: center; gap: 1.1rem; flex-wrap: wrap;
-    background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--accent);
-    border-radius: var(--r-lg); padding: 1.05rem 1.35rem; }
+  /* ── Estado do envio automático: painel tonal, sem caixa ── */
+  .auto-bar { display: flex; align-items: center; gap: 1.1rem; flex-wrap: wrap; }
   .auto-info { flex: 1; min-width: 230px; }
   .auto-line { display: flex; align-items: center; gap: .7rem; flex-wrap: wrap; }
   .auto-label { font-weight: 600; font-size: 1rem; letter-spacing: -.01em; }
@@ -44,11 +44,9 @@
   .ms-opt input { width: auto; margin: 0; }
   .ms-empty { padding: .6rem .7rem; color: var(--muted); font-size: 12.5px; }
 
-  /* ── Formulário de nova regra: seções ── */
-  .rule-form .section-head { margin: 1.6rem 0 .8rem; }
-  .rule-form .section-head:first-of-type { margin-top: 0; }
-  .rule-form .section-head h2 { display: flex; align-items: center; gap: .5rem; }
-  .rule-form .section-head h2 .lucide { color: var(--accent); }
+  /* ── Drawer: formulário de nova regra ── */
+  .rule-form .form-section:first-of-type { margin-top: 0; }
+  .drawer-head .drawer-close { margin-left: auto; }
   .label-note { font-weight: 400; color: var(--muted); }
   .grupo-sync { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-top: .55rem; }
   .grupo-sync .help { margin-top: 0; }
@@ -58,10 +56,10 @@
   .adv-checks { grid-column: 1 / -1; display: flex; flex-direction: column; gap: .65rem; }
 
   /* opções avançadas (details) */
-  .adv { margin-top: 1.1rem; border: 1px solid var(--border); border-radius: var(--r-md);
+  .adv { margin-top: 1.6rem; border: 1px solid var(--border); border-radius: var(--r-md);
     background: var(--surface-2); }
   .adv summary { cursor: pointer; padding: .7rem .95rem; font-weight: 600; font-size: 13px;
-    display: flex; align-items: center; gap: .5rem; list-style: none; }
+    display: flex; align-items: center; gap: .5rem; list-style: none; min-height: 42px; }
   .adv summary::-webkit-details-marker { display: none; }
   .adv summary .lucide { color: var(--muted); transition: transform .18s var(--ease); margin-left: auto; }
   .adv[open] summary .lucide { transform: rotate(180deg); }
@@ -87,7 +85,6 @@
     .cfg-table .rule-main { margin-left: auto; min-width: 0; }
     .cfg-table .rule-tags { justify-content: flex-end; }
     .cfg-table .rank-preview { flex: 1 0 100%; max-width: none; padding-top: .2rem; text-align: left; }
-    .table-wrap.flush { border: 0; background: transparent; overflow: visible; }
   }
 </style>
 {% endblock %}
@@ -102,7 +99,7 @@
 </div>
 
 <!-- Envio automático (independente da raspagem; usa as regras abaixo) -->
-<section class="auto-bar" aria-label="Estado do envio automático">
+<section class="panel auto-bar" aria-label="Estado do envio automático">
   <div class="auto-info">
     <div class="auto-line">
       <span class="auto-label">Envio automático</span>
@@ -117,18 +114,21 @@
 </section>
 
 {# Texto preenchido por loadGrupos(): o motivo varia e antes tudo virava "WhatsApp desconectado". #}
-<div id="wa-offline" class="alert alert-warn" style="display:none;">
+<div id="wa-offline" class="alert-row warn" style="display:none;">
   <i data-lucide="alert-triangle"></i>
   <div id="wa-offline-msg"></div>
 </div>
 
 <div class="section-head">
   <h2>Regras de envio</h2>
-  <span class="head-actions"><span class="badge badge-muted">{{ configs|length }} regra{{ configs|length|pluralize }}</span></span>
+  <span class="head-actions">
+    <span class="badge badge-muted">{{ configs|length }} regra{{ configs|length|pluralize }}</span>
+    <button class="btn btn-accent btn-sm" type="button" onclick="openRuleDrawer()"><i data-lucide="plus"></i> Nova regra</button>
+  </span>
 </div>
 
 {% if configs %}
-<div class="table-wrap flush">
+<div class="table-flat">
   <table class="cfg-table">
     <thead>
       <tr><th class="cell-grow">Regra</th><th>Destino</th><th>Status</th><th>Último envio</th><th class="col-actions">Ações</th></tr>
@@ -172,158 +172,174 @@
 <div class="empty">
   <i data-lucide="inbox"></i>
   <div class="empty-title">Nenhuma regra de envio ainda</div>
-  <p>Crie a primeira regra no formulário abaixo — defina o que enviar, para onde e com que frequência.</p>
+  <p>Use o botão <b>Nova regra</b> acima para definir o que enviar, para onde e com que frequência.</p>
 </div>
 {% endif %}
 
-<div class="card" style="margin-top:1.6rem;">
-  <div class="card-head"><h2><i data-lucide="plus-circle"></i> Nova regra</h2></div>
-  <form method="post" class="rule-form">{% csrf_token %}
+<div id="log" class="log"></div>
 
-    <div class="section-head">
-      <h2><i data-lucide="package"></i> O que enviar</h2>
-      <span class="hint">filtros do conteúdo que entra no ranking</span>
-    </div>
-    <div class="form-grid">
-      <div>
-        <label>Categoria</label>
-        <select name="macro_categoria" id="sel-macro" onchange="msFilter()">
-          <option value="">Todas as categorias</option>
-          {% for m in macros %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
-        </select>
-      </div>
-      <div>
-        <label>Nichos (opcional)</label>
-        <div class="ms" id="ms-sub">
-          <div class="ms-box" onclick="document.getElementById('ms-sub').classList.toggle('open')">
-            <span class="cap" id="ms-cap">Todos da categoria</span><span class="arrow">▾</span>
+<!-- Drawer lateral: criação de regra (mesmo form, campos e endpoint de sempre) -->
+<div class="drawer-scrim" id="rule-scrim" onclick="closeRuleDrawer()" aria-hidden="true"></div>
+<aside class="drawer" id="rule-drawer" aria-label="Nova regra de envio">
+  <div class="drawer-head">
+    <h2><i data-lucide="plus-circle"></i> Nova regra</h2>
+    <button type="button" class="icon-btn drawer-close" onclick="closeRuleDrawer()" title="Fechar" aria-label="Fechar"><i data-lucide="x"></i></button>
+  </div>
+  <div class="drawer-body">
+    <form method="post" class="rule-form">{% csrf_token %}
+
+      <div class="form-section">
+        <div class="fs-title"><i data-lucide="package"></i> Conteúdo</div>
+        <div class="form-grid">
+          <div>
+            <label>Categoria</label>
+            <select name="macro_categoria" id="sel-macro" onchange="msFilter()">
+              <option value="">Todas as categorias</option>
+              {% for m in macros %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+            </select>
           </div>
-          <div class="ms-panel">
-            {% for grp in subnichos %}
-            <div class="ms-grp-block" data-macro="{{ grp.macro }}">
-              <div class="ms-group">{{ grp.macro }}</div>
-              {% for it in grp.itens %}
-              <label class="ms-opt"><input type="checkbox" name="termo_busca" value="{{ it.termos }}" onchange="msUpdate()"> {{ it.label }}</label>
-              {% endfor %}
+          <div>
+            <label>Nichos (opcional)</label>
+            <div class="ms" id="ms-sub">
+              <div class="ms-box" onclick="document.getElementById('ms-sub').classList.toggle('open')">
+                <span class="cap" id="ms-cap">Todos da categoria</span><span class="arrow">▾</span>
+              </div>
+              <div class="ms-panel">
+                {% for grp in subnichos %}
+                <div class="ms-grp-block" data-macro="{{ grp.macro }}">
+                  <div class="ms-group">{{ grp.macro }}</div>
+                  {% for it in grp.itens %}
+                  <label class="ms-opt"><input type="checkbox" name="termo_busca" value="{{ it.termos }}" onchange="msUpdate()"> {{ it.label }}</label>
+                  {% endfor %}
+                </div>
+                {% endfor %}
+                <div class="ms-empty" id="ms-empty" style="display:none;">Nenhum nicho nesta categoria.</div>
+              </div>
             </div>
-            {% endfor %}
-            <div class="ms-empty" id="ms-empty" style="display:none;">Nenhum nicho nesta categoria.</div>
+          </div>
+          <div>
+            <label>Loja</label>
+            <select name="marketplace">
+              <option value="">Todas as lojas</option>
+              {% for mk in marketplaces %}<option value="{{ mk }}">{% if mk == "mercadolivre" %}Mercado Livre{% elif mk == "amazon" %}Amazon{% else %}{{ mk|title }}{% endif %}</option>{% endfor %}
+            </select>
+          </div>
+          <div>
+            <label>Desconto mínimo (%)</label>
+            <input name="min_desconto_percent" type="number" value="15" min="0" step="0.5">
           </div>
         </div>
       </div>
-      <div>
-        <label>Loja</label>
-        <select name="marketplace">
-          <option value="">Todas as lojas</option>
-          {% for mk in marketplaces %}<option value="{{ mk }}">{% if mk == "mercadolivre" %}Mercado Livre{% elif mk == "amazon" %}Amazon{% else %}{{ mk|title }}{% endif %}</option>{% endfor %}
-        </select>
-      </div>
-      <div>
-        <label>Desconto mínimo (%)</label>
-        <input name="min_desconto_percent" type="number" value="15" min="0" step="0.5">
-      </div>
-    </div>
 
-    <div class="section-head">
-      <h2><i data-lucide="send"></i> Para onde</h2>
-      <span class="hint">canal e grupo de destino</span>
-    </div>
-    <div class="form-grid">
-      <div>
-        <label>Canal de envio</label>
-        <select name="canal" id="sel-canal" onchange="toggleCanal()">
-          {% for ch in canais %}<option value="{{ ch }}">{% if ch == "whatsapp" %}WhatsApp{% elif ch == "telegram" %}Telegram{% else %}{{ ch|title }}{% endif %}</option>{% endfor %}
-        </select>
-      </div>
-      <div id="dest-whatsapp">
-        <label>Grupo do WhatsApp <span id="grupos-msg" class="label-note"></span></label>
-        <div id="grupo-field">
-          <input name="grupo_id" placeholder="12345@g.us">
-        </div>
-        <input type="hidden" name="grupo_nome">
-        <div class="grupo-sync">
-          <button type="button" id="refresh-grupos" class="btn btn-ghost btn-sm" onclick="atualizarGrupos()"><i data-lucide="refresh-cw"></i> Sincronizar grupos</button>
-          <span id="refresh-msg" class="help"></span>
+      <div class="form-section">
+        <div class="fs-title"><i data-lucide="send"></i> Destino</div>
+        <div class="form-grid">
+          <div>
+            <label>Canal de envio</label>
+            <select name="canal" id="sel-canal" onchange="toggleCanal()">
+              {% for ch in canais %}<option value="{{ ch }}">{% if ch == "whatsapp" %}WhatsApp{% elif ch == "telegram" %}Telegram{% else %}{{ ch|title }}{% endif %}</option>{% endfor %}
+            </select>
+          </div>
+          <div id="dest-whatsapp">
+            <label>Grupo do WhatsApp <span id="grupos-msg" class="label-note"></span></label>
+            <div id="grupo-field">
+              <input name="grupo_id" placeholder="12345@g.us">
+            </div>
+            <input type="hidden" name="grupo_nome">
+            <div class="grupo-sync">
+              <button type="button" id="refresh-grupos" class="btn btn-ghost btn-sm" onclick="atualizarGrupos()"><i data-lucide="refresh-cw"></i> Sincronizar grupos</button>
+              <span id="refresh-msg" class="help"></span>
+            </div>
+          </div>
+          <div id="dest-telegram" style="display:none">
+            <label>Canal do Telegram</label>
+            <input name="telegram_chat_id" placeholder="@meucanal">
+            <span class="help">Use @nomedocanal ou o ID numérico (começa com -100).</span>
+          </div>
         </div>
       </div>
-      <div id="dest-telegram" style="display:none">
-        <label>Canal do Telegram</label>
-        <input name="telegram_chat_id" placeholder="@meucanal">
-        <span class="help">Use @nomedocanal ou o ID numérico (começa com -100).</span>
-      </div>
-    </div>
 
-    <div class="section-head">
-      <h2><i data-lucide="clock"></i> Quando</h2>
-      <span class="hint">janela de horário e frequência</span>
-    </div>
-    <div class="form-grid">
-      <div>
-        <label>Horário de envio (0–23h)</label>
-        <div class="hora-row">
-          <input name="janela_inicio" type="number" value="8" min="0" max="23" aria-label="Hora inicial">
-          <span class="muted">até</span>
-          <input name="janela_fim" type="number" value="20" min="0" max="23" aria-label="Hora final">
+      <div class="form-section">
+        <div class="fs-title"><i data-lucide="clock"></i> Agendamento</div>
+        <div class="form-grid">
+          <div>
+            <label>Horário de envio (0–23h)</label>
+            <div class="hora-row">
+              <input name="janela_inicio" type="number" value="8" min="0" max="23" aria-label="Hora inicial">
+              <span class="muted">até</span>
+              <input name="janela_fim" type="number" value="20" min="0" max="23" aria-label="Hora final">
+            </div>
+          </div>
+          <div>
+            <label>Intervalo entre envios (minutos)</label>
+            <input name="intervalo_minutos" type="number" value="60" min="1">
+            <span class="help">Com variação aleatória de até 10 min.</span>
+          </div>
         </div>
       </div>
-      <div>
-        <label>Intervalo entre envios (minutos)</label>
-        <input name="intervalo_minutos" type="number" value="60" min="1">
-        <span class="help">Com variação aleatória de até 10 min.</span>
-      </div>
-    </div>
 
-    <div class="section-head">
-      <h2><i data-lucide="sliders-horizontal"></i> Comportamento</h2>
-      <span class="hint">estado inicial e opções avançadas</span>
-    </div>
-    <label class="switch">
-      <input name="ativo" type="checkbox" checked>
-      <span class="track"></span>
-      <span class="switch-text">Começar ativa — a regra entra no próximo ciclo do envio automático</span>
-    </label>
-
-    <details class="adv">
-      <summary>Opções avançadas <i data-lucide="chevron-down"></i></summary>
-      <div class="adv-body">
-        <p class="help" style="margin-top:.2rem;">Os padrões funcionam bem para a maioria dos grupos. Campos em branco usam a identidade definida em Conta.</p>
-        <div class="adv-title">Limites de segurança</div>
+      <div class="form-section">
+        <div class="fs-title"><i data-lucide="shield-check"></i> Limites</div>
         <div class="form-grid">
           <div><label>Limite diário de envios</label><input name="max_envios_dia" type="number" value="20" min="1" max="300"></div>
           <div><label>Pausar após falhas consecutivas</label><input name="pausar_apos_falhas" type="number" value="5" min="1" max="20"></div>
         </div>
-        <div class="adv-title">Fontes e campanhas</div>
-        <div class="form-grid">
-          {% if awin_programas %}<div style="grid-column:1/-1;"><label>Anunciantes Awin (opcional)</label><select name="programas" multiple size="5">{% for p in awin_programas %}<option value="{{ p.id }}">{{ p.nome }}</option>{% endfor %}</select><span class="help">Sem seleção, todos os anunciantes conectados participam do ranking.</span></div>{% endif %}
-          <div class="adv-checks">
-            <label class="switch"><input name="incluir_restritos" type="checkbox" checked><span class="track"></span><span class="switch-text">Incluir cupons restritos</span></label>
-            <label class="switch"><input name="incluir_sem_desconto" type="checkbox" checked><span class="track"></span><span class="switch-text">Incluir campanhas sem desconto calculável</span></label>
+        <span class="help">Protegem o grupo contra volume excessivo e pausam a regra se os envios começarem a falhar.</span>
+      </div>
+
+      <details class="adv">
+        <summary>Opções avançadas <i data-lucide="chevron-down"></i></summary>
+        <div class="adv-body">
+          <p class="help" style="margin-top:.2rem;">Os padrões funcionam bem para a maioria dos grupos. Campos em branco usam a identidade definida em Conta.</p>
+          <div class="adv-title">Fontes e campanhas</div>
+          <div class="form-grid">
+            {% if awin_programas %}<div style="grid-column:1/-1;"><label>Anunciantes Awin (opcional)</label><select name="programas" multiple size="5">{% for p in awin_programas %}<option value="{{ p.id }}">{{ p.nome }}</option>{% endfor %}</select><span class="help">Sem seleção, todos os anunciantes conectados participam do ranking.</span></div>{% endif %}
+            <div class="adv-checks">
+              <label class="switch"><input name="incluir_restritos" type="checkbox" checked><span class="track"></span><span class="switch-text">Incluir cupons restritos</span></label>
+              <label class="switch"><input name="incluir_sem_desconto" type="checkbox" checked><span class="track"></span><span class="switch-text">Incluir campanhas sem desconto calculável</span></label>
+            </div>
+          </div>
+          <div class="adv-title">Personalização deste grupo</div>
+          <div class="form-grid">
+            <div><label>Nome da marca</label><input name="nome_marca" placeholder="{{ perfil.nome_marca }}"></div>
+            <div><label>Tom</label><select name="tom_marca"><option value="">Padrão da conta</option><option value="direto">Direto</option><option value="amigavel">Amigável</option><option value="premium">Premium</option><option value="urgente">Urgente, sem falsa escassez</option></select></div>
+            <div><label>Chamada para ação</label><input name="chamada_acao" placeholder="{{ perfil.chamada_acao }}"></div>
+            <div><label>Variação de mensagem</label><select name="variante_template"><option value="alternar">Alternar entre A e B</option><option value="A">Somente A</option><option value="B">Somente B</option></select></div>
+            <div style="grid-column:1/-1;"><label>Divulgação de afiliado</label><input name="divulgacao_afiliado" placeholder="{{ perfil.divulgacao_afiliado }}"></div>
+            <div style="grid-column:1/-1;"><label>Template A (opcional)</label><textarea name="template_a" rows="3" placeholder="{marca}&#10;{nome} — {preco} ({desconto})&#10;{link}"></textarea></div>
+            <div style="grid-column:1/-1;"><label>Template B (opcional)</label><textarea name="template_b" rows="3" placeholder="Variáveis: {marca}, {nome}, {preco}, {desconto}, {link}"></textarea></div>
           </div>
         </div>
-        <div class="adv-title">Personalização deste grupo</div>
-        <div class="form-grid">
-          <div><label>Nome da marca</label><input name="nome_marca" placeholder="{{ perfil.nome_marca }}"></div>
-          <div><label>Tom</label><select name="tom_marca"><option value="">Padrão da conta</option><option value="direto">Direto</option><option value="amigavel">Amigável</option><option value="premium">Premium</option><option value="urgente">Urgente, sem falsa escassez</option></select></div>
-          <div><label>Chamada para ação</label><input name="chamada_acao" placeholder="{{ perfil.chamada_acao }}"></div>
-          <div><label>Variação de mensagem</label><select name="variante_template"><option value="alternar">Alternar entre A e B</option><option value="A">Somente A</option><option value="B">Somente B</option></select></div>
-          <div style="grid-column:1/-1;"><label>Divulgação de afiliado</label><input name="divulgacao_afiliado" placeholder="{{ perfil.divulgacao_afiliado }}"></div>
-          <div style="grid-column:1/-1;"><label>Template A (opcional)</label><textarea name="template_a" rows="3" placeholder="{marca}&#10;{nome} — {preco} ({desconto})&#10;{link}"></textarea></div>
-          <div style="grid-column:1/-1;"><label>Template B (opcional)</label><textarea name="template_b" rows="3" placeholder="Variáveis: {marca}, {nome}, {preco}, {desconto}, {link}"></textarea></div>
-        </div>
+      </details>
+
+      <label class="switch" style="margin-top:1.4rem;">
+        <input name="ativo" type="checkbox" checked>
+        <span class="track"></span>
+        <span class="switch-text">Começar ativa — a regra entra no próximo ciclo do envio automático</span>
+      </label>
+
+      <div class="form-actions">
+        <button class="btn btn-accent" type="submit"><i data-lucide="save"></i> Salvar regra</button>
+        <button class="btn btn-ghost" type="button" onclick="closeRuleDrawer()">Cancelar</button>
       </div>
-    </details>
-
-    <div class="form-actions">
-      <button class="btn btn-accent" type="submit"><i data-lucide="save"></i> Salvar regra</button>
-    </div>
-  </form>
-</div>
-
-<div id="log" class="log"></div>
+    </form>
+  </div>
+</aside>
 {% endblock %}
 
 {% block scripts %}
 <script>
+  // --- Drawer de nova regra (abre/fecha por classe; form inalterado) ---
+  function openRuleDrawer() {
+    document.getElementById('rule-drawer').classList.add('open');
+    document.getElementById('rule-scrim').classList.add('open');
+  }
+  function closeRuleDrawer() {
+    document.getElementById('rule-drawer').classList.remove('open');
+    document.getElementById('rule-scrim').classList.remove('open');
+  }
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeRuleDrawer(); });
+
   // --- Envio automático (tipo=envio, independente da raspagem) ---
   function getCookie(nome) {
     const m = document.cookie.match('(^|;)\\s*' + nome + '\\s*=\\s*([^;]+)');

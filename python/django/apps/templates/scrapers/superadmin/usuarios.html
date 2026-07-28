@@ -3,8 +3,8 @@
 
 {% block head_extra %}
 <style>
-  /* criação de conta: card recolhido — o summary inteiro é a affordance */
-  .create-card { margin-bottom: 1rem; }
+  /* criação de conta: painel recolhido — o summary inteiro é a affordance */
+  .create-card { margin-bottom: 1.4rem; }
   .create-card summary { cursor: pointer; list-style: none; display: flex; align-items: center;
     gap: .55rem; font-weight: 600; font-size: 14.5px; }
   .create-card summary::-webkit-details-marker { display: none; }
@@ -22,12 +22,10 @@
   .int { display: inline-flex; align-items: center; gap: .3rem; font-family: var(--mono);
     font-size: 10.5px; color: var(--text-2); white-space: nowrap; }
   .int .int-state { color: var(--muted); }
-
-  /* stat com estado textual ao lado do número */
-  .stat .n .dot { margin-right: .15rem; }
-  .stat .n small { font-size: .8rem; font-weight: 500; color: var(--muted); letter-spacing: 0; }
 </style>
 {% endblock %}
+
+{% block topbar_context %}<strong>Usuários</strong><span>Gestão</span>{% endblock %}
 
 {% block content %}
 <div class="page-head">
@@ -45,7 +43,7 @@
   </div>
 </div>
 
-<details class="card create-card" id="criar-usuario">
+<details class="panel create-card" id="criar-usuario">
   <summary>
     <i data-lucide="user-plus"></i> Criar usuário
     <span class="hint">nova conta com acesso à plataforma</span>
@@ -80,20 +78,26 @@
   </div>
 </details>
 
-<div class="card">
-  <div class="card-head">
-    <h2><i data-lucide="users"></i> Contas</h2>
-    <span class="count">{{ total_users }}</span>
+<section class="section">
+  <div class="section-head">
+    <h2>Contas</h2>
+    <span class="hint">{{ total_users }} no total</span>
   </div>
 
-  <div class="stat-grid" style="margin-bottom:1.1rem;">
-    <div class="stat">
-      <div class="n">{% if worker_scrape %}<span class="dot on"></span>{% else %}<span class="dot off"></span>{% endif %}<small>{% if scrape_ligado %}Ligado{% else %}Desligado{% endif %}</small></div>
-      <div class="l">Worker scrape (global)</div>
+  {% comment %}
+  Estado global dos workers em linhas compactas (não mereciam cards com borda):
+  quem administra quer ler "está ligado?" de relance antes de julgar a tabela.
+  {% endcomment %}
+  <div class="rows" style="margin-bottom:1.2rem;">
+    <div class="row-item">
+      <span class="dot {% if worker_scrape %}on{% else %}off{% endif %}"></span>
+      <div class="row-main"><strong>Worker scrape</strong> <span class="muted">(global)</span></div>
+      <div class="row-side muted" style="font-size:12.5px;">{% if scrape_ligado %}Ligado{% else %}Desligado{% endif %}</div>
     </div>
-    <div class="stat">
-      <div class="n">{% if worker_envio %}<span class="dot on"></span>{% else %}<span class="dot off"></span>{% endif %}<small>{% if envio_ligado %}Ligado{% else %}Desligado{% endif %}</small></div>
-      <div class="l">Worker envio (global)</div>
+    <div class="row-item">
+      <span class="dot {% if worker_envio %}on{% else %}off{% endif %}"></span>
+      <div class="row-main"><strong>Worker envio</strong> <span class="muted">(global)</span></div>
+      <div class="row-side muted" style="font-size:12.5px;">{% if envio_ligado %}Ligado{% else %}Desligado{% endif %}</div>
     </div>
   </div>
 
@@ -147,5 +151,5 @@
     <p>Crie a primeira conta no formulário acima.</p>
   </div>
   {% endif %}
-</div>
+</section>
 {% endblock %}

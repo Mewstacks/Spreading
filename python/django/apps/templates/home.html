@@ -1,30 +1,23 @@
 {% extends "base.html" %}
 {% block title %}Operação — Spreading{% endblock %}
+{% block topbar_context %}<strong>Início</strong><span>Centro operacional</span>{% endblock %}
 {% block head_extra %}
 <style>
   /* detalhe editorial: uma palavra do título em serif itálica (assinatura da landing) */
   .page-head h1 em { font-family: var(--serif); font-style: italic; font-weight: 500; }
 
-  /* KPIs: comissão tem peso maior (largura + hairline de acento), demais apoiam */
-  .kpis { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; margin-bottom: 1rem; }
-  .kpi-hero { border-top: 2px solid var(--accent); }
-  .kpi .kpi-value.na { color: var(--muted); font-weight: 500; }
+  .stat-cell .kpi-value.na { color: var(--muted); font-weight: 500; }
 
-  /* composição assimétrica: fluxo principal largo + rail de contexto */
-  .ops-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; align-items: start; }
-  @media (min-width: 900px) {
-    .kpis { grid-template-columns: 1.45fr 1fr 1fr 1fr; }
-    .ops-grid { grid-template-columns: minmax(0, 1.6fr) minmax(300px, .9fr); }
-  }
-  .col-stack > * + * { margin-top: 1rem; }
+  /* respiro entre a faixa de indicadores e a área principal */
+  .split.section { margin-top: 2.2rem; }
 
-  /* alertas como links — mantém o visual de .alert, sem margem de fluxo */
-  a.alert-link { text-decoration: none; color: inherit; margin: 0; transition: background .15s var(--ease); }
-  a.alert-link:hover { background: var(--surface-2); }
-  a.alert-link .alert-body { flex: 1; min-width: 0; }
-  a.alert-link .alert-cta { flex: none; align-self: center; color: var(--muted); display: inline-flex; }
-  a.alert-link:hover .alert-cta { color: var(--accent); }
-  .alert-list > * + * { margin-top: .55rem; }
+  /* alertas como links — linha inteira clicável, sem virar caixa */
+  a.alert-row { text-decoration: none; color: inherit; border-radius: var(--r-md);
+    transition: background .15s var(--ease); }
+  a.alert-row:hover { background: var(--surface-2); }
+  a.alert-row .row-body { flex: 1; min-width: 0; }
+  a.alert-row .row-side { align-self: center; color: var(--muted); display: inline-flex; }
+  a.alert-row:hover .row-side { color: var(--accent); }
 
   /* "tudo certo": discreto, sem alarme nem fanfarra */
   .all-clear { display: flex; align-items: center; gap: .7rem; padding: .9rem 1rem;
@@ -32,23 +25,18 @@
   .all-clear .lucide { color: var(--green); flex: none; }
   .all-clear small { display: block; color: var(--muted); font-size: 12px; }
 
-  /* linhas de lista com hairlines (conexões, syncs, rankings) */
-  .line-list { display: flex; flex-direction: column; }
-  .line-row { display: flex; align-items: center; gap: .8rem; padding: .75rem 0;
-    border-top: 1px solid var(--border); }
-  .line-row:first-child { border-top: 0; padding-top: .15rem; }
-  .line-main { flex: 1; min-width: 0; }
-  .line-title { display: flex; align-items: center; gap: .5rem; font-weight: 600; font-size: 13.5px; flex-wrap: wrap; }
-  .line-meta { color: var(--muted); font-size: 12px; margin-top: .15rem; }
-  .line-meta.err { color: var(--red); }
-  .line-side { flex: none; display: flex; align-items: center; gap: .6rem; }
+  /* metadados secundários dentro das linhas */
+  .row-sub { color: var(--muted); font-size: 12px; margin-top: .15rem; }
+  .row-sub.err { color: var(--red); }
 
   /* rankings: posição mono + nome + contagem tabular */
   .rank-pos { font-family: var(--mono); font-size: 10.5px; color: var(--muted); width: 1.2rem; flex: none; }
   .rank-n { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); white-space: nowrap; }
+  .rank-label { font-family: var(--mono); font-size: 10px; font-weight: 500; text-transform: uppercase;
+    letter-spacing: .14em; color: var(--muted); margin-bottom: .55rem; display: flex; align-items: center; gap: .45rem; }
+  .rank-label .lucide { width: .95rem; height: .95rem; color: var(--accent); }
 
-  /* tabela dentro de card: sem moldura dupla */
-  .table-wrap.in-card { border: 0; background: transparent; }
+  /* linhas da tabela de publicações */
   .pub-erro { color: var(--red); font-size: 11.5px; margin-top: .2rem; max-width: 220px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pub-meta { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: .2rem; }
@@ -57,7 +45,7 @@
 {% block content %}
 <div class="page-head">
   <div class="head-main">
-    <span class="eyebrow">Operação</span>
+    <span class="eyebrow">Centro operacional</span>
     <h1 aria-label="Sua operação">Sua <em>operação</em></h1>
     <p class="sub">O que foi publicado, o que gerou comissão e onde melhorar.</p>
   </div>
@@ -67,8 +55,8 @@
   </div>
 </div>
 
-<div class="kpis">
-  <div class="kpi kpi-hero">
+<div class="stat-strip" aria-label="Indicadores dos últimos 30 dias">
+  <div class="stat-cell hero">
     <span class="kpi-label">Comissão</span>
     {% if financeiro.periodo_inicio %}
     <span class="kpi-value tnum">R$ {{ financeiro.comissao|default:0|floatformat:2 }}</span>
@@ -78,7 +66,7 @@
     <span class="kpi-sub">Conecte uma loja para importar os relatórios de comissão.</span>
     {% endif %}
   </div>
-  <div class="kpi">
+  <div class="stat-cell">
     <span class="kpi-label">Pedidos</span>
     {% if financeiro.periodo_inicio %}
     <span class="kpi-value tnum">{{ financeiro.pedidos|default:0 }}</span>
@@ -88,7 +76,7 @@
     <span class="kpi-sub">Sem relatórios importados ainda</span>
     {% endif %}
   </div>
-  <div class="kpi">
+  <div class="stat-cell">
     <span class="kpi-label">Cliques</span>
     {% if financeiro.periodo_inicio %}
     <span class="kpi-value tnum">{{ financeiro.cliques_mkt|default:0 }}</span>
@@ -98,7 +86,7 @@
     <span class="kpi-sub">Sem relatórios importados ainda</span>
     {% endif %}
   </div>
-  <div class="kpi">
+  <div class="stat-cell">
     <span class="kpi-label">Comissão por publicação</span>
     {% if resumo.enviados %}
     <span class="kpi-value tnum">R$ {{ financeiro.comissao_por_post|default:0|floatformat:2 }}</span>
@@ -110,48 +98,17 @@
   </div>
 </div>
 
-<div class="ops-grid">
-  <div class="col-stack">
-    <section class="card" aria-label="Pendências">
-      <div class="card-head">
-        <h2><i data-lucide="bell"></i> Precisa de atenção</h2>
-        {% if alertas %}<span class="count">{{ alertas|length }}</span>{% endif %}
-      </div>
-      {% if alertas %}
-      <div class="alert-list">
-        {% for titulo, texto, rota in alertas %}
-        {% if "pausada" in titulo %}
-        <a class="alert alert-warn alert-link" href="{% url rota %}">
-          <i data-lucide="pause-circle"></i>
-        {% elif "primeira" in titulo %}
-        <a class="alert alert-info alert-link" href="{% url rota %}">
-          <i data-lucide="sparkles"></i>
-        {% else %}
-        <a class="alert alert-error alert-link" href="{% url rota %}">
-          <i data-lucide="alert-circle"></i>
-        {% endif %}
-          <div class="alert-body"><strong>{{ titulo }}</strong><br>{{ texto }}</div>
-          <span class="alert-cta"><i data-lucide="arrow-right"></i></span>
-        </a>
-        {% endfor %}
-      </div>
-      {% else %}
-      <div class="all-clear">
-        <i data-lucide="check-circle-2"></i>
-        <span>Tudo certo por aqui.<small>Nenhuma pendência de conexão, automação ou sincronização.</small></span>
-      </div>
-      {% endif %}
-    </section>
-
-    <section class="card" aria-label="Publicações recentes">
-      <div class="card-head">
-        <h2><i data-lucide="activity"></i> Publicações recentes</h2>
+<div class="split split-main-side section">
+  <div>
+    <section class="section" aria-label="Publicações recentes">
+      <div class="section-head">
+        <h2>Publicações recentes</h2>
         <div class="head-actions">
           <a class="btn btn-ghost btn-sm" href="{% url 'scraper-top' %}">Ver ofertas</a>
         </div>
       </div>
       {% if publicacoes %}
-      <div class="table-wrap in-card">
+      <div class="table-flat">
         <table>
           {% comment %}Sem coluna de cliques: a mensagem leva o link direto da
              loja (meli.la/amazon), então o redirecionador não conta mais os
@@ -178,30 +135,32 @@
       {% endif %}
     </section>
 
-    <section class="card" aria-label="Receita automática">
-      <div class="card-head"><h2><i data-lucide="refresh-cw"></i> Receita automática</h2></div>
-      <p class="muted" style="font-size:12.5px;margin:0 0 .4rem;">Os relatórios de comissão são importados automaticamente das contas conectadas.</p>
-      <div class="line-list">
+    <section class="section section-lined" aria-label="Receita automática">
+      <div class="section-head">
+        <h2>Receita automática</h2>
+        <span class="hint">Relatórios de comissão importados das contas conectadas</span>
+      </div>
+      <div class="rows">
         {% for sync in syncs %}
-        <div class="line-row">
-          <div class="line-main">
-            <div class="line-title">
+        <div class="row-item">
+          <div class="row-main">
+            <div style="display:flex;align-items:center;gap:.5rem;font-weight:600;font-size:13.5px;flex-wrap:wrap;">
               {% if sync.marketplace == "mercadolivre" %}Mercado Livre{% else %}{{ sync.marketplace|title }}{% endif %}
               <span class="badge {% if sync.status == 'ok' %}badge-green{% elif sync.status == 'acao' %}badge-yellow{% elif sync.status == 'erro' %}badge-red{% else %}badge-muted{% endif %}"><span class="dot"></span>{{ sync.get_status_display|default:"Nunca sincronizado" }}</span>
             </div>
-            <div class="line-meta">
+            <div class="row-sub">
               {% if sync.ultimo_sucesso %}Última sincronização: <span class="tnum">{{ sync.ultimo_sucesso|date:"d/m H:i" }}</span>{% else %}Nenhuma sincronização concluída até agora{% endif %}
             </div>
-            {% if sync.erro_publico %}<div class="line-meta err">{{ sync.erro_publico }}</div>{% endif %}
+            {% if sync.erro_publico %}<div class="row-sub err">{{ sync.erro_publico }}</div>{% endif %}
           </div>
-          <div class="line-side">
+          <div class="row-side">
             {% if sync.status == 'acao' and sync.marketplace == 'mercadolivre' %}
             <a class="btn btn-ghost btn-sm" href="{% url 'scraper-ml-conexao' %}"><i data-lucide="plug-zap"></i> Reconectar</a>
             {% elif sync.status == 'nao_configurado' %}
             {% comment %}Sem botão: não há leitura automática desta loja, então "Sincronizar"
                só repetiria a mesma resposta. Oferecer o botão seria mentir sobre o que ele
                faz. Atenção: {# #} do Django é só de linha única — multi-linha vira texto
-               renderizado no card.{% endcomment %}
+               renderizado na página.{% endcomment %}
             {% else %}
             <form method="post" action="{% url 'scraper-sincronizar-receitas' %}">
               {% csrf_token %}
@@ -216,79 +175,105 @@
     </section>
   </div>
 
-  <aside class="col-stack">
-    <section class="card" aria-label="Conexões">
-      <div class="card-head"><h2><i data-lucide="radio"></i> Conexões</h2></div>
-      <div class="line-list">
-        <div class="line-row">
-          <div class="line-main">
-            <div class="line-title">
-              Mercado Livre
-              {% if ml_ok %}<span class="badge badge-green"><span class="dot"></span>Conectado</span>
-              {% else %}<span class="badge badge-red"><span class="dot"></span>Desconectado</span>{% endif %}
-            </div>
-            {% if not ml_ok and est_ml.motivo %}<div class="line-meta">{{ est_ml.motivo }}</div>{% endif %}
-          </div>
-          <div class="line-side"><a class="text-action" href="{% url 'scraper-ml-conexao' %}">{% if ml_ok %}Gerenciar{% else %}Conectar{% endif %}</a></div>
-        </div>
-        <div class="line-row">
-          <div class="line-main">
-            <div class="line-title">
-              WhatsApp
-              {% if wa_ok %}<span class="badge badge-green"><span class="dot"></span>Conectado</span>
-              {% elif est_wa.detalhe == "conectando" %}<span class="badge badge-yellow"><span class="dot"></span>Conectando</span>
-              {% else %}<span class="badge badge-red"><span class="dot"></span>Desconectado</span>{% endif %}
-            </div>
-            {% if not wa_ok and est_wa.motivo %}<div class="line-meta">{{ est_wa.motivo }}</div>{% endif %}
-          </div>
-          <div class="line-side"><a class="text-action" href="{% url 'scraper-whatsapp' %}">{% if wa_ok %}Gerenciar{% else %}Conectar{% endif %}</a></div>
-        </div>
-        <div class="line-row">
-          <div class="line-main">
-            <div class="line-title">
-              Telegram
-              {% if tg_ok %}<span class="badge badge-green"><span class="dot"></span>Conectado</span>
-              {% else %}<span class="badge badge-muted"><span class="dot"></span>Não conectado</span>{% endif %}
-            </div>
-          </div>
-          <div class="line-side"><a class="text-action" href="{% url 'scraper-telegram' %}">{% if tg_ok %}Gerenciar{% else %}Conectar{% endif %}</a></div>
-        </div>
+  <aside>
+    <section class="section" aria-label="Pendências">
+      <div class="section-head">
+        <h2>Precisa de atenção</h2>
+        {% if alertas %}<span class="hint">{{ alertas|length }} pendência{{ alertas|length|pluralize }}</span>{% endif %}
       </div>
-    </section>
-
-    <section class="card" aria-label="Categorias">
-      <div class="card-head"><h2><i data-lucide="trophy"></i> Categorias</h2></div>
-      {% if melhores_categorias %}
-      <div class="line-list">
-        {% for r in melhores_categorias %}
-        <div class="line-row">
-          <span class="rank-pos">{{ forloop.counter }}</span>
-          <div class="line-main">{{ r.categoria|default:"Sem categoria" }}</div>
-          <span class="rank-n tnum">{{ r.envios }} posts</span>
-        </div>
+      {% if alertas %}
+      <div>
+        {% for titulo, texto, rota in alertas %}
+        {% if "pausada" in titulo %}
+        <a class="alert-row warn" href="{% url rota %}">
+          <i data-lucide="pause-circle"></i>
+        {% elif "primeira" in titulo %}
+        <a class="alert-row info" href="{% url rota %}">
+          <i data-lucide="sparkles"></i>
+        {% else %}
+        <a class="alert-row error" href="{% url rota %}">
+          <i data-lucide="alert-circle"></i>
+        {% endif %}
+          <span class="row-body"><strong>{{ titulo }}</strong><br>{{ texto }}</span>
+          <span class="row-side"><i data-lucide="arrow-right"></i></span>
+        </a>
         {% endfor %}
       </div>
       {% else %}
-      <p class="muted" style="font-size:12.5px;margin:0;">Os rankings aparecem após as primeiras publicações.</p>
+      <div class="all-clear">
+        <i data-lucide="check-circle-2"></i>
+        <span>Tudo certo por aqui.<small>Nenhuma pendência de conexão, automação ou sincronização.</small></span>
+      </div>
       {% endif %}
     </section>
 
-    <section class="card" aria-label="Destinos">
-      <div class="card-head"><h2><i data-lucide="users"></i> Destinos</h2></div>
-      {% if melhores_destinos %}
-      <div class="line-list">
-        {% for r in melhores_destinos %}
-        <div class="line-row">
-          <span class="rank-pos">{{ forloop.counter }}</span>
-          <div class="line-main">{{ r.destino_nome|default:r.destino_id|truncatechars:22 }}</div>
-          <span class="rank-n tnum">{{ r.envios }} posts</span>
+    <section class="section section-lined" aria-label="Conexões">
+      <div class="section-head"><h2>Conexões</h2></div>
+      <div class="rows">
+        <div class="row-item">
+          <span class="dot {% if ml_ok %}on{% else %}off{% endif %}"></span>
+          <div class="row-main">
+            <div style="font-weight:600;font-size:13.5px;">Mercado Livre</div>
+            {% if not ml_ok and est_ml.motivo %}<div class="row-sub">{{ est_ml.motivo }}</div>{% endif %}
+          </div>
+          <div class="row-side"><a class="btn-link" href="{% url 'scraper-ml-conexao' %}">{% if ml_ok %}Gerenciar{% else %}Conectar{% endif %}</a></div>
         </div>
-        {% endfor %}
+        <div class="row-item">
+          <span class="dot {% if wa_ok %}on{% elif est_wa.detalhe == "conectando" %}warn{% else %}off{% endif %}"></span>
+          <div class="row-main">
+            <div style="font-weight:600;font-size:13.5px;">WhatsApp{% if est_wa.detalhe == "conectando" and not wa_ok %} <span class="row-sub" style="display:inline;margin:0;">· conectando</span>{% endif %}</div>
+            {% if not wa_ok and est_wa.motivo %}<div class="row-sub">{{ est_wa.motivo }}</div>{% endif %}
+          </div>
+          <div class="row-side"><a class="btn-link" href="{% url 'scraper-whatsapp' %}">{% if wa_ok %}Gerenciar{% else %}Conectar{% endif %}</a></div>
+        </div>
+        <div class="row-item">
+          <span class="dot {% if tg_ok %}on{% endif %}"></span>
+          <div class="row-main">
+            <div style="font-weight:600;font-size:13.5px;">Telegram</div>
+          </div>
+          <div class="row-side"><a class="btn-link" href="{% url 'scraper-telegram' %}">{% if tg_ok %}Gerenciar{% else %}Conectar{% endif %}</a></div>
+        </div>
       </div>
-      {% else %}
-      <p class="muted" style="font-size:12.5px;margin:0;">Cada grupo terá seu próprio histórico.</p>
-      {% endif %}
     </section>
   </aside>
 </div>
+
+{% if melhores_categorias or melhores_destinos %}
+<section class="section section-lined" aria-label="Insights">
+  <div class="section-head">
+    <h2>O que está rendendo</h2>
+    <span class="hint">Publicações enviadas nos últimos 30 dias</span>
+  </div>
+  <div class="split split-2">
+    {% if melhores_categorias %}
+    <div>
+      <div class="rank-label"><i data-lucide="trophy"></i> Categorias</div>
+      <div class="rows">
+        {% for r in melhores_categorias %}
+        <div class="row-item">
+          <span class="rank-pos">{{ forloop.counter }}</span>
+          <div class="row-main">{{ r.categoria|default:"Sem categoria" }}</div>
+          <span class="rank-n tnum">{{ r.envios }} posts</span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+    {% if melhores_destinos %}
+    <div>
+      <div class="rank-label"><i data-lucide="users"></i> Destinos</div>
+      <div class="rows">
+        {% for r in melhores_destinos %}
+        <div class="row-item">
+          <span class="rank-pos">{{ forloop.counter }}</span>
+          <div class="row-main">{{ r.destino_nome|default:r.destino_id|truncatechars:22 }}</div>
+          <span class="rank-n tnum">{{ r.envios }} posts</span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
 {% endblock %}

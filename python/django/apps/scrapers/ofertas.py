@@ -412,7 +412,9 @@ def _conteudo_marketing(produto, *, persistir_cache=True):
         return {"titulo": titulo_cache, "nome_curto": nome_cache or nome_fallback}
 
     from apps.scrapers.llm import gerar_conteudo
-    preco = getattr(produto, "preco_com_cupom", None)
+    # A IA cita o preço no texto: precisa receber o mesmo valor que a mensagem
+    # publica, senão o título gerado contradiz a linha "POR".
+    preco = preco_publicavel(produto)
     de = getattr(produto, "preco_sem_desconto", 0) or 0
     desconto = ((de - preco) / de) * 100 if preco and de and de > preco else None
     gerado = gerar_conteudo(
@@ -1132,14 +1134,27 @@ def _nome_principal_produto(nome, limite=70) -> str:
 
 
 def _preco_br(valor) -> str:
-    """R$ no formato brasileiro sem 'R$' e sem centavos zerados: 49,90 / 352."""
+    """R$ no formato brasileiro sem 'R$' e sem centavos zerados: 49,90 / 1.352."""
     try:
         numero = float(valor)
     except (TypeError, ValueError):
         return ""
-    if numero.is_integer():
-        return str(int(numero))
-    return f"{numero:.2f}".replace(".", ",")
+    bruto = f"{numero:,.0f}" if numero.is_integer() else f"{numero:,.2f}"
+    # en-US -> pt-BR: 1,299.90 vira 1.299,90 (o X é ponte para não trocar duas vezes).
+    return bruto.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def preco_publicavel(produto) -> float:
+    """Preço que o cliente realmente paga na página.
+
+    `preco_com_cupom` guarda a vitrine; em fontes onde o desconto só se aplica ao
+    ativar um cupom (página oficial de cupons da Amazon), o valor pago fica em
+    `preco_efetivo`. Anunciar a vitrine junto de "ative o cupom" faz a mensagem
+    prometer um número que a página não cobra.
+    """
+    atual = getattr(produto, "preco_com_cupom", 0) or 0
+    efetivo = getattr(produto, "preco_efetivo", 0) or 0
+    return efetivo if 0 < efetivo < atual else atual
 
 
 def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
@@ -1155,7 +1170,8 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     m = markup or WhatsAppMarkup()
     esc = m.escape
 
-    economia_rs = produto.preco_sem_desconto - produto.preco_com_cupom
+    preco_final = preco_publicavel(produto)
+    economia_rs = produto.preco_sem_desconto - preco_final
     desconto_percent = (economia_rs / produto.preco_sem_desconto) * 100 if produto.preco_sem_desconto else 0
     perfil = getattr(usuario, "perfil", None) if usuario else None
     marca = (
@@ -1182,7 +1198,7 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         try:
             return template.format(
                 marca=marca, nome=nome_exibicao,
-                preco=f"R$ {produto.preco_com_cupom:.2f}",
+                preco=f"R$ {preco_final:.2f}",
                 desconto=f"{desconto_percent:.0f}%", link=link_afiliado,
             )
         except (KeyError, ValueError):
@@ -1206,8 +1222,8 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     # Guarda final: desconto >= 90% (ou "De:" <= "Por:") indica preço corrompido
     # (ex.: savingBasis em escala errada). Em vez de imprimir "100% OFF" absurdo,
     # esconde a parte "DE" e mostra só o "POR".
-    desconto_valido = 0 < desconto_percent < 90 and produto.preco_sem_desconto > produto.preco_com_cupom
-    por = _preco_br(produto.preco_com_cupom)
+    desconto_valido = 0 < desconto_percent < 90 and produto.preco_sem_desconto > preco_final
+    por = _preco_br(preco_final)
     if desconto_valido:
         de = _preco_br(produto.preco_sem_desconto)
         linhas.append(f"🔥 DE {m.strike(de)} | {m.bold(f'POR {por}')}")
@@ -1415,7 +1431,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                 | Q(status="enviado", enviada_em__gte=desde)
                 | Q(status="incerto", criada_em__gte=desde)
             ).order_by("-criada_em").first()
-            if recente and produto.preco_com_cupom > recente.preco_final * .95:
+            if recente and preco_publicavel(produto) > recente.preco_final * .95:
                 motivo = ("Esta oferta já está sendo enviada para o destino."
                           if recente.status == "pendente"
                           else "Este destino recebeu a oferta nas últimas 24h.")
@@ -1427,7 +1443,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                 destino_id=str(grupo_id or "")[:100],
                 destino_nome=str(destino_nome or "")[:255],
                 preco_original=produto.preco_sem_desconto,
-                preco_final=produto.preco_com_cupom,
+                preco_final=preco_publicavel(produto),
                 categoria=produto.macro_categoria or produto.categoria or "",
                 score=getattr(produto, "score_oferta", 0),
                 motivos_score=getattr(produto, "motivos_score", []),
@@ -1564,6 +1580,17 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                 return falhar("link reprovado na verificação",
                               link=link, verificacao=verificacao)
 
+        # Preço ao vivo: depois da verificação (não faz sentido revalidar link
+        # reprovado) e ANTES de montar a mensagem, para o texto gravado na
+        # Publicacao ser exatamente o que foi enviado.
+        if getattr(settings, "PRECO_REVALIDA_ANTES_ENVIO", True):
+            from apps.scrapers import preco_ao_vivo
+            checagem = preco_ao_vivo.revalidar(
+                produto, usuario=usuario, configuracao=configuracao)
+            if not checagem["ok"]:
+                return falhar(f"preço mudou antes do envio: {checagem['motivo']}",
+                              link=link)
+
         # Ofertas (origem='oferta') não têm Cupom; só busca quando há campanha_id
         cupom = None
         if produto.campanha_id:
@@ -1582,8 +1609,13 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             publicacao.link_rastreado = link_publicado
             publicacao.cupom = (
                 cupom.titulo if cupom else getattr(produto, "codigo_checkout", "") or "")
+            # preco_final foi gravado antes da revalidação; realinhar aqui mantém
+            # o registro igual ao número que a mensagem anuncia.
+            publicacao.preco_final = preco_publicavel(produto)
+            publicacao.preco_original = produto.preco_sem_desconto
             publicacao.save(update_fields=[
-                "variante", "link_afiliado", "link_rastreado", "cupom"])
+                "variante", "link_afiliado", "link_rastreado", "cupom",
+                "preco_final", "preco_original"])
         mensagem = montar_mensagem(
             produto, link_publicado, cupom, markup=sender.markup, usuario=usuario,
             configuracao=configuracao, variante=variante)

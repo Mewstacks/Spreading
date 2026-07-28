@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Telegram — Conexão{% endblock %}
+{% block page_class %}page-narrow{% endblock %}
+{% block topbar_context %}<strong>Telegram</strong><span>Integrações</span>{% endblock %}
 
 {% block head_extra %}
 <style>
-  /* duas áreas em telas largas: instruções | conexão */
-  .tg-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; align-items: start;
-    max-width: 1020px; }
-  @media (min-width: 900px) { .tg-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+  /* o atributo hidden precisa vencer .split/.panel (display próprio) */
+  [hidden] { display: none !important; }
 
   /* passos numerados com índice mono (assinatura editorial) */
   .steps { list-style: none; margin: 0; padding: 0; }
@@ -16,6 +16,13 @@
   .step-n { flex: none; width: 1.5rem; height: 1.5rem; margin-top: .1rem; display: inline-flex;
     align-items: center; justify-content: center; font-family: var(--mono); font-size: 10.5px;
     color: var(--accent); border: 1px solid var(--border); border-radius: var(--r-sm); }
+
+  /* linha de conexão ativa: dot + identidade do bot + ação */
+  .tg-conn { display: flex; gap: .9rem; align-items: flex-start; flex-wrap: wrap; }
+  .tg-conn .dot { margin-top: .4rem; }
+  .tg-conn-main { min-width: 0; flex: 1; }
+  #tg-bot-info { font-size: 14px; font-weight: 600; color: var(--text); }
+  #tg-bot-info b { font-weight: 600; color: var(--accent); }
 
   /* token: fonte mono, erro some quando vazio */
   #tg-token { font-family: var(--mono); }
@@ -28,32 +35,62 @@
 
 {% block content %}
 <div class="page-head">
+  <span class="int-icon" aria-hidden="true"><i data-lucide="send"></i></span>
   <div class="head-main">
     <span class="eyebrow">Canal · Telegram</span>
-    <h1><i data-lucide="send"></i> Telegram</h1>
+    <h1>Telegram</h1>
     <p class="sub">Conecte um bot do Telegram para enviar suas ofertas. Sem QR code: basta o token do bot.</p>
   </div>
   <div class="head-actions">
     <span id="tg-status"><span class="badge badge-muted">verificando…</span></span>
+    <button id="tg-remover" class="btn btn-danger btn-sm" style="display:none;"><i data-lucide="unplug"></i> Desconectar</button>
   </div>
 </div>
 
-<div class="tg-grid">
-  <section class="card" aria-label="Instruções">
-    <div class="card-head"><h2><i data-lucide="list-ordered"></i> Como conectar</h2></div>
+<!-- CONECTADO: identidade do bot + orientação, sem formulário de token -->
+<section id="tg-conectado" class="section" aria-label="Conexão ativa" hidden>
+  <div class="section-head" style="margin-top:0;">
+    <h2>Conexão</h2>
+    <span class="hint">bot autenticado via token</span>
+  </div>
+  <div class="panel">
+    <div class="tg-conn">
+      <span class="dot on" aria-hidden="true"></span>
+      <div class="tg-conn-main">
+        <div id="tg-bot-info"></div>
+        <span class="help">Adicione o bot como <strong>administrador</strong> do canal ou grupo de destino. Para trocar de bot, desconecte e cole o novo token.</span>
+      </div>
+      <a class="btn btn-accent btn-sm" href="/scrapers/config/"><i data-lucide="settings-2"></i> Criar regra de envio</a>
+    </div>
+  </div>
+  <div class="alert-row info" style="margin-top:1rem;">
+    <i data-lucide="info"></i>
+    <div>O envio em si é configurado em <a class="link" href="/scrapers/config/">Envios</a>: crie uma regra usando o canal Telegram e escolha o destino.</div>
+  </div>
+</section>
+
+<!-- DESCONECTADO: instruções ao lado do formulário -->
+<div id="tg-desconectado" class="split split-2" hidden>
+  <section aria-label="Instruções">
+    <div class="section-head" style="margin-top:0;">
+      <h2>Como conectar</h2>
+      <span class="hint">leva menos de 2 minutos</span>
+    </div>
     <ol class="steps">
       <li><span class="step-n">01</span><span>Crie um bot com o <a class="link" href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> usando o comando <span class="mono">/newbot</span>.</span></li>
       <li><span class="step-n">02</span><span>Copie o token que ele te dá (algo como <span class="mono">123456:ABC-Def…</span>) e cole ao lado.</span></li>
       <li><span class="step-n">03</span><span>Adicione o bot como <strong>administrador</strong> do canal ou grupo de destino.</span></li>
     </ol>
-    <div class="alert alert-info" style="margin-bottom:0;">
-      <i data-lucide="info"></i>
-      <div>Depois de conectar, crie uma regra em <a class="link" href="/scrapers/config/">Envios</a> usando o canal Telegram.</div>
+    <div class="alert-row warn" style="margin-top:1rem;">
+      <i data-lucide="shield-alert"></i>
+      <div>O token dá controle total sobre o bot: não compartilhe nem cole em outros sites. Aqui ele fica armazenado criptografado e nunca é exibido novamente.</div>
     </div>
   </section>
 
-  <section class="card" aria-label="Conexão">
-    <div class="card-head"><h2><i data-lucide="key-round"></i> Conexão</h2></div>
+  <section class="panel" aria-label="Conexão">
+    <div class="section-head" style="margin-top:0;">
+      <h2>Conectar bot</h2>
+    </div>
     <div id="tg-detail" class="help" style="margin:0 0 1rem;"></div>
 
     <label for="tg-token">Token do bot</label>
@@ -62,9 +99,8 @@
 
     <div class="tg-actions">
       <button id="tg-salvar" class="btn btn-accent"><i data-lucide="plug"></i> Conectar</button>
-      <button id="tg-remover" class="btn btn-danger btn-sm" style="display:none;"><i data-lucide="unplug"></i> Desconectar</button>
     </div>
-    <span class="help">O token fica armazenado criptografado e nunca é exibido novamente.</span>
+    <span class="help">Depois de conectar, crie uma regra em <a class="link" href="/scrapers/config/">Envios</a> usando o canal Telegram.</span>
   </section>
 </div>
 {% endblock %}
@@ -75,6 +111,8 @@
   const salvarBtn  = document.getElementById('tg-salvar');
   const removerBtn = document.getElementById('tg-remover');
   const formErr    = document.getElementById('tg-form-err');
+  const connBlock  = document.getElementById('tg-conectado');
+  const discBlock  = document.getElementById('tg-desconectado');
 
   function getCookie(nome) {
     const m = document.cookie.match('(^|;)\\s*' + nome + '\\s*=\\s*([^;]+)');
@@ -99,22 +137,31 @@
         st.innerHTML = '<span class="badge badge-yellow"><i data-lucide="alert-triangle"></i> Não conectado</span>';
         dt.textContent = 'Cole o token do seu bot abaixo para conectar.';
         removerBtn.style.display = 'none';
+        connBlock.hidden = true;
+        discBlock.hidden = false;
       } else if (s.ok) {
         st.innerHTML = '<span class="badge badge-green"><i data-lucide="check-circle-2"></i> Bot conectado</span>';
         // username/nome vêm do getMe (externo) — escapa via textContent p/ evitar XSS.
+        const bi = document.getElementById('tg-bot-info');
         const b = document.createElement('b');
         b.textContent = '@' + (s.username || '?');
-        dt.textContent = '';
-        dt.append('Bot ', b, ' (' + (s.nome || '') + ') pronto para enviar.');
+        bi.textContent = '';
+        bi.append('Bot ', b, ' (' + (s.nome || '') + ') pronto para enviar.');
         removerBtn.style.display = 'inline-flex';
+        connBlock.hidden = false;
+        discBlock.hidden = true;
       } else {
         st.innerHTML = '<span class="badge badge-red"><i data-lucide="x-circle"></i> Token inválido</span>';
         dt.textContent = s.erro || 'Não foi possível validar o token. Confira se copiou o token completo.';
         removerBtn.style.display = 'inline-flex';
+        connBlock.hidden = true;
+        discBlock.hidden = false;
       }
     } catch (e) {
       st.innerHTML = '<span class="badge badge-red"><i data-lucide="x-circle"></i> Erro</span>';
       dt.textContent = 'Não foi possível verificar a conexão. Tente novamente.';
+      connBlock.hidden = true;
+      discBlock.hidden = false;
     }
     if (window.renderIcons) renderIcons(); else if (window.lucide) lucide.createIcons();
   }

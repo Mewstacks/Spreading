@@ -1,5 +1,10 @@
 {% extends "base.html" %}
 {% block title %}WhatsApp — Conexão{% endblock %}
+{% block page_class %}page-narrow{% endblock %}
+{% block topbar_context %}<strong>WhatsApp</strong><span>Integrações</span>{% endblock %}
+{% block topbar_actions %}
+<div id="conn-pill" class="conn-pill"><span class="dot"></span><span id="pill-txt">verificando…</span></div>
+{% endblock %}
 
 {% block head_extra %}
 <style>
@@ -14,39 +19,49 @@
   .conn-pill.is-off { background:var(--red-bg); color:var(--red); border-color:color-mix(in srgb,var(--red) 35%,transparent); }
   .conn-pill.is-on .dot { animation:pulse 2s ease-in-out infinite; }
 
-  /* ── Layout em duas colunas (desktop) ── */
-  .conn-grid { display:grid; gap:1rem; }
-  @media (min-width:900px) {
-    .conn-grid { grid-template-columns:minmax(0,7fr) minmax(0,5fr); align-items:start; }
+  /* ── Palco: data-state (parear|conectado|erro|offline) é escrito pelo poll ── */
+  /* Conectado: o pareamento perde a segunda coluna e vira ajuda recolhível. */
+  @media (min-width:1024px) {
+    #wa-stage[data-state="conectado"] .wa-grid { grid-template-columns:minmax(0,1fr); }
   }
+  /* Erro terminal (sessão expirada, limite de conexões, falha de auth): a área da
+     sessão ganha um acento vermelho próprio, sem caixa de alerta extra. */
+  #wa-stage[data-state="erro"] #estado-panel { box-shadow:inset 3px 0 0 var(--red); }
 
-  /* ── Stepper: vertical com linha-guia no mobile, horizontal no desktop ── */
-  .steps { display:flex; flex-direction:column; gap:1.15rem; position:relative; margin:0; }
-  .steps::before { content:''; position:absolute; left:13px; top:14px; bottom:14px; width:2px;
+  /* ── Cabeçalho da área de sessão: título + KPI de grupos na mesma linha ── */
+  .estado-top { display:flex; align-items:center; gap:.8rem; flex-wrap:wrap; margin-bottom:1.1rem; }
+  .estado-title { margin:0; font-size:14.5px; font-weight:600; letter-spacing:-.01em;
+    display:flex; align-items:center; gap:.5rem; }
+  .estado-title .lucide { color:var(--accent); }
+
+  /* ── Stepper da conexão: vertical com linha-guia no mobile, horizontal no desktop.
+     (.wa-step, não .step: o base já tem um .step próprio para onboarding.) ── */
+  .wa-steps { display:flex; flex-direction:column; gap:1.15rem; position:relative; margin:0; }
+  .wa-steps::before { content:''; position:absolute; left:13px; top:14px; bottom:14px; width:2px;
     background:var(--border); }
-  .step { position:relative; z-index:1; display:flex; flex-direction:row; align-items:flex-start;
+  .wa-step { position:relative; z-index:1; display:flex; flex-direction:row; align-items:flex-start;
     gap:.75rem; min-width:0; }
-  .step .ball { width:28px; height:28px; flex:none; border-radius:50%; background:var(--surface);
+  .wa-step .ball { width:28px; height:28px; flex:none; border-radius:50%; background:var(--surface);
     border:2px solid var(--border-strong); display:flex; align-items:center; justify-content:center;
     font-family:var(--mono); font-size:.72rem; font-weight:500; color:var(--muted);
     transition:all .25s var(--ease); }
-  .step .step-txt { min-width:0; padding-top:.15rem; }
-  .step .lbl { font-size:.82rem; font-weight:500; color:var(--muted); line-height:1.25; }
-  .step .step-desc { font-size:11.5px; color:var(--muted); line-height:1.35; margin-top:.1rem;
+  .wa-step .step-txt { min-width:0; padding-top:.15rem; }
+  .wa-step .lbl { font-size:.82rem; font-weight:500; color:var(--muted); line-height:1.25; }
+  .wa-step .step-desc { font-size:11.5px; color:var(--muted); line-height:1.35; margin-top:.1rem;
     opacity:.85; }
-  .step.done .ball { background:var(--green); border-color:var(--green); color:var(--accent-ink); }
-  .step.done .lbl { color:var(--text-2); }
-  .step.active .ball { border-color:var(--accent); color:var(--accent);
+  .wa-step.done .ball { background:var(--green); border-color:var(--green); color:var(--accent-ink); }
+  .wa-step.done .lbl { color:var(--text-2); }
+  .wa-step.active .ball { border-color:var(--accent); color:var(--accent);
     box-shadow:0 0 0 4px var(--accent-bg); animation:pulse 1.4s ease-in-out infinite; }
-  .step.active .lbl { color:var(--accent); font-weight:600; }
-  .step.err .ball { border-color:var(--red); color:var(--red); background:var(--red-bg); }
-  .step.err .lbl { color:var(--red); }
+  .wa-step.active .lbl { color:var(--accent); font-weight:600; }
+  .wa-step.err .ball { border-color:var(--red); color:var(--red); background:var(--red-bg); }
+  .wa-step.err .lbl { color:var(--red); }
 
   @media (min-width:900px) {
-    .steps { flex-direction:row; gap:.9rem; }
-    .steps::before { left:10%; right:10%; top:14px; bottom:auto; width:auto; height:2px; }
-    .step { flex:1 1 0; flex-direction:column; align-items:center; gap:.55rem; text-align:center; }
-    .step .step-txt { padding-top:0; }
+    .wa-steps { flex-direction:row; gap:.9rem; }
+    .wa-steps::before { left:10%; right:10%; top:14px; bottom:auto; width:auto; height:2px; }
+    .wa-step { flex:1 1 0; flex-direction:column; align-items:center; gap:.55rem; text-align:center; }
+    .wa-step .step-txt { padding-top:0; }
   }
 
   /* ── Progresso (ids consumidos pelo JS) ── */
@@ -60,8 +75,8 @@
 
   /* ── QR: fundo claro fixo é funcional (o QR escuro precisa de contraste em
      qualquer tema), não estético ── */
-  #qr-area { margin-top:.4rem; }
-  #qr-box { margin:1rem auto .4rem; background:#fff; padding:.9rem; border-radius:var(--r-lg);
+  #qr-area { margin-top:1.2rem; padding-top:1.2rem; border-top:1px solid var(--border); }
+  #qr-box { margin:0 auto .4rem; background:#fff; padding:.9rem; border-radius:var(--r-lg);
     border:1px solid var(--border); display:flex; align-items:center; justify-content:center;
     width:280px; height:280px; max-width:100%; }
   #qr-box img { width:248px; height:248px; display:block; }
@@ -69,11 +84,22 @@
   #qr-box img:not([src]) { display:none; }
   #qr-box:has(img:not([src])) { background:var(--surface); border:1px dashed var(--border-strong); }
   #qr-box:has(img:not([src]))::after { content:'Gerando QR code…'; color:var(--muted); font-size:.85rem; }
+  .qr-hint { text-align:center; font-size:12px; color:var(--muted); margin:.5rem auto 0; max-width:32ch; }
 
   .empty-box { background:var(--surface); border:1px dashed var(--border-strong);
     border-radius:var(--r-lg); color:var(--muted); font-size:13px;
     display:flex; align-items:center; justify-content:center; }
-  #qr-box-off { margin:1rem auto .4rem; width:280px; max-width:100%; height:140px; }
+  #qr-box-off { margin:0 auto .4rem; width:280px; max-width:100%; height:140px; }
+  #offline-area { margin-top:1.2rem; padding-top:1.2rem; border-top:1px solid var(--border); }
+
+  /* ── Ajuda recolhível (pareamento). Aberta por padrão; o poll fecha quando conecta. ── */
+  details.ajuda summary { list-style:none; display:flex; align-items:center; gap:.5rem;
+    font-size:13.5px; font-weight:600; color:var(--text); cursor:pointer; }
+  details.ajuda summary::-webkit-details-marker { display:none; }
+  details.ajuda summary > .lucide:first-child { color:var(--accent); }
+  details.ajuda summary .chev { margin-left:auto; color:var(--muted); transition:transform .2s var(--ease); }
+  details.ajuda[open] summary .chev { transform:rotate(180deg); }
+  details.ajuda[open] summary { margin-bottom:1rem; padding-bottom:.85rem; border-bottom:1px solid var(--border); }
 
   /* ── Instruções de pareamento ── */
   .qr-how { margin:.2rem 0 0; padding:0; list-style:none; display:flex; flex-direction:column; gap:.55rem; }
@@ -85,7 +111,7 @@
   .qr-how b { color:var(--text); font-weight:600; }
 
   /* ── KPI discreto de grupos (id consumido pelo JS) ── */
-  .grupos-chip { display:inline-flex; align-items:baseline; gap:.5rem; margin:0;
+  .grupos-chip { display:inline-flex; align-items:baseline; gap:.5rem; margin:0 0 0 auto;
     padding:.5rem .85rem; border-radius:var(--r-md); background:var(--surface-2);
     border:1px solid var(--border); font-size:12px; color:var(--muted); }
   .grupos-chip .lucide { width:.95rem; height:.95rem; align-self:center; }
@@ -109,131 +135,132 @@
 
 {% block content %}
 <div class="page-head">
+  <div class="int-icon"><i data-lucide="message-circle"></i></div>
   <div class="head-main">
     <span class="eyebrow">Canal · WhatsApp</span>
-    <h1><i data-lucide="message-circle"></i> Conexão WhatsApp</h1>
+    <h1>Conexão WhatsApp</h1>
     <p class="sub">Pareie um número do WhatsApp para usar os grupos como fonte de ofertas. A sessão fica ativa no servidor e sincroniza sozinha depois do pareamento.</p>
-  </div>
-  <div class="head-actions">
-    <div id="conn-pill" class="conn-pill"><span class="dot"></span><span id="pill-txt">verificando…</span></div>
   </div>
 </div>
 
-<div class="conn-grid">
-  <!-- Estado da sessão: stepper, progresso, grupos e ações -->
-  <div class="card">
-    <div class="card-head">
-      <h2><i data-lucide="activity"></i> Estado da conexão</h2>
-    </div>
+<div id="wa-stage" data-state="parear">
+  <div class="split split-main-side wa-grid">
 
-    <!-- Stepper de fases -->
-    <div class="steps" id="steps">
-      <div class="step" data-step="qr">
-        <div class="ball">1</div>
-        <div class="step-txt">
-          <div class="lbl">Escanear QR</div>
-          <div class="step-desc">Aponte a câmera do app</div>
+    <!-- Coluna principal: estado da sessão, QR e ações -->
+    <section class="panel" id="estado-panel">
+      <div class="estado-top">
+        <h2 class="estado-title"><i data-lucide="activity"></i> Estado da conexão</h2>
+        <div id="grupos-chip" class="grupos-chip" style="display:none;"><i data-lucide="folder"></i> <span id="grupos-n">0</span> grupos sincronizados</div>
+      </div>
+
+      <!-- Stepper de fases -->
+      <div class="wa-steps" id="steps">
+        <div class="wa-step" data-step="qr">
+          <div class="ball">1</div>
+          <div class="step-txt">
+            <div class="lbl">Escanear QR</div>
+            <div class="step-desc">Aponte a câmera do app</div>
+          </div>
+        </div>
+        <div class="wa-step" data-step="autenticado">
+          <div class="ball">2</div>
+          <div class="step-txt">
+            <div class="lbl">Autenticar</div>
+            <div class="step-desc">Validando a sessão</div>
+          </div>
+        </div>
+        <div class="wa-step" data-step="carregando">
+          <div class="ball">3</div>
+          <div class="step-txt">
+            <div class="lbl">Carregar grupos</div>
+            <div class="step-desc">Buscando conversas</div>
+          </div>
+        </div>
+        <div class="wa-step" data-step="sincronizando">
+          <div class="ball">4</div>
+          <div class="step-txt">
+            <div class="lbl">Sincronizar</div>
+            <div class="step-desc">Gravando a lista</div>
+          </div>
+        </div>
+        <div class="wa-step" data-step="conectado">
+          <div class="ball">✓</div>
+          <div class="step-txt">
+            <div class="lbl">Conectado</div>
+            <div class="step-desc">Sessão ativa</div>
+          </div>
         </div>
       </div>
-      <div class="step" data-step="autenticado">
-        <div class="ball">2</div>
-        <div class="step-txt">
-          <div class="lbl">Autenticar</div>
-          <div class="step-desc">Validando a sessão</div>
-        </div>
+
+      <div id="prog-area" style="display:none;">
+        <div class="progress-bg"><div id="prog-bar" class="progress-bar" style="width:0%;"></div></div>
+        <p id="prog-msg"></p>
       </div>
-      <div class="step" data-step="carregando">
-        <div class="ball">3</div>
-        <div class="step-txt">
-          <div class="lbl">Carregar grupos</div>
-          <div class="step-desc">Buscando conversas</div>
-        </div>
+
+      {% comment %}
+        Recusa do próprio Django (flag/allowlist), antes de qualquer worker: precisa de
+        caixa própria porque #cancelar-msg vive dentro do botão de cancelar, que aqui
+        não faz sentido mostrar. Sem isto a tela ficava muda.
+        ({# #} não pode ter várias linhas — vira texto visível.)
+      {% endcomment %}
+      <div id="wa-aviso" class="alert alert-error" style="display:none;"></div>
+
+      {# Conectado mas getChats falhou: antes isto aparecia como "0 grupos sincronizados". #}
+      <div id="grupos-aviso" class="alert alert-warn" style="display:none;">
+        <i data-lucide="alert-triangle"></i>
+        <span>Conectado, mas a lista de grupos não veio.
+          <button id="grupos-retry" class="btn btn-ghost btn-sm">
+            <i data-lucide="refresh-cw"></i> Sincronizar grupos
+          </button><span id="grupos-retry-msg"></span>
+        </span>
       </div>
-      <div class="step" data-step="sincronizando">
-        <div class="ball">4</div>
-        <div class="step-txt">
-          <div class="lbl">Sincronizar</div>
-          <div class="step-desc">Gravando a lista</div>
-        </div>
+
+      <!-- Pareamento: QR em destaque enquanto a fase pedir leitura -->
+      <div id="qr-area" style="display:none;">
+        <div id="qr-box"><img id="qr-img" alt="QR code para conectar o WhatsApp"></div>
+        <p class="qr-hint">Escaneie com o WhatsApp do celular. O código atualiza sozinho se expirar.</p>
       </div>
-      <div class="step" data-step="conectado">
-        <div class="ball">✓</div>
-        <div class="step-txt">
-          <div class="lbl">Conectado</div>
-          <div class="step-desc">Sessão ativa</div>
-        </div>
+
+      <div id="offline-area" style="display:none;">
+        <div id="qr-box-off" class="empty-box">Serviço indisponível</div>
+        <p class="help" style="text-align:center;">O serviço de envio está fora do ar no momento. Recarregue a página em instantes; se o problema continuar, fale com o suporte.</p>
       </div>
-    </div>
 
-    <div id="prog-area" style="display:none;">
-      <div class="progress-bg"><div id="prog-bar" class="progress-bar" style="width:0%;"></div></div>
-      <p id="prog-msg"></p>
-    </div>
+      <div id="logout-area" class="sessao-bloco" style="display:none;">
+        <div class="sessao-acoes">
+          <button id="wa-sync" class="btn btn-ghost btn-sm">
+            <i data-lucide="refresh-cw"></i> Sincronizar grupos
+          </button>
+          <button id="wa-desconectar" class="btn btn-danger btn-sm">
+            <i data-lucide="unplug"></i> Desconectar WhatsApp
+          </button>
+        </div>
+        {# Toda ação precisa dizer no que deu: sem isto, uma falha fica idêntica a um sucesso. #}
+        <div id="logout-msg" class="acao-msg"></div>
+        <p class="help">Desconectar desvincula este número e pede um QR novo. As regras de Telegram não são afetadas.</p>
+      </div>
 
-    {% comment %}
-      Recusa do próprio Django (flag/allowlist), antes de qualquer worker: precisa de
-      caixa própria porque #cancelar-msg vive dentro do botão de cancelar, que aqui
-      não faz sentido mostrar. Sem isto a tela ficava muda.
-      ({# #} não pode ter várias linhas — vira texto visível.)
-    {% endcomment %}
-    <div id="wa-aviso" class="alert alert-error" style="display:none;"></div>
-
-    <div id="grupos-chip" class="grupos-chip" style="display:none;"><i data-lucide="folder"></i> <span id="grupos-n">0</span> grupos sincronizados</div>
-
-    {# Conectado mas getChats falhou: antes isto aparecia como "0 grupos sincronizados". #}
-    <div id="grupos-aviso" class="alert alert-warn" style="display:none;">
-      <i data-lucide="alert-triangle"></i>
-      <span>Conectado, mas a lista de grupos não veio.
-        <button id="grupos-retry" class="btn btn-ghost btn-sm">
-          <i data-lucide="refresh-cw"></i> Sincronizar grupos
-        </button><span id="grupos-retry-msg"></span>
-      </span>
-    </div>
-
-    <div id="logout-area" class="sessao-bloco" style="display:none;">
-      <div class="sessao-acoes">
-        <button id="wa-sync" class="btn btn-ghost btn-sm">
-          <i data-lucide="refresh-cw"></i> Sincronizar grupos
+      {# Saída manual do loop: sem isto, cada F5 só reiniciava as 6 tentativas de reconexão. #}
+      <div id="cancelar-area" class="sessao-bloco" style="display:none;">
+        <button id="wa-cancelar" class="btn btn-ghost btn-sm">
+          <i data-lucide="rotate-ccw"></i> Cancelar e ler o QR de novo
         </button>
-        <button id="wa-desconectar" class="btn btn-danger btn-sm">
-          <i data-lucide="unplug"></i> Desconectar WhatsApp
-        </button>
+        <div id="cancelar-msg" class="acao-msg"></div>
+        <p class="help">Descarta a sessão atual e recomeça do zero, com um QR code novo.</p>
       </div>
-      {# Toda ação precisa dizer no que deu: sem isto, uma falha fica idêntica a um sucesso. #}
-      <div id="logout-msg" class="acao-msg"></div>
-      <p class="help">Desconectar desvincula este número e pede um QR novo. As regras de Telegram não são afetadas.</p>
-    </div>
+    </section>
 
-    {# Saída manual do loop: sem isto, cada F5 só reiniciava as 6 tentativas de reconexão. #}
-    <div id="cancelar-area" class="sessao-bloco" style="display:none;">
-      <button id="wa-cancelar" class="btn btn-ghost btn-sm">
-        <i data-lucide="rotate-ccw"></i> Cancelar e ler o QR de novo
-      </button>
-      <div id="cancelar-msg" class="acao-msg"></div>
-      <p class="help">Descarta a sessão atual e recomeça do zero, com um QR code novo.</p>
-    </div>
-  </div>
+    <!-- Coluna lateral: instruções de pareamento (recolhem quando conecta) -->
+    <details class="panel ajuda" id="instr-detalhes" open>
+      <summary><i data-lucide="qr-code"></i> Como parear o aparelho <i data-lucide="chevron-down" class="chev"></i></summary>
+      <ol class="qr-how">
+        <li><span class="n">1</span><span>Abra o <b>WhatsApp</b> no celular.</span></li>
+        <li><span class="n">2</span><span>Toque em <b>Aparelhos conectados</b> → <b>Conectar aparelho</b>.</span></li>
+        <li><span class="n">3</span><span>Escaneie o QR code exibido aqui. Ele <b>atualiza sozinho</b> se expirar.</span></li>
+      </ol>
+      <p class="help">O pareamento é feito uma única vez por número. Depois de conectado, a sessão sincroniza os grupos sozinha.</p>
+    </details>
 
-  <!-- Pareamento: instruções sempre visíveis + QR / indisponibilidade -->
-  <div class="card">
-    <div class="card-head">
-      <h2><i data-lucide="qr-code"></i> Parear aparelho</h2>
-    </div>
-
-    <ol class="qr-how">
-      <li><span class="n">1</span><span>Abra o <b>WhatsApp</b> no celular.</span></li>
-      <li><span class="n">2</span><span>Toque em <b>Aparelhos conectados</b> → <b>Conectar aparelho</b>.</span></li>
-      <li><span class="n">3</span><span>Escaneie o QR code exibido aqui. Ele <b>atualiza sozinho</b> se expirar.</span></li>
-    </ol>
-
-    <div id="qr-area" style="display:none;">
-      <div id="qr-box"><img id="qr-img" alt="QR code para conectar o WhatsApp"></div>
-    </div>
-
-    <div id="offline-area" style="display:none;">
-      <div id="qr-box-off" class="empty-box">Serviço indisponível</div>
-      <p class="help" style="text-align:center;">O serviço de envio está fora do ar no momento. Recarregue a página em instantes; se o problema continuar, fale com o suporte.</p>
-    </div>
   </div>
 </div>
 {% endblock %}
@@ -256,6 +283,10 @@
   const cancelArea = document.getElementById('cancelar-area');
   const cancelMsg = document.getElementById('cancelar-msg');
   const waAviso = document.getElementById('wa-aviso');
+  // Palco visual: o poll traduz a fase do worker em um data-state que o CSS usa
+  // para trocar o layout (parear/conectado/erro/offline). Só apresentação.
+  const stage    = document.getElementById('wa-stage');
+  const instrDetalhes = document.getElementById('instr-detalhes');
 
   // Ordem das fases p/ marcar passos concluídos.
   const ORDEM = ['qr', 'autenticado', 'carregando', 'sincronizando', 'conectado'];
@@ -339,9 +370,20 @@
     qrImg.src = '/scrapers/whatsapp/qr.png?t=' + Date.now();
   }
 
+  // Layout por estado: conectado recolhe a coluna de instruções e o pareamento;
+  // erro terminal ganha acento próprio. Só apresentação — a lógica de fases
+  // continua idêntica.
+  function pintarPalco(fase, isErr) {
+    const estado = fase === 'conectado' ? 'conectado' : (isErr ? 'erro' : 'parear');
+    stage.dataset.state = estado;
+    instrDetalhes.open = estado !== 'conectado';
+  }
+
   function showOffline() {
     pill.className = 'conn-pill is-off';
     pillTxt.textContent = 'Serviço indisponível';
+    stage.dataset.state = 'offline';
+    instrDetalhes.open = true;
     stepsEl.style.display = 'none';
     qrArea.style.display = 'none';
     waAviso.style.display = 'none';
@@ -356,9 +398,9 @@
 
   function pintarSteps(fase, isErr) {
     const idx = ORDEM.indexOf(FASES[fase] ? FASES[fase].step : 'qr');
-    stepsEl.querySelectorAll('.step').forEach(function (el) {
+    stepsEl.querySelectorAll('.wa-step').forEach(function (el) {
       const i = ORDEM.indexOf(el.dataset.step);
-      el.className = 'step';
+      el.className = 'wa-step';
       if (isErr && i === 0) { el.classList.add('err'); return; }
       if (fase === 'conectado') { el.classList.add('done'); return; }
       if (i < idx) el.classList.add('done');
@@ -409,7 +451,8 @@
       pill.className = 'conn-pill ' + f.cls;
       pillTxt.textContent = f.txt;
 
-      // Stepper
+      // Layout do estado + stepper
+      pintarPalco(fase, f.err);
       pintarSteps(fase, f.err);
 
       // QR: `s.qr` vence a tabela de fases. O worker pode ter um QR pronto numa

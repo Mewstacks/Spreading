@@ -1,34 +1,22 @@
 {% extends "base.html" %}
 {% block title %}Scraper — Mercado Livre{% endblock %}
 
+{% block topbar_context %}<strong>Scraper</strong><span>Coleta</span>{% endblock %}
+{% block topbar_actions %}
+{% with ml=passos.0 %}
+{% if ml.feito %}
+<span class="badge badge-green"><span class="dot"></span> Mercado Livre conectado</span>
+{% else %}
+<a href="{% url 'scraper-ml-conexao' %}" class="badge badge-yellow badge-link"><span class="dot"></span> Mercado Livre não conectado</a>
+{% endif %}
+{% endwith %}
+{% endblock %}
+
 {% block head_extra %}
 <style>
-  /* badge clicável no cabeçalho (estado da conexão ML) */
+  /* badge clicável na topbar (estado da conexão ML) */
   .badge-link { text-decoration: none; }
   .badge-link:hover { filter: brightness(1.1); }
-
-  /* ── Primeiros passos: fluxo numerado, não cards ── */
-  .steps { list-style: none; margin: 0; padding: 0; }
-  .step { display: flex; align-items: center; gap: 1rem; padding: .95rem 0; border-top: 1px solid var(--border); }
-  .step:first-child { border-top: 0; padding-top: .2rem; }
-  .step:last-child { padding-bottom: .2rem; }
-  .step-num { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: .08em;
-    color: var(--muted); flex: none; width: 1.8rem; }
-  .step-mark { flex: none; width: 22px; height: 22px; border-radius: 50%; display: flex;
-    align-items: center; justify-content: center; border: 1px solid var(--border-strong); color: var(--muted); }
-  .step-mark .lucide { width: .75rem; height: .75rem; }
-  .step-body { flex: 1; min-width: 0; }
-  .step-title { font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
-  .step-desc { margin-top: .15rem; font-size: 12.5px; color: var(--muted); }
-  .step-action { flex: none; }
-  /* concluída: recolhida, verde só no indicador */
-  .step.done { padding: .6rem 0; }
-  .step.done .step-num, .step.done .step-title { color: var(--muted); font-weight: 500; }
-  .step.done .step-mark { border-color: color-mix(in srgb, var(--green) 45%, transparent);
-    background: var(--green-bg); color: var(--green); }
-  .step.done .step-desc { display: none; }
-  /* bloqueada: depende da etapa anterior */
-  .step.blocked .step-title { color: var(--muted); font-weight: 500; }
 
   /* ── Raspagem automática ── */
   .auto-row { display: flex; align-items: flex-start; gap: 1.25rem; }
@@ -44,105 +32,96 @@
   .auto-detail .err { color: var(--red); font-size: 12px; word-break: break-word; }
   .auto-row .switch { margin-top: .2rem; }
 
-  /* ── Ações manuais: hierarquia primária → ghost → texto ── */
+  /* ── Ações manuais: hierarquia primária → secundária → texto ── */
   .acoes { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
-  .acoes .text-action { margin-left: auto; }
 
-  @media (max-width: 899px) {
-    .acoes .text-action { margin-left: 0; }
+  /* stepper: CTA cai para linha própria no mobile */
+  @media (max-width: 639px) {
     .step { flex-wrap: wrap; }
-    .step-action { margin-left: calc(1.8rem + 22px + 2rem); }
+    .step .step-cta { margin-left: calc(26px + .9rem); }
   }
 </style>
 {% endblock %}
 
 {% block content %}
-{% with ml=passos.0 %}
 <div class="page-head">
   <div class="head-main">
     <span class="eyebrow">Coleta</span>
     <h1>Scraper</h1>
     <p class="sub">Ofertas e cupons do Mercado Livre, com links de afiliado gerados na hora.</p>
   </div>
-  <div class="head-actions">
-    {% if ml.feito %}
-    <span class="badge badge-green"><span class="dot"></span> Mercado Livre conectado</span>
-    {% else %}
-    <a href="{% url 'scraper-ml-conexao' %}" class="badge badge-yellow badge-link"><span class="dot"></span> Mercado Livre não conectado</a>
-    {% endif %}
-  </div>
 </div>
-{% endwith %}
 
-<!-- Primeiros passos: fluxo de integração (some quando tudo está pronto) -->
+<!-- Primeiros passos: stepper progressivo (some quando tudo está pronto) -->
 {% if not onboarding_completo %}
-<div class="card">
-  <div class="card-head">
-    <h2><i data-lucide="rocket"></i> Primeiros passos</h2>
-    <span class="count">{{ passos_feitos }}/{{ passos_total }} concluídos</span>
+<section class="section">
+  <div class="section-head">
+    <h2>Primeiros passos</h2>
+    <span class="hint">{{ passos_feitos }}/{{ passos_total }} concluídos</span>
   </div>
-  <ol class="steps">
+  <div class="stepper">
     {% with prox=passos_feitos|add:1 %}
     {% for p in passos %}
-    <li class="step {% if p.feito %}done{% elif forloop.counter == prox %}next{% else %}blocked{% endif %}">
-      <span class="step-num">0{{ forloop.counter }}</span>
-      <span class="step-mark"><i data-lucide="{% if p.feito %}check{% else %}{{ p.icon }}{% endif %}"></i></span>
-      <div class="step-body">
+    <div class="step {% if p.feito %}done{% elif forloop.counter == prox %}next{% endif %}">
+      <span class="step-marker">{% if p.feito %}<i data-lucide="check"></i>{% else %}{{ forloop.counter|stringformat:"02d" }}{% endif %}</span>
+      <div class="step-main">
         <div class="step-title">
           {{ p.titulo }}
           {% if p.feito %}<span class="badge badge-green"><span class="dot"></span> pronto</span>{% endif %}
-          {% if not p.feito and forloop.counter != prox %}<span class="tech-tag">aguarda etapa 0{{ prox }}</span>{% endif %}
+          {% if not p.feito and forloop.counter != prox %}<span class="tech-tag">aguarda etapa {{ prox|stringformat:"02d" }}</span>{% endif %}
         </div>
         <div class="step-desc">{{ p.desc }}</div>
       </div>
       {% if not p.feito and forloop.counter == prox %}
-      <div class="step-action"><a href="{{ p.url }}" class="btn btn-sm">{{ p.cta }} <i data-lucide="arrow-right"></i></a></div>
+      <div class="step-cta"><a href="{{ p.url }}" class="btn btn-accent btn-sm">{{ p.cta }} <i data-lucide="arrow-right"></i></a></div>
       {% endif %}
-    </li>
+    </div>
     {% endfor %}
     {% endwith %}
-  </ol>
-</div>
+  </div>
+</section>
 {% else %}
 <div class="alert alert-success" style="margin-top:0;"><i data-lucide="check-circle-2"></i><span><strong>Tudo conectado.</strong> O robô está pronto para divulgar e comissionar.</span></div>
 {% endif %}
 
-<!-- Raspagem automática 24/7 (só raspa — envios são controlados na tela Envios) -->
-<div class="section-head">
-  <h2>Raspagem automática</h2>
-  <span class="hint">Coleta completa a cada 3h · ofertas rápidas a cada 5min</span>
-</div>
-<div class="card">
-  <div class="auto-row">
-    <div class="auto-info">
-      <div class="auto-title">Coleta 24/7 <span id="auto-status"><span class="badge badge-muted"><span class="dot"></span>verificando…</span></span></div>
-      <div class="auto-sub">Ligada, mantém ofertas e cupons atualizados sozinha. Os envios são configurados em <a class="link" href="/scrapers/config/">Envios</a>.</div>
-      <div id="auto-detail" class="auto-detail" style="display:none;"></div>
+<!-- Raspagem: automática (estado) + manual (sob demanda) agrupadas -->
+<section class="section">
+  <div class="section-head">
+    <h2>Raspagem</h2>
+    <span class="hint">Coleta completa a cada 3h · ofertas rápidas a cada 5min</span>
+  </div>
+  <div class="split split-main-side">
+    <!-- automática 24/7 (só raspa — envios são controlados na tela Envios) -->
+    <div class="panel">
+      <div class="auto-row">
+        <div class="auto-info">
+          <div class="auto-title">Coleta automática 24/7 <span id="auto-status"><span class="badge badge-muted"><span class="dot"></span>verificando…</span></span></div>
+          <div class="auto-sub">Ligada, mantém ofertas e cupons atualizados sozinha. Os envios são configurados em <a class="link" href="/scrapers/config/">Envios</a>.</div>
+          <div id="auto-detail" class="auto-detail" style="display:none;"></div>
+        </div>
+        <label class="switch" title="Ligar/desligar raspagem automática">
+          <input type="checkbox" id="auto-toggle" onchange="toggleAuto(this)">
+          <span class="track"></span>
+        </label>
+      </div>
     </div>
-    <label class="switch" title="Ligar/desligar raspagem automática">
-      <input type="checkbox" id="auto-toggle" onchange="toggleAuto(this)">
-      <span class="track"></span>
-    </label>
+    <!-- manual + log ao vivo -->
+    <div class="panel-2">
+      <div class="auto-title">Sob demanda</div>
+      <div class="auto-sub" style="margin-bottom:.9rem;">Roda agora, sem esperar o ciclo automático.</div>
+      <div class="acoes">
+        <button id="ofertas-btn" class="btn btn-accent" onclick="startOfertas()"><i data-lucide="tag"></i> Raspar ofertas</button>
+        <button id="cupons-btn" class="btn" onclick="startCuponsCodigo()"><i data-lucide="ticket"></i> Raspar cupons</button>
+        <a href="{% url 'scraper-ml-conexao' %}" class="btn-link"><i data-lucide="key-round"></i> Conectar Mercado Livre</a>
+      </div>
+      <div id="progress-wrap" class="progress-wrap">
+        <div id="progress-text" class="progress-text">Progresso</div>
+        <div class="progress-bg"><div id="progress-bar" class="progress-bar"></div></div>
+      </div>
+      <div id="log" class="log"></div>
+    </div>
   </div>
-</div>
-
-<!-- Raspagem manual + log ao vivo -->
-<div class="section-head">
-  <h2>Raspagem manual</h2>
-  <span class="hint">Sob demanda — roda agora, sem esperar o ciclo automático.</span>
-</div>
-<div class="card">
-  <div class="acoes">
-    <button id="ofertas-btn" class="btn" onclick="startOfertas()"><i data-lucide="tag"></i> Raspar ofertas</button>
-    <button id="cupons-btn" class="btn btn-ghost" onclick="startCuponsCodigo()"><i data-lucide="ticket"></i> Raspar cupons</button>
-    <a href="{% url 'scraper-ml-conexao' %}" class="text-action"><i data-lucide="key-round"></i> Conectar Mercado Livre</a>
-  </div>
-  <div id="progress-wrap" class="progress-wrap">
-    <div id="progress-text" class="progress-text">Progresso</div>
-    <div class="progress-bg"><div id="progress-bar" class="progress-bar"></div></div>
-  </div>
-  <div id="log" class="log"></div>
-</div>
+</section>
 {% endblock %}
 
 {% block scripts %}

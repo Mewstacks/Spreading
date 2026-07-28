@@ -180,7 +180,7 @@ def operations_dashboard(request):
         # diferentes, e o texto fixo dizia a mesma coisa para os dois.
         alertas.append(("Loja desconectada",
                         est_ml.motivo or "Conecte Mercado Livre ou Amazon para gerar links comissionados.",
-                        "scraper-conta"))
+                        "scraper-ml-conexao"))
     # "conectando" é o worker religando após deploy — piscar "Nenhum canal
     # conectado" nesses segundos assustava sem haver o que fazer.
     if not wa_ok and est_wa.detalhe != "conectando" and not perfil.telegram_conectado():
@@ -206,7 +206,7 @@ def operations_dashboard(request):
                 sync.erro_publico or "Sincronização automática não concluiu.",
                 # Reconectar a conta é o que resolve; "home" apontava pra esta mesma
                 # página, então clicar no alerta não levava a lugar nenhum.
-                "scraper-conta",
+                "scraper-amazon" if sync.marketplace == "amazon" else "scraper-ml-conexao",
             ))
     publicacoes = list(
         pubs.select_related("produto", "configuracao", "cupom_normalizado")
@@ -376,18 +376,59 @@ def _tem_sessao_ml(user) -> bool:
     return estado_ml(user).conectado
 
 
-def configurar_conta(request):
-    """Conta do afiliado: tags de comissão (ML/Amazon), credenciais Amazon Creators
-    e sessão do Mercado Livre. Cada usuário configura a PRÓPRIA conta (multi-tenant).
+def _salvar_campos_amazon(perfil, post) -> None:
+    """Persiste tag de afiliado e credenciais Creators API da Amazon.
 
-    A tag é o que garante a comissão do usuário; a sessão ML é o "login salvo no robô"
-    (conectada pela web em Conexão Mercado Livre — browser remoto com live view)."""
+    Único caminho de escrita desses campos: a página da integração Amazon usa
+    este helper. A secret só é sobrescrita quando o campo vem preenchido
+    (em branco mantém a atual); o valor é criptografado pelo campo do model."""
+    perfil.afiliado_tag_amazon = (post.get("afiliado_tag_amazon") or "").strip()
+    perfil.amazon_credential_id = (post.get("amazon_credential_id") or "").strip()
+    perfil.amazon_creators_host = (post.get("amazon_creators_host") or "").strip()
+    campos = ["afiliado_tag_amazon", "amazon_credential_id", "amazon_creators_host"]
+    novo_secret = (post.get("amazon_credential_secret") or "").strip()
+    if novo_secret:
+        perfil.amazon_credential_secret = novo_secret
+        campos.append("amazon_credential_secret")
+    perfil.save(update_fields=campos)
+
+
+def amazon_painel(request):
+    """Página da integração Amazon: tag de afiliado, Creators API (opcional),
+    portal de relatórios e saúde das fontes. Antes essa configuração vivia
+    embutida em Conta — agora a Amazon tem página própria, como ML/WhatsApp/
+    Telegram, reutilizando o MESMO salvamento (sem duplicar regras)."""
     perfil = getattr(request.user, "perfil", None)
     if perfil and request.method == "POST":
-        perfil.afiliado_tag_ml = (request.POST.get("afiliado_tag_ml") or "").strip()
-        perfil.afiliado_tag_amazon = (request.POST.get("afiliado_tag_amazon") or "").strip()
-        perfil.amazon_credential_id = (request.POST.get("amazon_credential_id") or "").strip()
-        perfil.amazon_creators_host = (request.POST.get("amazon_creators_host") or "").strip()
+        _salvar_campos_amazon(perfil, request.POST)
+        messages.success(request, "Integração Amazon atualizada.")
+        return redirect("scraper-amazon")
+
+    from apps.scrapers.conexoes import estado_amazon_relatorios
+    sync = RelatorioSync.objects.filter(
+        usuario=request.user, marketplace="amazon").first()
+    fontes = FonteIngestao.objects.filter(
+        marketplace="amazon", habilitada=True).order_by("nome")
+    return render(request, "scrapers/amazon.html", {
+        "perfil": perfil,
+        "tem_secret": bool(perfil and perfil.amazon_credential_secret),
+        # Ortogonal ao "conectado": a Creators API é upgrade opcional, exibido só
+        # como informação. Não pode voltar a virar requisito de conexão.
+        "amazon_conectado": bool(perfil and perfil.amazon_conectado()),
+        "amazon_creators_ativa": bool(perfil and perfil.amazon_creators_ativa()),
+        "est_relatorios": estado_amazon_relatorios(request.user),
+        "sync": sync,
+        "fontes": fontes,
+    })
+
+
+def configurar_conta(request):
+    """Conta do afiliado: plano, identidade de publicação, templates e resumo
+    das integrações. A configuração da Amazon mora na página própria da
+    integração (scraper-amazon); a sessão ML é conectada em Conexão Mercado
+    Livre. Cada usuário configura a PRÓPRIA conta (multi-tenant)."""
+    perfil = getattr(request.user, "perfil", None)
+    if perfil and request.method == "POST":
         perfil.nome_marca = (request.POST.get("nome_marca") or perfil.nome_marca).strip()[:80]
         perfil.tom_marca = (request.POST.get("tom_marca") or perfil.tom_marca).strip()[:20]
         perfil.chamada_acao = (request.POST.get("chamada_acao") or perfil.chamada_acao).strip()[:120]
@@ -396,15 +437,8 @@ def configurar_conta(request):
         ).strip()[:180]
         perfil.template_a = (request.POST.get("template_a") or "").strip()
         perfil.template_b = (request.POST.get("template_b") or "").strip()
-        # Secret só sobrescreve se o campo veio preenchido (em branco mantém o atual).
-        novo_secret = (request.POST.get("amazon_credential_secret") or "").strip()
-        campos = ["afiliado_tag_ml", "afiliado_tag_amazon", "amazon_credential_id",
-                  "amazon_creators_host", "nome_marca", "tom_marca", "chamada_acao",
-                  "divulgacao_afiliado", "template_a", "template_b"]
-        if novo_secret:
-            perfil.amazon_credential_secret = novo_secret
-            campos.append("amazon_credential_secret")
-        perfil.save(update_fields=campos)
+        perfil.save(update_fields=["nome_marca", "tom_marca", "chamada_acao",
+                                   "divulgacao_afiliado", "template_a", "template_b"])
         messages.success(request, "Conta atualizada.")
         return redirect("scraper-conta")
 
@@ -779,7 +813,7 @@ def amazon_conexao_painel(request):
     return render(request, "scrapers/ml_conexao.html", {
         "status": amazon_conexao.status(request.user.id),
         "marketplace_nome": "Amazon Associados", "conexao_prefix": "/scrapers/amazon",
-        "relatorio": True,
+        "relatorio": True, "live_v2": True,
     })
 
 
@@ -792,7 +826,14 @@ def amazon_conexao_status_json(request):
 @require_POST
 def amazon_conexao_start(request):
     from apps.scrapers import amazon_conexao
-    return JsonResponse(amazon_conexao.criar_sessao(request.user))
+    import json
+    if len(request.body or b"") > 4096:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        client = json.loads((request.body or b"{}").decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(amazon_conexao.criar_sessao(request.user, client))
 
 
 @require_POST
@@ -813,8 +854,13 @@ def amazon_conexao_cancelar(request):
 def amazon_conexao_frames(request):
     from apps.scrapers import amazon_conexao
     def _stream():
-        yield from (f"data: {frame}\n\n" for frame in amazon_conexao.frames(request.user.id))
-        yield "data: __DONE__\n\n"
+        for event in amazon_conexao.frames(
+            request.user.id, request.GET.get("session_id"),
+        ):
+            if event.get("id") is not None:
+                yield f"id: {event['id']}\n"
+            yield f"event: {event['event']}\ndata: {event['data']}\n\n"
+        yield "event: done\ndata: __DONE__\n\n"
     return StreamingHttpResponse(_stream(), content_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -823,11 +869,15 @@ def amazon_conexao_frames(request):
 def amazon_conexao_input(request):
     import json
     from apps.scrapers import amazon_conexao
+    if len(request.body or b"") > 65536:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
     try:
-        events = json.loads((request.body or b"").decode() or "{}").get("events")
+        payload = json.loads((request.body or b"").decode() or "{}")
     except (ValueError, UnicodeDecodeError):
         return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
-    return JsonResponse(amazon_conexao.enfileirar_input(request.user.id, events))
+    return JsonResponse(amazon_conexao.enfileirar_input(
+        request.user.id, payload.get("session_id"), payload.get("events"),
+    ))
 
 
 # --- Conexão do portal de RELATÓRIOS do ML (afiliados), separada do site principal ---

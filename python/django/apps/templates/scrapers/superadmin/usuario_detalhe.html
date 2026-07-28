@@ -6,8 +6,12 @@
   /* identidade e metadados do cabeçalho */
   .page-head h1 .badge { font-size: 11px; letter-spacing: 0; }
 
-  /* conexões: estado textual ao lado do dot */
-  .conn .n { display: flex; align-items: center; gap: .45rem; font-size: 1rem; font-weight: 600; letter-spacing: 0; }
+  /* conexões: estado textual ao lado do dot dentro da faixa */
+  .conn-val { font-size: 1.1rem; display: flex; align-items: center; gap: .5rem; }
+
+  /* faixa de 3 indicadores: stat-strip forçado a 3 colunas (o padrão é 4) */
+  .strip-3 { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+  @media (max-width: 899px) { .strip-3 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; } }
 
   /* ações administrativas */
   .admin-actions { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
@@ -16,6 +20,8 @@
   .admin-note { font-size: 12px; color: var(--muted); }
 </style>
 {% endblock %}
+
+{% block topbar_context %}<strong>{{ u.user.get_username }}</strong><span>Gestão · Usuários</span>{% endblock %}
 
 {% block content %}
 <div class="page-head">
@@ -34,9 +40,8 @@
   </div>
 </div>
 
-<div class="card-stack">
-<div class="card">
-  <div class="card-head"><h2><i data-lucide="bar-chart-3"></i> Atividade</h2></div>
+<section class="section">
+  <div class="section-head"><h2>Atividade</h2></div>
   <div class="stat-grid">
     <div class="stat"><div class="n tnum">{{ u.envios_total }}</div><div class="l">Envios (total)</div></div>
     <div class="stat"><div class="n tnum">{{ u.envios_7d }}</div><div class="l">Envios (7 dias)</div></div>
@@ -45,41 +50,41 @@
     <div class="stat"><div class="n tnum">{{ u.canais }}</div><div class="l">Canais monitorados</div></div>
     <div class="stat"><div class="n tnum" style="font-size:1.05rem;">{{ u.ultima_atividade|date:"d/m H:i"|default:"—" }}</div><div class="l">Última atividade</div></div>
   </div>
-</div>
+</section>
 
-<div class="card">
-  <div class="card-head"><h2><i data-lucide="activity"></i> Conexões</h2></div>
-  <div class="stat-grid">
-    <div class="stat conn">
-      <div class="n">
+<section class="section section-lined">
+  <div class="section-head"><h2>Conexões</h2></div>
+  <div class="stat-strip strip-3">
+    <div class="stat-cell">
+      <div class="kpi-label">WhatsApp</div>
+      <div class="kpi-value conn-val">
         {% if u.wa_estado %}<span class="dot on"></span> Conectado
         {% elif u.wa_estado is False %}<span class="dot off"></span> Desconectado
         {% else %}<span class="dot"></span> <span class="muted">—</span>{% endif %}
       </div>
-      <div class="l">WhatsApp</div>
     </div>
-    <div class="stat conn">
-      <div class="n">
+    <div class="stat-cell">
+      <div class="kpi-label">Mercado Livre</div>
+      <div class="kpi-value conn-val">
         {% if u.ml_estado %}<span class="dot on"></span> Conectado
         {% elif u.ml_estado is False %}<span class="dot off"></span> Desconectado
         {% else %}<span class="dot"></span> <span class="muted">—</span>{% endif %}
       </div>
-      <div class="l">Mercado Livre</div>
     </div>
-    <div class="stat conn">
-      <div class="n">
+    <div class="stat-cell">
+      <div class="kpi-label">Amazon Creators</div>
+      <div class="kpi-value conn-val">
         {% if u.amazon_elegivel %}<span class="dot on"></span> Elegível
         {% elif u.amazon_elegivel is False %}<span class="dot off"></span> Não elegível
         {% else %}<span class="dot"></span> <span class="muted">—</span>{% endif %}
       </div>
-      <div class="l">Amazon Creators</div>
     </div>
   </div>
   {% if u.amazon_erro %}<div class="alert alert-error" style="margin-bottom:0;"><i data-lucide="alert-circle"></i><div><strong>Amazon:</strong> {{ u.amazon_erro }}</div></div>{% endif %}
-</div>
+</section>
 
-<div class="card">
-  <div class="card-head"><h2><i data-lucide="gauge"></i> Cotas</h2></div>
+<section class="section section-lined">
+  <div class="section-head"><h2>Cotas</h2></div>
   <form method="post" action="{% url 'superadmin-cotas' u.user.id %}">
     {% csrf_token %}
     <div class="form-grid">
@@ -104,11 +109,11 @@
       <span class="help" style="margin:0;">0 = usa o default global de settings.</span>
     </div>
   </form>
-</div>
+</section>
 
 {% if not u.user.is_superuser %}
-<div class="card">
-  <div class="card-head"><h2><i data-lucide="shield-alert"></i> Ações administrativas</h2></div>
+<section class="section section-lined">
+  <div class="section-head"><h2>Ações administrativas</h2></div>
   <div class="admin-actions">
     <form method="post" action="{% url 'superadmin-impersonar' u.user.id %}">
       {% csrf_token %}
@@ -125,7 +130,6 @@
       {% endif %}
     </form>
   </div>
-</div>
+</section>
 {% endif %}
-</div>
 {% endblock %}

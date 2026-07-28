@@ -3,6 +3,16 @@
 É deliberadamente separado da tag/Creators API: aquelas dão links e catálogo;
 esta sessão dá acesso ao portal de comissões. A senha é digitada na página real da
 Amazon no Chromium remoto e nunca passa pelo Django.
+
+Usa o mesmo LiveTransport dos dois fluxos do ML. O transporte antigo (CDP
+Page.startScreencast) só emitia quadro quando havia mudança visual: medido em
+homologação, uma tela de login parada produzia ZERO frames em 40s. Isso disparava
+o watchdog do cliente — o overlay "Reconectando" cobria justamente o CAPTCHA que
+o usuário precisava ler — e encerrava o stream, matando os listeners de teclado.
+O LiveTransport captura por screenshot em cadência própria e manda heartbeat.
+
+Os eventos de entrada são retransmitidos ao Chromium e nunca são persistidos ou
+registrados em logs. O storage_state é salvo cifrado via report_sessions.
 """
 import logging
 import queue
@@ -14,7 +24,9 @@ from django.core.cache import cache
 from apps.scrapers.erros_conexao import mensagem_de_erro, novo_codigo
 from apps.scrapers.ml_conexao import (
     GOTO_TIMEOUT_MS, LOGIN_DEADLINE_S, LOOP_MS, MAX_EVENTOS_POR_POST,
-    SCREENCAST, VIEW_H, VIEW_W, _SPECIAL_KEYS, _despachar_input,
+)
+from apps.scrapers.ml_live_transport import (
+    ActivePage, LiveTransport, despachar_input,
 )
 from apps.scrapers.report_sessions import has_report_session, save_report_state
 from apps.accounts.tenant import organization_job_sem_transacao
@@ -23,8 +35,9 @@ logger = logging.getLogger(__name__)
 
 LOGIN_URL = "https://associados.amazon.com.br/"
 REPORT_URL = "https://associados.amazon.com.br/home/reports"
-_threads, _frames, _inputs = {}, {}, {}
+_threads = {}
 _lock = threading.Lock()
+_transport = LiveTransport("amazon_associados")
 
 
 def _key(user_id):
@@ -44,6 +57,9 @@ def status(user_id):
     from django.contrib.auth import get_user_model
     user = get_user_model().objects.filter(pk=user_id).first()
     state["auth_valido"] = bool(user and has_report_session(user, "amazon"))
+    # Sem isto a tela nunca se autocorrigia: o poll não recebia session_id,
+    # viewport nem estado do stream, então um badge errado ficava errado.
+    state.update(_transport.status(user_id))
     return state
 
 
@@ -55,12 +71,18 @@ def _logado(page) -> bool:
     cookies anônimos. A rota de relatórios exige autenticação e é a confirmação que
     interessa para este tipo de sessão.
     """
-    value = (page.url or "").lower()
-    if any(x in value for x in ("signin", "ap/signin", "login")):
+    try:
+        value = (page.url or "").lower()
+        if any(x in value for x in ("signin", "ap/signin", "login")):
+            return False
+        if "/home" not in value and "/reports" not in value:
+            return False
+        return page.locator("input[type='password'], input[name*='password' i]").count() == 0
+    except Exception:
+        # Consultar o DOM no meio de uma navegação levanta ("Execution context was
+        # destroyed"). Isso é "ainda não confirmado", não "a sessão morreu" — sem
+        # esta guarda a exceção subiria e o finally fecharia o Chromium.
         return False
-    if "/home" not in value and "/reports" not in value:
-        return False
-    return page.locator("input[type='password'], input[name*='password' i]").count() == 0
 
 
 # Sem transação: organization_job envolveria os até 10 min do live view num
@@ -72,56 +94,82 @@ def _worker(user):
     from apps.scrapers.auxiliar import ua_aleatorio
 
     uid = user.id
-    fila = queue.Queue(maxsize=2000)
-    with _lock:
-        _inputs[uid] = fila
-        _frames.pop(uid, None)
+    runtime = _transport.get(uid) or _transport.create(uid)
     estado_capturado = None
     try:
         _set(uid, fase="iniciando", erro="")
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"])
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled",
+                      "--disable-dev-shm-usage"],
+            )
             try:
-                context = browser.new_context(viewport={"width": VIEW_W, "height": VIEW_H}, user_agent=ua_aleatorio())
+                context = browser.new_context(
+                    viewport={
+                        "width": runtime.viewport["width"],
+                        "height": runtime.viewport["height"],
+                    },
+                    device_scale_factor=runtime.viewport["device_pixel_ratio"],
+                    is_mobile=runtime.viewport["device_class"] == "mobile",
+                    has_touch=runtime.viewport["pointer"] == "coarse",
+                    user_agent=ua_aleatorio(),
+                    # Colar a senha é o caminho normal de quem usa gerenciador de
+                    # senhas; sem a permissão o Ctrl+V não funcionava.
+                    permissions=["clipboard-read", "clipboard-write"],
+                )
                 page = context.new_page()
-                cdp = context.new_cdp_session(page)
-
-                def on_frame(params):
-                    _frames[uid] = params.get("data", "")
-                    try:
-                        cdp.send("Page.screencastFrameAck", {"sessionId": params.get("sessionId")})
-                    except Exception:
-                        pass
-
-                cdp.send("Page.enable")
-                cdp.on("Page.screencastFrame", on_frame)
-                try:
-                    cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
-                except Exception:
-                    pass
+                # Desafios da Amazon costumam abrir popup/nova aba. Sem seguir a
+                # aba ativa, o stream ficava preso na página antiga.
+                active_page = ActivePage(context, page, runtime)
                 page.goto(LOGIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
-                cdp.send("Page.startScreencast", SCREENCAST)
-                _set(uid, fase="aguardando_login", erro="")
+                _transport.capture(runtime, page, active=True)
+                _set(uid, fase="aguardando_login", erro="",
+                     session_id=runtime.session_id, viewport=runtime.viewport)
                 deadline, logged = time.time() + LOGIN_DEADLINE_S, False
                 while time.time() < deadline:
                     state = cache.get(_key(uid)) or {}
                     if state.get("cancelar"):
                         _set(uid, fase="idle", erro="")
                         break
+                    current_page = active_page.current()
+                    if current_page is None:
+                        raise RuntimeError("A janela da Amazon foi fechada.")
+                    houve_input = False
                     for _ in range(MAX_EVENTOS_POR_POST * 4):
                         try:
-                            _despachar_input(cdp, page, fila.get_nowait())
+                            evento = runtime.input_queue.get_nowait()
                         except queue.Empty:
                             break
+                        despachar_input(current_page, evento)
+                        houve_input = True
+                    _transport.capture(runtime, current_page, active=houve_input)
+
                     if state.get("salvar_agora"):
                         # O botão de salvar também valida a sessão na página que o
                         # sincronizador usará, sem depender da URL da landing.
-                        page.goto(REPORT_URL, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
-                        _set(uid, salvar_agora=False)
-                    if _logado(page):
+                        _set(uid, fase="validando", salvar_agora=False)
+                        try:
+                            current_page.goto(REPORT_URL, wait_until="domcontentloaded",
+                                              timeout=GOTO_TIMEOUT_MS)
+                            _transport.capture(runtime, current_page, active=True)
+                        except Exception:
+                            # Um "já entrei" prematuro (ou rede lenta) não pode
+                            # encerrar a sessão: o usuário continua no login.
+                            logger.warning(
+                                "Validação do login Amazon não navegou (user %s).",
+                                uid, exc_info=True)
+                            _set(uid, fase="aguardando_login",
+                                 aviso="Ainda não foi possível confirmar o login. "
+                                       "Conclua a etapa aberta e tente de novo.")
+                    if _logado(current_page):
                         logged = True
+                        logger.info(
+                            "ml_login_metric transport=amazon_associados user=%s "
+                            "validation=conectado", uid,
+                        )
                         break
-                    page.wait_for_timeout(LOOP_MS)
+                    current_page.wait_for_timeout(LOOP_MS)
                 if logged:
                     _set(uid, fase="salvando")
                     # Só a leitura fica aqui. Gravar depois do bloco mantém o mesmo
@@ -141,89 +189,39 @@ def _worker(user):
 
         if estado_capturado is not None:
             save_report_state(user, "amazon", estado_capturado)
-            _set(uid, fase="conectado", erro="", salvar_agora=False)
+            _set(uid, fase="conectado", erro="", aviso="", salvar_agora=False)
     except Exception as exc:
         codigo = novo_codigo()
         logger.exception("Conexão Amazon falhou (user=%s codigo=%s)", uid, codigo)
         _set(uid, fase="erro", codigo_erro=codigo,
              erro=mensagem_de_erro(exc, codigo, servico="A Amazon"))
     finally:
+        _transport.finish(uid, runtime)
         with _lock:
             _threads.pop(uid, None)
-            _inputs.pop(uid, None)
-            _frames.pop(uid, None)
 
 
-def criar_sessao(user):
+def criar_sessao(user, client: dict | None = None):
     with _lock:
         running = _threads.get(user.id)
         if running and running.is_alive():
             return status(user.id)
-        _set(user.id, fase="iniciando", erro="", cancelar=False, salvar_agora=False)
+        runtime = _transport.create(user.id, client)
+        _set(user.id, fase="iniciando", erro="", aviso="", cancelar=False,
+             salvar_agora=False, session_id=runtime.session_id,
+             viewport=runtime.viewport)
         thread = threading.Thread(target=_worker, args=(user,), daemon=True)
         _threads[user.id] = thread
         thread.start()
     return status(user.id)
 
 
-def frames(user_id):
-    previous, waiting = None, 0
-    while waiting < 600:
-        if user_id not in _inputs:
-            waiting += 1
-            time.sleep(.05)
-            continue
-        frame = _frames.get(user_id)
-        if frame and frame != previous:
-            previous, waiting = frame, 0
-            yield frame
-        else:
-            waiting += 1
-        time.sleep(.05)
+def frames(user_id, session_id=None):
+    yield from _transport.frames(user_id, session_id)
 
 
-def enfileirar_input(user_id, eventos):
-    queue_ = _inputs.get(user_id)
-    if queue_ is None:
-        return {"ok": False, "erro": "sessao_inativa"}
-    if not isinstance(eventos, list):
-        return {"ok": False, "erro": "payload_invalido"}
-    accepted = 0
-    for event in eventos[:MAX_EVENTOS_POR_POST]:
-        if not isinstance(event, dict):
-            continue
-        kind = event.get("t")
-        clean = {"t": kind}
-        if kind in {"move", "down", "up", "wheel"}:
-            try:
-                clean["x"] = max(0, min(VIEW_W, int(event.get("x", 0))))
-                clean["y"] = max(0, min(VIEW_H, int(event.get("y", 0))))
-            except (TypeError, ValueError):
-                continue
-            if kind in {"down", "up"}:
-                clean["button"] = event.get("button") if event.get("button") in {"left", "right", "middle"} else "left"
-                clean["clickCount"] = event.get("clickCount", 1)
-            elif kind == "wheel":
-                clean["dx"] = event.get("dx", 0)
-                clean["dy"] = event.get("dy", 0)
-            else:
-                clean["buttons"] = event.get("buttons", 0)
-        elif kind == "char":
-            clean["text"] = str(event.get("text", ""))[:8]
-            if not clean["text"]:
-                continue
-        elif kind == "key":
-            if event.get("key") not in _SPECIAL_KEYS:
-                continue
-            clean["key"] = event["key"]
-        else:
-            continue
-        try:
-            queue_.put_nowait(clean)
-            accepted += 1
-        except queue.Full:
-            break
-    return {"ok": True, "aceitos": accepted}
+def enfileirar_input(user_id, session_id, eventos):
+    return _transport.enqueue(user_id, session_id, eventos)
 
 
 def salvar_agora(user_id):
@@ -231,4 +229,4 @@ def salvar_agora(user_id):
 
 
 def cancelar(user_id):
-    _set(user_id, cancelar=True)
+    _set(user_id, cancelar=True, fase="idle", erro="")

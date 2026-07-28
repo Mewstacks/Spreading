@@ -349,6 +349,14 @@ AFILIADO_TAG = os.getenv("AFILIADO_TAG", "")
 # Recusar envio quando o link não carrega a tag? (1=recusa, 0=envia c/ aviso)
 AFILIADO_EXIGIR = os.getenv("AFILIADO_EXIGIR", "1") == "1"
 
+# Conferir o preço ao vivo logo antes de publicar. O catálogo tolera até 48h de
+# idade (expire_stale), e era essa janela que fazia a mensagem anunciar um valor
+# diferente do que a página cobra. Desligável por secret, sem deploy.
+PRECO_REVALIDA_ANTES_ENVIO = os.getenv("PRECO_REVALIDA_ANTES_ENVIO", "1") == "1"
+# Fallback por raspagem da PDP quando a Creators API não responde. É Playwright:
+# custa segundos e uma das threads do gunicorn, por isso nasce desligado.
+PRECO_REVALIDA_PLAYWRIGHT = os.getenv("PRECO_REVALIDA_PLAYWRIGHT", "0") == "1"
+
 
 # ─────────────────────────────────────────────────────────────
 # Amazon — Associates (BR) + Creators API (sucessor da PA-API 5.0, desligada

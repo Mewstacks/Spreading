@@ -18,6 +18,7 @@ urlpatterns = [
     path("", views.dashboard, name="scraper-dashboard"),
     path("comecar/", views.comecar, name="scraper-comecar"),
     path("conta/", views.configurar_conta, name="scraper-conta"),
+    path("integracoes/amazon/", views.amazon_painel, name="scraper-amazon"),
     path("integracoes/awin/conectar/", views.awin_conectar, name="scraper-awin-conectar"),
     path("integracoes/awin/selecionar-conta/", views.awin_selecionar_conta, name="scraper-awin-selecionar"),
     path("integracoes/awin/sincronizar/", views.awin_sincronizar, name="scraper-awin-sincronizar"),

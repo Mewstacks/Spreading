@@ -173,7 +173,29 @@ class Amazon(Marketplace):
         if not itens:
             return False
         listing = (itens[0].get("offersV2", {}) or {}).get("listings") or []
-        return True if listing else False
+        if not listing:
+            return False
+        # A mesma resposta já traz preço fresco; descartá-lo era o que deixava a
+        # mensagem publicar valor de até 48h atrás (a idade que expire_stale tolera).
+        from apps.scrapers.scraper_amazon.ofertas_scraper import _mapear_item
+        try:
+            mapeado = _mapear_item(itens[0])
+        except Exception:
+            mapeado = None
+        if mapeado and mapeado.get("preco_com_cupom", 0) > 0:
+            from django.utils import timezone
+            from apps.scrapers import precos
+            produto.preco_com_cupom = mapeado["preco_com_cupom"]
+            produto.preco_sem_desconto = mapeado["preco_sem_desconto"]
+            produto.preco_efetivo = mapeado["preco_com_cupom"]
+            produto.ultima_verificacao = timezone.now()
+            produto.save(update_fields=[
+                "preco_com_cupom", "preco_sem_desconto", "preco_efetivo",
+                "ultima_verificacao",
+            ])
+            precos.registrar("amazon", asin, produto.link_produto,
+                             mapeado["preco_com_cupom"])
+        return True
 
     def buscar_por_termo(self, termo_busca, min_desconto=15, macro=None, usuario=None):
         from apps.scrapers.scraper_amazon.ofertas_scraper import buscar_por_termo

@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block title %}{{ marketplace_nome|default:"Mercado Livre" }} — Conexão{% endblock %}
 
+{% block topbar_context %}<strong>{{ marketplace_nome|default:"Mercado Livre" }}</strong><span>{% if relatorio %}Portal de relatórios{% else %}Integração{% endif %}</span>{% endblock %}
+
 {% block head_extra %}
 <style>
   /* ── Pill de status (ids/classes consumidos pelo JS: is-on|is-mid|is-off) ── */
@@ -14,20 +16,15 @@
   .conn-pill.is-off { background:var(--red-bg); color:var(--red); border-color:color-mix(in srgb,var(--red) 35%,transparent); }
   .conn-pill.is-on .dot { animation:pulse 2s ease-in-out infinite; }
 
-  /* ── Composição: estado à esquerda, ações/dicas no rail (desktop) ── */
-  .conn-grid { display:grid; gap:1rem; }
-  @media (min-width:900px) {
-    .conn-grid { grid-template-columns:minmax(0,7fr) minmax(0,5fr); align-items:start; }
-  }
-  .rail > * + * { margin-top:1rem; }
-
   /* ── Stepper: vertical com linha-guia no mobile, horizontal no desktop.
      O JS alterna .is-current / .is-done nos <li> #step-1..3. ── */
-  .steps { display:flex; flex-direction:column; gap:1.15rem; position:relative; margin:0;
+  .steps { display:flex; flex-direction:column; gap:1.15rem; position:relative; margin:.9rem 0 0;
     padding:0; list-style:none; }
   .steps::before { content:''; position:absolute; left:13px; top:14px; bottom:14px; width:2px;
     background:var(--border); }
-  .step { position:relative; z-index:1; display:flex; align-items:flex-start; gap:.75rem; min-width:0; }
+  .steps .step { position:relative; z-index:1; display:flex; align-items:flex-start; gap:.75rem;
+    min-width:0; padding:0; }
+  .steps .step + .step { border-top:0; }
   .step .ball { width:28px; height:28px; flex:none; border-radius:50%; background:var(--surface);
     border:2px solid var(--border-strong); display:flex; align-items:center; justify-content:center;
     font-family:var(--mono); font-size:.72rem; font-weight:500; color:var(--muted);
@@ -47,20 +44,20 @@
     .step .step-txt { padding-top:0; }
   }
 
-  /* alertas de erro/aviso dentro do card de estado (JS alterna display) */
-  #err-box, #warn-box { margin:.9rem 0 0; }
+  /* alertas de erro/aviso (JS alterna display) */
+  #err-box, #warn-box { margin:1.1rem 0 0; }
   #err-box span, #warn-box span { flex:1; min-width:0; }
 
   /* ── Painéis de ação (start / conectado) — JS mostra com display:grid ── */
-  #start-area, #ok-area { gap:1rem; align-content:start; }
+  #start-area, #ok-area { gap:1rem; align-content:start; margin-bottom:1.6rem; }
   .panel-head { display:flex; align-items:flex-start; gap:.8rem; }
   .panel-ico { display:grid; place-items:center; width:40px; height:40px; flex:none;
     border-radius:var(--r-lg); background:var(--accent-bg); color:var(--accent); }
   .panel-ico.ok { background:var(--green-bg); color:var(--green); }
   .panel-ico .lucide { width:1.25rem; height:1.25rem; }
-  .panel-head strong { display:block; font-size:14.5px; font-weight:600; letter-spacing:-.01em; }
-  .panel-head .hint { margin:.25rem 0 0; color:var(--muted); font-size:12.5px; line-height:1.5; }
-  .actions { display:flex; gap:.6rem; flex-wrap:wrap; }
+  .panel-head strong { display:block; font-size:15px; font-weight:600; letter-spacing:-.01em; }
+  .panel-head .hint { margin:.25rem 0 0; color:var(--muted); font-size:12.5px; line-height:1.5; max-width:56ch; }
+  .actions { display:flex; gap:.6rem; flex-wrap:wrap; align-items:center; }
   .acao-msg { font-size:12px; color:var(--muted); min-height:1em; margin:0; }
 
   /* linhas de detalhe da conta conectada (hairlines) */
@@ -72,7 +69,7 @@
   .ok-row .v { color:var(--text-2); font-weight:500; text-align:right; }
 
   /* ── Live view: peça central. JS mostra com display:grid. ── */
-  #live-area { gap:.9rem; margin-bottom:1rem; }
+  #live-area { gap:.9rem; margin-bottom:1.6rem; }
   .live-toolbar { display:flex; justify-content:space-between; align-items:center; gap:.75rem;
     flex-wrap:wrap; padding-bottom:.85rem; border-bottom:1px solid var(--border); }
   .live-title { display:flex; align-items:center; gap:.5rem; font-family:var(--mono);
@@ -91,7 +88,7 @@
     border-color:color-mix(in srgb,var(--red) 35%,transparent); }
   .stream-badge.is-live .stream-dot { animation:pulse 2s ease-in-out infinite; }
 
-  #live-frame-wrap { position:relative; width:100%; max-width:1120px; margin:0 auto;
+  #live-frame-wrap { position:relative; width:100%; max-width:1340px; margin:0 auto;
     aspect-ratio:1280 / 800; overflow:hidden; border:1px solid var(--border-strong);
     border-radius:var(--r-lg); background:var(--bg-inset); }
   #live-canvas { position:absolute; inset:0; display:block; width:100%; height:100%;
@@ -119,7 +116,7 @@
   .security-note { margin:0; color:var(--muted); font-size:11.5px; line-height:1.5; text-align:center; }
 
   /* ── Dicas de segurança (rail) ── */
-  .tips-list { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:.6rem; }
+  .tips-list { margin:.8rem 0 0; padding:0; list-style:none; display:flex; flex-direction:column; gap:.6rem; }
   .tips-list li { display:flex; gap:.6rem; align-items:flex-start; font-size:12.5px;
     color:var(--text-2); line-height:1.45; }
   .tips-list .lucide { width:1rem; height:1rem; flex:none; margin-top:.1rem; color:var(--accent); }
@@ -133,9 +130,10 @@
 
 {% block content %}
 <div class="page-head">
+  <span class="int-icon" aria-hidden="true"><i data-lucide="{% if live_v2 %}shopping-bag{% else %}package{% endif %}"></i></span>
   <div class="head-main">
-    <span class="eyebrow">{% if live_v2 %}Fonte · Mercado Livre{% else %}Fonte · Amazon{% endif %}</span>
-    <h1><i data-lucide="{% if live_v2 %}shopping-bag{% else %}package{% endif %}"></i> Conexão {{ marketplace_nome|default:"Mercado Livre" }}</h1>
+    <span class="eyebrow">{% if relatorio %}Portal de relatórios{% else %}Integração{% endif %}</span>
+    <h1>{{ marketplace_nome|default:"Mercado Livre" }}</h1>
     <p class="sub">{% if relatorio %}Autorize o portal usado para sincronizar suas métricas e comissões.{% else %}Conecte sua conta para gerar links e usar suas integrações do Mercado Livre.{% endif %}</p>
   </div>
   <div class="head-actions">
@@ -146,7 +144,7 @@
 </div>
 
 <!-- Live view remota: peça central enquanto a conexão está em andamento -->
-<div id="live-area" class="card" style="display:none;">
+<div id="live-area" class="panel" style="display:none;">
   <div class="live-toolbar">
     <div class="live-title"><i data-lucide="monitor-smartphone"></i> Sessão remota · {% if live_v2 %}Mercado Livre{% else %}Amazon{% endif %}</div>
     <div id="stream-badge" class="stream-badge is-wait" role="status" aria-live="polite">
@@ -176,52 +174,15 @@
   <p class="security-note">{% if live_v2 %}Seus cliques e teclas são retransmitidos somente para esta janela remota. O conteúdo digitado não é armazenado nem incluído nos logs.{% else %}Use esta janela somente para concluir a autenticação no site exibido.{% endif %}</p>
 </div>
 
-<div class="conn-grid">
-  <!-- Estado da conexão: stepper + alertas -->
-  <div class="card">
-    <div class="card-head">
-      <h2><i data-lucide="activity"></i> Estado da conexão</h2>
-    </div>
-    <ol class="steps" aria-label="Etapas da conexão">
-      <li id="step-1" class="step">
-        <span class="ball">1</span>
-        <span class="step-txt">
-          <span class="lbl">Abrir {% if live_v2 %}o Mercado Livre{% else %}a Amazon{% endif %}</span>
-          <span class="step-desc">Janela oficial de login</span>
-        </span>
-      </li>
-      <li id="step-2" class="step">
-        <span class="ball">2</span>
-        <span class="step-txt">
-          <span class="lbl">Confirmar sua identidade</span>
-          <span class="step-desc">{% if live_v2 %}Senha, SMS ou aplicativo{% else %}Senha e verificação{% endif %}</span>
-        </span>
-      </li>
-      <li id="step-3" class="step">
-        <span class="ball">3</span>
-        <span class="step-txt">
-          <span class="lbl">{% if live_v2 %}Validar a conexão{% else %}Salvar a sessão{% endif %}</span>
-          <span class="step-desc">Sessão pronta para uso</span>
-        </span>
-      </li>
-    </ol>
-
-    <div id="err-box" class="alert alert-error" role="alert" style="display:none;">
-      <i data-lucide="circle-alert"></i><span id="err-text"></span>
-    </div>
-    <div id="warn-box" class="alert alert-warn" role="status" style="display:none;">
-      <i data-lucide="info"></i><span id="warn-text"></span>
-    </div>
-  </div>
-
-  <!-- Rail: ação do momento + segurança -->
-  <div class="rail">
-    <div id="start-area" class="card" style="display:none;">
+<div class="split split-main-side">
+  <div>
+    <!-- Ação do momento: conectar (desconectado/erro) — JS mostra com display:grid -->
+    <div id="start-area" class="panel" style="display:none;">
       <div class="panel-head">
         <span class="panel-ico"><i data-lucide="shield-check"></i></span>
         <div>
           <strong>Conectar {% if live_v2 %}ao Mercado Livre{% else %}à Amazon{% endif %}</strong>
-          <p class="hint">O login {% if live_v2 %}do Mercado Livre será aberto aqui, no formato correto para este dispositivo{% else %}da Amazon será aberto nesta janela{% endif %}.</p>
+          <p class="hint">O login {% if live_v2 %}do Mercado Livre será aberto aqui, no formato correto para este dispositivo{% else %}da Amazon será aberto nesta janela{% endif %}. Você entra direto no site oficial — o Spreading só retransmite a janela.</p>
         </div>
       </div>
       <div class="actions">
@@ -229,7 +190,8 @@
       </div>
     </div>
 
-    <div id="ok-area" class="card" style="display:none;">
+    <!-- Conta conectada: estado + ações — JS mostra com display:grid -->
+    <div id="ok-area" class="panel" style="display:none;">
       <div class="panel-head">
         <span class="panel-ico ok"><i data-lucide="badge-check"></i></span>
         <div>
@@ -246,6 +208,9 @@
         <button id="reconectar-btn" class="btn btn-ghost btn-sm"><i data-lucide="refresh-cw"></i> Reconectar</button>
         {% if not relatorio %}
         <button id="desconectar-btn" class="btn btn-danger btn-sm"><i data-lucide="unplug"></i> Desconectar</button>
+        <a class="btn-link" href="/scrapers/ml-relatorio/">Abrir portal de relatórios</a>
+        {% elif live_v2 %}
+        <a class="btn-link" href="/scrapers/ml/">Conexão principal do Mercado Livre</a>
         {% endif %}
       </div>
       <p id="desconectar-msg" class="acao-msg" aria-live="polite"></p>
@@ -254,16 +219,50 @@
       {% endif %}
     </div>
 
-    <div class="card">
-      <div class="card-head">
-        <h2><i data-lucide="lock"></i> Conexão segura</h2>
+    <!-- Etapas da conexão: sempre visível, reflete a fase atual -->
+    <section class="section">
+      <span class="eyebrow">Etapas da conexão</span>
+      <ol class="steps" aria-label="Etapas da conexão">
+        <li id="step-1" class="step">
+          <span class="ball">1</span>
+          <span class="step-txt">
+            <span class="lbl">Abrir {% if live_v2 %}o Mercado Livre{% else %}a Amazon{% endif %}</span>
+            <span class="step-desc">Janela oficial de login</span>
+          </span>
+        </li>
+        <li id="step-2" class="step">
+          <span class="ball">2</span>
+          <span class="step-txt">
+            <span class="lbl">Confirmar sua identidade</span>
+            <span class="step-desc">{% if live_v2 %}Senha, SMS ou aplicativo{% else %}Senha e verificação{% endif %}</span>
+          </span>
+        </li>
+        <li id="step-3" class="step">
+          <span class="ball">3</span>
+          <span class="step-txt">
+            <span class="lbl">{% if live_v2 %}Validar a conexão{% else %}Salvar a sessão{% endif %}</span>
+            <span class="step-desc">Sessão pronta para uso</span>
+          </span>
+        </li>
+      </ol>
+
+      <div id="err-box" class="alert alert-error" role="alert" style="display:none;">
+        <i data-lucide="circle-alert"></i><span id="err-text"></span>
       </div>
-      <ul class="tips-list">
-        <li><i data-lucide="globe"></i><span>A janela remota mostra somente o site oficial {% if live_v2 %}do Mercado Livre{% else %}da Amazon{% endif %} — nunca um formulário do Spreading.</span></li>
-        <li><i data-lucide="keyboard"></i><span>Teclas e cliques são retransmitidos apenas para essa janela e não ficam registrados.</span></li>
-        <li><i data-lucide="unplug"></i><span>Você pode desconectar quando quiser — a sessão é apagada do servidor.</span></li>
-      </ul>
-    </div>
+      <div id="warn-box" class="alert alert-warn" role="status" style="display:none;">
+        <i data-lucide="info"></i><span id="warn-text"></span>
+      </div>
+    </section>
+  </div>
+
+  <!-- Rail: segurança da sessão remota -->
+  <div class="panel">
+    <span class="eyebrow">Conexão segura</span>
+    <ul class="tips-list">
+      <li><i data-lucide="globe"></i><span>A janela remota mostra somente o site oficial {% if live_v2 %}do Mercado Livre{% else %}da Amazon{% endif %} — nunca um formulário do Spreading.</span></li>
+      <li><i data-lucide="keyboard"></i><span>Teclas e cliques são retransmitidos apenas para essa janela e não ficam registrados.</span></li>
+      <li><i data-lucide="unplug"></i><span>Você pode desconectar quando quiser — a sessão é apagada do servidor.</span></li>
+    </ul>
   </div>
 </div>
 {% endblock %}
@@ -355,9 +354,13 @@
   }
   function setViewport(viewport) {
     if (!viewport || !viewport.width || !viewport.height) return;
+    frameWrap.style.aspectRatio = `${viewport.width} / ${viewport.height}`;
+    // Atribuir width/height APAGA o canvas, mesmo com o valor idêntico. Como o
+    // poll repinta a cada 3s e a captura ociosa é de 1 fps, sem esta guarda a
+    // tela ficava em branco por até 1s a cada 3s — o "piscando" relatado.
+    if (canvas.width === viewport.width && canvas.height === viewport.height) return;
     canvas.width = viewport.width;
     canvas.height = viewport.height;
-    frameWrap.style.aspectRatio = `${viewport.width} / ${viewport.height}`;
   }
   function updateSteps(current) {
     steps.forEach((step, index) => {
@@ -384,11 +387,15 @@
 
   function coords(event) {
     const rect = canvas.getBoundingClientRect();
+    // Canvas oculto ou em transição tem rect zerado: a divisão viraria NaN, o
+    // JSON levaria null e o servidor rejeitaria o evento — abrindo uma lacuna
+    // permanente na sequência de input.
+    if (!rect.width || !rect.height) return {x:0, y:0};
     const x = Math.round((event.clientX - rect.left) / rect.width * canvas.width);
     const y = Math.round((event.clientY - rect.top) / rect.height * canvas.height);
     return {
-      x:Math.max(0, Math.min(canvas.width, x)),
-      y:Math.max(0, Math.min(canvas.height, y)),
+      x:Number.isFinite(x) ? Math.max(0, Math.min(canvas.width, x)) : 0,
+      y:Number.isFinite(y) ? Math.max(0, Math.min(canvas.height, y)) : 0,
     };
   }
   function push(event) {
@@ -560,6 +567,9 @@
     } else {
       framesES.onmessage = event => {
         if (event.data === '__DONE__') { stopLive(); return; }
+        // Keepalive: a tela parada (CAPTCHA sendo lido) não gera quadro novo.
+        // Sem isto o watchdog acusava queda e o overlay tapava o desafio.
+        if (event.data === '__PING__') { lastFrameAt = Date.now(); setStream('ao_vivo'); return; }
         queueFrame(event.data, lastDrawnSeq + 1);
       };
     }
@@ -587,7 +597,13 @@
       stopLive();
     }
     if (state.viewport) setViewport(state.viewport);
-    if (state.stream && state.stream.estado) setStream(state.stream.estado);
+    // O badge tem três donos (desenho de frame, watchdog e este poll). Deixar o
+    // servidor sobrescrever um stream que ACABOU de desenhar fazia o rótulo
+    // oscilar com a imagem perfeitamente saudável; aqui ele só desempata quando
+    // o cliente realmente está sem quadro.
+    if (state.stream && state.stream.estado && Date.now() - lastFrameAt > 12000) {
+      setStream(state.stream.estado);
+    }
 
     if (state.erro) {
       errText.textContent = state.erro;
@@ -646,8 +662,11 @@
     finally { stopLive(); cancelarBtn.disabled = false; poll(); }
   };
 
+  // 12s > os 10s de heartbeat/ping do servidor. Com o limite antigo de 4s, uma
+  // página simplesmente parada — o estado normal enquanto se lê um CAPTCHA —
+  // sempre acusava queda e cobria a tela com o overlay.
   setInterval(() => {
-    if (framesES && lastFrameAt && Date.now() - lastFrameAt > 4000) setStream('interrompida');
+    if (framesES && lastFrameAt && Date.now() - lastFrameAt > 12000) setStream('interrompida');
   }, 1000);
   poll();
   setInterval(poll, 3000);

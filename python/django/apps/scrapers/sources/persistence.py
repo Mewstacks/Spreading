@@ -46,7 +46,8 @@ def persist_items(items, owner=None, integration=None):
             "origem": "oferta", "nome": item.title,
             "preco_sem_desconto": item.reference_price,
             "preco_com_cupom": item.current_price,
-            "preco_fonte": item.reference_price, "preco_efetivo": item.current_price,
+            "preco_fonte": item.reference_price,
+            "preco_efetivo": item.effective_price or item.current_price,
             "link_produto": item.canonical_url, "fonte": item.source,
             "estado": "ativo", "confianca": "media", "evidencia": item.evidence,
             "valido_ate": item.valid_until, "falha_verificacao": "",
@@ -60,6 +61,15 @@ def persist_items(items, owner=None, integration=None):
         Produto.objects.update_or_create(
             **lookup,
             defaults=defaults,
+        )
+        # Sem esta observação as fontes públicas nunca acumulam histórico e ficam
+        # de fora do gate anti-desconto-falso (precos.stats exige n >= 3).
+        from apps.scrapers import precos
+        precos.registrar(
+            item.marketplace,
+            item.external_id if item.marketplace == "amazon" else "",
+            item.canonical_url,
+            defaults["preco_efetivo"],
         )
         offers += 1
     return {"offers": offers, "coupons": coupons, "at": timezone.now()}

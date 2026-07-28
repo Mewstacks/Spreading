@@ -78,17 +78,22 @@ def _logado(page) -> bool:
     A landing /afiliados/ é pública; por isso a validação real acontece ao navegar
     para a página de relatório (_report_url) e confirmar a ausência de campo de
     senha — o mesmo cuidado do fluxo Amazon."""
-    value = (page.url or "").lower()
-    if any(x in value for x in ("signin", "/login", "lgz", "loginhub", "msl/login")):
+    try:
+        value = (page.url or "").lower()
+        if any(x in value for x in ("signin", "/login", "lgz", "loginhub", "msl/login")):
+            return False
+        expected = urlparse(_report_url())
+        current = urlparse(value)
+        if current.netloc != expected.netloc.lower():
+            return False
+        expected_path = expected.path.rstrip("/")
+        if not current.path.rstrip("/").startswith(expected_path):
+            return False
+        return page.locator("input[type='password'], input[name*='password' i]").count() == 0
+    except Exception:
+        # Consulta ao DOM durante uma navegação levanta; aqui isso significa
+        # "ainda não confirmado", e não pode derrubar o worker.
         return False
-    expected = urlparse(_report_url())
-    current = urlparse(value)
-    if current.netloc != expected.netloc.lower():
-        return False
-    expected_path = expected.path.rstrip("/")
-    if not current.path.rstrip("/").startswith(expected_path):
-        return False
-    return page.locator("input[type='password'], input[name*='password' i]").count() == 0
 
 
 # Sem transação: organization_job envolveria os até 10 min do live view num

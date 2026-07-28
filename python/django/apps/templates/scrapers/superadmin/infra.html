@@ -10,8 +10,13 @@
   .app-head .badge { font-weight: 600; }
   .app-block .msg { margin: .4rem 0 .7rem; }
   .no-machines { color: var(--muted); font-size: 12.5px; margin: 0; }
+
+  /* faixa de 2 indicadores: stat-strip forçado a 2 colunas (o padrão é 4) */
+  .strip-2 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; margin-bottom: 1.3rem; }
 </style>
 {% endblock %}
+
+{% block topbar_context %}<strong>Infra Fly</strong><span>Gestão</span>{% endblock %}
 
 {% block content %}
 <div class="page-head">
@@ -30,15 +35,18 @@
   </div>
 </div>
 
-<div class="card-stack">
-<div class="card">
-  <div class="card-head">
-    <h2><i data-lucide="server"></i> Máquinas Fly (compartilhadas)</h2>
-  </div>
+<section class="section">
+  <div class="section-head"><h2>Máquinas Fly (compartilhadas)</h2></div>
 
-  <div class="stat-grid" style="margin-bottom:1.1rem;">
-    <div class="stat"><div class="n tnum">US$ {{ fly.custo_mensal }}</div><div class="l">Custo/mês (estimado)</div></div>
-    <div class="stat"><div class="n tnum">{{ wa_ativas }}</div><div class="l">Sessões WhatsApp ativas (~cap 3-4)</div></div>
+  <div class="stat-strip strip-2">
+    <div class="stat-cell">
+      <div class="kpi-label">Custo/mês (estimado)</div>
+      <div class="kpi-value">US$ {{ fly.custo_mensal }}</div>
+    </div>
+    <div class="stat-cell">
+      <div class="kpi-label">Sessões WhatsApp ativas (~cap 3-4)</div>
+      <div class="kpi-value">{{ wa_ativas }}</div>
+    </div>
   </div>
 
   {% if not fly.disponivel %}
@@ -75,12 +83,10 @@
     {% endfor %}
   {% endif %}
   <p class="help" style="margin:1rem 0 0;">Infra é uma máquina por serviço (não por usuário). Uso por usuário fica na lista de <a class="link" href="{% url 'superadmin-usuarios' %}">usuários</a>.</p>
-</div>
+</section>
 
-<div class="card">
-  <div class="card-head">
-    <h2><i data-lucide="scroll-text"></i> Logs operacionais recentes</h2>
-  </div>
+<section class="section section-lined">
+  <div class="section-head"><h2>Logs operacionais recentes</h2></div>
   {% if eventos %}
   <div class="tbl-wrap">
     <table class="grid">
@@ -107,6 +113,5 @@
   </div>
   {% endif %}
   <p class="help" style="margin:.9rem 0 0;">Eventos detalhados também ficam no Django Admin em “Evento operacional”.</p>
-</div>
-</div>
+</section>
 {% endblock %}

@@ -91,6 +91,22 @@ def normalizar_viewport(client: dict | None) -> dict:
     }
 
 
+def seq_de(evento) -> int | None:
+    """Número de sequência de um evento, mesmo quando o resto é inválido.
+
+    O ACK precisa avançar sobre eventos rejeitados: sem isso um único evento
+    descartado abre uma lacuna que nunca fecha, o ack congela e o cliente
+    reenvia o mesmo buffer para sempre (a digitação trava).
+    """
+    if not isinstance(evento, dict):
+        return None
+    try:
+        seq = int(evento.get("seq"))
+    except (TypeError, ValueError):
+        return None
+    return seq if seq >= 1 else None
+
+
 def limpar_evento(evento: dict, width: int, height: int) -> dict | None:
     """Valida um evento do cliente e devolve somente os campos aceitos."""
     if not isinstance(evento, dict):
@@ -233,33 +249,45 @@ class LiveTransport:
         if not isinstance(eventos, list):
             return {"ok": False, "erro": "payload_invalido", "ack": runtime.input_ack}
 
-        cleaned = []
+        validos, rejeitados = {}, set()
         for event in eventos[:MAX_EVENTOS_POR_POST]:
             clean = limpar_evento(
                 event, runtime.viewport["width"], runtime.viewport["height"],
             )
             if clean is not None:
-                cleaned.append(clean)
-        cleaned.sort(key=lambda event: event["seq"])
+                validos[clean["seq"]] = clean
+                continue
+            # Evento descartado de propósito (coordenada inválida, tecla fora da
+            # lista). O seq ainda precisa ser consumido, senão a faixa do ACK
+            # nunca mais avança.
+            seq = seq_de(event)
+            if seq is not None:
+                rejeitados.add(seq)
 
         accepted = 0
         with runtime.lock:
-            if any(clean["seq"] <= runtime.input_ack for clean in cleaned):
+            if any(seq <= runtime.input_ack for seq in validos):
                 runtime.input_retries += 1
-            for clean in cleaned:
-                if clean["seq"] <= runtime.input_ack:
+            # O ACK continua representando uma faixa contínua: só uma lacuna REAL
+            # (evento que ainda não chegou) interrompe o avanço, e aí o cliente
+            # reenvia o buffer.
+            proximo = runtime.input_ack + 1
+            while True:
+                if proximo in rejeitados:
+                    runtime.input_ack = proximo
+                    proximo += 1
                     continue
-                # O ACK representa sempre uma faixa contínua. Um evento posterior
-                # fica no buffer do cliente para a próxima tentativa quando existe
-                # uma lacuna, em vez de confirmar entrada que ainda não foi aplicada.
-                if clean["seq"] != runtime.input_ack + 1:
+                clean = validos.get(proximo)
+                if clean is None:
                     break
                 try:
                     runtime.input_queue.put_nowait(clean)
                 except queue.Full:
+                    # Fila cheia: não confirmar, para o cliente reenviar.
                     break
-                runtime.input_ack = clean["seq"]
+                runtime.input_ack = proximo
                 accepted += 1
+                proximo += 1
             ack = runtime.input_ack
         return {"ok": True, "aceitos": accepted, "ack": ack}
 

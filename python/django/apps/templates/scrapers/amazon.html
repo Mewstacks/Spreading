@@ -1,0 +1,228 @@
+{% extends "base.html" %}
+{% block title %}Amazon · Integrações{% endblock %}
+{% block page_class %}page-narrow{% endblock %}
+
+{% block head_extra %}
+<style>
+  /* bloco opcional (Creators API): hairline própria, sem virar card */
+  .adv { margin-top: 1.2rem; border-top: 1px solid var(--border); padding-top: 1.2rem; }
+  .adv summary { cursor: pointer; font-weight: 600; font-size: 13.5px;
+    display: flex; align-items: center; gap: .5rem; list-style: none; color: var(--text-2); }
+  .adv summary::-webkit-details-marker { display: none; }
+  .adv summary .lucide { color: var(--muted); transition: transform .18s var(--ease); margin-left: auto; }
+  .adv[open] summary .lucide { transform: rotate(180deg); }
+  .adv-body { padding-top: .8rem; }
+  .adv-body .form-grid { margin-top: .8rem; }
+
+  /* valor atual da tag: destaque mono, não caixa */
+  .tag-current { display: inline-flex; align-items: center; gap: .5rem; font-family: var(--mono);
+    font-size: 12.5px; color: var(--text); background: var(--surface-2); border-radius: var(--r-sm);
+    padding: .3rem .6rem; }
+</style>
+{% endblock %}
+
+{% block topbar_context %}
+<strong>Amazon</strong><span>Integrações</span>
+{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <span class="int-icon" aria-hidden="true"><i data-lucide="package"></i></span>
+  <div class="head-main">
+    <span class="eyebrow">Integrações</span>
+    <h1>Amazon</h1>
+    <p class="sub">Tag de afiliado, Creators API opcional e portal de relatórios — as três camadas da integração, cada uma com seu estado.</p>
+  </div>
+  <div class="head-actions">
+    {% if amazon_conectado %}<span class="badge badge-green"><span class="dot"></span>Conectada</span>
+    {% else %}<span class="badge badge-red"><span class="dot"></span>Não conectada</span>{% endif %}
+  </div>
+</div>
+
+{# ── 1. Estado da integração: leitura rápida em linhas, sem cards ── #}
+<div class="section">
+  <div class="rows">
+    <div class="row-item">
+      <div class="row-main">
+        <strong style="font-size:13.5px;">Tag de afiliado</strong>
+        <div class="muted" style="font-size:12.5px;">É o que comissiona seus links. Sem ela, nada abaixo funciona.</div>
+      </div>
+      <div class="row-side">
+        {% if perfil.afiliado_tag_amazon %}<span class="tag-current">{{ perfil.afiliado_tag_amazon }}</span>
+        {% else %}<span class="badge badge-red"><span class="dot"></span>Faltando</span>{% endif %}
+        <a class="btn-link btn-sm" href="#tag">Editar</a>
+      </div>
+    </div>
+    <div class="row-item">
+      <div class="row-main">
+        <strong style="font-size:13.5px;">Creators API <span class="muted" style="font-weight:400;">· opcional</span></strong>
+        <div class="muted" style="font-size:12.5px;">Melhora a origem dos dados de oferta. Não é necessária para vender.</div>
+      </div>
+      <div class="row-side">
+        {% if amazon_creators_ativa %}<span class="badge badge-green">salvas</span>
+        {% elif perfil.amazon_elegivel is False %}<span class="badge badge-muted">conta ainda não elegível</span>
+        {% else %}<span class="badge badge-muted">não configurada</span>{% endif %}
+        <a class="btn-link btn-sm" href="#creators">Configurar</a>
+      </div>
+    </div>
+    <div class="row-item">
+      <div class="row-main">
+        <strong style="font-size:13.5px;">Portal de relatórios</strong>
+        <div class="muted" style="font-size:12.5px;">Sessão do Amazon Associados usada para importar comissões.</div>
+      </div>
+      <div class="row-side">
+        {% if est_relatorios.conectado %}<span class="badge badge-green"><span class="dot"></span>Conectado</span>
+        {% else %}<span class="badge badge-red"><span class="dot"></span>Não conectado</span>{% endif %}
+        <a class="btn-link btn-sm" href="{% url 'scraper-amazon-conexao' %}">{% if est_relatorios.conectado %}Reconectar{% else %}Conectar{% endif %}</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="split split-main-side section">
+  <div>
+    <form method="post" action="{% url 'scraper-amazon' %}">
+      {% csrf_token %}
+
+      {# ── 2. Tag de afiliado ── #}
+      <div class="section" id="tag" style="margin-top:0;">
+        <div class="section-head" style="margin-top:0;">
+          <h2>Tag de afiliado</h2>
+          {% if perfil.afiliado_tag_amazon %}<span class="hint">atual: <span class="mono">{{ perfil.afiliado_tag_amazon }}</span></span>{% endif %}
+        </div>
+        <label>Tag do programa Amazon Associados</label>
+        <input name="afiliado_tag_amazon" value="{{ perfil.afiliado_tag_amazon }}" placeholder="sualoja-20" style="max-width:340px;">
+        <span class="help">Sua tag do programa Amazon Associados (ex.: <code>sualoja-20</code>). É só isto que a Amazon exige: com a tag salva, seus links já saem comissionados.</span>
+      </div>
+
+      {# ── 3. Creators API ── #}
+      <details class="adv" id="creators" {% if perfil.amazon_credential_id %}open{% endif %}>
+        <summary>
+          Creators API — opcional
+          {% if amazon_creators_ativa %}<span class="badge badge-green">salvas</span>
+          {% elif perfil.amazon_elegivel is False %}<span class="badge badge-muted">conta ainda não elegível</span>
+          {% else %}<span class="badge badge-muted">não configurada</span>{% endif %}
+          <i data-lucide="chevron-down"></i>
+        </summary>
+        <div class="adv-body">
+          <p class="help" style="margin-top:.2rem;">
+            Melhora a origem dos dados de oferta, mas <strong>não</strong> é necessária para
+            vender: sem ela, as ofertas vêm da busca pública e seus links comissionados
+            funcionam igual. A Amazon só libera estas credenciais para contas com
+            10 vendas qualificadas em 30 dias — se você ainda não chegou lá, ignore esta seção.
+          </p>
+          <div class="form-grid">
+            <div>
+              <label>Credential ID</label>
+              <input name="amazon_credential_id" value="{{ perfil.amazon_credential_id }}" placeholder="AKIA...">
+            </div>
+            <div>
+              <label>Credential Secret</label>
+              <input name="amazon_credential_secret" type="password" placeholder="••••••••">
+              <span class="help">{% if tem_secret %}Já salvo. Preencha apenas para substituir.{% else %}Fornecido pela Amazon junto com o Credential ID.{% endif %} Armazenado criptografado.</span>
+            </div>
+            <div>
+              <label>Host (opcional)</label>
+              <input name="amazon_creators_host" value="{{ perfil.amazon_creators_host }}" placeholder="creators.amazon.com.br">
+              <span class="help">Preencha apenas se a Amazon indicar um host diferente do padrão.</span>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <div class="form-actions">
+        <button class="btn btn-accent" type="submit"><i data-lucide="save"></i> Salvar integração</button>
+      </div>
+    </form>
+  </div>
+
+  <div>
+    {# ── 4. Portal de relatórios ── #}
+    <div class="panel">
+      <div class="section-head" style="margin:0 0 .7rem;">
+        <h2>Portal de relatórios</h2>
+        <span class="head-actions">
+          {% if est_relatorios.conectado %}<span class="badge badge-green"><span class="dot"></span>Conectado</span>
+          {% else %}<span class="badge badge-muted"><span class="dot"></span>Desconectado</span>{% endif %}
+        </span>
+      </div>
+      {% if not est_relatorios.conectado and est_relatorios.motivo %}
+      <p class="muted" style="font-size:13px;margin:0 0 .7rem;">{{ est_relatorios.motivo }}</p>
+      {% endif %}
+      {% if sync %}
+      <div class="rows" style="margin-bottom:.9rem;">
+        <div class="row-item" style="padding:.55rem 0;">
+          <span class="muted" style="font-size:12.5px;">Sincronização</span>
+          <span class="row-side">
+            {% if sync.status == 'ok' %}<span class="badge badge-green">em dia</span>
+            {% elif sync.status == 'rodando' %}<span class="badge badge-blue">sincronizando</span>
+            {% elif sync.status == 'erro' or sync.status == 'acao' %}<span class="badge badge-red">precisa de ação</span>
+            {% elif sync.status == 'nao_configurado' %}<span class="badge badge-muted">automática indisponível</span>
+            {% else %}<span class="badge badge-muted">nunca sincronizado</span>{% endif %}
+          </span>
+        </div>
+        {% if sync.ultimo_sucesso %}
+        <div class="row-item" style="padding:.55rem 0;">
+          <span class="muted" style="font-size:12.5px;">Última sincronização</span>
+          <span class="row-side mono" style="font-size:12px;">{{ sync.ultimo_sucesso|date:"d/m/Y H:i" }}</span>
+        </div>
+        {% endif %}
+      </div>
+      {% if sync.erro_publico %}
+      <div class="alert alert-warn" style="margin:.5rem 0 .9rem;"><i data-lucide="alert-triangle"></i><div>{{ sync.erro_publico }}</div></div>
+      {% endif %}
+      {% endif %}
+      <a class="btn {% if est_relatorios.conectado %}btn-ghost{% else %}btn-accent{% endif %} btn-sm" href="{% url 'scraper-amazon-conexao' %}">
+        <i data-lucide="bar-chart-3"></i> {% if est_relatorios.conectado %}Reconectar portal de relatórios{% else %}Conectar portal de relatórios{% endif %}
+      </a>
+      <span class="help">Login feito na própria página, em janela segura. A sessão importa suas comissões e é separada da tag e das credenciais Creators API.</span>
+    </div>
+
+    {# ── 6. Ajuda contextual ── #}
+    <div class="panel-2" style="margin-top:1rem;">
+      <div class="section-head" style="margin:0 0 .6rem;"><h2>Qual a diferença?</h2></div>
+      <div class="rows">
+        <div class="row-item" style="align-items:flex-start;padding:.6rem 0;">
+          <i data-lucide="tag" style="color:var(--accent);margin-top:.15rem;"></i>
+          <div class="row-main" style="font-size:12.5px;"><strong>Tag de afiliado</strong><br><span class="muted">Obrigatória. Comissiona todos os seus links.</span></div>
+        </div>
+        <div class="row-item" style="align-items:flex-start;padding:.6rem 0;">
+          <i data-lucide="key-round" style="color:var(--blue);margin-top:.15rem;"></i>
+          <div class="row-main" style="font-size:12.5px;"><strong>Creators API</strong><br><span class="muted">Opcional. Dados de oferta mais ricos; exige 10 vendas qualificadas.</span></div>
+        </div>
+        <div class="row-item" style="align-items:flex-start;padding:.6rem 0;border-bottom:0;">
+          <i data-lucide="bar-chart-3" style="color:var(--green);margin-top:.15rem;"></i>
+          <div class="row-main" style="font-size:12.5px;"><strong>Portal de relatórios</strong><br><span class="muted">Opcional. Importa comissões para o seu painel financeiro.</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── 5. Saúde da fonte ── #}
+{% if fontes %}
+<div class="section section-lined">
+  <div class="section-head">
+    <h2>Saúde das fontes</h2>
+    <span class="hint">conectores que alimentam o catálogo e os cupons da Amazon</span>
+  </div>
+  <div class="rows">
+    {% for f in fontes %}
+    <div class="row-item">
+      <div class="row-main">
+        <strong style="font-size:13.5px;">{{ f.nome }}</strong>
+        {% if f.erro_publico and f.status != 'ok' %}<div class="muted" style="font-size:12.5px;">{{ f.erro_publico }}</div>{% endif %}
+      </div>
+      <div class="row-side">
+        {% if f.ultimo_sucesso %}<span class="muted mono" style="font-size:11.5px;">{{ f.ultimo_sucesso|date:"d/m H:i" }}</span>{% endif %}
+        {% if f.status == 'ok' %}<span class="badge badge-green"><span class="dot"></span>ok</span>
+        {% elif f.status == 'degraded' %}<span class="badge badge-yellow"><span class="dot"></span>degradada</span>
+        {% elif f.status == 'blocked' %}<span class="badge badge-red"><span class="dot"></span>bloqueada</span>
+        {% else %}<span class="badge badge-muted">{{ f.status }}</span>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+{% endblock %}

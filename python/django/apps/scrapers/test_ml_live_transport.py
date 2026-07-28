@@ -85,6 +85,36 @@ class TransporteEntradaTests(SimpleTestCase):
         self.assertEqual(gap["ack"], 2)
         self.assertEqual(gap["aceitos"], 0)
 
+    def test_evento_rejeitado_nao_congela_o_ack(self):
+        """Um evento descartado consome o seq; só lacuna real segura a faixa.
+
+        Coordenada nula chega quando o canvas está oculto/em transição. Antes o
+        ack parava nesse buraco para sempre e o cliente reenviava o buffer
+        indefinidamente — a digitação travava sem erro visível.
+        """
+        result = self.transport.enqueue(10, self.runtime.session_id, [
+            {"seq": 1, "t": "char", "text": "a"},
+            {"seq": 2, "t": "move", "x": None, "y": 10},
+            {"seq": 3, "t": "char", "text": "b"},
+        ])
+
+        self.assertEqual(result["ack"], 3)
+        self.assertEqual(result["aceitos"], 2)
+        self.assertEqual(
+            [self.runtime.input_queue.get_nowait()["text"] for _ in range(2)],
+            ["a", "b"],
+        )
+
+    def test_digitacao_continua_apos_evento_rejeitado(self):
+        self.transport.enqueue(10, self.runtime.session_id, [
+            {"seq": 1, "t": "key", "key": "TeclaInexistente"},
+        ])
+        seguinte = self.transport.enqueue(10, self.runtime.session_id, [
+            {"seq": 2, "t": "char", "text": "x"},
+        ])
+        self.assertEqual(seguinte["ack"], 2)
+        self.assertEqual(seguinte["aceitos"], 1)
+
     def test_sessao_antiga_nao_atinge_login_novo(self):
         result = self.transport.enqueue(
             10, "outra-sessao", [{"seq": 1, "t": "char", "text": "segredo"}],

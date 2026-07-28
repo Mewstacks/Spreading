@@ -76,6 +76,14 @@ class SourcePipelineTests(TestCase):
         self.assertEqual(len(offers), 2)
         self.assertEqual(offers[0].image_url, "https://m.media-amazon.com/a.jpg")
         self.assertEqual(offers[0].evidence["coupon_final_price"], 90.0)
+        # A vitrine e o preço pago viajam em campos distintos: 'current' alimenta
+        # os gates de desconto, 'effective' é o que a mensagem publica.
+        self.assertEqual(offers[0].current_price, 100.0)
+        self.assertEqual(offers[0].effective_price, 90.0)
+        persist_items([offers[0]], owner=self.user)
+        produto = Produto.objects.get(owner=self.user, asin="B012345678")
+        self.assertEqual(produto.preco_com_cupom, 100.0)
+        self.assertEqual(produto.preco_efetivo, 90.0)
         self.assertEqual(len(coupons), 1)
         self.assertEqual(coupons[0].evidence["asins"], ["B012345678", "B087654321"])
         self.assertEqual(coupons[0].coupon_rules["modo_resgate"], "ativacao")

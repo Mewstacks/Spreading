@@ -1,5 +1,8 @@
 # Staging isolado
 
+> Resumo histórico. O plano completo e atualizado (com o que já existe no Fly, o que
+> falta e o ambiente local em Docker) está em [`homologacao.md`](homologacao.md).
+
 1. Crie `spreading-web-staging`, `spreading-wa-staging`, um Postgres e os volumes
    `ml_data_staging` / `wa_data_staging`, todos na região `gru`.
 2. Aplique segredos novos: `DJANGO_SECRET_KEY`, `SECRETS_FERNET_KEY`, banco e uma

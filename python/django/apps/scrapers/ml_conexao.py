@@ -101,6 +101,15 @@ def status(user_id: int) -> dict:
     fase: 'idle' | 'iniciando' | 'aguardando_login' | 'salvando' | 'conectado' | 'erro'
     """
     estado = cache.get(_cache_key(user_id)) or {"fase": "idle"}
+    # Durante o login em curso o veredito da sessão salva não muda nada na tela
+    # (a fase já manda), e em cache-miss a sonda custa até 8s de rede. Com o
+    # front pedindo status a cada 3s, isso empilhava requisições nas 8 threads do
+    # gunicorn e atrasava a pintura da imagem.
+    if estado.get("fase") in {"iniciando", "aguardando_login", "validando", "salvando"}:
+        estado["auth_valido"] = False
+        estado["motivo_desconexao"] = ""
+        estado.update(_transport.status(user_id))
+        return estado
     # 'conectado' de verdade vem da fonte única (conexoes.py) — a mesma que o
     # dashboard e a Saúde leem. A `fase` acima é só o progresso do login em curso.
     try:
@@ -268,6 +277,8 @@ def _worker(user_id: int):
     pending_state = None
     last_fingerprint = ""
     manual_validation = False
+    # Zero garante uma primeira leitura de cookies logo na entrada do loop.
+    ultima_leitura_storage = 0.0
     try:
         _set_estado(user_id, fase="iniciando", erro="")
         with sync_playwright() as p:
@@ -346,19 +357,26 @@ def _worker(user_id: int):
                             salvar_agora=False, aviso="",
                         )
 
-                    snapshot = context.storage_state()
-                    fingerprint = _storage_fingerprint(snapshot)
-                    changed = fingerprint != last_fingerprint
-                    if changed:
-                        last_fingerprint = fingerprint
-                    if (
-                        pending_validation is None
-                        and (changed or manual_validation)
-                    ):
-                        pending_state = snapshot
-                        pending_validation = validator.submit(
-                            sondar_sessao_ml, pending_state,
-                        )
+                    # storage_state() é um round-trip CDP + serialização de todos os
+                    # cookies. No loop de 50ms isso rodava 20x/s, atrasando o drain
+                    # da fila de input e as capturas — a digitação engasgava. Cookie
+                    # de login não muda em milissegundos; 1s basta.
+                    agora = time.monotonic()
+                    if manual_validation or agora - ultima_leitura_storage >= 1.0:
+                        ultima_leitura_storage = agora
+                        snapshot = context.storage_state()
+                        fingerprint = _storage_fingerprint(snapshot)
+                        changed = fingerprint != last_fingerprint
+                        if changed:
+                            last_fingerprint = fingerprint
+                        if (
+                            pending_validation is None
+                            and (changed or manual_validation)
+                        ):
+                            pending_state = snapshot
+                            pending_validation = validator.submit(
+                                sondar_sessao_ml, pending_state,
+                            )
 
                     if pending_validation is not None and pending_validation.done():
                         verdict, _reason = pending_validation.result()

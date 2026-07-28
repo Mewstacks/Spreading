@@ -43,13 +43,13 @@
   .prob dd { margin: .15rem 0 0; }
   .meta { color: var(--muted); font-size: 11.5px; }
 
-  /* workers/conexões: estado textual dentro do stat */
-  .stat .stat-head { display: flex; align-items: center; gap: .45rem; font-weight: 600; font-size: 13px; }
-  .stat .stat-sub { margin-top: .35rem; }
-  .stat .stat-sub + .stat-sub { margin-top: .25rem; }
-  .stat form { margin-top: .6rem; }
+  /* workers/conexões em linhas: nome + estado textual + ação à direita */
+  .row-item .row-title { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+  .row-item .row-note { margin-top: .2rem; font-size: 12px; color: var(--muted); }
 </style>
 {% endblock %}
+
+{% block topbar_context %}<strong>Saúde do sistema</strong><span>Gestão</span>{% endblock %}
 
 {% block content %}
 {% comment %}
@@ -109,46 +109,43 @@ divergência que mais confundia. Lendo da fonte única, divergir virou impossív
 Só com uma conta filtrada: sondar todas a cada carregamento (e a cada polling)
 seria uma ida à rede por usuário.
 {% endcomment %}
-<div class="card-stack">
 {% if r.conexoes %}
-<div class="card">
-  <div class="card-head"><h2><i data-lucide="plug-zap"></i> Conexões de {{ usuario_encontrado.get_username }} agora</h2></div>
-  <div class="stat-grid" id="conexoes">
+<section class="section">
+  <div class="section-head"><h2>Conexões de {{ usuario_encontrado.get_username }} agora</h2></div>
+  <div class="rows" id="conexoes">
     {% for c in r.conexoes %}
-    <div class="stat">
-      <div class="stat-head">
-        <span class="dot {% if c.conectado %}on{% else %}off{% endif %}"></span>
-        {{ c.servico }}
-      </div>
-      <div class="l stat-sub">
-        {% if c.conectado %}Conectado{% elif c.detalhe == 'conectando' or c.detalhe == 'capacidade' %}<span style="color:var(--yellow);">{{ c.motivo }}</span>{% else %}<span style="color:var(--red);">{{ c.motivo }}</span>{% endif %}
+    <div class="row-item">
+      <span class="dot {% if c.conectado %}on{% else %}off{% endif %}"></span>
+      <div class="row-main"><strong>{{ c.servico }}</strong></div>
+      <div class="row-side" style="font-size:12.5px;">
+        {% if c.conectado %}<span class="muted">Conectado</span>{% elif c.detalhe == 'conectando' or c.detalhe == 'capacidade' %}<span style="color:var(--yellow);">{{ c.motivo }}</span>{% else %}<span style="color:var(--red);">{{ c.motivo }}</span>{% endif %}
       </div>
     </div>
     {% endfor %}
   </div>
-</div>
+</section>
 {% endif %}
 
 {% comment %}
 Workers antes dos problemas: se um worker está parado, a lista de erros abaixo está
 mentindo por omissão — nada roda, então nada falha.
 {% endcomment %}
-<div class="card">
-  <div class="card-head"><h2><i data-lucide="activity"></i> Workers</h2></div>
-  <div class="stat-grid" id="workers">
+<section class="section section-lined">
+  <div class="section-head"><h2>Workers</h2></div>
+  <div class="rows" id="workers">
     {% for w in r.workers %}
-    <div class="stat">
-      <div class="stat-head">
-        <span class="dot {% if w.vivo and w.ligado %}on{% else %}off{% endif %}"></span>
-        {{ w.nome }}
+    <div class="row-item">
+      <span class="dot {% if w.vivo and w.ligado %}on{% else %}off{% endif %}"></span>
+      <div class="row-main">
+        <div class="row-title">
+          <strong>{{ w.nome }}</strong>
+          {% if w.alerta %}<span class="badge badge-red"><span class="dot"></span>Ligado mas não está rodando</span>
+          {% elif not w.controlavel %}<span class="badge badge-muted">{{ w.fase }}</span>
+          {% elif not w.ligado %}<span class="badge badge-muted">Desligado</span>
+          {% else %}<span class="badge badge-green"><span class="dot"></span>{{ w.fase }}</span>{% endif %}
+        </div>
+        {% if w.ultima_msg %}<div class="row-note">{{ w.ultima_msg|truncatechars:80 }}</div>{% endif %}
       </div>
-      <div class="stat-sub">
-        {% if w.alerta %}<span class="badge badge-red"><span class="dot"></span>Ligado mas não está rodando</span>
-        {% elif not w.controlavel %}<span class="badge badge-muted">{{ w.fase }}</span>
-        {% elif not w.ligado %}<span class="badge badge-muted">Desligado</span>
-        {% else %}<span class="badge badge-green"><span class="dot"></span>{{ w.fase }}</span>{% endif %}
-      </div>
-      {% if w.ultima_msg %}<div class="l stat-sub">{{ w.ultima_msg|truncatechars:80 }}</div>{% endif %}
       {% comment %}
       Toggle do worker de relatórios: a flag existe em automacao_state.JOBS e o
       endpoint já a aceita, mas NENHUMA tela a expunha — só ligava por SSH
@@ -156,26 +153,28 @@ mentindo por omissão — nada roda, então nada falha.
       é por isso que o sync de comissão nunca rodou em produção.
       {% endcomment %}
       {% if w.job == 'relatorios' %}
-      <form method="post" action="{% url 'scraper-automacao' %}">
-        {% csrf_token %}
-        <input type="hidden" name="tipo" value="relatorios">
-        <input type="hidden" name="acao" value="{% if w.ligado %}stop{% else %}start{% endif %}">
-        <input type="hidden" name="next" value="{{ request.get_full_path }}">
-        <button class="btn btn-sm {% if w.ligado %}btn-ghost{% else %}btn-accent{% endif %}" type="submit">
-          <i data-lucide="{% if w.ligado %}pause{% else %}play{% endif %}"></i>
-          {% if w.ligado %}Desligar{% else %}Ligar sync de comissão{% endif %}
-        </button>
-      </form>
+      <div class="row-side">
+        <form method="post" action="{% url 'scraper-automacao' %}" style="margin:0;">
+          {% csrf_token %}
+          <input type="hidden" name="tipo" value="relatorios">
+          <input type="hidden" name="acao" value="{% if w.ligado %}stop{% else %}start{% endif %}">
+          <input type="hidden" name="next" value="{{ request.get_full_path }}">
+          <button class="btn btn-sm {% if w.ligado %}btn-ghost{% else %}btn-accent{% endif %}" type="submit">
+            <i data-lucide="{% if w.ligado %}pause{% else %}play{% endif %}"></i>
+            {% if w.ligado %}Desligar{% else %}Ligar sync de comissão{% endif %}
+          </button>
+        </form>
+      </div>
       {% endif %}
     </div>
     {% endfor %}
   </div>
-</div>
+</section>
 
-<div class="card">
-  <div class="card-head">
-    <h2><i data-lucide="stethoscope"></i> Precisa de atenção</h2>
-    {% if r.problemas %}<span class="count">{{ r.problemas|length }}</span>{% endif %}
+<section class="section section-lined">
+  <div class="section-head">
+    <h2>Precisa de atenção</h2>
+    {% if r.problemas %}<span class="hint">{{ r.problemas|length }} grupo(s)</span>{% endif %}
   </div>
   {% for p in r.problemas %}
   <div class="prob {% if p.critico %}critico{% else %}aviso{% endif %}">
@@ -214,21 +213,21 @@ mentindo por omissão — nada roda, então nada falha.
     <p>Nenhum erro nem aviso nas últimas {{ r.horas }}h.</p>
   </div>
   {% endfor %}
-</div>
+</section>
 
-<div class="card">
-  <div class="card-head"><h2><i data-lucide="circle-check"></i> Ajustes concluídos</h2></div>
+<section class="section section-lined">
+  <div class="section-head"><h2>Ajustes concluídos</h2></div>
   {% for p in r.concluidos %}
   <div class="prob concluido">
     <div class="prob-head"><strong>{{ p.titulo }}</strong><span class="badge badge-green"><span class="dot"></span>Ajuste concluído</span><span class="tech-tag">{{ p.escopo }}</span><span class="meta">{{ p.confirmado_em|date:"d/m H:i" }}</span></div>
     <div class="meta" style="margin-top:.4rem;">{{ p.confirmacao }}</div>
   </div>
   {% empty %}<p class="muted" style="font-size:12.5px;margin:0;">Nenhum ajuste confirmado no período.</p>{% endfor %}
-</div>
+</section>
 
 {# Prova de vida: "zero erro" só é boa notícia se algo aconteceu. #}
-<div class="card">
-  <div class="card-head"><h2><i data-lucide="heart-pulse"></i> Sinais de vida no período</h2></div>
+<section class="section section-lined">
+  <div class="section-head"><h2>Sinais de vida no período</h2></div>
   <div class="stat-grid">
     {% for s in r.sinais %}
     <div class="stat"><div class="n tnum">{{ s.n }}</div><div class="l">{{ s.nome }}</div></div>
@@ -238,8 +237,7 @@ mentindo por omissão — nada roda, então nada falha.
     Zero erro com zero atividade não é saúde — confira os workers acima.
     O log cru de cada evento fica em <a class="link" href="{% url 'superadmin-infra' %}">Infra</a> e no Django Admin.
   </p>
-</div>
-</div>
+</section>
 {% endblock %}
 
 {% block scripts %}

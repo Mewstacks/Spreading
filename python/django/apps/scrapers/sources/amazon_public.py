@@ -4,17 +4,13 @@ from django.conf import settings
 from django.utils import timezone
 
 from apps.scrapers.auxiliar import iniciar_browser
-from .base import IngestedItem, SourceAdapter
+from .base import IngestedItem, SourceAdapter, normalizar_dinheiro
 
 ASIN_RE = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})", re.I)
 
 
 def _money(text):
-    raw = (text or "").replace("R$", "").replace(".", "").replace(",", ".").strip()
-    try:
-        return float(re.search(r"\d+(?:\.\d{1,2})?", raw).group())
-    except (AttributeError, ValueError):
-        return 0
+    return normalizar_dinheiro(text)
 
 
 def verify_product_url(url, nome_esperado=None):

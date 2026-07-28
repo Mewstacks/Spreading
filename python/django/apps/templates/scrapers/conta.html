@@ -1,26 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Conta{% endblock %}
+{% block page_class %}page-narrow{% endblock %}
 
 {% block head_extra %}
 <style>
-  /* pares de integração lado a lado em telas largas */
-  .duo { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; align-items: start; }
-  @media (min-width: 900px) { .duo { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-
-  /* badge de estado dentro do título de seção */
-  .section-head .badge { flex: none; }
-
-  /* bloco opcional (Creators API): hairline própria, sem virar card */
-  .adv { margin-top: 1rem; border: 1px solid var(--border); border-radius: var(--r-md);
-    background: var(--surface-2); }
-  .adv summary { cursor: pointer; padding: .7rem .95rem; font-weight: 600; font-size: 13px;
-    display: flex; align-items: center; gap: .5rem; list-style: none; color: var(--text-2); }
-  .adv summary::-webkit-details-marker { display: none; }
-  .adv summary .lucide { color: var(--muted); transition: transform .18s var(--ease); margin-left: auto; }
-  .adv[open] summary .lucide { transform: rotate(180deg); }
-  .adv-body { padding: 0 .95rem 1rem; }
-  .adv-body .form-grid { margin-top: .8rem; }
-
   /* editor de templates: mono confortável + variáveis destacadas */
   .tpl-vars { display: flex; flex-wrap: wrap; gap: .35rem; margin-bottom: 1rem; }
   textarea.tpl { font-family: var(--mono); font-size: 12.5px; line-height: 1.6; min-height: 7.5rem; }
@@ -28,6 +11,7 @@
 
   /* programas Awin */
   .program-list { display: grid; grid-template-columns: 1fr; gap: .55rem; margin-top: .9rem; }
+  @media (min-width: 900px) { .program-list { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .program-row { display: flex; align-items: center; gap: .7rem; padding: .7rem;
     border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); }
   .program-row img { width: 36px; height: 36px; object-fit: contain; border-radius: var(--r-sm);
@@ -36,190 +20,156 @@
 </style>
 {% endblock %}
 
+{% block topbar_context %}
+<strong>Conta</strong><span>Configurações</span>
+{% endblock %}
+
 {% block content %}
 <div class="page-head">
   <div class="head-main">
-    <span class="eyebrow">Conta</span>
+    <span class="eyebrow">Configurações</span>
     <h1><i data-lucide="user-cog"></i> Conta</h1>
-    <p class="sub">Plano, tags de afiliado, conexões com as lojas e identidade das suas mensagens.</p>
+    <p class="sub">Plano, identidade de publicação e templates das suas mensagens. As integrações têm páginas próprias.</p>
   </div>
 </div>
 
-<div class="section-head">
-  <h2>Plano e limites</h2>
-  <span class="head-actions"><span class="badge badge-accent">{{ perfil.plano|title }} · {{ perfil.assinatura_status }}</span></span>
-</div>
-<div class="card">
-  <p class="muted" style="font-size:13px;margin:0 0 .8rem;">Os limites do seu plano são aplicados automaticamente a cada envio.</p>
-  {% if billing_portal_url %}<a class="btn btn-ghost btn-sm" href="{{ billing_portal_url }}" target="_blank" rel="noopener"><i data-lucide="credit-card"></i> Gerenciar assinatura</a>
-  {% elif billing_checkout_url %}<a class="btn btn-accent btn-sm" href="{{ billing_checkout_url }}" target="_blank" rel="noopener"><i data-lucide="sparkles"></i> Escolher plano</a>{% endif %}
+<div class="split split-main-side">
+  <div>
+    <form method="post" action="{% url 'scraper-conta' %}">
+      {% csrf_token %}
+
+      <div class="section" style="margin-top:0;">
+        <div class="section-head" style="margin-top:0;">
+          <h2>Identidade de publicação</h2>
+          <span class="hint">usada quando um grupo não possui personalização própria</span>
+        </div>
+        <div class="form-grid">
+          <div><label>Nome da marca</label><input name="nome_marca" value="{{ perfil.nome_marca }}"></div>
+          <div><label>Tom</label><select name="tom_marca"><option value="direto" {% if perfil.tom_marca == "direto" %}selected{% endif %}>Direto</option><option value="amigavel" {% if perfil.tom_marca == "amigavel" %}selected{% endif %}>Amigável</option><option value="premium" {% if perfil.tom_marca == "premium" %}selected{% endif %}>Premium</option></select></div>
+          <div><label>Chamada para ação</label><input name="chamada_acao" value="{{ perfil.chamada_acao }}"></div>
+          <div><label>Divulgação de afiliado</label><input name="divulgacao_afiliado" value="{{ perfil.divulgacao_afiliado }}"></div>
+        </div>
+      </div>
+
+      <div class="form-section">
+        <div class="fs-title"><i data-lucide="layout-template"></i> Templates de mensagem <span class="muted" style="font-weight:400;">· opcionais — em branco, usa o padrão do Spreading</span></div>
+        <div class="tpl-vars">
+          <span class="tech-tag">{marca}</span>
+          <span class="tech-tag">{nome}</span>
+          <span class="tech-tag">{preco}</span>
+          <span class="tech-tag">{desconto}</span>
+          <span class="tech-tag">{link}</span>
+        </div>
+        <div class="tpl-field">
+          <label>Template A</label>
+          <textarea class="tpl" name="template_a" rows="4" placeholder="{marca} — {nome} — {preco} — {desconto} — {link}">{{ perfil.template_a }}</textarea>
+        </div>
+        <div class="tpl-field">
+          <label>Template B</label>
+          <textarea class="tpl" name="template_b" rows="4">{{ perfil.template_b }}</textarea>
+          <span class="help">Usado para variar as mensagens e reduzir repetição nos grupos.</span>
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button class="btn btn-accent" type="submit"><i data-lucide="save"></i> Salvar alterações</button>
+      </div>
+    </form>
+  </div>
+
+  <div>
+    <div class="panel">
+      <div class="section-head" style="margin:0 0 .6rem;">
+        <h2>Plano e limites</h2>
+        <span class="head-actions"><span class="badge badge-accent">{{ perfil.plano|title }} · {{ perfil.assinatura_status }}</span></span>
+      </div>
+      <p class="muted" style="font-size:13px;margin:0 0 .8rem;">Os limites do seu plano são aplicados automaticamente a cada envio.</p>
+      {% if billing_portal_url %}<a class="btn btn-ghost btn-sm" href="{{ billing_portal_url }}" target="_blank" rel="noopener"><i data-lucide="credit-card"></i> Gerenciar assinatura</a>
+      {% elif billing_checkout_url %}<a class="btn btn-accent btn-sm" href="{{ billing_checkout_url }}" target="_blank" rel="noopener"><i data-lucide="sparkles"></i> Escolher plano</a>{% endif %}
+    </div>
+
+    <div class="panel" style="margin-top:1rem;">
+      <div class="section-head" style="margin:0 0 .5rem;">
+        <h2>Integrações</h2>
+        <span class="hint">gerenciadas nas páginas próprias</span>
+      </div>
+      <div class="rows">
+        <div class="row-item">
+          <i data-lucide="shopping-bag" style="color:var(--muted);"></i>
+          <div class="row-main" style="font-size:13px;"><strong>Mercado Livre</strong></div>
+          <div class="row-side">
+            {% if ml_sessao_ok %}<span class="badge badge-green"><span class="dot"></span>Conectado</span>
+            {% else %}<span class="badge badge-red"><span class="dot"></span>Não conectado</span>{% endif %}
+            <a class="btn-link btn-sm" href="{% url 'scraper-ml-conexao' %}">Gerenciar</a>
+          </div>
+        </div>
+        <div class="row-item">
+          <i data-lucide="package" style="color:var(--muted);"></i>
+          <div class="row-main" style="font-size:13px;"><strong>Amazon</strong></div>
+          <div class="row-side">
+            {% if amazon_conectado %}<span class="badge badge-green"><span class="dot"></span>Conectada</span>
+            {% else %}<span class="badge badge-red"><span class="dot"></span>Não conectada</span>{% endif %}
+            <a class="btn-link btn-sm" href="{% url 'scraper-amazon' %}">Gerenciar</a>
+          </div>
+        </div>
+        <div class="row-item">
+          <i data-lucide="message-circle" style="color:var(--muted);"></i>
+          <div class="row-main" style="font-size:13px;"><strong>WhatsApp</strong></div>
+          <div class="row-side"><a class="btn-link btn-sm" href="{% url 'scraper-whatsapp' %}">Gerenciar</a></div>
+        </div>
+        <div class="row-item" style="border-bottom:0;">
+          <i data-lucide="send" style="color:var(--muted);"></i>
+          <div class="row-main" style="font-size:13px;"><strong>Telegram</strong></div>
+          <div class="row-side"><a class="btn-link btn-sm" href="{% url 'scraper-telegram' %}">Gerenciar</a></div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
-<form method="post" action="{% url 'scraper-conta' %}">
-  {% csrf_token %}
-  <input type="hidden" name="afiliado_tag_ml" value="{{ perfil.afiliado_tag_ml }}">
-
+{% if awin_enabled %}
+<div class="section section-lined" id="awin">
   <div class="section-head">
-    <h2>Amazon</h2>
-    <span class="hint">tag de afiliado e credenciais opcionais</span>
+    <h2><i data-lucide="network" style="color:var(--accent);"></i> Awin</h2>
+    <span class="hint">rede de afiliados</span>
     <span class="head-actions">
-      {% if amazon_conectado %}<span class="badge badge-green"><span class="dot"></span>Conectada</span>
+      {% if awin_integracao.status == 'conectada' %}<span class="badge badge-green"><span class="dot"></span>Conectada</span>
+      {% elif awin_integracao.status == 'reconectar' %}<span class="badge badge-red"><span class="dot"></span>Reconectar</span>
+      {% elif awin_integracao %}<span class="badge badge-muted"><span class="dot"></span>{{ awin_integracao.get_status_display }}</span>
       {% else %}<span class="badge badge-red"><span class="dot"></span>Não conectada</span>{% endif %}
     </span>
   </div>
-  <div class="card">
-    <label>Tag de afiliado da Amazon</label>
-    <input name="afiliado_tag_amazon" value="{{ perfil.afiliado_tag_amazon }}" placeholder="sualoja-20">
-    <span class="help">Sua tag do programa Amazon Associados (ex.: <code>sualoja-20</code>). É só isto que a Amazon exige: com a tag salva, seus links já saem comissionados.</span>
-
-    <details class="adv" {% if perfil.amazon_credential_id %}open{% endif %}>
-      <summary>
-        Creators API — opcional
-        {% if amazon_creators_ativa %}<span class="badge badge-green">salvas</span>
-        {% elif perfil.amazon_elegivel is False %}<span class="badge badge-muted">conta ainda não elegível</span>
-        {% else %}<span class="badge badge-muted">não configurada</span>{% endif %}
-        <i data-lucide="chevron-down"></i>
-      </summary>
-      <div class="adv-body">
-        <p class="help" style="margin-top:.2rem;">
-          Melhora a origem dos dados de oferta, mas <strong>não</strong> é necessária para
-          vender: sem ela, as ofertas vêm da busca pública e seus links comissionados
-          funcionam igual. A Amazon só libera estas credenciais para contas com
-          10 vendas qualificadas em 30 dias — se você ainda não chegou lá, ignore esta seção.
-        </p>
-        <div class="form-grid">
-          <div>
-            <label>Credential ID</label>
-            <input name="amazon_credential_id" value="{{ perfil.amazon_credential_id }}" placeholder="AKIA...">
-          </div>
-          <div>
-            <label>Credential Secret</label>
-            <input name="amazon_credential_secret" type="password" placeholder="••••••••">
-            <span class="help">{% if tem_secret %}Já salvo. Preencha apenas para substituir.{% else %}Fornecido pela Amazon junto com o Credential ID.{% endif %} Armazenado criptografado.</span>
-          </div>
-          <div>
-            <label>Host (opcional)</label>
-            <input name="amazon_creators_host" value="{{ perfil.amazon_creators_host }}" placeholder="creators.amazon.com.br">
-            <span class="help">Preencha apenas se a Amazon indicar um host diferente do padrão.</span>
-          </div>
-        </div>
-      </div>
-    </details>
-
-    <div class="form-actions">
-      <a class="btn btn-ghost btn-sm" href="{% url 'scraper-amazon-conexao' %}"><i data-lucide="bar-chart-3"></i> {% if amazon_relatorio_conectado %}Portal de relatórios conectado{% else %}Conectar portal de relatórios Amazon{% endif %}</a>
-      <span class="help" style="margin:0;">Esta sessão é separada da tag e das credenciais Creators API.</span>
-    </div>
-  </div>
-
-  <div class="section-head">
-    <h2>Identidade de publicação</h2>
-    <span class="hint">usada quando um grupo não possui personalização própria</span>
-  </div>
-  <div class="card">
-    <div class="form-grid">
-      <div><label>Nome da marca</label><input name="nome_marca" value="{{ perfil.nome_marca }}"></div>
-      <div><label>Tom</label><select name="tom_marca"><option value="direto" {% if perfil.tom_marca == "direto" %}selected{% endif %}>Direto</option><option value="amigavel" {% if perfil.tom_marca == "amigavel" %}selected{% endif %}>Amigável</option><option value="premium" {% if perfil.tom_marca == "premium" %}selected{% endif %}>Premium</option></select></div>
-      <div><label>Chamada para ação</label><input name="chamada_acao" value="{{ perfil.chamada_acao }}"></div>
-      <div><label>Divulgação de afiliado</label><input name="divulgacao_afiliado" value="{{ perfil.divulgacao_afiliado }}"></div>
-    </div>
-
-    <div class="section-head" style="margin:1.8rem 0 .9rem;">
-      <h2>Templates de mensagem</h2>
-      <span class="hint">opcionais — em branco, usa o padrão do Spreading</span>
-    </div>
-    <div class="tpl-vars">
-      <span class="tech-tag">{marca}</span>
-      <span class="tech-tag">{nome}</span>
-      <span class="tech-tag">{preco}</span>
-      <span class="tech-tag">{desconto}</span>
-      <span class="tech-tag">{link}</span>
-    </div>
-    <div class="tpl-field">
-      <label>Template A</label>
-      <textarea class="tpl" name="template_a" rows="4" placeholder="{marca} — {nome} — {preco} — {desconto} — {link}">{{ perfil.template_a }}</textarea>
-    </div>
-    <div class="tpl-field">
-      <label>Template B</label>
-      <textarea class="tpl" name="template_b" rows="4">{{ perfil.template_b }}</textarea>
-      <span class="help">Usado para variar as mensagens e reduzir repetição nos grupos.</span>
-    </div>
-
-    <div class="form-actions">
-      <button class="btn btn-accent" type="submit"><i data-lucide="save"></i> Salvar alterações</button>
-    </div>
-  </div>
-</form>
-
-<div class="section-head">
-  <h2>Integrações</h2>
-  <span class="hint">sessões das lojas e redes de afiliados</span>
-</div>
-<div class="duo">
-  <section class="card" aria-label="Mercado Livre">
-    <div class="card-head">
-      <h2><i data-lucide="shopping-bag"></i> Mercado Livre</h2>
-      <div class="head-actions">
-        {% if ml_sessao_ok %}<span class="badge badge-green"><span class="dot"></span>Conectado</span>
-        {% else %}<span class="badge badge-red"><span class="dot"></span>Não conectado</span>{% endif %}
-      </div>
-    </div>
-    <p class="muted" style="font-size:13px;line-height:1.6;margin:0 0 .8rem;">
-      Faça login no Mercado Livre sem sair do Spreading. A sessão fica salva
-      e é usada para gerar seus links de afiliado.
-    </p>
+  {% if awin_integracao and awin_integracao.status == 'conectada' %}
+    <p class="muted" style="font-size:13px;margin:0 0 .8rem;">Publisher <strong>{{ awin_integracao.nome_conta|default:awin_integracao.identificador_conta }}</strong> · {{ awin_programas|length }} programa(s) · última sincronização {{ awin_integracao.ultimo_sucesso|default:"ainda não concluída" }}.</p>
+    {% if awin_integracao.erro_publico %}<div class="alert alert-warn" style="margin-top:0;"><i data-lucide="alert-triangle"></i><div>{{ awin_integracao.erro_publico }}</div></div>{% endif %}
     <div style="display:flex;gap:.5rem;flex-wrap:wrap;">
-      <a class="btn btn-accent" href="{% url 'scraper-ml-conexao' %}">
-        <i data-lucide="log-in"></i> Conectar Mercado Livre
-      </a>
-      <a class="btn btn-ghost btn-sm" href="{% url 'scraper-ml-relatorio-conexao' %}"><i data-lucide="bar-chart-3"></i> {% if ml_relatorio_conectado %}Portal de relatórios conectado{% else %}Conectar portal de relatórios ML{% endif %}</a>
+      <form method="post" action="{% url 'scraper-awin-sincronizar' %}">{% csrf_token %}<button class="btn btn-ghost btn-sm"><i data-lucide="refresh-cw"></i> Sincronizar agora</button></form>
+      <form method="post" action="{% url 'scraper-awin-desconectar' %}" onsubmit="return confirm('Desconectar a Awin? O histórico será preservado.')">{% csrf_token %}<button class="btn btn-danger btn-sm"><i data-lucide="unlink"></i> Desconectar</button></form>
     </div>
-    <span class="help">O portal de afiliados (comissão) tem login próprio, separado do site principal — por isso a conexão de relatórios é uma etapa à parte.</span>
-  </section>
-
-  {% if awin_enabled %}
-  <section class="card" id="awin" aria-label="Awin">
-    <div class="card-head">
-      <h2><i data-lucide="network"></i> Awin</h2>
-      <div class="head-actions">
-        {% if awin_integracao.status == 'conectada' %}<span class="badge badge-green"><span class="dot"></span>Conectada</span>
-        {% elif awin_integracao.status == 'reconectar' %}<span class="badge badge-red"><span class="dot"></span>Reconectar</span>
-        {% elif awin_integracao %}<span class="badge badge-muted"><span class="dot"></span>{{ awin_integracao.get_status_display }}</span>
-        {% else %}<span class="badge badge-red"><span class="dot"></span>Não conectada</span>{% endif %}
-      </div>
+    <div class="program-list">
+      {% for p in awin_programas %}<div class="program-row">
+        {% if p.logo_url %}<img src="{{ p.logo_url }}" alt="">{% endif %}
+        <div style="min-width:0"><strong style="display:block;overflow-wrap:anywhere;">{{ p.nome }}</strong><span class="muted" style="font-size:12px;">{{ p.dominio|default:p.status_vinculo }} · {{ p.link_status }}</span></div>
+        <form method="post" action="{% url 'scraper-awin-programa-toggle' p.id %}">{% csrf_token %}<button class="btn btn-sm {% if p.habilitado %}btn-green{% else %}btn-ghost{% endif %}">{% if p.habilitado %}Ativo{% else %}Pausado{% endif %}</button></form>
+      </div>{% empty %}<p class="muted" style="margin:0;">Nenhum programa brasileiro ativo foi encontrado.</p>{% endfor %}
     </div>
-    {% if awin_integracao and awin_integracao.status == 'conectada' %}
-      <p class="muted" style="font-size:13px;margin:0 0 .8rem;">Publisher <strong>{{ awin_integracao.nome_conta|default:awin_integracao.identificador_conta }}</strong> · {{ awin_programas|length }} programa(s) · última sincronização {{ awin_integracao.ultimo_sucesso|default:"ainda não concluída" }}.</p>
-      {% if awin_integracao.erro_publico %}<div class="alert alert-warn" style="margin-top:0;"><i data-lucide="alert-triangle"></i><div>{{ awin_integracao.erro_publico }}</div></div>{% endif %}
-      <div style="display:flex;gap:.5rem;flex-wrap:wrap;">
-        <form method="post" action="{% url 'scraper-awin-sincronizar' %}">{% csrf_token %}<button class="btn btn-ghost btn-sm"><i data-lucide="refresh-cw"></i> Sincronizar agora</button></form>
-        <form method="post" action="{% url 'scraper-awin-desconectar' %}" onsubmit="return confirm('Desconectar a Awin? O histórico será preservado.')">{% csrf_token %}<button class="btn btn-danger btn-sm"><i data-lucide="unlink"></i> Desconectar</button></form>
-      </div>
-      <div class="program-list">
-        {% for p in awin_programas %}<div class="program-row">
-          {% if p.logo_url %}<img src="{{ p.logo_url }}" alt="">{% endif %}
-          <div style="min-width:0"><strong style="display:block;overflow-wrap:anywhere;">{{ p.nome }}</strong><span class="muted" style="font-size:12px;">{{ p.dominio|default:p.status_vinculo }} · {{ p.link_status }}</span></div>
-          <form method="post" action="{% url 'scraper-awin-programa-toggle' p.id %}">{% csrf_token %}<button class="btn btn-sm {% if p.habilitado %}btn-green{% else %}btn-ghost{% endif %}">{% if p.habilitado %}Ativo{% else %}Pausado{% endif %}</button></form>
-        </div>{% empty %}<p class="muted" style="margin:0;">Nenhum programa brasileiro ativo foi encontrado.</p>{% endfor %}
-      </div>
+  {% else %}
+    <p class="muted" style="font-size:13px;line-height:1.55;margin:0 0 .9rem;max-width:56ch;">Gere seu token em <a class="link" href="https://ui.awin.com/awin-api" target="_blank" rel="noopener">API Credentials da Awin</a> e cole abaixo. O Spreading nunca solicita sua senha.</p>
+    {% if awin_contas %}
+      <form method="post" action="{% url 'scraper-awin-selecionar' %}" style="max-width:420px;">{% csrf_token %}
+        <label>Conta Publisher</label>
+        <select name="publisher_id" required>{% for c in awin_contas %}<option value="{{ c.id }}">{{ c.nome }} · {{ c.id }}</option>{% endfor %}</select>
+        <div class="form-actions"><button class="btn btn-accent" type="submit"><i data-lucide="check"></i> Usar esta conta</button></div>
+      </form>
     {% else %}
-      <p class="muted" style="font-size:13px;line-height:1.55;margin:0 0 .9rem;">Gere seu token em <a class="link" href="https://ui.awin.com/awin-api" target="_blank" rel="noopener">API Credentials da Awin</a> e cole abaixo. O Spreading nunca solicita sua senha.</p>
-      {% if awin_contas %}
-        <form method="post" action="{% url 'scraper-awin-selecionar' %}">{% csrf_token %}
-          <label>Conta Publisher</label>
-          <select name="publisher_id" required>{% for c in awin_contas %}<option value="{{ c.id }}">{{ c.nome }} · {{ c.id }}</option>{% endfor %}</select>
-          <div class="form-actions"><button class="btn btn-accent" type="submit"><i data-lucide="check"></i> Usar esta conta</button></div>
-        </form>
-      {% else %}
-        <form method="post" action="{% url 'scraper-awin-conectar' %}">{% csrf_token %}
-          <label>Token pessoal da Awin</label>
-          <input name="token" type="password" autocomplete="new-password" required placeholder="Cole o token">
-          <span class="help">Armazenado criptografado e nunca exibido novamente.</span>
-          <div class="form-actions"><button class="btn btn-accent" type="submit"><i data-lucide="plug"></i> Validar e conectar</button></div>
-        </form>
-      {% endif %}
+      <form method="post" action="{% url 'scraper-awin-conectar' %}" style="max-width:420px;">{% csrf_token %}
+        <label>Token pessoal da Awin</label>
+        <input name="token" type="password" autocomplete="new-password" required placeholder="Cole o token">
+        <span class="help">Armazenado criptografado e nunca exibido novamente.</span>
+        <div class="form-actions"><button class="btn btn-accent" type="submit"><i data-lucide="plug"></i> Validar e conectar</button></div>
+      </form>
     {% endif %}
-  </section>
   {% endif %}
 </div>
+{% endif %}
 {% endblock %}

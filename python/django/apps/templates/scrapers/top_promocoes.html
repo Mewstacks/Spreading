@@ -1,6 +1,14 @@
 {% extends "base.html" %}
 {% block title %}Top Promoções{% endblock %}
 
+{% block topbar_context %}<strong>Promoções</strong><span>Ofertas &amp; cupons</span>{% endblock %}
+{% block topbar_actions %}
+<div class="seg">
+  <a href="?tipo=oferta" class="{% if tipo != 'cupom' %}active{% endif %}"><i data-lucide="tag"></i> Ofertas</a>
+  <a href="?tipo=cupom" class="{% if tipo == 'cupom' %}active{% endif %}"><i data-lucide="ticket-percent"></i> Cupons</a>
+</div>
+{% endblock %}
+
 {% block head_extra %}
 <style>
   /* ── Dropdowns de categoria (macro/sub) ── */
@@ -17,8 +25,8 @@
   .dd-item:hover { background: var(--surface-2); }
   .dd-item input { accent-color: var(--accent); cursor: pointer; flex-shrink: 0; width: auto; }
 
-  /* ── Barra de saúde das fontes ── */
-  .fontes-card { padding: .9rem 1.1rem; margin-bottom: 1.1rem; }
+  /* ── Estado das fontes: linha compacta, sem caixa ── */
+  .fontes-strip { padding: .8rem 0 .95rem; border-bottom: 1px solid var(--border); }
   .fontes-bar { display: flex; align-items: center; gap: .5rem .9rem; flex-wrap: wrap; }
   .fontes-label { font-family: var(--mono); font-size: 10px; font-weight: 500; text-transform: uppercase;
     letter-spacing: .16em; color: var(--muted); }
@@ -33,9 +41,9 @@
   .fontes-sub .lucide { width: 1em; height: 1em; }
   .fontes-sub .fontes-acoes { margin-left: auto; display: inline-flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
 
-  /* ── Filtros ── */
-  .filter-card { padding: 1rem 1.1rem; margin-bottom: 1.25rem; }
-  .filter-main { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+  /* ── Filtros: toolbar integrada à listagem, sem caixa ── */
+  .filtros { padding-bottom: 1rem; margin-bottom: 1.1rem; border-bottom: 1px solid var(--border); }
+  .filter-main { row-gap: .6rem; }
   .filter-search { position: relative; flex: 1 1 280px; }
   .filter-search .lucide { position: absolute; left: .75rem; top: 50%; transform: translateY(-50%);
     color: var(--muted); pointer-events: none; }
@@ -53,7 +61,7 @@
   .filter-adv[open] > summary .chev { transform: rotate(180deg); }
   .filter-adv-grid { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
     margin-top: .55rem; padding: .8rem .9rem; background: var(--surface-2);
-    border: 1px solid var(--border); border-radius: var(--r-md); }
+    border-radius: var(--r-md); }
   .filter-adv-grid select { width: auto; min-width: 150px; }
   .filter-meta { display: flex; align-items: center; gap: .5rem .9rem; flex-wrap: wrap;
     margin-top: .8rem; padding-top: .8rem; border-top: 1px solid var(--border); }
@@ -78,14 +86,14 @@
   .deal-cell { min-width: 150px; }
   .deal-prices { display: flex; align-items: baseline; gap: .5rem; }
   .deal-saving { color: var(--muted); font-size: 11.5px; margin-top: .18rem; }
-  .table-wrap table { min-width: 880px; }
+  .table-flat table { min-width: 880px; border-top: 0; /* a hairline já vem da .filtros */ }
   .td-prod { width: 100%; white-space: normal; }
   .td-prod .prod-name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   /* Código de cupom pode ser bem longo (até 120 chars): quebra e limita a largura
      p/ não empurrar a coluna Cupom pra fora da tela (bug da tabela cortada). */
   .cell-code { white-space: normal; width: 200px; min-width: 160px; }
   .cell-code .td-val { white-space: normal; overflow-wrap: anywhere; }
-  .col-actions { position: sticky; right: 0; background: var(--surface); border-left: 1px solid var(--border); }
+  .col-actions { position: sticky; right: 0; background: var(--bg); box-shadow: -1px 0 0 var(--border); }
   thead .col-actions { z-index: 2; }
   tbody tr:hover .col-actions { background: var(--surface-2); }
 
@@ -106,7 +114,9 @@
   .busca-bar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-top: .7rem; }
   .busca-bar input[type="text"] { flex: 1; min-width: 180px; }
 
-  /* ── Cupom privado (form inline) ── */
+  /* ── Cupom privado (form inline recolhível): painel tonal, sem borda ── */
+  details.collapse-card { background: var(--surface); border-radius: var(--r-lg);
+    padding: 1rem 1.2rem; margin-bottom: 1.1rem; }
   details.collapse-card > summary { list-style: none; display: flex; align-items: center; gap: .5rem;
     cursor: pointer; user-select: none; font-size: 14.5px; font-weight: 600; letter-spacing: -.01em; }
   details.collapse-card > summary::-webkit-details-marker { display: none; }
@@ -165,10 +175,10 @@
     .filter-meta .seg a { flex: 1; justify-content: center; }
     .fontes-afiliacao { margin-left: 0; flex-basis: 100%; }
     .fontes-sub .fontes-acoes { margin-left: 0; }
-    .col-actions { position: static; border-left: 0; }
-    .table-wrap table { min-width: 0; }
+    .col-actions { position: static; box-shadow: none; }
+    .table-flat table { min-width: 0; }
 
-    .table-wrap { border: none; background: transparent; overflow: visible; }
+    .table-flat { overflow: visible; }
     table, thead, tbody, tr, td { display: block; width: 100%; }
     thead { display: none; }
     tbody tr {
@@ -240,12 +250,7 @@
   </div>
 </div>
 
-<div class="seg" style="margin-bottom:1.1rem;">
-  <a href="?tipo=oferta" class="{% if tipo != 'cupom' %}active{% endif %}"><i data-lucide="tag"></i> Ofertas</a>
-  <a href="?tipo=cupom" class="{% if tipo == 'cupom' %}active{% endif %}"><i data-lucide="ticket-percent"></i> Cupons</a>
-</div>
-
-<section class="card fontes-card" aria-label="Saúde das fontes">
+<section class="fontes-strip" aria-label="Saúde das fontes">
   <div class="fontes-bar">
     <span class="fontes-label">Fontes</span>
     {% if fontes %}
@@ -297,9 +302,9 @@
 {{ categorias_por_macro|json_script:"cats-data" }}
 {{ categorias_selecionadas|json_script:"sel-cats-data" }}
 
-<form method="get" id="filtro-form" class="card filter-card">
-  <div class="filter-main">
-    <div class="filter-search">
+<form method="get" id="filtro-form" class="filtros">
+  <div class="toolbar filter-main">
+    <div class="filter-search grow">
       <i data-lucide="search"></i>
       <input type="search" name="q" value="{{ busca }}" placeholder="Buscar produto ou categoria"
              aria-label="Buscar promoções">
@@ -434,7 +439,7 @@
 </details>{% endif %}
 
 {% if tipo == 'cupom' %}
-  <details class="card collapse-card" style="margin-bottom:1rem;" id="cupom-manual">
+  <details class="collapse-card" id="cupom-manual">
     <summary><i data-lucide="plus-circle"></i> Adicionar cupom privado <i data-lucide="chevron-down" class="chev"></i></summary>
     <p class="muted" style="font-size:12.5px;margin-top:0;">Visível somente na sua conta. O link afiliado é preparado antes da publicação.</p>
     <form method="post" action="{% url 'scraper-cupom-manual' %}">{% csrf_token %}
@@ -463,7 +468,7 @@
     </form>
   </details>
   {% if cupons_catalogo %}
-  <div class="table-wrap"><table><thead><tr><th>Como usar</th><th class="cell-grow">Cupom</th><th>Loja</th><th>Validade</th><th class="col-actions">Ação</th></tr></thead><tbody>
+  <div class="table-flat"><table><thead><tr><th>Como usar</th><th class="cell-grow">Cupom</th><th>Loja</th><th>Validade</th><th class="col-actions">Ação</th></tr></thead><tbody>
   {% for c in cupons_catalogo %}<tr>
     <td data-label="Como usar" class="cell-code"><div class="td-val">{% if c.codigo_publico %}<span class="tech-tag" style="font-size:12px;color:var(--text);">{{ c.codigo_publico }}</span>{% else %}<span class="tech-tag">Ativar no link</span>{% endif %}</div></td>
     <td data-label="Cupom"><div class="td-val"><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.3rem;">{% if c.relampago %}<span class="badge badge-yellow">Relâmpago</span>{% endif %}{% if c.restrito %}<span class="badge badge-muted">Restrito</span>{% endif %}{% if c.marketplace == 'awin' %}<span class="badge badge-accent">Awin</span>{% endif %}{% if c.fonte.slug == 'manual-private' %}<span class="badge badge-green">Privado</span>{% endif %}{% if not c.codigo_publico %}<span class="badge badge-muted">Ativação no link</span>{% endif %}</div><div class="muted" style="font-size:11.5px;margin-top:.25rem;">{% if c.restrito %}Confira as condições antes de publicar.{% else %}Confirme a aplicação no checkout.{% endif %}</div></div></td>
@@ -483,7 +488,7 @@
   </div>
   {% endif %}
 {% elif produtos %}
-<div class="table-wrap">
+<div class="table-flat">
   <table>
     <thead>
       <tr><th>#</th><th>Produto</th><th>Cupom</th><th>Preço</th><th>Desconto</th><th class="col-actions">Ação</th></tr>
