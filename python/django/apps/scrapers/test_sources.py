@@ -2,7 +2,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from apps.scrapers.models import (
@@ -607,3 +607,65 @@ class GerarLinksNaoSeguraTransacaoTests(TestCase):
 
         organization_callable(org.pk, _corpo, segurar_transacao=True)()
         self.assertEqual(visto["instalado"], str(org.pk))
+
+
+class MensagensDoGerarLinksTests(TransactionTestCase):
+    """Anti-bot e sessão morta pedem AÇÕES DIFERENTES do usuário: esperar vs
+    reconectar. Unificar os dois num "[ERRO] sessão expirada" com link de
+    Reconectar fazia o usuário refazer um login que estava perfeito.
+
+    TransactionTestCase (e não TestCase) porque o job SSE roda em thread própria:
+    dentro da transação do TestCase o SQLite trava a tabela para a outra thread.
+    Mesmo motivo de EndpointsEnvioPostTests.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("msg-links", password="test")
+        self.user.perfil.marcar_verificado()
+        self.client.force_login(self.user)
+        self.produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Item", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=70,
+            link_produto="https://produto.mercadolivre.com.br/MLB-999999")
+
+    def _corpo(self, excecao):
+        from apps.scrapers.marketplaces.mercadolivre import MercadoLivre
+        with patch.object(MercadoLivre, "prefetch_links", side_effect=excecao):
+            resp = self.client.get("/scrapers/gerar-links/")
+            return b"".join(resp.streaming_content).decode()
+
+    def test_antibot_nao_manda_reconectar(self):
+        from apps.scrapers.scraper_mercadolivre.link import AntiBotError
+        corpo = self._corpo(AntiBotError("verificação"))
+        self.assertIn("verificação de segurança", corpo)
+        self.assertNotIn("__ML_LOGIN__", corpo)
+        self.assertNotIn("expirou", corpo)
+        self.assertIn("[AVISO]", corpo)
+
+    def test_sessao_morta_continua_mandando_reconectar(self):
+        """O caminho legítimo não pode regredir."""
+        from apps.scrapers.scraper_mercadolivre.link import LoginError
+        corpo = self._corpo(LoginError("Sua sessão do Mercado Livre expirou."))
+        self.assertIn("__ML_LOGIN__", corpo)
+        self.assertIn("[ERRO]", corpo)
+
+    def test_ml_fora_do_ar_nao_manda_reconectar(self):
+        from apps.scrapers.scraper_mercadolivre.link import AuthError
+        corpo = self._corpo(AuthError("sem resposta"))
+        self.assertNotIn("__ML_LOGIN__", corpo)
+        self.assertIn("[AVISO]", corpo)
+
+    def test_progresso_do_lote_chega_na_tela(self):
+        """O emitir_fase já existia em gerar_links_em_lote, mas ia só para o logger:
+        o usuário via a primeira linha e nada mais por ~4 minutos."""
+        from apps.scrapers.marketplaces.mercadolivre import MercadoLivre
+        from apps.scrapers.progresso import emitir_fase
+
+        def _fingir(produtos, usuario=None, faixa=None):
+            emitir_fase("Link 1/2", 0.5, (0, 100))
+            return (1, 0)
+
+        with patch.object(MercadoLivre, "prefetch_links", side_effect=_fingir):
+            resp = self.client.get("/scrapers/gerar-links/")
+            corpo = b"".join(resp.streaming_content).decode()
+        self.assertIn("Link 1/2", corpo)

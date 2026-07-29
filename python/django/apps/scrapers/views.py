@@ -2235,7 +2235,10 @@ def gerar_links_stream(request):
     """
     from apps.scrapers.marketplaces.registry import get_marketplace
     from apps.scrapers.auxiliar import SessaoExpirada
-    from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
+    from apps.scrapers.progresso import usar_reporter
+    from apps.scrapers.scraper_mercadolivre.link import (
+        AntiBotError, AuthError, LoginError,
+    )
 
     try:
         limite = int(request.GET.get("limite", 50))
@@ -2277,11 +2280,33 @@ def gerar_links_stream(request):
             por_loja.setdefault(p.marketplace or "mercadolivre", []).append(p)
         for slug, grupo in por_loja.items():
             try:
-                get_marketplace(slug).prefetch_links(grupo, usuario=usuario)
-            except (LoginError, AuthError, SessaoExpirada) as exc:
+                # usar_reporter faz o `emitir_fase("Link i/N")` que já existe em
+                # gerar_links_em_lote chegar à caixa de log. Sem ele o progresso ia
+                # só para o logger do servidor: o usuário via a primeira linha e
+                # mais nada por ~4 minutos, o que fazia qualquer falha parecer
+                # instantânea e total. As linhas periódicas também mantêm o stream
+                # vivo — um SSE ocioso por minutos é candidato a ser cortado pelo
+                # proxy da Fly, o que vira "A conexão foi perdida" na tela.
+                with usar_reporter(lambda msg, progresso=None: print(msg)):
+                    get_marketplace(slug).prefetch_links(grupo, usuario=usuario)
+            except (LoginError, SessaoExpirada) as exc:
+                # Sessão morta DE VERDADE: aqui o "Reconectar" resolve.
                 print(f"[ERRO] Sessão do Mercado Livre expirada: {exc}")
                 print("__ML_LOGIN__")
-                break
+                continue
+            except AntiBotError:
+                # A conta está boa; foi o gateway anti-bot do ML reagindo ao IP do
+                # servidor. Oferecer "Reconectar" aqui mandava o usuário refazer um
+                # login que estava perfeito.
+                print("[AVISO] O Mercado Livre pediu verificação de segurança ao abrir "
+                      "o Link Builder (proteção contra robôs, dispara pelo IP do "
+                      "servidor). Sua conta está conectada e não há nada a corrigir — "
+                      "o robô tenta de novo sozinho.")
+                continue
+            except AuthError:
+                print("[AVISO] Não foi possível abrir o Link Builder agora (o Mercado "
+                      "Livre não respondeu). Tente de novo em alguns minutos.")
+                continue
             except Exception as exc:
                 print(f"Aviso: geração de links em {slug} falhou ({exc}).")
         # O resumo é informativo: se ELE falhar, o lote já feito continua válido e

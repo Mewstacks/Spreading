@@ -169,6 +169,8 @@
     padding: .6rem .75rem; max-height: 160px; overflow-y: auto; }
   .modal-log:empty { display: none; }
   .modal-log .err { color: var(--red); }
+  /* Situação passageira que o robô resolve sozinho — âmbar, não vermelho. */
+  .modal-log .warn { color: var(--yellow, #d9a441); }
   .modal-log .ok { color: var(--green); font-weight: 700; }
   #modal-envio .btn, #modal-envio select, #modal-envio input, #modal-envio .x-btn { min-height: 44px; }
 
@@ -782,7 +784,11 @@ function gerarLinks() {
       ln.className = 'err';
       ln.innerHTML = '&rarr; <a href="/scrapers/ml/" style="color:inherit;font-weight:600;text-decoration:underline">Reconectar Mercado Livre</a>';
     } else {
+      // [AVISO] é situação que se resolve sozinha (o ML pediu verificação, o robô
+      // retenta). Pintar de vermelho como erro fazia o usuário procurar culpa numa
+      // conta que está perfeita — e clicar em "Reconectar" à toa.
       if (e.data.startsWith('[ERRO]')) ln.className = 'err';
+      else if (e.data.startsWith('[AVISO]')) ln.className = 'warn';
       ln.textContent = e.data;
     }
     log.appendChild(ln); log.scrollTop = log.scrollHeight;
