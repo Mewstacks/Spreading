@@ -1688,23 +1688,22 @@ def top_promocoes(request):
     for cupom_catalogo in cupons_lista:
         cupom_catalogo.codigo_publico = codigo_publicavel(cupom_catalogo)
         cupom_catalogo.modo_resgate = regras_do_cupom(cupom_catalogo)["modo_resgate"]
-    from apps.scrapers.coupon_products import (
-        ids_cupons_prontos, relacoes_preparadas_para_envio,
-    )
-    ids_prontos = ids_cupons_prontos(request.user, cupons_lista)
+    from apps.scrapers.coupon_products import mapa_relacoes_prontas
+    # Filtrar publicáveis ANTES de consultar. A ordem invertida cobrava 3 queries
+    # por cupom do catálogo inteiro (~7 mil com os 2379 de homologação) e jogava
+    # quase todo o resultado fora na linha seguinte.
     cupons_publicaveis = [c for c in cupons_lista if cupom_publicavel(c)]
     if como_usar_selecionado == "codigo":
         cupons_publicaveis = [c for c in cupons_publicaveis if c.codigo_publico]
     elif como_usar_selecionado == "ativacao":
         cupons_publicaveis = [c for c in cupons_publicaveis if not c.codigo_publico]
-    cupons_prontos = sum(c.id in ids_prontos for c in cupons_publicaveis)
-    relacoes_por_cupom = {
-        cupom.id: relacoes_preparadas_para_envio(cupom, request.user)
-        for cupom in cupons_publicaveis
-    }
-    ids_preparados = {
-        cupom_id for cupom_id, relacoes in relacoes_por_cupom.items() if relacoes
-    }
+    # Uma passada em lote responde as duas perguntas (preparado? pronto?) num número
+    # de queries que não cresce com a quantidade de cupons.
+    relacoes_por_cupom, relacoes_prontas = mapa_relacoes_prontas(
+        request.user, cupons_publicaveis)
+    ids_preparados = set(relacoes_por_cupom)
+    ids_prontos = set(relacoes_prontas)
+    cupons_prontos = len(ids_prontos)
     cupons_aguardando_preparo = len(cupons_publicaveis) - len(ids_preparados)
     ids_produtos_preparados = {
         relacao.produto_id

@@ -694,3 +694,78 @@ class CasamentoDeContainerTests(TestCase):
                 '<a href="/p/MLB987654?ref=1">b</a>'
                 '<a href="https://exemplo.com/nada">c</a>')
         self.assertEqual(_ids_do_html(html), {"MLB123456", "MLB987654"})
+
+
+class MapaDeRelacoesEmLoteTests(TestCase):
+    """A tela chamava relacoes_prontas_para_envio (3 queries) por cupom do catálogo
+    inteiro — ~7 mil queries com os 2379 de homologação, quase todas descartadas
+    logo depois pelo filtro de publicáveis."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("lote", password="test")
+        self.fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML público"})
+
+    def _cupom_pronto(self, sufixo, *, com_link=True, preparado=True):
+        from apps.scrapers.coupon_products import chave_produtos_cupom
+        cupom = CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id=f"campanha:{sufixo}",
+            marketplace="mercadolivre", titulo=f"Cupom {sufixo}", codigo=f"COD{sufixo}",
+            estado="ativo", regras={"modo_resgate": "codigo", "valor_desconto": 10})
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", nome=f"Produto {sufixo}", origem="cupom",
+            preco_sem_desconto=100, preco_com_cupom=80,
+            imagem_url="https://img/x.jpg",
+            link_produto=f"https://www.mercadolivre.com.br/p/MLB{sufixo}")
+        ProdutoCupom.objects.create(
+            produto=produto, cupom=cupom, status="confirmado",
+            preco_original=Decimal("100.00"), preco_atual=Decimal("90.00"),
+            preco_final=Decimal("80.00"))
+        if preparado:
+            CupomPreparacao.objects.create(
+                cupom=cupom, usuario=None, status="pronto",
+                produtos_chave=chave_produtos_cupom(cupom),
+                verificado_em=timezone.now())
+        if com_link:
+            LinkAfiliadoUsuario.objects.create(
+                usuario=self.user, produto=produto, estado="pronto",
+                link_afiliado=f"https://meli.la/{sufixo}", afiliado_ok=True,
+                verificado_ok=True)
+        return cupom
+
+    def test_numero_de_queries_nao_cresce_com_a_quantidade(self):
+        from apps.scrapers.coupon_products import mapa_relacoes_prontas
+        poucos = [self._cupom_pronto(f"1{i}") for i in range(2)]
+        with self.assertNumQueries(3):
+            mapa_relacoes_prontas(self.user, poucos)
+
+        muitos = poucos + [self._cupom_pronto(f"2{i}") for i in range(20)]
+        with self.assertNumQueries(3):
+            mapa_relacoes_prontas(self.user, muitos)
+
+    def test_paridade_com_a_versao_por_cupom(self):
+        """A versão single é a fonte do ENVIO. Se as duas divergirem, a tela oferece
+        o que o envio recusa — exatamente o defeito que link_validacao documenta ter
+        custado caro antes."""
+        from apps.scrapers.coupon_products import (
+            mapa_relacoes_prontas, relacoes_prontas_para_envio,
+        )
+        casos = [
+            self._cupom_pronto("31"),                        # pronto
+            self._cupom_pronto("32", com_link=False),        # preparado, sem link
+            self._cupom_pronto("33", preparado=False),       # nem preparado
+        ]
+        _, prontas = mapa_relacoes_prontas(self.user, casos)
+        for cupom in casos:
+            esperado = bool(relacoes_prontas_para_envio(cupom, self.user))
+            self.assertEqual(cupom.id in prontas, esperado,
+                             f"divergência no cupom {cupom.external_id}")
+
+    def test_preparados_inclui_quem_ainda_nao_tem_link(self):
+        """A tela usa os preparados-sem-link para dizer 'aguardando link'."""
+        from apps.scrapers.coupon_products import mapa_relacoes_prontas
+        sem_link = self._cupom_pronto("41", com_link=False)
+        preparadas, prontas = mapa_relacoes_prontas(self.user, [sem_link])
+        self.assertIn(sem_link.id, preparadas)
+        self.assertNotIn(sem_link.id, prontas)

@@ -21,7 +21,9 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from apps.scrapers.models import CupomPreparacao, Produto, ProdutoCupom
+from apps.scrapers.models import (
+    CupomPreparacao, LinkAfiliadoUsuario, Produto, ProdutoCupom,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -581,11 +583,83 @@ def cupom_pronto_para_usuario(cupom, usuario) -> bool:
     return bool(relacoes_prontas_para_envio(cupom, usuario))
 
 
+def mapa_relacoes_prontas(usuario, cupons, limite=9):
+    """(preparados, prontos) para uma LISTA de cupons, em 3 queries fixas.
+
+    A versão por cupom (`relacoes_prontas_para_envio`) custa 3 queries CADA, e a
+    tela a chamava para todo cupom ativo: com os 2379 de homologação eram ~7 mil
+    queries por carregamento, quase todas descartadas logo depois pelo filtro de
+    publicáveis. Aqui o número de queries não depende da quantidade de cupons.
+
+    Devolve:
+      preparadas: dict id -> [ProdutoCupom] com preparo pronto, fresco e produtos
+                  válidos (o que a tela usa para diagnosticar a fila)
+      prontas:    dict id -> [ProdutoCupom] que também têm link afiliado verificado
+
+    `relacoes_prontas_para_envio` continua sendo a fonte do ENVIO: ela é o caminho
+    crítico e não vale o risco de as duas divergirem. Um teste de paridade amarra
+    as duas.
+    """
+    cupons = list(cupons)
+    if not cupons:
+        return {}, {}
+    ids = [c.id for c in cupons]
+    agora = timezone.now()
+    fresco_desde = agora - timedelta(hours=CACHE_HORAS)
+
+    # `chave_produtos_cupom` e `_usuario_do_preparo` são puras (só hash de campos do
+    # próprio objeto), então o casamento acontece em Python, sem ida ao banco.
+    chaves = {c.id: chave_produtos_cupom(c) for c in cupons}
+    contextos = {c.id: _usuario_do_preparo(c, usuario) for c in cupons}
+    contexto_id = {cid: (u.id if u is not None else None)
+                   for cid, u in contextos.items()}
+
+    preparados = set()
+    for prep in CupomPreparacao.objects.filter(
+            cupom_id__in=ids, status="pronto", verificado_em__gte=fresco_desde):
+        if (prep.produtos_chave == chaves.get(prep.cupom_id)
+                and prep.usuario_id == contexto_id.get(prep.cupom_id)):
+            preparados.add(prep.cupom_id)
+    if not preparados:
+        return {}, {}
+
+    por_cupom = defaultdict(list)
+    for relacao in (ProdutoCupom.objects.filter(
+            cupom_id__in=preparados, status="confirmado",
+            preco_original__isnull=False, preco_final__isnull=False,
+            produto__imagem_url__gt="")
+            .exclude(produto__estado__in=["indisponivel", "invalido", "expirado", "stale"])
+            .select_related("produto")):
+        por_cupom[relacao.cupom_id].append(relacao)
+
+    # Mesma ordenação de relacoes_preparadas_para_envio: maior desconto primeiro.
+    preparadas = {}
+    for cupom_id, relacoes in por_cupom.items():
+        relacoes.sort(key=lambda r: (
+            (r.preco_original - r.preco_final) / r.preco_original
+            if r.preco_original else Decimal("0"),
+            r.preco_original - r.preco_final,
+        ), reverse=True)
+        preparadas[cupom_id] = relacoes[:limite]
+
+    if usuario is None:
+        return preparadas, {}
+
+    todos_produtos = {r.produto_id for rs in preparadas.values() for r in rs}
+    com_link = set(LinkAfiliadoUsuario.objects.filter(
+        usuario=usuario, produto_id__in=todos_produtos, verificado_ok=True,
+    ).exclude(link_afiliado="").values_list("produto_id", flat=True))
+
+    prontas = {}
+    for cupom_id, relacoes in preparadas.items():
+        utilizaveis = [r for r in relacoes if r.produto_id in com_link]
+        if utilizaveis:
+            prontas[cupom_id] = utilizaveis
+    return preparadas, prontas
+
+
 def ids_cupons_prontos(usuario, cupons):
-    return {
-        cupom.id for cupom in cupons
-        if relacoes_prontas_para_envio(cupom, usuario)
-    }
+    return set(mapa_relacoes_prontas(usuario, cupons)[1])
 
 
 def preparar_lote(
