@@ -11,6 +11,7 @@ import html
 import json
 import logging
 import re
+from collections import defaultdict, deque
 from datetime import timedelta, timezone as datetime_timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html.parser import HTMLParser
@@ -373,13 +374,18 @@ def _coletar_ml_remoto(cupom, usuario=None):
     # Chromium aberto por vários minutos. Browser fica como fallback para challenge.
     resultado = None
     try:
-        response = _ml_http_session(state).get(link, timeout=25)
+        response = _ml_http_session(state).get(link, timeout=12)
         response.raise_for_status()
         rows = _produtos_ml_do_html(response.text, limite=9)
         if rows:
             resultado = {**payload, "produtos_aplicaveis": rows}
     except Exception as exc:
         logger.info("Container ML via HTTP falhou para %s: %s", cupom.pk, exc)
+    # Sem uma sessão válida o Chromium repete a mesma resposta pública/challenge e
+    # pode consumir dezenas de segundos por cupom. O worker registra o preparo vazio
+    # e volta no próximo ciclo; uma sessão conectada habilita novamente o fallback.
+    if resultado is None and state is None:
+        return 0
     if resultado is None:
         with iniciar_browser(
             storage_state=state, headless=True, validar_sessao=False,
@@ -528,8 +534,9 @@ def relacoes_preparadas_para_envio(cupom, usuario, limite=9):
 def relacoes_prontas_para_envio(cupom, usuario, limite=9):
     """Relações preparadas que também possuem link afiliado utilizável.
 
-    A aprovação por usuário tem precedência; o campo legado no produto mantém a
-    compatibilidade com os links públicos já verificados antes do cache tenant.
+    O veredito por usuário é obrigatório. Um link legado no produto não registra
+    qual conta receberá a comissão nem se o destino foi verificado, portanto não
+    pode liberar um cupom na listagem estrita.
     """
     relacoes = relacoes_preparadas_para_envio(cupom, usuario, limite=limite)
     if not relacoes or usuario is None:
@@ -539,10 +546,10 @@ def relacoes_prontas_para_envio(cupom, usuario, limite=9):
         usuario=usuario, produto_id__in=[relacao.produto_id for relacao in relacoes],
         verificado_ok=True,
     ).exclude(link_afiliado="").values_list("produto_id", flat=True))
-    return [relacao for relacao in relacoes if (
-        relacao.produto_id in ids_com_link
-        or bool(getattr(relacao.produto, "link_afiliado", ""))
-    )]
+    return [
+        relacao for relacao in relacoes
+        if relacao.produto_id in ids_com_link
+    ]
 
 
 def cupom_pronto_para_usuario(cupom, usuario) -> bool:
@@ -556,8 +563,16 @@ def ids_cupons_prontos(usuario, cupons):
     }
 
 
-def preparar_lote(limite=PREPARO_LOTE_POR_CICLO):
-    """Prepara cupons ativos em pequenos lotes; chamado pelo worker de catalogo."""
+def preparar_lote(
+    limite=PREPARO_LOTE_POR_CICLO, *, usuarios=None, detalhado=False,
+    permitir_rede=True,
+):
+    """Prepara cupons ativos com round-robin por fonte, usuário e organização.
+
+    O catálogo de uma fonte grande (notadamente campanhas/feeds) não pode consumir
+    todo o ciclo. Cada bucket avança um item por rodada, mantendo a janela de três
+    horas renovada também para cupons privados e integrações menores.
+    """
     from django.contrib.auth import get_user_model
     from apps.scrapers.coupon_rules import cupom_publicavel
     from apps.scrapers.models import CupomNormalizado
@@ -570,18 +585,19 @@ def preparar_lote(limite=PREPARO_LOTE_POR_CICLO):
         Q(codigo__gt="") | Q(fonte__slug="amazon-public-coupons")
     ).filter(
         Q(validade__isnull=True) | Q(validade__gte=agora)
-    ).order_by("-ultima_observacao")[:500])
+    ).order_by("-ultima_observacao"))
     fresco_desde = agora - timedelta(hours=CACHE_HORAS)
-    preparos_publicos = {
-        prep.cupom_id: prep
+    preparos = {
+        (prep.cupom_id, prep.usuario_id): prep
         for prep in CupomPreparacao.objects.filter(
-            cupom_id__in=[cupom.id for cupom in cupons], usuario__isnull=True,
+            cupom_id__in=[cupom.id for cupom in cupons],
         )
     }
 
-    def prioridade(cupom):
+    def prioridade(cupom, usuario):
         """Evita que cupons já frescos ocupem sempre o começo do lote."""
-        prep = preparos_publicos.get(cupom.id)
+        contexto = _usuario_do_preparo(cupom, usuario)
+        prep = preparos.get((cupom.id, getattr(contexto, "id", None)))
         if prep is None:
             estado = 0  # nunca preparado
         elif prep.proxima_tentativa and prep.proxima_tentativa > agora:
@@ -593,26 +609,65 @@ def preparar_lote(limite=PREPARO_LOTE_POR_CICLO):
         validade = cupom.validade or timezone.datetime.max.replace(tzinfo=datetime_timezone.utc)
         return (estado, 0 if cupom.relampago else 1, validade, cupom.id)
 
-    cupons.sort(key=prioridade)
-    feitos = prontos = 0
-    usuarios = list(get_user_model().objects.filter(is_active=True))
+    usuarios = list(
+        usuarios if usuarios is not None
+        else get_user_model().objects.filter(is_active=True)
+    )
+    buckets = defaultdict(list)
     for cupom in cupons:
-        if feitos >= limite or not cupom_publicavel(cupom):
+        if not cupom_publicavel(cupom):
             continue
         contextos = [None] if _usuario_do_preparo(cupom, None) is None else (
             [cupom.owner] if cupom.owner_id else usuarios)
         for usuario in contextos:
-            if feitos >= limite:
-                break
-            contexto = _usuario_do_preparo(cupom, usuario)
-            chave = atualizar_chave_cupom(cupom)
-            prep = CupomPreparacao.objects.filter(cupom=cupom, usuario=contexto).first()
-            if prep and prep.produtos_chave == chave and prep.verificado_em:
-                if prep.status == "pronto" and prep.verificado_em >= fresco_desde:
-                    continue
-                if prep.proxima_tentativa and prep.proxima_tentativa > agora:
-                    continue
-            feitos += 1
-            if preparar_cupom(cupom, usuario=usuario, force=True):
-                prontos += 1
-    return {"processados": feitos, "prontos": prontos}
+            if usuario is None and cupom.owner_id:
+                continue
+            organization_id = (
+                getattr(cupom, "organization_id", None)
+                or getattr(usuario, "organization_id", None)
+                or getattr(getattr(usuario, "perfil", None), "organization_id", None)
+            )
+            fonte = getattr(getattr(cupom, "fonte", None), "slug", "") or "sem-fonte"
+            buckets[(fonte, getattr(usuario, "id", None), organization_id)].append(
+                (cupom, usuario)
+            )
+    for items in buckets.values():
+        items.sort(key=lambda item: prioridade(*item))
+
+    filas = deque(
+        deque(items)
+        for _key, items in sorted(
+            buckets.items(), key=lambda pair: tuple(str(value or "") for value in pair[0])
+        )
+        if items
+    )
+    feitos = prontos = 0
+    por_fonte = defaultdict(lambda: {"processados": 0, "prontos": 0})
+    while filas and feitos < limite:
+        fila = filas.popleft()
+        cupom, usuario = fila.popleft()
+        if fila:
+            filas.append(fila)
+        contexto = _usuario_do_preparo(cupom, usuario)
+        chave = atualizar_chave_cupom(cupom)
+        prep = preparos.get((cupom.id, getattr(contexto, "id", None)))
+        if prep and prep.produtos_chave == chave and prep.verificado_em:
+            if prep.status == "pronto" and prep.verificado_em >= fresco_desde:
+                continue
+            if prep.proxima_tentativa and prep.proxima_tentativa > agora:
+                continue
+        fonte = getattr(getattr(cupom, "fonte", None), "slug", "") or "sem-fonte"
+        feitos += 1
+        por_fonte[fonte]["processados"] += 1
+        if preparar_cupom(
+            cupom, usuario=usuario, force=True, permitir_rede=permitir_rede,
+        ):
+            prontos += 1
+            por_fonte[fonte]["prontos"] += 1
+    resultado = {
+        "processados": feitos,
+        "prontos": prontos,
+    }
+    if detalhado:
+        resultado["por_fonte"] = dict(por_fonte)
+    return resultado

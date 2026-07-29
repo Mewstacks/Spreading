@@ -4,6 +4,9 @@ primary_region = "gru"
 [build]
   dockerfile = "Dockerfile"
 
+[[restart]]
+  policy = "always"
+
 [env]
   PORT = "3000"
   WA_CAPABILITY_ISSUER = "spreading-web"
@@ -14,6 +17,8 @@ primary_region = "gru"
   QR_BOOTSTRAP_TIMEOUT_MS = "90000"
   QR_BOOTSTRAP_MAX_ATTEMPTS = "2"
   QR_BOOTSTRAP_RETRY_MS = "2000"
+  GROUP_SYNC_TIMEOUT_MS = "45000"
+  QR_IDLE_DESTROY_MS = "180000"
   SEND_TIMEOUT_MS = "60000"
   SEND_REQUEST_TIMEOUT_MS = "55000"
 

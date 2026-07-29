@@ -22,3 +22,27 @@ class Awin(Marketplace):
     def can_affiliate(self, produto, usuario=None):
         return bool(getattr(produto, "owner_id", None) == getattr(usuario, "id", None)
                     and self.verify_affiliate_tag(getattr(produto, "link_produto", "")))
+
+    def prefetch_links(self, produtos, usuario=None, faixa=None):
+        """Valida e materializa o deep link Awin no cache uniforme por usuário."""
+        from apps.scrapers.afiliado import registrar_falha, salvar_cache
+
+        gerados = falhas = 0
+        for produto in produtos:
+            link = str(getattr(produto, "link_produto", "") or "").strip()
+            if (getattr(produto, "owner_id", None) != getattr(usuario, "id", None)
+                    or not self.verify_affiliate_tag(link, usuario=usuario)):
+                registrar_falha(
+                    usuario, produto,
+                    "O feed não forneceu um deep link Awin válido para esta conta.",
+                    terminal=True,
+                )
+                falhas += 1
+                continue
+            salvar_cache(
+                usuario, produto, link, link, True,
+                verificado_ok=True, url_canonica=link,
+                verificacao_motivo="deep link Awin validado",
+            )
+            gerados += 1
+        return gerados, falhas

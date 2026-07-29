@@ -57,6 +57,43 @@ def _extrair_codigos(texto):
     return [c for c in cands if c not in _NAO_CODIGO]
 
 
+def _extrair_codigos_semanticos(page):
+    """Aceita código sem dígito apenas quando o DOM o identifica como cupom.
+
+    A vitrine contém marcas/categorias em caixa alta; varrer o texto geral com um
+    regex mais permissivo criaria falsos cupons. Aqui a permissão é condicionada a
+    elementos cujo nome/classe/test-id/aria-label declara semanticamente "cupom" ou
+    "código", e o valor precisa aparecer junto de uma ação/legenda explícita.
+    """
+    seletores = (
+        '[data-testid*="coupon" i]', '[data-testid*="cupom" i]',
+        '[class*="coupon" i]', '[class*="cupom" i]',
+        '[aria-label*="cupom" i]', '[aria-label*="código" i]',
+    )
+    textos = []
+    for seletor in seletores:
+        try:
+            textos.extend(page.locator(seletor).all_inner_texts())
+        except Exception:
+            continue
+    codigos = set()
+    for texto in textos:
+        normalizado = " ".join(str(texto or "").upper().split())
+        candidatos = []
+        candidatos.extend(re.findall(
+            r"\b(?:CUPOM|C[ÓO]DIGO)\s*:?\s*([A-Z0-9][A-Z0-9_-]{3,29})\b",
+            normalizado,
+        ))
+        candidatos.extend(re.findall(
+            r"\b([A-Z0-9][A-Z0-9_-]{3,29})\b\s*(?:COPIAR|APLICAR|USAR)\b",
+            normalizado,
+        ))
+        for codigo in candidatos:
+            if codigo not in _NAO_CODIGO:
+                codigos.add(codigo)
+    return sorted(codigos)
+
+
 # ── Cupons do carrossel oficial (payload SSR) ────────────────────────────────
 # Destinos que não são lista de produtos: publicar isso como cupom manda o usuário
 # para uma vitrine sem garantia de que o desconto se aplica. Mesma regra do scraper
@@ -292,7 +329,12 @@ def mapear_cupons_codigo(faixa=None, usuario=None):
             links_vistos.update(c["link_produto"] for c in novos)
             coletados.extend(novos)
             try:
-                achados = _extrair_codigos(page.locator("body").inner_text(timeout=5000))
+                # O texto geral só aceita o formato conservador letras+dígitos.
+                # Códigos apenas alfabéticos exigem evidência semântica no DOM.
+                achados = set(_extrair_codigos(
+                    page.locator("body").inner_text(timeout=5000)
+                ))
+                achados.update(_extrair_codigos_semanticos(page))
                 codigos.update(achados)
                 if not achados:
                     paginas_sem_codigo += 1

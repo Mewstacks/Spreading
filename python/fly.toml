@@ -25,7 +25,7 @@ primary_region = "gru"
 # (createcachetable saiu: o cache é LocMem por processo -- ver settings.py --, então
 # a tabela nunca foi lida por ninguém.)
 [deploy]
-  release_command = "sh -c 'python django/manage.py migrate --noinput && python django/manage.py bootstrap_superuser'"
+  release_command = "sh -c 'python django/manage.py migrate --noinput && env TENANT_SYSTEM_PROCESS=1 python django/manage.py bootstrap_superuser'"
 
 # Volume persistente das sessões do ML (auth_{id}.json). Preso a UMA máquina:
 # por isso web + workers rodam juntos (honcho) e não escalamos horizontalmente.

@@ -151,7 +151,9 @@ def registrar_aprovacao(usuario, produto, link_afiliado, url_canonica="") -> Non
     from apps.scrapers.models import LinkAfiliadoUsuario
     LinkAfiliadoUsuario.objects.filter(usuario=usuario, produto=produto).update(
         verificado_ok=True, verificado_em=timezone.now(),
-        url_canonica=url_canonica or "", verificacao_motivo="", estado="pronto")
+        url_canonica=url_canonica or "", verificacao_motivo="", estado="pronto",
+        proxima_tentativa=None,
+    )
 
 
 def registrar_reprovacao(usuario, produto, motivo: str) -> None:
@@ -166,7 +168,9 @@ def registrar_reprovacao(usuario, produto, motivo: str) -> None:
     from apps.scrapers.models import LinkAfiliadoUsuario
     LinkAfiliadoUsuario.objects.filter(usuario=usuario, produto=produto).update(
         verificado_ok=False, verificado_em=timezone.now(),
-        url_canonica="", verificacao_motivo=(motivo or "")[:300])
+        url_canonica="", verificacao_motivo=(motivo or "")[:300],
+        proxima_tentativa=None,
+    )
 
 
 # Backoff entre tentativas de afiliar o mesmo produto. Antes não havia nenhum: o

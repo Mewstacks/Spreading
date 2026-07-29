@@ -16,6 +16,20 @@ from apps.scrapers.manual_scraping import (
 from apps.scrapers.models import EventoOperacional, ExecucaoRaspagem
 
 
+def _pipeline_result(**overrides):
+    result = {
+        "encontrados": 4, "persistidos": 4, "preparados": 4, "vinculados": 3,
+        "links_gerados": 3, "links_verificados": 3, "links_reprovados": 0,
+        "links_transitorios": 0, "links_falhos": 0, "prontos": 3, "falhos": 0,
+        "fontes": {"ml-cupons-afiliados": {
+            "status": "ok", "encontrados": 4, "persistidos": 4, "motivo": "",
+        }},
+        "preparo_por_fonte": {},
+    }
+    result.update(overrides)
+    return result
+
+
 class ManualScrapingApiTests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(
@@ -218,13 +232,10 @@ class ManualScrapingQueueTests(TransactionTestCase):
         self.assertEqual(evento.contexto["tipo_raspagem"], "ofertas")
         self.assertEqual(evento.contexto["codigo"], "unknown")
 
-    @patch("apps.scrapers.manual_scraping._gerar_links", return_value=(0, 0))
-    @patch("apps.scrapers.sources.persistence.persist_items",
-           return_value={"offers": 0, "coupons": 4})
-    @patch("apps.scrapers.sources.run_source",
-           return_value={"status": "ok", "coupons": [object()]})
-    @patch("apps.scrapers.coupon_products.preparar_lote",
-           return_value={"processados": 4, "prontos": 3})
+    @patch(
+        "apps.scrapers.coupon_pipeline.executar_pipeline_cupons",
+        return_value=_pipeline_result(),
+    )
     @patch(
         "apps.scrapers.scraper_mercadolivre.scraper.projetar_catalogo_cupons",
         return_value=2,
@@ -251,17 +262,19 @@ class ManualScrapingQueueTests(TransactionTestCase):
 
         self.assertEqual(job.status, "partial")
         self.assertEqual(job.contagens["campanhas"], 6)
-        self.assertEqual(job.contagens["cupons_oficiais"], 4)
+        self.assertEqual(job.contagens["encontrados"], 4)
+        self.assertEqual(job.contagens["links_verificados"], 3)
         self.assertTrue(job.eventos.filter(nivel="warning").exists())
 
-    @patch("apps.scrapers.manual_scraping._gerar_links", return_value=(1, 0))
     @patch(
-        "apps.scrapers.sources.run_source",
-        side_effect=TimeoutError("fonte oficial demorou"),
-    )
-    @patch(
-        "apps.scrapers.coupon_products.preparar_lote",
-        return_value={"processados": 3, "prontos": 2},
+        "apps.scrapers.coupon_pipeline.executar_pipeline_cupons",
+        return_value=_pipeline_result(
+            falhos=1,
+            fontes={"ml-cupons-afiliados": {
+                "status": "error", "encontrados": 0, "persistidos": 0,
+                "motivo": "A fonte demorou demais para responder.",
+            }},
+        ),
     )
     @patch(
         "apps.scrapers.scraper_mercadolivre.scraper.projetar_catalogo_cupons",
@@ -290,21 +303,27 @@ class ManualScrapingQueueTests(TransactionTestCase):
         self.assertEqual(job.contagens["produtos_checkout"], 3)
         self.assertTrue(
             job.eventos.filter(
-                nivel="warning", mensagem__startswith="Fonte oficial:",
+                nivel="warning", mensagem__startswith="ml-cupons-afiliados:",
             ).exists()
         )
 
     @patch(
+        "apps.scrapers.coupon_pipeline.executar_pipeline_cupons",
+        return_value=_pipeline_result(encontrados=0, persistidos=0, prontos=0),
+    )
+    @patch(
         "apps.scrapers.conexoes.estado_ml",
         return_value=SimpleNamespace(conectado=False),
     )
-    def test_cupom_sem_sessao_retorna_acao_especifica(self, _estado):
+    def test_cupom_sem_sessao_nao_impede_as_demais_fontes(self, _estado, _pipeline):
         job = self._job(tipo="cupons", status="running", tentativas=1)
 
         executar_job(job)
         job.refresh_from_db()
 
-        self.assertEqual(job.status, "failed")
-        self.assertEqual(job.codigo_erro, "session_expired")
-        self.assertEqual(job.etapa, "Validando conexão")
-        self.assertIn("Reconecte", job.acao_recomendada)
+        self.assertEqual(job.status, "partial")
+        self.assertEqual(job.codigo_erro, "")
+        self.assertTrue(job.eventos.filter(
+            nivel="warning", mensagem__startswith="Mercado Livre desconectado",
+        ).exists())
+        self.assertFalse(_pipeline.call_args.kwargs["permitir_rede_preparo"])

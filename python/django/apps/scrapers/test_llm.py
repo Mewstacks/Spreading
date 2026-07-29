@@ -36,6 +36,11 @@ class LLMContentTests(SimpleTestCase):
             resultado["nome_curto"],
             "Monitor Gamer Samsung Odyssey G5 27 QHD 165Hz",
         )
+        self.assertEqual(messages.create.call_args.kwargs["model"], "modelo-de-teste")
+        self.assertEqual(
+            messages.create.call_args.kwargs["thinking"],
+            {"type": "disabled"},
+        )
 
     @patch("apps.scrapers.llm._cliente")
     def test_lote_preserva_ordem_e_remove_formatacao(self, cliente):
@@ -54,3 +59,8 @@ class LLMContentTests(SimpleTestCase):
             "Monitor Samsung Odyssey G5 27 QHD",
             "Cadeira Gamer Healer Wells Preta",
         ])
+        self.assertEqual(messages.create.call_args.kwargs["model"], "modelo-de-teste")
+        self.assertEqual(
+            messages.create.call_args.kwargs["thinking"],
+            {"type": "disabled"},
+        )

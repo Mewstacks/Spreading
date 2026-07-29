@@ -1,11 +1,7 @@
-"""
-Loops de automação full-time (sem Redis/Celery). Dois modos independentes:
-  - --modo scrape: a cada --scrape-horas, raspa ofertas + cupons + termos das configs.
-  - --modo envio:  a cada --tick minutos, processa ConfiguracaoEnvio vencidas (envia).
+"""Loops full-time de coleta, cupons, afiliação, envio e relatórios.
 
-Cada modo roda em processo separado, ligado/desligado pela sua tela.
-Manual:  python manage.py automacao --modo scrape --scrape-horas 3
-         python manage.py automacao --modo envio  --tick 5
+Cada modo roda em processo separado. ``cupons`` é deliberadamente independente
+do toggle da raspagem geral para renovar a janela segura de preparo.
 """
 import logging
 import threading
@@ -113,25 +109,6 @@ def _rodar_scrape():
     if sucessos:
         from apps.scrapers.maintenance import expire_stale
         expire_stale()
-    from apps.scrapers.sources import run_source
-    from apps.scrapers.sources.persistence import persist_items
-    # Cupons oficiais de afiliados do ML (página pública, sem segredo). run_source já
-    # isola exceções e devolve listas vazias, então uma falha aqui não derruba o ciclo.
-    cupons_ml = run_source("ml-cupons-afiliados")
-    persist_items(cupons_ml.get("coupons", []))
-    # Casa cada cupom de container com os produtos rastreados (via item id MLB) e grava
-    # ProdutoCupom 'confirmado' — é isso que libera o cupom a entrar na mensagem. Roda
-    # depois da raspagem (produtos já no banco) e nunca derruba o ciclo.
-    try:
-        from apps.scrapers.scraper_mercadolivre.cupons_container import casar_cupons_container
-        casar_cupons_container()
-    except Exception:
-        logger.exception("Casamento cupom-container falhou")
-    try:
-        from apps.scrapers.coupon_products import PREPARO_LOTE_POR_CICLO, preparar_lote
-        preparar_lote(limite=PREPARO_LOTE_POR_CICLO)
-    except Exception:
-        logger.exception("Preparacao automatica de produtos dos cupons falhou")
     if not sucessos:
         raise RuntimeError(f"Todas as fontes falharam: {', '.join(falhas)}")
     if falhas:
@@ -141,37 +118,6 @@ def _rodar_scrape():
     return {"sucessos": sucessos, "falhas": falhas}
 
 
-def _rodar_feed_afiliados():
-    """Ativa e ingere o feed somente quando sua URL esta configurada.
-
-    A migracao 0031 semeou a fonte como desabilitada. A URL de ambiente e o gate
-    definitivo para este adaptador: assim o secret liga o conector em bancos ja
-    existentes, mas ele continua ausente da UI em instalacoes sem feed contratado.
-    """
-    from django.conf import settings
-    from apps.scrapers.models import FonteIngestao
-    from apps.scrapers.sources import run_source
-    from apps.scrapers.sources.persistence import persist_items
-
-    if not getattr(settings, "AFFILIATE_FEED_URL", ""):
-        return {"offers": 0, "coupons": 0}
-    fonte, _ = FonteIngestao.objects.get_or_create(
-        slug="licensed-affiliate-feed",
-        defaults={
-            "marketplace": "multiloja",
-            "nome": "Feed licenciado de afiliados",
-            "habilitada": True,
-        },
-    )
-    if not fonte.habilitada:
-        fonte.habilitada = True
-        fonte.status = "degraded"
-        fonte.erro_publico = ""
-        fonte.save(update_fields=("habilitada", "status", "erro_publico"))
-    feed = run_source("licensed-affiliate-feed")
-    return persist_items(feed.get("offers", []) + feed.get("coupons", []))
-
-
 def _rodar_scrape_rapido(paginas=8):
     """LANE RÁPIDA/flash (B3): só o feed /ofertas do ML, poucas páginas, em UPSERT
     (não zera o feed da lane lenta). Pega deals-relâmpago entre as raspagens completas."""
@@ -179,17 +125,6 @@ def _rodar_scrape_rapido(paginas=8):
     from apps.scrapers.models import FonteIngestao
     logger.info("[%s] SCRAPE-FLASH: feed ML (%s paginas)", timezone.now().strftime("%H:%M"), paginas)
     total = mapear_ofertas(max_paginas=paginas, substituir=False)
-    # A mesma lane rapida traz cupons oficiais do ML. A fonte e HTTP e idempotente;
-    # assim os cupons limitados nao esperam o ciclo completo de tres horas.
-    from apps.scrapers.sources import run_source
-    from apps.scrapers.sources.persistence import persist_items
-    cupons_ml = run_source("ml-cupons-afiliados")
-    persist_items(cupons_ml.get("coupons", []))
-    _rodar_awin_integracoes()
-    from apps.scrapers.coupon_products import PREPARO_LOTE_POR_CICLO, preparar_lote
-    preparo = preparar_lote(limite=PREPARO_LOTE_POR_CICLO)
-    logger.info("Cupons preparados: %s processado(s), %s pronto(s)",
-                preparo["processados"], preparo["prontos"])
     now = timezone.now()
     fonte, _ = FonteIngestao.objects.get_or_create(
         slug="mercadolivre-web",
@@ -209,27 +144,30 @@ def _rodar_scrape_rapido(paginas=8):
     return total
 
 
-def _rodar_awin_integracoes():
-    """Executa somente contas Awin vencidas; credenciais e catálogo são por usuário."""
-    from django.conf import settings
-    if not getattr(settings, "AWIN_INTEGRATION_ENABLED", False):
-        return {"ok": 0, "falhas": 0}
-    from django.db.models import Q
-    from apps.scrapers.awin import AwinError, sincronizar_integracao
-    from apps.scrapers.models import IntegracaoAfiliado
+def _rodar_feed_afiliados():
+    """Compatibilidade: a implementação efetiva mora no pipeline central."""
+    from apps.scrapers.coupon_pipeline import coletar_feed_licenciado
 
-    now = timezone.now()
-    integracoes = IntegracaoAfiliado.objects.filter(
-        provedor="awin", habilitada=True, status__in=("conectada", "degradada"),
-    ).filter(Q(proxima_sincronizacao__isnull=True) | Q(proxima_sincronizacao__lte=now))
-    ok = falhas = 0
-    for integracao in integracoes.select_related("owner"):
-        try:
-            sincronizar_integracao(integracao)
-            ok += 1
-        except AwinError:
-            falhas += 1
-    return {"ok": ok, "falhas": falhas}
+    return coletar_feed_licenciado()
+
+
+def _rodar_cupons(lote=40):
+    """Mantém coleta, preparo e links mesmo com a raspagem geral desligada."""
+    from apps.scrapers.coupon_pipeline import executar_pipeline_cupons
+
+    resultado = executar_pipeline_cupons(
+        coletar=True,
+        limite_preparo=max(12, lote),
+        limite_links=max(1, lote),
+    )
+    logger.info(
+        "CUPONS: %s encontrado(s), %s persistido(s), %s preparado(s), "
+        "%s link(s) verificado(s), %s cupom(ns) pronto(s), %s falha(s)",
+        resultado["encontrados"], resultado["persistidos"],
+        resultado["preparados"], resultado["links_verificados"],
+        resultado["prontos"], resultado["falhos"] + resultado["links_falhos"],
+    )
+    return resultado
 
 
 def _rodar_links(lote=40):
@@ -325,14 +263,16 @@ def _avisar_sem_sessao_ml(user):
 
 class Command(BaseCommand):
     help = ("Loop de automação: scrape (full) / scrape_rapido (flash) / envio / "
-            "links (afiliação) / relatorios.")
+            "cupons / links (afiliação) / relatorios.")
 
     def add_arguments(self, parser):
         parser.add_argument("--modo",
-                            choices=("scrape", "scrape_rapido", "envio", "links", "relatorios"),
+                            choices=("scrape", "scrape_rapido", "envio", "cupons",
+                                     "links", "relatorios"),
                             required=True,
                             help="scrape = raspagem completa; scrape_rapido = feed flash; "
-                                 "envio = envio pelas regras; links = pré-gera links "
+                                 "envio = envio pelas regras; cupons = manutenção "
+                                 "independente; links = pré-gera links "
                                  "de afiliado dos pendentes.")
         parser.add_argument("--tick", type=int, default=5, help="Minutos entre ciclos (envio/flash/links).")
         parser.add_argument("--lote", type=int, default=40, help="Links gerados por ciclo, por usuário.")
@@ -346,10 +286,83 @@ class Command(BaseCommand):
             self._loop_scrape_rapido(opts)
         elif opts["modo"] == "envio":
             self._loop_envio(opts)
+        elif opts["modo"] == "cupons":
+            self._loop_cupons(opts)
         elif opts["modo"] == "links":
             self._loop_links(opts)
         else:
             self._loop_relatorios(opts)
+
+    def _loop_cupons(self, opts):
+        tick = max(1, opts["tick"])
+        lote = max(1, opts["lote"])
+        poll = 15
+        logger.info(
+            "CUPONS worker no ar; ciclo a cada %smin, independente da raspagem geral",
+            tick,
+        )
+        proximo = timezone.now()
+        falhas_banco = 0
+        while True:
+            if timezone.now() < proximo:
+                st.write_state("cupons", fase="aguardando")
+                time.sleep(poll)
+                continue
+            agora = timezone.now()
+            try:
+                st.write_state("cupons", fase="processando", erro="")
+                _renovar_conexoes_db()
+                from apps.scrapers.carga import operacao_pesada
+                with operacao_pesada() as acquired:
+                    if not acquired:
+                        proximo = timezone.now() + timedelta(seconds=poll)
+                        st.write_state(
+                            "cupons", fase="aguardando_capacidade", erro="",
+                            proximo_ciclo=proximo.isoformat(),
+                            ultima_msg="Aguardando outra tarefa pesada terminar.",
+                        )
+                        continue
+                    with _heartbeat_durante("cupons"):
+                        resultado = _rodar_cupons(lote=lote)
+                falhas_banco = 0
+                proximo = timezone.now() + timedelta(minutes=tick)
+                falhas = resultado["falhos"] + resultado["links_falhos"]
+                st.write_state(
+                    "cupons",
+                    fase="degradado" if falhas else "aguardando",
+                    ultimo_ciclo_fim=timezone.now().isoformat(),
+                    proximo_ciclo=proximo.isoformat(),
+                    encontrados=resultado["encontrados"],
+                    persistidos=resultado["persistidos"],
+                    preparados=resultado["preparados"],
+                    vinculados=resultado["vinculados"],
+                    links_gerados=resultado["links_gerados"],
+                    links_verificados=resultado["links_verificados"],
+                    prontos=resultado["prontos"],
+                    falhas=falhas,
+                    fontes=resultado["fontes"],
+                    erro="" if not falhas else "Uma ou mais fontes/links falharam.",
+                    ultima_msg=(
+                        f"{resultado['prontos']} cupom(ns) pronto(s), "
+                        f"{resultado['links_verificados']} link(s) verificado(s) "
+                        f"às {agora:%H:%M}."
+                    ),
+                )
+            except DatabaseError as exc:
+                falhas_banco += 1
+                proximo = _pausar_por_banco("cupons", exc, falhas_banco)
+            except Exception as exc:
+                logger.exception("Erro no ciclo central de cupons")
+                log_event(
+                    "scraper", "cupons_ciclo_erro",
+                    f"Ciclo central de cupons falhou: {exc}",
+                    level="error", exc=exc,
+                )
+                proximo = timezone.now() + timedelta(minutes=tick)
+                st.write_state(
+                    "cupons", fase="aguardando",
+                    proximo_ciclo=proximo.isoformat(), erro=ERRO_PUBLICO,
+                )
 
     def _loop_links(self, opts):
         # Gate no MESMO flag "scrape" (igual à lane flash): afiliar é parte do

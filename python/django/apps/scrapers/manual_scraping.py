@@ -236,7 +236,12 @@ class JobReporter:
         )
 
     def count(self, **values):
-        self.counts.update({k: int(v or 0) for k, v in values.items()})
+        # ``contagens`` já é JSON: além dos totais, preserva o diagnóstico por
+        # fonte/marketplace sem exigir migração.
+        self.counts.update({
+            key: value if isinstance(value, (dict, list, str)) else int(value or 0)
+            for key, value in values.items()
+        })
         self._persist()
 
     def warning(self, message):
@@ -379,106 +384,112 @@ def _executar_ofertas(job, reporter):
 
 def _executar_cupons(job, reporter):
     from apps.scrapers.conexoes import estado_ml
-    from apps.scrapers.coupon_products import preparar_lote
+    from apps.scrapers.coupon_pipeline import executar_pipeline_cupons
     from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import (
         mapear_cupons_codigo,
     )
     from apps.scrapers.scraper_mercadolivre.scraper import (
         mapear_cupons, projetar_catalogo_cupons,
     )
-    from apps.scrapers.sources import run_source
-    from apps.scrapers.sources.persistence import persist_items
-
     warnings = []
     reporter.step("Validando conexão", 2)
     estado = estado_ml(job.solicitada_por)
-    if not estado.conectado:
-        reporter.finish("failed", code="session_expired")
-        return
+    campanha = checkout = projetados = 0
+    if estado.conectado:
+        reporter.step("Coletando campanhas", 5)
+        try:
+            with usar_reporter(reporter.emit):
+                campanha = mapear_cupons(
+                    faixa=(5, 35), usuario=job.solicitada_por,
+                )
+            reporter.count(campanhas=campanha)
+        except Exception as exc:
+            warnings.append(_erro_publico(classificar_erro(exc))[0])
+            reporter.warning(f"Campanhas: {warnings[-1]}")
 
-    campanha = checkout = oficiais = 0
-    reporter.step("Coletando campanhas", 5)
-    try:
-        with usar_reporter(reporter.emit):
-            campanha = mapear_cupons(
-                faixa=(5, 35), usuario=job.solicitada_por,
+        reporter.step("Coletando vitrine de cupons", 38)
+        try:
+            with usar_reporter(reporter.emit):
+                checkout = mapear_cupons_codigo(
+                    faixa=(38, 55), usuario=job.solicitada_por,
+                )
+            reporter.count(produtos_checkout=checkout)
+        except Exception as exc:
+            warnings.append(_erro_publico(classificar_erro(exc))[0])
+            reporter.warning(f"Vitrine: {warnings[-1]}")
+
+        reporter.step("Atualizando catálogo interno", 58)
+        try:
+            projetados = _db_retry(
+                lambda: projetar_catalogo_cupons(faixa=(58, 64)),
             )
-        reporter.count(campanhas=campanha)
-    except Exception as exc:
-        warnings.append(_erro_publico(classificar_erro(exc))[0])
-        reporter.warning(f"Campanhas: {warnings[-1]}")
-
-    reporter.step("Coletando cupons de checkout", 38)
-    try:
-        with usar_reporter(reporter.emit):
-            checkout = mapear_cupons_codigo(
-                faixa=(38, 55), usuario=job.solicitada_por,
-            )
-        reporter.count(produtos_checkout=checkout)
-    except Exception as exc:
-        warnings.append(_erro_publico(classificar_erro(exc))[0])
-        reporter.warning(f"Checkout: {warnings[-1]}")
-
-    reporter.step("Atualizando catálogo de cupons", 58)
-    try:
-        projetados = _db_retry(lambda: projetar_catalogo_cupons(faixa=(58, 65)))
-        reporter.count(campanhas_projetadas=projetados)
-    except Exception as exc:
-        warnings.append(_erro_publico(classificar_erro(exc))[0])
-        reporter.warning(f"Catálogo: {warnings[-1]}")
-
-    reporter.step("Consultando cupons oficiais", 67)
-    try:
-        fonte = run_source("ml-cupons-afiliados")
-        if fonte.get("status") == "error":
-            raise RuntimeError(
-                fonte.get("error") or "A fonte oficial de cupons falhou."
-            )
-        persistidos = _db_retry(
-            lambda: persist_items(fonte.get("coupons", [])),
+            reporter.count(campanhas_projetadas=projetados)
+        except Exception as exc:
+            warnings.append(_erro_publico(classificar_erro(exc))[0])
+            reporter.warning(f"Catálogo: {warnings[-1]}")
+    else:
+        # A sessão ML afeta só as duas fontes autenticadas. Cupons oficiais,
+        # Amazon, Awin, feed e privados continuam avançando.
+        warnings.append(
+            "Mercado Livre desconectado: campanhas personalizadas e vitrine foram "
+            "puladas; as demais fontes continuarão."
         )
-        oficiais = persistidos["coupons"]
-        reporter.count(cupons_oficiais=oficiais)
-    except Exception as exc:
-        warnings.append(f"Fonte oficial: {_erro_publico(classificar_erro(exc))[0]}")
         reporter.warning(warnings[-1])
 
-    reporter.step("Preparando produtos dos cupons", 75)
+    reporter.step("Coletando e preparando fontes habilitadas", 66)
     try:
-        preparo = _db_retry(lambda: preparar_lote(limite=max(12, oficiais)))
+        pipeline = _db_retry(lambda: executar_pipeline_cupons(
+            usuarios=[job.solicitada_por],
+            coletar=True,
+            limite_preparo=40,
+            limite_links=80,
+            permitir_rede_preparo=estado.conectado,
+        ))
         reporter.count(
-            cupons_processados=preparo["processados"],
-            cupons_prontos=preparo["prontos"],
+            encontrados=pipeline["encontrados"],
+            persistidos=pipeline["persistidos"],
+            preparados=pipeline["preparados"],
+            vinculados=pipeline["vinculados"],
+            links_gerados=pipeline["links_gerados"],
+            links_verificados=pipeline["links_verificados"],
+            links_reprovados=pipeline["links_reprovados"],
+            links_transitorios=pipeline["links_transitorios"],
+            links_falhos=pipeline["links_falhos"],
+            cupons_prontos=pipeline["prontos"],
+            falhos=pipeline["falhos"],
+            por_fonte=pipeline["fontes"],
+            preparo_por_fonte=pipeline.get("preparo_por_fonte", {}),
         )
-    except Exception as exc:
-        warnings.append(_erro_publico(classificar_erro(exc))[0])
-        reporter.warning(f"Preparação: {warnings[-1]}")
-
-    reporter.step("Gerando links de afiliado", 84)
-    try:
-        with usar_reporter(reporter.emit):
-            gerados, falhas = _gerar_links(
-                job.solicitada_por,
-                origens=("cupom", "cupom_codigo"),
-                limite=80,
-                faixa=(84, 98),
-                reporter=reporter,
+        for slug, diagnostico in pipeline["fontes"].items():
+            motivo = diagnostico.get("motivo")
+            if diagnostico.get("status") == "error":
+                warnings.append(f"{slug}: {motivo or 'falha isolada da fonte'}")
+                reporter.warning(warnings[-1])
+            elif motivo:
+                reporter.emit(f"{slug}: {motivo}")
+        if pipeline["links_falhos"]:
+            warnings.append(
+                f"{pipeline['links_falhos']} link(s) de cupom falharam; "
+                "o backoff foi preservado."
             )
-        reporter.count(links_gerados=gerados, links_falhos=falhas)
-        if falhas:
-            warnings.append(f"{falhas} link(s) de cupom não puderam ser gerados.")
             reporter.warning(warnings[-1])
     except Exception as exc:
+        pipeline = None
         warnings.append(_erro_publico(classificar_erro(exc))[0])
-        reporter.warning(f"Links: {warnings[-1]}")
+        reporter.warning(f"Pipeline central: {warnings[-1]}")
 
-    if not any((campanha, checkout, oficiais)) and warnings:
-        reporter.finish("failed", code="unknown")
-    else:
-        if not any((campanha, checkout, oficiais)):
-            warnings.append("Nenhum cupom foi encontrado; dados anteriores preservados.")
-            reporter.warning(warnings[-1])
-        reporter.finish("partial" if warnings else "succeeded")
+    reporter.step("Concluindo diagnóstico", 99)
+    houve_resultado = any((
+        campanha, checkout, projetados,
+        (pipeline or {}).get("encontrados", 0),
+        (pipeline or {}).get("prontos", 0),
+    ))
+    if not houve_resultado:
+        reporter.warning(
+            "Nenhum cupom novo foi encontrado; todos os registros anteriores "
+            "foram preservados."
+        )
+    reporter.finish("partial" if warnings else "succeeded")
 
 
 def executar_job(job: ExecucaoRaspagem):

@@ -82,7 +82,16 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
     if usuario is not None:
         # Multi-tenant: cache por usuário; não sobrescreve o cache global do Produto.
         from apps.scrapers.afiliado import salvar_cache
-        salvar_cache(usuario, produto, link_afiliado, url_isca, True)
+        # Na Amazon a verificação é determinística e local: a URL canônica acabou
+        # de ser montada com a tag cadastrada do próprio usuário. Persistir o mesmo
+        # contrato de ``verificado_ok`` usado pelo ML evita que um link válido fique
+        # eternamente na etapa "aguardando verificação".
+        salvar_cache(
+            usuario, produto, link_afiliado, url_isca, True,
+            verificado_ok=link_tem_tag_afiliado(link_afiliado, usuario=usuario),
+            url_canonica=link_afiliado,
+            verificacao_motivo="tag Amazon validada localmente",
+        )
     elif hasattr(produto, "save"):
         produto.url_isca = url_isca
         produto.link_afiliado = link_afiliado

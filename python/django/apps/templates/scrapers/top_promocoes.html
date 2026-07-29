@@ -253,9 +253,12 @@
   <div class="head-actions">
     <span class="tech-tag"><i data-lucide="list"></i> {% if tipo == 'cupom' %}{{ cupons_page.paginator.count }}{% else %}{{ page_obj.paginator.count }}{% endif %} resultado(s)</span>
     {% if tipo == 'cupom' %}
+      <span class="tech-tag"><i data-lucide="database"></i> {{ cupons_coletados }} coletado(s)</span>
       <span class="tech-tag"><i data-lucide="circle-check"></i> {{ cupons_prontos }} pronto(s)</span>
       {% if cupons_aguardando_preparo %}<span class="tech-tag"><i data-lucide="loader-circle"></i> {{ cupons_aguardando_preparo }} aguardando preparo</span>{% endif %}
       {% if cupons_aguardando_link %}<span class="tech-tag"><i data-lucide="link"></i> {{ cupons_aguardando_link }} aguardando link</span>{% endif %}
+      {% if cupons_aguardando_verificacao %}<span class="tech-tag"><i data-lucide="scan-search"></i> {{ cupons_aguardando_verificacao }} aguardando verificação</span>{% endif %}
+      {% if cupons_aguardando_conexao %}<span class="tech-tag"><i data-lucide="unplug"></i> {{ cupons_aguardando_conexao }} aguardando conexão</span>{% endif %}
     {% endif %}
     {% if tipo != 'cupom' %}
       {% if so_afiliados %}
@@ -492,8 +495,19 @@
   {% else %}
   <div class="empty">
     <i data-lucide="ticket-percent"></i>
-    <div class="empty-title">Nenhum cupom ativo encontrado</div>
-    <p>As fontes ainda não encontraram cupons publicáveis com os filtros atuais.</p>
+    <div class="empty-title">Nenhum cupom pronto para envio</div>
+    {% if cupons_coletados %}
+      <p>{{ cupons_coletados }} cupom(ns) foram coletado(s), mas
+      {% if cupons_aguardando_preparo %}{{ cupons_aguardando_preparo }} aguardam preparo{% endif %}{% if cupons_aguardando_preparo and cupons_aguardando_link %}, {% endif %}
+      {% if cupons_aguardando_link %}{{ cupons_aguardando_link }} aguardam geração de link{% endif %}{% if cupons_aguardando_verificacao %}{% if cupons_aguardando_preparo or cupons_aguardando_link %}, {% endif %}{{ cupons_aguardando_verificacao }} aguardam verificação{% endif %}{% if cupons_aguardando_conexao %}{% if cupons_aguardando_preparo or cupons_aguardando_link or cupons_aguardando_verificacao %}, {% endif %}{{ cupons_aguardando_conexao }} aguardam conexão da conta{% endif %}.
+      O worker de cupons tenta novamente a cada 15 minutos.</p>
+    {% elif filtros_ativos %}
+      <p>Nenhum cupom pronto corresponde aos filtros atuais.</p>
+    {% elif cupons_fontes_sem_resultado %}
+      <p>As fontes habilitadas não retornaram resultados na última coleta; o catálogo anterior foi preservado.</p>
+    {% else %}
+      <p>As fontes habilitadas ainda não encontraram cupons publicáveis.</p>
+    {% endif %}
   </div>
   {% endif %}
 {% elif produtos %}

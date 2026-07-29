@@ -8,6 +8,9 @@
 web: gunicorn core.wsgi:application --chdir django --bind 0.0.0.0:8080 --workers 1 --threads 8 --timeout 120
 scrape: env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape --scrape-horas 3
 scrapeflash: env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape_rapido --tick 5
+# Cupons têm janela segura de 3h e precisam continuar prontos mesmo quando a
+# raspagem geral está desligada. O pipeline isola fontes e roda a cada 15 minutos.
+cupons: env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo cupons --tick 15 --lote 40
 envio: env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo envio --tick 5
 # links: sem este processo nada gera link de afiliado e a tela de Promoções mostra
 # tudo como "pendente" -- cada raspagem so aumentava a pilha. Lote pequeno: cada link

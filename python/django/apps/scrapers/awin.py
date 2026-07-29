@@ -444,9 +444,19 @@ def sincronizar_integracao(integracao, *, forcar_programas=False):
         source.save(update_fields=["status", "ultima_tentativa", "ultimo_sucesso",
                                    "ultimo_total", "erro_publico", "falhas_consecutivas"])
         active_ids = [item.external_id for item in items]
-        CupomNormalizado.objects.filter(
-            owner=integracao.owner, integracao=integracao, fonte=source,
-        ).exclude(external_id__in=active_ids).update(estado="expirado")
+        # Anti-wipe: uma resposta vazia pode ser rate limit, payload alterado ou
+        # indisponibilidade parcial. Só expiramos ausentes quando a mesma coleta
+        # trouxe ao menos um registro válido.
+        if active_ids:
+            CupomNormalizado.objects.filter(
+                owner=integracao.owner, integracao=integracao, fonte=source,
+            ).exclude(external_id__in=active_ids).update(estado="expirado")
+        else:
+            source.status = "degraded"
+            source.erro_publico = (
+                "A coleta não retornou cupons; catálogo anterior preservado."
+            )
+            source.save(update_fields=["status", "erro_publico"])
         commission_retry_after = 0
         try:
             sincronizar_comissoes(integracao)

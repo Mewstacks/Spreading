@@ -9,7 +9,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from apps.scrapers.models import (
-    CupomNormalizado, CupomPreparacao, FonteIngestao, Produto,
+    CupomNormalizado, CupomPreparacao, FonteIngestao, LinkAfiliadoUsuario, Produto,
 )
 
 
@@ -47,6 +47,13 @@ class CouponPreparationTests(TestCase):
         values.update(overrides)
         return Produto.objects.create(**values)
 
+    def _verified(self, owner, product):
+        return LinkAfiliadoUsuario.objects.create(
+            usuario=owner, produto=product, afiliado_ok=True, estado="pronto",
+            link_afiliado=f"https://affiliate.example/{owner.id}/{product.id}",
+            verificado_ok=True, verificado_em=timezone.now(),
+        )
+
     def test_tema_parecido_nao_cria_associacao_mas_codigo_no_item_cria(self):
         from apps.scrapers.coupon_products import preparar_cupom
 
@@ -70,17 +77,20 @@ class CouponPreparationTests(TestCase):
         from apps.scrapers.coupon_products import ids_cupons_prontos, preparar_cupom
 
         cupom = self._coupon()
-        self._product(self.user, evidencia={"promotional_text": "Use LIVRO20"})
-        self._product(
+        own = self._product(
+            self.user, evidencia={"promotional_text": "Use LIVRO20"})
+        other = self._product(
             self.other, asin="ASINOTHER",
             link_produto="https://www.amazon.com.br/dp/ASINOTHER",
             evidencia={"promotional_text": "Use LIVRO20"})
 
         preparar_cupom(cupom, self.user, force=True, permitir_rede=False)
+        self._verified(self.user, own)
         self.assertEqual(ids_cupons_prontos(self.user, [cupom]), {cupom.id})
         self.assertEqual(ids_cupons_prontos(self.other, [cupom]), set())
 
         preparar_cupom(cupom, self.other, force=True, permitir_rede=False)
+        self._verified(self.other, other)
         self.assertEqual(ids_cupons_prontos(self.other, [cupom]), {cupom.id})
 
     def test_ativacao_amazon_oficial_e_publicavel_com_preco_final(self):
@@ -118,8 +128,10 @@ class CouponPreparationTests(TestCase):
         from apps.scrapers.coupon_products import ids_cupons_prontos, preparar_cupom
 
         cupom = self._coupon()
-        self._product(self.user, evidencia={"promotion_text": "LIVRO20"})
+        product = self._product(
+            self.user, evidencia={"promotion_text": "LIVRO20"})
         preparar_cupom(cupom, self.user, force=True, permitir_rede=False)
+        self._verified(self.user, product)
         self.assertEqual(ids_cupons_prontos(self.user, [cupom]), {cupom.id})
 
         cupom.regras = {**cupom.regras, "valor_desconto": 25}
@@ -138,8 +150,10 @@ class CouponPreparationTests(TestCase):
             CACHE_HORAS, ids_cupons_prontos, preparar_cupom)
 
         cupom = self._coupon()
-        self._product(self.user, evidencia={"promotion_text": "LIVRO20"})
+        product = self._product(
+            self.user, evidencia={"promotion_text": "LIVRO20"})
         preparar_cupom(cupom, self.user, force=True, permitir_rede=False)
+        self._verified(self.user, product)
         self.assertEqual(ids_cupons_prontos(self.user, [cupom]), {cupom.id})
 
         vencido = timezone.now() - timedelta(hours=CACHE_HORAS, minutes=1)
@@ -229,6 +243,30 @@ class CouponPreparationTests(TestCase):
         from apps.scrapers.coupon_products import PREPARO_LOTE_POR_CICLO
 
         self.assertEqual(PREPARO_LOTE_POR_CICLO, 12)
+
+    @patch("apps.scrapers.auxiliar.iniciar_browser")
+    @patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session")
+    @patch("apps.scrapers.ml_auth.storage_state", return_value=None)
+    @patch("apps.scrapers.ml_auth.avisar_sem_sessao")
+    def test_container_sem_sessao_nao_abre_browser(
+        self, _avisar, _storage, http_session, iniciar_browser,
+    ):
+        from apps.scrapers.coupon_products import _coletar_ml_remoto
+
+        resposta = Mock(text="<html>sem produtos</html>")
+        resposta.raise_for_status.return_value = None
+        http_session.return_value.get.return_value = resposta
+        cupom = self._coupon(
+            marketplace="mercadolivre",
+            link="https://www.mercadolivre.com.br/ofertas/cupons/teste",
+            regras={
+                "container_url":
+                    "https://www.mercadolivre.com.br/ofertas/cupons/teste",
+            },
+        )
+
+        self.assertEqual(_coletar_ml_remoto(cupom), 0)
+        iniciar_browser.assert_not_called()
 
 
 class CouponMessageTests(SimpleTestCase):
