@@ -202,10 +202,17 @@ def afiliate_link_builder(link_base, auth_path=None, usuario=None):
         raise BrowserError(
             "Link Builder por navegador está desativado para esta organização."
         )
+    # validar_sessao=False: a pré-checagem abre um Chromium INTEIRO só para navegar
+    # até myaccount (goto 45s + networkidle 8s), fecha, e só então abre o browser de
+    # verdade — ~10-15s por ITEM neste caminho de link único. E ela não decide nada:
+    # se der timeout, `iniciar_browser` marca "inconclusiva" e segue mesmo assim.
+    # Quem detecta sessão caída de verdade é `_abrir_link_builder` logo abaixo, que
+    # levanta LoginError ao cair na tela de login do portal de afiliados.
     with iniciar_browser(
         auth_path=auth_path,
         session_user=usuario,
         headless=True,
+        validar_sessao=False,
     ) as (page, context):
         _abrir_link_builder(page)
 
@@ -350,9 +357,13 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
     # DJANGO_ALLOW_ASYNC_UNSAFE no os.environ do PROCESSO — global às 8 threads do
     # gunicorn — e o `finally` dele removia a permissão debaixo de outro fluxo que
     # ainda estava usando. Era a origem do "às vezes funciona".
+    # validar_sessao=False pelo mesmo motivo de afiliate_link_builder: o Chromium
+    # extra da pré-checagem não decide nada e `_abrir_link_builder` já falha cedo
+    # com LoginError se a sessão caiu. Aqui é 1x por lote, não por item.
     with iniciar_browser(
         session_user=usuario,
         headless=True,
+        validar_sessao=False,
     ) as (page, context):
         _abrir_link_builder(page)
 
