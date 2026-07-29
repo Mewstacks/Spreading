@@ -626,3 +626,71 @@ class MensagemDeCupomDeAtivacaoTests(TestCase):
 
         self.assertIn("Ative o cupom no link", texto)
         self.assertNotIn("Use o cupom", texto)
+
+
+class CasamentoDeContainerTests(TestCase):
+    """A varredura pegava TODOS os cupons ativos com container (2357 em
+    homologação), a 2 páginas cada, dentro de um try/except que só loga — ela não
+    falhava, ela virava o ciclo inteiro."""
+
+    def setUp(self):
+        self.fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML público"})
+        Produto.objects.create(
+            marketplace="mercadolivre", nome="Item", origem="oferta", estado="ativo",
+            preco_sem_desconto=100, preco_com_cupom=80,
+            link_produto="https://produto.mercadolivre.com.br/MLB-123456")
+
+    def _cupons(self, quantos):
+        for i in range(quantos):
+            CupomNormalizado.objects.create(
+                fonte=self.fonte, external_id=f"campanha:{i}", marketplace="mercadolivre",
+                titulo=f"Cupom {i}", codigo="", estado="ativo",
+                regras={"container_url": f"https://lista.mercadolivre.com.br/_Container_{i}",
+                        "is_mar_aberto": False, "modo_resgate": "ativacao"})
+
+    def test_limite_de_cupons_por_passada(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_container import casar_cupons_container
+        self._cupons(30)
+        chamadas = []
+
+        def coletor(url, paginas):
+            chamadas.append(url)
+            return set()
+
+        casar_cupons_container(coletor=coletor, limite_cupons=10)
+        self.assertEqual(len(chamadas), 10)
+
+    def test_orcamento_de_tempo_interrompe(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_container import casar_cupons_container
+        self._cupons(10)
+        chamadas = []
+
+        def coletor(url, paginas):
+            chamadas.append(url)
+            return set()
+
+        casar_cupons_container(coletor=coletor, orcamento_s=0)
+        self.assertEqual(chamadas, [])
+
+    def test_nunca_casados_vem_primeiro(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_container import _cupons_de_container
+        self._cupons(3)
+        antigo = CupomNormalizado.objects.get(external_id="campanha:0")
+        produto = Produto.objects.first()
+        ProdutoCupom.objects.create(
+            produto=produto, cupom=antigo, status="confirmado",
+            verificado_em=timezone.now(), evidencia={"regra": "container"})
+
+        ordem = _cupons_de_container(limite=3)
+
+        # O já casado vai para o fim; os nunca casados na frente.
+        self.assertEqual(ordem[-1].id, antigo.id)
+
+    def test_extrai_ids_do_html_sem_browser(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_container import _ids_do_html
+        html = ('<a href="https://produto.mercadolivre.com.br/MLB-123456-x">a</a>'
+                '<a href="/p/MLB987654?ref=1">b</a>'
+                '<a href="https://exemplo.com/nada">c</a>')
+        self.assertEqual(_ids_do_html(html), {"MLB123456", "MLB987654"})
