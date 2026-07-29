@@ -486,3 +486,65 @@ class AmazonDiscountRecoveryTests(TestCase):
                                         "savingBasis": {"money": {"amount": 100}},
                                         "savings": {"percentage": 20}}))
         self.assertEqual(m["preco_sem_desconto"], 100)
+
+
+class VerificacaoDeLinksEhLanePropriaTests(TestCase):
+    """A verificação NÃO pode depender de haver link novo para gerar.
+
+    Era um passageiro de _rodar_links: ficava depois do `if not pendentes: continue`,
+    então bastava a fila de geração esvaziar (todo produto já com link) para a
+    verificação nunca mais rodar. Em homologação isso deixou 287 links gerados com
+    6 verificados — e a tela de Promoções só lista item com verificado_ok=True.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("verificador", password="test")
+        self.user.perfil.marcar_verificado()
+
+    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_links_pendentes")
+    def test_verifica_mesmo_sem_nenhum_produto_para_gerar(self, verificar):
+        """O caso exato do bug: fila de geração vazia."""
+        from apps.scrapers.management.commands.automacao import _rodar_verificacao_links
+        verificar.return_value = {"aprovados": 3, "reprovados": 1, "transitorios": 0}
+
+        total = _rodar_verificacao_links(limite=40)
+
+        verificar.assert_called_once()
+        self.assertEqual(total["aprovados"], 3)
+
+    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_links_pendentes")
+    def test_nao_exige_sessao_do_mercado_livre(self, verificar):
+        """Sem sessão ML o usuário ainda tem centenas de links esperando veredito.
+        A verificação abre a página pública do destino — exigir sessão os manteria
+        invisíveis sem motivo (a geração é que precisa do Link Builder logado)."""
+        from apps.scrapers.management.commands.automacao import _rodar_verificacao_links
+        verificar.return_value = {"aprovados": 1, "reprovados": 0, "transitorios": 0}
+
+        with patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=False):
+            total = _rodar_verificacao_links(limite=40)
+
+        verificar.assert_called_once()
+        self.assertEqual(total["aprovados"], 1)
+
+    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_links_pendentes")
+    def test_falha_de_um_usuario_nao_derruba_os_outros(self, verificar):
+        from apps.scrapers.management.commands.automacao import _rodar_verificacao_links
+        outro = get_user_model().objects.create_user("outro-verif", password="test")
+        outro.perfil.marcar_verificado()
+        verificar.side_effect = [
+            RuntimeError("browser caiu"),
+            {"aprovados": 2, "reprovados": 0, "transitorios": 0},
+        ]
+
+        total = _rodar_verificacao_links(limite=40)
+
+        self.assertEqual(verificar.call_count, 2)
+        self.assertEqual(total["aprovados"], 2)
+
+    def test_geracao_nao_verifica_mais(self):
+        """_rodar_links cuida só de gerar; quem verifica é a lane própria. Se alguém
+        reintroduzir a chamada lá dentro, o acoplamento volta."""
+        import inspect
+        from apps.scrapers.management.commands import automacao
+        fonte = inspect.getsource(automacao._rodar_links)
+        self.assertNotIn("verificar_links_pendentes", fonte)

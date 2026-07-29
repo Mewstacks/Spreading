@@ -231,16 +231,41 @@ def _rodar_links(lote=40):
         falhas += f
         logger.info("Links ML p/ %s: %s gerado(s), %s falha(s) de %s pendente(s)",
                     user, g, f, len(pendentes))
-        # Aprova o DESTINO dos links recém-gerados ANTES de a oferta poder aparecer
-        # como enviável. Sem este passo, o veredito só era calculado no clique de
-        # enviar — e um link que caía na vitrine /social/ passava por enviável e só
-        # reprovava depois. Limitado ao lote para não estourar o tick.
+    return {"gerados": gerados, "falhas": falhas, "pulados": pulados}
+
+
+def _rodar_verificacao_links(limite=40):
+    """Aprova o DESTINO dos links já gerados — o passo que torna a oferta enviável.
+
+    Era um "passageiro" da geração: ficava DEPOIS do `if not pendentes: continue`
+    dentro de _rodar_links, então assim que a fila de geração esvaziava (todo
+    produto já com link) a verificação nunca mais rodava. Em homologação isso
+    deixou 287 links gerados com apenas 6 verificados — e como a tela só lista item
+    com verificado_ok=True, o catálogo inteiro ficava invisível. Agora é uma lane
+    própria, que roda tenha ou não link novo para gerar.
+
+    NÃO exige sessão do ML: a verificação abre a página pública do destino
+    (validar_sessao=False, e `verificar_link_afiliado` nem usa o usuário). Um
+    usuário com a conta desconectada tem centenas de links esperando veredito, e
+    exigir sessão aqui os manteria invisíveis sem motivo.
+    """
+    from django.contrib.auth import get_user_model
+    from apps.scrapers.scraper_mercadolivre.link import verificar_links_pendentes
+
+    total = {"aprovados": 0, "reprovados": 0, "transitorios": 0}
+    for user in get_user_model().objects.filter(is_active=True):
         try:
-            from apps.scrapers.scraper_mercadolivre.link import verificar_links_pendentes
-            verificar_links_pendentes(user, limite=lote)
+            r = verificar_links_pendentes(user, limite=limite)
         except Exception as e:
             logger.warning("Verificação de destino ML falhou para %s: %s", user, e)
-    return {"gerados": gerados, "falhas": falhas, "pulados": pulados}
+            continue
+        for chave in total:
+            total[chave] += r.get(chave, 0)
+    if any(total.values()):
+        logger.info("Verificação de destino ML: %s aprovado(s), %s reprovado(s), "
+                    "%s transitório(s)", total["aprovados"], total["reprovados"],
+                    total["transitorios"])
+    return total
 
 
 def _avisar_sem_sessao_ml(user):
@@ -402,13 +427,24 @@ class Command(BaseCommand):
                         continue
                     with _heartbeat_durante("links"):
                         res = _rodar_links(lote=lote)
+                # A verificação roda FORA do operacao_pesada() e fora do `if` da
+                # geração. Fora do lock porque ela abre um browser só, curto, e
+                # segurar o advisory lock durante ela deixava scrape e scrapeflash
+                # famintos por dezenas de minutos. Fora do `if` porque é justamente
+                # quando NÃO há link novo para gerar que a fila de veredito precisa
+                # ser drenada — ver _rodar_verificacao_links.
+                st.write_state("links", fase="verificando", erro="")
+                with _heartbeat_durante("links"):
+                    ver = _rodar_verificacao_links(limite=lote)
                 falhas_banco = 0
                 proximo = timezone.now() + timedelta(minutes=tick)
                 st.write_state(
                     "links", fase="aguardando", proximo_ciclo=proximo.isoformat(),
                     gerados=res["gerados"], falhas=res["falhas"], erro="",
+                    verificados=ver["aprovados"], reprovados=ver["reprovados"],
                     ultima_msg=(f"{res['gerados']} link(s) gerado(s), "
-                                f"{res['falhas']} falha(s) às {agora:%H:%M}."),
+                                f"{res['falhas']} falha(s), "
+                                f"{ver['aprovados']} verificado(s) às {agora:%H:%M}."),
                 )
             except DatabaseError as e:
                 falhas_banco += 1
