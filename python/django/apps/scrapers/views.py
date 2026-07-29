@@ -2233,6 +2233,7 @@ def gerar_links_stream(request):
     Promoções só lista item afiliado, então quem não é staff precisava esperar o
     worker para ter QUALQUER produto enviável.
     """
+    from apps.scrapers.carga import operacao_pesada_com_espera
     from apps.scrapers.marketplaces.registry import get_marketplace
     from apps.scrapers.auxiliar import SessaoExpirada
     from apps.scrapers.progresso import usar_reporter
@@ -2273,12 +2274,37 @@ def gerar_links_stream(request):
             return
         alvo = f" ({', '.join(macros)})" if macros else ""
         print(f"Gerando link de afiliado para {len(pendentes)} produto(s){alvo}...")
+
+        _esperou = False
+
+        def _quando_o_robo_volta():
+            """" — ele os pega no próximo ciclo, às HH:MM" quando dá para saber."""
+            try:
+                from apps.scrapers import automacao_state as st
+                from django.utils.dateparse import parse_datetime
+                proximo = parse_datetime((st.read_state("links") or {})
+                                         .get("proximo_ciclo") or "")
+                if proximo:
+                    return f" — o robô os pega no próximo ciclo, às {timezone.localtime(proximo):%H:%M}"
+            except Exception:
+                pass
+            return " — o robô os pega no próximo ciclo"
+
+        def _avisar_espera(segundos):
+            nonlocal _esperou
+            if not _esperou:
+                _esperou = True
+                print("O robô está usando o navegador agora. Sua vez assim que ele "
+                      "soltar — costuma levar menos de 2 minutos.")
+                return
+            print(f"Aguardando o navegador ficar livre… ({segundos // 60:02d}:{segundos % 60:02d})")
         # Agrupa por loja: cada marketplace gera seus links (ML=Playwright,
         # Amazon=puro Python). Evita rodar o Link Builder do ML num ASIN.
         por_loja = {}
         for p in pendentes:
             por_loja.setdefault(p.marketplace or "mercadolivre", []).append(p)
-        for slug, grupo in por_loja.items():
+        def _gerar(slug, grupo):
+            """Uma loja. Traduz cada falha na AÇÃO que o usuário precisa tomar."""
             try:
                 # usar_reporter faz o `emitir_fase("Link i/N")` que já existe em
                 # gerar_links_em_lote chegar à caixa de log. Sem ele o progresso ia
@@ -2293,7 +2319,6 @@ def gerar_links_stream(request):
                 # Sessão morta DE VERDADE: aqui o "Reconectar" resolve.
                 print(f"[ERRO] Sessão do Mercado Livre expirada: {exc}")
                 print("__ML_LOGIN__")
-                continue
             except AntiBotError:
                 # A conta está boa; foi o gateway anti-bot do ML reagindo ao IP do
                 # servidor. Oferecer "Reconectar" aqui mandava o usuário refazer um
@@ -2302,13 +2327,34 @@ def gerar_links_stream(request):
                       "o Link Builder (proteção contra robôs, dispara pelo IP do "
                       "servidor). Sua conta está conectada e não há nada a corrigir — "
                       "o robô tenta de novo sozinho.")
-                continue
             except AuthError:
                 print("[AVISO] Não foi possível abrir o Link Builder agora (o Mercado "
                       "Livre não respondeu). Tente de novo em alguns minutos.")
-                continue
             except Exception as exc:
                 print(f"Aviso: geração de links em {slug} falhou ({exc}).")
+
+        # Primeiro as lojas LEVES, fora do lock: a Amazon é Python puro (concatena a
+        # tag na URL) e não abre navegador. Fazer um usuário só-Amazon esperar o
+        # worker seria dano gratuito.
+        for slug, grupo in por_loja.items():
+            if slug != "mercadolivre":
+                _gerar(slug, grupo)
+
+        grupo_ml = por_loja.get("mercadolivre")
+        if grupo_ml:
+            # O ML disputa o MESMO advisory lock do worker. Sem isto, clicar o botão
+            # enquanto o worker está no Link Builder abria um segundo Chromium no
+            # mesmo portal SSO com a mesma sessão — e o ML derrubava um dos dois para
+            # login. Era a causa do falso "sessão expirada".
+            with operacao_pesada_com_espera(aviso=_avisar_espera) as conseguiu:
+                if conseguiu:
+                    if _esperou:
+                        print("Navegador liberado.")
+                    _gerar("mercadolivre", grupo_ml)
+                else:
+                    print(f"O robô ainda está ocupado. Seus {len(grupo_ml)} produto(s) "
+                          f"continuam na fila{_quando_o_robo_volta()}.")
+                    print("__LINKS_OCUPADO__")
         # O resumo é informativo: se ELE falhar, o lote já feito continua válido e
         # não pode ser reportado como erro da operação inteira.
         try:

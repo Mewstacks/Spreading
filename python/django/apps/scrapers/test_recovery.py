@@ -137,3 +137,51 @@ class DatabaseUnavailableMiddlewareTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 503)
         downstream.assert_not_called()
+
+
+class LockComEsperaTests(SimpleTestCase):
+    """O botão manual disputa o MESMO advisory lock do worker. Sem isso, clicar
+    enquanto o worker está no Link Builder abria um segundo Chromium no mesmo
+    portal SSO com a mesma sessão — e o ML derrubava um dos dois para login."""
+
+    def _conexao(self, respostas):
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [(r,) for r in respostas]
+        conexao = MagicMock()
+        conexao.vendor = "postgresql"
+        conexao.cursor.return_value.__enter__.return_value = cursor
+        return conexao, cursor
+
+    def test_espera_e_consegue_na_terceira(self):
+        from apps.scrapers import carga
+        conexao, cursor = self._conexao([False, False, True])
+        avisos = []
+        with patch.object(carga, "connections", {"default": conexao}), \
+             patch.object(carga.time, "sleep"):
+            with carga.operacao_pesada_com_espera(
+                    poll_s=0, aviso=avisos.append) as conseguiu:
+                self.assertTrue(conseguiu)
+        self.assertEqual(len(avisos), 2)
+        sqls = [c.args[0] for c in cursor.execute.call_args_list]
+        self.assertEqual(sum("pg_advisory_unlock" in s for s in sqls), 1)
+
+    def test_timeout_nao_adquire_e_nao_desbloqueia(self):
+        """Soltar um lock que não é nosso derrubaria o worker no meio do lote."""
+        from apps.scrapers import carga
+        conexao, cursor = self._conexao([False] * 20)
+        with patch.object(carga, "connections", {"default": conexao}), \
+             patch.object(carga.time, "sleep"):
+            with carga.operacao_pesada_com_espera(timeout_s=0, poll_s=0) as conseguiu:
+                self.assertFalse(conseguiu)
+        sqls = [c.args[0] for c in cursor.execute.call_args_list]
+        self.assertFalse(any("pg_advisory_unlock" in s for s in sqls))
+
+    def test_sqlite_nao_espera(self):
+        """Em dev/testes não há processos concorrentes e a função nem existe."""
+        from apps.scrapers import carga
+        conexao = MagicMock()
+        conexao.vendor = "sqlite"
+        with patch.object(carga, "connections", {"default": conexao}):
+            with carga.operacao_pesada_com_espera(timeout_s=999) as conseguiu:
+                self.assertTrue(conseguiu)
+        conexao.cursor.assert_not_called()

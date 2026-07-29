@@ -777,10 +777,24 @@ function gerarLinks() {
   var macro = macroSel ? macroSel.value.trim() : '';
   var url = '/scrapers/gerar-links/' + (macro ? '?macro=' + encodeURIComponent(macro) : '');
   var es = new EventSource(url);
+  var ocupado = false;
   es.onmessage = function (e) {
-    if (e.data === '__DONE__') { es.close(); location.reload(); return; }
+    if (e.data === '__DONE__') {
+      es.close();
+      // Recarregar quando o robô estava ocupado apagaria a mensagem que acabou de
+      // aparecer — e a tela não teria nada de novo para mostrar mesmo.
+      if (ocupado) { _linksOcupado(false); return; }
+      location.reload();
+      return;
+    }
     var ln = document.createElement('div');
-    if (e.data.indexOf('__ML_LOGIN__') !== -1) {
+    if (e.data.indexOf('__LINKS_OCUPADO__') !== -1) {
+      // Antes do teste de __ML_LOGIN__: não é problema de conta, é fila.
+      ocupado = true;
+      ln.className = 'warn';
+      ln.innerHTML = '&rarr; <a href="#" onclick="gerarLinks();return false;" ' +
+        'style="color:inherit;font-weight:600;text-decoration:underline">Tentar de novo</a>';
+    } else if (e.data.indexOf('__ML_LOGIN__') !== -1) {
       ln.className = 'err';
       ln.innerHTML = '&rarr; <a href="/scrapers/ml/" style="color:inherit;font-weight:600;text-decoration:underline">Reconectar Mercado Livre</a>';
     } else {

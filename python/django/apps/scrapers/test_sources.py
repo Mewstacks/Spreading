@@ -669,3 +669,74 @@ class MensagensDoGerarLinksTests(TransactionTestCase):
             resp = self.client.get("/scrapers/gerar-links/")
             corpo = b"".join(resp.streaming_content).decode()
         self.assertIn("Link 1/2", corpo)
+
+
+class BotaoDisputaOLockDoWorkerTests(TransactionTestCase):
+    """A causa raiz: o botão manual não pegava o advisory lock que o worker pega."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("lock-links", password="test")
+        self.user.perfil.marcar_verificado()
+        self.client.force_login(self.user)
+        Produto.objects.create(
+            marketplace="mercadolivre", nome="Item ML", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=70,
+            link_produto="https://produto.mercadolivre.com.br/MLB-111111")
+
+    def _corpo(self, conseguiu):
+        from contextlib import contextmanager
+        from apps.scrapers.marketplaces.mercadolivre import MercadoLivre
+
+        @contextmanager
+        def _lock(*a, **kw):
+            yield conseguiu
+
+        # O import em gerar_links_stream é local, então o patch vai no módulo de
+        # origem — é ele que a chamada resolve em tempo de execução.
+        with patch("apps.scrapers.carga.operacao_pesada_com_espera", _lock), \
+             patch.object(MercadoLivre, "prefetch_links",
+                          return_value=(1, 0)) as prefetch:
+            resp = self.client.get("/scrapers/gerar-links/")
+            corpo = b"".join(resp.streaming_content).decode()
+        return corpo, prefetch
+
+    def test_sem_lock_nao_abre_navegador_e_avisa_a_fila(self):
+        corpo, prefetch = self._corpo(False)
+        prefetch.assert_not_called()          # nada de segundo Chromium
+        self.assertIn("__LINKS_OCUPADO__", corpo)
+        self.assertIn("continuam na fila", corpo)
+        # Fila não é problema de conta: não pode oferecer "Reconectar".
+        self.assertNotIn("__ML_LOGIN__", corpo)
+        self.assertNotIn("expirada", corpo)
+
+    def test_com_lock_gera_normalmente(self):
+        corpo, prefetch = self._corpo(True)
+        prefetch.assert_called_once()
+        self.assertNotIn("__LINKS_OCUPADO__", corpo)
+
+    def test_amazon_nao_espera_o_lock(self):
+        """A Amazon é Python puro e não abre navegador — fazer um usuário
+        só-Amazon esperar o worker seria dano gratuito."""
+        from contextlib import contextmanager
+        from apps.scrapers.marketplaces.amazon import Amazon
+
+        Produto.objects.filter(marketplace="mercadolivre").delete()
+        Produto.objects.create(
+            marketplace="amazon", owner=self.user, asin="B0LOCK0001",
+            nome="Item Amazon", origem="oferta", preco_sem_desconto=100,
+            preco_com_cupom=70, link_produto="https://www.amazon.com.br/dp/B0LOCK0001")
+
+        pediu_lock = {"sim": False}
+
+        @contextmanager
+        def _lock(*a, **kw):
+            pediu_lock["sim"] = True
+            yield False
+
+        with patch("apps.scrapers.carga.operacao_pesada_com_espera", _lock), \
+             patch.object(Amazon, "prefetch_links", return_value=(1, 0)) as prefetch:
+            resp = self.client.get("/scrapers/gerar-links/")
+            b"".join(resp.streaming_content)
+
+        prefetch.assert_called_once()
+        self.assertFalse(pediu_lock["sim"])
