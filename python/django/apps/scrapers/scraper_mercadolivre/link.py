@@ -4,7 +4,8 @@ import re
 import logging
 from datetime import timedelta
 
-from django.db.models import Q
+from django.conf import settings
+from django.db.models import F, Q
 from django.utils import timezone
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
@@ -425,8 +426,8 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
                             nome_esperado: str = None, confiar_desconto: bool = False,
                             usuario=None) -> dict:
     """
-    Abre o link de afiliado num browser real, segue o redirect (meli.la -> destino)
-    e checa se a oferta certa aparece com cupom/afiliado ativos.
+    Segue o redirect do link de afiliado (meli.la -> destino) e checa se a oferta
+    certa aparece com cupom/afiliado ativos.
 
     Aceita DOIS destinos válidos:
       - página de produto (produto.mercadolivre / /p/MLB / /MLB-id)
@@ -434,9 +435,50 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
     Em ambos confirma: produto não inativo, preço visível e (se nome_esperado dado)
     que o nome do produto bate com a página.
 
+    Transporte: HTTP por padrão (link_http), ~1s por link. O caminho com Chromium
+    custava ~20-30s e não interage com a página — só lê URL final e HTML, que vêm
+    no SSR. `ML_VERIFICACAO_TRANSPORTE=browser` volta ao antigo sem deploy de
+    código; `screenshot_path` força o browser, porque só ele tira print.
+
     Retorna dict-relatório com ok/url_final/is_pagina_produto/is_landing_afiliado/
     cupom_detectado/preco_visivel/nome_confere/erros.
     """
+    if not screenshot_path and getattr(
+            settings, "ML_VERIFICACAO_TRANSPORTE", "http") != "browser":
+        from apps.scrapers.scraper_mercadolivre.link_http import relatorio_por_http
+        return relatorio_por_http(link_afiliado, nome_esperado, confiar_desconto)
+    return _verificar_com_browser(
+        link_afiliado, screenshot_path, nome_esperado, confiar_desconto)
+
+
+def _verificar_com_browser(link_afiliado: str, screenshot_path: str = None,
+                           nome_esperado: str = None,
+                           confiar_desconto: bool = False) -> dict:
+    """Verifica UM link abrindo um browser próprio.
+
+    Caminho de item único (envio, backfill manual). O lote usa
+    `_relatorio_na_pagina` com uma página só — abrir e fechar um Chromium por link
+    custava ~2s de processo antes de qualquer trabalho útil.
+    """
+    if not link_afiliado:
+        return {
+            "ok": False, "url_final": None, "is_pagina_produto": False,
+            "is_landing_afiliado": False, "cupom_detectado": False,
+            "preco_visivel": None, "nome_confere": None,
+            "erros": ["link_afiliado vazio."],
+        }
+    # validar_sessao=False: o destino é página pública — verificar não exige login e
+    # não pode derrubar/apagar sessão (era a causa do falso 'Sessão ML expirada'
+    # logo após o link ser gerado com sucesso).
+    with iniciar_browser(headless=True, validar_sessao=False) as (page, context):
+        return _relatorio_na_pagina(page, link_afiliado, screenshot_path,
+                                    nome_esperado, confiar_desconto)
+
+
+def _relatorio_na_pagina(page, link_afiliado: str, screenshot_path: str = None,
+                         nome_esperado: str = None,
+                         confiar_desconto: bool = False) -> dict:
+    """Faz a verificação numa página JÁ aberta — o que permite reusar o browser."""
     relatorio = {
         "ok": False, "url_final": None, "is_pagina_produto": False,
         "is_landing_afiliado": False, "cupom_detectado": False,
@@ -446,51 +488,65 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
         relatorio["erros"].append("link_afiliado vazio.")
         return relatorio
 
-    # validar_sessao=False: o destino é página pública — verificar não exige login e
-    # não pode derrubar/apagar sessão (era a causa do falso 'Sessão ML expirada'
-    # logo após o link ser gerado com sucesso).
-    with iniciar_browser(
-        headless=True,
-        validar_sessao=False,
-    ) as (page, context):
+    try:
+        page.goto(link_afiliado, wait_until="domcontentloaded", timeout=45000)
+        # 3s, não 15s: a PDP do ML nunca fica ociosa (ads/tracking), então o
+        # networkidle estourava o timeout inteiro em todo link — 15s de espera por
+        # nada. Tudo que lemos aqui (URL final, HTML, preço) já está no DOM logo
+        # após o domcontentloaded.
         try:
-            page.goto(link_afiliado, wait_until="domcontentloaded", timeout=45000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=15000)
-            except Exception:
-                pass
+            page.wait_for_load_state("networkidle", timeout=3000)
+        except Exception:
+            pass
 
-            url_final = page.url
-            relatorio["url_final"] = url_final
+        url_final = page.url
+        relatorio["url_final"] = url_final
 
-            # Classificação do destino: fonte ÚNICA (link_validacao), a mesma usada
-            # pela aprovação na geração e pela conferência do envio.
-            relatorio["is_pagina_produto"] = eh_pagina_produto(url_final)
-            # Landing de afiliado que destaca o produto (storefront /social/)
-            relatorio["is_landing_afiliado"] = eh_vitrine_social(url_final)
+        # Interstitial do anti-bot (/gz/account-verification, captcha, challenge):
+        # a página pedida NUNCA foi vista. Sem isto o relatório saía sem destino
+        # válido e sem erro, e `verificar_e_aprovar` REPROVAVA um link que está
+        # perfeito — bastava uma janela de bloqueio para esvaziar a tela.
+        from apps.scrapers.scraper_mercadolivre.link_http import _CAMINHOS_INTERSTICIAIS
+        if any(p in url_final.lower() for p in _CAMINHOS_INTERSTICIAIS):
+            relatorio["erros"].append(
+                "Falha ao abrir link: o Mercado Livre exigiu verificação "
+                "antes de mostrar a página")
+            return relatorio
 
-            corpo = page.content().lower()
+        # Classificação do destino: fonte ÚNICA (link_validacao), a mesma usada
+        # pela aprovação na geração e pela conferência do envio.
+        relatorio["is_pagina_produto"] = eh_pagina_produto(url_final)
+        # Landing de afiliado que destaca o produto (storefront /social/)
+        relatorio["is_landing_afiliado"] = eh_vitrine_social(url_final)
 
-            termos_morto = ["anúncio pausado", "página não encontrada", "estoque indisponível"]
-            if any(t in corpo for t in termos_morto):
-                relatorio["erros"].append("Página indica anúncio inativo/inexistente.")
+        corpo = page.content().lower()
 
-            # Cupom REAL: badge de cupom na página ("X% OFF com cupom", "cupom de R$").
-            # NÃO usar só a palavra "cupom" — ela aparece no menu global "Cupons" (falso positivo).
-            relatorio["cupom_detectado"] = bool(
-                re.search(r"com\s+cupom|cupom\s+de\s+r?\$|%\s*off\s*com\s*cupom|aplicar\s+cupom", corpo)
-            )
-            # Preço antigo riscado SOMENTE no buybox do produto (não nos cards de vitrine
-            # da /social/, que dariam falso positivo de outro item).
+        termos_morto = ["anúncio pausado", "página não encontrada", "estoque indisponível"]
+        if any(t in corpo for t in termos_morto):
+            relatorio["erros"].append("Página indica anúncio inativo/inexistente.")
+
+        # Cupom REAL: badge de cupom na página ("X% OFF com cupom", "cupom de R$").
+        # NÃO usar só a palavra "cupom" — ela aparece no menu global "Cupons" (falso positivo).
+        relatorio["cupom_detectado"] = bool(
+            re.search(r"com\s+cupom|cupom\s+de\s+r?\$|%\s*off\s*com\s*cupom|aplicar\s+cupom", corpo)
+        )
+        if nome_esperado is not None:
+            relatorio["nome_confere"] = _nome_bate(nome_esperado, corpo)
+
+        # Preço e desconto só pesam na decisão quando `confiar_desconto` é False
+        # (ver aprovado_por_relatorio: oferta/busca já teve o de/por confirmado na
+        # raspagem). Para elas, estes dois `is_visible` eram 7s de espera por um
+        # dado que ninguém lê — o item mais caro do orçamento por link depois do
+        # próprio carregamento.
+        if not confiar_desconto:
+            # Preço antigo riscado SOMENTE no buybox do produto (não nos cards de
+            # vitrine da /social/, que dariam falso positivo de outro item).
             try:
                 relatorio["preco_riscado"] = page.locator(
                     ".ui-pdp-price s.andes-money-amount--previous, .ui-pdp-container s.andes-money-amount--previous"
                 ).first.is_visible(timeout=2000)
             except Exception:
                 relatorio["preco_riscado"] = False
-
-            if nome_esperado is not None:
-                relatorio["nome_confere"] = _nome_bate(nome_esperado, corpo)
 
             try:
                 preco_el = page.locator(".andes-money-amount__fraction").first
@@ -499,23 +555,23 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
             except Exception:
                 pass
 
-            if screenshot_path:
-                try:
-                    page.screenshot(path=screenshot_path, full_page=False)
-                    relatorio["screenshot"] = screenshot_path
-                except Exception as e:
-                    relatorio["erros"].append(f"screenshot falhou: {e}")
+        if screenshot_path:
+            try:
+                page.screenshot(path=screenshot_path, full_page=False)
+                relatorio["screenshot"] = screenshot_path
+            except Exception as e:
+                relatorio["erros"].append(f"screenshot falhou: {e}")
 
-            # Decisão ÚNICA de aprovação (link_validacao.aprovado_por_relatorio):
-            # a MESMA regra aplicada na aprovação (geração) e no envio.
-            relatorio["ok"] = aprovado_por_relatorio(relatorio, confiar_desconto)
-            if (not confiar_desconto and relatorio["is_landing_afiliado"]
-                    and not relatorio["is_pagina_produto"]):
-                relatorio["erros"].append(
-                    "Caiu na vitrine /social/ (afiliado ok, mas não dá pra confirmar o cupom do item)."
-                )
-        except Exception as e:
-            relatorio["erros"].append(f"Falha ao abrir link: {e}")
+        # Decisão ÚNICA de aprovação (link_validacao.aprovado_por_relatorio):
+        # a MESMA regra aplicada na aprovação (geração) e no envio.
+        relatorio["ok"] = aprovado_por_relatorio(relatorio, confiar_desconto)
+        if (not confiar_desconto and relatorio["is_landing_afiliado"]
+                and not relatorio["is_pagina_produto"]):
+            relatorio["erros"].append(
+                "Caiu na vitrine /social/ (afiliado ok, mas não dá pra confirmar o cupom do item)."
+            )
+    except Exception as e:
+        relatorio["erros"].append(f"Falha ao abrir link: {e}")
 
     return relatorio
 
@@ -569,33 +625,69 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
     )
     if produto_ids is not None:
         queryset = queryset.filter(produto_id__in=list(produto_ids))
-    linhas = list(queryset.order_by("-ultima_tentativa", "-id")[:limite])
+    # Nunca-verificados primeiro; entre os já tentados, o que esperou mais. O
+    # `-ultima_tentativa` de antes olhava um campo que só a GERAÇÃO escreve, então a
+    # ordem não refletia a fila de verificação.
+    linhas = list(
+        queryset.order_by(F("proxima_tentativa").asc(nulls_first=True), "id")[:limite]
+    )
+    if not linhas:
+        return {"aprovados": 0, "reprovados": 0, "transitorios": 0}
     aprovados = reprovados = transitorios = 0
-    # Sem guarda de ORM: `verificar_e_aprovar` fecha o browser antes de retornar, e
-    # registrar_aprovacao/registrar_reprovacao já rodam com o Playwright encerrado.
-    for linha in linhas:
-        try:
-            r = verificar_e_aprovar(
-                usuario, linha.produto, linha.link_afiliado, linha.url_isca)
-        except Exception as e:
-            logger.warning("Verificação de destino falhou p/ produto %s: %s",
-                           getattr(linha.produto, "id", None), e)
-            LinkAfiliadoUsuario.objects.filter(pk=linha.pk).update(
-                proxima_tentativa=timezone.now() + timedelta(minutes=15),
-                verificacao_motivo="Verificação temporariamente indisponível.",
-            )
-            transitorios += 1
-            continue
-        if r == "aprovado":
-            aprovados += 1
-        elif r == "reprovado":
-            reprovados += 1
-        else:
-            LinkAfiliadoUsuario.objects.filter(pk=linha.pk).update(
-                proxima_tentativa=timezone.now() + timedelta(minutes=15),
-                verificacao_motivo="Verificação temporariamente indisponível.",
-            )
-            transitorios += 1
+
+    def _adiar(linha, motivo="Verificação temporariamente indisponível."):
+        LinkAfiliadoUsuario.objects.filter(pk=linha.pk).update(
+            proxima_tentativa=timezone.now() + timedelta(minutes=15),
+            verificacao_motivo=motivo,
+        )
+
+    # A organização é resolvida do PRÓPRIO usuário, não do contexto ambiente: esta
+    # função é chamada tanto do worker (contexto de sistema) quanto de comandos e
+    # testes, e `executar_no_tenant` recusa gravar sem escopo. Passar explicitamente
+    # torna o comportamento igual nos três.
+    from apps.accounts.models import organization_for_user
+    org = organization_for_user(usuario)
+    org_id = org.pk if org else None
+
+    def _no_tenant(fn, *args, **kwargs):
+        return executar_no_tenant(fn, *args, organization_id=org_id, **kwargs)
+
+    # UM browser para o lote inteiro. Abrir e fechar um Chromium por link custava
+    # ~2s de processo antes de qualquer trabalho útil — num lote de 40, mais de um
+    # minuto só subindo e derrubando navegador.
+    #
+    # Com o Playwright vivo nesta thread, o ORM levanta SynchronousOnlyOperation:
+    # por isso as gravações vão por executar_no_tenant, que as desvia para a thread
+    # dedicada (a mesma solução que gerar_links_em_lote já usa).
+    with iniciar_browser(headless=True, validar_sessao=False) as (page, _ctx):
+        for linha in linhas:
+            confiar = _confiar_desconto(linha.produto)
+            try:
+                relatorio = _relatorio_na_pagina(
+                    page, linha.link_afiliado,
+                    nome_esperado=getattr(linha.produto, "nome", None),
+                    confiar_desconto=confiar)
+            except Exception as e:
+                logger.warning("Verificação de destino falhou p/ produto %s: %s",
+                               getattr(linha.produto, "id", None), e)
+                _no_tenant(_adiar, linha)
+                transitorios += 1
+                continue
+            if relatorio.get("ok"):
+                _no_tenant(registrar_aprovacao, usuario, linha.produto,
+                                   linha.link_afiliado,
+                                   url_canonica=linha.link_afiliado)
+                aprovados += 1
+            elif any("Falha ao abrir link" in str(e)
+                     for e in relatorio.get("erros", [])):
+                # Rede, timeout ou challenge do anti-bot: o destino nunca foi visto.
+                # Reprovar aqui derrubaria links bons em massa.
+                _no_tenant(_adiar, linha)
+                transitorios += 1
+            else:
+                _no_tenant(registrar_reprovacao, usuario, linha.produto,
+                                   motivo_reprovacao(relatorio, confiar))
+                reprovados += 1
     logger.info("Verificação de destino ML p/ %s: %s aprovado(s), %s reprovado(s), "
                 "%s transitório(s)", usuario, aprovados, reprovados, transitorios)
     return {"aprovados": aprovados, "reprovados": reprovados,

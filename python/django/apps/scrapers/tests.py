@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from contextlib import contextmanager
 from datetime import timedelta
 from io import StringIO
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import requests
 from django.contrib.auth import get_user_model
@@ -2877,8 +2877,27 @@ class VerificarLinksPendentesTests(TestCase):
             link_produto="https://www.mercadolivre.com.br/item",
         )
 
-    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_link_afiliado")
+    def setUpBrowserFalso(self):
+        """O lote agora reusa UM browser: fingimos o `iniciar_browser` dele.
+
+        Os testes fazem patch de `_relatorio_na_pagina` (o trabalho por link) em vez
+        de `verificar_link_afiliado` (o caminho de item único, que abre browser
+        próprio) — é essa a função que o lote passou a usar.
+        """
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _browser_falso(*a, **kw):
+            yield MagicMock(), MagicMock()
+
+        remendo = patch("apps.scrapers.scraper_mercadolivre.link.iniciar_browser",
+                        _browser_falso)
+        remendo.start()
+        self.addCleanup(remendo.stop)
+
+    @patch("apps.scrapers.scraper_mercadolivre.link._relatorio_na_pagina")
     def test_aprova_link_que_abre_o_produto(self, verify):
+        self.setUpBrowserFalso()
         produto = self._produto("Fone bom")
         LinkAfiliadoUsuario.objects.create(
             usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",
@@ -2892,8 +2911,9 @@ class VerificarLinksPendentesTests(TestCase):
         self.assertIs(linha.verificado_ok, True)
         self.assertEqual(linha.url_canonica, "https://meli.la/bom")
 
-    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_link_afiliado")
+    @patch("apps.scrapers.scraper_mercadolivre.link._relatorio_na_pagina")
     def test_reprova_link_que_cai_na_vitrine_social(self, verify):
+        self.setUpBrowserFalso()
         produto = self._produto("Solda vitrine")
         LinkAfiliadoUsuario.objects.create(
             usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",
@@ -2911,8 +2931,9 @@ class VerificarLinksPendentesTests(TestCase):
         self.assertIs(linha.verificado_ok, False)
         self.assertTrue(linha.verificacao_motivo)
 
-    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_link_afiliado")
+    @patch("apps.scrapers.scraper_mercadolivre.link._relatorio_na_pagina")
     def test_falha_de_rede_e_transitoria_nao_reprova(self, verify):
+        self.setUpBrowserFalso()
         produto = self._produto("Fone rede caiu")
         LinkAfiliadoUsuario.objects.create(
             usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",

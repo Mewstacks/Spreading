@@ -79,6 +79,16 @@ TELETHON_RELINK_ENABLED = os.getenv(
 WHATSAPP_WEB_ENABLED = os.getenv(
     "WHATSAPP_WEB_ENABLED", _AUTOMATION_DEFAULT,
 ) == "1"
+# Transporte da verificação de destino do link de afiliado: "browser" (padrão) ou
+# "http". O HTTP seria ~1s por link contra ~6s do browser, mas foi MEDIDO como
+# inviável: o ML responde `/gz/account-verification` a qualquer cliente sem
+# fingerprint de browser (TLS/JA3), tanto do IP de casa quanto do datacenter da Fly.
+# Nem User-Agent completo, nem cookies aquecidos pela home contornam. O módulo
+# link_http fica pronto e testado caso o ML afrouxe — trocar aqui não exige deploy.
+ML_VERIFICACAO_TRANSPORTE = os.getenv("ML_VERIFICACAO_TRANSPORTE", "browser")
+# Verificações simultâneas. É I/O puro (o GIL não atrapalha), mas são requisições
+# ao ML a partir de um IP de datacenter: subir demais convida rate-limit.
+ML_VERIFICACAO_THREADS = int(os.getenv("ML_VERIFICACAO_THREADS", "4"))
 PILOT_ORGANIZATION_IDS = {
     value.strip() for value in os.getenv("PILOT_ORGANIZATION_IDS", "").split(",")
     if value.strip()
