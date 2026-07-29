@@ -2266,10 +2266,18 @@ def gerar_links_stream(request):
         # tinha ficado de fora. O sintoma era cruel: o lote gerava os links
         # certinho e o resumo final derrubava tudo com "[ERRO] Falha inesperada",
         # fazendo um sucesso parecer falha total.
-        from django.db import close_old_connections
+        # `connections.close_all()`, NÃO `close_old_connections()`: esta última só
+        # olha idade e flags locais (erro anterior, CONN_MAX_AGE vencido) e um
+        # socket encerrado pelo proxy da Fly parece perfeitamente saudável por esse
+        # critério — a conexão é reaproveitada e só então estoura. É o mesmo motivo
+        # documentado em scraper._persistir_campanhas_cupons, e o que
+        # automacao._renovar_conexoes_db já faz nos workers. Roda numa thread
+        # própria (o job SSE), e `connections` é thread-local: não mexe na conexão
+        # da request.
+        from django.db import connections
 
         for slug, grupo in por_loja.items():
-            close_old_connections()
+            connections.close_all()
             try:
                 get_marketplace(slug).prefetch_links(grupo, usuario=usuario)
             except (LoginError, AuthError, SessaoExpirada) as exc:
@@ -2278,7 +2286,7 @@ def gerar_links_stream(request):
                 break
             except Exception as exc:
                 print(f"Aviso: geração de links em {slug} falhou ({exc}).")
-        close_old_connections()
+        connections.close_all()
         # O resumo é informativo: se ELE falhar, o lote já feito continua válido e
         # não pode ser reportado como erro da operação inteira.
         try:

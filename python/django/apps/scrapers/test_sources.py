@@ -548,3 +548,32 @@ class VerificacaoDeLinksEhLanePropriaTests(TestCase):
         from apps.scrapers.management.commands import automacao
         fonte = inspect.getsource(automacao._rodar_links)
         self.assertNotIn("verificar_links_pendentes", fonte)
+
+
+class GerarLinksRenovaConexaoTests(TestCase):
+    """Minutos no Link Builder deixam o socket do Postgres ocioso e o proxy da Fly
+    o derruba. `close_old_connections()` NÃO resolve: ela só olha idade e flags
+    locais, e um socket morto pelo proxy parece saudável por esse critério — a
+    conexão é reaproveitada e só então estoura OperationalError. Tem de ser
+    `connections.close_all()`, que é incondicional.
+    """
+
+    def test_usa_close_all_e_nao_close_old_connections(self):
+        import inspect
+        from apps.scrapers import views
+        fonte = inspect.getsource(views.gerar_links_stream)
+        self.assertIn("connections.close_all()", fonte)
+        # Olha só o CÓDIGO: a menção em comentário é proposital (explica por que
+        # não usar). O que não pode voltar é a chamada.
+        codigo = "\n".join(l for l in fonte.split("\n")
+                           if not l.strip().startswith("#"))
+        self.assertNotIn("close_old_connections(", codigo)
+
+    def test_renova_antes_de_cada_loja_e_antes_do_resumo(self):
+        """A Amazon gera link logo depois da fase longa do ML: sem renovar entre as
+        lojas, ela herda o socket morto (foi o erro visto em homologação)."""
+        import inspect
+        from apps.scrapers import views
+        fonte = inspect.getsource(views.gerar_links_stream)
+        # uma dentro do laço por loja, uma antes do resumo final
+        self.assertGreaterEqual(fonte.count("connections.close_all()"), 2)
