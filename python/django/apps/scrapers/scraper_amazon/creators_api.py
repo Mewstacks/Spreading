@@ -179,7 +179,14 @@ def _obter_token(creds: Credenciais) -> str:
         return token
 
 
-def _post(operacao: str, payload: dict, creds: Credenciais) -> dict:
+# Tentativas ao tomar 429. O retry era recursivo e SEM teto: com a Amazon
+# respondendo 429 de forma sustentada (o que acontece quando a cota diária estoura),
+# cada chamada empilhava um frame e dormia 2s indefinidamente — na prática o worker
+# travava e só saía com RecursionError depois de ~30 min.
+_MAX_TENTATIVAS_429 = 3
+
+
+def _post(operacao: str, payload: dict, creds: Credenciais, _tentativa: int = 1) -> dict:
     """POST genérico autenticado para uma operação da Creators API (com as creds dadas)."""
     _exigir(creds)
     body = dict(payload)
@@ -206,8 +213,13 @@ def _post(operacao: str, payload: dict, creds: Credenciais) -> dict:
     if r.status_code == 403 and "eligib" in r.text.lower():
         raise AmazonNotEligible(r.text[:200])
     if r.status_code == 429:
-        time.sleep(2)
-        return _post(operacao, payload, creds)
+        if _tentativa >= _MAX_TENTATIVAS_429:
+            raise AmazonAPIError(
+                f"{operacao}: a Amazon segue limitando as chamadas (429) depois de "
+                f"{_MAX_TENTATIVAS_429} tentativas."
+            )
+        time.sleep(2 ** _tentativa)   # 2s, 4s — backoff, não espera fixa
+        return _post(operacao, payload, creds, _tentativa + 1)
     if r.status_code >= 400:
         raise AmazonAPIError(f"{operacao} HTTP {r.status_code}: {r.text[:200]}")
     return r.json()

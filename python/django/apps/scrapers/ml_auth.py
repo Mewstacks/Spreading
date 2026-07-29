@@ -21,9 +21,44 @@ segue anônimo, mas deve DIZER isso no log em vez de raspar em silêncio.
 """
 import logging
 
+import requests
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+
+def http_session(state) -> requests.Session:
+    """`requests.Session` com os cookies do storage_state do Playwright.
+
+    Ponto ÚNICO de conversão storage_state → cookie jar. Existia uma segunda
+    conversão em `conexoes._cookies_do_storage_state` que achatava tudo num dict
+    `{name: value}` e descartava `domain`/`path`. O storage_state do ML carrega
+    cookies homônimos de vários domínios (`ssid`, `_d2id`, `orgnickp` aparecem em
+    `.mercadolivre.com.br`, `.mercadolibre.com`, `.mercadopago.com.br`): no dict o
+    último do arquivo vencia e era enviado ao host errado, então a sonda tomava
+    302→login sobre uma sessão perfeitamente viva — e o veredito apagava a sessão.
+    """
+    session = requests.Session()
+    state = state or {}
+    for cookie in state.get("cookies", []):
+        try:
+            # Preserva o domínio como salvo (inclusive o ponto inicial): é ele que
+            # diz ao jar para mandar o cookie também nos subdomínios (www., lista.).
+            session.cookies.set(
+                cookie["name"], cookie["value"],
+                domain=cookie.get("domain") or "",
+                path=cookie.get("path") or "/",
+            )
+        except Exception:
+            continue
+    from apps.scrapers.auxiliar import ua_aleatorio
+    session.headers.update({
+        "User-Agent": ua_aleatorio(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+        "Upgrade-Insecure-Requests": "1",
+    })
+    return session
 
 
 def storage_state_para(usuario):

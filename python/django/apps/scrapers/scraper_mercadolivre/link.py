@@ -67,7 +67,13 @@ class UrlNaoPermitidaError(Exception):
     pass
 
 
-MSG_SESSAO_EXPIRADA = ("Sua sessão do Mercado Livre expirou. "
+# O portal de afiliados tem SSO PRÓPRIO (jms/msl), separado do site principal — o
+# mesmo desenho já reconhecido em ml_relatorio_conexao.py. Cookie bom em
+# mercadolivre.com.br não implica Link Builder logado, e é essa assimetria que
+# produz o relato "a tela diz conectado mas a geração de link falha": a sonda de
+# conexoes.py mede o site principal, e nenhuma tela media este portal.
+MSG_SESSAO_EXPIRADA = ("O portal de afiliados do Mercado Livre pediu login de novo. "
+                       "Ele tem sessão própria, separada da sua conta no site. "
                        "Reconecte em Conexão Mercado Livre para gerar os links de afiliado.")
 
 
@@ -271,17 +277,10 @@ def afiliate_link_builder(link_base, auth_path=None, usuario=None):
         raise BrowserError(
             "Link Builder por navegador está desativado para esta organização."
         )
-    # validar_sessao=False: a pré-checagem abre um Chromium INTEIRO só para navegar
-    # até myaccount (goto 45s + networkidle 8s), fecha, e só então abre o browser de
-    # verdade — ~10-15s por ITEM neste caminho de link único. E ela não decide nada:
-    # se der timeout, `iniciar_browser` marca "inconclusiva" e segue mesmo assim.
-    # Quem detecta sessão caída de verdade é `_abrir_link_builder` logo abaixo, que
-    # levanta LoginError ao cair na tela de login do portal de afiliados.
     with iniciar_browser(
         auth_path=auth_path,
         session_user=usuario,
-        headless=True,
-        validar_sessao=False,
+        headless=True
     ) as (page, context):
         _abrir_link_builder(page)
 
@@ -428,13 +427,9 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
     # DJANGO_ALLOW_ASYNC_UNSAFE no os.environ do PROCESSO — global às 8 threads do
     # gunicorn — e o `finally` dele removia a permissão debaixo de outro fluxo que
     # ainda estava usando. Era a origem do "às vezes funciona".
-    # validar_sessao=False pelo mesmo motivo de afiliate_link_builder: o Chromium
-    # extra da pré-checagem não decide nada e `_abrir_link_builder` já falha cedo
-    # com LoginError se a sessão caiu. Aqui é 1x por lote, não por item.
     with iniciar_browser(
         session_user=usuario,
-        headless=True,
-        validar_sessao=False,
+        headless=True
     ) as (page, context):
         _abrir_link_builder(page)
 
@@ -581,10 +576,7 @@ def _verificar_com_browser(link_afiliado: str, screenshot_path: str = None,
             "preco_visivel": None, "nome_confere": None,
             "erros": ["link_afiliado vazio."],
         }
-    # validar_sessao=False: o destino é página pública — verificar não exige login e
-    # não pode derrubar/apagar sessão (era a causa do falso 'Sessão ML expirada'
-    # logo após o link ser gerado com sucesso).
-    with iniciar_browser(headless=True, validar_sessao=False) as (page, context):
+    with iniciar_browser(headless=True) as (page, context):
         return _relatorio_na_pagina(page, link_afiliado, screenshot_path,
                                     nome_esperado, confiar_desconto)
 
@@ -773,7 +765,7 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
     # Com o Playwright vivo nesta thread, o ORM levanta SynchronousOnlyOperation:
     # por isso as gravações vão por executar_no_tenant, que as desvia para a thread
     # dedicada (a mesma solução que gerar_links_em_lote já usa).
-    with iniciar_browser(headless=True, validar_sessao=False) as (page, _ctx):
+    with iniciar_browser(headless=True) as (page, _ctx):
         for linha in linhas:
             confiar = _confiar_desconto(linha.produto)
             try:

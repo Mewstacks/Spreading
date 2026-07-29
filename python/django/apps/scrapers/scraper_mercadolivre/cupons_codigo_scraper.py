@@ -295,8 +295,7 @@ def mapear_cupons_codigo(faixa=None, usuario=None):
     smart = []
     links_vistos = set()
 
-    with iniciar_browser(storage_state=state, headless=True,
-                         validar_sessao=False) as (page, context):
+    with iniciar_browser(storage_state=state, headless=True) as (page, context):
         for n in range(1, 6):  # algumas páginas
             emitir_fase(f"Cupons de checkout — página {n}/5", n / 5, faixa)
             url = "https://www.mercadolivre.com.br/ofertas/cupons"

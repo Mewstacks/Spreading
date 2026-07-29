@@ -75,28 +75,12 @@ def _ml_http_session(state):
     inválidos => o GET cai na página de login (sem payload) e o transporte alterna
     para o browser, que é quem sabe distinguir challenge de sessão expirada.
 
-    `state` é o dict do storage_state vindo de scrapers/ml_auth.py (repositório
-    cifrado), não mais um caminho de arquivo: o arquivo legado sumiu na migração
-    multi-tenant e o `open()` falhava calado, deixando o jar vazio.
+    A construção do jar vive em `ml_auth.http_session`: a sonda de estado
+    (conexoes.sondar_sessao_ml) precisa exatamente do mesmo jar, e a cópia que ela
+    mantinha descartava o domínio dos cookies.
     """
-    sess = requests.Session()
-    state = state or {}
-    for c in state.get("cookies", []):
-        try:
-            # Preserva o domínio como salvo (inclusive o ponto inicial): é ele que diz
-            # ao jar para mandar o cookie também nos subdomínios (www., lista., ...).
-            sess.cookies.set(c["name"], c["value"],
-                             domain=c.get("domain") or "",
-                             path=c.get("path") or "/")
-        except Exception:
-            continue
-    sess.headers.update({
-        "User-Agent": ua_aleatorio(),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-        "Upgrade-Insecure-Requests": "1",
-    })
-    return sess
+    from apps.scrapers.ml_auth import http_session
+    return http_session(state)
 
 
 @contextmanager
@@ -108,7 +92,7 @@ def _transporte_cupons(state):
     o fetch serve via browser headless. O Chromium só é aberto se/quando o fallback
     ligar o flag.
 
-    `validar_sessao=False` de propósito: no IP de datacenter da Fly o gateway anti-bot
+    A raspagem só navega: no IP de datacenter da Fly o gateway anti-bot
     do ML costuma redirecionar QUALQUER navegação (inclusive com cookie válido) para uma
     tela de challenge/login. A validação por redirect lia isso como logout e apagava a
     MercadoLivreSession da organização — a mesma sessão que a tela do dashboard
@@ -131,8 +115,7 @@ def _transporte_cupons(state):
                 logger.debug("Falha HTTP na pagina %s de cupons: %s", n, e)
                 return None
         if estado["_page"] is None:
-            cm = iniciar_browser(storage_state=state, headless=True,
-                                 validar_sessao=False)
+            cm = iniciar_browser(storage_state=state, headless=True)
             page, _ctx = cm.__enter__()
             estado["_cm"] = cm
             estado["_page"] = page

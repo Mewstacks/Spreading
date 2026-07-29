@@ -62,6 +62,32 @@ def superadmin_required(view):
     return _wrapped
 
 
+_TAXONOMIA_TTL_S = 600
+
+
+def _taxonomia_cacheada(sufixo: str, request, produzir):
+    """Cacheia listas de categoria derivadas de um DISTINCT sobre `Produto`.
+
+    Esses DISTINCT varrem a tabela de produtos INTEIRA e rodavam a cada GET de
+    /scrapers/config/ e /scrapers/top/, só para preencher os <select> de filtro. A
+    taxonomia muda no ritmo da raspagem (horas), não no ritmo dos cliques.
+
+    A chave inclui a organização porque a RLS decide o que cada tenant enxerga: uma
+    chave global entregaria a um tenant a lista derivada das linhas de outro.
+    """
+    from django.core.cache import cache
+
+    # A organização já foi resolvida pelo OrganizationMiddleware; chamar
+    # `organization_for_user` de novo seria uma query só para montar a chave.
+    organization = getattr(request, "organization", None)
+    chave = f"taxonomia:{sufixo}:org:{getattr(organization, 'pk', '_sem_org')}"
+    valor = cache.get(chave)
+    if valor is None:
+        valor = produzir()
+        cache.set(chave, valor, _TAXONOMIA_TTL_S)
+    return valor
+
+
 def throttle_sse(max_por_min=10):
     """Limita quantas vezes/min um usuário dispara um endpoint SSE pesado.
 
@@ -850,6 +876,11 @@ def amazon_conexao_cancelar(request):
     return JsonResponse({"ok": True})
 
 
+# Um stream de frames prende UMA das 8 threads do gunicorn enquanto a aba
+# estiver aberta (--workers 1 --threads 8, ver python/Procfile). Sem teto,
+# recarregar a tela algumas vezes esgotava o pool e o painel inteiro parava
+# de responder — os streams de raspagem/envio já eram limitados, estes não.
+@throttle_sse(6)
 @require_GET
 def amazon_conexao_frames(request):
     from apps.scrapers import amazon_conexao
@@ -926,6 +957,11 @@ def ml_relatorio_conexao_cancelar(request):
     return JsonResponse({"ok": True})
 
 
+# Um stream de frames prende UMA das 8 threads do gunicorn enquanto a aba
+# estiver aberta (--workers 1 --threads 8, ver python/Procfile). Sem teto,
+# recarregar a tela algumas vezes esgotava o pool e o painel inteiro parava
+# de responder — os streams de raspagem/envio já eram limitados, estes não.
+@throttle_sse(6)
 @require_GET
 def ml_relatorio_conexao_frames(request):
     from apps.scrapers import ml_relatorio_conexao
@@ -1012,6 +1048,11 @@ def ml_conexao_desconectar(request):
     })
 
 
+# Um stream de frames prende UMA das 8 threads do gunicorn enquanto a aba
+# estiver aberta (--workers 1 --threads 8, ver python/Procfile). Sem teto,
+# recarregar a tela algumas vezes esgotava o pool e o painel inteiro parava
+# de responder — os streams de raspagem/envio já eram limitados, estes não.
+@throttle_sse(6)
 @require_GET
 def ml_conexao_frames(request):
     """SSE — transmite os frames (JPEG base64) do Chromium local pro <canvas> do front.
@@ -1239,11 +1280,11 @@ def configuracoes(request):
                 cfg_obj.programas.set(program_ids)
         return redirect("scraper-configuracoes")
 
-    macros = list(
+    macros = _taxonomia_cacheada("macros", request, lambda: list(
         Produto.objects
         .exclude(macro_categoria__isnull=True).exclude(macro_categoria="")
         .values_list("macro_categoria", flat=True).distinct().order_by("macro_categoria")
-    )
+    ))
     # Grupos do WhatsApp NÃO são buscados aqui: a chamada ao Node pode travar o render
     # (até 15s) quando o serviço está offline. Carregados via AJAX (ver whatsapp_grupos_json).
 
@@ -1595,25 +1636,30 @@ def top_promocoes(request):
     # `tem_filtros_na_url` de propósito — paginar não pode reescrever os filtros.
     pagina = request.GET.get("pagina")
 
-    macro_categorias = (
+    macro_categorias = _taxonomia_cacheada("macros", request, lambda: list(
         Produto.objects
         .exclude(macro_categoria__isnull=True)
         .exclude(macro_categoria="")
         .values_list("macro_categoria", flat=True)
         .distinct()
         .order_by("macro_categoria")
-    )
+    ))
 
-    categorias_por_macro = {}
-    for row in (
-        Produto.objects
-        .exclude(macro_categoria__isnull=True).exclude(macro_categoria="")
-        .exclude(categoria__isnull=True).exclude(categoria="").exclude(categoria="DESCONHECIDO")
-        .values("macro_categoria", "categoria")
-        .distinct()
-        .order_by("macro_categoria", "categoria")
-    ):
-        categorias_por_macro.setdefault(row["macro_categoria"], []).append(row["categoria"])
+    def _montar_categorias_por_macro():
+        agrupado = {}
+        for row in (
+            Produto.objects
+            .exclude(macro_categoria__isnull=True).exclude(macro_categoria="")
+            .exclude(categoria__isnull=True).exclude(categoria="").exclude(categoria="DESCONHECIDO")
+            .values("macro_categoria", "categoria")
+            .distinct()
+            .order_by("macro_categoria", "categoria")
+        ):
+            agrupado.setdefault(row["macro_categoria"], []).append(row["categoria"])
+        return agrupado
+
+    categorias_por_macro = _taxonomia_cacheada(
+        "categorias", request, _montar_categorias_por_macro)
 
     # Ordenação: 'percent' (padrão — melhor p/ deal bot) ou 'valor' (R$ absoluto economizado).
     ordenar = "valor" if filtros.get("ordenar") == "valor" else "percent"
@@ -1790,27 +1836,35 @@ def top_promocoes(request):
     # Atribuição é regra de cada loja (ver Marketplace.preparar_exibicao). Em lote e
     # agrupado por loja: por item seria uma query por produto da página.
     from apps.scrapers.marketplaces.registry import get_marketplace
-    por_loja = {}
-    for p in candidatos:
-        por_loja.setdefault(p.marketplace, []).append(p)
-    for slug, itens in por_loja.items():
-        get_marketplace(slug).preparar_exibicao(itens, request.user)
 
-    # O corte só acontece AQUI: item sem link de afiliado não vai para a tela de
-    # envio, porque enviá-lo não comissiona nada. O filtro é em Python, e não em SQL,
-    # de propósito — `afiliado_pronto` é contrato de cada loja (na Amazon sai de tag +
-    # ASIN, não de linha no banco), então só `preparar_exibicao` sabe respondê-lo.
+    def _preparar(itens):
+        por_loja = {}
+        for p in itens:
+            por_loja.setdefault(p.marketplace, []).append(p)
+        for slug, do_slug in por_loja.items():
+            get_marketplace(slug).preparar_exibicao(do_slug, request.user)
+
+    # O corte por afiliação é em Python, e não em SQL, de propósito —
+    # `afiliado_pronto` é contrato de cada loja (na Amazon sai de tag + ASIN, não de
+    # linha no banco), então só `preparar_exibicao` sabe respondê-lo. Isso obriga a
+    # preparar o conjunto INTEIRO quando o filtro está ligado: paginar antes contaria
+    # itens que a tela nunca mostra.
+    #
+    # Quando o filtro está DESLIGADO, porém, nada depende de `afiliado_pronto` fora
+    # da página exibida — e preparar o catálogo inteiro só para renderizar 20 linhas
+    # era trabalho jogado fora em cima da consulta mais pesada do sistema.
     pendentes_ocultos = 0
     if so_afiliados:
+        _preparar(candidatos)
         prontos = [p for p in candidatos if getattr(p, "afiliado_pronto", False)]
         pendentes_ocultos = len(candidatos) - len(prontos)
         candidatos = prontos
-    # Pagina a lista já materializada, e não o queryset: `afiliado_pronto` é
-    # decidido em Python (acima), então uma paginação em SQL contaria itens que a
-    # tela nunca mostra. As queries por item abaixo continuam recebendo só a
-    # página corrente.
-    page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
-    produtos = list(page_obj)
+        page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
+        produtos = list(page_obj)
+    else:
+        page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
+        produtos = list(page_obj)
+        _preparar(produtos)
 
     cupons_map = {
         c.campanha_id: c

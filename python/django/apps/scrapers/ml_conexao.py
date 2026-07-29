@@ -108,6 +108,7 @@ def status(user_id: int) -> dict:
     if estado.get("fase") in {"iniciando", "aguardando_login", "validando", "salvando"}:
         estado["auth_valido"] = False
         estado["motivo_desconexao"] = ""
+        estado["alerta_conexao"] = ""
         estado.update(_transport.status(user_id))
         return estado
     # 'conectado' de verdade vem da fonte única (conexoes.py) — a mesma que o
@@ -120,11 +121,16 @@ def status(user_id: int) -> dict:
         est = estado_ml(user) if user else None
         estado["auth_valido"] = bool(est and est.conectado)
         estado["motivo_desconexao"] = est.motivo if est and not est.conectado else ""
+        # Conectado, mas a última sonda não passou. A tela precisa dizer isso sem
+        # alarmar: o anti-bot do ML bloqueia requisições legítimas vindas do IP da
+        # Fly, e a conexão volta ao normal sozinha na maioria das vezes.
+        estado["alerta_conexao"] = est.alerta if est and est.conectado else ""
     except Exception:
         from apps.accounts.ml_sessions import has_storage_state
         user = get_user_model().objects.filter(id=user_id).first()
         estado["auth_valido"] = bool(user and has_storage_state(user))
         estado["motivo_desconexao"] = ""
+        estado["alerta_conexao"] = ""
     estado.update(_transport.status(user_id))
     return estado
 

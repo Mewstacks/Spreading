@@ -353,15 +353,18 @@
       ? '<span class="badge badge-green"><span class="dot"></span>Ligado</span>'
       : '<span class="badge badge-muted">Desligado</span>';
   }
+  let ultimoAuto = null;
   async function autoStatus() {
-    if (autoBusy) return;
+    if (autoBusy || document.hidden) return;
     try {
       const r = await fetch('/scrapers/automacao/?tipo=envio');
       const d = await r.json();
-      paintAuto(d.rodando);
+      // `renderIcons()` varre o DOM inteiro. Rodava a cada 10s mesmo quando nada
+      // mudava — e este badge só troca quando alguém mexe no interruptor.
+      if (d.rodando !== ultimoAuto) { ultimoAuto = d.rodando; paintAuto(d.rodando); renderIcons(); }
     } catch (e) {}
-    renderIcons();
   }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) autoStatus(); });
   async function toggleAuto(el) {
     autoBusy = true;
     const acao = el.checked ? 'start' : 'stop';

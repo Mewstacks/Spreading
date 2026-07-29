@@ -109,6 +109,31 @@ divergência que mais confundia. Lendo da fonte única, divergir virou impossív
 Só com uma conta filtrada: sondar todas a cada carregamento (e a cada polling)
 seria uma ida à rede por usuário.
 {% endcomment %}
+{% comment %}
+Configuração que desliga funcionalidade em SILÊNCIO. Nada disso gera evento nem
+erro de log — do ponto de vista do código não houve falha, o fluxo apenas não
+rodou. O sintoma que chega ao usuário ("0 cupons prontos", "sessão expirada")
+aponta para o Mercado Livre, e ele reconecta em looping uma conta que está
+perfeita. Fica ANTES dos workers porque uma variável vazia explica silêncio tão
+bem quanto um worker parado.
+{% endcomment %}
+{% if r.configuracao %}
+<section class="section section-lined">
+  <div class="section-head"><h2>Configuração desligando funcionalidades</h2></div>
+  <div class="rows" id="configuracao">
+    {% for c in r.configuracao %}
+    <div class="row-item">
+      <span class="dot off"></span>
+      <div class="row-main">
+        <div class="row-title"><strong>{{ c.chave }}</strong></div>
+        <div class="row-note"><span style="color:var(--yellow);">{{ c.efeito }}</span></div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
 {% if r.conexoes %}
 <section class="section">
   <div class="section-head"><h2>Conexões de {{ usuario_encontrado.get_username }} agora</h2></div>
@@ -118,7 +143,8 @@ seria uma ida à rede por usuário.
       <span class="dot {% if c.conectado %}on{% else %}off{% endif %}"></span>
       <div class="row-main"><strong>{{ c.servico }}</strong></div>
       <div class="row-side" style="font-size:12.5px;">
-        {% if c.conectado %}<span class="muted">Conectado</span>{% elif c.detalhe == 'conectando' or c.detalhe == 'capacidade' %}<span style="color:var(--yellow);">{{ c.motivo }}</span>{% else %}<span style="color:var(--red);">{{ c.motivo }}</span>{% endif %}
+        {# Conectado COM alerta = a última sonda não passou, mas a sessão vale. #}
+        {% if c.conectado %}{% if c.alerta %}<span style="color:var(--yellow);">{{ c.alerta }}</span>{% else %}<span class="muted">Conectado</span>{% endif %}{% elif c.detalhe == 'conectando' or c.detalhe == 'capacidade' %}<span style="color:var(--yellow);">{{ c.motivo }}</span>{% else %}<span style="color:var(--red);">{{ c.motivo }}</span>{% endif %}
       </div>
     </div>
     {% endfor %}

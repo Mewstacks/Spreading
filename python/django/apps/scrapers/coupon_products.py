@@ -409,7 +409,7 @@ def _coletar_ml_remoto(cupom, usuario=None):
         return 0
     if resultado is None:
         with iniciar_browser(
-            storage_state=state, headless=True, validar_sessao=False,
+            storage_state=state, headless=True,
         ) as (page, _context):
             resultado = listar_itens_por_cupom(payload, page, max_paginas=2)
     total = 0

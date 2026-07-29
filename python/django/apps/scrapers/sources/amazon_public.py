@@ -15,7 +15,7 @@ def _money(text):
 
 def verify_product_url(url, nome_esperado=None):
     """Validação JIT pública usada antes de qualquer publicação Amazon."""
-    with iniciar_browser(headless=True, validar_sessao=False) as (page, _):
+    with iniciar_browser(headless=True) as (page, _):
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
         body = page.locator("body").inner_text(timeout=5000)
         lower = body.lower()
@@ -42,7 +42,7 @@ class AmazonPublicSource(SourceAdapter):
     def discover_offers(self, terms=None, **kwargs):
         terms = terms or getattr(settings, "AMAZON_FEED_KEYWORDS", []) or ["ofertas"]
         seen = set()
-        with iniciar_browser(headless=True, validar_sessao=False) as (page, _):
+        with iniciar_browser(headless=True) as (page, _):
             for term in terms[:12]:
                 page.goto(f"https://www.amazon.com.br/s?k={quote_plus(term)}",
                           wait_until="domcontentloaded", timeout=45000)
@@ -82,7 +82,7 @@ class AmazonPublicSource(SourceAdapter):
         return []
 
     def refresh_offer(self, item, **kwargs):
-        with iniciar_browser(headless=True, validar_sessao=False) as (page, _):
+        with iniciar_browser(headless=True) as (page, _):
             page.goto(item.canonical_url, wait_until="domcontentloaded", timeout=45000)
             body = page.locator("body").inner_text(timeout=5000).lower()
             if "não disponível" in body or "indisponível" in body:

@@ -64,7 +64,7 @@ class AmazonCouponsSource(SourceAdapter):
             return list(self._cache)
 
         rows = []
-        with iniciar_browser(headless=True, validar_sessao=False) as (page, _):
+        with iniciar_browser(headless=True) as (page, _):
             page.goto(COUPONS_URL, wait_until="domcontentloaded", timeout=45000)
             page.wait_for_timeout(1800)
             body = page.locator("body").inner_text(timeout=10000)

@@ -429,8 +429,7 @@ def mapear_ofertas(max_paginas=40, substituir=True, usuario=None):
     coletados = []
 
     vazias_seguidas = 0
-    with iniciar_browser(storage_state=storage_state(usuario), headless=True,
-                         validar_sessao=False) as (page, context):
+    with iniciar_browser(storage_state=storage_state(usuario), headless=True) as (page, context):
         for n in range(1, max_paginas + 1):
             emitir_progresso(f"[PROGRESSO] Ofertas página {n}/{max_paginas} ({n*100//max_paginas}%)")
             try:
@@ -493,8 +492,7 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None,
         return 0
     coletados = []
 
-    with iniciar_browser(storage_state=storage_state(usuario), headless=True,
-                         validar_sessao=False) as (page, context):
+    with iniciar_browser(storage_state=storage_state(usuario), headless=True) as (page, context):
         for termo in termos:
             slug = _slug_busca(termo)
             if not slug:

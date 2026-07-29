@@ -186,9 +186,23 @@ class DespachoDeTransporteTests(SimpleTestCase):
 
 
 class SemValidacaoDeSessaoRedundanteTests(SimpleTestCase):
-    """A pré-checagem de sessão abre um Chromium inteiro (goto 45s + networkidle 8s),
-    fecha, e só então abre o browser real. Não decide nada — em timeout ela marca
-    "inconclusiva" e segue. Quem detecta sessão caída é _abrir_link_builder."""
+    """A pré-checagem de sessão abria um Chromium inteiro (goto 45s + networkidle 8s),
+    fechava, e só então abria o browser real. Não decidia nada — em timeout marcava
+    "inconclusiva" e seguia. Quem detecta sessão caída é _abrir_link_builder.
+
+    Ela foi REMOVIDA de `iniciar_browser`, não desligada: enquanto o parâmetro
+    existisse, bastava um call-site novo esquecer `validar_sessao=False` para o
+    Chromium extra voltar — e, no IP de datacenter da Fly, voltar junto o falso
+    "sessão expirada" que ela produzia. Por isso o teste afere a ausência do
+    parâmetro na assinatura, e não o valor passado.
+    """
+
+    def test_iniciar_browser_nao_tem_mais_pre_checagem(self):
+        import inspect
+        from apps.scrapers.auxiliar import iniciar_browser
+
+        parametros = inspect.signature(iniciar_browser).parameters
+        self.assertNotIn("validar_sessao", parametros)
 
     def _capturar_kwargs(self, alvo):
         from contextlib import contextmanager
@@ -209,7 +223,8 @@ class SemValidacaoDeSessaoRedundanteTests(SimpleTestCase):
              patch("apps.accounts.feature_flags.enabled_for_user", return_value=True):
             with self.assertRaises(RuntimeError):
                 link.afiliate_link_builder("https://produto.mercadolivre.com.br/MLB-1")
-        self.assertIs(capturado.get("validar_sessao"), False)
+        # Um único browser, e sem pedir validação: o kwarg nem existe mais.
+        self.assertNotIn("validar_sessao", capturado)
 
     def test_lote_nao_valida_sessao(self):
         from apps.scrapers.scraper_mercadolivre import link
@@ -223,7 +238,7 @@ class SemValidacaoDeSessaoRedundanteTests(SimpleTestCase):
         with patch.object(link, "iniciar_browser", falso):
             with self.assertRaises(RuntimeError):
                 link.gerar_links_em_lote([ProdutoFalso()])
-        self.assertIs(capturado.get("validar_sessao"), False)
+        self.assertNotIn("validar_sessao", capturado)
 
 
 class AbrirLinkBuilderTests(SimpleTestCase):

@@ -409,7 +409,12 @@
     } else {
       inputBuffer.push(event);
     }
-    if (!flushTimer) flushTimer = setTimeout(flush, 50);
+    // 120ms, não 50. Cliques, teclas e wheel já chamam flush() na hora — este timer
+    // só atende ao movimento do mouse, que o próprio push já coalesce (só o último
+    // 'move' sobrevive). A 50ms uma passada de mouse virava ~20 POSTs/s contra um
+    // processo web de thread única que ainda hospeda o Chromium; a 120ms vira ~8,
+    // sem diferença perceptível no cursor remoto.
+    if (!flushTimer) flushTimer = setTimeout(flush, 120);
   }
   async function flush() {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
@@ -600,6 +605,11 @@
       if (state.auth_valido) phase = 'conectado';
       else if (phase === 'conectado') phase = state.erro ? 'erro' : 'idle';
     }
+    // Login em andamento é o único momento em que a fase muda sozinha; conectado,
+    // 'idle' e 'erro' são estados de repouso e não justificam um poll de 3s.
+    const emAndamento = FASES_EM_CURSO.has(phase);
+    agendarPoll(emAndamento ? POLL_ATIVO_MS : POLL_OCIOSO_MS);
+    watchFrames(emAndamento);
     const visual = FASES[phase] || FASES.idle;
     pill.className = `conn-pill ${visual.cls}`;
     pillTxt.textContent = visual.txt;
@@ -625,10 +635,15 @@
       errText.textContent = state.erro;
       show(errBox, true, 'flex');
     } else show(errBox, false);
-    // `motivo_desconexao` é o porquê que o servidor já calculava e a tela descartava
-    // ("Nenhuma sessão do Mercado Livre", "Sessão expirou — reconecte"). Sem isto o
-    // painel só ficava cinza e não dizia o que houve.
-    const aviso = state.aviso || (!state.auth_valido ? state.motivo_desconexao : '');
+    // Dois avisos distintos, nunca simultâneos:
+    // - `motivo_desconexao`: o porquê de estar desconectado, que o servidor já
+    //   calculava e a tela descartava ("Nenhuma sessão do Mercado Livre");
+    // - `alerta_conexao`: conexão VIVA cuja última sonda não passou (o anti-bot do
+    //   ML barra requisições legítimas vindas do datacenter). Vai no box de aviso,
+    //   e não no de erro, porque não há nada para o usuário fazer ainda.
+    const aviso = state.aviso
+      || (!state.auth_valido ? state.motivo_desconexao : state.alerta_conexao)
+      || '';
     if (aviso) {
       warnText.textContent = aviso;
       show(warnBox, true, 'flex');
@@ -682,14 +697,46 @@
     finally { stopLive(); cancelarBtn.disabled = false; poll(); }
   };
 
+  // O watchdog de frame só faz sentido com um stream aberto; ligá-lo sempre acordava
+  // a aba 1x/s para não fazer nada.
+  //
   // 12s > os 10s de heartbeat/ping do servidor. Com o limite antigo de 4s, uma
   // página simplesmente parada — o estado normal enquanto se lê um CAPTCHA —
   // sempre acusava queda e cobria a tela com o overlay.
-  setInterval(() => {
-    if (framesES && lastFrameAt && Date.now() - lastFrameAt > 12000) setStream('interrompida');
-  }, 1000);
+  let frameWatch = null;
+  function watchFrames(ligar) {
+    if (ligar && !frameWatch) {
+      frameWatch = setInterval(() => {
+        if (framesES && lastFrameAt && Date.now() - lastFrameAt > 12000) setStream('interrompida');
+      }, 1000);
+    } else if (!ligar && frameWatch) {
+      clearInterval(frameWatch); frameWatch = null;
+    }
+  }
+
+  // Cadência do polling. Cada disparo é um request Django completo (middleware de
+  // tenant + contexto RLS) num processo web de thread única compartilhada com o
+  // Chromium do login: a 3s, por aba, isso era carga contínua para observar algo
+  // que só muda quando o usuário age. Regras:
+  //   - parado enquanto a aba está oculta (nada muda que o usuário vá ver);
+  //   - lento (20s) fora de um login em curso — só para perceber uma desconexão;
+  //   - rápido (3s) durante o login, que é quando a fase muda sozinha.
+  const POLL_ATIVO_MS = 3000, POLL_OCIOSO_MS = 20000;
+  let pollTimer = null, pollAtual = 0;
+  function agendarPoll(ms) {
+    if (document.hidden) { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } pollAtual = 0; return; }
+    if (pollTimer && pollAtual === ms) return;
+    if (pollTimer) clearTimeout(pollTimer);
+    pollAtual = ms;
+    pollTimer = setTimeout(async () => { pollTimer = null; await poll(); agendarPoll(pollAtual); }, ms);
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { if (pollTimer) clearTimeout(pollTimer); pollTimer = null; pollAtual = 0; }
+    else { poll(); agendarPoll(pollAtual || POLL_ATIVO_MS); }   // volta a olhar: atualiza já
+  });
+
   poll();
-  setInterval(poll, 3000);
+  agendarPoll(POLL_ATIVO_MS);
   if (window.lucide) lucide.createIcons();
 })();
 </script>
