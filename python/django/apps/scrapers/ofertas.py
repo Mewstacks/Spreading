@@ -1424,49 +1424,85 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
     if usuario is not None:
         from django.contrib.auth import get_user_model
         agora_abertura = timezone.now()
-        with transaction.atomic():
-            get_user_model().objects.select_for_update().get(pk=usuario.pk)
-            Produto.objects.select_for_update().get(pk=produto.pk)
-            perfil = getattr(usuario, "perfil", None)
-            inicio_dia = timezone.localtime(agora_abertura).replace(
-                hour=0, minute=0, second=0, microsecond=0)
-            limite = perfil.cota_max_envios_dia() if perfil else 0
-            usados = Publicacao.objects.filter(
-                usuario=usuario, criada_em__gte=inicio_dia,
-                status__in=("pendente", "enviado", "incerto"),
-            ).count()
-            if perfil and perfil.bloqueado:
-                return {"sucesso": False, "motivo": "Conta bloqueada para envios.",
-                        "classe": "permanente"}
-            if limite and usados >= limite:
-                return {"sucesso": False, "motivo": "Limite diário de envios atingido.",
-                        "classe": "permanente"}
-            desde = agora_abertura - timedelta(hours=24)
-            recente = Publicacao.objects.filter(
-                usuario=usuario, origem="produto", produto=produto,
-                canal=canal, destino_id=grupo_id,
-            ).filter(
-                Q(status="pendente", criada_em__gte=agora_abertura - timedelta(minutes=30))
-                | Q(status="enviado", enviada_em__gte=desde)
-                | Q(status="incerto", criada_em__gte=desde)
-            ).order_by("-criada_em").first()
-            if recente and produto.preco_com_cupom > recente.preco_final * .95:
-                motivo = ("Esta oferta já está sendo enviada para o destino."
-                          if recente.status == "pendente"
-                          else "Este destino recebeu a oferta nas últimas 24h.")
-                return {"sucesso": False, "motivo": motivo, "duplicado": True,
-                        "classe": "permanente"}
-            publicacao = Publicacao.objects.create(
-                usuario=usuario, origem="produto", produto=produto,
-                configuracao=configuracao, canal=canal,
-                destino_id=str(grupo_id or "")[:100],
-                destino_nome=str(destino_nome or "")[:255],
-                preco_original=produto.preco_sem_desconto,
-                preco_final=produto.preco_com_cupom,
-                categoria=produto.macro_categoria or produto.categoria or "",
-                score=getattr(produto, "score_oferta", 0),
-                motivos_score=getattr(produto, "motivos_score", []),
+        try:
+            with transaction.atomic():
+                get_user_model().objects.select_for_update().get(pk=usuario.pk)
+                # O lock do usuário já serializa cota e deduplicação. O catálogo do ML,
+                # porém, é pool COMPARTILHADO (owner=None): o RLS o deixa legível por
+                # qualquer tenant, mas `FOR UPDATE` exige a policy de ESCRITA e o
+                # PostgreSQL esconde a linha como se não existisse — era isto que
+                # derrubava TODO envio de oferta do ML com o erro genérico do SSE.
+                # Este fluxo não escreve no produto: relê só p/ confirmar que ele ainda
+                # existe e bloqueia apenas o item privado (Amazon do próprio usuário).
+                produto_qs = Produto.objects.filter(pk=produto.pk)
+                if getattr(produto, "owner_id", None) is None:
+                    atual = produto_qs.filter(owner__isnull=True).first()
+                else:
+                    atual = produto_qs.filter(
+                        owner_id=produto.owner_id).select_for_update().first()
+                if not atual:
+                    return {"sucesso": False,
+                            "motivo": "Esta oferta foi atualizada e não está mais "
+                                      "disponível. Atualize a tela e tente outra.",
+                            "classe": "permanente", "produto_atualizado": True}
+                perfil = getattr(usuario, "perfil", None)
+                inicio_dia = timezone.localtime(agora_abertura).replace(
+                    hour=0, minute=0, second=0, microsecond=0)
+                limite = perfil.cota_max_envios_dia() if perfil else 0
+                usados = Publicacao.objects.filter(
+                    usuario=usuario, criada_em__gte=inicio_dia,
+                    status__in=("pendente", "enviado", "incerto"),
+                ).count()
+                if perfil and perfil.bloqueado:
+                    return {"sucesso": False, "motivo": "Conta bloqueada para envios.",
+                            "classe": "permanente"}
+                if limite and usados >= limite:
+                    return {"sucesso": False, "motivo": "Limite diário de envios atingido.",
+                            "classe": "permanente"}
+                desde = agora_abertura - timedelta(hours=24)
+                recente = Publicacao.objects.filter(
+                    usuario=usuario, origem="produto", produto=produto,
+                    canal=canal, destino_id=grupo_id,
+                ).filter(
+                    Q(status="pendente", criada_em__gte=agora_abertura - timedelta(minutes=30))
+                    | Q(status="enviado", enviada_em__gte=desde)
+                    | Q(status="incerto", criada_em__gte=desde)
+                ).order_by("-criada_em").first()
+                if recente and produto.preco_com_cupom > recente.preco_final * .95:
+                    motivo = ("Esta oferta já está sendo enviada para o destino."
+                              if recente.status == "pendente"
+                              else "Este destino recebeu a oferta nas últimas 24h.")
+                    return {"sucesso": False, "motivo": motivo, "duplicado": True,
+                            "classe": "permanente"}
+                publicacao = Publicacao.objects.create(
+                    usuario=usuario, origem="produto", produto=produto,
+                    configuracao=configuracao, canal=canal,
+                    destino_id=str(grupo_id or "")[:100],
+                    destino_nome=str(destino_nome or "")[:255],
+                    preco_original=produto.preco_sem_desconto,
+                    preco_final=produto.preco_com_cupom,
+                    categoria=produto.macro_categoria or produto.categoria or "",
+                    score=getattr(produto, "score_oferta", 0),
+                    motivos_score=getattr(produto, "motivos_score", []),
+                )
+        except Exception as exc:
+            # Reservar o envio é escrita em banco: se falhar, o usuário precisa de um
+            # motivo, não do erro genérico do runner SSE (nada foi enviado aqui).
+            logger.exception("Falha ao reservar envio do produto %s", produto.pk)
+            log_event(
+                "publicacao", "offer_reservation_failed",
+                "Não foi possível reservar o envio da oferta.", level="error",
+                usuario=usuario, contexto={
+                    "produto_id": getattr(produto, "id", None),
+                    "marketplace": getattr(produto, "marketplace", ""),
+                    "canal": canal, "destino": destino_nome or grupo_id,
+                    "causa": type(exc).__name__,
+                }, exc=exc,
             )
+            return {"sucesso": False,
+                    "motivo": "Não foi possível reservar esta oferta para envio. "
+                              "Atualize a tela e tente novamente.",
+                    "classe": "transitorio", "causa": type(exc).__name__}
 
     def falhar(motivo, **extra):
         erro_tecnico = extra.pop("_erro_tecnico", "")
