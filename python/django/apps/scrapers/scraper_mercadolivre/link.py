@@ -1,6 +1,7 @@
 import sys
 import os
 import re
+import time
 import logging
 from datetime import timedelta
 
@@ -43,6 +44,21 @@ class AuthError(Exception):
     pass
 
 
+class AntiBotError(Exception):
+    """O ML pediu verificação antes de mostrar a página — ela NUNCA foi vista.
+
+    Semanticamente diferente de LoginError: aqui a conta está boa e não há nada
+    para o usuário corrigir. É o gateway anti-bot reagindo ao IP de datacenter da
+    Fly (ver auxiliar.iniciar_browser e ml_conexao._ir_para_login, que já
+    documentam o mesmo comportamento).
+
+    Existe para quebrar o vínculo falso entre "não abriu" e "reconecte sua conta":
+    tratar challenge como sessão morta manda o usuário refazer um login que estava
+    perfeito, e — pior — fazia o lote inteiro ser descartado.
+    """
+    pass
+
+
 
 
 
@@ -77,26 +93,79 @@ def _pagina_de_login(page) -> bool:
         return False
 
 
-def _abrir_link_builder(page):
+def _pagina_intersticial(page) -> bool:
+    """True se o ML interpôs uma verificação (/gz/account-verification, captcha).
+
+    Reusa a mesma lista da verificação de destino (link_http), onde ela nasceu de
+    uma medição: o interstitial responde 200 com corpo grande, então sem
+    reconhecê-lo o código conclui "não é página válida" e culpa a sessão.
     """
-    Abre o Link Builder e falha CEDO com LoginError se a sessão caiu.
+    from apps.scrapers.scraper_mercadolivre.link_http import _CAMINHOS_INTERSTICIAIS
+    url = (getattr(page, "url", "") or "").lower()
+    return any(p in url for p in _CAMINHOS_INTERSTICIAIS)
+
+
+_LB_URL = "https://www.mercadolivre.com.br/afiliados/linkbuilder#hub"
+# Mesma forma de ml_conexao._ir_para_login, e pelo mesmo motivo declarado lá: "em
+# prod o IP de datacenter da Fly bate no gateway anti-bot da ML". Uma tentativa só
+# transformava um soluço do gateway em "sessão expirada".
+_LB_TENTATIVAS = 2
+_LB_TIMEOUT_MS = 60000
+# Reaberturas seguidas do Link Builder antes de desistir do lote. Uma reabertura
+# isolada é o gateway anti-bot piscando; três seguidas é o ML recusando o IP, e
+# aí insistir só queima tempo.
+_MAX_FALHAS_CONSECUTIVAS = 3
+
+
+def _abrir_link_builder(page):
+    """Abre o Link Builder, distinguindo anti-bot de sessão realmente caída.
 
     O portal de afiliados usa SSO próprio (jms/msl): mesmo com cookies válidos no
     site principal, ele pode redirecionar pro login. O redirect leva alguns
     segundos, então espera a navegação assentar ANTES de checar a URL — checar
     só o campo de login imediatamente após o goto dá falso negativo e o erro
     real só apareceria como timeout genérico no fill() seguinte.
+
+    Levanta AntiBotError (verificação interposta), LoginError (sessão morta de
+    verdade) ou AuthError (o ML não respondeu). São três causas com três ações
+    diferentes: esperar, reconectar, tentar mais tarde.
     """
-    try:
-        page.goto("https://www.mercadolivre.com.br/afiliados/linkbuilder#hub",
-                  wait_until="domcontentloaded", timeout=45000)
+    ultimo_erro = None
+    navegou = False
+    for tentativa in range(1, _LB_TENTATIVAS + 1):
         try:
-            page.wait_for_load_state("networkidle", timeout=10000)
-        except Exception:
-            pass
-    except Exception:
-        raise AuthError("Não foi possível acessar o Link Builder do Mercado Livre. "
-                        "Reconecte sua conta em Conexão Mercado Livre e tente de novo.")
+            page.goto(_LB_URL, wait_until="domcontentloaded", timeout=_LB_TIMEOUT_MS)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            navegou, ultimo_erro = True, None
+        except Exception as exc:
+            ultimo_erro = exc
+            logger.warning("Link Builder: navegação falhou (tentativa %s/%s): %s",
+                           tentativa, _LB_TENTATIVAS, exc)
+            continue
+
+        if not _pagina_intersticial(page):
+            break
+        # O gateway costuma liberar na segunda passada; só insiste se ainda sobra
+        # tentativa.
+        logger.info("Link Builder: verificação anti-bot interposta (tentativa %s/%s)",
+                    tentativa, _LB_TENTATIVAS)
+        if tentativa < _LB_TENTATIVAS:
+            time.sleep(3)
+
+    # Três causas, três ações do usuário: tentar mais tarde, esperar, reconectar.
+    if not navegou:
+        raise AuthError(
+            "O Mercado Livre não respondeu ao abrir o Link Builder. "
+            "Tente de novo em alguns minutos."
+        ) from ultimo_erro
+    if _pagina_intersticial(page):
+        raise AntiBotError(
+            "O Mercado Livre pediu verificação de segurança antes de abrir o Link "
+            "Builder. A conta segue conectada."
+        )
     if _pagina_de_login(page):
         raise LoginError(MSG_SESSAO_EXPIRADA)
 
@@ -352,6 +421,8 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
     gerados = 0
     falhas = 0
     ultimo_erro = None
+    consecutivas = 0      # reaberturas seguidas do Link Builder
+    interrompido = None   # erro que encerrou o lote antes do fim
     # Sem guarda global de ORM: cada gravação vai por executar_no_tenant, que a
     # desvia para uma thread sem event loop. O `with` que existia aqui setava
     # DJANGO_ALLOW_ASYNC_UNSAFE no os.environ do PROCESSO — global às 8 threads do
@@ -401,22 +472,54 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
                 executar_no_tenant(registrar_falha, usuario, prod, str(e), terminal=True)
                 falhas += 1
             except Exception as e:
-                if _pagina_de_login(page):
-                    raise LoginError(MSG_SESSAO_EXPIRADA)
                 ultimo_erro = e
+                # A página caiu fora do Link Builder (login ou verificação
+                # anti-bot). Antes isso levantava LoginError na hora e MATAVA o
+                # lote inteiro no primeiro soluço. Agora tenta reabrir UMA vez e
+                # segue de onde parou — os itens já gerados ficam salvos.
+                if _pagina_de_login(page) or _pagina_intersticial(page):
+                    try:
+                        _abrir_link_builder(page)
+                    except AntiBotError:
+                        interrompido = e
+                        break
+                    except (LoginError, AuthError):
+                        # Sessão morta de verdade: não vale queimar 50 × 60s.
+                        raise
+                    # Reabriu: este item não foi culpa do produto, não registra
+                    # falha nele e não conta para o teto — ele volta ao topo da fila.
+                    consecutivas += 1
+                    if consecutivas >= _MAX_FALHAS_CONSECUTIVAS:
+                        interrompido = e
+                        break
+                    continue
+                consecutivas = 0
                 logger.warning("Falha ao gerar link afiliado ML em lote para produto %s: %s", getattr(prod, "id", None), e)
+                # Só erro DO PRODUTO conta tentativa. Erro de infraestrutura passar
+                # por aqui aposentava o item: registrar_falha incrementa `tentativas`
+                # e, aos MAX_TENTATIVAS_ERRO, marca estado="erro" com
+                # proxima_tentativa=None — fora da fila para sempre. Uma janela de
+                # anti-bot poderia aposentar dezenas de produtos afiliáveis.
                 executar_no_tenant(registrar_falha, usuario, prod, str(e))
                 falhas += 1
 
+    if interrompido is not None:
+        logger.warning("Lote de links ML interrompido após %s gerado(s): %s",
+                       gerados, interrompido)
     logger.info("Links afiliados ML em lote: %s gerados, %s falhas", gerados, falhas)
-    if falhas and usuario is not None:
+    if (falhas or interrompido) and usuario is not None:
         from apps.scrapers.eventos import log_event
         log_event(
             "scraper", "links_erro",
-            f"Lote de links ML: {gerados} gerado(s), {falhas} falha(s).",
+            f"Lote de links ML: {gerados} gerado(s), {falhas} falha(s)."
+            + (" Interrompido por instabilidade do Mercado Livre."
+               if interrompido else ""),
             level="warning", usuario=usuario,
-            contexto={"gerados": gerados, "falhas": falhas, "total": len(pendentes)},
-            exc=ultimo_erro,
+            # `interrompido` separa "o produto não afilia" de "o ML não deixou
+            # trabalhar" — é o que vai permitir medir se a serialização resolveu.
+            contexto={"gerados": gerados, "falhas": falhas, "total": len(pendentes),
+                      "interrompido": bool(interrompido)},
+            exc=interrompido or ultimo_erro,
         )
     return (gerados, falhas)
 

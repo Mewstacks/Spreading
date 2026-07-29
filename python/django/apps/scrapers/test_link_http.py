@@ -224,3 +224,83 @@ class SemValidacaoDeSessaoRedundanteTests(SimpleTestCase):
             with self.assertRaises(RuntimeError):
                 link.gerar_links_em_lote([ProdutoFalso()])
         self.assertIs(capturado.get("validar_sessao"), False)
+
+
+class AbrirLinkBuilderTests(SimpleTestCase):
+    """Distinguir anti-bot de sessão morta é a diferença entre "espere" e
+    "reconecte sua conta" — e entre descartar ou não um lote de 50."""
+
+    class PageFalsa:
+        """Playwright mínimo: só o que _abrir_link_builder toca."""
+        def __init__(self, urls, erros=None):
+            self._urls = list(urls)
+            self._erros = list(erros or [])
+            self.url = ""
+            self.gotos = 0
+
+        def goto(self, *a, **kw):
+            self.gotos += 1
+            erro = self._erros.pop(0) if self._erros else None
+            if erro:
+                raise erro
+            self.url = self._urls.pop(0) if self._urls else self.url
+
+        def wait_for_load_state(self, *a, **kw):
+            pass
+
+        def get_by_test_id(self, *a, **kw):
+            class _El:
+                def is_visible(self_inner, *a, **kw):
+                    return False
+            return _El()
+
+    def setUp(self):
+        from apps.scrapers.scraper_mercadolivre import link
+        self.link = link
+        remendo = patch.object(link.time, "sleep")   # não dormir 3s no teste
+        remendo.start()
+        self.addCleanup(remendo.stop)
+
+    def test_intersticial_vira_antibot_e_nao_login(self):
+        """O caso do bug: challenge do anti-bot virava 'sessão expirada' e mandava
+        o usuário reconectar uma conta que estava perfeita."""
+        pagina = self.PageFalsa([
+            "https://www.mercadolivre.com.br/gz/account-verification?go=x",
+            "https://www.mercadolivre.com.br/gz/account-verification?go=x",
+        ])
+        with self.assertRaises(self.link.AntiBotError) as ctx:
+            self.link._abrir_link_builder(pagina)
+        self.assertNotIsInstance(ctx.exception, self.link.LoginError)
+        self.assertEqual(pagina.gotos, 2)   # retentou antes de desistir
+
+    def test_intersticial_que_libera_na_segunda_passa(self):
+        pagina = self.PageFalsa([
+            "https://www.mercadolivre.com.br/gz/account-verification?go=x",
+            "https://www.mercadolivre.com.br/afiliados/linkbuilder#hub",
+        ])
+        self.link._abrir_link_builder(pagina)     # não levanta
+        self.assertEqual(pagina.gotos, 2)
+
+    def test_timeout_na_primeira_e_sucesso_na_segunda(self):
+        pagina = self.PageFalsa(
+            ["https://www.mercadolivre.com.br/afiliados/linkbuilder#hub"],
+            erros=[TimeoutError("lento")],
+        )
+        self.link._abrir_link_builder(pagina)     # não levanta
+        self.assertEqual(pagina.gotos, 2)
+
+    def test_login_de_verdade_continua_levantando_login_error(self):
+        """A detecção legítima não pode regredir."""
+        pagina = self.PageFalsa([
+            "https://www.mercadolivre.com/jms/mlb/lgz/msl/login/",
+            "https://www.mercadolivre.com/jms/mlb/lgz/msl/login/",
+        ])
+        with self.assertRaises(self.link.LoginError):
+            self.link._abrir_link_builder(pagina)
+
+    def test_navegacao_que_nunca_responde_vira_auth_error(self):
+        pagina = self.PageFalsa([], erros=[TimeoutError("x"), TimeoutError("y")])
+        with self.assertRaises(self.link.AuthError) as ctx:
+            self.link._abrir_link_builder(pagina)
+        # A mensagem antiga mandava "Reconecte sua conta", que era o conselho errado.
+        self.assertNotIn("Reconecte", str(ctx.exception))

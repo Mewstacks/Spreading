@@ -5116,3 +5116,125 @@ class RenovacaoDeSessaoPersistidaTests(TestCase):
                 pass
 
         self.assertNotIn("sessao_gravada", ordem)
+
+
+class LoteDeLinksResilienteTests(TestCase):
+    """O lote parava inteiro no primeiro soluço do Link Builder — e, pior, marcava
+    falha nos produtos por erro de INFRAESTRUTURA. Como registrar_falha incrementa
+    `tentativas` e aos MAX_TENTATIVAS_ERRO (8) marca estado='erro' com
+    proxima_tentativa=None, uma janela de anti-bot podia aposentar dezenas de
+    produtos perfeitamente afiliáveis."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("lote-links", password="test")
+
+    def _produtos(self, n):
+        return [Produto.objects.create(
+            marketplace="mercadolivre", nome=f"Item {i}", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=70,
+            link_produto=f"https://produto.mercadolivre.com.br/MLB-{100000+i}",
+        ) for i in range(n)]
+
+    def _rodar(self, produtos, afiliar):
+        """Roda gerar_links_em_lote com browser e Link Builder falsos."""
+        from contextlib import contextmanager
+        from apps.scrapers.scraper_mercadolivre import link as ml
+
+        page = MagicMock()
+        page.url = "https://www.mercadolivre.com.br/afiliados/linkbuilder#hub"
+        # Sem isto, `is_visible()` devolve um MagicMock TRUTHY e _pagina_de_login
+        # conclui "tela de login" em toda checagem — o teste passaria por um
+        # caminho que não é o que ele quer medir.
+        page.get_by_test_id.return_value.is_visible.return_value = False
+
+        @contextmanager
+        def _browser(*a, **kw):
+            yield page, MagicMock()
+
+        # executar_no_tenant exige contexto de tenant instalado (RLS); no teste ele
+        # não existe, então a gravação viraria exceção e mascararia o que se mede.
+        direto = lambda fn, *a, **kw: fn(*a, **kw)
+
+        with patch.object(ml, "iniciar_browser", _browser), \
+             patch.object(ml, "_abrir_link_builder") as abrir, \
+             patch.object(ml, "_afiliar_url_na_pagina", side_effect=afiliar), \
+             patch.object(ml, "executar_no_tenant", direto), \
+             patch.object(ml, "salvar_cache"), \
+             patch.object(ml, "registrar_falha") as falha:
+            resultado = ml.gerar_links_em_lote(produtos, usuario=self.user)
+        return resultado, falha, abrir, page
+
+    def test_falha_no_meio_reabre_e_continua_o_lote(self):
+        from apps.scrapers.scraper_mercadolivre import link as ml
+        produtos = self._produtos(3)
+        chamadas = {"n": 0}
+
+        def afiliar(page, url):
+            chamadas["n"] += 1
+            if chamadas["n"] == 2:
+                # Simula o ML jogando a página para o interstitial no meio do lote.
+                page.url = "https://www.mercadolivre.com.br/gz/account-verification?go=x"
+                raise RuntimeError("caiu")
+            page.url = "https://www.mercadolivre.com.br/afiliados/linkbuilder#hub"
+            return "https://meli.la/ok"
+
+        (gerados, falhas), falha, abrir, _ = self._rodar(produtos, afiliar)
+
+        self.assertEqual(gerados, 2)          # antes: 0, o lote inteiro morria
+        self.assertEqual(abrir.call_count, 2)  # abertura inicial + 1 reabertura
+        falha.assert_not_called()              # erro de infra não queima a fila
+
+    def test_erro_do_proprio_produto_continua_registrando_falha(self):
+        produtos = self._produtos(2)
+
+        def afiliar(page, url):
+            raise RuntimeError("o Link Builder recusou este item")
+
+        (gerados, falhas), falha, _, _ = self._rodar(produtos, afiliar)
+
+        self.assertEqual(gerados, 0)
+        self.assertEqual(falhas, 2)
+        self.assertEqual(falha.call_count, 2)  # aqui a culpa É do produto
+
+    def test_tres_reaberturas_seguidas_encerram_o_lote(self):
+        produtos = self._produtos(10)
+
+        def afiliar(page, url):
+            page.url = "https://www.mercadolivre.com.br/gz/account-verification?go=x"
+            raise RuntimeError("bloqueado")
+
+        (gerados, falhas), falha, abrir, _ = self._rodar(produtos, afiliar)
+
+        self.assertEqual(gerados, 0)
+        falha.assert_not_called()
+        # 1 abertura inicial + 3 reaberturas; não gasta as 10 tentativas.
+        self.assertEqual(abrir.call_count, 4)
+
+    def test_sessao_morta_de_verdade_aborta_sem_queimar_a_fila(self):
+        from apps.scrapers.scraper_mercadolivre import link as ml
+        produtos = self._produtos(5)
+
+        def afiliar(page, url):
+            page.url = "https://www.mercadolivre.com/jms/mlb/lgz/msl/login/"
+            raise RuntimeError("deslogou")
+
+        from contextlib import contextmanager
+        page = MagicMock()
+        page.url = "https://www.mercadolivre.com.br/afiliados/linkbuilder#hub"
+        page.get_by_test_id.return_value.is_visible.return_value = False
+
+        @contextmanager
+        def _browser(*a, **kw):
+            yield page, MagicMock()
+
+        direto = lambda fn, *a, **kw: fn(*a, **kw)
+        with patch.object(ml, "iniciar_browser", _browser), \
+             patch.object(ml, "_abrir_link_builder",
+                          side_effect=[None, ml.LoginError("morreu")]), \
+             patch.object(ml, "_afiliar_url_na_pagina", side_effect=afiliar), \
+             patch.object(ml, "executar_no_tenant", direto), \
+             patch.object(ml, "salvar_cache"), \
+             patch.object(ml, "registrar_falha") as falha:
+            with self.assertRaises(ml.LoginError):
+                ml.gerar_links_em_lote(produtos, usuario=self.user)
+        falha.assert_not_called()
