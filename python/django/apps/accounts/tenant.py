@@ -392,15 +392,32 @@ def organization_job_sem_transacao(func):
     return wrapped
 
 
-def organization_callable(organization, func):
-    """Adapta um callable sem argumentos para execução segura em nova thread."""
+def organization_callable(organization, func, *, segurar_transacao=True):
+    """Adapta um callable sem argumentos para execução segura em nova thread.
+
+    `segurar_transacao=False` é o modo para jobs LONGOS (SSE de raspagem, geração
+    de links): o escopo fica apenas anotado, sem transação nem conexão presas, e
+    quem grava reinstala o tenant via `executar_no_tenant` — mesmo desenho de
+    `organization_job_sem_transacao`.
+
+    Por que isso importa: `organization_context` mantém um `transaction.atomic()`
+    aberto durante TODO o job. Um lote de links passa minutos no Link Builder sem
+    tocar no banco, e essa transação fica `idle in transaction` até o proxy da Fly
+    derrubar o socket. Pior: dentro de uma transação o Django NÃO fecha a conexão —
+    ele só marca `closed_in_transaction` e a mantém quebrada até o fim — então
+    nenhuma tentativa de renovar (`close_all`, `close_old_connections`) tem efeito
+    ali dentro, e toda query seguinte estoura "the connection is closed".
+    """
     organization_id = getattr(organization, "pk", organization)
 
     @wraps(func)
     def wrapped():
         close_old_connections()
         try:
-            with organization_context(organization_id):
+            if segurar_transacao:
+                with organization_context(organization_id):
+                    return func()
+            with tenant_suspenso(organization_id):
                 return func()
         finally:
             close_old_connections()

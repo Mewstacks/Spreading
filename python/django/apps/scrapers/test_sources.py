@@ -550,30 +550,60 @@ class VerificacaoDeLinksEhLanePropriaTests(TestCase):
         self.assertNotIn("verificar_links_pendentes", fonte)
 
 
-class GerarLinksRenovaConexaoTests(TestCase):
-    """Minutos no Link Builder deixam o socket do Postgres ocioso e o proxy da Fly
-    o derruba. `close_old_connections()` NÃO resolve: ela só olha idade e flags
-    locais, e um socket morto pelo proxy parece saudável por esse critério — a
-    conexão é reaproveitada e só então estoura OperationalError. Tem de ser
-    `connections.close_all()`, que é incondicional.
+class GerarLinksNaoSeguraTransacaoTests(TestCase):
+    """O job de gerar links passa MINUTOS no Link Builder sem tocar no banco.
+
+    Se o tenant for instalado com `transaction.atomic()` aberto (o padrão de
+    organization_context), essa transação fica `idle in transaction` o tempo todo e
+    o proxy da Fly derruba o socket. E o pior: dentro de uma transação o Django NÃO
+    fecha a conexão — só marca `closed_in_transaction` — então nenhuma tentativa de
+    renovar tem efeito, e toda query seguinte estoura "the connection is closed".
+
+    A saída é a mesma que o live view do ML já usava: escopo apenas anotado, e cada
+    ida ao banco reinstalando o tenant numa transação de milissegundos.
     """
 
-    def test_usa_close_all_e_nao_close_old_connections(self):
+    def test_job_de_links_nao_segura_transacao(self):
         import inspect
         from apps.scrapers import views
         fonte = inspect.getsource(views.gerar_links_stream)
-        self.assertIn("connections.close_all()", fonte)
-        # Olha só o CÓDIGO: a menção em comentário é proposital (explica por que
-        # não usar). O que não pode voltar é a chamada.
-        codigo = "\n".join(l for l in fonte.split("\n")
-                           if not l.strip().startswith("#"))
-        self.assertNotIn("close_old_connections(", codigo)
+        self.assertIn("segurar_transacao=False", fonte)
 
-    def test_renova_antes_de_cada_loja_e_antes_do_resumo(self):
-        """A Amazon gera link logo depois da fase longa do ML: sem renovar entre as
-        lojas, ela herda o socket morto (foi o erro visto em homologação)."""
+    def test_idas_ao_banco_passam_por_executar_no_tenant(self):
+        """Sem transação não há GUC de tenant: leitura direta seria filtrada pela
+        RLS e devolveria zero produto."""
         import inspect
         from apps.scrapers import views
         fonte = inspect.getsource(views.gerar_links_stream)
-        # uma dentro do laço por loja, uma antes do resumo final
-        self.assertGreaterEqual(fonte.count("connections.close_all()"), 2)
+        codigo = " ".join(l for l in fonte.split("\n")
+                          if not l.strip().startswith("#")).split()
+        codigo = " ".join(codigo)   # normaliza quebras de linha da chamada
+        self.assertIn("executar_no_tenant( _produtos_sem_link", codigo)
+        self.assertIn("executar_no_tenant(frase_resumo_afiliacao", codigo)
+
+    def test_modo_sem_transacao_apenas_anota_o_escopo(self):
+        """No modo sem transação o tenant fica SUSPENSO, não instalado: nenhum GUC
+        e nenhuma transação presos durante os minutos de browser. Quem grava o
+        reinstala via executar_no_tenant.
+
+        (Não dá para medir `in_atomic_block` aqui: o próprio TestCase envolve tudo
+        numa transação. O que se observa é o modo do escopo.)"""
+        from apps.accounts.tenant import (
+            current_organization_id, organization_callable, _tenant_suspenso,
+        )
+        from apps.accounts.models import organization_for_user
+
+        user = get_user_model().objects.create_user("semtrans", password="test")
+        org = organization_for_user(user)
+        visto = {}
+
+        def _corpo():
+            visto["instalado"] = current_organization_id()
+            visto["suspenso"] = (_tenant_suspenso.get() or (None, None))[0]
+
+        organization_callable(org.pk, _corpo, segurar_transacao=False)()
+        self.assertIsNone(visto["instalado"])
+        self.assertEqual(visto["suspenso"], str(org.pk))
+
+        organization_callable(org.pk, _corpo, segurar_transacao=True)()
+        self.assertEqual(visto["instalado"], str(org.pk))

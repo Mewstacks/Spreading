@@ -2006,8 +2006,16 @@ def scrape_ofertas_stream(request):
     return _criar_raspagem_manual(request, "ofertas")
 
 
-def _sse_runner(fn, organization):
-    """Roda fn() capturando prints e streamando via SSE (reusa o padrão _QueueWriter)."""
+def _sse_runner(fn, organization, *, segurar_transacao=True):
+    """Roda fn() capturando prints e streamando via SSE (reusa o padrão _QueueWriter).
+
+    `segurar_transacao=False` para jobs que passam minutos fora do banco (geração de
+    links): sem isso o tenant é instalado com um `transaction.atomic()` aberto do
+    início ao fim, a conexão fica `idle in transaction` enquanto o Link Builder
+    trabalha, e o proxy da Fly a derruba. Dentro de transação o Django nem consegue
+    renovar a conexão — só marca `closed_in_transaction`. Quem usa este modo tem de
+    passar suas leituras/gravações por `executar_no_tenant`, senão a RLS as bloqueia.
+    """
     def _event_stream():
         q: queue.Queue = queue.Queue()
         writer = _QueueWriter(q)
@@ -2032,7 +2040,8 @@ def _sse_runner(fn, organization):
                 q.put(None)
 
         threading.Thread(
-            target=organization_callable(organization, _run),
+            target=organization_callable(organization, _run,
+                                         segurar_transacao=segurar_transacao),
             daemon=True,
         ).start()
         while True:
@@ -2240,15 +2249,24 @@ def gerar_links_stream(request):
     def _job():
         from django.contrib.auth import get_user_model
         from apps.scrapers.afiliado import frase_resumo_afiliacao
-        usuario = get_user_model().objects.filter(id=uid).first()
+        from apps.accounts.tenant import executar_no_tenant
 
-        pendentes = _produtos_sem_link(usuario, limite=limite, macros=macros or None)
+        # Este job roda com o tenant apenas ANOTADO (segurar_transacao=False, ver
+        # _sse_runner): não há transação nem GUC abertos enquanto o Link Builder
+        # trabalha. Em troca, TODA ida ao banco passa por executar_no_tenant, que
+        # reinstala o escopo numa transação de milissegundos — sem isso a RLS
+        # devolveria zero linha.
+        usuario = executar_no_tenant(
+            lambda: get_user_model().objects.filter(id=uid).first())
+
+        pendentes = executar_no_tenant(
+            _produtos_sem_link, usuario, limite=limite, macros=macros or None)
         if not pendentes:
             if macros:
                 print(f"Nenhum produto sem link na categoria selecionada ({', '.join(macros)}).")
             else:
                 print("Nenhum produto na fila — todos já têm link de afiliado.")
-            print(frase_resumo_afiliacao(usuario))
+            print(executar_no_tenant(frase_resumo_afiliacao, usuario))
             return
         alvo = f" ({', '.join(macros)})" if macros else ""
         print(f"Gerando link de afiliado para {len(pendentes)} produto(s){alvo}...")
@@ -2257,27 +2275,7 @@ def gerar_links_stream(request):
         por_loja = {}
         for p in pendentes:
             por_loja.setdefault(p.marketplace or "mercadolivre", []).append(p)
-        # Cada lote passa MINUTOS no Link Builder (~5s por produto) sem tocar no
-        # banco. Nesse intervalo o proxy do Postgres da Fly derruba o socket ocioso
-        # e o Django não sabe: a próxima query estoura
-        # OperationalError("the connection is closed"). É o mesmo problema que a
-        # raspagem já resolve com _reconectar_db() (ofertas_scraper) e que os
-        # workers resolvem com _renovar_conexoes_db() (automacao) — só este caminho
-        # tinha ficado de fora. O sintoma era cruel: o lote gerava os links
-        # certinho e o resumo final derrubava tudo com "[ERRO] Falha inesperada",
-        # fazendo um sucesso parecer falha total.
-        # `connections.close_all()`, NÃO `close_old_connections()`: esta última só
-        # olha idade e flags locais (erro anterior, CONN_MAX_AGE vencido) e um
-        # socket encerrado pelo proxy da Fly parece perfeitamente saudável por esse
-        # critério — a conexão é reaproveitada e só então estoura. É o mesmo motivo
-        # documentado em scraper._persistir_campanhas_cupons, e o que
-        # automacao._renovar_conexoes_db já faz nos workers. Roda numa thread
-        # própria (o job SSE), e `connections` é thread-local: não mexe na conexão
-        # da request.
-        from django.db import connections
-
         for slug, grupo in por_loja.items():
-            connections.close_all()
             try:
                 get_marketplace(slug).prefetch_links(grupo, usuario=usuario)
             except (LoginError, AuthError, SessaoExpirada) as exc:
@@ -2286,13 +2284,16 @@ def gerar_links_stream(request):
                 break
             except Exception as exc:
                 print(f"Aviso: geração de links em {slug} falhou ({exc}).")
-        connections.close_all()
         # O resumo é informativo: se ELE falhar, o lote já feito continua válido e
         # não pode ser reportado como erro da operação inteira.
         try:
-            print(frase_resumo_afiliacao(usuario))
+            print(executar_no_tenant(frase_resumo_afiliacao, usuario))
         except Exception:
             logger.exception("Resumo de afiliação falhou após gerar links")
             print("Links processados. (Não foi possível montar o resumo final.)")
 
-    return _sse_runner(_job, request.organization)
+    # segurar_transacao=False: o lote passa minutos no Link Builder, e uma
+    # transação aberta esse tempo todo vira `idle in transaction` até o proxy
+    # da Fly matar o socket — e dentro de transação o Django nem consegue
+    # renovar a conexão. As idas ao banco deste job vão por executar_no_tenant.
+    return _sse_runner(_job, request.organization, segurar_transacao=False)
