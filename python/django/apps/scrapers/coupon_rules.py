@@ -157,17 +157,67 @@ def codigo_publicavel(cupom) -> str:
     return codigo_humano(getattr(cupom, "codigo", ""))
 
 
-def ativacao_publicavel(cupom) -> bool:
-    """Aceita ativação somente quando a própria loja prova promoção + produtos.
+_FONTES_ML_ATIVACAO = ("mercadolivre-web", "ml-cupons-afiliados")
 
-    Não libera as milhares de campanhas personalizadas do ML: elas carregam token
-    de sessão e não podem ser reproduzidas pelo público. A exceção atual é a página
-    oficial de cupons da Amazon, que fornece identificador da promoção, ASINs e
-    preço final depois da ativação.
+
+def _ativacao_ml_publicavel(cupom, regras) -> bool:
+    """Cupom de ATIVAÇÃO do Mercado Livre (clique, não código digitável).
+
+    O ML migrou a página /ofertas/cupons para cupons ativados por clique: o campo
+    `code` do payload é um token opaco de sessão, não algo que o comprador digita.
+    Por isso a ingestão grava `codigo=""`, e sem este ramo TODO cupom ML de campanha
+    ficava inpublicável — em homologação, 2357 de 2379.
+
+    O que difere do token de sessão (que continua fora): a `container_url` do
+    carrossel é PÚBLICA (`lista.mercadolivre.com.br/_Container_<id>`), reproduzível
+    por qualquer pessoa. É ela que a mensagem divulga.
+
+    A regra aqui é ESTRUTURAL de propósito — nada de consultar ProdutoCupom. Duas
+    razões: `preparar_cupom` devolve "vazio" ANTES de criar qualquer ProdutoCupom
+    quando o cupom não é publicável, então exigir a relação aqui criaria um
+    deadlock em que ela nunca passaria a existir; e esta função é chamada por cupom
+    em três laços (views, preparar_lote, content_ranking), onde uma query por
+    chamada é o N+1 que já custa caro.
+
+    A prova de associação continua exigida a jusante, em três portões intactos:
+    `_base_produtos` (produto tem de bater campanha), `relacoes_preparadas_para_envio`
+    (ProdutoCupom confirmado com preços) e `relacoes_prontas_para_envio`
+    (LinkAfiliadoUsuario verificado).
     """
-    if regras_do_cupom(cupom)["modo_resgate"] != "ativacao":
+    from apps.accounts.feature_flags import enabled_for_user
+
+    if not enabled_for_user("ML_CUPONS_ATIVACAO_ENABLED", getattr(cupom, "owner", None)):
         return False
-    if str(getattr(cupom, "marketplace", "") or "").casefold() != "amazon":
+    if getattr(getattr(cupom, "fonte", None), "slug", "") not in _FONTES_ML_ATIVACAO:
+        return False
+    # Só campanha identificada: é o id que amarra cupom, container e produto.
+    if not str(getattr(cupom, "external_id", "") or "").startswith("campanha:"):
+        return False
+    # Site-wide nunca entra por aqui: sem escopo não há como provar que o desconto
+    # se aplica ao item divulgado.
+    if regras.get("is_mar_aberto"):
+        return False
+    if not regras.get("container_url"):
+        return False
+    # Sem valor de desconto não há promessa a fazer na mensagem.
+    return regras.get("valor_desconto") not in (None, "", 0)
+
+
+def ativacao_publicavel(cupom) -> bool:
+    """Aceita ativação quando a loja prova promoção + produtos.
+
+    Amazon: a página oficial de cupons fornece identificador da promoção, ASINs e
+    preço final depois da ativação.
+    Mercado Livre: campanha com container público — ver `_ativacao_ml_publicavel`,
+    atrás da flag ML_CUPONS_ATIVACAO_ENABLED.
+    """
+    regras = regras_do_cupom(cupom)
+    if regras["modo_resgate"] != "ativacao":
+        return False
+    marketplace = str(getattr(cupom, "marketplace", "") or "").casefold()
+    if marketplace == "mercadolivre":
+        return _ativacao_ml_publicavel(cupom, regras)
+    if marketplace != "amazon":
         return False
     evidence = getattr(cupom, "evidencia", {}) or {}
     source = getattr(getattr(cupom, "fonte", None), "slug", "")

@@ -26,6 +26,9 @@ from apps.scrapers.models import CupomPreparacao, Produto, ProdutoCupom
 logger = logging.getLogger(__name__)
 
 CACHE_HORAS = 3
+# Espera antes de reprocessar um cupom que não rendeu nenhum produto. Sem isto o
+# preparo vazio é reagendado imediatamente e consome o lote inteiro em repetição.
+BACKOFF_VAZIO = timedelta(hours=6)
 MAX_CANDIDATOS = 36
 PREPARO_LOTE_POR_CICLO = 12
 _CENT = Decimal("0.01")
@@ -270,8 +273,24 @@ def _base_produtos(cupom, usuario):
     campanha = external.split(":", 1)[1] if external.startswith("campanha:") else ""
     programa_id = str(getattr(getattr(cupom, "programa", None), "external_id", "") or "")
 
+    # Cupom de ATIVAÇÃO do ML: a mensagem divulga o link do PRODUTO, e esse link só
+    # carrega `coupon_campaign_id` quando `produto.campanha_id` está preenchido (ver
+    # _montar_url_isca). Produtos casados apenas pelo container vêm do feed de
+    # ofertas com campanha_id VAZIO — divulgar um deles diria "ative o cupom" e a
+    # pessoa cairia numa página sem cupom nenhum. Exigimos a campanha no próprio
+    # produto, o que na prática restringe aos produtos coletados da página oficial
+    # do cupom (_coletar_ml_remoto), que já nascem com ela.
+    #
+    # Não vale para cupom de CÓDIGO: ali o desconto é digitado no checkout e não
+    # depende de o link carregar a campanha.
+    from apps.scrapers.coupon_rules import codigo_publicavel
+    exige_campanha_no_produto = bool(
+        campanha and mkt == "mercadolivre" and not codigo_publicavel(cupom))
+
     candidatos = []
     for produto in qs.order_by("-ultima_observacao")[:500]:
+        if exige_campanha_no_produto and produto.campanha_id != campanha:
+            continue
         provado = produto.id in ids_confirmados
         if not provado and campanha:
             provado = bool(produto.campanha_id == campanha)
@@ -447,7 +466,7 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
     if not cupom_publicavel(cupom):
         CupomPreparacao.objects.filter(pk=preparo.pk).update(
             status="vazio", produtos_chave=chave, verificado_em=timezone.now(),
-            proxima_tentativa=None,
+            proxima_tentativa=timezone.now() + BACKOFF_VAZIO,
             erro="Cupom sem código público ou ativação comprovada.")
         return []
 
@@ -485,7 +504,13 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
                 id__in=ids).update(status="expirado")
             CupomPreparacao.objects.filter(pk=preparo.pk).update(
                 status="pronto" if validos else "vazio", produtos_chave=chave,
-                verificado_em=agora, proxima_tentativa=None,
+                verificado_em=agora,
+                # Preparo vazio agendava proxima_tentativa=None, o que a prioridade
+                # de preparar_lote lê como "retomável" — o cupom voltava TODO ciclo e
+                # ocupava os 12 slots para dar vazio de novo. Com 22 cupons isso era
+                # irrelevante; com os milhares que a ativação do ML libera, os vazios
+                # girariam para sempre e nenhum cupom novo seria preparado.
+                proxima_tentativa=None if validos else agora + BACKOFF_VAZIO,
                 erro="" if validos else "Nenhum produto comprovadamente aplicavel.")
         validos.sort(key=lambda r: (
             (r.preco_original - r.preco_final) / r.preco_original,
@@ -574,15 +599,17 @@ def preparar_lote(
     horas renovada também para cupons privados e integrações menores.
     """
     from django.contrib.auth import get_user_model
-    from apps.scrapers.coupon_rules import cupom_publicavel
+    from apps.scrapers.coupon_rules import _FONTES_ML_ATIVACAO, cupom_publicavel
     from apps.scrapers.models import CupomNormalizado
 
     agora = timezone.now()
-    # Filtra as duas origens publicáveis antes do recorte. As milhares de campanhas
-    # personalizadas do ML não podem ocupar o lote; os cupons oficiais Amazon são
-    # de ativação e, portanto, não possuem código digitável.
+    # Pré-filtro barato das origens que PODEM ser publicáveis; `cupom_publicavel`
+    # reconfere item a item no laço. Cupons de ativação (Amazon e, quando a flag
+    # está ligada, campanhas ML com container público) não têm código digitável,
+    # então não podem ser filtrados por `codigo__gt=""`.
     cupons = list(CupomNormalizado.objects.filter(estado="ativo").filter(
-        Q(codigo__gt="") | Q(fonte__slug="amazon-public-coupons")
+        Q(codigo__gt="")
+        | Q(fonte__slug__in=("amazon-public-coupons",) + _FONTES_ML_ATIVACAO)
     ).filter(
         Q(validade__isnull=True) | Q(validade__gte=agora)
     ).order_by("-ultima_observacao"))

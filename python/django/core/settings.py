@@ -89,6 +89,11 @@ ML_VERIFICACAO_TRANSPORTE = os.getenv("ML_VERIFICACAO_TRANSPORTE", "browser")
 # Verificações simultâneas. É I/O puro (o GIL não atrapalha), mas são requisições
 # ao ML a partir de um IP de datacenter: subir demais convida rate-limit.
 ML_VERIFICACAO_THREADS = int(os.getenv("ML_VERIFICACAO_THREADS", "4"))
+# Cupons de ATIVAÇÃO do Mercado Livre (clique no container público, sem código
+# digitável). Nasce DESLIGADA: ligar faz milhares de cupons entrarem no ranking
+# automático de envio de uma vez, e o worker publica em grupo real. Ligue numa
+# organização (PILOT_ORGANIZATION_IDS), observe, e só então generalize.
+ML_CUPONS_ATIVACAO_ENABLED = os.getenv("ML_CUPONS_ATIVACAO_ENABLED", "0") == "1"
 PILOT_ORGANIZATION_IDS = {
     value.strip() for value in os.getenv("PILOT_ORGANIZATION_IDS", "").split(",")
     if value.strip()

@@ -5,11 +5,13 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
+from apps.scrapers.coupon_rules import cupom_publicavel
 from apps.scrapers.models import (
     CupomNormalizado, CupomPreparacao, FonteIngestao, LinkAfiliadoUsuario, Produto,
+    ProdutoCupom,
 )
 
 
@@ -489,3 +491,138 @@ class TelegramCouponMediaTests(SimpleTestCase):
         self.assertEqual(kwargs["data"]["caption"], "legenda completa")
         self.assertEqual(kwargs["files"]["photo"][1], b"jpeg-bytes")
         self.assertEqual(kwargs["files"]["photo"][2], "image/jpeg")
+
+
+@override_settings(ML_CUPONS_ATIVACAO_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
+class CupomAtivacaoMercadoLivreTests(TestCase):
+    """O ML migrou /ofertas/cupons para cupons de ATIVAÇÃO (clique, sem código
+    digitável). Sem este ramo, 2357 de 2379 cupons ficavam inpublicáveis."""
+
+    def setUp(self):
+        self.fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML público"})
+
+    def _cupom(self, **kw):
+        regras = {"tipo_desconto": "porcentagem", "valor_desconto": 60,
+                  "valor_minimo": None, "desconto_maximo": None,
+                  "modo_resgate": "ativacao", "escopo": "Itens para Casa",
+                  "container_url": "https://lista.mercadolivre.com.br/_Container_13975432",
+                  "container_name": "13975432", "is_mar_aberto": False,
+                  "dia_inicio": "", "dia_fim": ""}
+        regras.update(kw.pop("regras", {}))
+        campos = {"fonte": self.fonte, "external_id": "campanha:13975432",
+                  "marketplace": "mercadolivre", "titulo": "60% OFF — Itens para Casa",
+                  "codigo": "", "regras": regras, "estado": "ativo"}
+        campos.update(kw)
+        return CupomNormalizado.objects.create(**campos)
+
+    def test_campanha_com_container_publico_e_publicavel(self):
+        self.assertTrue(cupom_publicavel(self._cupom()))
+
+    def test_site_wide_nunca_e_publicavel(self):
+        """Sem escopo não há como provar que o desconto se aplica ao item."""
+        cupom = self._cupom(regras={"is_mar_aberto": True})
+        self.assertFalse(cupom_publicavel(cupom))
+
+    def test_sem_container_nao_e_publicavel(self):
+        self.assertFalse(cupom_publicavel(self._cupom(regras={"container_url": ""})))
+
+    def test_sem_valor_de_desconto_nao_e_publicavel(self):
+        """Sem valor não há promessa a fazer na mensagem."""
+        self.assertFalse(cupom_publicavel(self._cupom(regras={"valor_desconto": None})))
+
+    def test_sem_campanha_no_external_id_nao_e_publicavel(self):
+        self.assertFalse(cupom_publicavel(self._cupom(external_id="checkout:XPTO10")))
+
+    @override_settings(ML_CUPONS_ATIVACAO_ENABLED=False)
+    def test_flag_desligada_mantem_comportamento_anterior(self):
+        """A flag nasce desligada: ligar joga milhares de cupons no ranking de envio
+        de uma vez, e o worker publica em grupo real."""
+        self.assertFalse(cupom_publicavel(self._cupom()))
+
+    def test_amazon_continua_intacta(self):
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="amazon-public-coupons",
+            defaults={"marketplace": "amazon", "nome": "Amazon"})
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="promo:1", marketplace="amazon",
+            titulo="Cupom Amazon", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao"},
+            evidencia={"association": "amazon-official-coupon-page",
+                       "promotion_id": "P1", "asins": ["B01"]})
+        self.assertTrue(cupom_publicavel(cupom))
+
+
+@override_settings(ML_CUPONS_ATIVACAO_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
+class ProdutoDeCupomPrecisaCarregarACampanhaTests(TestCase):
+    """O link enviado é o do PRODUTO, e ele só carrega coupon_campaign_id quando
+    produto.campanha_id está preenchido. Produto casado só pelo container vem do
+    feed com campanha vazia: divulgá-lo diria "ative o cupom" e a pessoa cairia
+    numa página sem cupom nenhum."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("cupomml", password="test")
+        self.fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML público"})
+        self.cupom = CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id="campanha:777", marketplace="mercadolivre",
+            titulo="20% OFF", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao", "valor_desconto": 20,
+                    "tipo_desconto": "porcentagem", "is_mar_aberto": False,
+                    "container_url": "https://lista.mercadolivre.com.br/_Container_777"})
+
+    def _produto(self, nome, campanha_id):
+        return Produto.objects.create(
+            marketplace="mercadolivre", nome=nome, origem="cupom",
+            campanha_id=campanha_id, preco_sem_desconto=100, preco_com_cupom=80,
+            imagem_url="https://img/x.jpg",
+            link_produto=f"https://www.mercadolivre.com.br/p/MLB{nome}")
+
+    def test_produto_da_pagina_oficial_entra(self):
+        from apps.scrapers.coupon_products import _base_produtos
+        certo = self._produto("111111", "777")
+        self.assertIn(certo, _base_produtos(self.cupom, self.user))
+
+    def test_produto_casado_so_pelo_container_fica_de_fora(self):
+        from apps.scrapers.coupon_products import _base_produtos
+        do_feed = self._produto("222222", "")           # veio do /ofertas
+        ProdutoCupom.objects.create(                    # casar_cupons_container
+            produto=do_feed, cupom=self.cupom, status="confirmado",
+            evidencia={"regra": "container"})
+        self.assertNotIn(do_feed, _base_produtos(self.cupom, self.user))
+
+    def test_cupom_de_codigo_nao_exige_campanha_no_produto(self):
+        """Com código digitável o desconto é aplicado no checkout: o link não
+        precisa carregar a campanha."""
+        from apps.scrapers.coupon_products import _base_produtos
+        self.cupom.codigo = "TECH20"
+        self.cupom.regras = {**self.cupom.regras, "modo_resgate": "codigo"}
+        self.cupom.save()
+        do_feed = self._produto("333333", "")
+        ProdutoCupom.objects.create(produto=do_feed, cupom=self.cupom,
+                                    status="confirmado", evidencia={"regra": "container"})
+        self.assertIn(do_feed, _base_produtos(self.cupom, self.user))
+
+
+@override_settings(ML_CUPONS_ATIVACAO_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
+class MensagemDeCupomDeAtivacaoTests(TestCase):
+    """Cupom sem código digitável não pode instruir o leitor a digitar nada."""
+
+    def test_mensagem_manda_ativar_e_nunca_oferece_codigo(self):
+        from apps.scrapers.ofertas import montar_mensagem_cupom
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML público"})
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:999", marketplace="mercadolivre",
+            titulo="30% OFF — Tecnologia", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao", "valor_desconto": 30,
+                    "tipo_desconto": "porcentagem", "is_mar_aberto": False,
+                    "container_url": "https://lista.mercadolivre.com.br/_Container_999"})
+
+        texto = montar_mensagem_cupom(cupom)
+
+        self.assertIn("Ative o cupom no link", texto)
+        self.assertNotIn("Use o cupom", texto)
