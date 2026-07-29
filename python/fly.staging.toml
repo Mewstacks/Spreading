@@ -28,6 +28,10 @@ primary_region = "gru"
   ML_BROWSER_REPORTS_ENABLED = "1"
   ML_LINK_BUILDER_ENABLED = "1"
   WHATSAPP_WEB_ENABLED = "1"
+  # Cupons de ativação do ML (clique no container público, sem código digitável).
+  # Ligado SÓ aqui: em produção ele entra por organização, depois de validar o texto
+  # da mensagem. É seguro em homologação porque não há destino de envio configurado.
+  ML_CUPONS_ATIVACAO_ENABLED = "1"
 
 [deploy]
   release_command = "sh -c 'python django/manage.py migrate --noinput && env TENANT_SYSTEM_PROCESS=1 python django/manage.py bootstrap_superuser'"
