@@ -388,7 +388,7 @@ def _coletar_ml_remoto(cupom, usuario=None):
         return 0
     if resultado is None:
         with iniciar_browser(
-            storage_state=state, headless=True, validar_sessao=False,
+            storage_state=state, headless=True,
         ) as (page, _context):
             resultado = listar_itens_por_cupom(payload, page, max_paginas=2)
     total = 0
@@ -523,12 +523,7 @@ def relacoes_preparadas_para_envio(cupom, usuario, limite=9):
         preco_final__isnull=False, produto__imagem_url__gt="",
     ).exclude(produto__estado__in=["indisponivel", "invalido", "expirado", "stale"])
       .select_related("produto"))
-    relacoes.sort(key=lambda r: (
-        (r.preco_original - r.preco_final) / r.preco_original
-        if r.preco_original else Decimal("0"),
-        r.preco_original - r.preco_final,
-    ), reverse=True)
-    return relacoes[:limite]
+    return _ordenar_por_desconto(relacoes, limite)
 
 
 def relacoes_prontas_para_envio(cupom, usuario, limite=9):
@@ -556,11 +551,92 @@ def cupom_pronto_para_usuario(cupom, usuario) -> bool:
     return bool(relacoes_prontas_para_envio(cupom, usuario))
 
 
-def ids_cupons_prontos(usuario, cupons):
-    return {
-        cupom.id for cupom in cupons
-        if relacoes_prontas_para_envio(cupom, usuario)
+def _ordenar_por_desconto(relacoes, limite):
+    relacoes.sort(key=lambda r: (
+        (r.preco_original - r.preco_final) / r.preco_original
+        if r.preco_original else Decimal("0"),
+        r.preco_original - r.preco_final,
+    ), reverse=True)
+    return relacoes[:limite]
+
+
+def relacoes_preparadas_em_lote(cupons, usuario, limite=9) -> dict:
+    """{cupom_id: [relações]} para uma LISTA de cupons, em 2 queries no total.
+
+    Mesmo predicado de `relacoes_preparadas_para_envio`, só que sem o N+1: aquela
+    função faz duas queries por cupom, e as telas a chamavam dentro de laços sobre o
+    catálogo inteiro. Em /scrapers/top/, com ~2.400 cupons ativos, isso passava de
+    sete mil queries em UM carregamento de página — e depois o mesmo trabalho era
+    refeito logo abaixo para montar outro dicionário.
+    """
+    from django.db.models import Q
+
+    cupons = list(cupons)
+    if not cupons:
+        return {}
+    chaves = {c.id: chave_produtos_cupom(c) for c in cupons}
+    contextos = {c.id: _usuario_do_preparo(c, usuario) for c in cupons}
+    fresco_desde = timezone.now() - timedelta(hours=CACHE_HORAS)
+
+    # `usuario` do preparo é None para cupom público do ML e o dono nos demais, então
+    # os dois casos vêm na mesma query e o pareamento exato acontece em memória.
+    filtro_dono = Q(usuario__isnull=True)
+    if usuario is not None:
+        filtro_dono |= Q(usuario=usuario)
+    preparados = {
+        (p["cupom_id"], p["usuario_id"], p["produtos_chave"])
+        for p in CupomPreparacao.objects.filter(
+            filtro_dono, cupom_id__in=chaves, status="pronto",
+            verificado_em__gte=fresco_desde,
+        ).values("cupom_id", "usuario_id", "produtos_chave")
     }
+    ids_prontos = [
+        cid for cid in chaves
+        if (cid, getattr(contextos[cid], "id", None), chaves[cid]) in preparados
+    ]
+    if not ids_prontos:
+        return {}
+
+    por_cupom = {}
+    for relacao in (ProdutoCupom.objects.filter(
+        cupom_id__in=ids_prontos, status="confirmado",
+        preco_original__isnull=False, preco_final__isnull=False,
+        produto__imagem_url__gt="",
+    ).exclude(produto__estado__in=["indisponivel", "invalido", "expirado", "stale"])
+      .select_related("produto")):
+        por_cupom.setdefault(relacao.cupom_id, []).append(relacao)
+
+    return {cid: _ordenar_por_desconto(rels, limite)
+            for cid, rels in por_cupom.items()}
+
+
+def relacoes_prontas_em_lote(cupons, usuario, limite=9, *, preparadas=None) -> dict:
+    """{cupom_id: [relações]} já filtradas por link afiliado utilizável.
+
+    Uma query a mais que `relacoes_preparadas_em_lote` — três no total, para
+    qualquer quantidade de cupons. `preparadas` evita refazer as duas primeiras
+    quando quem chama já as tem na mão.
+    """
+    if preparadas is None:
+        preparadas = relacoes_preparadas_em_lote(cupons, usuario, limite=limite)
+    if not preparadas or usuario is None:
+        return {}
+    from apps.scrapers.models import LinkAfiliadoUsuario
+
+    ids_produtos = {r.produto_id for rels in preparadas.values() for r in rels}
+    com_link = set(LinkAfiliadoUsuario.objects.filter(
+        usuario=usuario, produto_id__in=ids_produtos, verificado_ok=True,
+    ).exclude(link_afiliado="").values_list("produto_id", flat=True))
+    resultado = {}
+    for cupom_id, relacoes in preparadas.items():
+        uteis = [r for r in relacoes if r.produto_id in com_link]
+        if uteis:
+            resultado[cupom_id] = uteis
+    return resultado
+
+
+def ids_cupons_prontos(usuario, cupons):
+    return set(relacoes_prontas_em_lote(cupons, usuario))
 
 
 def preparar_lote(

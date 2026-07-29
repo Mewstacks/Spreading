@@ -272,146 +272,198 @@ class MLAuthPathTests(SimpleTestCase):
 class SondaSessaoMLTests(SimpleTestCase):
     """A sonda pergunta ao ML se a sessão salva ainda vale.
 
-    A regra anterior era só a idade do arquivo (mtime <= 7 dias), o que mentia: um
-    cookie revogado pelo ML seguia "conectado" por uma semana, enquanto o sync de
-    relatório falhava e a Saúde abria incidente ao lado de um dashboard verde.
+    Ela NÃO decide desconectar ninguém: devolve "suspeito", e a acumulação de
+    suspeitas em accounts.ml_sessions.registrar_veredito é que muda o estado. Do
+    IP de datacenter da Fly, o gateway anti-bot do ML responde 302→login e 403 a
+    requisições perfeitamente autenticadas — um veredito isolado não distingue
+    challenge de logout.
     """
 
-    def _auth(self, d, nome="auth_7.json", cookies=True):
-        caminho = os.path.join(d, nome)
-        estado = {"cookies": [{"name": "ssid", "value": "x"}] if cookies else [],
-                  "origins": []}
-        with open(caminho, "w", encoding="utf-8") as f:
-            json.dump(estado, f)
-        return caminho
+    STATE = {"cookies": [{"name": "ssid", "value": "x", "domain": ".mercadolivre.com.br",
+                          "path": "/"}], "origins": []}
+
+    @staticmethod
+    def _resposta(status, location=None):
+        return Mock(status_code=status,
+                    headers={"Location": location} if location else {})
+
+    def _sondar(self, **kwargs):
+        from apps.scrapers.conexoes import sondar_sessao_ml
+
+        with patch("requests.Session.get", **kwargs):
+            return sondar_sessao_ml(self.STATE)
 
     def test_200_e_sessao_viva(self):
-        from apps.scrapers.conexoes import sondar_sessao_ml
+        self.assertEqual(self._sondar(return_value=self._resposta(200)),
+                         ("conectado", ""))
 
-        with tempfile.TemporaryDirectory() as d:
-            caminho = self._auth(d)
-            with patch("apps.scrapers.conexoes.requests.get",
-                       return_value=Mock(status_code=200, headers={})):
-                self.assertEqual(sondar_sessao_ml(caminho), ("conectado", ""))
+    def test_redirect_para_login_e_suspeito_nao_expirado(self):
+        """Redirect p/ login é suspeita, não sentença: o anti-bot faz isso com
+        cookie válido, e tratar como expirado desconectava quem tinha acabado de
+        conectar."""
+        veredito, _ = self._sondar(return_value=self._resposta(
+            302, "https://www.mercadolivre.com.br/jms/mlb/lgz/login"))
+        self.assertEqual(veredito, "suspeito")
 
-    def test_redirect_para_login_e_sessao_expirada(self):
-        from apps.scrapers.conexoes import sondar_sessao_ml
-
-        with tempfile.TemporaryDirectory() as d:
-            caminho = self._auth(d)
-            resposta = Mock(status_code=302,
-                            headers={"Location": "https://www.mercadolivre.com.br/jms/mlb/lgz/login"})
-            with patch("apps.scrapers.conexoes.requests.get", return_value=resposta):
-                veredito, _ = sondar_sessao_ml(caminho)
-        self.assertEqual(veredito, "expirado")
+    def test_403_e_inconclusivo(self):
+        """403 é o gateway anti-bot barrando o IP antes de olhar o cookie."""
+        veredito, _ = self._sondar(return_value=self._resposta(403))
+        self.assertEqual(veredito, "inconclusivo")
 
     def test_timeout_e_inconclusivo_nao_expirado(self):
-        """Oscilação de rede não é logout — a lição de auxiliar.py:85-89."""
-        from apps.scrapers.conexoes import sondar_sessao_ml
-
-        with tempfile.TemporaryDirectory() as d:
-            caminho = self._auth(d)
-            with patch("apps.scrapers.conexoes.requests.get",
-                       side_effect=requests.Timeout("estourou")):
-                veredito, _ = sondar_sessao_ml(caminho)
+        """Oscilação de rede não é logout — a lição de auxiliar.py."""
+        veredito, _ = self._sondar(side_effect=requests.Timeout("estourou"))
         self.assertEqual(veredito, "inconclusivo")
 
     def test_erro_do_ml_e_inconclusivo(self):
         """5xx é problema do ML, não da sessão: não pode desconectar o usuário."""
-        from apps.scrapers.conexoes import sondar_sessao_ml
-
-        with tempfile.TemporaryDirectory() as d:
-            caminho = self._auth(d)
-            with patch("apps.scrapers.conexoes.requests.get",
-                       return_value=Mock(status_code=503, headers={})):
-                veredito, _ = sondar_sessao_ml(caminho)
+        veredito, _ = self._sondar(return_value=self._resposta(503))
         self.assertEqual(veredito, "inconclusivo")
+
+    def test_cookies_homonimos_de_dominios_diferentes_convivem(self):
+        """O storage_state do ML tem `ssid` em vários domínios.
+
+        O jar antigo era um dict {name: value}: o último do arquivo vencia e ia
+        para o host errado, então a sonda tomava 302→login sobre uma sessão viva —
+        e o veredito apagava a sessão.
+        """
+        from apps.scrapers.ml_auth import http_session
+
+        sessao = http_session({"cookies": [
+            {"name": "ssid", "value": "correto", "domain": ".mercadolivre.com.br", "path": "/"},
+            {"name": "ssid", "value": "outro", "domain": ".mercadopago.com.br", "path": "/"},
+        ]})
+        valores = {c.domain: c.value for c in sessao.cookies}
+        self.assertEqual(valores[".mercadolivre.com.br"], "correto")
+        self.assertEqual(valores[".mercadopago.com.br"], "outro")
 
 
 class EstadoMLTests(SimpleTestCase):
+    """Tradução do veredito persistido no Estado que a tela renderiza.
+
+    A POLÍTICA (quantas suspeitas até desconectar, e o fato de nunca apagar a
+    credencial) é do repositório e está coberta em apps/accounts/tests.py; aqui só
+    verificamos a leitura e o cache.
+    """
+
+    STATE = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
+
     def setUp(self):
         cache.clear()
 
     @staticmethod
     def _org(pk="11111111-1111-1111-1111-111111111111"):
-        """Organização fake para a chave de cache.
-
-        `_chave_ml` chaveia por ORGANIZAÇÃO (a sessão ML é OneToOne com ela), então
-        estes testes sem banco precisam dizer qual é — antes a chave saía do
-        `user.id` e o Mock bastava.
-        """
+        """Organização fake: o estado é chaveado por ORGANIZAÇÃO, não por usuário
+        (a sessão ML é OneToOne com ela)."""
         return patch("apps.accounts.models.organization_for_user",
                      return_value=Mock(pk=pk))
 
-    def _auth(self, d, nome="auth_7.json"):
-        caminho = os.path.join(d, nome)
-        with open(caminho, "w", encoding="utf-8") as f:
-            json.dump({"cookies": [{"name": "ssid", "value": "x"}], "origins": []}, f)
-        return caminho
+    @staticmethod
+    def _snapshot(**campos):
+        base = {"status": "active", "last_probe_at": None,
+                "last_probe_result": "", "probe_failures": 0, "probe_reason": ""}
+        base.update(campos)
+        return base
 
-    def test_sem_arquivo_e_desconectado_com_motivo(self):
+    def test_sem_sessao_e_desconectado_com_motivo(self):
         from apps.scrapers.conexoes import estado_ml
 
-        with patch(
-            "apps.accounts.ml_sessions.load_storage_state", return_value=None,
-        ):
+        with self._org(), patch("apps.accounts.ml_sessions.probe_snapshot",
+                                return_value=None):
             est = estado_ml(Mock(id=7))
         self.assertFalse(est.conectado)
         self.assertEqual(est.detalhe, "sem_sessao")
         self.assertTrue(est.motivo)
 
-    def test_sessao_expirada_apaga_o_registro_cifrado(self):
-        """Confirmado o logout, some com a sessão morta: a tela passa a oferecer
-        'Reconectar' em vez de insistir que está tudo bem."""
+    def test_suspeita_isolada_mantem_conectado_com_alerta(self):
+        """Uma suspeita não desconecta ninguém: o anti-bot do ML redireciona
+        requisições autenticadas vindas do IP da Fly, e derrubar a conexão aí
+        desconectava quem tinha acabado de conectar."""
         from apps.scrapers.conexoes import estado_ml
 
-        state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
         with (
             self._org(),
-            patch("apps.accounts.ml_sessions.load_storage_state", return_value=state),
-            patch("apps.accounts.ml_sessions.delete_storage_state") as delete,
+            patch("apps.accounts.ml_sessions.probe_snapshot",
+                  return_value=self._snapshot()),
+            patch("apps.accounts.ml_sessions.load_storage_state", return_value=self.STATE),
+            patch("apps.accounts.ml_sessions.registrar_veredito",
+                  return_value=self._snapshot(status="suspect", probe_failures=1)),
             patch("apps.scrapers.conexoes.sondar_sessao_ml",
-                  return_value=("expirado", "redirect")),
+                  return_value=("suspeito", "redirect")),
         ):
             est = estado_ml(Mock(id=7))
-        delete.assert_called_once()
-        self.assertEqual(est.detalhe, "expirado")
+        self.assertTrue(est.conectado)
+        self.assertFalse(est.motivo)
+        self.assertTrue(est.alerta)
 
-    def test_inconclusivo_preserva_o_ultimo_estado_e_o_ciphertext(self):
+    def test_suspeitas_repetidas_pedem_reconexao(self):
         from apps.scrapers.conexoes import estado_ml
 
-        state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
-        user = Mock(id=7)
         with (
             self._org(),
-            patch("apps.accounts.ml_sessions.load_storage_state", return_value=state),
-            patch("apps.accounts.ml_sessions.delete_storage_state") as delete,
+            patch("apps.accounts.ml_sessions.probe_snapshot",
+                  return_value=self._snapshot(status="expired", probe_failures=3,
+                                              last_probe_at=timezone.now(),
+                                              last_probe_result="suspeito")),
         ):
-            with patch("apps.scrapers.conexoes.sondar_sessao_ml",
-                       return_value=("conectado", "")):
-                self.assertTrue(estado_ml(user).conectado)      # popula o cache
-            with patch("apps.scrapers.conexoes.sondar_sessao_ml",
-                       return_value=("inconclusivo", "timeout")):
-                est = estado_ml(user, usar_cache=False)
-        delete.assert_not_called()
-        self.assertTrue(est.conectado)                          # manteve o que sabia
+            est = estado_ml(Mock(id=7))
+        self.assertFalse(est.conectado)
+        self.assertEqual(est.detalhe, "expirado")
+
+    def test_veredito_fresco_do_banco_nao_sonda_de_novo(self):
+        """O veredito é compartilhado pelos nove processos: se um sondou há pouco,
+        os outros oito leem em vez de bater no ML de novo."""
+        from apps.scrapers.conexoes import estado_ml
+
+        with (
+            self._org(),
+            patch("apps.accounts.ml_sessions.probe_snapshot",
+                  return_value=self._snapshot(last_probe_at=timezone.now(),
+                                              last_probe_result="conectado")),
+            patch("apps.scrapers.conexoes.sondar_sessao_ml") as sonda,
+        ):
+            self.assertTrue(estado_ml(Mock(id=7)).conectado)
+        sonda.assert_not_called()
 
     def test_conectado_e_cacheado(self):
         """A sonda vai à rede; dashboard e Saúde fazem polling. Sem cache, cada aba
         aberta viraria uma ida ao ML."""
         from apps.scrapers.conexoes import estado_ml
 
-        state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
         user = Mock(id=7)
-        with self._org(), patch(
-            "apps.accounts.ml_sessions.load_storage_state", return_value=state,
+        with (
+            self._org(),
+            patch("apps.accounts.ml_sessions.probe_snapshot",
+                  return_value=self._snapshot()),
+            patch("apps.accounts.ml_sessions.load_storage_state", return_value=self.STATE),
+            patch("apps.accounts.ml_sessions.registrar_veredito",
+                  return_value=self._snapshot(last_probe_result="conectado")),
+            patch("apps.scrapers.conexoes.sondar_sessao_ml",
+                  return_value=("conectado", "")) as sonda,
         ):
-            with patch("apps.scrapers.conexoes.sondar_sessao_ml",
-                       return_value=("conectado", "")) as sonda:
-                estado_ml(user)
-                estado_ml(user)
-                estado_ml(user)
+            estado_ml(user)
+            estado_ml(user)
+            estado_ml(user)
         self.assertEqual(sonda.call_count, 1)
+
+    def test_sondar_nao_marca_a_sessao_como_usada(self):
+        """`last_used_at` responde 'quando a sessão trabalhou', e uma tela aberta
+        não é trabalho — era isso que virava um UPDATE a cada poll de 3s."""
+        from apps.scrapers.conexoes import estado_ml
+
+        with (
+            self._org(),
+            patch("apps.accounts.ml_sessions.probe_snapshot",
+                  return_value=self._snapshot()),
+            patch("apps.accounts.ml_sessions.load_storage_state",
+                  return_value=self.STATE) as load,
+            patch("apps.accounts.ml_sessions.registrar_veredito",
+                  return_value=self._snapshot()),
+            patch("apps.scrapers.conexoes.sondar_sessao_ml",
+                  return_value=("conectado", "")),
+        ):
+            estado_ml(Mock(id=7))
+        self.assertFalse(load.call_args.kwargs["touch"])
 
 
 @override_settings(
@@ -4620,9 +4672,11 @@ class EnvioCupomTests(TestCase):
         from apps.scrapers.ofertas import enviar_cupom
 
         sender = self._sender({"sucesso": True})
+        bloqueio = {"mensagem": "Sessão do Mercado Livre expirada. Reconecte sua conta.",
+                    "precisa_login_ml": True}
         with patch("apps.scrapers.senders.registry.get_sender", return_value=sender), \
              patch("apps.scrapers.ofertas._preparar_itens_cupom",
-                   return_value=([], True)):
+                   return_value=([], bloqueio)):
             resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
 
         self.assertFalse(resultado["sucesso"])
@@ -4630,6 +4684,29 @@ class EnvioCupomTests(TestCase):
         self.assertIn("Mercado Livre", resultado["motivo"])
         self.assertEqual(
             Publicacao.objects.get(cupom_normalizado=self.cupom).status, "falhou")
+
+    def test_link_builder_desativado_nao_pede_reconexao(self):
+        """Flag desligada não é sessão caída.
+
+        ML_LINK_BUILDER_ENABLED nasce desligada em produção (core/settings.py), e
+        antes esse BrowserError era agrupado com as exceções de sessão: o usuário
+        lia "Sessão expirada, reconecte" e reconectava em looping uma conta que
+        estava perfeita.
+        """
+        from apps.scrapers.ofertas import enviar_cupom
+
+        sender = self._sender({"sucesso": True})
+        bloqueio = {"mensagem": "Link Builder por navegador está desativado para "
+                                "esta organização.",
+                    "precisa_login_ml": False}
+        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender), \
+             patch("apps.scrapers.ofertas._preparar_itens_cupom",
+                   return_value=([], bloqueio)):
+            resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertFalse(resultado["precisa_login_ml"])
+        self.assertIn("Link Builder", resultado["motivo"])
 
     def test_cupom_publico_nao_tenta_lock_de_escrita(self):
         """RLS deixa o catálogo público legível, mas não permite FOR UPDATE nele."""
@@ -5069,7 +5146,7 @@ class RenovacaoDeSessaoPersistidaTests(TestCase):
 
         ordem = []
         with self._cenario(ordem, {"cookies": [{"name": "velho"}]}):
-            with iniciar_browser(session_user=self.user, validar_sessao=False) as (_p, _c):
+            with iniciar_browser(session_user=self.user) as (_p, _c):
                 pass
 
         self.assertEqual(ordem, ["playwright_fechado", "sessao_gravada"])
@@ -5080,7 +5157,7 @@ class RenovacaoDeSessaoPersistidaTests(TestCase):
         ordem = []
         with self._cenario(ordem, {"cookies": [{"name": "velho"}]}):
             with self.assertRaises(ValueError):
-                with iniciar_browser(session_user=self.user, validar_sessao=False):
+                with iniciar_browser(session_user=self.user):
                     raise ValueError("o Link Builder falhou no meio")
 
         self.assertIn("sessao_gravada", ordem)
@@ -5091,7 +5168,7 @@ class RenovacaoDeSessaoPersistidaTests(TestCase):
 
         ordem = []
         with self._cenario(ordem, None):
-            with iniciar_browser(validar_sessao=False) as (_p, _c):
+            with iniciar_browser() as (_p, _c):
                 pass
 
         self.assertNotIn("sessao_gravada", ordem)

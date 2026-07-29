@@ -642,14 +642,37 @@ def produtos_do_cupom(cupom, limite=9, macro=None):
     return []
 
 
+def _motivo_navegador(texto: str, generico: str = "Não foi possível preparar o link afiliado.") -> str:
+    """Mensagem de BrowserError que o usuário deve ler.
+
+    Alguns BrowserError já são escritos para o usuário e dizem exatamente o que
+    resolver — o principal é "Link Builder por navegador está desativado para esta
+    organização", que em produção é o estado DEFAULT (as flags de automação nascem
+    desligadas, ver core/settings.py). Substituí-los por um genérico — ou pior, por
+    "Sessão expirada, reconecte" — mandava o usuário reconectar em looping uma
+    sessão que estava perfeita. Falha técnica de navegador continua genérica: o
+    traceback não é texto de tela.
+    """
+    texto = (texto or "").strip()
+    return texto if texto.startswith("Link Builder") else generico
+
+
 def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
-    """([{produto, link}], sessao_caiu) com link afiliado válido + foto p/ a colagem.
+    """([{produto, link}], bloqueio) com link afiliado válido + foto p/ a colagem.
 
     Cada produto leva o PRÓPRIO link comissionado (como na imagem-modelo). Usa o
     cache em lote (`situacao_dos_links`) e, só p/ quem não tem, gera via Link
-    Builder. Se a sessão do ML cair, para de tentar (evita N falhas lentas) e
-    devolve o que houver mais `sessao_caiu=True` — o chamador transforma isso na
-    mensagem de reconexão em vez de "cupom sem produtos".
+    Builder. Se a geração falhar por conexão, para de tentar (evita N falhas
+    lentas) e devolve o que houver mais o motivo.
+
+    `bloqueio` é None ou um dict {mensagem, precisa_login_ml}. São dois casos
+    diferentes que antes se confundiam: sessão do ML caída (o usuário reconecta e
+    resolve) e Link Builder indisponível — tipicamente a feature flag
+    ML_LINK_BUILDER_ENABLED desligada, que em produção é o DEFAULT
+    (core/settings.py). Mandar "Sessão expirada. Reconecte sua conta." para o
+    segundo caso fazia o usuário reconectar em looping sobre uma sessão perfeita,
+    sem nunca saber que o problema era uma variável de ambiente.
+
     `relacoes` vem do predicado de leitura de preparo fresco. O envio manual não
     chama preparar_cupom: esse caminho pode escrever no catálogo público e é
     reservado ao worker de preparação.
@@ -666,20 +689,31 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
     mp = get_marketplace(mkt)
     situacao = situacao_dos_links(usuario, produtos)
 
-    itens, sessao_caiu = [], False
+    itens, bloqueio = [], None
     relacao_por_produto = {r.produto_id: r for r in relacoes}
     for p in produtos:
         if len(itens) >= limite:
             break
         link = ((situacao.get(p.id) or {}).get("link_afiliado")
                 or getattr(p, "link_afiliado", "") or "")
-        if not link and not sessao_caiu:
+        if not link and bloqueio is None:
             try:
                 info = mp.build_affiliate_link(p, usuario=usuario)
-            except (LoginError, AuthError, SessaoExpirada, BrowserError) as exc:
-                logger.warning("Sessão/navegador ao afiliar produto %s do cupom %s: %s",
+            except (LoginError, AuthError, SessaoExpirada) as exc:
+                logger.warning("Sessão ML ao afiliar produto %s do cupom %s: %s",
                                getattr(p, "id", "?"), getattr(cupom, "pk", "?"), exc)
-                sessao_caiu = True
+                bloqueio = {"mensagem": "Sessão do Mercado Livre expirada. "
+                                        "Reconecte sua conta.",
+                            "precisa_login_ml": True}
+                info = None
+            except BrowserError as exc:
+                # Navegador/Link Builder fora — NÃO é sessão. Repassa o texto real
+                # (ex.: "Link Builder por navegador está desativado para esta
+                # organização"), que diz o que de fato precisa ser resolvido.
+                logger.warning("Link Builder indisponível ao afiliar produto %s do "
+                               "cupom %s: %s", getattr(p, "id", "?"),
+                               getattr(cupom, "pk", "?"), exc)
+                bloqueio = {"mensagem": str(exc), "precisa_login_ml": False}
                 info = None
             except Exception as exc:
                 logger.debug("Falha ao afiliar produto %s do cupom: %s",
@@ -694,7 +728,7 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
         if link:
             itens.append({"produto": p, "link": link,
                           "relacao": relacao_por_produto[p.id]})
-    return itens, sessao_caiu
+    return itens, bloqueio
 
 
 def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
@@ -1016,7 +1050,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     try:
         # Cupom publicavel exige produtos comprovados. Nao existe mais fallback de
         # texto puro nem foto manual que burle a associacao cupom-produto.
-        itens_cupom, sessao_ml_caiu = _preparar_itens_cupom(
+        itens_cupom, bloqueio_afiliacao = _preparar_itens_cupom(
             cupom, usuario, relacoes_prontas)
         img_kwargs = {}
         if itens_cupom:
@@ -1036,13 +1070,14 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 cupom, itens_cupom, markup=sender.markup)
             link_registro = itens_cupom[0]["link"]
             img_kwargs = {"imagem_b64": colagem_b64, "mimetype": colagem_mime}
-        elif sessao_ml_caiu:
-            # Havia produtos comprovados, mas a sessão do Mercado Livre caiu na
-            # hora de gerar os links afiliados. Não é "cupom sem produtos": é
-            # reconexão. Transitório para não pausar a automação por queda de
-            # sessão, e com o flag que a UI usa para oferecer o botão de reconectar.
-            return falhar("Sessão do Mercado Livre expirada. Reconecte sua conta.",
-                          classe="transitorio", precisa_login_ml=True)
+        elif bloqueio_afiliacao:
+            # Havia produtos comprovados, mas a afiliação não pôde ser feita. Não é
+            # "cupom sem produtos" — e o motivo importa: sessão caída pede o botão
+            # de reconectar (precisa_login_ml), Link Builder desativado pede outra
+            # coisa e não deve oferecer reconexão. Transitório nos dois casos, para
+            # não pausar a automação por algo que se resolve fora do cupom.
+            return falhar(bloqueio_afiliacao["mensagem"], classe="transitorio",
+                          precisa_login_ml=bloqueio_afiliacao["precisa_login_ml"])
         else:
             return falhar("Cupom sem produtos comprovadamente aplicáveis, com foto e link afiliado.",
                           classe="permanente")
@@ -1496,7 +1531,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             precisa_login = "LOGIN_REQUIRED" in texto
             return falhar(
                 "Sessão do Mercado Livre expirada. Reconecte sua conta."
-                if precisa_login else "Não foi possível preparar o link afiliado.",
+                if precisa_login else _motivo_navegador(texto),
                 precisa_login_ml=precisa_login, _erro_tecnico=texto)
         if not info:
             return falhar("falha ao gerar link de afiliado "
@@ -1549,7 +1584,8 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                 precisa_login = "LOGIN_REQUIRED" in texto
                 return falhar(
                     "Sessão do Mercado Livre expirada. Reconecte sua conta."
-                    if precisa_login else "Não foi possível verificar a oferta.",
+                    if precisa_login
+                    else _motivo_navegador(texto, "Não foi possível verificar a oferta."),
                     precisa_login_ml=precisa_login, _erro_tecnico=texto)
             # Persiste o veredito na fonte única (self-heal): um link que reprova ao
             # vivo é marcado como inválido e some da tela de envio; um que aprova

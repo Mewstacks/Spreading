@@ -534,7 +534,16 @@
   </main>
 
   <!-- Lucide icons + tema (fora do bloco scripts p/ valer em todas as páginas) -->
-  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  {% comment %}
+  Versão FIXA, não @latest. O unpkg serve `@latest` com `cache-control: max-age=60`
+  e um 302 para a versão real, então toda navegação do painel pagava um redirect
+  mais uma revalidação antes de poder desenhar os ícones — em TODA página. A URL
+  versionada vem com `immutable` e cache de um ano.
+  Servir um arquivo local pelo WhiteNoise seria melhor ainda (uma requisição externa
+  a menos), mas exige STATICFILES_DIRS e um passo de vendor no Dockerfile — o projeto
+  hoje não tem diretório de estáticos próprio.
+  {% endcomment %}
+  <script src="https://unpkg.com/lucide@1.27.0/dist/umd/lucide.min.js"></script>
   <script>
     function renderIcons() { if (window.lucide) lucide.createIcons(); }
     function toggleNav() {

@@ -111,11 +111,16 @@ def status(user_id: int) -> dict:
         est = estado_ml(user) if user else None
         estado["auth_valido"] = bool(est and est.conectado)
         estado["motivo_desconexao"] = est.motivo if est and not est.conectado else ""
+        # Conectado, mas a última sonda não passou. A tela precisa dizer isso sem
+        # alarmar: o anti-bot do ML bloqueia requisições legítimas vindas do IP da
+        # Fly, e a conexão volta ao normal sozinha na maioria das vezes.
+        estado["alerta_conexao"] = est.alerta if est and est.conectado else ""
     except Exception:
         from apps.accounts.ml_sessions import has_storage_state
         user = get_user_model().objects.filter(id=user_id).first()
         estado["auth_valido"] = bool(user and has_storage_state(user))
         estado["motivo_desconexao"] = ""
+        estado["alerta_conexao"] = ""
     estado.update(_transport.status(user_id))
     return estado
 
@@ -304,6 +309,7 @@ def _worker(user_id: int):
                 logado = False
                 last_beat = time.time()
                 last_check = 0.0
+                last_snapshot = 0.0
                 estado = {}
                 while time.time() < deadline:
                     # O loop gira a cada 50ms para bombear os frames e drenar o input, mas
@@ -346,19 +352,29 @@ def _worker(user_id: int):
                             salvar_agora=False, aviso="",
                         )
 
-                    snapshot = context.storage_state()
-                    fingerprint = _storage_fingerprint(snapshot)
-                    changed = fingerprint != last_fingerprint
-                    if changed:
-                        last_fingerprint = fingerprint
-                    if (
-                        pending_validation is None
-                        and (changed or manual_validation)
-                    ):
-                        pending_state = snapshot
-                        pending_validation = validator.submit(
-                            sondar_sessao_ml, pending_state,
-                        )
+                    # `context.storage_state()` é um round-trip CDP que serializa TODOS
+                    # os cookies + localStorage, e o fingerprint é um SHA-256 sobre
+                    # esse dump inteiro. No loop de 50ms isso rodava 20x por segundo,
+                    # dentro do processo do gunicorn e segurando a GIL — era o maior
+                    # consumidor de CPU da tela de conexão. Cookie de login não muda
+                    # nessa escala; 1s de latência para DETECTAR a mudança não atrasa
+                    # nada, porque a validação em si já é assíncrona (validator).
+                    # Uma verificação manual ("já entrei") não espera o intervalo.
+                    if agora - last_snapshot > 1.0 or manual_validation:
+                        last_snapshot = agora
+                        snapshot = context.storage_state()
+                        fingerprint = _storage_fingerprint(snapshot)
+                        changed = fingerprint != last_fingerprint
+                        if changed:
+                            last_fingerprint = fingerprint
+                        if (
+                            pending_validation is None
+                            and (changed or manual_validation)
+                        ):
+                            pending_state = snapshot
+                            pending_validation = validator.submit(
+                                sondar_sessao_ml, pending_state,
+                            )
 
                     if pending_validation is not None and pending_validation.done():
                         verdict, _reason = pending_validation.result()

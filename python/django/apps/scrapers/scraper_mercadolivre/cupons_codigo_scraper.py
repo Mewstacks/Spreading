@@ -96,8 +96,7 @@ def mapear_cupons_codigo(faixa=None, usuario=None):
     coletados, codigos = [], set()
     paginas_sem_codigo = 0
 
-    with iniciar_browser(storage_state=state, headless=True,
-                         validar_sessao=False) as (page, context):
+    with iniciar_browser(storage_state=state, headless=True) as (page, context):
         for n in range(1, 6):  # algumas páginas
             emitir_fase(f"Cupons de checkout — página {n}/5", n / 5, faixa)
             url = "https://www.mercadolivre.com.br/ofertas/cupons"

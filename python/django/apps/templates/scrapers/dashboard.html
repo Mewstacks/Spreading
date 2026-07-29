@@ -209,15 +209,20 @@
     det.style.display = 'flex';
     det.innerHTML = html;
   }
+  let ultimoAuto = null;
   async function autoStatus() {
-    if (autoBusy) return;
+    // Aba oculta não precisa de status: ninguém está olhando, e cada disparo é um
+    // request Django completo contra um processo web de thread única.
+    if (autoBusy || document.hidden) return;
     try {
       const r = await fetch('/scrapers/automacao/?tipo=scrape');
-      const d = await r.json();
-      paintAuto(d);
+      const texto = JSON.stringify(await r.json());
+      // `renderIcons()` varre o DOM inteiro; a cada 10s, quase sempre para repintar
+      // exatamente o mesmo estado.
+      if (texto !== ultimoAuto) { ultimoAuto = texto; paintAuto(JSON.parse(texto)); renderIcons(); }
     } catch (e) {}
-    renderIcons();
   }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) autoStatus(); });
   async function toggleAuto(el) {
     autoBusy = true;
     const acao = el.checked ? 'start' : 'stop';

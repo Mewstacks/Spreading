@@ -110,6 +110,28 @@ Só com uma conta filtrada: sondar todas a cada carregamento (e a cada polling)
 seria uma ida à rede por usuário.
 {% endcomment %}
 <div class="card-stack">
+{% comment %}
+Configuração que desliga funcionalidade em SILÊNCIO. Nada disso gera evento nem
+erro de log — do ponto de vista do código não houve falha, o fluxo apenas não
+rodou. O sintoma que chega ao usuário ("0 cupons prontos", "sessão expirada")
+aponta para o Mercado Livre, e ele reconecta em looping uma conta que está
+perfeita. Fica ANTES dos workers porque uma variável vazia explica silêncio tão
+bem quanto um worker parado.
+{% endcomment %}
+{% if r.configuracao %}
+<div class="card">
+  <div class="card-head"><h2><i data-lucide="settings-2"></i> Configuração desligando funcionalidades</h2></div>
+  <div class="stat-grid" id="configuracao">
+    {% for c in r.configuracao %}
+    <div class="stat">
+      <div class="stat-head"><span class="dot off"></span>{{ c.chave }}</div>
+      <div class="l stat-sub"><span style="color:var(--yellow);">{{ c.efeito }}</span></div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 {% if r.conexoes %}
 <div class="card">
   <div class="card-head"><h2><i data-lucide="plug-zap"></i> Conexões de {{ usuario_encontrado.get_username }} agora</h2></div>
@@ -121,7 +143,7 @@ seria uma ida à rede por usuário.
         {{ c.servico }}
       </div>
       <div class="l stat-sub">
-        {% if c.conectado %}Conectado{% elif c.detalhe == 'conectando' or c.detalhe == 'capacidade' %}<span style="color:var(--yellow);">{{ c.motivo }}</span>{% else %}<span style="color:var(--red);">{{ c.motivo }}</span>{% endif %}
+        {% if c.conectado %}{% if c.alerta %}<span style="color:var(--yellow);">{{ c.alerta }}</span>{% else %}Conectado{% endif %}{% elif c.detalhe == 'conectando' or c.detalhe == 'capacidade' %}<span style="color:var(--yellow);">{{ c.motivo }}</span>{% else %}<span style="color:var(--red);">{{ c.motivo }}</span>{% endif %}
       </div>
     </div>
     {% endfor %}

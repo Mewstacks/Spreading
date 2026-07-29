@@ -402,7 +402,12 @@
     } else {
       inputBuffer.push(event);
     }
-    if (!flushTimer) flushTimer = setTimeout(flush, 50);
+    // 120ms, não 50. Cliques, teclas e wheel já chamam flush() na hora — este timer
+    // só atende ao movimento do mouse, que o próprio push já coalesce (só o último
+    // 'move' sobrevive). A 50ms uma passada de mouse virava ~20 POSTs/s contra um
+    // processo web de thread única que ainda hospeda o Chromium; a 120ms vira ~8,
+    // sem diferença perceptível no cursor remoto.
+    if (!flushTimer) flushTimer = setTimeout(flush, 120);
   }
   async function flush() {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
@@ -574,6 +579,11 @@
   function paint(state) {
     let phase = state.fase || 'idle';
     if (phase === 'idle' && state.auth_valido) phase = 'conectado';
+    // Login em andamento é o único momento em que a fase muda sozinha; conectado,
+    // 'idle' e 'erro' são estados de repouso e não justificam um poll de 3s.
+    const emAndamento = !['conectado', 'idle', 'erro', 'indisponivel'].includes(phase);
+    agendarPoll(emAndamento ? POLL_ATIVO_MS : POLL_OCIOSO_MS);
+    watchFrames(emAndamento);
     const visual = FASES[phase] || FASES.idle;
     pill.className = `conn-pill ${visual.cls}`;
     pillTxt.textContent = visual.txt;
@@ -593,8 +603,12 @@
       errText.textContent = state.erro;
       show(errBox, true, 'flex');
     } else show(errBox, false);
-    if (state.aviso) {
-      warnText.textContent = state.aviso;
+    // `alerta_conexao` é conexão VIVA cuja última sonda não passou (o anti-bot do
+    // ML barra requisições legítimas vindas do datacenter). Vai no mesmo box de
+    // aviso, e não no de erro, porque não há nada para o usuário fazer ainda.
+    const aviso = state.aviso || (phase === 'conectado' ? state.alerta_conexao : '');
+    if (aviso) {
+      warnText.textContent = aviso;
       show(warnBox, true, 'flex');
     } else show(warnBox, false);
 
@@ -646,11 +660,42 @@
     finally { stopLive(); cancelarBtn.disabled = false; poll(); }
   };
 
-  setInterval(() => {
-    if (framesES && lastFrameAt && Date.now() - lastFrameAt > 4000) setStream('interrompida');
-  }, 1000);
+  // O watchdog de frame só faz sentido com um stream aberto; ligá-lo sempre acordava
+  // a aba 1x/s para não fazer nada.
+  let frameWatch = null;
+  function watchFrames(ligar) {
+    if (ligar && !frameWatch) {
+      frameWatch = setInterval(() => {
+        if (framesES && lastFrameAt && Date.now() - lastFrameAt > 4000) setStream('interrompida');
+      }, 1000);
+    } else if (!ligar && frameWatch) {
+      clearInterval(frameWatch); frameWatch = null;
+    }
+  }
+
+  // Cadência do polling. Cada disparo é um request Django completo (middleware de
+  // tenant + contexto RLS) num processo web de thread única compartilhada com o
+  // Chromium do login: a 3s, por aba, isso era carga contínua para observar algo
+  // que só muda quando o usuário age. Regras:
+  //   - parado enquanto a aba está oculta (nada muda que o usuário vá ver);
+  //   - lento (20s) depois de conectado — só para perceber uma desconexão;
+  //   - rápido (3s) apenas durante um login em andamento, que é quando a fase muda.
+  const POLL_ATIVO_MS = 3000, POLL_OCIOSO_MS = 20000;
+  let pollTimer = null, pollAtual = 0;
+  function agendarPoll(ms) {
+    if (document.hidden) { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } pollAtual = 0; return; }
+    if (pollTimer && pollAtual === ms) return;
+    if (pollTimer) clearTimeout(pollTimer);
+    pollAtual = ms;
+    pollTimer = setTimeout(async () => { pollTimer = null; await poll(); agendarPoll(pollAtual); }, ms);
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { if (pollTimer) clearTimeout(pollTimer); pollTimer = null; pollAtual = 0; }
+    else { poll(); agendarPoll(pollAtual || POLL_ATIVO_MS); }   // volta a olhar: atualiza já
+  });
+
   poll();
-  setInterval(poll, 3000);
+  agendarPoll(POLL_ATIVO_MS);
   if (window.lucide) lucide.createIcons();
 })();
 </script>

@@ -50,8 +50,17 @@ class UrlNaoPermitidaError(Exception):
     pass
 
 
-MSG_SESSAO_EXPIRADA = ("Sua sessão do Mercado Livre expirou. "
-                       "Reconecte em Conexão Mercado Livre para gerar os links de afiliado.")
+# O portal de afiliados tem SSO PRÓPRIO (jms/msl), separado do site principal — o
+# mesmo desenho já reconhecido em ml_relatorio_conexao.py. Cookie bom em
+# mercadolivre.com.br não implica Link Builder logado, e é essa assimetria que
+# produz o relato "a tela diz conectado mas a geração de link falha": a sonda de
+# conexoes.py mede o site principal, e nenhuma tela media este portal. A mensagem
+# precisa dizer isso, senão o usuário reconecta a sessão que já está certa.
+MSG_SESSAO_EXPIRADA = (
+    "O portal de afiliados do Mercado Livre pediu login de novo. Ele tem sessão "
+    "própria, separada da sua conta no site — reconecte em Conexão Mercado Livre "
+    "para voltar a gerar links de afiliado."
+)
 
 
 def e_catalogo_universal(url: str) -> bool:
@@ -446,12 +455,11 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
         relatorio["erros"].append("link_afiliado vazio.")
         return relatorio
 
-    # validar_sessao=False: o destino é página pública — verificar não exige login e
-    # não pode derrubar/apagar sessão (era a causa do falso 'Sessão ML expirada'
+    # Contexto anônimo de propósito: o destino é página pública, verificar não exige
+    # login e não pode derrubar a sessão (era a causa do falso 'Sessão ML expirada'
     # logo após o link ser gerado com sucesso).
     with iniciar_browser(
         headless=True,
-        validar_sessao=False,
     ) as (page, context):
         try:
             page.goto(link_afiliado, wait_until="domcontentloaded", timeout=45000)

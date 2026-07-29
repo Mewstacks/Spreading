@@ -63,6 +63,32 @@ def _logado(page) -> bool:
     return page.locator("input[type='password'], input[name*='password' i]").count() == 0
 
 
+GOTO_TENTATIVAS = 2
+
+
+def _abrir_login(page):
+    """Navega até o login com uma 2ª tentativa — o mesmo tratamento do ML.
+
+    Do IP de datacenter da Fly a Amazon também passa por gateway anti-bot e a
+    primeira navegação estoura o tempo com frequência. O ML já tratava isso
+    (ml_conexao._abrir_login); aqui um único timeout matava a tentativa de login
+    inteira e o usuário via só "Tempo esgotado", sem nada a fazer além de repetir.
+    """
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    for tentativa in range(1, GOTO_TENTATIVAS + 1):
+        try:
+            page.goto(LOGIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+            return
+        except PlaywrightTimeoutError:
+            logger.warning("Login Amazon: navegação estourou o tempo (tentativa %s/%s).",
+                           tentativa, GOTO_TENTATIVAS)
+    raise RuntimeError(
+        "A Amazon demorou demais a responder a partir do servidor. "
+        "Tente novamente em alguns instantes."
+    )
+
+
 # Sem transação: organization_job envolveria os até 10 min do live view num
 # transaction.atomic(), deixando uma conexão `idle in transaction` enquanto o
 # usuário digita a senha.
@@ -99,12 +125,26 @@ def _worker(user):
                     cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
                 except Exception:
                     pass
-                page.goto(LOGIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+                _abrir_login(page)
                 cdp.send("Page.startScreencast", SCREENCAST)
                 _set(uid, fase="aguardando_login", erro="")
                 deadline, logged = time.time() + LOGIN_DEADLINE_S, False
+                # O loop gira a 20Hz (LOOP_MS=50) para bombear frames e drenar input,
+                # mas nem o cache nem o DOM mudam nessa escala. Ler os dois a cada
+                # volta custava, POR SEGUNDO, 20 idas ao cache e 20 consultas de
+                # seletor CSS via CDP — dentro do processo do gunicorn, segurando a
+                # GIL e derrubando a latência das outras 7 threads. O ML já tinha
+                # essa correção (ml_conexao, "ler o cache 20x/s só gastava CPU"); a
+                # Amazon nunca recebeu. Meio segundo de latência num clique de
+                # cancelar ninguém percebe.
+                state = {}
+                proxima_leitura = 0.0
+                proxima_checagem = 0.0
                 while time.time() < deadline:
-                    state = cache.get(_key(uid)) or {}
+                    agora = time.time()
+                    if agora >= proxima_leitura:
+                        state = cache.get(_key(uid)) or {}
+                        proxima_leitura = agora + 0.5
                     if state.get("cancelar"):
                         _set(uid, fase="idle", erro="")
                         break
@@ -118,9 +158,15 @@ def _worker(user):
                         # sincronizador usará, sem depender da URL da landing.
                         page.goto(REPORT_URL, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
                         _set(uid, salvar_agora=False)
-                    if _logado(page):
-                        logged = True
-                        break
+                        state["salvar_agora"] = False
+                        # Depois de navegar, confere já: é o momento em que o
+                        # resultado muda.
+                        proxima_checagem = 0.0
+                    if agora >= proxima_checagem:
+                        proxima_checagem = agora + 1.0
+                        if _logado(page):
+                            logged = True
+                            break
                     page.wait_for_timeout(LOOP_MS)
                 if logged:
                     _set(uid, fase="salvando")

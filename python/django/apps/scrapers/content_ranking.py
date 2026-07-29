@@ -26,6 +26,10 @@ def _freshness(observed):
     return max(0.0, 10.0 * (1.0 - min(hours, 72.0) / 72.0))
 
 
+def _pontuar_performance(posts, clicks) -> float:
+    return min(10.0, clicks / posts * 5.0) if posts else 0.0
+
+
 def _performance(user, destination, *, product_id=None, coupon_id=None):
     if not user:
         return 0.0
@@ -33,9 +37,25 @@ def _performance(user, destination, *, product_id=None, coupon_id=None):
     query = query.filter(produto_id=product_id) if product_id else query.filter(
         cupom_normalizado_id=coupon_id)
     stats = query.aggregate(posts=Count("id", distinct=True), clicks=Count("cliques"))
-    if not stats["posts"]:
-        return 0.0
-    return min(10.0, stats["clicks"] / stats["posts"] * 5.0)
+    return _pontuar_performance(stats["posts"], stats["clicks"])
+
+
+def _performance_em_lote(user, destination, campo, ids) -> dict:
+    """{id: score} num único GROUP BY, em vez de um aggregate() por item.
+
+    `_performance` era chamada dentro do laço de candidatos, e o pool tem sempre 80
+    itens: 80 agregações por regra de envio, multiplicadas pelo número de regras
+    ativas, a cada carregamento de /scrapers/config/.
+    """
+    if not user or not ids:
+        return {}
+    linhas = (Publicacao.objects
+              .filter(usuario=user, destino_id=destination, status="enviado",
+                      **{f"{campo}__in": list(ids)})
+              .values(campo)
+              .annotate(posts=Count("id", distinct=True), clicks=Count("cliques")))
+    return {linha[campo]: _pontuar_performance(linha["posts"], linha["clicks"])
+            for linha in linhas}
 
 
 def _product_candidates(config, limit):
@@ -49,6 +69,8 @@ def _product_candidates(config, limit):
         termo=config.termo_busca, marketplace=config.marketplace or None,
         usuario=config.owner, grupo_id=config.grupo_id,
     )
+    performance_por_produto = _performance_em_lote(
+        config.owner, config.grupo_id, "produto_id", [p.id for p in products])
     candidates = []
     for product in products:
         percent = float(getattr(product, "desconto_percent", 0) or 0)
@@ -57,7 +79,7 @@ def _product_candidates(config, limit):
         confidence = {"alta": 15.0, "media": 10.0, "baixa": 3.0}.get(
             getattr(product, "confianca", "media"), 8.0)
         fresh = _freshness(getattr(product, "ultima_observacao", None))
-        performance = _performance(config.owner, config.grupo_id, product_id=product.id)
+        performance = performance_por_produto.get(product.id, 0.0)
         source = 5.0 if getattr(product, "fonte", "") else 2.0
         reasons = [f"{percent:.0f}% de desconto"]
         if urgency:
@@ -111,6 +133,8 @@ def _coupon_candidates(config, limit):
     from apps.scrapers.coupon_products import ids_cupons_prontos
     from apps.scrapers.coupon_rules import cupom_publicavel
     prontos = ids_cupons_prontos(config.owner, pool)
+    performance_por_cupom = _performance_em_lote(
+        config.owner, config.grupo_id, "cupom_normalizado_id", prontos)
     candidates = []
     for coupon in pool:
         if coupon.id not in prontos or not cupom_publicavel(coupon):
@@ -140,7 +164,7 @@ def _coupon_candidates(config, limit):
         confidence = {"alta": 15.0, "media": 10.0, "baixa": 3.0}.get(
             coupon.confianca, 8.0)
         fresh = _freshness(coupon.ultima_observacao)
-        performance = _performance(config.owner, config.grupo_id, coupon_id=coupon.id)
+        performance = performance_por_cupom.get(coupon.id, 0.0)
         source = 5.0 if coupon.fonte.status == "ok" else 2.0
         restricted_penalty = 5.0 if coupon.restrito else 0.0
         commission = float(coupon.programa.comissao_max or 0) if coupon.programa else 0.0

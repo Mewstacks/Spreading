@@ -157,8 +157,7 @@ def casar_cupons_container(coletor=None, max_paginas=2, usuario=None):
 
     # A gravação fica FORA do `with`: dentro dele o ORM levanta
     # SynchronousOnlyOperation (event loop do Playwright vivo nesta thread).
-    with iniciar_browser(storage_state=state, headless=True,
-                         validar_sessao=False) as (page, _context):
+    with iniciar_browser(storage_state=state, headless=True) as (page, _context):
         pares = _coletar(cupons,
                          lambda url, paginas: _ids_do_container(page, url, paginas),
                          max_paginas)

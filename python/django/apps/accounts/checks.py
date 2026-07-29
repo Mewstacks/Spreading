@@ -64,6 +64,29 @@ def phase0_security_checks(app_configs, **kwargs):
             "Telethon/relink deve permanecer desligado nesta fase.",
             id="accounts.E011",
         ))
+    # Avisos de configuração que quebram funcionalidades EM SILÊNCIO. Nenhum deles
+    # gera erro em log nem mensagem de tela: o usuário só vê "0 cupons" ou "sessão
+    # expirada" e vai reconectar o Mercado Livre, que não é o problema.
+    if not settings.ML_SYSTEM_ORGANIZATION_ID:
+        errors.append(Warning(
+            "ML_SYSTEM_ORGANIZATION_ID vazio: o preparo de cupons PÚBLICOS do "
+            "Mercado Livre roda anônimo (scrapers/coupon_products.py resolve o "
+            "contexto como None para eles) e os cupons nunca ficam prontos, mesmo "
+            "com todos os usuários conectados.",
+            id="accounts.W002",
+        ))
+    if not settings.ML_LINK_BUILDER_ENABLED:
+        errors.append(Warning(
+            "ML_LINK_BUILDER_ENABLED desligada: nenhum link de afiliado do Mercado "
+            "Livre será gerado. A tela de Promoções mostrará tudo como pendente.",
+            id="accounts.W003",
+        ))
+    if not settings.ML_BROWSER_LOGIN_ENABLED:
+        errors.append(Warning(
+            "ML_BROWSER_LOGIN_ENABLED desligada: a tela de Conexão Mercado Livre "
+            "não consegue abrir o login.",
+            id="accounts.W004",
+        ))
     try:
         tenant_key = settings.TENANT_CONTEXT_SIGNING_KEY
         padded_key = tenant_key + ("=" * (-len(tenant_key) % 4))

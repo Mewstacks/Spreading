@@ -84,9 +84,19 @@ class MercadoLivreSession(models.Model):
 
     STATUS = [
         ("active", "Ativa"),
+        ("suspect", "Suspeita"),
         ("expired", "Expirada"),
         ("decrypt_error", "Erro de criptografia"),
         ("rotation_required", "Rotação necessária"),
+    ]
+
+    # Vereditos da sonda de sessão (conexoes.sondar_sessao_ml). "suspeito" NÃO é
+    # logout: é o que o ML responde a um IP de datacenter quando o anti-bot entra
+    # no caminho. Só a repetição (PROBE_FALHAS_PARA_DESCONECTAR) vira "reconecte".
+    PROBE_RESULTS = [
+        ("conectado", "Conectado"),
+        ("suspeito", "Suspeito"),
+        ("inconclusivo", "Inconclusivo"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -106,6 +116,17 @@ class MercadoLivreSession(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     rotated_at = models.DateTimeField(null=True, blank=True)
     last_used_at = models.DateTimeField(null=True, blank=True)
+
+    # ── Veredito da sonda: fonte COMPARTILHADA entre os 9 processos ──
+    # O cache do Django é LocMem, por processo (ver core/settings.py). Enquanto o
+    # veredito morava só lá, web e workers sondavam o ML em paralelo e discordavam:
+    # a tela ficava verde com o cache do gunicorn e um worker, cinco minutos depois,
+    # concluía "expirado" e apagava a credencial da organização inteira. Guardar o
+    # veredito aqui, ao lado da própria sessão, dá UMA leitura para todo mundo.
+    last_probe_at = models.DateTimeField(null=True, blank=True)
+    last_probe_result = models.CharField(max_length=16, choices=PROBE_RESULTS, blank=True)
+    probe_failures = models.PositiveSmallIntegerField(default=0)
+    probe_reason = models.CharField(max_length=200, blank=True)
 
     def __str__(self):
         return f"MLSession<{self.organization_id}>"

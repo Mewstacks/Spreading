@@ -527,8 +527,9 @@ else:
 
 # Cooldown (horas) entre alertas repetidos de conexão caída p/ não floodar e-mail.
 ALERTA_CONEXAO_COOLDOWN_H = int(os.getenv("ALERTA_CONEXAO_COOLDOWN_H", "6"))
-# Dias sem atualizar o auth.json do ML antes de considerar a sessão "stale" (caída).
-ML_AUTH_STALE_DIAS = int(os.getenv("ML_AUTH_STALE_DIAS", "7"))
+# (ML_AUTH_STALE_DIAS saiu: a idade do arquivo deixou de ser critério de sessão viva
+# quando conexoes.py passou a perguntar ao próprio ML, e o único leitor da variável
+# já era código morto.)
 
 # ─────────────────────────────────────────────────────────────
 # Sessões do ML (auth.json / auth_{id}.json). Precisa ser PERSISTENTE: no Fly o
