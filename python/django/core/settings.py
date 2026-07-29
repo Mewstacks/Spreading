@@ -373,6 +373,10 @@ AMAZON_CREATORS_HOST = os.getenv("AMAZON_CREATORS_HOST", "")
 AMAZON_MARKETPLACE = os.getenv("AMAZON_MARKETPLACE", "www.amazon.com.br")
 # Desconto mínimo (%) para um item entrar no feed de ofertas Amazon.
 AMAZON_MIN_SAVINGS_PCT = float(os.getenv("AMAZON_MIN_SAVINGS_PCT", "15"))
+# Páginas de busca varridas por keyword. A Creators API devolve no máximo 10 itens por
+# página, então este número multiplica o teto do feed (5 -> até 50 itens por keyword).
+# Cada página é uma chamada com throttle de ~1 TPS: subir muito alonga o ciclo.
+AMAZON_FEED_PAGES = int(os.getenv("AMAZON_FEED_PAGES", "5"))
 AMAZON_PUBLIC_FALLBACK = os.getenv("AMAZON_PUBLIC_FALLBACK", "1") == "1"
 AFFILIATE_FEED_URL = os.getenv("AFFILIATE_FEED_URL", "")
 AFFILIATE_FEED_TOKEN = os.getenv("AFFILIATE_FEED_TOKEN", "")

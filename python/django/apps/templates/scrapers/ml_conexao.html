@@ -581,9 +581,25 @@
     detachInput();
   }
 
+  // Fases de login EM CURSO: aqui a `fase` manda, porque o servidor zera
+  // auth_valido de propósito enquanto o login não terminou (ml_conexao.status).
+  const FASES_EM_CURSO = new Set(['iniciando','aguardando_login','validando','salvando']);
+
   function paint(state) {
     let phase = state.fase || 'idle';
-    if (phase === 'idle' && state.auth_valido) phase = 'conectado';
+    // Fora do login em curso quem manda é a sessão que EXISTE de fato (auth_valido
+    // vem de conexoes.estado_ml, a mesma fonte do dashboard e da Saúde).
+    //
+    // Antes: `if (phase === 'idle' && state.auth_valido) phase = 'conectado'`. O
+    // veredito só conseguia PROMOVER idle→conectado; nunca rebaixar. Como a `fase`
+    // vem de cache LocMem por processo, um login que chegou em 'conectado' mas não
+    // persistiu a sessão deixava a tela verde ("Sessão Ativa · Pronto para gerar")
+    // com ZERO sessão salva — e o Link Builder falhava sem explicação, porque a
+    // tela de conexão jurava que estava tudo certo.
+    if (!FASES_EM_CURSO.has(phase) && phase !== 'indisponivel') {
+      if (state.auth_valido) phase = 'conectado';
+      else if (phase === 'conectado') phase = state.erro ? 'erro' : 'idle';
+    }
     const visual = FASES[phase] || FASES.idle;
     pill.className = `conn-pill ${visual.cls}`;
     pillTxt.textContent = visual.txt;
@@ -609,8 +625,12 @@
       errText.textContent = state.erro;
       show(errBox, true, 'flex');
     } else show(errBox, false);
-    if (state.aviso) {
-      warnText.textContent = state.aviso;
+    // `motivo_desconexao` é o porquê que o servidor já calculava e a tela descartava
+    // ("Nenhuma sessão do Mercado Livre", "Sessão expirou — reconecte"). Sem isto o
+    // painel só ficava cinza e não dizia o que houve.
+    const aviso = state.aviso || (!state.auth_valido ? state.motivo_desconexao : '');
+    if (aviso) {
+      warnText.textContent = aviso;
       show(warnBox, true, 'flex');
     } else show(warnBox, false);
 

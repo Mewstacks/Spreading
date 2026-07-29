@@ -48,6 +48,22 @@ def _primeiro(d, *caminhos):
     return None
 
 
+def _reconstruir_preco_de(listing: dict, preco_atual: float) -> float:
+    """Preço "De:" derivado de `price.savings` quando `savingBasis` não veio.
+
+    Prefere o valor absoluto (soma exata); só cai na porcentagem se ela for o único
+    dado. Devolve `preco_atual` quando não há como reconstruir — o chamador trata
+    isso como "sem desconto de/por".
+    """
+    economia = _num(_primeiro(listing, ("price", "savings", "money", "amount")))
+    if economia > 0:
+        return preco_atual + economia
+    pct = _num(_primeiro(listing, ("price", "savings", "percentage")))
+    if 0 < pct < 100:
+        return preco_atual / (1 - pct / 100)
+    return preco_atual
+
+
 def _mapear_item(item: dict) -> dict | None:
     """
     Converte um item bruto da Creators API -> dict no formato do _upsert.
@@ -73,6 +89,13 @@ def _mapear_item(item: dict) -> dict | None:
     preco_de = _num(_primeiro(listing, ("price", "savingBasis", "money", "amount")))
     if preco_atual <= 0:
         return None
+    if preco_de <= preco_atual:
+        # `savingBasis` é opcional no catalog/v1 e falta com frequência. Como a busca
+        # já foi filtrada por `minSavingPercent`, o item TEM desconto — mas sem o "De:"
+        # ele saía daqui com preco_de == preco_atual e o feed (que exige de > por) o
+        # descartava. Reconstruímos o "De:" a partir do desconto que a própria API
+        # informa, em vez de jogar fora uma oferta legítima.
+        preco_de = _reconstruir_preco_de(listing, preco_atual)
     if preco_de <= preco_atual:
         preco_de = preco_atual  # sem desconto de/por; pode ainda ter promoção (dealDetails)
     elif preco_de > preco_atual:
@@ -166,9 +189,16 @@ def _upsert_produto(m: dict, origem: str, macro=None, owner=None) -> bool:
     return True
 
 
-def _coletar(keyword, min_savings, max_paginas=2, creds=None):
+def _paginas_padrao() -> int:
+    """Páginas por keyword. A Creators API devolve no máximo 10 itens por página, então
+    este número é o teto real do feed: 2 páginas limitavam cada keyword a 20 itens."""
+    return max(1, int(getattr(settings, "AMAZON_FEED_PAGES", 5)))
+
+
+def _coletar(keyword, min_savings, max_paginas=None, creds=None):
     """Coleta itens mapeados de uma busca (até max_paginas) com as creds dadas."""
     out = []
+    max_paginas = _paginas_padrao() if max_paginas is None else max_paginas
     for p in range(1, max_paginas + 1):
         itens = creators_api.search_items(
             keyword, min_savings_percent=min_savings, item_count=10, page=p, creds=creds
@@ -206,7 +236,7 @@ def mapear_ofertas(usuario=None):
     return total
 
 
-def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=2, macro=None, usuario=None):
+def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=None, macro=None, usuario=None):
     """searchItems por sub-nicho (lista separada por vírgula) -> origem='busca', owner=usuario."""
     creds = creators_api.creds_de_usuario(usuario)
     termos = [t.strip() for t in (termo_busca or "").split(",") if t.strip()]

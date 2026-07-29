@@ -517,6 +517,15 @@ def projetar_catalogo_cupons(faixa=None):
                   "container_name": "",
                   "is_mar_aberto": False,
                   "dia_inicio": "", "dia_fim": ""}
+        # A campanha (/cupons/filter) não sabe o container; a página pública sabe
+        # (cupons_codigo_scraper). As duas gravam o MESMO external_id, e esta projeção
+        # roda depois — sem preservar, ela zerava o container_url recém-descoberto e o
+        # casamento cupom-produto (casar_cupons_container) nunca acontecia.
+        anterior = CupomNormalizado.objects.filter(
+            fonte=fonte, external_id=ext).values_list("regras", flat=True).first() or {}
+        for campo in ("container_url", "container_name"):
+            if not regras[campo] and anterior.get(campo):
+                regras[campo] = anterior[campo]
         cupom_normalizado, _ = CupomNormalizado.objects.update_or_create(
             fonte=fonte, external_id=ext,
             defaults={

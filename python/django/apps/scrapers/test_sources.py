@@ -328,3 +328,161 @@ class SourcePipelineTests(TestCase):
             result = _rodar_scrape()
         self.assertEqual(result, {"sucessos": 1, "falhas": ["amazon"]})
         expire.assert_called_once()
+
+
+class CouponPagePayloadTests(TestCase):
+    """A página /ofertas/cupons virou 'smart-coupon' renderizado no cliente: o DOM
+    hidratado não tem mais `.poly-card`, então a coleta tem de vir do payload SSR."""
+
+    # Recorte fiel de um cupom do carrossel oficial (campos e grafia reais).
+    CUPOM = {
+        "campaign_id": "13975432",
+        "title": {"text": "60% OFF"},
+        "category": "Itens para Casa",
+        "benefit_mode": "PERCENT",
+        "status": {"id": "ACTIVE"},
+        "expiration_date": "2026-08-31T02:59:00Z",
+        "amount": {"min_amount": "Compra mínima R$ 1.099",
+                   "cap_amount": "Limite de desconto R$ 63"},
+        "action": {"type": "link", "value": (
+            "https://lista.mercadolivre.com.br/_Container_13975432"
+            "?coupon_campaign_id=13975432#navigation_id=coupons-carousel-1_x")},
+        "segmentations": {"container": {"id": "1708749", "name": "13975432"},
+                          "total_items": 30},
+    }
+
+    def _html(self, *cupons):
+        import json
+        payload = {"appProps": {"pageProps": {"floxPreloadedState": {
+            "@meli/web/flox/FLOX_STATE": {"brickStack": {
+                # A chave carrega um timestamp que muda a cada render — o parser
+                # não pode depender dela.
+                "coupons-carousel-1780432282667": {"data": {"coupons": list(cupons)}},
+            }}}}}}
+        return ('<script id="__NORDIC_RENDERING_CTX__">_n.ctx.r='
+                + json.dumps(payload)
+                + ';_n.ctx.r.assets.manifest=new Map([]);</script>')
+
+    def test_payload_yields_coupon_with_container_url(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import (
+            _cupons_do_payload, _normalizar_cupom, _payload_nordic,
+        )
+        dados = _payload_nordic(self._html(self.CUPOM))
+        brutos = _cupons_do_payload(dados)
+        self.assertEqual(len(brutos), 1)
+
+        cupom = _normalizar_cupom(brutos[0])
+        self.assertEqual(cupom["campanha_id"], "13975432")
+        self.assertEqual(cupom["tipo_desconto"], "porcentagem")
+        self.assertEqual(cupom["valor_desconto"], 60.0)
+        self.assertEqual(cupom["valor_minimo"], 1099.0)   # "R$ 1.099" é milhar, não 1,099
+        self.assertEqual(cupom["desconto_maximo"], 63.0)
+        # O fragmento de telemetria do carrossel não pode entrar na URL do container:
+        # é ele que casar_cupons_container abre para descobrir os produtos.
+        self.assertEqual(
+            cupom["container_url"],
+            "https://lista.mercadolivre.com.br/_Container_13975432?coupon_campaign_id=13975432")
+
+    def test_finished_or_non_listing_coupons_are_dropped(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import _normalizar_cupom
+        self.assertIsNone(_normalizar_cupom({**self.CUPOM, "status": {"id": "FINISHED"}}))
+        # Vitrine social não é lista de produtos: publicar levaria a clique sem desconto.
+        self.assertIsNone(_normalizar_cupom({**self.CUPOM, "action": {
+            "type": "link", "value": "https://www.mercadolivre.com.br/social/loja"}}))
+
+    def test_malformed_page_never_raises(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import _payload_nordic
+        self.assertIsNone(_payload_nordic("<html>sem script</html>"))
+        self.assertIsNone(_payload_nordic(object()))
+        self.assertIsNone(_payload_nordic(
+            '<script id="__NORDIC_RENDERING_CTX__">_n.ctx.r={quebrado;_n.ctx.r.assets</script>'))
+
+    def test_coupons_are_persisted_with_container_rules(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import (
+            _cupons_do_payload, _normalizar_cupom, _payload_nordic, _salvar_cupons_smart,
+        )
+        brutos = _cupons_do_payload(_payload_nordic(self._html(self.CUPOM)))
+        total = _salvar_cupons_smart([_normalizar_cupom(b) for b in brutos])
+
+        self.assertEqual(total, 1)
+        cupom = CupomNormalizado.objects.get(external_id="campanha:13975432")
+        self.assertEqual(cupom.estado, "ativo")
+        # Token opaco de ativação nunca vira "código para digitar no checkout".
+        self.assertEqual(cupom.codigo, "")
+        self.assertEqual(cupom.regras["modo_resgate"], "ativacao")
+        self.assertFalse(cupom.regras["is_mar_aberto"])
+        self.assertTrue(cupom.regras["container_url"].endswith("coupon_campaign_id=13975432"))
+
+
+class OfferFeedPaginationTests(TestCase):
+    """O feed /ofertas tem ~40 páginas cheias; uma página em branco é quase sempre
+    challenge do anti-bot, não fim do catálogo."""
+
+    def _rodar(self, paginas_de_cards, max_paginas=6):
+        from contextlib import contextmanager
+        from unittest.mock import MagicMock
+        from apps.scrapers.scraper_mercadolivre import ofertas_scraper as mod
+
+        @contextmanager
+        def fake_browser(*a, **kw):
+            yield MagicMock(), MagicMock()
+
+        with patch.object(mod, "iniciar_browser", fake_browser), \
+             patch.object(mod, "pausa_humana"), \
+             patch.object(mod, "storage_state", return_value=None), \
+             patch.object(mod, "_coletar_cards", side_effect=paginas_de_cards), \
+             patch.object(mod, "_salvar", side_effect=lambda c, **kw: len(c)) as salvar:
+            total = mod.mapear_ofertas(max_paginas=max_paginas)
+        return total, salvar
+
+    def _card(self, i):
+        return {"link_produto": f"https://ml/{i}", "nome": f"Item {i}"}
+
+    def test_single_blank_page_does_not_truncate_the_feed(self):
+        # Antes: a página 2 vazia encerrava tudo e o feed vinha com 1 item.
+        paginas = [[self._card(1)], [], [self._card(2)], [self._card(3)],
+                   [self._card(4)], [self._card(5)]]
+        total, _ = self._rodar(paginas)
+        self.assertEqual(total, 5)
+
+    def test_three_blank_pages_in_a_row_end_the_scan(self):
+        paginas = [[self._card(1)], [], [], [], [self._card(9)], [self._card(10)]]
+        total, salvar = self._rodar(paginas)
+        self.assertEqual(total, 1)
+        # Parou na 4ª página: não gastou as duas restantes.
+        self.assertEqual(len(salvar.call_args[0][0]), 1)
+
+
+class AmazonDiscountRecoveryTests(TestCase):
+    """`savingBasis` é opcional no catalog/v1; sem reconstruir o 'De:' o feed
+    descartava ofertas que a própria API já filtrou por minSavingPercent."""
+
+    def _item(self, price):
+        return {"asin": "B0RECOVER1",
+                "itemInfo": {"title": {"displayValue": "Fone"}},
+                "offersV2": {"listings": [{"price": price}]}}
+
+    def test_percentage_only_item_keeps_its_discount(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+        m = az._mapear_item(self._item({"money": {"amount": 80},
+                                        "savings": {"percentage": 20}}))
+        self.assertEqual(m["preco_com_cupom"], 80)
+        self.assertEqual(round(m["preco_sem_desconto"], 2), 100.0)
+
+    def test_absolute_savings_item_keeps_its_discount(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+        m = az._mapear_item(self._item({"money": {"amount": 80},
+                                        "savings": {"money": {"amount": 20}}}))
+        self.assertEqual(m["preco_sem_desconto"], 100)
+
+    def test_item_without_any_discount_signal_stays_flat(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+        m = az._mapear_item(self._item({"money": {"amount": 80}}))
+        self.assertEqual(m["preco_sem_desconto"], m["preco_com_cupom"])
+
+    def test_saving_basis_still_wins_when_present(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+        m = az._mapear_item(self._item({"money": {"amount": 80},
+                                        "savingBasis": {"money": {"amount": 100}},
+                                        "savings": {"percentage": 20}}))
+        self.assertEqual(m["preco_sem_desconto"], 100)

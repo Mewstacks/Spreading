@@ -11,6 +11,19 @@
 
 {% block head_extra %}
 <style>
+  /* ── Ação "Gerar links de afiliado" (sempre visível, sem dropdown) ── */
+  .links-acao { display: inline-flex; align-items: center; gap: .4rem; }
+  .links-acao .links-macro { max-width: 190px; }
+  /* Fila estampada no botão: o número dizia "há trabalho a fazer" só na faixa de
+     Fontes, longe do controle que resolve. */
+  .links-fila { display: inline-flex; align-items: center; justify-content: center;
+    min-width: 1.35rem; height: 1.35rem; padding: 0 .35rem; margin-left: .1rem;
+    border-radius: 999px; background: color-mix(in srgb, currentColor 18%, transparent);
+    font-family: var(--mono); font-size: 10.5px; font-weight: 600; line-height: 1; }
+  .js-links-btn[disabled] { opacity: .6; cursor: progress; }
+  .empty-acoes { display: flex; gap: .5rem; justify-content: center;
+    flex-wrap: wrap; margin-top: 1rem; }
+
   /* ── Dropdowns de categoria (macro/sub) ── */
   .dd { position: relative; display: inline-block; }
   .dd-panel { display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 100;
@@ -39,7 +52,6 @@
     margin-top: .7rem; padding-top: .7rem; border-top: 1px solid var(--border);
     font-size: 12.5px; color: var(--muted); }
   .fontes-sub .lucide { width: 1em; height: 1em; }
-  .fontes-sub .fontes-acoes { margin-left: auto; display: inline-flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
 
   /* ── Filtros: toolbar integrada à listagem, sem caixa ── */
   .filtros { padding-bottom: 1rem; margin-bottom: 1.1rem; border-bottom: 1px solid var(--border); }
@@ -174,7 +186,12 @@
     .filter-meta .seg { margin-left: 0; width: 100%; }
     .filter-meta .seg a { flex: 1; justify-content: center; }
     .fontes-afiliacao { margin-left: 0; flex-basis: 100%; }
-    .fontes-sub .fontes-acoes { margin-left: 0; }
+    /* A ação de links é a principal da tela: no mobile ocupa a linha inteira, com
+       alvo de toque cheio, em vez de espremer select + botão lado a lado. */
+    .links-acao { flex-basis: 100%; flex-wrap: wrap; }
+    .links-acao .links-macro { max-width: none; flex: 1 1 100%; min-height: 44px; }
+    .links-acao .js-links-btn { flex: 1 1 100%; justify-content: center; min-height: 44px; }
+    .empty-acoes .btn { flex-basis: 100%; justify-content: center; min-height: 44px; }
     .col-actions { position: static; box-shadow: none; }
     .table-flat table { min-width: 0; }
 
@@ -246,9 +263,18 @@
       {% else %}
       <a class="btn btn-ghost btn-sm" href="?{{ qs_base_sem_afiliado }}afiliado=prontos"><i data-lucide="check"></i> Mostrar só os afiliados</a>
       {% endif %}
+      {% comment %}
+      Ação principal da tela: sem link de afiliado o item não aparece na lista nem
+      pode ser enviado. Ela morava recolhida num <details> ghost dentro da faixa de
+      diagnóstico "Fontes" — o texto do estado vazio mandava "use Gerar links acima"
+      apontando para um botão que ninguém achava. Agora é botão de ação, no lugar
+      onde o usuário já está olhando, com a fila estampada.
+      {% endcomment %}
+      {% include "scrapers/_gerar_links.html" %}
     {% endif %}
   </div>
 </div>
+{% if tipo != 'cupom' %}<div id="links-log" class="modal-log" style="margin-top:.7rem;"></div>{% endif %}
 
 <section class="fontes-strip" aria-label="Saúde das fontes">
   <div class="fontes-bar">
@@ -279,24 +305,7 @@
   </div>
   <div class="fontes-sub">
     <span><i data-lucide="info"></i> {{ amazon_diagnostico }}</span>
-    {% if tipo != 'cupom' %}
-    <span class="fontes-acoes">
-      {# Filtro de geração de links recolhido: só aparece o gatilho até o clique. #}
-      <details class="dd">
-        <summary class="btn btn-ghost btn-sm acao-sm links-summary"><i data-lucide="link"></i> Gerar links de afiliado</summary>
-        <div class="dd-panel links-panel" style="padding:.6rem;min-width:260px;">
-          <select id="links-macro" class="btn-sm acao-sm" aria-label="Categoria para gerar links" style="width:100%;margin-bottom:.5rem;">
-            <option value="">Todas as categorias</option>
-            {% for mc in macro_categorias %}<option value="{{ mc }}">{{ mc }}</option>{% endfor %}
-          </select>
-          <button type="button" id="links-btn" class="btn btn-accent btn-sm acao-sm" style="width:100%;" onclick="gerarLinks()">
-            <i data-lucide="zap"></i> Gerar</button>
-        </div>
-      </details>
-    </span>
-    {% endif %}
   </div>
-  {% if tipo != 'cupom' %}<div id="links-log" class="modal-log" style="margin-top:.7rem;"></div>{% endif %}
 </section>
 
 {{ categorias_por_macro|json_script:"cats-data" }}
@@ -579,10 +588,22 @@ que era exatamente o que não resolvia.
 <div class="empty">
   <i data-lucide="hourglass"></i>
   <div class="empty-title">Nenhum item afiliado ainda</div>
-  <p>{{ pendentes_ocultos }} produto(s) aguardando link —
-    {{ afiliacao.pendente }} na fila{% if afiliacao.erro %} · {{ afiliacao.erro }} com erro{% endif %}{% if afiliacao.nao_afiliavel %} · {{ afiliacao.nao_afiliavel }} não afiliáveis{% endif %}.<br>
-    Use <strong>Gerar links de afiliado</strong> acima, ou
-    <a class="link" href="/scrapers/ml/">reconecte o Mercado Livre</a> se a sessão caiu.</p>
+  <p>A raspagem trouxe {{ pendentes_ocultos }} produto(s), mas eles só aparecem aqui
+    depois que o link de afiliado sai — enviar sem link não comissiona.<br>
+    {{ afiliacao.pendente }} na fila{% if afiliacao.erro %} · {{ afiliacao.erro }} com erro{% endif %}{% if afiliacao.nao_afiliavel %} · {{ afiliacao.nao_afiliavel }} não afiliáveis{% endif %}.</p>
+  {% comment %}
+  Antes: "Use Gerar links de afiliado acima" — apontando para um controle que o CSS
+  mantinha invisível. O botão da ação vem junto do texto que pede a ação.
+  {% endcomment %}
+  <div class="empty-acoes">
+    <button type="button" class="btn btn-accent btn-sm js-links-btn" onclick="gerarLinks()">
+      <i data-lucide="link"></i> Gerar links agora</button>
+    <a class="btn btn-ghost btn-sm" href="?{{ qs_base_sem_afiliado }}afiliado=todos">
+      <i data-lucide="eye"></i> Ver os pendentes assim mesmo</a>
+  </div>
+  <p class="muted" style="margin-top:.6rem;font-size:12.5px;">
+    Se o log acusar sessão expirada,
+    <a class="link" href="/scrapers/ml/">reconecte o Mercado Livre</a>.</p>
 </div>
 {% else %}
 <div class="empty">
@@ -711,10 +732,31 @@ function buscarItens() {
 // ─── Gerar links de afiliado da fila deste usuário ───
 // A lista só mostra item afiliado, então sem isto quem não é staff dependia só do
 // worker para ter QUALQUER produto enviável na tela.
+// O botão existe em dois lugares (cabeçalho e estado vazio da lista), então o
+// estado é aplicado por CLASSE: com id só o primeiro travava, e o outro seguia
+// clicável durante a geração, disparando um segundo stream em paralelo.
+function _linksBotoes() { return document.querySelectorAll('.js-links-btn'); }
+
+function _linksOcupado(ocupado) {
+  _linksBotoes().forEach(function (b) {
+    b.disabled = ocupado;
+    if (ocupado) {
+      if (!b.dataset.rotulo) b.dataset.rotulo = b.innerHTML;
+      b.textContent = 'Gerando links…';
+    } else if (b.dataset.rotulo) {
+      b.innerHTML = b.dataset.rotulo;
+      if (window.lucide) lucide.createIcons();
+    }
+  });
+}
+
 function gerarLinks() {
-  var btn = document.getElementById('links-btn');
   var log = document.getElementById('links-log');
-  btn.disabled = true; log.textContent = '';
+  _linksOcupado(true);
+  log.textContent = '';
+  // O log fica no topo; sem isto o clique no estado vazio (fim da página) não
+  // mostrava nenhuma resposta e parecia que o botão não fez nada.
+  log.scrollIntoView({ behavior: 'smooth', block: 'center' });
   var macroSel = document.getElementById('links-macro');
   var macro = macroSel ? macroSel.value.trim() : '';
   var url = '/scrapers/gerar-links/' + (macro ? '?macro=' + encodeURIComponent(macro) : '');
@@ -734,7 +776,7 @@ function gerarLinks() {
   es.onerror = function () {
     var l = document.createElement('div'); l.className = 'err';
     l.textContent = 'A conexão foi perdida. Tente novamente.';
-    log.appendChild(l); es.close(); btn.disabled = false;
+    log.appendChild(l); es.close(); _linksOcupado(false);
   };
 }
 

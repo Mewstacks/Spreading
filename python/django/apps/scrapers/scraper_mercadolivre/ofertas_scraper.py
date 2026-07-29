@@ -226,6 +226,16 @@ SUBNICHOS = {
 }
 
 
+# Páginas seguidas sem nenhum card antes de considerar o feed encerrado.
+#
+# Uma página em branco NÃO é o fim do feed: /ofertas devolve ~40 cards por página até
+# a 40ª, e quando vem vazia é quase sempre challenge do anti-bot (o IP de datacenter da
+# Fly é desafiado — ver auxiliar.iniciar_browser) ou render que não completou. Parar na
+# primeira vazia jogava fora todo o resto da varredura: um soluço na página 3 custava
+# ~1.480 ofertas. Só encerramos depois desta quantidade de vazias CONSECUTIVAS.
+VAZIAS_PARA_PARAR = 3
+
+
 def _preco_float(texto_frac, texto_cents="0"):
     frac = (texto_frac or "0").replace(".", "").strip()
     cents = (texto_cents or "0").strip() or "0"
@@ -418,6 +428,7 @@ def mapear_ofertas(max_paginas=40, substituir=True, usuario=None):
     logger.info("Iniciando raspagem de ofertas ML (%s)", "full" if substituir else "flash")
     coletados = []
 
+    vazias_seguidas = 0
     with iniciar_browser(storage_state=storage_state(usuario), headless=True,
                          validar_sessao=False) as (page, context):
         for n in range(1, max_paginas + 1):
@@ -431,11 +442,25 @@ def mapear_ofertas(max_paginas=40, substituir=True, usuario=None):
                     pass
             except Exception as e:
                 logger.warning("Erro ao carregar pagina de ofertas ML %s: %s", n, e)
+                # Falha de carregamento entra na mesma contagem das vazias: um
+                # bloqueio total encerra em 3 páginas em vez de gastar 40 timeouts.
+                vazias_seguidas += 1
+                if vazias_seguidas >= VAZIAS_PARA_PARAR:
+                    logger.warning("%s páginas seguidas sem ofertas; encerrando na %s",
+                                   vazias_seguidas, n)
+                    break
                 continue
             cards = _coletar_cards(page)
             if not cards:
-                logger.info("Pagina %s sem ofertas; parando", n)
-                break
+                vazias_seguidas += 1
+                if vazias_seguidas >= VAZIAS_PARA_PARAR:
+                    logger.info("%s páginas seguidas sem ofertas; fim do feed na %s",
+                                vazias_seguidas, n)
+                    break
+                logger.info("Pagina %s sem ofertas; seguindo para a proxima", n)
+                pausa_humana()
+                continue
+            vazias_seguidas = 0
             coletados.extend(cards)
             pausa_humana()  # ritmo humano entre páginas (anti-bloqueio)
 
@@ -474,6 +499,7 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None,
             slug = _slug_busca(termo)
             if not slug:
                 continue
+            vazias_seguidas = 0  # a tolerância é POR TERMO
             for p in range(max_paginas):
                 desde = p * 50 + 1
                 url = f"https://lista.mercadolivre.com.br/{slug}_Discount_{int(min_desconto)}-100"
@@ -488,10 +514,20 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None,
                         pass
                 except Exception as e:
                     logger.warning("Erro na busca ML por termo '%s': %s", termo, e)
-                    break
+                    vazias_seguidas += 1
+                    if vazias_seguidas >= VAZIAS_PARA_PARAR:
+                        break
+                    continue
                 cards = _coletar_cards(page)
                 if not cards:
-                    break
+                    # Mesma razão de mapear_ofertas: a 1ª página em branco costuma ser
+                    # bloqueio/render, não fim dos resultados do termo.
+                    vazias_seguidas += 1
+                    if vazias_seguidas >= VAZIAS_PARA_PARAR:
+                        break
+                    pausa_humana()
+                    continue
+                vazias_seguidas = 0
                 coletados.extend(cards)
                 pausa_humana()  # ritmo humano entre páginas (anti-bloqueio)
 

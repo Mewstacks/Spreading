@@ -2211,7 +2211,19 @@ def gerar_links_stream(request):
         por_loja = {}
         for p in pendentes:
             por_loja.setdefault(p.marketplace or "mercadolivre", []).append(p)
+        # Cada lote passa MINUTOS no Link Builder (~5s por produto) sem tocar no
+        # banco. Nesse intervalo o proxy do Postgres da Fly derruba o socket ocioso
+        # e o Django não sabe: a próxima query estoura
+        # OperationalError("the connection is closed"). É o mesmo problema que a
+        # raspagem já resolve com _reconectar_db() (ofertas_scraper) e que os
+        # workers resolvem com _renovar_conexoes_db() (automacao) — só este caminho
+        # tinha ficado de fora. O sintoma era cruel: o lote gerava os links
+        # certinho e o resumo final derrubava tudo com "[ERRO] Falha inesperada",
+        # fazendo um sucesso parecer falha total.
+        from django.db import close_old_connections
+
         for slug, grupo in por_loja.items():
+            close_old_connections()
             try:
                 get_marketplace(slug).prefetch_links(grupo, usuario=usuario)
             except (LoginError, AuthError, SessaoExpirada) as exc:
@@ -2220,6 +2232,13 @@ def gerar_links_stream(request):
                 break
             except Exception as exc:
                 print(f"Aviso: geração de links em {slug} falhou ({exc}).")
-        print(frase_resumo_afiliacao(usuario))
+        close_old_connections()
+        # O resumo é informativo: se ELE falhar, o lote já feito continua válido e
+        # não pode ser reportado como erro da operação inteira.
+        try:
+            print(frase_resumo_afiliacao(usuario))
+        except Exception:
+            logger.exception("Resumo de afiliação falhou após gerar links")
+            print("Links processados. (Não foi possível montar o resumo final.)")
 
     return _sse_runner(_job, request.organization)
