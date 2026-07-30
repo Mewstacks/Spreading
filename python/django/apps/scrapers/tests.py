@@ -1643,6 +1643,57 @@ class AttributionWorkflowTests(TestCase):
             Publicacao.objects.get(produto=self.product).status, "enviado"
         )
 
+    @patch("apps.scrapers.ofertas._baixar_imagem_b64", return_value=(None, None))
+    @patch("apps.scrapers.senders.registry.get_sender")
+    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
+    def test_produto_publico_nao_tenta_lock_de_escrita(
+        self, get_marketplace, get_sender, _image
+    ):
+        """RLS deixa o catálogo do ML legível, mas não permite FOR UPDATE nele."""
+        from apps.scrapers.ofertas import enviar_oferta_de_produto
+        from apps.scrapers.senders.base import WhatsAppMarkup
+
+        marketplace = Mock()
+        marketplace.build_affiliate_link.return_value = {
+            "link_afiliado": "https://example.com/a?tracking_id=ok",
+            "afiliado_ok": True,
+        }
+        get_marketplace.return_value = marketplace
+        sender = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
+        sender.enviar_oferta.return_value = {"sucesso": True, "via": "test"}
+        get_sender.return_value = sender
+
+        with patch.object(Produto.objects, "select_for_update",
+                          side_effect=AssertionError("produto público não pode ser bloqueado")):
+            result = enviar_oferta_de_produto(
+                self.product, "group@g.us", verificar=False,
+                usuario=self.user, destino_nome="Grupo")
+
+        self.assertTrue(result["sucesso"])
+
+    @patch("apps.scrapers.ofertas._baixar_imagem_b64", return_value=(None, None))
+    @patch("apps.scrapers.senders.registry.get_sender")
+    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
+    def test_produto_removido_entre_tela_e_reserva_tem_erro_claro(
+        self, get_marketplace, get_sender, _image
+    ):
+        from apps.scrapers.ofertas import enviar_oferta_de_produto
+        from apps.scrapers.senders.base import WhatsAppMarkup
+
+        get_marketplace.return_value = Mock()
+        get_sender.return_value = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
+        exibido = self.product
+        self.product.delete()
+
+        result = enviar_oferta_de_produto(
+            exibido, "group@g.us", verificar=False, usuario=self.user,
+            destino_nome="Grupo")
+
+        self.assertFalse(result["sucesso"])
+        self.assertTrue(result["produto_atualizado"])
+        self.assertIn("Atualize a tela", result["motivo"])
+        self.assertFalse(Publicacao.objects.filter(usuario=self.user).exists())
+
     def test_group_specific_branding_overrides_account_default(self):
         # A mensagem padrão agora é mínima (estilo dos grupos, sem header de marca).
         # A marca do grupo entra pelo template_a — é esse override que precede a conta.
@@ -4933,6 +4984,22 @@ class EndpointsEnvioPostTests(TransactionTestCase):
 
         response = self.client.post(reverse("scraper-enviar-cupom"), {
             "cupom": cupom.id, "grupo": "123@g.us", "canal": "whatsapp",
+        })
+        corpo = b"".join(response.streaming_content).decode()
+
+        self.assertIn("O envio encontrou uma falha temporária", corpo)
+        self.assertNotIn("Falha inesperada ao processar a solicitação", corpo)
+
+    @patch("apps.scrapers.ofertas.enviar_oferta_de_produto",
+           side_effect=RuntimeError("falha de teste"))
+    def test_sse_de_envio_produto_nao_esconde_excecao_do_nucleo(self, _enviar):
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Oferta SSE", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=60,
+            link_produto="https://example.com/p")
+
+        response = self.client.post(reverse("scraper-enviar-produto"), {
+            "produto": produto.id, "grupo": "123@g.us", "canal": "whatsapp",
         })
         corpo = b"".join(response.streaming_content).decode()
 

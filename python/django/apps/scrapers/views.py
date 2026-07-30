@@ -1445,9 +1445,32 @@ def enviar_produto_stream(request):
             print("[ERRO] Produto não encontrado.")
             return
         print(f"Enviando '{prod.nome[:60]}' → {grupo_nome or grupo_id} ({canal})...")
-        r = enviar_oferta_de_produto(
-            prod, grupo_id, verificar=True, canal=canal, usuario=usuario,
-            destino_nome=grupo_nome, imagem_b64_custom=imagem_custom)
+        try:
+            r = enviar_oferta_de_produto(
+                prod, grupo_id, verificar=True, canal=canal, usuario=usuario,
+                destino_nome=grupo_nome, imagem_b64_custom=imagem_custom)
+        except Exception as exc:
+            # O núcleo re-levanta o inesperado para fechar a Publicacao; o SSE não pode
+            # devolver o erro genérico do runner e esconder a regressão do log.
+            logger.exception("Falha não tratada ao enviar produto %s", prod_id)
+            from apps.scrapers.eventos import log_event
+            try:
+                log_event(
+                    "publicacao", "offer_sse_failed",
+                    "Não foi possível concluir o envio da oferta.", level="error",
+                    usuario=usuario, contexto={"produto_id": prod_id, "canal": canal,
+                                               "destino": grupo_nome or grupo_id,
+                                               "causa": type(exc).__name__}, exc=exc,
+                )
+            except Exception:
+                logger.exception("Não foi possível auditar falha SSE da oferta %s", prod_id)
+            print("[ERRO] O envio encontrou uma falha temporária. Nada foi publicado; "
+                  "tente novamente em instantes.")
+            return
+        if not isinstance(r, dict):
+            logger.error("Envio do produto %s retornou resultado inválido: %r", prod_id, r)
+            print("[ERRO] Não foi possível concluir o envio. Atualize a tela e tente novamente.")
+            return
         if r.get("sucesso"):
             print(f"__SENT__ OK Enviado (via {r.get('via')}). Link: {r.get('link')}")
         else:
