@@ -317,7 +317,7 @@ def mapear_cupons(n=1, faixa=None, usuario=None):
                 titulo_final = titulo_bruto.get("text") if isinstance(titulo_bruto, dict) else titulo_bruto
                 subtitulo = cupom.get("initialSubtitle", {}).get("text", "")
                 titulo_completo = f"{titulo_final} {subtitulo}".strip() if subtitulo else titulo_final
-                
+
                 track_info = tracking_dict.get(camp_id, {})
                 segmentacoes = track_info.get("segmentations", {})
 
@@ -337,12 +337,12 @@ def mapear_cupons(n=1, faixa=None, usuario=None):
                     # Se inválido, cai no elif abaixo para tentar reconstruir pelo container
 
                 if tipo_acao == "button" or not link_final:
-                    
+
                     container_singular = segmentacoes.get("container", {})
                     container_lista = segmentacoes.get("containers", [])
-                    
+
                     slug = ""
-                    
+
                     if container_singular and container_singular.get("name"):
                         slug = str(container_singular.get("name"))
                     elif container_lista:
@@ -351,33 +351,33 @@ def mapear_cupons(n=1, faixa=None, usuario=None):
                             slug = str(c0.get("name") or c0.get("id") or "")
                         else:
                             slug = str(c0)
-                    
+
                     created_by = track_info.get("created_by", "")
                     is_seller = (created_by == "seller" and subtitulo.startswith("Em produtos de "))
-                    
+
                     if is_seller:
                         nome_loja = subtitulo.replace("Em produtos de ", "").strip()
                         nome_loja_formatado = nome_loja.lower().replace(" oficial", "").replace(" ", "-")
                         # Para cupons de vendedor, _Container_{seller_internal_id} redireciona
                         # para /social/ no ML — usa sempre a URL da loja, que é estável.
                         link_final = f"https://lista.mercadolivre.com.br/loja/{nome_loja_formatado}/"
-                            
+
                     elif slug:
                         slug_formatado = slug.strip().replace(" ", "-").lower()
                         link_final = f"https://lista.mercadolivre.com.br/_Container_{slug_formatado}"
-                    
+
                     elif segmentacoes.get("store_ids"):
                         loja_id = str(segmentacoes["store_ids"][0])
                         if loja_id == "-1":
                             link_final = "https://www.mercadolivre.com.br/l/lojas-oficiais#origin=coupons"
                         else:
                             link_final = f"https://lista.mercadolivre.com.br/_CustId_{loja_id}"
-                        
+
                     elif segmentacoes.get("categories"):
                         cat0 = segmentacoes["categories"][0]
                         cat_id = cat0.get("id") if isinstance(cat0, dict) else cat0
                         link_final = f"https://lista.mercadolivre.com.br/{cat_id}"
-                        
+
                     else:
                         link_final = f"https://lista.mercadolivre.com.br/_Container_{camp_id}"
 
@@ -418,7 +418,7 @@ def mapear_cupons(n=1, faixa=None, usuario=None):
                     "codigo": codigo,
                     "valor_minimo": valor_minimo,
                 }
-                
+
                 todos_os_cupons_limpos.append(cupom_limpo)
 
             logger.debug("Pagina %s processada: %s cupons limpos; total=%s", n, len(lista_da_pagina), len(todos_os_cupons_limpos))
@@ -596,7 +596,7 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
 
     logger.debug("Acessando cupom: %s", cupom.get("title"))
     produtos_raspados = []
-    
+
     try:
         # A página de lista mantém recursos/telemetria pendentes por muito tempo;
         # esperar o evento "load" estoura 30s mesmo quando os cards já estão na
@@ -608,7 +608,7 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
         return None
 
     pagina_atual = 1
-    
+
     while pagina_atual <= max_paginas:
         try:
             page.wait_for_selector(".ui-search-layout", timeout=15000)
@@ -785,7 +785,7 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
 
         if len(produtos_raspados) >= 9:
             break
-        
+
         seletores_prox = [
             ".andes-pagination__button--next:not(.andes-pagination__button--disabled) a",
             "a[title='Seguinte']",

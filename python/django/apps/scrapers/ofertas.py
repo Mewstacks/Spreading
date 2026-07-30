@@ -178,15 +178,15 @@ def _selecionar_item_legacy(macros_selecionadas=None, categorias_selecionadas=No
             continue
 
         # PONTUAÇÃO BASE: O peso foca bastante no Desconto Percentual
-        score = prod.desconto_percent * 2.0 
-        
+        score = prod.desconto_percent * 2.0
+
         # BÔNUS ECONOMIA (R$): Ajuda produtos caros com bom desconto em R$
         score += (prod.economia_rs / 20.0)
-        
+
         # BÔNUS TICKET BAIXO: Produtos baratos (<R$30) recebem mais chance
         if prod.preco_com_cupom < 30.0:
             score += 20.0
-            
+
         # BÔNUS URGÊNCIA: Cupom novo (criado nas últimas 12h) recebe Boost de 50%
         if cupom and cupom.data_criacao >= timezone.now() - timedelta(hours=12):
             score *= 1.5
@@ -212,7 +212,7 @@ def _selecionar_item_legacy(macros_selecionadas=None, categorias_selecionadas=No
     vencedores = []
     tentativas = 0
     max_tentativas = limite_envio * 10 # proteção contra loop infinito
-    
+
     while len(vencedores) < limite_envio and opcoes_sorteio and tentativas < max_tentativas:
         tentativas += 1
         escolhido = random.choices(population=opcoes_sorteio, weights=pesos_sorteio, k=1)[0]
