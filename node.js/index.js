@@ -13,7 +13,8 @@ const fs = require('fs');
 const { spawn, execFileSync } = require('child_process');
 const {
     reconnectDelay, shouldPurgeAuth, reconnectAction, isRevokedReason, ocupaSlot,
-    groupRetryDelay, qrBootstrapOutcome, preAuthEventIsStale,
+    groupRetryDelay, qrBootstrapOutcome, preAuthEventIsStale, estadoIndicaQueda,
+    keepaliveIndicaQueda, KEEPALIVE_FALHAS_ATE_QUEDA,
 } = require('./session_policy');
 const {
     resetSessionForQr, markResetFailure, markQrBootstrap, finalizeQrBootstrapFailure,
@@ -38,13 +39,19 @@ const {
 } = require('./chromium_locks');
 const authStore = require('./auth_store');
 const { runtimePronto } = require('./session_readiness');
-const { criarPrazo, expirou, timeoutDaEtapa, timeoutComEnvioIniciado } = require('./send_deadline');
+const {
+    criarPrazo, restante, expirou, timeoutDaEtapa, timeoutDePreflight, timeoutComEnvioIniciado,
+} = require('./send_deadline');
 const {
     timeoutPreflight, mensagemPreflight, registrarStoreIndisponivel,
     mensagemEstabilizacao, deveReciclarTimeoutPreflight, iniciarRecuperacaoPreflight,
 } = require('./preflight_recovery');
 const { aguardarStorePronto } = require('./store_ready');
 const { capabilityAuth, idempotencyGuard } = require('./capability_auth');
+const {
+    qrAtivo, limparQr, registrarCarregamento, iniciarRecuperacaoLogout,
+    rejeicaoRecuperavelDuranteLogout,
+} = require('./qr_lifecycle');
 
 const app = express();
 
@@ -117,10 +124,14 @@ const WA_TAKEOVER_ON_CONFLICT = process.env.WA_TAKEOVER_ON_CONFLICT === '1';
 //
 // WA_WEB_VERSION continua configurável por Fly secret + restart, sem deploy.
 // Mantenha o sufixo -alpha no nome das versões arquivadas.
-const WA_WEB_VERSION = process.env.WA_WEB_VERSION || '2.3000.1043690208-alpha';
+const WA_WEB_VERSION = process.env.WA_WEB_VERSION || '2.3000.1044104838-alpha';
 const WA_WEB_VERSION_REMOTE_PATH = process.env.WA_WEB_VERSION_REMOTE_PATH
     || 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html';
 const SESSION_INIT_TIMEOUT_MS = parseInt(process.env.SESSION_INIT_TIMEOUT_MS, 10) || 90000;
+// O whatsapp-web.js usa 30s por padrão em duas esperas internas. No Chromium
+// compartilhado do Fly o primeiro pareamento saudável já levou 28s, portanto o
+// default da biblioteca abortava antes do orçamento de 90s do nosso worker.
+const WA_AUTH_TIMEOUT_MS = parseInt(process.env.WA_AUTH_TIMEOUT_MS, 10) || 60000;
 // O watchdog mede o heartbeat do event loop; uma inicializacao async longa nao
 // o aciona. O bootstrap frio recebe a mesma janela da inicializacao normal.
 const QR_BOOTSTRAP_TIMEOUT_MS = parseInt(process.env.QR_BOOTSTRAP_TIMEOUT_MS, 10) || 90000;
@@ -131,15 +142,42 @@ const QR_BOOTSTRAP_TIMEOUT_MS = parseInt(process.env.QR_BOOTSTRAP_TIMEOUT_MS, 10
 const QR_BOOTSTRAP_MAX_ATTEMPTS =
     parseInt(process.env.QR_BOOTSTRAP_MAX_ATTEMPTS, 10) || 4;
 const QR_BOOTSTRAP_RETRY_MS = parseInt(process.env.QR_BOOTSTRAP_RETRY_MS, 10) || 2000;
+// Depois de LOGOUT a própria biblioteca tenta reinjetar a página. Damos a ela o
+// orçamento interno mais uma margem curta; se nenhum QR/auth chegar, reciclamos
+// de forma determinística antes do teto geral do bootstrap.
+const LOGOUT_RECOVERY_TIMEOUT_MS = Math.min(
+    QR_BOOTSTRAP_TIMEOUT_MS, WA_AUTH_TIMEOUT_MS + 5000
+);
+// Intervalo do vigia de WAState de uma sessao conectada. 45s e o compromisso: um
+// getState e barato (leitura na pagina, sem rede), mas cada chamada compete com
+// envios pela mesma pagina do Chromium, entao nao vale ser mais agressivo. Com
+// isto, uma queda silenciosa e detectada em <=45s em vez de "no proximo envio".
+const KEEPALIVE_INTERVAL_MS = parseInt(process.env.WA_KEEPALIVE_INTERVAL_MS, 10) || 45000;
+// Quanto o preflight de envio espera a reconexao antes de desistir. A sessao volta
+// pelo scheduleReconnect (backoff a partir de 5s), entao 25s cobre a primeira e a
+// segunda tentativa. Esperar dentro do envio e o que transforma "o canal nao e mais
+// valido" em uma pausa que o usuario nem percebe.
+const SEND_RECONNECT_WAIT_MS = parseInt(process.env.WA_SEND_RECONNECT_WAIT_MS, 10) || 25000;
 // 15s e folgado: a leitura so percorre a collection em memoria da pagina, sem
 // round-trip de rede. Estourar aqui significa pagina morta, nao lentidao — por
 // isso nao vale mais os 45s que existiam quando isto era um getChats completo.
 const GROUP_SYNC_TIMEOUT_MS = parseInt(process.env.GROUP_SYNC_TIMEOUT_MS, 10) || 15000;
 const QR_IDLE_DESTROY_MS = parseInt(process.env.QR_IDLE_DESTROY_MS, 10) || 180000;
-const SEND_TIMEOUT_MS = parseInt(process.env.SEND_TIMEOUT_MS, 10) || 60000;
 // Tem de ser menor que o read timeout do Django. Inclui o tempo esperando a
 // cadeia da sessao, nao apenas o sendMessage do Chromium.
 const SEND_REQUEST_TIMEOUT_MS = parseInt(process.env.SEND_REQUEST_TIMEOUT_MS, 10) || 55000;
+// Teto do sendMessage. Nunca pode passar do orcamento da request: o valor antigo
+// (60s contra 55s de orcamento) anunciava um teto que era impossivel de alcancar,
+// e escondia o fato de que o envio recebia so as sobras do preflight.
+const SEND_TIMEOUT_MS = Math.min(
+    parseInt(process.env.SEND_TIMEOUT_MS, 10) || 55000, SEND_REQUEST_TIMEOUT_MS
+);
+// Piso garantido para o sendMessage: o preflight nao pode consumir o orcamento
+// inteiro. Ver timeoutDePreflight em send_deadline.js.
+const SEND_PREFLIGHT_RESERVE_MS = Math.min(
+    parseInt(process.env.SEND_PREFLIGHT_RESERVE_MS, 10) || 30000,
+    Math.floor(SEND_REQUEST_TIMEOUT_MS / 2)
+);
 const MIN_SEND_INTERVAL_MS = parseInt(process.env.MIN_SEND_INTERVAL_MS, 10) || 2500;
 // O evento `ready` do whatsapp-web.js pode chegar antes de WWebJS terminar de
 // injetar. O worker só libera envios depois do primeiro sync de grupos, para
@@ -340,11 +378,14 @@ const createSessionState = (instanceId) => ({
     progresso: 0,
     reconnectTimer: null,
     qrBootstrapTimer: null,
+    logoutRecoveryTimer: null,
     reconnectAttempts: 0,
     initTimer: null,
     qrIdleTimer: null,
     requestedAt: 0,
     initFailures: 0,
+    lifecycleAttempt: 0,
+    lifecycleAttemptAt: 0,
     authPurges: 0,           // purgas de auth neste ciclo de recuperacao
     encerrandoManual: false, // logout pedido pelo usuario: suprime o auto-reconnect
     resetPromise: null,      // coalesce requisicoes simultaneas de novo QR
@@ -362,6 +403,10 @@ const createSessionState = (instanceId) => ({
     whatsappId: null,
     sendChain: Promise.resolve(),
     lastSendAt: 0,
+    keepaliveTimer: null,   // vigia o WAState enquanto a sessao esta conectada
+    keepaliveEmVoo: false,  // um getState de vigia por sessao, nunca dois
+    keepaliveFalhas: 0,     // leituras de estado seguidas que nao responderam
+    enviosEmVoo: 0,         // >0 suprime o keepalive: o envio ja checa o estado
     faseMsg: 'Iniciando serviço…',
 });
 
@@ -372,6 +417,121 @@ const createCapacitySessionState = (instanceId) => ({
 });
 
 const sessions = new Map();
+
+const registrarLifecycle = (session, evento, extra = {}) => {
+    const agora = Date.now();
+    const payload = {
+        evento,
+        instancia: session.id,
+        tentativa: session.lifecycleAttempt || 0,
+        fase: session.fase,
+        duracao_ms: session.lifecycleAttemptAt
+            ? Math.max(0, agora - session.lifecycleAttemptAt)
+            : 0,
+        ...extra,
+    };
+    console.log(`[WA_LIFECYCLE] ${JSON.stringify(payload)}`);
+};
+
+const limparLogoutRecovery = (session) => {
+    if (session.logoutRecoveryTimer) clearTimeout(session.logoutRecoveryTimer);
+    session.logoutRecoveryTimer = null;
+};
+
+const limparKeepalive = (session) => {
+    if (session.keepaliveTimer) clearTimeout(session.keepaliveTimer);
+    session.keepaliveTimer = null;
+    session.keepaliveEmVoo = false;
+    session.keepaliveFalhas = 0; // pagina nova, historico zerado
+};
+
+// Ponto UNICO de reacao a "o socket caiu e nao houve evento 'disconnected'".
+// Chamado pelo handler de change_state e pelo keepalive. Antes so o preflight de
+// envio percebia isso, e a consequencia era a queixa central: o usuario estava
+// enviando promocoes e, do nada, o canal virava invalido — a conexao tinha caido
+// minutos antes, em silencio, e ninguem havia religado nada.
+const tratarQuedaDeEstado = (session, client, estado, origem) => {
+    if (session.client !== client) return;
+    if (!session.isConnected && session.fase === 'reconectando') return; // ja em curso
+    const motivo = `estado ${estado || 'desconhecido'} (${origem})`;
+    session.isConnected = false;
+    session.preparando = false;
+    session.fase = 'reconectando';
+    session.faseMsg = 'WhatsApp perdeu a conexão — reconectando…';
+    limparKeepalive(session);
+    registrarLifecycle(session, 'state_change', { estado: String(estado || ''), origem });
+    console.warn(`[${session.id}] WAState ${estado} via ${origem}; reconectando.`);
+    // Sem purgar a credencial: CONFLICT/TIMEOUT nao a invalidam, e apagar o
+    // LocalAuth aqui forcaria um QR novo em cada oscilacao de rede.
+    recycleSession(session, motivo).catch((err) => {
+        console.error(`[${session.id}] Falha ao reciclar apos ${motivo}:`, err.message);
+    });
+};
+
+// Vigia periodico do WAState. Existe porque `ready` fica obsoleto em silencio: o
+// Chromium pode perder o socket sem emitir 'disconnected', e ate aqui a unica
+// deteccao era o getState() do preflight de envio — ou seja, o usuario descobria
+// pela falha. O intervalo e async e curto, entao nao bloqueia o event loop e nao
+// concorre com o watchdog de heartbeat.
+// Fases em que nao ha socket a vigiar: reagendar aqui manteria um timer girando a
+// cada 45s por sessao morta, para sempre.
+const FASES_SEM_KEEPALIVE = new Set([
+    'expirado', 'qr', 'reiniciando_qr', 'falha_reset', 'falha_auth',
+    'capacidade', 'inativo', 'recuperacao_pausada',
+]);
+
+const agendarKeepalive = (session, client) => {
+    if (session.keepaliveTimer || session.keepaliveEmVoo) return;
+    if (session.client !== client) return;
+    if (FASES_SEM_KEEPALIVE.has(session.fase)) return;
+    session.keepaliveTimer = setTimeout(async () => {
+        session.keepaliveTimer = null;
+        if (session.client !== client) return;
+        // Envio em voo ja faz o getState do preflight: duas chamadas concorrentes
+        // contra a mesma pagina e justamente o que trava o Chromium.
+        if (!session.isConnected || session.enviosEmVoo > 0) {
+            agendarKeepalive(session, client);
+            return;
+        }
+        // O getState leva ate 10s; sem esta trava, um envio terminando nesse
+        // intervalo chamaria agendarKeepalive e abriria uma SEGUNDA corrente de
+        // vigia contra a mesma pagina — exatamente o que o vigia evita.
+        session.keepaliveEmVoo = true;
+        let estado = null;
+        try {
+            estado = await repetirSeFrameDestacado(
+                () => withTimeout(client.getState(), 10000, 'keepalive.getState')
+            );
+        } catch (err) {
+            // Uma leitura perdida nao e veredito (a pagina pode estar ocupada com
+            // um sync); tres seguidas sao. Sem esta escalada, uma pagina morta
+            // ficava eternamente marcada como "conectado" na tela do usuario.
+            session.keepaliveFalhas += 1;
+            console.warn(
+                `[${session.id}] Keepalive nao leu o estado (${session.keepaliveFalhas}`
+                + `/${KEEPALIVE_FALHAS_ATE_QUEDA}): ${err.message}`
+            );
+            session.keepaliveEmVoo = false;
+            if (session.client !== client) return;
+            if (keepaliveIndicaQueda(session.keepaliveFalhas)) {
+                session.keepaliveFalhas = 0;
+                tratarQuedaDeEstado(session, client, 'sem resposta', 'keepalive');
+                return;
+            }
+            agendarKeepalive(session, client);
+            return;
+        }
+        session.keepaliveEmVoo = false;
+        session.keepaliveFalhas = 0;
+        if (session.client !== client) return;
+        if (estadoIndicaQueda(estado)) {
+            tratarQuedaDeEstado(session, client, estado, 'keepalive');
+            return;
+        }
+        agendarKeepalive(session, client);
+    }, KEEPALIVE_INTERVAL_MS);
+    session.keepaliveTimer.unref();
+};
 // Marca uma sessao encerrada de proposito (logout, duplicata). Lido pelo
 // restore do boot para nao religar quem foi desligado deliberadamente.
 const DISABLED_MARKER = '.runtime-disabled';
@@ -403,6 +563,27 @@ const limparMarcadorQrBootstrap = (session) => {
             console.error(`[${session.id}] Falha ao limpar marca de QR em preparo:`, err.message);
         }
     }
+};
+
+const agendarRecuperacaoLogout = (session, client) => {
+    limparLogoutRecovery(session);
+    session.logoutRecoveryTimer = setTimeout(() => {
+        session.logoutRecoveryTimer = null;
+        if (
+            session.client !== client
+            || session.isConnected
+            || session.authenticatedInAttempt
+            || session.readyReceived
+            || qrAtivo(session)
+        ) return;
+        registrarLifecycle(session, 'logout_reinject_timeout', {
+            timeout_ms: LOGOUT_RECOVERY_TIMEOUT_MS,
+        });
+        recycleSession(session, 'LOGOUT sem novo QR após reinjeção').catch((err) => {
+            console.error(`[${session.id}] Falha ao recuperar LOGOUT:`, err.message);
+        });
+    }, LOGOUT_RECOVERY_TIMEOUT_MS);
+    session.logoutRecoveryTimer.unref();
 };
 
 // Fecha o estado terminal de um "novo QR" que nao vingou: apaga o rastro do
@@ -452,27 +633,77 @@ const withTimeout = (promise, timeoutMs, label) => {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 };
 
+// client.destroy() RESOLVER nao prova que o Chromium morreu, e essa suposicao era
+// a causa direta do "desconectou sozinho". Caso real (30/07, homologacao): o
+// destroy voltou em ~3s, sem timeout nenhum, e 87s depois o pid 934 AINDA segurava
+// /app/.wwebjs_auth/2/session. O client seguinte subiu sobre um perfil ocupado,
+// queimou os 60s de authTimeoutMs em "Waiting failed: 60000ms exceeded" e a sessao
+// terminou em falha_auth. Era assim que UMA falha de envio virava sessao morta.
+//
+// Confirmamos a morte pelo processo, nunca pelo retorno do destroy. O SingletonLock
+// tambem nao serve de testemunha: o Chromium o remove assim que COMECA a encerrar,
+// e foi justamente por isso que o liberarPerfilChromium do initializeSession nao viu
+// o orfao na primeira tentativa e so o encontrou na seguinte, tarde demais.
+const encerrarClienteChromium = async (session, client, motivo) => {
+    let processo = null;
+    try {
+        processo = client.pupBrowser?.process() || null;
+    } catch (_) {
+        processo = null; // browser ja desmontado: sobra a varredura por perfil
+    }
+
+    let destroyFalhou = false;
+    try {
+        await withTimeout(client.destroy(), 10000, 'client.destroy');
+    } catch (err) {
+        destroyFalhou = true;
+        console.warn(`[${session.id}] Chromium nao encerrou limpo:`, err.message);
+    }
+
+    const pid = processo && processo.pid;
+    const sobreviveu = Boolean(pid) && processoVivo(pid);
+    if (sobreviveu) {
+        try {
+            process.kill(pid, 'SIGKILL');
+            registrarLifecycle(session, 'chromium_orfao_morto', { pid, motivo });
+            console.warn(
+                `[${session.id}] Chromium ${pid} sobreviveu ao destroy (${motivo}); encerrado a forca.`
+            );
+        } catch (err) {
+            if (err.code !== 'ESRCH') {
+                console.error(`[${session.id}] Falha ao encerrar Chromium ${pid}:`, err.message);
+            }
+        }
+    }
+
+    // Varredura pelo --user-data-dir exato: pega zygote/renderers e qualquer
+    // processo que nao seja o do pupBrowser. So roda quando ja ha indicio de
+    // sujeira — sem isso, um recycle normal poderia matar o Chromium que uma
+    // reconexao concorrente acabou de subir sobre o mesmo perfil.
+    if (destroyFalhou || sobreviveu) await encerrarChromiumsDoPerfil(session.authPath);
+};
+
 const destroySessionRuntime = async (session, reason, removeFromMap = false) => {
     console.log(`[${session.id}] Encerrando runtime da sessao. Motivo: ${reason}`);
     if (session.initTimer) clearTimeout(session.initTimer);
     if (session.qrIdleTimer) clearTimeout(session.qrIdleTimer);
     if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
     if (session.qrBootstrapTimer) clearTimeout(session.qrBootstrapTimer);
+    limparLogoutRecovery(session);
     if (session.preparationTimer) clearTimeout(session.preparationTimer);
     session.initTimer = null;
     session.qrIdleTimer = null;
     session.reconnectTimer = null;
     session.qrBootstrapTimer = null;
     session.preparationTimer = null;
-    try {
-        if (session.client) await withTimeout(session.client.destroy(), 10000, 'client.destroy');
-    } catch (err) {
-        console.warn(`[${session.id}] Chromium nao encerrou limpo:`, err.message);
-    }
+    limparKeepalive(session);
+    limparLogoutRecovery(session);
+    if (session.client) await encerrarClienteChromium(session, session.client, reason);
     session.client = null;
     session.initialized = false;
     session.isConnected = false;
     session.readyReceived = false;
+    limparQr(session);
     session.whatsappId = null;
     session.gruposSincronizando = false;
     session.syncPedidoDurante = false; // sem Chromium nao ha o que repicar
@@ -492,7 +723,9 @@ const scheduleQrIdleDestroy = (session) => {
     if (session.qrIdleTimer) return;
     session.qrIdleTimer = setTimeout(async () => {
         const idleMs = Date.now() - (session.requestedAt || 0);
-        if (!session.isConnected && session.ultimoQR && idleMs >= QR_IDLE_DESTROY_MS) {
+        // qrAtivo, nao `ultimoQR` cru: um QR ja consumido (ou de uma fase que
+        // avancou) nao e motivo para destruir o runtime de uma sessao viva.
+        if (!session.isConnected && qrAtivo(session) && idleMs >= QR_IDLE_DESTROY_MS) {
             await destroySessionRuntime(session, 'QR ocioso de sessao restaurada', true);
         } else {
             session.qrIdleTimer = null;
@@ -560,6 +793,23 @@ const sondarStore = (session, probeTimeoutMs = 10000) => repetirSeFrameDestacado
         'verificarStore'
     )
 );
+
+// "A pagina ainda executa JavaScript?" — a pergunta mais barata possivel, sem
+// tocar em Store, WWebJS nem rede. Serve de perito depois de um timeout de envio:
+// distingue um Chromium morto (CPU/recurso) de um Chromium saudavel que ficou
+// preso no upload da midia. CONTRATO: nunca lanca. null = nao deu para saber.
+const sondarVivacidadePagina = async (session, timeoutMs = 2000) => {
+    const client = session.client;
+    if (!client || !client.pupPage) return null;
+    try {
+        const vivo = await withTimeout(
+            client.pupPage.evaluate('1 + 1'), timeoutMs, 'vivacidadePagina'
+        );
+        return vivo === 2;
+    } catch (_) {
+        return false; // timeout OU contexto destruido: nao esta respondendo
+    }
+};
 
 // Uma leitura de grupos. CONTRATO: nunca lanca — as rotas chamam syncGroups sem
 // await, entao uma rejeicao viraria unhandled rejection e derrubaria o processo.
@@ -659,7 +909,23 @@ const concluirPreparacao = (session, client) => {
     setTimeout(() => {
         if (session.client !== client) return;
         withTimeout(client.getWWebVersion(), 10000, 'getWWebVersion')
-            .then((versao) => console.log(`[${session.id}] WA Web ${versao}`))
+            .then((versao) => {
+                // O pin NAO gruda: o WA Web se auto-atualiza depois do load. Medido
+                // em 30/07 nos dois ambientes — pin 2.3000.1044151668, pagina
+                // 2.3000.1044159214. Consequencia pratica, e o motivo do aviso: o
+                // WA_WEB_VERSION governa apenas a janela de PAREAMENTO (e um pin
+                // velho ali faz o celular recusar o QR), nao o bundle que executa
+                // os envios. Nao adianta caçar bug de envio no numero do pin.
+                const pinado = WA_WEB_VERSION.replace(/-alpha$/, '');
+                if (versao && !String(versao).startsWith(pinado)) {
+                    console.warn(
+                        `[${session.id}] WA Web ${versao} (pin ${WA_WEB_VERSION} nao aplicado — `
+                        + `a pagina se atualizou; o pin so vale para o pareamento).`
+                    );
+                    return;
+                }
+                console.log(`[${session.id}] WA Web ${versao}`);
+            })
             .catch((err) => console.warn(`[${session.id}] Versao WA Web indisponivel: ${err.message}`));
     }, CONNECTION_STABILIZATION_MS).unref();
 
@@ -679,6 +945,13 @@ const concluirPreparacao = (session, client) => {
             session.faseMsg = session.gruposCarregados
                 ? `Conectado - ${session.gruposCache.length} grupos.`
                 : 'Conectado - atualizando a lista de grupos em segundo plano.';
+            registrarLifecycle(session, 'connected', {
+                grupos: session.gruposCarregados ? session.gruposCache.length : null,
+            });
+            // Daqui em diante o WAState e vigiado: e o unico ponto do ciclo em que
+            // a sessao passa a "conectada e ociosa", que era exatamente o estado em
+            // que ela morria sem ninguem notar.
+            agendarKeepalive(session, client);
             console.log(`[${session.id}] Sessao estabilizada; envios liberados.`);
         });
 };
@@ -686,6 +959,7 @@ const concluirPreparacao = (session, client) => {
 const scheduleQrBootstrapRetry = async (session, reason) => {
     if (!session.qrBootstrapAtivo) return false;
     if (session.qrBootstrapTimer) return true;
+    limparLogoutRecovery(session);
     if (session.qrIdleTimer) clearTimeout(session.qrIdleTimer);
     session.qrIdleTimer = null;
 
@@ -712,7 +986,7 @@ const scheduleQrBootstrapRetry = async (session, reason) => {
     const proximaTentativa = session.qrBootstrapAttempts + 1;
     session.fase = 'reiniciando_qr';
     session.progresso = 0;
-    session.ultimoQR = null;
+    limparQr(session);
     session.faseMsg =
         `Preparando um novo QR (tentativa ${proximaTentativa}/${QR_BOOTSTRAP_MAX_ATTEMPTS})…`;
 
@@ -789,7 +1063,8 @@ const scheduleReconnect = (session, reason, msgOverride = null) => {
         session.progresso = 0;
         session.faseMsg = 'Sessão expirada. Leia o QR novamente.';
         session.isConnected = false;
-        session.ultimoQR = null;
+        limparQr(session);
+        limparKeepalive(session);
         // Sem QR, o coletor de QR ocioso nunca dispara e ficaria se reagendando
         // a cada QR_IDLE_DESTROY_MS para sempre.
         if (session.qrIdleTimer) clearTimeout(session.qrIdleTimer);
@@ -850,6 +1125,8 @@ const reviveSession = (session) => {
     session.encerrandoManual = false;
     session.preparando = false;
     session.readyReceived = false;
+    limparQr(session);
+    limparLogoutRecovery(session);
     session.estabilizandoAte = 0;
     session.fase = 'iniciando';
     session.progresso = 0;
@@ -878,11 +1155,12 @@ const recycleSession = async (session, reason, purgeAuth = false, msgOverride = 
     session.syncPedidoDurante = false; // sem Chromium nao ha o que repicar
     session.authenticatedInAttempt = false;
     session.readyReceived = false;
+    limparQr(session);
+    limparLogoutRecovery(session);
+    limparKeepalive(session);
     if (session.initTimer) clearTimeout(session.initTimer);
     session.initTimer = null;
-    try { await withTimeout(client.destroy(), 10000, 'client.destroy'); } catch (err) {
-        console.warn(`[${session.id}] Chromium nao encerrou limpo:`, err.message);
-    }
+    await encerrarClienteChromium(session, client, reason);
     if (session.qrBootstrapAtivo) {
         await scheduleQrBootstrapRetry(session, reason);
         return;
@@ -926,6 +1204,7 @@ const initializeSession = (session) => {
     if (session.qrBootstrapAtivo) marcarQrBootstrap(session);
     const client = new Client({
         authStrategy: new LocalAuth({ dataPath: session.authPath }),
+        authTimeoutMs: WA_AUTH_TIMEOUT_MS,
         takeoverOnConflict: WA_TAKEOVER_ON_CONFLICT,
         takeoverTimeoutMs: 10000,
         // Usa um bundle recente para o QR ser aceito. O fallback para o WhatsApp
@@ -953,18 +1232,25 @@ const initializeSession = (session) => {
 
     session.client = client;
     session.initialized = true;
+    session.lifecycleAttempt += 1;
+    session.lifecycleAttemptAt = Date.now();
+    registrarLifecycle(session, 'initialize', {
+        auth_timeout_ms: WA_AUTH_TIMEOUT_MS,
+        bootstrap_timeout_ms: session.qrBootstrapAtivo
+            ? QR_BOOTSTRAP_TIMEOUT_MS : SESSION_INIT_TIMEOUT_MS,
+    });
     const armInitializationTimeout = (stage) => {
         if (session.initTimer) clearTimeout(session.initTimer);
         const timeoutMs = session.qrBootstrapAtivo
             ? QR_BOOTSTRAP_TIMEOUT_MS : SESSION_INIT_TIMEOUT_MS;
         session.initTimer = setTimeout(async () => {
             session.initTimer = null;
-            if (session.client !== client || session.isConnected || session.ultimoQR) return;
+            if (session.client !== client || session.isConnected || qrAtivo(session)) return;
             console.error(
                 `[${session.id}] Sessao travada em "${stage}" por ${timeoutMs}ms. Reiniciando Chromium.`
             );
             const diagnostic = await collectBrowserDiagnostic(client);
-            if (session.client !== client || session.isConnected || session.ultimoQR) return;
+            if (session.client !== client || session.isConnected || qrAtivo(session)) return;
             console.error(
                 `[${session.id}] Diagnostico do bootstrap: ${JSON.stringify(diagnostic)}`
             );
@@ -995,10 +1281,12 @@ const initializeSession = (session) => {
         }
         if (session.initTimer) clearTimeout(session.initTimer);
         session.initTimer = null;
+        limparLogoutRecovery(session);
         session.ultimoQR = qr;
         session.fase = 'qr';
         session.progresso = 0;
         session.faseMsg = 'Aguardando leitura do QR Code…';
+        registrarLifecycle(session, 'qr_generated');
         console.log(`[${session.id}] Sessão não encontrada ou expirada. QR disponivel na API.`);
         scheduleQrIdleDestroy(session);
         if (PRINT_QR_TO_LOGS) qrcode.generate(qr, { small: true });
@@ -1010,13 +1298,14 @@ const initializeSession = (session) => {
         // primeiro sync isConnected=false de propósito; a trava considera toda
         // a progressão pós-auth para a UI nunca voltar a "preparando o leitor".
         if (preAuthEventIsStale(session)) return;
-        session.progresso = parseInt(percent, 10) || 0;
-        if (session.qrBootstrapAtivo) {
-            session.fase = 'reiniciando_qr';
-            session.faseMsg = 'Preparando o leitor para gerar um novo QR…';
-        } else {
-            session.fase = 'carregando';
-            session.faseMsg = message || 'Carregando WhatsApp Web…';
+        const qrConsumido = registrarCarregamento(session, {
+            progresso: percent,
+            mensagem: message,
+        });
+        if (qrConsumido) {
+            registrarLifecycle(session, 'qr_consumed', {
+                progresso: session.progresso,
+            });
         }
         if (!session.initTimer) armInitializationTimeout('carregamento do WhatsApp Web');
         console.log(`[${session.id}] ⏳ Carregando: ${session.progresso}% — ${session.faseMsg}`);
@@ -1029,6 +1318,7 @@ const initializeSession = (session) => {
         session.qrBootstrapAttempts = 0;
         if (session.qrBootstrapTimer) clearTimeout(session.qrBootstrapTimer);
         session.qrBootstrapTimer = null;
+        limparLogoutRecovery(session);
         // Bootstrap venceu: o `.paired` volta a existir logo abaixo, então o
         // rastro de "QR em preparo" já não é necessário e não pode re-armar.
         limparMarcadorQrBootstrap(session);
@@ -1037,7 +1327,7 @@ const initializeSession = (session) => {
         // O layout do LocalAuth nao serve como sinal: ver auth_store.js.
         markPaired(session);
         session.pairedAt = Date.now();
-        session.ultimoQR = null;
+        limparQr(session);
         if (!faseJaAvancada) {
             session.fase = 'autenticado';
             session.faseMsg = 'Autenticado — preparando sessão…';
@@ -1045,6 +1335,7 @@ const initializeSession = (session) => {
         // "authenticated" can be followed by a permanent loading hang without
         // a "ready" event. Keep recovery armed through the post-login phase.
         if (!session.readyReceived) armInitializationTimeout('pos-autenticacao');
+        registrarLifecycle(session, 'authenticated');
         console.log(`[${session.id}] 🔑 Autenticado.`);
     });
 
@@ -1067,6 +1358,8 @@ const initializeSession = (session) => {
         // Marcar antes do primeiro await fecha a janela em que loading_screen ou
         // QR tardio rebaixava a fase enquanto WWebJS ainda era sondado.
         session.readyReceived = true;
+        limparQr(session);
+        limparLogoutRecovery(session);
         // `ready` pode anteceder a injeção de WWebJS. Nesse caso a sessão fica
         // em preparação e nenhum envio ou sync concorre com o Chromium.
         const storePronto = await aguardarStorePronto({
@@ -1088,7 +1381,7 @@ const initializeSession = (session) => {
         markPaired(session);    // rede de seguranca: 'authenticated' pode nao vir num restore
         session.whatsappId = client.info?.wid?._serialized || null;
         await encerrarSessoesDuplicadas(session);
-        session.ultimoQR = null;
+        limparQr(session);
         if (session.qrIdleTimer) clearTimeout(session.qrIdleTimer);
         session.qrIdleTimer = null;
         session.preparando = true;
@@ -1096,12 +1389,24 @@ const initializeSession = (session) => {
         session.fase = 'preparando';
         session.progresso = 100;
         session.faseMsg = 'WhatsApp autenticado. Preparando a sessão…';
+        registrarLifecycle(session, 'ready', { store_pronto: Boolean(storePronto) });
         if (storePronto) {
             concluirPreparacao(session, client);
         } else {
             console.warn(`[${session.id}] 'ready' recebido sem WWebJS; aguardando sem reciclar a sessao.`);
             agendarProbeProntidao(session, client);
         }
+    });
+
+    // O whatsapp-web.js emite 'disconnected' apenas em parte das perdas de socket.
+    // CONFLICT (o numero abriu WhatsApp Web em outro lugar), UNPAIRED, TIMEOUT e
+    // UNLAUNCHED chegam SO por aqui — e este handler nao existia. Sem ele a sessao
+    // ficava marcada como conectada indefinidamente e a queda aparecia como um envio
+    // falhando ("o canal de envio nao e mais valido"), sem nada tendo religado.
+    client.on('change_state', (estado) => {
+        if (session.client !== client) return;
+        if (!estadoIndicaQueda(estado)) return;
+        tratarQuedaDeEstado(session, client, estado, 'change_state');
     });
 
     client.on('disconnected', async (reason) => {
@@ -1113,12 +1418,14 @@ const initializeSession = (session) => {
         session.preparando = false;
         session.readyReceived = false;
         limparPreparationTimer(session);
+        limparKeepalive(session);
         session.gruposCarregados = false;
         session.gruposSincronizando = false;
         session.gruposSyncFalhou = false; // conexao nova merece tentativa nova
         session.gruposSyncFalhas = 0;
         limparRetryGrupos(session);
         session.syncPedidoDurante = false; // sem Chromium nao ha o que repicar
+        limparQr(session);
         session.fase = session.qrBootstrapAtivo ? 'reiniciando_qr' : 'desconectado';
         session.progresso = 0;
         session.faseMsg = session.qrBootstrapAtivo
@@ -1132,6 +1439,10 @@ const initializeSession = (session) => {
             `[${session.id}] ❌ WhatsApp foi desconectado. Motivo: ${reason}. `
             + `Fase anterior=${faseAnterior}; idade do pareamento=${idadePareamento}.${contextoRecuperacao}`
         );
+        registrarLifecycle(session, 'disconnected', {
+            motivo: String(reason || ''),
+            fase_anterior: faseAnterior,
+        });
 
         // No redirect post_logout=1, o whatsapp-web.js emite LOGOUT e, no mesmo
         // handler interno, apaga o LocalAuth, recria o perfil e injeta outro QR.
@@ -1144,13 +1455,16 @@ const initializeSession = (session) => {
             session.authenticatedInAttempt = false;
             session.pairedAt = null;
             session.whatsappId = null;
-            session.ultimoQR = null;
             session.gruposCache = [];
-            session.fase = 'qr';
-            session.faseMsg = faseAnterior === 'qr'
-                ? 'O WhatsApp renovou o leitor. Aguarde o novo QR e tente novamente.'
-                : 'Aparelho desvinculado — aguardando novo QR para reconectar.';
+            iniciarRecuperacaoLogout(
+                session,
+                faseAnterior === 'qr'
+                    ? 'O WhatsApp recusou o QR anterior. Preparando um código novo…'
+                    : 'Aparelho desvinculado. Preparando um novo QR para reconectar…'
+            );
+            marcarQrBootstrap(session);
             armInitializationTimeout('renovacao do QR');
+            agendarRecuperacaoLogout(session, client);
             return;
         }
 
@@ -1240,6 +1554,31 @@ const resolveInstanceId = (req) => sanitizeInstanceId(
     || req.body?.instance || req.body?.session || req.body?.userId || req.body?.usuario
 );
 
+// Espera a sessao voltar de pe, respeitando o prazo do envio em curso.
+//
+// Existe por causa da queixa central: "estou enviando promocoes e do nada aparece
+// que o canal nao e mais valido". A reconexao ja existia (scheduleReconnect, com
+// backoff a partir de 5s) — o que faltava era o envio ESPERAR por ela em vez de
+// falhar no primeiro milissegundo em que a sessao esta baixa. Quem chama continua
+// tratando o retorno false como falha transitoria; a diferenca e que o caso comum
+// (queda de segundos) deixa de virar mensagem de erro.
+const esperarReconexao = async (session, {
+    tetoMs = SEND_RECONNECT_WAIT_MS,
+    intervaloMs = 1000,
+    expirouPrazo = () => false,
+} = {}) => {
+    const limite = Date.now() + tetoMs;
+    while (Date.now() < limite) {
+        if (session.isConnected && session.client && !session.preparando) return true;
+        if (expirouPrazo()) return false;
+        // Terminal: nao ha o que esperar, so leitura de QR resolve.
+        if (session.fase === 'expirado' || session.fase === 'qr'
+            || session.fase === 'falha_reset') return false;
+        await new Promise((resolve) => setTimeout(resolve, intervaloMs));
+    }
+    return Boolean(session.isConnected && session.client && !session.preparando);
+};
+
 const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes = {}) => {
     const session = ensureSession(instanceId);
     const iniciadoEm = Date.now();
@@ -1250,6 +1589,13 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
     );
     const timeoutEtapa = (etapa, tetoMs) => {
         const timeout = timeoutDaEtapa(prazo, tetoMs);
+        if (!timeout) throw semTempo(etapa);
+        return timeout;
+    };
+    // Etapas de preflight cedem o piso do envio. A fila (MIN_SEND_INTERVAL_MS) fica
+    // de fora de proposito: ela e espera pura, nao trabalho do Chromium.
+    const prazoDePreflight = (etapa, tetoMs) => {
+        const timeout = timeoutDePreflight(prazo, tetoMs, SEND_PREFLIGHT_RESERVE_MS);
         if (!timeout) throw semTempo(etapa);
         return timeout;
     };
@@ -1271,22 +1617,39 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
     }
 
     if (!session.isConnected || !session.client) {
-        // Transitorio: quem religa e o gate de sessao do Django (POST /api/sessoes)
-        // ou o restore do boot. Contar isto como falha da config era o que
-        // desligava a automacao sozinha depois de ~5h de sessao caida.
-        return {
-            sucesso: false,
-            erro: 'WhatsApp não está conectado. Leia o QR Code.',
-            classe: TRANSITORIO,
-            instancia: session.id,
-            etapa: 'sessao',
-            duracao_ms: duracao(),
-        };
+        // Reconexao em curso (queda de rede, CONFLICT, recycle): espera antes de
+        // desistir. Sem esta espera, uma oscilacao de segundos no meio de uma fila
+        // de envios virava erro na tela do usuario, embora a sessao voltasse sozinha
+        // logo depois.
+        const reconectando = session.fase === 'reconectando'
+            || Boolean(session.reconnectTimer) || session.preparando;
+        const voltou = reconectando
+            && await esperarReconexao(session, { expirouPrazo: () => expirou(prazo) });
+        if (!voltou) {
+            // Transitorio: quem religa e o gate de sessao do Django (POST /api/sessoes)
+            // ou o restore do boot. Contar isto como falha da config era o que
+            // desligava a automacao sozinha depois de ~5h de sessao caida.
+            return {
+                sucesso: false,
+                erro: reconectando
+                    ? 'WhatsApp reconectando — o envio será retomado.'
+                    : 'WhatsApp não está conectado. Leia o QR Code.',
+                classe: TRANSITORIO,
+                repetir: true,
+                instancia: session.id,
+                etapa: 'sessao',
+                duracao_ms: duracao(),
+            };
+        }
     }
 
     const executar = async () => {
       let etapa = 'fila';
       let envioIniciado = false;
+      // O keepalive le o mesmo WAState pela mesma pagina; duas chamadas concorrentes
+      // contra o Chromium sao justamente o que o trava. Enquanto ha envio em voo, o
+      // preflight abaixo ja e a verificacao — o vigia pode folgar.
+      session.enviosEmVoo += 1;
       try {
         const espera = Math.max(0, MIN_SEND_INTERVAL_MS - (Date.now() - session.lastSendAt));
         if (espera) {
@@ -1297,19 +1660,34 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         // `ready` can become stale if Chromium loses connectivity without a
         // disconnected event. Check the live state immediately before sending.
         etapa = 'getState';
-        const estado = await repetirSeFrameDestacado(
-            () => withTimeout(session.client.getState(), timeoutEtapa(etapa, 10000), 'getState')
+        const lerEstado = () => repetirSeFrameDestacado(
+            () => withTimeout(session.client.getState(), prazoDePreflight(etapa, 10000), 'getState')
         );
+        let estado = await lerEstado();
         if (estado !== 'CONNECTED') {
+            // Recicla e ESPERA: nada foi enviado ainda, então retomar aqui é seguro
+            // e não pode duplicar mensagem. Antes este caminho abortava na hora, e
+            // era o que produzia o "do nada o canal não é mais válido" no meio de
+            // uma fila de envios — a sessão voltava sozinha segundos depois.
             session.isConnected = false;
             session.fase = 'reconectando';
             session.faseMsg = `WhatsApp sem conexao (${estado || 'estado desconhecido'}).`;
+            limparKeepalive(session);
             setTimeout(() => recycleSession(
                 session, `estado ${estado || 'desconhecido'} antes do envio`
             ), 0).unref();
-            throw erroClassificado(
-                'WhatsApp nao esta conectado. Reconecte antes de enviar.', TRANSITORIO
-            );
+            const voltou = await esperarReconexao(session, {
+                expirouPrazo: () => expirou(prazo),
+            });
+            // Uma tentativa só: se o estado ainda não é CONNECTED depois de a sessão
+            // se declarar de pé, insistir só queima o prazo do envio.
+            estado = voltou && session.client ? await lerEstado().catch(() => null) : null;
+            if (estado !== 'CONNECTED') {
+                throw erroClassificado(
+                    'WhatsApp reconectando — o envio será retomado.', TRANSITORIO
+                );
+            }
+            console.log(`[${session.id}] Conexao restabelecida no preflight; seguindo com o envio.`);
         }
 
         // O sendMessage resolve o destino via window.WWebJS.getChat DENTRO da
@@ -1322,7 +1700,7 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         // prazo, Store ausente ainda pode ser apenas a hidratacao tardia do WA
         // Web; destruir o Chromium aqui derrubaria uma sessao autenticada.
         const storePronto = await aguardarStorePronto({
-            sondar: () => sondarStore(session, () => timeoutEtapa(etapa, 10000)), // mantem o prazo compartilhado
+            sondar: () => sondarStore(session, () => prazoDePreflight(etapa, 10000)), // mantem o prazo compartilhado
             tetoMs: STORE_READY_WAIT_MS,
             expirou: () => expirou(prazo),
         });
@@ -1345,7 +1723,7 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             etapa = 'verificar_grupo';
             const grupo = await repetirSeFrameDestacado(
                 () => withTimeout(
-                    lerGrupoDaPagina(session, chatId), timeoutEtapa(etapa, 15000), 'inspecionarGrupo'
+                    lerGrupoDaPagina(session, chatId), prazoDePreflight(etapa, 15000), 'inspecionarGrupo'
                 )
             );
             // ok=false e existe=false sao coisas MUITO diferentes, e tratar as duas
@@ -1377,6 +1755,16 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             );
         } else {
             const midia = new MessageMedia(opcoes.mimetype, dados, opcoes.nomeArquivo);
+            // O envio de midia desce em processMediaData -> prepRawMedia().waitForPrep()
+            // -> uploadMedia(), tudo DENTRO da pagina e nenhum deles com timeout
+            // proprio. Quando trava, o unico sinal era o prazo estourando. Registrar
+            // tamanho e prazo aqui e o que permite comparar um upload lento (bytes
+            // altos) de uma pagina morta (qualquer tamanho, sempre o prazo inteiro).
+            registrarLifecycle(session, 'send_midia_inicio', {
+                bytes: typeof dados === 'string' ? dados.length : null,
+                mimetype: opcoes.mimetype || null,
+                prazo_restante_ms: restante(prazo),
+            });
             envioIniciado = true;
             const promessaEnvio = session.client.sendMessage(chatId, midia, opcoesDeEnvio(opcoes.legenda));
             envioAindaEmVoo = Promise.resolve(promessaEnvio).then(() => undefined, () => undefined);
@@ -1443,6 +1831,21 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         // oferta; devolvemos um resultado explicito para o Django bloquear retry.
         const timeoutDuranteEnvio = timeoutComEnvioIniciado(envioIniciado, etapa, erro, prazo);
         if (timeoutDuranteEnvio) {
+            // Antes de reciclar, pergunte a pagina se ela ainda esta viva. Os dois
+            // modos de falha produziam log IDENTICO e exigem correcoes opostas:
+            //   responde  -> o Chromium esta bem; travou no prep/upload da midia
+            //                (lado WhatsApp/rede), e reciclar nao resolve nada;
+            //   nao responde -> a pagina morreu (CPU/recurso) e o recycle e o certo.
+            // A sonda tem de ser barata e curta: aqui o prazo do usuario JA acabou.
+            const paginaViva = await sondarVivacidadePagina(session);
+            registrarLifecycle(session, 'send_timeout', {
+                tipo,
+                etapa,
+                pagina_viva: paginaViva,
+                veredito: paginaViva === true ? 'stall_no_upload'
+                    : paginaViva === false ? 'pagina_travada' : 'indeterminado',
+                duracao_ms: duracao(),
+            });
             console.warn(`[${session.id}] Resultado incerto apos timeout de envio; reciclando sessao.`);
             setTimeout(() => recycleSession(session, 'timeout com entrega incerta'), 0).unref();
             return {
@@ -1539,6 +1942,14 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             duracao_ms: duracao(),
             falha_infra: /timeout|prazo total/i.test(String(erro && erro.message || erro)),
         };
+      } finally {
+        session.enviosEmVoo = Math.max(0, session.enviosEmVoo - 1);
+        // Sessao de pe e nenhum envio em voo: o vigia volta a ser o unico a olhar o
+        // estado. Sem isto, o keepalive parava para sempre no primeiro envio que
+        // reciclasse a sessao.
+        if (session.enviosEmVoo === 0 && session.isConnected && session.client) {
+            agendarKeepalive(session, session.client);
+        }
       }
     };
     const resultado = session.sendChain.then(executar, executar);
@@ -1569,6 +1980,31 @@ process.on('uncaughtException', (error) => {
     process.exit(1);
 });
 process.on('unhandledRejection', (reason) => {
+    const emLogout = Array.from(sessions.values()).filter((session) => (
+        session.logoutRecoveryTimer && session.client
+    ));
+    if (emLogout.length && rejeicaoRecuperavelDuranteLogout(reason)) {
+        const mensagem = String(reason && reason.message || reason || '');
+        console.warn(
+            `[WA_LIFECYCLE] ${JSON.stringify({
+                evento: 'logout_upstream_rejection',
+                instancias: emLogout.map((session) => session.id),
+                motivo: mensagem,
+            })}`
+        );
+        for (const session of emLogout) {
+            limparLogoutRecovery(session);
+            const timer = setTimeout(() => {
+                recycleSession(
+                    session, `falha da reinjeção após LOGOUT: ${mensagem}`
+                ).catch((err) => {
+                    console.error(`[${session.id}] Falha ao reciclar reinjeção:`, err.message);
+                });
+            }, 0);
+            timer.unref();
+        }
+        return;
+    }
     console.error('Promise rejeitada sem tratamento:', reason);
 });
 
@@ -1822,10 +2258,10 @@ app.get(['/api/qrcode', '/api/qrcode/:instance'],
     if (session.isConnected) {
         return res.json({ conectado: true, instancia: session.id, qr: null, mensagem: 'WhatsApp já está conectado.' });
     }
-    if (!session.ultimoQR) {
+    if (!qrAtivo(session)) {
         return res.status(503).json({ conectado: false, instancia: session.id, qr: null, mensagem: 'QR Code ainda não gerado. Aguarde alguns segundos e tente novamente.' });
     }
-    res.json({ conectado: false, instancia: session.id, qr: session.ultimoQR });
+    res.json({ conectado: false, instancia: session.id, qr: session.ultimoQR });  // qrAtivo ja validou acima
 });
 
 app.post(['/api/enviar', '/api/enviar/:instance'],

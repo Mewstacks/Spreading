@@ -1,5 +1,7 @@
 'use strict';
 
+const { qrAtivo } = require('./qr_lifecycle');
+
 // Serializacao do estado de sessao para o front.
 //
 // Invariante que sustenta as duas abas (WhatsApp e Envios):
@@ -37,7 +39,7 @@ const buildSessionPayload = (session) => ({
     grupos: session.gruposCarregados ? session.gruposCache.length : 0,
     grupos_sincronizando: gruposEmRecuperacao(session),
     grupos_indisponivel: gruposIndisponivel(session),
-    qr: session.ultimoQR,
+    qr: qrAtivo(session) ? session.ultimoQR : null,
 });
 
 const buildGruposPayload = (session) => ({

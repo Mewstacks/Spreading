@@ -23,6 +23,7 @@ const sessionState = (id = 'u1') => ({
     qrIdleTimer: 2,
     reconnectTimer: 3,
     qrBootstrapTimer: 4,
+    logoutRecoveryTimer: 7,
     preparationTimer: 5,
     gruposRetryTimer: 6,
     encerrandoManual: false,
@@ -43,6 +44,7 @@ const freshState = (id) => ({
     qrIdleTimer: null,
     reconnectTimer: null,
     qrBootstrapTimer: null,
+    logoutRecoveryTimer: null,
     preparationTimer: null,
     gruposRetryTimer: null,
     encerrandoManual: false,
@@ -86,7 +88,7 @@ test('reset cancela timers, apaga auth e inicia exatamente uma sessao limpa', as
         },
     });
 
-    assert.deepEqual(timersCancelados, [1, 2, 3, 4, 5, 6]);
+    assert.deepEqual(timersCancelados, [1, 2, 3, 4, 7, 5, 6]);
     assert.deepEqual(eventos, ['destroy', 'cleanup', 'purge', 'replace', 'initialize']);
     assert.equal(resultado.sucesso, true);
     assert.equal(resultado.auth_removido, true);

@@ -66,12 +66,58 @@ const REVOKED_REASONS = new Set(['LOGOUT', 'UNPAIRED', 'UNPAIRED_IDLE']);
 
 // Motivos de 'disconnected' que significam credencial revogada no celular:
 // reconectar com ela e inutil e so queima Chromium em loop.
-// NAVIGATION e CONFLICT ficam DE FORA de proposito: sao transitorios (e
-// takeoverOnConflict ja cobre o segundo). Purgar neles apagaria um auth valido
-// e forcaria QR novo sem necessidade.
+// NAVIGATION e CONFLICT ficam DE FORA de proposito: purgar neles apagaria um auth
+// valido e forcaria QR novo sem necessidade. Atencao: a versao anterior deste
+// comentario dizia que "takeoverOnConflict ja cobre" o CONFLICT — nao cobre mais,
+// ele nasce desligado (WA_TAKEOVER_ON_CONFLICT). Quem cobre CONFLICT agora e
+// classificarEstadoWa + o handler de change_state, reconectando sem purgar.
 function isRevokedReason(reason) {
     if (!reason) return false;
     return REVOKED_REASONS.has(String(reason).trim().toUpperCase());
+}
+
+// Estados do WAState que significam "a pagina esta trabalhando", nao queda.
+// OPENING/PAIRING aparecem durante o proprio boot da sessao; trata-los como queda
+// faria o keepalive reciclar um Chromium que ainda esta subindo.
+const ESTADOS_EM_TRANSICAO = new Set(['OPENING', 'PAIRING']);
+
+// Classifica um WAState (de client.getState() ou do evento change_state):
+//   'ok'        -> CONNECTED
+//   'transicao' -> ainda subindo: espera, nao mexe
+//   'queda'     -> perdeu o socket: precisa reconectar AGORA
+//   'indefinido'-> getState devolveu null/undefined (pagina sem WWebJS ainda)
+//
+// Existe porque o worker nao escutava 'change_state': CONFLICT, UNPAIRED, TIMEOUT
+// e UNLAUNCHED nao geravam evento nenhum e a sessao morria em silencio — o
+// primeiro sintoma era um envio falhando no preflight, minutos ou horas depois.
+// CONFLICT entra aqui como queda mesmo com takeoverOnConflict desligado (o padrao,
+// e deliberado: ligar o takeover reabria o spam de sync de multi-sessao). Sem
+// takeover o socket nao volta sozinho, entao reciclar e a unica saida.
+function classificarEstadoWa(estado) {
+    if (estado === null || estado === undefined || estado === '') return 'indefinido';
+    const normalizado = String(estado).trim().toUpperCase();
+    if (normalizado === 'CONNECTED') return 'ok';
+    if (ESTADOS_EM_TRANSICAO.has(normalizado)) return 'transicao';
+    return 'queda';
+}
+
+function estadoIndicaQueda(estado) {
+    return classificarEstadoWa(estado) === 'queda';
+}
+
+// Quantas leituras seguidas de WAState podem falhar antes de a sessao ser tratada
+// como caida. Nao e 1: um getState perdido e rotina (a pagina pode estar ocupada
+// com um sync, e o proprio timeout de 10s e apertado sob carga).
+const KEEPALIVE_FALHAS_ATE_QUEDA = 3;
+
+// Falha de LEITURA do keepalive nao e o mesmo que estado de queda: ali o WhatsApp
+// respondeu 'UNPAIRED'/'CONFLICT', aqui ele nao respondeu nada. O codigo antigo
+// so reagendava, e o resultado foi o pior caso possivel para o usuario: em
+// 30/07 a pagina parou de responder as 18:05, o log repetiu "Keepalive nao leu o
+// estado" e a sessao seguiu marcada como CONECTADA na tela ate o envio falhar
+// tres minutos depois. Falha repetida e sim um veredito.
+function keepaliveIndicaQueda(falhasConsecutivas) {
+    return Number(falhasConsecutivas) >= KEEPALIVE_FALHAS_ATE_QUEDA;
 }
 
 // Decide o que fazer quando syncGroups e chamado com um sync ja em voo.
@@ -129,6 +175,10 @@ module.exports = {
     qrBootstrapOutcome,
     preAuthEventIsStale,
     isRevokedReason,
+    classificarEstadoWa,
+    estadoIndicaQueda,
+    keepaliveIndicaQueda,
+    KEEPALIVE_FALHAS_ATE_QUEDA,
     syncGroupsOutcome,
     groupRetryDelay,
     syncPollDelay,

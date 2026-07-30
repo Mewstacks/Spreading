@@ -10,6 +10,10 @@ const {
     qrBootstrapOutcome,
     preAuthEventIsStale,
     isRevokedReason,
+    classificarEstadoWa,
+    estadoIndicaQueda,
+    keepaliveIndicaQueda,
+    KEEPALIVE_FALHAS_ATE_QUEDA,
     syncGroupsOutcome,
     groupRetryDelay,
     syncPollDelay,
@@ -207,4 +211,64 @@ test('sync polling window outlasts a slow group read', () => {
         total += delay;
     }
     assert.ok(total >= 15000 + 5000 + 10000, `janela de repoll curta demais: ${total}ms`);
+});
+
+
+// ── classificarEstadoWa ────────────────────────────────────────────────────────
+// O worker nao escutava 'change_state', e CONFLICT/UNPAIRED/TIMEOUT/UNLAUNCHED
+// chegam SO por esse evento: a conexao caia em silencio e o primeiro sintoma era
+// um envio falhando ("o canal de envio nao e mais valido"). Estes casos fixam
+// quais estados exigem reconexao imediata e quais sao apenas a sessao subindo.
+test('CONNECTED e o unico estado saudavel', () => {
+    assert.equal(classificarEstadoWa('CONNECTED'), 'ok');
+    assert.equal(classificarEstadoWa('connected'), 'ok'); // WAState vem maiusculo, mas nao dependemos disso
+    assert.equal(estadoIndicaQueda('CONNECTED'), false);
+});
+
+test('OPENING e PAIRING sao transicao, nunca queda', () => {
+    for (const estado of ['OPENING', 'PAIRING']) {
+        assert.equal(classificarEstadoWa(estado), 'transicao', estado);
+        // Reciclar aqui derrubaria um Chromium que ainda esta subindo.
+        assert.equal(estadoIndicaQueda(estado), false, estado);
+    }
+});
+
+test('os estados que morriam em silencio agora sao queda', () => {
+    for (const estado of [
+        'CONFLICT',            // o numero abriu WhatsApp Web em outro lugar
+        'UNPAIRED', 'UNPAIRED_IDLE',
+        'TIMEOUT',
+        'UNLAUNCHED',
+        'DEPRECATED_VERSION',
+        'PROXYBLOCK', 'TOS_BLOCK', 'SMB_TOS_BLOCK',
+    ]) {
+        assert.equal(classificarEstadoWa(estado), 'queda', estado);
+        assert.equal(estadoIndicaQueda(estado), true, estado);
+    }
+});
+
+test('estado ausente nao e veredito: nao dispara reconexao', () => {
+    // getState() devolve null/undefined enquanto a pagina nao tem WWebJS. Tratar
+    // isso como queda faria o keepalive reciclar a sessao a cada boot.
+    for (const vazio of [null, undefined, '']) {
+        assert.equal(classificarEstadoWa(vazio), 'indefinido');
+        assert.equal(estadoIndicaQueda(vazio), false);
+    }
+});
+
+// CONFLICT precisa ser queda justamente porque takeoverOnConflict nasce
+// desligado (WA_TAKEOVER_ON_CONFLICT): sem takeover o socket nao volta sozinho,
+// e sem reconexao a sessao ficaria "conectada" para sempre sem poder enviar.
+test('CONFLICT nao e purgavel, mas e queda', () => {
+    assert.equal(estadoIndicaQueda('CONFLICT'), true);
+    assert.equal(isRevokedReason('CONFLICT'), false);
+});
+
+test('keepalive so declara queda depois de falhas seguidas', () => {
+    // Uma leitura perdida e rotina (pagina ocupada com sync); repeticao e veredito.
+    assert.equal(keepaliveIndicaQueda(1), false);
+    assert.equal(keepaliveIndicaQueda(2), false);
+    assert.equal(keepaliveIndicaQueda(KEEPALIVE_FALHAS_ATE_QUEDA), true);
+    assert.equal(keepaliveIndicaQueda(KEEPALIVE_FALHAS_ATE_QUEDA + 1), true);
+    assert.equal(keepaliveIndicaQueda(0), false);
 });
