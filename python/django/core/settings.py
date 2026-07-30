@@ -73,6 +73,11 @@ ML_LINK_BUILDER_ENABLED = os.getenv(
 ML_BROWSER_REPORTS_ENABLED = os.getenv(
     "ML_BROWSER_REPORTS_ENABLED", _AUTOMATION_DEFAULT,
 ) == "1"
+# A tela de login da Amazon era a única das três sem kill-switch: um problema no
+# gateway da Amazon não tinha como ser contido sem deploy.
+AMAZON_BROWSER_LOGIN_ENABLED = os.getenv(
+    "AMAZON_BROWSER_LOGIN_ENABLED", _AUTOMATION_DEFAULT,
+) == "1"
 TELETHON_RELINK_ENABLED = os.getenv(
     "TELETHON_RELINK_ENABLED", "0",
 ) == "1"

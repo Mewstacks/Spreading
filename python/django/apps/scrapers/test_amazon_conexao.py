@@ -5,6 +5,8 @@ visual. Medido em homologação: uma página de login parada produz ZERO frames 
 40s. Isso disparava o watchdog do cliente (overlay "Reconectando" por cima do
 CAPTCHA) e o corte do gerador, que matava os listeners de teclado.
 """
+from pathlib import Path
+
 from django.test import TestCase
 
 from apps.scrapers import amazon_conexao
@@ -79,8 +81,15 @@ class TemplateLiveViewTests(TestCase):
     """Tela parada (CAPTCHA sendo lido) não pode acusar queda sozinha."""
 
     def setUp(self):
-        with open("apps/templates/scrapers/ml_conexao.html", encoding="utf-8") as fh:
-            self.html = fh.read()
+        # Caminho derivado deste arquivo, não do cwd: o CI roda `manage.py` a partir de
+        # `python/` (.github/workflows/ci.yml), então o caminho relativo antigo
+        # levantava FileNotFoundError e estes dois testes nunca chegavam a rodar.
+        from django.conf import settings
+
+        template = (
+            Path(settings.BASE_DIR) / "apps" / "templates" / "scrapers" / "ml_conexao.html"
+        )
+        self.html = template.read_text(encoding="utf-8")
 
     def test_watchdog_tolera_mais_que_o_intervalo_de_heartbeat(self):
         # 4000 era menor que os 10s de heartbeat do servidor: acusava queda sozinho.

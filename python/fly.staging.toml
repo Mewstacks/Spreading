@@ -26,6 +26,7 @@ primary_region = "gru"
   # TELETHON_RELINK_ENABLED fica de fora de propósito (checks.py accounts.E011).
   ML_BROWSER_LOGIN_ENABLED = "1"
   ML_BROWSER_REPORTS_ENABLED = "1"
+  AMAZON_BROWSER_LOGIN_ENABLED = "1"
   ML_LINK_BUILDER_ENABLED = "1"
   WHATSAPP_WEB_ENABLED = "1"
   # Cupons de ativação do ML (clique no container público, sem código digitável).

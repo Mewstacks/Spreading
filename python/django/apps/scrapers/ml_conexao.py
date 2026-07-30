@@ -43,38 +43,29 @@ from apps.scrapers.ml_live_transport import (
 
 logger = logging.getLogger(__name__)
 
-LOGIN_URL = "https://www.mercadolivre.com/jms/mlb/lgz/msl/login/"
+# O `go` é o parâmetro de retorno do SSO do ML: depois do login (inclusive depois de
+# SMS/app) ele devolve o navegador para uma página conhecida, em vez de parar num
+# destino que a sonda de sessão não reconhece. Entrar na rota de login sem ele era um
+# caminho que nenhum usuário real percorre.
+LOGIN_URL = (
+    "https://www.mercadolivre.com/jms/mlb/lgz/msl/login/"
+    "?go=https%3A%2F%2Fwww.mercadolivre.com.br%2F"
+)
+RECARGAS_APOS_ERRO = 1           # o gateway do ML às vezes aceita na 2ª tentativa
 
 LOGIN_DEADLINE_S = 600           # tempo máx. esperando o usuário logar
 LOOP_MS = 50                     # granularidade do worker (bombeia CDP + drena input)
 GOTO_TIMEOUT_MS = 60000          # em prod (IP de datacenter) o gateway de login demora
 GOTO_TENTATIVAS = 2              # timeout na 1ª tenta de novo antes de desistir
-
-# Compatibilidade da conexão Amazon, que ainda importa estes valores e o despachante
-# CDP legado. Os dois fluxos do ML usam viewport adaptativo + LiveTransport.
-VIEW_W, VIEW_H = 1280, 800
-
-# Parâmetros do screencast legado da Amazon. O ML captura JPEG 78 no viewport efetivo.
-SCREENCAST = {"format": "jpeg", "quality": 55,
-              "maxWidth": 960, "maxHeight": 600, "everyNthFrame": 2}
+SNAPSHOT_INTERVAL_S = 2.5        # de quanto em quanto tempo olhamos os cookies
 
 MAX_EVENTOS_POR_POST = 60        # teto de eventos por request (anti-abuso da fila)
 
 # Estado em memória DESTE worker (o cache guarda fase/erro visível entre threads).
+# Frames e fila de input vivem no LiveTransport, que os três fluxos compartilham.
 _threads: dict[int, threading.Thread] = {}
-_frames: dict[int, str] = {}                     # último frame base64 por usuário
-_inputs: dict[int, "queue.Queue"] = {}           # eventos de input pendentes por usuário
 _lock = threading.Lock()
 _transport = LiveTransport("mercado_livre")
-
-# Teclas não-imprimíveis que o front manda como {t:'key', key:'Enter'}; imprimíveis vêm
-# como {t:'char', text:'a'}. Os dois casos vão pro page.keyboard do Playwright, que já
-# tem o mapa tecla->code/keyCode (USKeyboardLayout) e emite keydown/keypress/keyup de
-# verdade. Estes nomes são os mesmos que keyboard.press() aceita.
-_SPECIAL_KEYS = frozenset({
-    "Enter", "Backspace", "Tab", "Delete", "Escape",
-    "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Home", "End",
-})
 
 
 def _cache_key(user_id: int) -> str:
@@ -149,50 +140,40 @@ def _storage_fingerprint(storage_state: dict) -> str:
     return sha256(material.encode("utf-8")).hexdigest()
 
 
-def _despachar_input(cdp, page, ev: dict):
-    """Traduz UM evento do front em input no Chromium local. Nunca levanta.
+def _pagina_de_erro_do_ml(page) -> bool:
+    """True quando o ML respondeu com a própria página de erro genérica.
 
-    Mouse vai por CDP cru (dispatchMouseEvent aceita coordenada; page.mouse também,
-    mas o CDP evita a ida-e-volta de estado do Playwright). Teclado vai por
-    page.keyboard: Input.insertText insere texto SEM disparar keydown/keypress/keyup,
-    e a página de login do ML ignora o que digita assim — o mouse funcionava e o texto
-    não entrava. page.keyboard.type() reusa o mapa de teclas do Playwright e emite os
-    eventos completos, que é o que o usuário de fato digitou do outro lado.
+    É o "Ops! Ocorreu um erro. Tente novamente mais tarde." que o gateway devolve
+    quando recusa a sessão vinda do servidor. Sem detectar isso, o worker seguia em
+    `aguardando_login` até o deadline de 10 minutos: o usuário ficava olhando uma tela
+    que nunca ia sair do lugar, e nem ele nem o log tinham como saber o motivo.
+
+    Usa `textContent` e não `innerText` de propósito: não força layout na página que o
+    live view está capturando ao mesmo tempo.
     """
     try:
-        t = ev.get("t")
-        if t == "move":
-            cdp.send("Input.dispatchMouseEvent", {
-                "type": "mouseMoved", "x": ev["x"], "y": ev["y"],
-                "button": "none", "buttons": int(ev.get("buttons", 0))})
-        elif t == "down":
-            cdp.send("Input.dispatchMouseEvent", {
-                "type": "mousePressed", "x": ev["x"], "y": ev["y"],
-                "button": ev.get("button", "left"), "buttons": 1,
-                "clickCount": int(ev.get("clickCount", 1))})
-        elif t == "up":
-            cdp.send("Input.dispatchMouseEvent", {
-                "type": "mouseReleased", "x": ev["x"], "y": ev["y"],
-                "button": ev.get("button", "left"), "buttons": 0,
-                "clickCount": int(ev.get("clickCount", 1))})
-        elif t == "wheel":
-            cdp.send("Input.dispatchMouseEvent", {
-                "type": "mouseWheel", "x": ev["x"], "y": ev["y"],
-                "deltaX": float(ev.get("dx", 0)), "deltaY": float(ev.get("dy", 0))})
-        elif t == "char":
-            texto = str(ev.get("text", ""))[:8]
-            if texto:
-                # delay=0: a cadência real já é a do usuário; o front manda cada tecla
-                # assim que ela acontece.
-                page.keyboard.type(texto, delay=0)
-        elif t == "key":
-            if ev.get("key") in _SPECIAL_KEYS:
-                page.keyboard.press(ev["key"])
+        texto = page.evaluate(
+            "() => ((document.title || '') + ' ' +"
+            " ((document.body && document.body.textContent) || ''))"
+            ".slice(0, 4000).toLowerCase()"
+        )
     except Exception:
-        # Um evento malformado/tardio (browser fechando) não pode derrubar o worker.
-        # Em debug dá pra ver o que morreu — foi o silêncio aqui que escondeu o
-        # teclado quebrado por tanto tempo.
-        logger.debug("Evento de input descartado (%s)", ev.get("t"), exc_info=True)
+        return False
+    if not isinstance(texto, str):
+        return False
+    if not any(m in texto for m in ("ocorreu um erro", "ocurrió un error")):
+        return False
+    if not any(m in texto for m in ("tente novamente mais tarde", "más tarde")):
+        return False
+    # A página de erro não tem formulário. Um campo de senha/e-mail presente significa
+    # que estamos na tela de login com alguma mensagem de validação — que é normal e
+    # não deve virar um alerta de bloqueio.
+    try:
+        if page.locator("input[type='password'], input[type='email']").count():
+            return False
+    except Exception:
+        return False
+    return True
 
 
 def _ir_para_login(page):
@@ -272,7 +253,9 @@ def _persistir_sessao(user_id: int, storage_state: dict, tentativas: int = 3) ->
 def _worker(user_id: int):
     """Sobe o Chromium, publica capturas nítidas e valida a sessão de verdade."""
     from playwright.sync_api import sync_playwright
-    from apps.scrapers.auxiliar import ua_aleatorio
+    from apps.scrapers.contexto_login import (
+        LAUNCH_ARGS, habilitar_foco, opcoes_de_contexto,
+    )
     from apps.scrapers.conexoes import sondar_sessao_ml
 
     runtime = _transport.get(user_id) or _transport.create(user_id)
@@ -285,29 +268,23 @@ def _worker(user_id: int):
     manual_validation = False
     # Zero garante uma primeira leitura de cookies logo na entrada do loop.
     ultima_leitura_storage = 0.0
+    recargas = 0
+    erro_ml_avisado = False
+    last_error_check = 0.0
     try:
         _set_estado(user_id, fase="iniciando", erro="")
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                # Mesmos flags do scraper (auxiliar.iniciar_browser) + dev-shm p/ não
-                # crashar o Chromium em container com /dev/shm pequeno (Fly).
-                args=["--disable-blink-features=AutomationControlled",
-                      "--disable-dev-shm-usage"],
-            )
+            # Flags do scraper (auxiliar.iniciar_browser) + dev-shm p/ não crashar o
+            # Chromium em container com /dev/shm pequeno (Fly) + locale, ver
+            # contexto_login.
+            browser = p.chromium.launch(headless=True, args=LAUNCH_ARGS)
             try:
-                context = browser.new_context(
-                    viewport={
-                        "width": runtime.viewport["width"],
-                        "height": runtime.viewport["height"],
-                    },
-                    device_scale_factor=runtime.viewport["device_pixel_ratio"],
-                    is_mobile=runtime.viewport["device_class"] == "mobile",
-                    has_touch=runtime.viewport["pointer"] == "coarse",
-                    user_agent=ua_aleatorio(),
+                context = browser.new_context(**opcoes_de_contexto(
+                    browser, runtime.viewport,
                     permissions=["clipboard-read", "clipboard-write"],
-                )
+                ))
                 page = context.pages[0] if context.pages else context.new_page()
+                habilitar_foco(context, page)
                 active_page = ActivePage(context, page, runtime)
 
                 _ir_para_login(page)
@@ -350,6 +327,35 @@ def _worker(user_id: int):
                         houve_input = True
                     _transport.capture(runtime, current_page, active=houve_input)
 
+                    # O gateway do ML pode responder com a própria página de erro em vez
+                    # da tela de login. Antes disso passar batido, o worker seguia
+                    # esperando um login que já havia sido recusado até o deadline de 10
+                    # minutos, e o log não registrava nada.
+                    if agora - last_error_check > SNAPSHOT_INTERVAL_S:
+                        last_error_check = agora
+                        if _pagina_de_erro_do_ml(current_page):
+                            logger.info(
+                                "ml_login_metric transport=mercado_livre user=%s "
+                                "gateway=pagina_de_erro recargas=%s",
+                                user_id, recargas,
+                            )
+                            if recargas < RECARGAS_APOS_ERRO:
+                                recargas += 1
+                                _set_estado(user_id, fase="aguardando_login", aviso=(
+                                    "O Mercado Livre recusou a primeira tentativa. "
+                                    "Abrindo o login novamente…"
+                                ))
+                                _ir_para_login(current_page)
+                                _transport.capture(runtime, current_page, active=True)
+                            elif not erro_ml_avisado:
+                                erro_ml_avisado = True
+                                _set_estado(user_id, fase="aguardando_login", aviso=(
+                                    "O Mercado Livre está recusando o login a partir do "
+                                    "servidor (a mensagem \"Ocorreu um erro\" na janela "
+                                    "vem dele, não do Spreading). Aguarde alguns "
+                                    "minutos e tente novamente."
+                                ))
+
                     # Alterações de cookie disparam uma sonda assíncrona. A URL sozinha
                     # nunca representa sucesso: SMS, QR, ajuda e recuperação também
                     # navegam dentro de mercadolivre.com.br.
@@ -366,19 +372,24 @@ def _worker(user_id: int):
                     # storage_state() é um round-trip CDP + serialização de todos os
                     # cookies. No loop de 50ms isso rodava 20x/s, atrasando o drain
                     # da fila de input e as capturas — a digitação engasgava. Cookie
-                    # de login não muda em milissegundos; 1s basta.
+                    # de login não muda em milissegundos.
+                    #
+                    # Com uma sonda EM VOO o snapshot é puro desperdício: o `submit`
+                    # abaixo seria descartado de qualquer forma, e a mudança acumulada
+                    # aparece no snapshot seguinte. Uma verificação manual ("já entrei")
+                    # não espera o intervalo.
                     agora = time.monotonic()
-                    if manual_validation or agora - ultima_leitura_storage >= 1.0:
+                    if pending_validation is None and (
+                        manual_validation
+                        or agora - ultima_leitura_storage >= SNAPSHOT_INTERVAL_S
+                    ):
                         ultima_leitura_storage = agora
                         snapshot = context.storage_state()
                         fingerprint = _storage_fingerprint(snapshot)
                         changed = fingerprint != last_fingerprint
                         if changed:
                             last_fingerprint = fingerprint
-                        if (
-                            pending_validation is None
-                            and (changed or manual_validation)
-                        ):
+                        if changed or manual_validation:
                             pending_state = snapshot
                             pending_validation = validator.submit(
                                 sondar_sessao_ml, pending_state,
@@ -456,8 +467,6 @@ def _worker(user_id: int):
         validator.shutdown(wait=False, cancel_futures=True)
         _transport.finish(user_id, runtime)
         with _lock:
-            _inputs.pop(user_id, None)
-            _frames.pop(user_id, None)
             _threads.pop(user_id, None)
 
 

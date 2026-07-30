@@ -51,11 +51,16 @@ def http_session(state) -> requests.Session:
             )
         except Exception:
             continue
-    from apps.scrapers.auxiliar import ua_aleatorio
+    # UA fixo, não sorteado. Estes cookies nasceram numa sessão de Chromium; sondá-los
+    # ora como Firefox, ora como Safari, é o tipo de incoerência que faz o ML devolver
+    # 403 para uma sessão que está viva. O 403 chega aqui como "inconclusivo", então o
+    # sintoma para o usuário era o login nunca confirmar e a tela ficar em "Aguardando
+    # login" até o deadline de 10 minutos.
+    from apps.scrapers.contexto_login import ACCEPT_LANGUAGE, UA_SONDA
     session.headers.update({
-        "User-Agent": ua_aleatorio(),
+        "User-Agent": UA_SONDA,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+        "Accept-Language": ACCEPT_LANGUAGE,
         "Upgrade-Insecure-Requests": "1",
     })
     return session

@@ -85,15 +85,12 @@ def _logado(page) -> bool:
         return False
 
 
-GOTO_TENTATIVAS = 2
-
-
 def _abrir_login(page):
     """Navega até o login com uma 2ª tentativa — o mesmo tratamento do ML.
 
     Do IP de datacenter da Fly a Amazon também passa por gateway anti-bot e a
     primeira navegação estoura o tempo com frequência. O ML já tratava isso
-    (ml_conexao._abrir_login); aqui um único timeout matava a tentativa de login
+    (ml_conexao._ir_para_login); aqui um único timeout matava a tentativa de login
     inteira e o usuário via só "Tempo esgotado", sem nada a fazer além de repetir.
     """
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -117,7 +114,9 @@ def _abrir_login(page):
 @organization_job_sem_transacao
 def _worker(user):
     from playwright.sync_api import sync_playwright
-    from apps.scrapers.auxiliar import ua_aleatorio
+    from apps.scrapers.contexto_login import (
+        LAUNCH_ARGS, habilitar_foco, opcoes_de_contexto,
+    )
 
     uid = user.id
     runtime = _transport.get(uid) or _transport.create(uid)
@@ -125,26 +124,16 @@ def _worker(user):
     try:
         _set(uid, fase="iniciando", erro="")
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled",
-                      "--disable-dev-shm-usage"],
-            )
+            browser = p.chromium.launch(headless=True, args=LAUNCH_ARGS)
             try:
-                context = browser.new_context(
-                    viewport={
-                        "width": runtime.viewport["width"],
-                        "height": runtime.viewport["height"],
-                    },
-                    device_scale_factor=runtime.viewport["device_pixel_ratio"],
-                    is_mobile=runtime.viewport["device_class"] == "mobile",
-                    has_touch=runtime.viewport["pointer"] == "coarse",
-                    user_agent=ua_aleatorio(),
+                context = browser.new_context(**opcoes_de_contexto(
+                    browser, runtime.viewport,
                     # Colar a senha é o caminho normal de quem usa gerenciador de
                     # senhas; sem a permissão o Ctrl+V não funcionava.
                     permissions=["clipboard-read", "clipboard-write"],
-                )
+                ))
                 page = context.new_page()
+                habilitar_foco(context, page)
                 # Desafios da Amazon costumam abrir popup/nova aba. Sem seguir a
                 # aba ativa, o stream ficava preso na página antiga.
                 active_page = ActivePage(context, page, runtime)
@@ -247,6 +236,19 @@ def _worker(user):
 
 
 def criar_sessao(user, client: dict | None = None):
+    from apps.accounts.feature_flags import enabled_for_user
+    if not enabled_for_user("AMAZON_BROWSER_LOGIN_ENABLED", user):
+        # Persistido, e não só retornado: o poll do front relê o cache e um estado
+        # efêmero seria imediatamente apagado pela fase antiga — a tela repintava
+        # "Conectado" sobre um login que nunca abriu (ver a mesma correção em
+        # ml_conexao.criar_sessao). Esta era a única das três telas de login sem
+        # kill-switch: um problema no gateway da Amazon não tinha como ser contido
+        # sem deploy.
+        return {
+            **_set(user.id, fase="indisponivel", cancelar=False, salvar_agora=False,
+                   erro="Login da Amazon por navegador está desativado para esta organização."),
+            "auth_valido": False,
+        }
     with _lock:
         running = _threads.get(user.id)
         if running and running.is_alive():

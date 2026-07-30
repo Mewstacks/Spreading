@@ -130,7 +130,7 @@
 
 {% block content %}
 <div class="page-head">
-  <span class="int-icon" aria-hidden="true"><i data-lucide="{% if live_v2 %}shopping-bag{% else %}package{% endif %}"></i></span>
+  <span class="int-icon" aria-hidden="true"><i data-lucide="{% if marketplace_ml %}shopping-bag{% else %}package{% endif %}"></i></span>
   <div class="head-main">
     <span class="eyebrow">{% if relatorio %}Portal de relatórios{% else %}Integração{% endif %}</span>
     <h1>{{ marketplace_nome|default:"Mercado Livre" }}</h1>
@@ -146,13 +146,13 @@
 <!-- Live view remota: peça central enquanto a conexão está em andamento -->
 <div id="live-area" class="panel" style="display:none;">
   <div class="live-toolbar">
-    <div class="live-title"><i data-lucide="monitor-smartphone"></i> Sessão remota · {% if live_v2 %}Mercado Livre{% else %}Amazon{% endif %}</div>
+    <div class="live-title"><i data-lucide="monitor-smartphone"></i> Sessão remota · {% if marketplace_ml %}Mercado Livre{% else %}Amazon{% endif %}</div>
     <div id="stream-badge" class="stream-badge is-wait" role="status" aria-live="polite">
       <span class="stream-dot"></span><span id="stream-txt">Preparando imagem…</span>
     </div>
   </div>
   <div id="live-frame-wrap">
-    <canvas id="live-canvas" width="1280" height="800" tabindex="0" aria-label="Janela interativa de login {% if live_v2 %}do Mercado Livre{% else %}da Amazon{% endif %}"></canvas>
+    <canvas id="live-canvas" width="1280" height="800" tabindex="0" aria-label="Janela interativa de login {% if marketplace_ml %}do Mercado Livre{% else %}da Amazon{% endif %}"></canvas>
     <input id="live-kbd" type="text" inputmode="text" autocomplete="off" autocapitalize="off"
       autocorrect="off" spellcheck="false" aria-hidden="true" tabindex="-1">
     <div id="stream-overlay" class="stream-overlay" aria-hidden="true">
@@ -165,13 +165,13 @@
   </div>
   <div class="device-tip">
     <i data-lucide="lightbulb"></i>
-    <span id="device-tip-text">{% if live_v2 %}No celular, prefira SMS ou o aplicativo do Mercado Livre. No computador, você também pode escanear o QR Code com o telefone.{% else %}Conclua o login acima. Assim que a Amazon confirmar a conta, salve a sessão.{% endif %}</span>
+    <span id="device-tip-text">{% if marketplace_ml %}No celular, prefira SMS ou o aplicativo do Mercado Livre. No computador, você também pode escanear o QR Code com o telefone.{% else %}Conclua o login acima. Assim que a Amazon confirmar a conta, salve a sessão.{% endif %}</span>
   </div>
   <div class="live-controls">
-    <button id="salvar-btn" class="btn btn-accent"><i data-lucide="badge-check"></i> {% if live_v2 %}Verificar conexão{% else %}Já entrei{% endif %}</button>
+    <button id="salvar-btn" class="btn btn-accent"><i data-lucide="badge-check"></i> {% if marketplace_ml %}Verificar conexão{% else %}Já entrei{% endif %}</button>
     <button id="cancelar-btn" class="btn btn-ghost"><i data-lucide="x"></i> Cancelar</button>
   </div>
-  <p class="security-note">{% if live_v2 %}Seus cliques e teclas são retransmitidos somente para esta janela remota. O conteúdo digitado não é armazenado nem incluído nos logs.{% else %}Use esta janela somente para concluir a autenticação no site exibido.{% endif %}</p>
+  <p class="security-note">{% if marketplace_ml %}Seus cliques e teclas são retransmitidos somente para esta janela remota. O conteúdo digitado não é armazenado nem incluído nos logs.{% else %}Use esta janela somente para concluir a autenticação no site exibido.{% endif %}</p>
 </div>
 
 <div class="split split-main-side">
@@ -181,8 +181,8 @@
       <div class="panel-head">
         <span class="panel-ico"><i data-lucide="shield-check"></i></span>
         <div>
-          <strong>Conectar {% if live_v2 %}ao Mercado Livre{% else %}à Amazon{% endif %}</strong>
-          <p class="hint">O login {% if live_v2 %}do Mercado Livre será aberto aqui, no formato correto para este dispositivo{% else %}da Amazon será aberto nesta janela{% endif %}. Você entra direto no site oficial — o Spreading só retransmite a janela.</p>
+          <strong>Conectar {% if marketplace_ml %}ao Mercado Livre{% else %}à Amazon{% endif %}</strong>
+          <p class="hint">O login {% if marketplace_ml %}do Mercado Livre será aberto aqui, no formato correto para este dispositivo{% else %}da Amazon será aberto nesta janela{% endif %}. Você entra direto no site oficial — o Spreading só retransmite a janela.</p>
         </div>
       </div>
       <div class="actions">
@@ -209,7 +209,7 @@
         {% if not relatorio %}
         <button id="desconectar-btn" class="btn btn-danger btn-sm"><i data-lucide="unplug"></i> Desconectar</button>
         <a class="btn-link" href="/scrapers/ml-relatorio/">Abrir portal de relatórios</a>
-        {% elif live_v2 %}
+        {% elif marketplace_ml %}
         <a class="btn-link" href="/scrapers/ml/">Conexão principal do Mercado Livre</a>
         {% endif %}
       </div>
@@ -226,7 +226,7 @@
         <li id="step-1" class="step">
           <span class="ball">1</span>
           <span class="step-txt">
-            <span class="lbl">Abrir {% if live_v2 %}o Mercado Livre{% else %}a Amazon{% endif %}</span>
+            <span class="lbl">Abrir {% if marketplace_ml %}o Mercado Livre{% else %}a Amazon{% endif %}</span>
             <span class="step-desc">Janela oficial de login</span>
           </span>
         </li>
@@ -234,13 +234,13 @@
           <span class="ball">2</span>
           <span class="step-txt">
             <span class="lbl">Confirmar sua identidade</span>
-            <span class="step-desc">{% if live_v2 %}Senha, SMS ou aplicativo{% else %}Senha e verificação{% endif %}</span>
+            <span class="step-desc">{% if marketplace_ml %}Senha, SMS ou aplicativo{% else %}Senha e verificação{% endif %}</span>
           </span>
         </li>
         <li id="step-3" class="step">
           <span class="ball">3</span>
           <span class="step-txt">
-            <span class="lbl">{% if live_v2 %}Validar a conexão{% else %}Salvar a sessão{% endif %}</span>
+            <span class="lbl">{% if marketplace_ml %}Validar a conexão{% else %}Salvar a sessão{% endif %}</span>
             <span class="step-desc">Sessão pronta para uso</span>
           </span>
         </li>
@@ -259,7 +259,7 @@
   <div class="panel">
     <span class="eyebrow">Conexão segura</span>
     <ul class="tips-list">
-      <li><i data-lucide="globe"></i><span>A janela remota mostra somente o site oficial {% if live_v2 %}do Mercado Livre{% else %}da Amazon{% endif %} — nunca um formulário do Spreading.</span></li>
+      <li><i data-lucide="globe"></i><span>A janela remota mostra somente o site oficial {% if marketplace_ml %}do Mercado Livre{% else %}da Amazon{% endif %} — nunca um formulário do Spreading.</span></li>
       <li><i data-lucide="keyboard"></i><span>Teclas e cliques são retransmitidos apenas para essa janela e não ficam registrados.</span></li>
       <li><i data-lucide="unplug"></i><span>Você pode desconectar quando quiser — a sessão é apagada do servidor.</span></li>
     </ul>
@@ -272,7 +272,6 @@
 (() => {
   'use strict';
   const PREFIX = '{{ conexao_prefix|default:"/scrapers/ml" }}';
-  const LIVE_V2 = {% if live_v2 %}true{% else %}false{% endif %};
   const pill = document.getElementById('conn-pill');
   const pillTxt = document.getElementById('pill-txt');
   const errBox = document.getElementById('err-box');
@@ -371,16 +370,23 @@
       else step.removeAttribute('aria-current');
     });
   }
+  let streamAtual = '';
   function setStream(state) {
     const states = {
       ao_vivo:['Ao vivo','is-live'],
       reconectando:['Reconectando…','is-wait'],
       interrompida:['Imagem interrompida','is-down'],
     };
-    const selected = states[state] || states.reconectando;
+    const resolved = states[state] ? state : 'reconectando';
+    // Chamado a cada frame desenhado E a cada flush de input. Sem esta guarda, o
+    // className do badge e o aria-hidden do overlay eram reescritos 4-8x/s à toa; o
+    // recálculo de estilo aparecia como cintilação no canto da imagem.
+    if (resolved === streamAtual) return;
+    streamAtual = resolved;
+    const selected = states[resolved];
     streamBadge.className = `stream-badge ${selected[1]}`;
     streamTxt.textContent = selected[0];
-    const interrupted = state === 'interrompida';
+    const interrupted = resolved === 'interrompida';
     streamOverlay.classList.toggle('is-visible', interrupted);
     streamOverlay.setAttribute('aria-hidden', interrupted ? 'false' : 'true');
   }
@@ -399,15 +405,18 @@
     };
   }
   function push(event) {
-    if (LIVE_V2) {
-      const previous = inputBuffer[inputBuffer.length - 1];
-      if (!sending && event.t === 'move' && previous && previous.t === 'move') {
-        inputBuffer[inputBuffer.length - 1] = {...event, seq:previous.seq};
-      } else {
-        inputBuffer.push({...event, seq:nextInputSeq++});
-      }
+    const previous = inputBuffer[inputBuffer.length - 1];
+    if (!sending && event.t === 'move' && previous && previous.t === 'move') {
+      inputBuffer[inputBuffer.length - 1] = {...event, seq:previous.seq};
+    } else if (!sending && event.t === 'char' && previous && previous.t === 'char'
+               && previous.text.length + event.text.length <= 16) {
+      // Teclas em rajada viram um evento só. O servidor aplica o texto com
+      // page.keyboard.type na mesma ordem, e cada round-trip economizado é um
+      // caractere de atraso a menos para quem digita rápido. O teto de 16 é o mesmo
+      // que limpar_evento aceita no campo `text`.
+      inputBuffer[inputBuffer.length - 1] = {...previous, text:previous.text + event.text};
     } else {
-      inputBuffer.push(event);
+      inputBuffer.push({...event, seq:nextInputSeq++});
     }
     // 120ms, não 50. Cliques, teclas e wheel já chamam flush() na hora — este timer
     // só atende ao movimento do mouse, que o próprio push já coalesce (só o último
@@ -419,31 +428,35 @@
   async function flush() {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
     if (sending || !inputBuffer.length) return;
-    if (LIVE_V2 && !sessionId) {
+    if (!sessionId) {
       flushTimer = setTimeout(flush, 250);
       return;
     }
     sending = true;
+    let entregou = false;
     const batch = inputBuffer.slice(0, 60);
     try {
-      const result = await post(`${PREFIX}/input/`, LIVE_V2
-        ? {session_id:sessionId, events:batch}
-        : {events:batch});
+      const result = await post(`${PREFIX}/input/`, {session_id:sessionId, events:batch});
       if (!result.ok) throw new Error(result.erro || 'input_rejected');
-      if (LIVE_V2) {
-        const ack = Number(result.ack || 0);
-        inputBuffer = inputBuffer.filter(event => event.seq > ack);
-      } else {
-        inputBuffer.splice(0, batch.length);
-      }
+      // ACK cumulativo: o servidor confirma uma faixa contínua e o que não entrou
+      // continua no buffer para a próxima tentativa.
+      const ack = Number(result.ack || 0);
+      inputBuffer = inputBuffer.filter(event => event.seq > ack);
       retryDelay = 250;
+      entregou = true;
       setStream('ao_vivo');
     } catch (_) {
       setStream('interrompida');
       retryDelay = Math.min(2000, retryDelay * 2);
     } finally {
       sending = false;
-      if (inputBuffer.length) flushTimer = setTimeout(flush, retryDelay);
+      // Em SUCESSO o que sobrou no buffer sai imediatamente. Agendar com retryDelay
+      // fazia cada tecla esperar o POST anterior MAIS 250ms — a digitação ficava
+      // travada em ~3 caracteres por segundo mesmo com a rede boa. O atraso agora só
+      // vale para reenvio depois de falha, que é para o que o backoff existe.
+      if (inputBuffer.length) {
+        flushTimer = setTimeout(flush, entregou ? 0 : retryDelay);
+      }
     }
   }
 
@@ -540,44 +553,57 @@
     pendingFrame = {data, seq:normalizedSeq};
     if (!decoding) drawNextFrame();
   }
+  function pintarFrame(fonte, seq) {
+    if (seq <= lastDrawnSeq) return;
+    ctx.drawImage(fonte, 0, 0, canvas.width, canvas.height);
+    lastDrawnSeq = seq;
+    lastFrameAt = Date.now();
+    setStream('ao_vivo');
+  }
+  function bytesDoFrame(base64) {
+    const binario = atob(base64);
+    const bytes = new Uint8Array(binario.length);
+    for (let i = 0; i < binario.length; i++) bytes[i] = binario.charCodeAt(i);
+    return bytes;
+  }
+  // createImageBitmap decodifica fora da thread principal e dispensa montar um
+  // data-URL de dezenas de KB por frame — era o que segurava a pintura agora que o
+  // servidor captura em rajada durante a interação. Image() continua como fallback.
   function drawNextFrame() {
     if (!pendingFrame) { decoding = false; return; }
     decoding = true;
     const frame = pendingFrame;
     pendingFrame = null;
-    const image = new Image();
-    image.onload = () => {
-      if (frame.seq > lastDrawnSeq) {
-        ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-        lastDrawnSeq = frame.seq;
-        lastFrameAt = Date.now();
-        setStream('ao_vivo');
+    if (window.createImageBitmap) {
+      let blob = null;
+      try { blob = new Blob([bytesDoFrame(frame.data)], {type:'image/jpeg'}); }
+      catch (_) { blob = null; }
+      if (blob) {
+        createImageBitmap(blob).then(bitmap => {
+          pintarFrame(bitmap, frame.seq);
+          bitmap.close();
+          drawNextFrame();
+        }).catch(() => drawNextFrame());
+        return;
       }
-      drawNextFrame();
-    };
+    }
+    const image = new Image();
+    image.onload = () => { pintarFrame(image, frame.seq); drawNextFrame(); };
     image.onerror = drawNextFrame;
     image.src = `data:image/jpeg;base64,${frame.data}`;
   }
   function startLive() {
     attachInput();
-    if (framesES || (LIVE_V2 && !sessionId)) return;
-    const query = LIVE_V2 ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    if (framesES || !sessionId) return;
+    const query = `?session_id=${encodeURIComponent(sessionId)}`;
     framesES = new EventSource(`${PREFIX}/frames/${query}`);
-    if (LIVE_V2) {
-      framesES.addEventListener('frame', event => queueFrame(event.data, event.lastEventId));
-      framesES.addEventListener('heartbeat', () => {
-        if (Date.now() - lastFrameAt < 3500) setStream('ao_vivo');
-      });
-      framesES.addEventListener('done', () => stopLive());
-    } else {
-      framesES.onmessage = event => {
-        if (event.data === '__DONE__') { stopLive(); return; }
-        // Keepalive: a tela parada (CAPTCHA sendo lido) não gera quadro novo.
-        // Sem isto o watchdog acusava queda e o overlay tapava o desafio.
-        if (event.data === '__PING__') { lastFrameAt = Date.now(); setStream('ao_vivo'); return; }
-        queueFrame(event.data, lastDrawnSeq + 1);
-      };
-    }
+    framesES.addEventListener('frame', event => queueFrame(event.data, event.lastEventId));
+    // Keepalive: a tela parada (CAPTCHA sendo lido) não gera quadro novo. Sem isto o
+    // watchdog acusava queda e o overlay tapava justamente o desafio.
+    framesES.addEventListener('heartbeat', () => {
+      if (Date.now() - lastFrameAt < 3500) setStream('ao_vivo');
+    });
+    framesES.addEventListener('done', () => stopLive());
     framesES.onopen = () => setStream('reconectando');
     framesES.onerror = () => setStream('interrompida');
   }
