@@ -97,7 +97,9 @@ def _logado(page) -> bool:
 @organization_job_sem_transacao
 def _worker(user):
     from playwright.sync_api import sync_playwright
-    from apps.scrapers.auxiliar import ua_aleatorio
+    from apps.scrapers.contexto_login import (
+        LAUNCH_ARGS, habilitar_foco, opcoes_de_contexto,
+    )
 
     uid = user.id
     runtime = _transport.get(uid) or _transport.create(uid)
@@ -105,19 +107,13 @@ def _worker(user):
     try:
         _set(uid, fase="iniciando", erro="")
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"])
+            browser = p.chromium.launch(headless=True, args=LAUNCH_ARGS)
             try:
                 context = browser.new_context(
-                    viewport={
-                        "width": runtime.viewport["width"],
-                        "height": runtime.viewport["height"],
-                    },
-                    device_scale_factor=runtime.viewport["device_pixel_ratio"],
-                    is_mobile=runtime.viewport["device_class"] == "mobile",
-                    has_touch=runtime.viewport["pointer"] == "coarse",
-                    user_agent=ua_aleatorio(),
+                    **opcoes_de_contexto(browser, runtime.viewport),
                 )
                 page = context.new_page()
+                habilitar_foco(context, page)
                 active_page = ActivePage(context, page, runtime)
                 # Abrir o destino autenticado preserva o redirect de retorno do SSO:
                 # depois do SMS/QR, o ML volta para a página que podemos validar.
@@ -131,8 +127,21 @@ def _worker(user):
                     session_id=runtime.session_id, viewport=runtime.viewport,
                 )
                 deadline, logged = time.time() + LOGIN_DEADLINE_S, False
+                # O laço gira a 20Hz (LOOP_MS=50) para drenar input e publicar frames,
+                # mas nem o cache nem o DOM mudam nessa escala. Ler os dois a cada volta
+                # custava, POR SEGUNDO, 20 idas ao cache e 20 consultas de seletor via
+                # CDP dentro do processo do gunicorn, segurando a GIL. `ml_conexao` e
+                # `amazon_conexao` já desacoplavam isso; este worker nunca recebeu a
+                # correção e era o mais caro dos três. Meio segundo de latência num
+                # clique de cancelar ninguém percebe.
+                state = {}
+                proxima_leitura = 0.0
+                proxima_checagem = 0.0
                 while time.time() < deadline:
-                    state = cache.get(_key(uid)) or {}
+                    agora = time.time()
+                    if agora >= proxima_leitura:
+                        state = cache.get(_key(uid)) or {}
+                        proxima_leitura = agora + 0.5
                     if state.get("cancelar"):
                         _set(uid, fase="idle", erro="")
                         break
@@ -157,11 +166,22 @@ def _worker(user):
                             uid, fase="validando", validar_agora=False,
                             salvar_agora=False, aviso="",
                         )
+                        # Zera também a cópia local: o cache só é relido a cada 0,5s e
+                        # sem isto o pedido continuaria "ligado" por várias voltas,
+                        # repetindo o goto do portal a cada 50ms.
+                        state["validar_agora"] = False
+                        state["salvar_agora"] = False
                         current_page.goto(
                             _report_url(), wait_until="domcontentloaded",
                             timeout=GOTO_TIMEOUT_MS,
                         )
                         _transport.capture(runtime, current_page, active=True)
+                        proxima_checagem = 0.0  # navegou: confere já
+
+                    if agora < proxima_checagem:
+                        current_page.wait_for_timeout(LOOP_MS)
+                        continue
+                    proxima_checagem = agora + 1.0
                     authenticated = _logado(current_page)
                     if validate_now or authenticated:
                         logger.info(

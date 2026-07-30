@@ -118,6 +118,38 @@ def throttle_sse(max_por_min=10):
     return deco
 
 
+# O EventSource reconecta sozinho sempre que o stream cai. Sem um `retry:` explícito o
+# navegador tenta de novo em ~3s, e 6 tentativas cabem em menos de 20 segundos: o teto
+# de throttle_sse(6) estourava e a tela ficava SEM IMAGEM justamente quando o stream
+# estava instável — o pior momento possível. 10s por tentativa mantém as reconexões
+# dentro do orçamento do throttle.
+SSE_RETRY_MS = 10000
+
+
+def _stream_login_sse(eventos):
+    """Serializa os eventos do transporte de login no formato do EventSource."""
+    yield f"retry: {SSE_RETRY_MS}\n\n"
+    for event in eventos:
+        if event.get("id") is not None:
+            yield f"id: {event['id']}\n"
+        yield f"event: {event['event']}\ndata: {event['data']}\n\n"
+    yield "event: done\ndata: __DONE__\n\n"
+
+
+def _resposta_login_sse(eventos):
+    """Resposta SSE das telas de login (ML, portal de relatórios e Amazon).
+
+    `X-Accel-Buffering: no` impede que qualquer proxy segure os frames num buffer, o
+    que transformaria o live view numa sequência de saltos.
+    """
+    resposta = StreamingHttpResponse(
+        _stream_login_sse(eventos), content_type="text/event-stream",
+    )
+    resposta["Cache-Control"] = "no-cache"
+    resposta["X-Accel-Buffering"] = "no"
+    return resposta
+
+
 class _QueueWriter:
     """File-like object that feeds lines into a Queue for SSE streaming."""
 
@@ -788,7 +820,9 @@ def ml_conexao_painel(request):
     return render(request, "scrapers/ml_conexao.html", {
         "status": ml_conexao.status(request.user.id),
         "marketplace_nome": "Mercado Livre", "conexao_prefix": "/scrapers/ml",
-        "live_v2": True,
+        # Só escolhe os textos da tela (ML x Amazon). O transporte é o mesmo nos três
+        # fluxos desde que a Amazon saiu do screencast legado.
+        "marketplace_ml": True,
     })
 
 
@@ -805,7 +839,7 @@ def amazon_conexao_painel(request):
     return render(request, "scrapers/ml_conexao.html", {
         "status": amazon_conexao.status(request.user.id),
         "marketplace_nome": "Amazon Associados", "conexao_prefix": "/scrapers/amazon",
-        "relatorio": True,
+        "relatorio": True, "marketplace_ml": False,
     })
 
 
@@ -817,8 +851,15 @@ def amazon_conexao_status_json(request):
 
 @require_POST
 def amazon_conexao_start(request):
+    import json
     from apps.scrapers import amazon_conexao
-    return JsonResponse(amazon_conexao.criar_sessao(request.user))
+    if len(request.body or b"") > 4096:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        client = json.loads((request.body or b"{}").decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(amazon_conexao.criar_sessao(request.user, client))
 
 
 @require_POST
@@ -843,22 +884,24 @@ def amazon_conexao_cancelar(request):
 @require_GET
 def amazon_conexao_frames(request):
     from apps.scrapers import amazon_conexao
-    def _stream():
-        yield from (f"data: {frame}\n\n" for frame in amazon_conexao.frames(request.user.id))
-        yield "data: __DONE__\n\n"
-    return StreamingHttpResponse(_stream(), content_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return _resposta_login_sse(amazon_conexao.frames(
+        request.user.id, request.GET.get("session_id"),
+    ))
 
 
 @require_POST
 def amazon_conexao_input(request):
     import json
     from apps.scrapers import amazon_conexao
+    if len(request.body or b"") > 65536:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
     try:
-        events = json.loads((request.body or b"").decode() or "{}").get("events")
+        payload = json.loads((request.body or b"").decode() or "{}")
     except (ValueError, UnicodeDecodeError):
         return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
-    return JsonResponse(amazon_conexao.enfileirar_input(request.user.id, events))
+    return JsonResponse(amazon_conexao.enfileirar_input(
+        request.user.id, payload.get("session_id"), payload.get("events"),
+    ))
 
 
 # --- Conexão do portal de RELATÓRIOS do ML (afiliados), separada do site principal ---
@@ -870,7 +913,7 @@ def ml_relatorio_conexao_painel(request):
         "status": ml_relatorio_conexao.status(request.user.id),
         "marketplace_nome": "Relatórios Mercado Livre",
         "conexao_prefix": "/scrapers/ml-relatorio",
-        "relatorio": True, "live_v2": True,
+        "relatorio": True, "marketplace_ml": True,
     })
 
 
@@ -915,16 +958,9 @@ def ml_relatorio_conexao_cancelar(request):
 @require_GET
 def ml_relatorio_conexao_frames(request):
     from apps.scrapers import ml_relatorio_conexao
-    def _stream():
-        for event in ml_relatorio_conexao.frames(
-            request.user.id, request.GET.get("session_id"),
-        ):
-            if event.get("id") is not None:
-                yield f"id: {event['id']}\n"
-            yield f"event: {event['event']}\ndata: {event['data']}\n\n"
-        yield "event: done\ndata: __DONE__\n\n"
-    return StreamingHttpResponse(_stream(), content_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return _resposta_login_sse(ml_relatorio_conexao.frames(
+        request.user.id, request.GET.get("session_id"),
+    ))
 
 
 @require_POST
@@ -1011,20 +1047,9 @@ def ml_conexao_frames(request):
     aqui só empurramos o frame atual de CADA usuário (isolado por request.user.id e
     pelo session_id opaco — um tenant nunca vê a tela do outro)."""
     from apps.scrapers import ml_conexao
-
-    def _stream():
-        for event in ml_conexao.frames(
-            request.user.id, request.GET.get("session_id"),
-        ):
-            if event.get("id") is not None:
-                yield f"id: {event['id']}\n"
-            yield f"event: {event['event']}\ndata: {event['data']}\n\n"
-        yield "event: done\ndata: __DONE__\n\n"
-
-    resp = StreamingHttpResponse(_stream(), content_type="text/event-stream")
-    resp["Cache-Control"] = "no-cache"
-    resp["X-Accel-Buffering"] = "no"
-    return resp
+    return _resposta_login_sse(ml_conexao.frames(
+        request.user.id, request.GET.get("session_id"),
+    ))
 
 
 @require_POST

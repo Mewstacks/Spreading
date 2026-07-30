@@ -52,6 +52,7 @@ def phase0_security_checks(app_configs, **kwargs):
         settings.ML_BROWSER_LOGIN_ENABLED,
         settings.ML_LINK_BUILDER_ENABLED,
         settings.ML_BROWSER_REPORTS_ENABLED,
+        settings.AMAZON_BROWSER_LOGIN_ENABLED,
         settings.WHATSAPP_WEB_ENABLED,
     )
     if any(fragile_flags) and not settings.PILOT_ORGANIZATION_IDS:

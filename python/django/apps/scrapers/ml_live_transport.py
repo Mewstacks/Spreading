@@ -28,8 +28,20 @@ DESKTOP_WIDTH = (1024, 1440)
 DESKTOP_HEIGHT = (700, 1000)
 
 CAPTURE_QUALITY = 78
+# Três faixas de cadência, escolhidas pelo tempo desde o último input do usuário.
+# 250ms fixos (4 FPS) davam um eco de quase meio segundo por tecla e tornavam captcha
+# de arrastar impossível de resolver. A rajada de ~14 FPS existe SÓ enquanto o usuário
+# está mexendo: o pico de CPU dura poucos segundos e no resto do tempo a captura fica
+# mais barata do que era antes, o que importa numa máquina que divide 2 vCPU com o
+# gunicorn e os workers de automação.
+CAPTURE_BURST_INTERVAL_S = 0.07
 CAPTURE_ACTIVE_INTERVAL_S = 0.25
 CAPTURE_IDLE_INTERVAL_S = 1.0
+BURST_WINDOW_S = 1.5
+ACTIVE_WINDOW_S = 5.0
+# O gerador SSE acompanha a rajada; fora dela não faz sentido acordar 20x/s.
+STREAM_POLL_BURST_S = 0.02
+STREAM_POLL_IDLE_S = 0.05
 HEARTBEAT_INTERVAL_S = 10.0
 MAX_EVENTOS_POR_POST = 60
 MAX_QUEUE_SIZE = 2000
@@ -154,6 +166,9 @@ class LiveRuntime:
     frame_at: float = 0.0
     first_frame_at: float = 0.0
     last_capture_at: float = 0.0
+    # Relógio monotônico do último input aceito. É ele que decide a cadência da
+    # captura e do stream — ver CAPTURE_BURST_INTERVAL_S.
+    last_input_at: float = 0.0
     input_ack: int = 0
     input_retries: int = 0
     stream_state: str = "reconectando"
@@ -182,6 +197,25 @@ class LiveRuntime:
                     "input_retries": self.input_retries,
                 },
             }
+
+
+def intervalo_de_captura(runtime: LiveRuntime, *, now: float, active: bool) -> float:
+    """Cadência da próxima captura, pelo tempo desde o último input do usuário.
+
+    ``active`` significa que o worker acabou de aplicar input nesta volta do loop e
+    força a rajada. A janela em ``last_input_at`` mantém a rajada por um instante
+    depois disso, porque o efeito de um clique (menu abrindo, campo validando, peça
+    de captcha voltando ao lugar) costuma continuar rendendo quadros por mais de um
+    tick — era aí que a tela parecia travar em degraus.
+    """
+    if active:
+        return CAPTURE_BURST_INTERVAL_S
+    desde_input = now - runtime.last_input_at
+    if runtime.last_input_at and desde_input <= BURST_WINDOW_S:
+        return CAPTURE_BURST_INTERVAL_S
+    if runtime.last_input_at and desde_input <= ACTIVE_WINDOW_S:
+        return CAPTURE_ACTIVE_INTERVAL_S
+    return CAPTURE_IDLE_INTERVAL_S
 
 
 class LiveTransport:
@@ -261,12 +295,16 @@ class LiveTransport:
                 runtime.input_ack = clean["seq"]
                 accepted += 1
             ack = runtime.input_ack
+            if accepted:
+                # Abre a janela de rajada: o usuário está interagindo agora e é neste
+                # instante que ele precisa ver o resultado do clique/tecla.
+                runtime.last_input_at = time.monotonic()
         return {"ok": True, "aceitos": accepted, "ack": ack}
 
     def capture(self, runtime: LiveRuntime, page, *, active: bool = False) -> bool:
         """Publica uma captura quando o intervalo de atividade permite."""
         now = time.monotonic()
-        interval = CAPTURE_ACTIVE_INTERVAL_S if active else CAPTURE_IDLE_INTERVAL_S
+        interval = intervalo_de_captura(runtime, now=now, active=active)
         if now - runtime.last_capture_at < interval:
             return False
         try:
@@ -324,17 +362,26 @@ class LiveTransport:
         last_seq = 0
         last_emit = time.monotonic()
         while not runtime.closed:
+            data = ""
             with runtime.lock:
                 seq = runtime.frame_seq
-                data = runtime.frame_data
-            if data and seq > last_seq:
+                # Copiar a string base64 (dezenas de KB) a cada volta do laço mesmo sem
+                # frame novo era trabalho puro dentro do lock que o worker do browser
+                # também disputa. Agora só o inteiro do seq é lido no caso comum.
+                if seq > last_seq:
+                    data = runtime.frame_data
+                em_rajada = (
+                    bool(runtime.last_input_at)
+                    and time.monotonic() - runtime.last_input_at <= BURST_WINDOW_S
+                )
+            if data:
                 last_seq = seq
                 last_emit = time.monotonic()
                 yield {"event": "frame", "id": seq, "data": data}
             elif time.monotonic() - last_emit >= HEARTBEAT_INTERVAL_S:
                 last_emit = time.monotonic()
                 yield {"event": "heartbeat", "data": str(last_seq)}
-            time.sleep(0.05)
+            time.sleep(STREAM_POLL_BURST_S if em_rajada else STREAM_POLL_IDLE_S)
 
 
 class ActivePage:
