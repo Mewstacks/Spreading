@@ -113,7 +113,7 @@ def _mapear_item(item: dict) -> dict | None:
                     asin, preco_de, preco_atual, _num(pct_api), pct_calc,
                 )
                 return None
-        elif preco_de > preco_atual * 10:
+        elif preco_de >= preco_atual * 10:
             # Sem a porcentagem da API, resta a guarda de escala.
             logger.warning(
                 "amazon_preco_incoerente asin=%s de=%.2f atual=%.2f (sem percentage)",

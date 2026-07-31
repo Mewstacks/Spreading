@@ -513,6 +513,46 @@ class AmazonDiscountRecoveryTests(TestCase):
                                         "savings": {"percentage": 20}}))
         self.assertEqual(m["preco_sem_desconto"], 100)
 
+    def test_rejects_saving_basis_at_ten_times_price_without_percentage(self):
+        """Razão 10x é 90% falso no topo; a guarda antiga usava `>` e deixava
+        passar exatamente os exemplos corrompidos encontrados em produção."""
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        m = az._mapear_item(self._item({
+            "money": {"amount": 63.99},
+            "savingBasis": {"money": {"amount": 639.90}},
+        }))
+
+        self.assertIsNone(m)
+
+    def test_rejects_saving_basis_that_disagrees_with_api_percentage(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        m = az._mapear_item(self._item({
+            "money": {"amount": 63.99},
+            "savingBasis": {"money": {"amount": 63990}},
+            "savings": {"percentage": 20},
+        }))
+
+        self.assertIsNone(m)
+
+
+class AmazonPublicPriceSanityTests(TestCase):
+    def test_accepts_plausible_discount(self):
+        from apps.scrapers.sources.amazon_public import _precos_publicaveis
+
+        self.assertTrue(_precos_publicaveis(80, 100))
+
+    def test_rejects_exactly_ninety_percent(self):
+        from apps.scrapers.sources.amazon_public import _precos_publicaveis
+
+        self.assertFalse(_precos_publicaveis(63.99, 639.90))
+
+    def test_rejects_reference_price_in_wrong_scale(self):
+        from apps.scrapers.sources.amazon_public import _precos_publicaveis
+
+        self.assertFalse(_precos_publicaveis(63.99, 63990))
+
 
 class VerificacaoDeLinksEhLanePropriaTests(TestCase):
     """A verificação NÃO pode depender de haver link novo para gerar.

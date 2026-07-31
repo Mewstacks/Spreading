@@ -88,6 +88,42 @@ class AutomationStatusSecurityTests(TestCase):
         self.assertFalse(data["rodando"])
         self.assertFalse(data["saudavel"])
 
+    @patch("apps.scrapers.maintenance.purgar_eventos_antigos", return_value=0)
+    @patch("apps.scrapers.maintenance.reconciliar_publicacoes_orfas", return_value=0)
+    @patch("apps.scrapers.ofertas.processar_configs_de_envio", return_value=[])
+    @patch("apps.scrapers.management.commands.automacao._renovar_conexoes_db")
+    @patch("apps.scrapers.management.commands.automacao.st.write_state")
+    @patch("apps.scrapers.management.commands.automacao.st.is_enabled", return_value=True)
+    def test_worker_envio_renova_heartbeat_durante_espera(
+        self, _enabled, write_state, _renovar, _processar, _orfas, _purgar,
+    ):
+        """O tick é 5 min e o heartbeat vence em 90s; a espera precisa escrever.
+
+        Três sleeps sem a correção mantinham uma única escrita `aguardando`
+        (fim do ciclo). Com ela, cada passagem de 15s renova o arquivo de estado.
+        """
+        from apps.scrapers.management.commands.automacao import Command
+
+        sleeps = {"n": 0}
+
+        def parar_depois_de_tres(_segundos):
+            sleeps["n"] += 1
+            if sleeps["n"] == 3:
+                raise RuntimeError("fim do loop de teste")
+
+        with patch(
+            "apps.scrapers.management.commands.automacao.time.sleep",
+            side_effect=parar_depois_de_tres,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "fim do loop de teste"):
+                Command()._loop_envio({"tick": 5})
+
+        aguardando = [
+            chamada for chamada in write_state.call_args_list
+            if chamada.kwargs.get("fase") == "aguardando"
+        ]
+        self.assertGreaterEqual(len(aguardando), 4)
+
 
 class AffiliateIdentityTests(TestCase):
     def setUp(self):
@@ -1650,6 +1686,21 @@ class TopPromocoesFilterTests(TestCase):
         response = self.client.get(self.url, {"q": "Oferta ativa mas vencida"})
 
         self.assertNotIn(old.id, [p.id for p in response.context["produtos"]])
+
+    def test_discount_at_or_above_ninety_percent_is_hidden(self):
+        incoerente = self._criar_produto(
+            marketplace="amazon", owner=self.user,
+            nome="Preço de referência em escala errada",
+            categoria="Outros", macro_categoria="Outros",
+            preco_sem_desconto=639.90, preco_com_cupom=63.99,
+            link_produto="https://example.com/preco-incoerente",
+        )
+
+        response = self.client.get(
+            self.url, {"q": "Preço de referência em escala errada"})
+
+        self.assertNotIn(
+            incoerente.id, [p.id for p in response.context["produtos"]])
 
     def test_same_ml_item_and_title_uses_only_latest_observation(self):
         first = self._criar_produto(
@@ -4320,6 +4371,44 @@ class RetesteDaSaudeTests(TestCase):
 
         self.assertFalse(r["sucesso"])
         self.assertIn("perfil", r["mensagem"].lower())
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
+        EMAIL_HOST_USER="",
+        EMAIL_HOST_PASSWORD="",
+    )
+    @patch("django.core.mail.get_connection")
+    def test_reteste_de_email_nao_aprova_smtp_sem_credenciais(self, get_connection):
+        """Abrir o socket do Titan sem login funciona, mas todo envio é recusado.
+        O painel não pode transformar esse falso positivo em incidente concluído."""
+        from apps.scrapers.views_admin import _retestar_incidente
+
+        inc = self._incidente(
+            self.u1, causa="email_falhou", pipeline="sistema", escopo="sistema")
+
+        r = _retestar_incidente(inc)
+
+        self.assertFalse(r["sucesso"])
+        self.assertIn("credenciais smtp", r["mensagem"].lower())
+        get_connection.assert_not_called()
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
+        EMAIL_HOST_USER="mailer@example.com",
+        EMAIL_HOST_PASSWORD="segredo-de-teste",
+    )
+    @patch("django.core.mail.get_connection")
+    def test_reteste_de_email_valida_login_sem_enviar(self, get_connection):
+        from apps.scrapers.views_admin import _retestar_incidente
+
+        inc = self._incidente(
+            self.u1, causa="email_falhou", pipeline="sistema", escopo="sistema")
+
+        r = _retestar_incidente(inc)
+
+        self.assertTrue(r["sucesso"])
+        get_connection.return_value.open.assert_called_once_with()
+        get_connection.return_value.close.assert_called_once_with()
 
     def test_causas_de_conexao_e_scraper_agora_sao_retestaveis(self):
         from apps.scrapers.saude import _retestavel

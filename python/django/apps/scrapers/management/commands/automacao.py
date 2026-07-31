@@ -610,6 +610,13 @@ class Command(BaseCommand):
                 time.sleep(POLL)
                 continue
             if timezone.now() < proximo:
+                # O intervalo normal é de 5 minutos, maior que o TTL de 90s usado
+                # pelo painel. Sem renovar aqui, um processo perfeitamente vivo era
+                # mostrado como morto durante a maior parte de todo ciclo.
+                st.write_state(
+                    "envio", fase="aguardando", erro="",
+                    proximo_ciclo=proximo.isoformat(),
+                )
                 time.sleep(POLL)
                 continue
             agora = timezone.now()

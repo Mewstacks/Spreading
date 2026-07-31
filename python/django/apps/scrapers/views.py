@@ -1740,6 +1740,11 @@ def top_promocoes(request):
             (F("preco_sem_desconto") - F("preco_publicado")) * 100.0 / F("preco_sem_desconto"),
             output_field=FloatField(),
         ),
+    ).filter(
+        # A seleção automática já rejeita 90%+: além de raros, esses valores
+        # quase sempre são `savingBasis` em escala errada (ex.: 63990 vs 63,99).
+        # A vitrine precisa aplicar a mesma barreira, inclusive para fontes novas.
+        percent__lt=90,
     )
     if macros_selecionados:
         qs = qs.filter(macro_categoria__in=macros_selecionados)
