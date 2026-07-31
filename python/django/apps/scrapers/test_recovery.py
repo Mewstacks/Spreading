@@ -1,5 +1,3 @@
-import json
-import os
 import tempfile
 from datetime import timedelta
 from unittest.mock import patch
@@ -41,9 +39,10 @@ class ReportQueueTests(TestCase):
 
 
 class ReportSessionTests(TestCase):
-    def test_amazon_session_is_isolated_per_user_and_readable_only_temporarily(self):
+    def test_amazon_session_is_isolated_and_decrypted_only_in_memory(self):
         from apps.scrapers.report_sessions import (
-            decrypted_state_file, encrypted_state_path, has_report_session, save_report_state,
+            encrypted_state_path, has_report_session, load_report_state,
+            save_report_state,
         )
 
         first = get_user_model().objects.create_user("session-first", password="x")
@@ -57,10 +56,9 @@ class ReportSessionTests(TestCase):
             self.assertTrue(has_report_session(first, "amazon"))
             self.assertFalse(has_report_session(second, "amazon"))
             self.assertNotEqual(encrypted_state_path(first, "amazon"), encrypted_state_path(second, "amazon"))
-            with decrypted_state_file(first, "amazon") as temporary:
-                with open(temporary, encoding="utf-8") as handle:
-                    self.assertEqual(json.load(handle), state)
-            self.assertFalse(os.path.exists(temporary))
+            self.assertEqual(load_report_state(first, "amazon"), state)
+            persisted = encrypted_state_path(first, "amazon").read_bytes()
+            self.assertNotIn(b"opaque", persisted)
 
     def test_report_parser_marks_login_page_as_reconnect_required(self):
         from apps.scrapers.relatorios import ReportSyncActionRequired, _extract_table_rows

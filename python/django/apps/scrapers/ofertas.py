@@ -173,8 +173,10 @@ def _selecionar_item_legacy(macros_selecionadas=None, categorias_selecionadas=No
     for prod in produtos_elegiveis:
         cupom = cupons_map.get(prod.campanha_id)
 
-        # Descarta produto que não atinge o valor mínimo de compra do cupom
-        if cupom and cupom.valor_minimo > 0 and prod.preco_sem_desconto < cupom.valor_minimo:
+        # Descarta produto que não atinge o valor mínimo de compra do cupom. A base
+        # é o preço de VITRINE (`preco_com_cupom`), que é o valor que entra no
+        # carrinho — comparar contra o preço de tabela deixava passar item barato.
+        if cupom and cupom.valor_minimo > 0 and prod.preco_com_cupom < cupom.valor_minimo:
             continue
 
         # PONTUAÇÃO BASE: O peso foca bastante no Desconto Percentual
@@ -305,7 +307,8 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
     opcoes = []
     for produto in elegiveis:
         cupom = cupons.get(produto.campanha_id)
-        if cupom and cupom.valor_minimo > produto.preco_sem_desconto:
+        # Compra mínima do cupom vs. preço de vitrine (o que vai ao carrinho).
+        if cupom and cupom.valor_minimo > produto.preco_com_cupom:
             continue
         anterior = recentes.get(produto.id)
         if anterior and produto.preco_com_cupom > anterior * .95:
@@ -723,8 +726,17 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
     for it in itens:
         p = it["produto"]
         relacao = it.get("relacao")
-        de_val = getattr(relacao, "preco_original", None) or p.preco_sem_desconto
-        por_val = getattr(relacao, "preco_final", None) or p.preco_com_cupom
+        # "De" é o preço de VITRINE (`preco_atual`), não o de tabela: assim a
+        # diferença anunciada é exatamente o que o cupom abate no checkout. Com o
+        # preço de tabela, a economia mostrada somava a promoção que o item já tinha
+        # e o cliente não conseguia reproduzir o valor.
+        # `is None` em vez de `or`: um preço legítimo de 0,00 caía no fallback.
+        de_val = getattr(relacao, "preco_atual", None)
+        if de_val is None:
+            de_val = p.preco_com_cupom
+        por_val = getattr(relacao, "preco_final", None)
+        if por_val is None:
+            por_val = p.preco_com_cupom
         nome = getattr(p, "nome_llm", "") or _nome_principal_produto(p.nome)
         linhas.append(f"{_emoji_produto(p)} {esc(_nome_principal_produto(nome))}")
         de = _preco_br(de_val)
@@ -739,6 +751,9 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
         linhas.append(f"🎟 Use o cupom {m.bold(esc(codigo))}")
     else:
         linhas.append(f"🎟 {m.bold('Ative o cupom no link')}")
+    condicao = _condicao_do_cupom(cupom)
+    if condicao:
+        linhas.append(f"⚠️ {m.bold('Condição:')} {esc(condicao)}")
     return "\n".join(linhas).strip()
 
 
@@ -792,8 +807,7 @@ def resolver_link_afiliado_cupom(cupom, usuario):
     if origem:
         try:
             from apps.scrapers.scraper_mercadolivre.link import afiliate_link_builder
-            from apps.scrapers.session_paths import ml_auth_path
-            link = afiliate_link_builder(origem, auth_path=ml_auth_path(usuario))
+            link = afiliate_link_builder(origem, usuario=usuario)
             if link and get_marketplace(marketplace).verify_affiliate_tag(
                     link, usuario=usuario):
                 LinkAfiliadoCupomUsuario.objects.update_or_create(
@@ -965,12 +979,20 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                           classe="permanente")
         if not mensagem.strip():
             return falhar("Não foi possível montar uma mensagem válida.", classe="permanente")
+        # Preços do primeiro item da colagem: sem isto a Publicacao de cupom ficava
+        # com 0/0 e não havia como reconciliar "o preço anunciado não bate".
+        # Aqui o par é (vitrine, pós-cupom) — nas publicações de produto o par é
+        # (tabela, vitrine), que é o que aquela mensagem anuncia.
+        relacao_topo = itens_cupom[0].get("relacao")
         Publicacao.objects.filter(pk=publicacao.pk).update(
             mensagem=mensagem, link_afiliado=link_registro,
-            link_rastreado=link_registro)
+            link_rastreado=link_registro,
+            preco_original=float(getattr(relacao_topo, "preco_atual", 0) or 0),
+            preco_final=float(getattr(relacao_topo, "preco_final", 0) or 0))
         resultado = sender.enviar_oferta(
             grupo_id, mensagem, legenda=mensagem, usuario=usuario,
-            session=wa_session_de(usuario), **img_kwargs)
+            session=wa_session_de(usuario),
+            operation_id=f"publicacao:{publicacao.pk}", **img_kwargs)
         if resultado.get("sucesso"):
             Publicacao.objects.filter(pk=publicacao.pk).update(
                 status="enviado", enviada_em=timezone.now())
@@ -1135,6 +1157,7 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     # > melhor código genérico VÁLIDO para este item. Nunca os três juntos.
     cod_item = getattr(produto, "codigo_checkout", "")
     linha_cupom = None
+    cupom_escolhido = cupom_pai
     if cupom_pai is not None:
         linha_cupom = f"🎟️ {m.bold('CUPOM: ative no link')}"
     elif cod_item:
@@ -1147,20 +1170,69 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         mkt = getattr(produto, "marketplace", "mercadolivre")
         codigo = None
         if mkt in ("mercadolivre", ""):
-            codigo = _melhor_cupom_normalizado(produto) or _melhor_codigo(produto)
+            do_catalogo = _melhor_cupom_normalizado_obj(produto)
+            if do_catalogo is not None:
+                from apps.scrapers.coupon_rules import codigo_publicavel
+                codigo = codigo_publicavel(do_catalogo) or None
+                cupom_escolhido = do_catalogo if codigo else None
+            if not codigo:
+                codigo, cupom_escolhido = _melhor_codigo(produto), None
         if codigo:
             linha_cupom = f"🎟️ {m.bold(f'CUPOM: {esc(codigo)}')}"
 
     if linha_cupom:
         # Com cupom: cola embaixo do preço e separa o link com uma linha em branco.
-        linhas += [linha_cupom, ""]
+        linhas.append(linha_cupom)
+        # Cupom com restrição de público (primeira compra, app, cartão, pix) só pode
+        # ser anunciado junto da condição — sem isso a mensagem promete a quem não
+        # tem direito e a oferta "não funciona" no checkout.
+        condicao = _condicao_do_cupom(cupom_escolhido)
+        if condicao:
+            linhas.append(f"⚠️ {m.bold('Condição:')} {esc(condicao)}")
+        linhas.append("")
     linhas.append(f"🔗 {esc(link_afiliado)}")
     return "\n".join(linhas)
+
+
+def _condicao_do_cupom(cupom) -> str:
+    """Texto da condição de uso quando o cupom é restrito; '' quando não é."""
+    if cupom is None or not getattr(cupom, "restrito", False):
+        return ""
+    from apps.scrapers.coupon_rules import regras_do_cupom
+    escopo = ""
+    if hasattr(cupom, "regras"):
+        escopo = str(regras_do_cupom(cupom).get("escopo") or "")
+    return (escopo or "Consulte quem pode usar antes de comprar")[:220]
 
 
 # Back-compat: chamadas antigas continuam funcionando (markup WhatsApp default).
 def montar_mensagem_whatsapp(produto, link_afiliado: str, cupom_pai) -> str:
     return montar_mensagem(produto, link_afiliado, cupom_pai)
+
+
+def _desconto_em_reais(preco, tipo, valor, teto=None):
+    """Desconto de um cupom convertido para R$, respeitando o teto.
+
+    Comparar "20%" com "R$ 50" pelo número cru elegia sempre o desconto fixo, mesmo
+    num item de R$ 3.000 onde os 20% valem R$ 600. E sem o teto o valor anunciado
+    ficava acima do que o ML realmente abate.
+    """
+    try:
+        valor = float(valor or 0)
+        preco = float(preco or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if valor <= 0:
+        return 0.0
+    bruto = preco * valor / 100.0 if str(tipo).lower() in (
+        "porcentagem", "percentual") else valor
+    try:
+        teto = float(teto) if teto not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        teto = 0.0
+    if teto > 0:
+        bruto = min(bruto, teto)
+    return min(bruto, preco)
 
 
 def _melhor_codigo(produto):
@@ -1173,31 +1245,32 @@ def _melhor_codigo(produto):
     from apps.scrapers.models import CupomCodigo
     # Códigos descobertos por regex na página do ML não possuem vínculo comprovado
     # com o produto. Permanecem no catálogo, mas nunca entram automaticamente.
-    candidatos = [c for c in CupomCodigo.objects.filter(ativo=True)
-                  .exclude(descricao="cupom ML (checkout)") if c.aplica_em(produto)]
+    candidatos = [c for c in CupomCodigo.objects.filter(ativo=True, automatico=False)
+                  if c.aplica_em(produto)]
     if not candidatos:
         return None
 
-    def desconto_est(c):
-        if c.tipo_desconto == "porcentagem":
-            return produto.preco_com_cupom * (c.valor_desconto / 100.0)
-        return c.valor_desconto
-
-    melhor = max(candidatos, key=desconto_est)
+    melhor = max(candidatos, key=lambda c: _desconto_em_reais(
+        produto.preco_com_cupom, c.tipo_desconto, c.valor_desconto))
     return f"{melhor.codigo} — {melhor.descricao}" if melhor.descricao else melhor.codigo
 
 
-def _melhor_cupom_normalizado(produto):
+def _melhor_cupom_normalizado_obj(produto):
     """Melhor CupomNormalizado (catálogo das fontes) VÁLIDO p/ este item ML, ou None.
 
     GATE DE CONFIANÇA: só entra na mensagem um cupom cuja aplicação a ESTE produto é
     segura — ou ele vale para o site inteiro (regras.is_mar_aberto), ou existe um
     ProdutoCupom 'confirmado' ligando os dois. Cupom de container/categoria sem match
     confirmado NÃO entra: melhor não anunciar cupom do que colar um que o produto não
-    aceita no checkout. Respeita a compra mínima (regras.min_compra) e escolhe o de
-    maior desconto (regras.discount_num).
+    aceita no checkout. Respeita a compra mínima (regras.valor_minimo) e escolhe o de
+    maior desconto — convertido para R$ e já com o teto aplicado, senão um "R$ 50 OFF"
+    ganhava de "20% OFF" mesmo num item de R$ 3.000.
+
+    Devolve o objeto (não só o código) porque a mensagem precisa saber se o cupom é
+    restrito para imprimir a linha de condição.
     """
     from apps.scrapers.models import CupomNormalizado, ProdutoCupom
+    from apps.scrapers.coupon_rules import regras_do_cupom, codigo_publicavel
     if getattr(produto, "marketplace", "mercadolivre") not in ("mercadolivre", ""):
         return None
     agora = timezone.now()
@@ -1212,11 +1285,12 @@ def _melhor_cupom_normalizado(produto):
         ).values_list("cupom_id", flat=True))
 
     preco = getattr(produto, "preco_com_cupom", 0) or 0
-    melhor, melhor_desc = None, -1.0
+    melhor, melhor_desc = None, 0.0
     for c in base:
-        from apps.scrapers.coupon_rules import regras_do_cupom, codigo_publicavel
         regras = regras_do_cupom(c)
         if not (regras.get("is_mar_aberto") or c.id in ids_confirmados):
+            continue
+        if not codigo_publicavel(c):
             continue
         try:
             minimo = float(regras.get("valor_minimo") or 0)
@@ -1224,12 +1298,18 @@ def _melhor_cupom_normalizado(produto):
             minimo = 0.0
         if preco < minimo:
             continue
-        try:
-            desc = float(regras.get("valor_desconto") or 0)
-        except (TypeError, ValueError):
-            desc = 0.0
+        desc = _desconto_em_reais(preco, regras.get("tipo_desconto"),
+                                  regras.get("valor_desconto"),
+                                  regras.get("desconto_maximo"))
         if desc > melhor_desc:
             melhor, melhor_desc = c, desc
+    return melhor
+
+
+def _melhor_cupom_normalizado(produto):
+    """Código publicável do melhor cupom do catálogo p/ este item, ou None."""
+    from apps.scrapers.coupon_rules import codigo_publicavel
+    melhor = _melhor_cupom_normalizado_obj(produto)
     return (codigo_publicavel(melhor) or None) if melhor else None
 
 
@@ -1523,7 +1603,10 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         if sender.prefers_image == "url" and not imagem_b64_custom:
             resultado = sender.enviar_oferta(grupo_id, mensagem,
                                              imagem_url=getattr(produto, "imagem_url", "") or None,
-                                             legenda=mensagem, usuario=usuario, session=wa_session)
+                                             legenda=mensagem, usuario=usuario, session=wa_session,
+                                             operation_id=(
+                                                 f"publicacao:{publicacao.pk}"
+                                                 if publicacao else None))
         else:
             if imagem_b64_custom:
                 imagem_b64, img_mime = imagem_b64_custom, "image/jpeg"
@@ -1531,7 +1614,10 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                 imagem_b64, img_mime = _baixar_imagem_b64(getattr(produto, "imagem_url", ""))
             resultado = sender.enviar_oferta(grupo_id, mensagem, imagem_b64=imagem_b64 or None,
                                              mimetype=img_mime or "image/jpeg", legenda=mensagem,
-                                             usuario=usuario, session=wa_session)
+                                             usuario=usuario, session=wa_session,
+                                             operation_id=(
+                                                 f"publicacao:{publicacao.pk}"
+                                                 if publicacao else None))
 
         if resultado.get("sucesso"):
             HistoricoEnvio.objects.create(produto=produto, usuario=usuario)  # só após sucesso

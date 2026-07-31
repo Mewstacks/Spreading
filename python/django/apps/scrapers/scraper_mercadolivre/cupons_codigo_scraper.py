@@ -108,8 +108,10 @@ def mapear_cupons_codigo(faixa=None):
     # (antes só criava e nunca marcava stale → códigos mortos ficavam na lista global).
     n_novos = 0
     for cod in codigos:
+        # `automatico` marca a origem e nunca é sobrescrito por edição manual da
+        # descrição — é ele que impede o código de ser colado em qualquer produto.
         _, criado = CupomCodigo.objects.update_or_create(
-            codigo=cod, defaults={"ativo": True})
+            codigo=cod, defaults={"ativo": True, "automatico": True})
         # descricao só na criação (não sobrescreve edição manual)
         if criado:
             CupomCodigo.objects.filter(codigo=cod).update(descricao=_DESC_AUTO)
@@ -137,7 +139,7 @@ def mapear_cupons_codigo(faixa=None):
     n_stale = 0
     if codigos:
         stale = (CupomCodigo.objects
-                 .filter(descricao=_DESC_AUTO, ativo=True)
+                 .filter(automatico=True, ativo=True)
                  .exclude(codigo__in=codigos))
         n_stale = stale.update(ativo=False)
 

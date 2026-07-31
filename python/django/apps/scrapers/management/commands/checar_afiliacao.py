@@ -1,9 +1,9 @@
 """Autoteste dos links de afiliado configurados por usuário."""
-import os
 from urllib.parse import urlencode
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
+from apps.accounts.tenant import system_job
 
 from apps.scrapers.afiliado import tag_amazon
 from apps.scrapers.eventos import log_event
@@ -12,7 +12,7 @@ from apps.scrapers.scraper_amazon.link import link_tem_tag_afiliado as amazon_te
 from apps.scrapers.scraper_mercadolivre.link import (
     link_tem_tag_afiliado as ml_tem_tag,
 )
-from apps.scrapers.session_paths import ml_auth_path
+from apps.accounts.ml_sessions import has_storage_state
 
 
 class Command(BaseCommand):
@@ -24,6 +24,7 @@ class Command(BaseCommand):
             help="Username a verificar. Sem a opção, verifica usuários ativos com sessão ML.",
         )
 
+    @system_job
     def handle(self, *args, **options):
         username = (options.get("usuario") or "").strip()
         User = get_user_model()
@@ -39,7 +40,7 @@ class Command(BaseCommand):
         else:
             usuarios = [
                 usuario for usuario in usuarios
-                if os.path.exists(ml_auth_path(usuario))
+                if has_storage_state(usuario)
             ]
 
         if not usuarios:
@@ -62,7 +63,7 @@ class Command(BaseCommand):
         self.stdout.write(f"\n{usuario.get_username()}:")
         falhas = 0
 
-        if not os.path.exists(ml_auth_path(usuario)):
+        if not has_storage_state(usuario):
             self.stdout.write(self.style.WARNING(
                 "  Mercado Livre: sessão não encontrada; cache ainda pode ser usado."))
 

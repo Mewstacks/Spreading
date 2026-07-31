@@ -10,8 +10,9 @@ some da tela de envio com o motivo, em vez de reprovar só no clique de enviar.
 """
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
+from apps.accounts.tenant import system_job
 
-from apps.scrapers.session_paths import ml_auth_path
+from apps.accounts.ml_sessions import has_storage_state
 
 
 class Command(BaseCommand):
@@ -23,6 +24,7 @@ class Command(BaseCommand):
         parser.add_argument("--limite", type=int, default=200,
                             help="Máximo de links a verificar por usuário (padrão 200).")
 
+    @system_job
     def handle(self, *args, **options):
         from apps.scrapers.scraper_mercadolivre.link import verificar_links_pendentes
 
@@ -36,7 +38,7 @@ class Command(BaseCommand):
                 raise CommandError(f'Usuário ativo "{username}" não encontrado.')
             usuarios = [usuario]
         else:
-            usuarios = [u for u in usuarios if ml_auth_path(u)]
+            usuarios = [u for u in usuarios if has_storage_state(u)]
 
         total = {"aprovados": 0, "reprovados": 0, "transitorios": 0}
         for usuario in usuarios:

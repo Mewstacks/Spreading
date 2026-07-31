@@ -126,12 +126,18 @@ def estado_ml(user=None, usar_cache: bool = True) -> Estado:
     semana, enquanto o sync de relatório falhava e a Saúde abria incidente. Aqui
     perguntamos ao próprio ML.
     """
-    from apps.scrapers.session_paths import ml_auth_path
+    from apps.accounts.ml_session_crypto import MLSessionCryptoError
+    from apps.accounts.ml_sessions import delete_storage_state, load_storage_state
 
     agora = timezone.now()
-    path = ml_auth_path(user)
-    if not os.path.exists(path):
-        return Estado(False, "Mercado Livre", "arquivo",
+    try:
+        storage_state = load_storage_state(user)
+    except MLSessionCryptoError:
+        return Estado(False, "Mercado Livre", "criptografia",
+                      "Sessão do Mercado Livre inválida — reconecte sua conta.",
+                      "decrypt_error", agora)
+    if storage_state is None:
+        return Estado(False, "Mercado Livre", "criptografia",
                       "Nenhuma sessão do Mercado Livre — conecte sua conta.", "sem_sessao", agora)
 
     chave = _chave_ml(user)
@@ -140,37 +146,30 @@ def estado_ml(user=None, usar_cache: bool = True) -> Estado:
         if cacheado is not None:
             return Estado(**{**cacheado, "fonte": "cache"})
 
-    veredito, motivo = sondar_sessao_ml(path)
+    veredito, motivo = sondar_sessao_ml(storage_state)
 
     if veredito == "expirado":
-        # Sessão morta CONFIRMADA: apaga o arquivo para a tela oferecer "Reconectar"
-        # em vez de mentir. Mesma decisão de auxiliar.py:96-100.
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+        delete_storage_state(user)
         cache.delete(chave)
         return Estado(False, "Mercado Livre", "sonda",
                       "Sessão do Mercado Livre expirou — reconecte sua conta.", "expirado", agora)
 
     if veredito == "inconclusivo":
         # Timeout/erro de rede NÃO é logout. Preserva o último estado conhecido: uma
-        # oscilação de rede não pode desconectar o usuário nem apagar a sessão dele
-        # (a lição de auxiliar.py:85-89). Sem estado anterior, cai no mtime — a regra
-        # antiga, que aqui serve bem como piso conservador.
+        # oscilação de rede não pode desconectar o usuário nem apagar a sessão dele.
         ultimo = cache.get(chave)
         if ultimo is not None:
             return Estado(**{**ultimo, "fonte": "cache",
                             "motivo": ultimo.get("motivo") or ""})
-        logger.warning("Sonda de sessão ML inconclusiva (%s); caindo na idade do arquivo.", motivo)
-        return _estado_ml_por_mtime(path, agora)
+        logger.warning("Sonda de sessão ML inconclusiva (%s); preservando sessão cifrada.", motivo)
+        return Estado(True, "Mercado Livre", "criptografia", motivo, "", agora)
 
     estado = Estado(True, "Mercado Livre", "sonda", "", "", agora)
     cache.set(chave, estado.as_dict(), timeout=_TTL_ML_S)
     return estado
 
 
-def sondar_sessao_ml(path: str) -> tuple:
+def sondar_sessao_ml(storage_state) -> tuple:
     """Pergunta ao ML se a sessão salva ainda vale. → ("conectado"|"expirado"|"inconclusivo", motivo)
 
     Usa requests com os cookies do storage_state em vez de subir um Chromium: a
@@ -178,7 +177,7 @@ def sondar_sessao_ml(path: str) -> tuple:
     verificação queimaria a CPU da máquina (que já divide com raspagem e painel).
     """
     try:
-        cookies = _cookies_do_storage_state(path)
+        cookies = _cookies_do_storage_state(storage_state)
     except Exception as e:
         return "inconclusivo", f"não foi possível ler a sessão: {e}"
     if not cookies:
@@ -208,10 +207,14 @@ def sondar_sessao_ml(path: str) -> tuple:
     return "inconclusivo", f"o ML respondeu {r.status_code}"
 
 
-def _cookies_do_storage_state(path: str) -> dict:
+def _cookies_do_storage_state(storage_state) -> dict:
     """Cookies do storage_state do Playwright → dict simples p/ o requests."""
-    with open(path, "r", encoding="utf-8") as f:
-        estado = json.load(f)
+    if isinstance(storage_state, dict):
+        estado = storage_state
+    else:
+        # Compatibilidade exclusiva de testes/migração.
+        with open(storage_state, "r", encoding="utf-8") as f:
+            estado = json.load(f)
     return {c["name"]: c["value"] for c in estado.get("cookies", []) if c.get("name")}
 
 

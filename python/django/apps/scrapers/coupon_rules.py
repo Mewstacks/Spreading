@@ -28,6 +28,12 @@ def _texto(valor) -> str:
     return "" if valor is None else str(valor).strip()
 
 
+# "1.199", "2.000", "10.000": ponto como separador de milhar. O padrão exige
+# grupos de exatamente 3 dígitos, então "129.90" (decimal no formato do Google
+# Feed) e "1.5" não casam e continuam sendo lidos como decimal.
+_MILHAR = re.compile(r"^\d{1,3}(?:\.\d{3})+$")
+
+
 def _numero(valor):
     if valor is None or valor == "":
         return None
@@ -39,11 +45,31 @@ def _numero(valor):
     texto = texto.replace(" ", "")
     if "," in texto:
         texto = texto.replace(".", "").replace(",", ".")
+    elif _MILHAR.fullmatch(texto):
+        # Sem esta linha, "compra mínima R$ 1.199" virava R$ 1,20 e o cupom passava
+        # a valer para qualquer item — o mesmo defeito que havia no parser do ML.
+        texto = texto.replace(".", "")
     try:
         return float(texto)
     except (TypeError, ValueError):
-        match = re.search(r"\d+(?:[.,]\d+)?", texto)
-        return float(match.group().replace(",", ".")) if match else None
+        match = re.search(r"\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:[.,]\d+)?", texto)
+        return _numero(match.group()) if match else None
+
+
+# Fronteira pública do parser de dinheiro. Toda fonte que lê valor em texto deve
+# usar isto, em vez de um `float()`/regex próprio — foi a divergência entre esses
+# parsers caseiros que produziu compra mínima e preço errados.
+numero_br = _numero
+
+
+def tem_restricao_publico(texto) -> bool:
+    """True quando o texto declara restrição de público/pagamento.
+
+    "primeira compra", "somente no app", "cartão", "pix" e afins mudam quem pode
+    usar o cupom. Quem publica precisa avisar; até aqui a expressão só era usada
+    para LIMPAR o rótulo de escopo, e a condição sumia da mensagem.
+    """
+    return bool(_CONDICAO_PUBLICO.search(_texto(texto)))
 
 
 def codigo_humano(valor) -> str:

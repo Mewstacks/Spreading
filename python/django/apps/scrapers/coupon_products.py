@@ -235,10 +235,20 @@ def _produto_direto(cupom, produto):
     return bool(pid and pid in ids)
 
 
+_MIN_CODIGO_PROVA = 4
+
+
 def _promocao_confirma_codigo(cupom, produto):
-    codigo = str(getattr(cupom, "codigo", "") or "").strip().casefold()
-    if not codigo:
+    """O texto promocional do produto cita o código do cupom por inteiro?
+
+    Precisa ser palavra inteira: com `in` cru, um código curto como "PET" casava
+    dentro de "PETSHOP"/"COMPETE" e o cupom era dado como comprovado para um
+    produto que não o aceita. Códigos com menos de 4 caracteres não provam nada.
+    """
+    codigo = str(getattr(cupom, "codigo", "") or "").strip()
+    if len(codigo) < _MIN_CODIGO_PROVA:
         return False
+    padrao = re.compile(rf"(?<![0-9A-Za-z]){re.escape(codigo)}(?![0-9A-Za-z])", re.I)
     ev = getattr(produto, "evidencia", {}) or {}
     promo = ev.get("promotion") or {}
     textos = [
@@ -246,7 +256,7 @@ def _promocao_confirma_codigo(cupom, produto):
         promo.get("label") if isinstance(promo, dict) else "",
         promo.get("code") if isinstance(promo, dict) else "",
     ]
-    return any(codigo in str(texto or "").casefold() for texto in textos)
+    return any(padrao.search(str(texto or "")) for texto in textos)
 
 
 def _base_produtos(cupom, usuario):
@@ -291,7 +301,12 @@ def _base_produtos(cupom, usuario):
 
 
 def calcular_precos(cupom, produto):
-    """(original, atual, final) ou None; todos Decimal e especificos do cupom."""
+    """(original, atual, final) ou None; todos Decimal e especificos do cupom.
+
+    `atual` é o preço de vitrine (o que o cliente paga sem o cupom) e é a base de
+    tudo: compra mínima, desconto e teto. `original` é só o preço de tabela, usado
+    para contexto — nunca para calcular o desconto do cupom.
+    """
     from apps.scrapers.coupon_rules import regras_do_cupom
 
     regras = regras_do_cupom(cupom)
@@ -300,6 +315,12 @@ def calcular_precos(cupom, produto):
     if atual is None or atual <= 0:
         return None
     if original is None or original < atual or original > atual * 10:
+        if original is not None and original != atual:
+            # Não pode ficar em silêncio: é assim que um "de" corrompido some da
+            # mensagem sem deixar rastro de qual produto/fonte o produziu.
+            logger.warning(
+                "Preço de tabela descartado no cupom %s, produto %s: de=%s por=%s",
+                getattr(cupom, "pk", "?"), getattr(produto, "id", "?"), original, atual)
         original = atual
     minimo = _decimal(regras.get("valor_minimo")) or Decimal("0")
     if minimo and atual < minimo:
@@ -329,6 +350,19 @@ def calcular_precos(cupom, produto):
     if (original - final) / original >= Decimal("0.90"):
         return None
     return original, atual, final
+
+
+def _ordem_por_valor_do_cupom(relacao):
+    """Ranking dos itens da colagem: o que o CUPOM abate, não o que a vitrine já fez.
+
+    Ordenar por (original - final) colocava na frente o item que já estava barato na
+    vitrine, ainda que o cupom mal encostasse nele.
+    """
+    atual = relacao.preco_atual or relacao.preco_original or Decimal("0")
+    if atual <= 0:
+        return (Decimal("0"), Decimal("0"))
+    economia = atual - relacao.preco_final
+    return (economia / atual, economia)
 
 
 def _coletar_ml_remoto(cupom):
@@ -395,9 +429,17 @@ def _coletar_ml_remoto(cupom):
             "estado": "ativo", "ultima_verificacao": timezone.now(),
         }
         if produto:
-            for key, value in defaults.items():
+            # O item pode já existir por outra lane (oferta/busca). Atualiza preço e
+            # disponibilidade, mas não rouba a identidade dele: gravar
+            # origem="cupom" e o campanha_id deste cupom fazia o produto passar a
+            # anunciar "ative o cupom no link" de uma campanha que não é a dele.
+            campos = dict(defaults)
+            if produto.origem and produto.origem != "cupom":
+                for campo in ("campanha_id", "origem", "fonte"):
+                    campos.pop(campo, None)
+            for key, value in campos.items():
                 setattr(produto, key, value)
-            produto.save(update_fields=list(defaults))
+            produto.save(update_fields=list(campos))
         else:
             produto = Produto.objects.create(marketplace="mercadolivre", **defaults)
         ProdutoCupom.objects.update_or_create(
@@ -422,10 +464,7 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
         cached = list(ProdutoCupom.objects.filter(
             cupom=cupom, status="confirmado", preco_final__isnull=False,
         ).select_related("produto"))
-        cached.sort(key=lambda r: (
-            (r.preco_original - r.preco_final) / r.preco_original,
-            r.preco_original - r.preco_final,
-        ), reverse=True)
+        cached.sort(key=_ordem_por_valor_do_cupom, reverse=True)
         return cached[:9]
 
     if not cupom_publicavel(cupom):
@@ -471,10 +510,7 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
                 status="pronto" if validos else "vazio", produtos_chave=chave,
                 verificado_em=agora, proxima_tentativa=None,
                 erro="" if validos else "Nenhum produto comprovadamente aplicavel.")
-        validos.sort(key=lambda r: (
-            (r.preco_original - r.preco_final) / r.preco_original,
-            r.preco_original - r.preco_final,
-        ), reverse=True)
+        validos.sort(key=_ordem_por_valor_do_cupom, reverse=True)
         return validos[:9]
     except Exception as exc:
         logger.exception("Preparacao do cupom %s falhou", cupom.pk)

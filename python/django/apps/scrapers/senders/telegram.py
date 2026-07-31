@@ -41,7 +41,8 @@ class TelegramSender(Sender):
         return f"https://api.telegram.org/bot{token}/{metodo}"
 
     def enviar_oferta(self, destino, mensagem, *, imagem_url=None, imagem_b64=None,
-                      mimetype="image/jpeg", legenda=None, usuario=None, session=None):
+                      mimetype="image/jpeg", legenda=None, usuario=None, session=None,
+                      operation_id=None):
         # session ignorado: o Bot API do Telegram usa `usuario` (token do bot por-usuário).
         destino = str(destino or "").strip()
         mensagem = str(mensagem or "")

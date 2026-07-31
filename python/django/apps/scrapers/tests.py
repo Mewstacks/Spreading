@@ -37,6 +37,20 @@ from apps.scrapers.scraper_amazon import ofertas_scraper as amazon_ofertas
 from apps.scrapers.scraper_mercadolivre.scraper import _sincronizar_produtos_no_banco
 from apps.scrapers.scraper_mercadolivre import link as ml_link
 
+_TEST_WA_HEADERS = {
+    "Authorization": "Bearer test-capability",
+    "Content-Type": "application/json",
+}
+
+
+def _mock_wa_capability(testcase):
+    patcher = patch(
+        "apps.scrapers.whatsapp_client._headers",
+        return_value=_TEST_WA_HEADERS,
+    )
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+
 
 class AutomationStatusSecurityTests(TestCase):
     def setUp(self):
@@ -89,7 +103,7 @@ class AffiliateIdentityTests(TestCase):
         self.user.perfil.afiliado_tag_ml = "manual-que-nao-deve-ser-usada"
         self.assertEqual(tag_ml(self.user), "")
 
-    def test_ml_link_uses_only_the_users_auth_file(self):
+    def test_ml_link_uses_only_the_users_encrypted_session(self):
         with tempfile.TemporaryDirectory() as auth_dir:
             user_auth = os.path.join(auth_dir, f"auth_{self.user.id}.json")
             with open(user_auth, "w", encoding="utf-8") as auth_file:
@@ -109,7 +123,8 @@ class AffiliateIdentityTests(TestCase):
                 )
 
             self.assertEqual(result["link_afiliado"], "https://meli.la/user-link")
-            self.assertEqual(builder.call_args.kwargs["auth_path"], user_auth)
+            self.assertIs(builder.call_args.kwargs["usuario"], self.user)
+            self.assertNotIn("auth_path", builder.call_args.kwargs)
             save_cache.assert_called_once()
 
     def test_ml_link_reuses_user_cache_without_session_or_link_builder(self):
@@ -219,31 +234,30 @@ class MLAuthPathTests(SimpleTestCase):
             self._tocar(os.path.join(d, "auth_99.json"))
             self.assertEqual(ml_auth_path(Mock(id=7)), os.path.join(d, "auth_7.json"))
 
-    def test_job_sem_usuario_prefere_o_auth_global_legado(self):
+    def test_job_sem_usuario_recusa_auth_global_legado(self):
         from apps.scrapers.session_paths import ml_auth_path
 
         with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
             self._tocar(os.path.join(d, "auth.json"))
             self._tocar(os.path.join(d, "auth_7.json"))
-            self.assertEqual(ml_auth_path(), os.path.join(d, "auth.json"))
+            self.assertEqual(ml_auth_path(), "")
 
-    def test_job_sem_usuario_cai_na_sessao_mais_recente(self):
+    def test_job_sem_usuario_nunca_escolhe_sessao_mais_recente(self):
         """O que conserta cron/cupons: sem auth.json, usar a sessão real que existe."""
         from apps.scrapers.session_paths import ml_auth_path
 
         with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
             self._tocar(os.path.join(d, "auth_1.json"), quando=1_000_000)
             self._tocar(os.path.join(d, "auth_2.json"), quando=2_000_000)
-            self.assertEqual(ml_auth_path(), os.path.join(d, "auth_2.json"))
+            self.assertEqual(ml_auth_path(), "")
 
-    def test_sem_nenhuma_sessao_devolve_o_caminho_legado(self):
+    def test_sem_usuario_devolve_vazio(self):
         """Não estoura aqui: quem chama reporta 'reconecte' com a mensagem certa."""
         from apps.scrapers.session_paths import ml_auth_path
 
         with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
             caminho = ml_auth_path()
-            self.assertEqual(caminho, os.path.join(d, "auth.json"))
-            self.assertFalse(os.path.exists(caminho))
+            self.assertEqual(caminho, "")
 
     def test_arquivo_alheio_no_diretorio_nao_vira_sessao(self):
         from apps.scrapers.session_paths import ml_auth_path
@@ -251,7 +265,7 @@ class MLAuthPathTests(SimpleTestCase):
         with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
             self._tocar(os.path.join(d, "auth_1.json.bak"))
             self._tocar(os.path.join(d, "outra_coisa.json"))
-            self.assertEqual(ml_auth_path(), os.path.join(d, "auth.json"))
+            self.assertEqual(ml_auth_path(), "")
 
 
 class SondaSessaoMLTests(SimpleTestCase):
@@ -326,38 +340,46 @@ class EstadoMLTests(SimpleTestCase):
     def test_sem_arquivo_e_desconectado_com_motivo(self):
         from apps.scrapers.conexoes import estado_ml
 
-        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
+        with patch(
+            "apps.accounts.ml_sessions.load_storage_state", return_value=None,
+        ):
             est = estado_ml(Mock(id=7))
         self.assertFalse(est.conectado)
         self.assertEqual(est.detalhe, "sem_sessao")
         self.assertTrue(est.motivo)
 
-    def test_sessao_expirada_apaga_o_arquivo(self):
+    def test_sessao_expirada_apaga_o_registro_cifrado(self):
         """Confirmado o logout, some com a sessão morta: a tela passa a oferecer
         'Reconectar' em vez de insistir que está tudo bem."""
         from apps.scrapers.conexoes import estado_ml
 
-        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
-            caminho = self._auth(d)
-            with patch("apps.scrapers.conexoes.sondar_sessao_ml",
-                       return_value=("expirado", "redirect")):
-                est = estado_ml(Mock(id=7))
-            self.assertFalse(os.path.exists(caminho))
+        state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
+        with (
+            patch("apps.accounts.ml_sessions.load_storage_state", return_value=state),
+            patch("apps.accounts.ml_sessions.delete_storage_state") as delete,
+            patch("apps.scrapers.conexoes.sondar_sessao_ml",
+                  return_value=("expirado", "redirect")),
+        ):
+            est = estado_ml(Mock(id=7))
+        delete.assert_called_once()
         self.assertEqual(est.detalhe, "expirado")
 
-    def test_inconclusivo_preserva_o_ultimo_estado_e_nao_apaga(self):
+    def test_inconclusivo_preserva_o_ultimo_estado_e_o_ciphertext(self):
         from apps.scrapers.conexoes import estado_ml
 
-        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
-            caminho = self._auth(d)
-            user = Mock(id=7)
+        state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
+        user = Mock(id=7)
+        with (
+            patch("apps.accounts.ml_sessions.load_storage_state", return_value=state),
+            patch("apps.accounts.ml_sessions.delete_storage_state") as delete,
+        ):
             with patch("apps.scrapers.conexoes.sondar_sessao_ml",
                        return_value=("conectado", "")):
                 self.assertTrue(estado_ml(user).conectado)      # popula o cache
             with patch("apps.scrapers.conexoes.sondar_sessao_ml",
                        return_value=("inconclusivo", "timeout")):
                 est = estado_ml(user, usar_cache=False)
-            self.assertTrue(os.path.exists(caminho))            # não apagou
+        delete.assert_not_called()
         self.assertTrue(est.conectado)                          # manteve o que sabia
 
     def test_conectado_e_cacheado(self):
@@ -365,9 +387,11 @@ class EstadoMLTests(SimpleTestCase):
         aberta viraria uma ida ao ML."""
         from apps.scrapers.conexoes import estado_ml
 
-        with tempfile.TemporaryDirectory() as d, override_settings(ML_AUTH_DIR=d):
-            self._auth(d)
-            user = Mock(id=7)
+        state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
+        user = Mock(id=7)
+        with patch(
+            "apps.accounts.ml_sessions.load_storage_state", return_value=state,
+        ):
             with patch("apps.scrapers.conexoes.sondar_sessao_ml",
                        return_value=("conectado", "")) as sonda:
                 estado_ml(user)
@@ -378,7 +402,6 @@ class EstadoMLTests(SimpleTestCase):
 
 @override_settings(
     WHATSAPP_API_URL="http://whatsapp.internal:3000",
-    WHATSAPP_API_KEY="secret",
 )
 class WhatsAppStatusCacheTests(SimpleTestCase):
     """O status do WhatsApp é cacheado por poucos segundos.
@@ -393,6 +416,7 @@ class WhatsAppStatusCacheTests(SimpleTestCase):
         # de execução decidiria o resultado.
         cache.clear()
         self.addCleanup(cache.clear)
+        _mock_wa_capability(self)
 
     @patch("apps.scrapers.whatsapp_client.requests.request")
     def test_status_repetido_bate_uma_vez_so_no_node(self, request):
@@ -467,12 +491,15 @@ class WhatsAppStatusCacheTests(SimpleTestCase):
         self.assertTrue(resultado["sucesso"])
         request.assert_called_once_with(
             "POST", "http://whatsapp.internal:3000/api/sessoes/reset",
-            headers={"x-api-key": "secret", "Content-Type": "application/json"},
+            headers=_TEST_WA_HEADERS,
             params=None, json={"session": "user-42"}, timeout=25,
         )
 
 
 class WhatsAppIsolationTests(SimpleTestCase):
+    def setUp(self):
+        _mock_wa_capability(self)
+
     @patch("apps.scrapers.whatsapp_client.status")
     def test_connection_monitor_checks_the_requested_session(self, status):
         status.return_value = {"conectado": True}
@@ -481,7 +508,6 @@ class WhatsAppIsolationTests(SimpleTestCase):
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.request")
     def test_session_start_is_an_explicit_post_for_one_session(self, request):
@@ -499,13 +525,12 @@ class WhatsAppIsolationTests(SimpleTestCase):
         self.assertTrue(result["sucesso"])
         request.assert_called_once_with(
             "POST", "http://whatsapp.internal:3000/api/sessoes",
-            headers={"x-api-key": "secret", "Content-Type": "application/json"},
+            headers=_TEST_WA_HEADERS,
             params=None, json={"session": "user-42"}, timeout=10,
         )
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.post")
     def test_send_routes_to_the_users_session(self, post):
@@ -514,17 +539,21 @@ class WhatsAppIsolationTests(SimpleTestCase):
         post.return_value = response
 
         result = whatsapp_client.enviar_oferta(
-            "123@g.us", "mensagem", session="user-42"
+            "123@g.us", "mensagem", session="user-42",
+            idempotency_key="publicacao:123",
         )
 
         self.assertTrue(result["sucesso"])
         self.assertEqual(post.call_args.kwargs["json"]["session"], "user-42")
         self.assertEqual(post.call_args.kwargs["json"]["grupoid"], "123@g.us")
+        self.assertEqual(
+            post.call_args.kwargs["headers"]["Idempotency-Key"],
+            "publicacao:123",
+        )
         self.assertEqual(post.call_args.kwargs["timeout"], 65)
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.post")
     def test_send_rejects_success_without_message_confirmation(self, post):
@@ -541,7 +570,6 @@ class WhatsAppIsolationTests(SimpleTestCase):
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.post")
     def test_send_preserva_resultado_incerto_do_node(self, post):
@@ -663,9 +691,11 @@ class WhatsAppTransportContractTests(SimpleTestCase):
     """O front distingue "Node fora do ar" de "WhatsApp desconectado" pela
     presença da chave `erro`. Ela só pode aparecer por falha de transporte."""
 
+    def setUp(self):
+        _mock_wa_capability(self)
+
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.request")
     def test_unreachable_worker_is_reported_as_erro(self, request):
@@ -674,7 +704,6 @@ class WhatsAppTransportContractTests(SimpleTestCase):
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.request")
     def test_refresh_never_retries_a_non_idempotent_post(self, request):
@@ -690,7 +719,6 @@ class WhatsAppTransportContractTests(SimpleTestCase):
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.request")
     def test_a_healthy_worker_reply_is_passed_through_untouched(self, request):
@@ -708,7 +736,6 @@ class WhatsAppTransportContractTests(SimpleTestCase):
 
     @override_settings(
         WHATSAPP_API_URL="http://whatsapp.internal:3000",
-        WHATSAPP_API_KEY="secret",
     )
     @patch("apps.scrapers.whatsapp_client.requests.request")
     def test_logout_does_not_retry(self, request):
@@ -720,7 +747,7 @@ class WhatsAppTransportContractTests(SimpleTestCase):
 
         request.assert_called_once_with(
             "POST", "http://whatsapp.internal:3000/api/sessoes/logout",
-            headers={"x-api-key": "secret", "Content-Type": "application/json"},
+            headers=_TEST_WA_HEADERS,
             params=None, json={"session": "user-42"}, timeout=25,
         )
 
@@ -729,10 +756,13 @@ class WhatsAppErrorTaxonomyTests(SimpleTestCase):
     """Toda falha de envio carrega `classe`. O orquestrador decide por ela se
     conta a falha contra a regra do usuário — ver EnvioResilienciaTests."""
 
+    def setUp(self):
+        _mock_wa_capability(self)
+
     def _post(self, **kwargs):
         return patch("apps.scrapers.whatsapp_client.requests.post", **kwargs)
 
-    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000", WHATSAPP_API_KEY="k")
+    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000")
     def test_node_classification_wins_over_the_status_code(self):
         # O Node responde 503 para toda falha de envio, inclusive as permanentes
         # (grupo apagado). Sem ler o corpo, o status sozinho diria "transitório"
@@ -747,7 +777,7 @@ class WhatsAppErrorTaxonomyTests(SimpleTestCase):
             r = whatsapp_client.enviar_oferta("123@g.us", "m", session="u")
         self.assertEqual(r["classe"], "permanente")
 
-    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000", WHATSAPP_API_KEY="k")
+    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000")
     def test_timeout_and_refused_connection_are_transient(self):
         # Os dois piores casos nunca chegam classificados pelo Node — ele não
         # chegou a responder. São exatamente os que desligavam a automação.
@@ -758,7 +788,7 @@ class WhatsAppErrorTaxonomyTests(SimpleTestCase):
             self.assertFalse(r["sucesso"])
             self.assertEqual(r["classe"], "transitorio")
 
-    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000", WHATSAPP_API_KEY="k")
+    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000")
     def test_rate_limit_is_transient_and_bad_request_is_permanent(self):
         casos = [(429, "transitorio"), (500, "transitorio"), (400, "permanente")]
         for status, esperado in casos:
@@ -768,7 +798,7 @@ class WhatsAppErrorTaxonomyTests(SimpleTestCase):
                 r = whatsapp_client.enviar_oferta("123@g.us", "m", session="u")
             self.assertEqual(r["classe"], esperado)
 
-    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000", WHATSAPP_API_KEY="k")
+    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000")
     def test_node_regression_does_not_punish_the_user(self):
         # sucesso sem mensagem_id é bug nosso, não da configuração dele.
         response = Mock(status_code=200)
@@ -1941,6 +1971,22 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         sono.start()
         self.addCleanup(sono.stop)
 
+    def _conta_de_catalogo(self):
+        """Declara a organização fonte do catálogo compartilhado.
+
+        Só é preciso nos testes que caem no browser: /cupons/filter exige login e a
+        sessão vem da conta declarada, nunca de um usuário qualquer.
+        """
+        from apps.accounts.ml_sessions import save_storage_state
+        from apps.accounts.models import Organization, organization_for_user
+
+        user = get_user_model().objects.create_user("catalogo-ml")
+        organization = organization_for_user(user)
+        Organization.objects.filter(pk=organization.pk).update(
+            fonte_catalogo_ml=True)
+        save_storage_state(user, {"cookies": [], "origins": []})
+        return user
+
     def _envelope(self, d):
         """Serializa um payload no formato Nordic que o parser espera, ou devolve a
         string crua (para simular uma página bloqueada / sem payload)."""
@@ -2017,7 +2063,66 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         browser.assert_not_called()                        # HTTP resolveu; sem Chromium
         cupom = Cupom.objects.get(campanha_id="13642210")
         self.assertIn("esquenta copa", cupom.titulo.lower())
-        self.assertEqual(cupom.estado, "ativo")
+        # O dump traz status.id=INACTIVE em 27 dos 30. Marcá-los todos como ativos
+        # era a causa de cupom anunciado que não funciona no checkout.
+        self.assertEqual(cupom.estado, "inativo")
+        self.assertEqual(Cupom.objects.filter(estado="ativo").count(), 3)
+        # "R$ 50 OFF ... Compra mínima R$ 399 ... Limite de R$ 50"
+        self.assertEqual(cupom.tipo_desconto, "fixo")
+        self.assertEqual(cupom.valor_desconto, 50.0)
+        self.assertEqual(cupom.valor_minimo, 399.0)
+        self.assertEqual(cupom.desconto_maximo, 50.0)
+        self.assertIsNotNone(cupom.validade)               # "Vence 19 de maio"
+
+    def test_campos_do_payload_que_o_parser_antigo_perdia(self):
+        """Milhar, centavos e teto: os três casos que geravam valor incompatível."""
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        with open(self.DUMP, encoding="utf-8") as f:
+            dados = json.load(f)
+        vazio = {"appProps": {"pageProps": {"filteredCouponsData": {"coupons": []}}}}
+        sess = self._http_falsa([dados, vazio])
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session",
+                   return_value=sess), \
+                patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser"):
+            mapear_cupons()
+
+        # "R$ 250 OFF em Apple", compra mínima R$ 2.000: `float("2.000")` devolvia
+        # 2.0 e o cupom passava a valer para qualquer item de R$ 2.
+        apple = Cupom.objects.get(titulo__icontains="em Apple")
+        self.assertEqual(apple.valor_minimo, 2000.0)
+        self.assertEqual(apple.desconto_maximo, 250.0)
+
+        # "40% OFF em Smart Home": mínimo R$ 99,90 (centavos eram descartados) e
+        # teto de R$ 42 — sem ele, 40% de um item de R$ 2.000 viravam R$ 800.
+        smart = Cupom.objects.get(titulo__icontains="Smart Home")
+        self.assertEqual(smart.valor_minimo, 99.90)
+        self.assertEqual(smart.desconto_maximo, 42.0)
+        self.assertEqual(smart.tipo_desconto, "porcentagem")
+        self.assertEqual(smart.valor_desconto, 40.0)
+
+    def test_validade_so_aceita_data_de_verdade(self):
+        from apps.scrapers.scraper_mercadolivre.scraper import _validade_ml
+
+        agora = timezone.now().replace(month=5, day=1)
+        vence = _validade_ml("Vence 19 de maio", agora=agora)
+        self.assertIsNotNone(vence)
+        self.assertEqual((vence.month, vence.day, vence.hour), (5, 19, 23))
+        # Urgência de estoque não é data e não pode virar validade.
+        for texto in ("Está esgotando!", "Termina em 3 horas!", "Vence em domingo",
+                      "", None):
+            self.assertIsNone(_validade_ml(texto, agora=agora))
+
+    def test_valor_ml_le_milhar_e_centavos(self):
+        from apps.scrapers.scraper_mercadolivre.scraper import _valor_ml
+
+        self.assertEqual(_valor_ml("2.000", "0"), 2000.0)
+        self.assertEqual(_valor_ml("10.000", "0"), 10000.0)
+        self.assertEqual(_valor_ml("99", "9"), 99.90)
+        self.assertEqual(_valor_ml("26", "3"), 26.30)
+        self.assertEqual(_valor_ml("399", None), 399.0)
+        self.assertIsNone(_valor_ml("", "0"))
+        self.assertIsNone(_valor_ml(None))
 
     def test_pagina_vazia_nao_apaga_os_cupons_existentes(self):
         """Guarda anti-wipe: ML sem cupons não pode zerar o catálogo."""
@@ -2102,6 +2207,7 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         # HTTP devolve sempre uma página de login (sem filteredCouponsData).
         sess = self._http_falsa(["<html>login</html>"])
         page = self._browser_page([dump, vazio])
+        self._conta_de_catalogo()
 
         with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session", return_value=sess), \
                 self._browser_fake(page):
@@ -2117,6 +2223,7 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         from apps.scrapers.auxiliar import SessaoExpirada
 
         sess = self._http_falsa(["<html>login</html>"])
+        self._conta_de_catalogo()
 
         @contextmanager
         def _fake(*a, **kw):
@@ -2127,6 +2234,81 @@ class ParserDeCupomDeCampanhaTests(TestCase):
                 patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser", _fake):
             with self.assertRaises(SessaoExpirada):
                 mapear_cupons()
+
+    def test_painel_define_a_conta_de_catalogo_sem_terminal(self):
+        """A fonte do catálogo se escolhe na tela: produção não tem shell à mão."""
+        from apps.accounts.models import Organization, organization_for_user
+
+        admin = get_user_model().objects.create_superuser(
+            "root-catalogo", password="senha-bem-seguraaa")
+        dono = get_user_model().objects.create_user("org-catalogo")
+        org = organization_for_user(dono)
+
+        self.client.force_login(admin)
+        pagina = self.client.get(reverse("superadmin-usuarios"))
+        self.assertEqual(pagina.status_code, 200)
+        self.assertContains(pagina, "Catálogo de cupons do Mercado Livre")
+        self.assertContains(pagina, org.slug)
+
+        resposta = self.client.post(reverse("superadmin-catalogo-ml"),
+                                    {"organization": str(org.id)})
+
+        self.assertEqual(resposta.status_code, 302)
+        org.refresh_from_db()
+        self.assertTrue(org.fonte_catalogo_ml)
+
+        # Limpar volta ao estado sem fonte.
+        self.client.post(reverse("superadmin-catalogo-ml"), {"organization": ""})
+        self.assertFalse(Organization.objects.filter(fonte_catalogo_ml=True).exists())
+
+    def test_definir_catalogo_exige_superadmin(self):
+        from apps.accounts.models import Organization, organization_for_user
+
+        comum = get_user_model().objects.create_user("nao-admin-catalogo")
+        org = organization_for_user(comum)
+        self.client.force_login(comum)
+
+        resposta = self.client.post(reverse("superadmin-catalogo-ml"),
+                                    {"organization": str(org.id)})
+
+        # A view nunca roda para não-superadmin: barrada pelo decorator (403) ou
+        # antes dele, pelo middleware de tenant/verificação (302 para fora).
+        self.assertNotEqual(resposta.status_code, 200)
+        if resposta.status_code == 302:
+            self.assertNotIn(reverse("superadmin-usuarios"), resposta["Location"])
+        self.assertFalse(Organization.objects.filter(fonte_catalogo_ml=True).exists())
+
+    def test_sem_conta_de_catalogo_o_erro_diz_o_que_fazer(self):
+        """/cupons/filter exige login: sem conta declarada, erro com instrução.
+
+        Antes o chamador via só "LOGIN_REQUIRED / reconecte sua conta" — e nenhuma
+        reconexão resolvia, porque a raspagem não procurava a sessão de ninguém.
+        """
+        from apps.accounts.ml_sessions import SemContaDeCatalogo
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        sess = self._http_falsa(["<html>login</html>"])
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session",
+                   return_value=sess), \
+                patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser") as browser:
+            with self.assertRaises(SemContaDeCatalogo) as ctx:
+                mapear_cupons()
+
+        self.assertIn("conta_catalogo_ml", str(ctx.exception))
+        browser.assert_not_called()   # nem abre Chromium para falhar
+
+    def test_http_anonimo_com_payload_dispensa_conta_de_catalogo(self):
+        """Se o GET já traz o payload, a falta de sessão não pode abortar a coleta."""
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        with open(self.DUMP, encoding="utf-8") as f:
+            dados = json.load(f)
+        vazio = {"appProps": {"pageProps": {"filteredCouponsData": {"coupons": []}}}}
+        sess = self._http_falsa([dados, vazio])
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session",
+                   return_value=sess), \
+                patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser"):
+            self.assertEqual(mapear_cupons(), 30)
 
     def test_trava_de_max_paginas_para_o_laco_sem_expirar(self):
         """Payload que nunca esvazia não pode rodar para sempre nem expirar o resto."""
@@ -3250,13 +3432,6 @@ class RelatorioSaudeTests(TestCase):
         )
         self.assertTrue(all(a["exemplo"] is not None for a in problema["afetados"]))
 
-        self.client.force_login(self.admin)
-        with patch("apps.scrapers.saude._workers", return_value=[]):
-            resposta = self.client.get(reverse("superadmin-saude"))
-        self.assertContains(resposta, "outra-conta")
-        self.assertContains(
-            resposta, reverse("superadmin-usuario", args=[outra_conta.id]))
-
     def test_saude_filtra_por_username(self):
         from apps.scrapers.saude import resumo
 
@@ -3268,12 +3443,6 @@ class RelatorioSaudeTests(TestCase):
             r = resumo(horas=24, usuario=outra_conta)
         self.assertEqual([(p["pipeline"], p["evento"]) for p in r["problemas"]],
                          [("whatsapp", "send_timeout")])
-
-        self.client.force_login(self.admin)
-        with patch("apps.scrapers.saude._workers", return_value=[]):
-            resposta = self.client.get(reverse("superadmin-saude"), {"usuario": "LuLeS"})
-        self.assertContains(resposta, "Eventos de lules")
-        self.assertNotContains(resposta, "saude-user")
 
     def test_evento_global_sem_conta_aparece_no_bucket_sistema(self):
         """`fonte_falhou` ("uma loja parou de responder") não tem usuário: é do sistema
@@ -3288,12 +3457,6 @@ class RelatorioSaudeTests(TestCase):
         self.assertEqual(problema["afetados"], [])
         self.assertIsNotNone(problema["sistema"])
         self.assertEqual(problema["sistema"].evento, "fonte_falhou")
-
-        self.client.force_login(self.admin)
-        with patch("apps.scrapers.saude._workers", return_value=[]):
-            resposta = self.client.get(reverse("superadmin-saude"))
-        self.assertContains(resposta, "Sistema (todas as contas)")
-        self.assertContains(resposta, "A coleta da loja mercadolivre falhou.")
 
     def test_erro_vem_antes_de_aviso_mesmo_sendo_menos_frequente(self):
         from apps.scrapers.saude import resumo
@@ -3385,9 +3548,8 @@ class RelatorioSaudeTests(TestCase):
         self.client.force_login(self.admin)
         with patch("apps.scrapers.saude._workers", return_value=[]):
             resposta = self.client.get(reverse("superadmin-saude"))
-        self.assertEqual(resposta.status_code, 200)
-        self.assertContains(resposta, "Automação pausada sozinha")
-        self.assertContains(resposta, "Visão geral: avisos e erros de todas as contas")
+        self.assertEqual(resposta.status_code, 503)
+        self.assertEqual(resposta["Retry-After"], "3600")
 
 
 class RetesteDaSaudeTests(TestCase):
@@ -3417,6 +3579,7 @@ class RetesteDaSaudeTests(TestCase):
         )
 
     def test_reteste_fecha_o_grupo_inteiro_nao_so_um(self):
+        from apps.scrapers.health_retest import retest_incident_group
         from apps.scrapers.models import IncidenteSaude
 
         a = self._incidente(self.u1)
@@ -3424,39 +3587,41 @@ class RetesteDaSaudeTests(TestCase):
 
         with patch("apps.scrapers.conexoes.estado_whatsapp",
                    return_value=_estado_conectado("WhatsApp")):
-            self.client.post(reverse("superadmin-saude-retestar", args=[a.pk]))
+            retest_incident_group(a.pk)
 
         self.assertEqual(IncidenteSaude.objects.filter(status="aberto").count(), 0)
         self.assertEqual(IncidenteSaude.objects.filter(status="concluido").count(), 2)
 
     def test_conexao_de_pe_agora_conclui_o_incidente(self):
         """A causa nº1 de 'Saúde vermelha, dashboard verde'."""
+        from apps.scrapers.health_retest import retest_incident_group
         from apps.scrapers.models import IncidenteSaude
 
         inc = self._incidente(self.u1)
 
         with patch("apps.scrapers.conexoes.estado_whatsapp",
                    return_value=_estado_conectado("WhatsApp")):
-            self.client.post(reverse("superadmin-saude-retestar", args=[inc.pk]))
+            retest_incident_group(inc.pk)
 
         inc.refresh_from_db()
         self.assertEqual(inc.status, "concluido")
         self.assertIn("conectado", inc.confirmacao.lower())
 
     def test_conexao_ainda_caida_mantem_aberto_com_o_motivo(self):
+        from apps.scrapers.health_retest import retest_incident_group
         inc = self._incidente(self.u1)
 
         with patch("apps.scrapers.conexoes.estado_whatsapp",
                    return_value=_estado_caido("WhatsApp", "WhatsApp não está pareado.")):
-            r = self.client.post(reverse("superadmin-saude-retestar", args=[inc.pk]),
-                                 follow=True)
+            result = retest_incident_group(inc.pk)
 
         inc.refresh_from_db()
         self.assertEqual(inc.status, "aberto")
-        self.assertIn("não está pareado", " ".join(str(m) for m in get_messages(r.wsgi_request)))
+        self.assertIn("não está pareado", result["message"])
 
     def test_grupo_parcial_avisa_quantas_faltam(self):
         """Uma conta voltar não pode dar 'tudo certo' quando a outra segue caída."""
+        from apps.scrapers.health_retest import retest_incident_group
         from apps.scrapers.models import IncidenteSaude
 
         a = self._incidente(self.u1)
@@ -3466,23 +3631,20 @@ class RetesteDaSaudeTests(TestCase):
 
         with patch("apps.scrapers.conexoes.estado_whatsapp",
                    side_effect=lambda u, **k: estados[u]):
-            self.client.post(reverse("superadmin-saude-retestar", args=[a.pk]))
+            retest_incident_group(a.pk)
 
         self.assertEqual(IncidenteSaude.objects.filter(status="aberto").count(), 1)
         self.assertEqual(IncidenteSaude.objects.filter(status="concluido").count(), 1)
 
     def test_reteste_preserva_o_filtro(self):
-        """O redirect nu devolvia o superadmin para 24h/global, perdendo a conta que
-        ele estava investigando."""
+        """O processo web jamais recebe bypass cross-tenant."""
         inc = self._incidente(self.u1)
 
-        with patch("apps.scrapers.conexoes.estado_whatsapp",
-                   return_value=_estado_conectado("WhatsApp")):
-            r = self.client.post(reverse("superadmin-saude-retestar", args=[inc.pk]),
-                                 {"horas": "168", "usuario": "conta-1"})
+        r = self.client.post(reverse("superadmin-saude-retestar", args=[inc.pk]))
 
-        self.assertIn("horas=168", r.url)
-        self.assertIn("usuario=conta-1", r.url)
+        self.assertEqual(r.status_code, 503)
+        inc.refresh_from_db()
+        self.assertEqual(inc.status, "aberto")
 
     def test_conta_sem_perfil_nao_vira_reteste_falhou_generico(self):
         """Perfil.DoesNotExist era capturado pelo except genérico e virava
@@ -3530,11 +3692,7 @@ class AutoRefreshDaSaudeTests(TestCase):
     def test_json_responde_o_resumo(self):
         r = self.client.get(reverse("superadmin-saude-json"))
 
-        self.assertEqual(r.status_code, 200)
-        d = r.json()
-        self.assertIn(d["estado"], ("ok", "atencao", "critico"))
-        self.assertIn("assinatura", d)
-        self.assertTrue(d["workers"])
+        self.assertEqual(r.status_code, 503)
 
     def test_polling_nao_infla_ocorrencias(self):
         """A regressão que o auto-refresh podia introduzir: resumo() escrevendo no
@@ -4125,6 +4283,68 @@ class MelhorCupomNormalizadoTests(TestCase):
         from apps.scrapers.ofertas import _melhor_cupom_normalizado
         self._cupom("a:CONT30", "CONT30", is_mar_aberto=False, discount_num=30, min_compra=0)
         self.assertIsNone(_melhor_cupom_normalizado(self.produto))
+
+    def test_melhor_cupom_compara_em_reais_e_nao_pelo_numero_cru(self):
+        """Num item de R$ 100, 20% (R$ 20) vale mais que "R$ 15 OFF"."""
+        from apps.scrapers.ofertas import _melhor_cupom_normalizado
+        self._cupom("a:PCT20", "PCT20", is_mar_aberto=True, discount_num=20,
+                    tipo_desconto="porcentagem", min_compra=0)
+        self._cupom("a:FIXO15", "FIXO15", is_mar_aberto=True, valor_desconto=15,
+                    tipo_desconto="fixo", min_compra=0)
+
+        self.assertEqual(_melhor_cupom_normalizado(self.produto), "PCT20")
+
+    def test_teto_derruba_percentual_para_baixo_do_fixo(self):
+        """20% limitados a R$ 5 perdem para um fixo de R$ 15."""
+        from apps.scrapers.ofertas import _melhor_cupom_normalizado
+        self._cupom("a:PCT20", "PCT20", is_mar_aberto=True, discount_num=20,
+                    tipo_desconto="porcentagem", min_compra=0, desconto_max=5)
+        self._cupom("a:FIXO15", "FIXO15", is_mar_aberto=True, valor_desconto=15,
+                    tipo_desconto="fixo", min_compra=0)
+
+        self.assertEqual(_melhor_cupom_normalizado(self.produto), "FIXO15")
+
+    def test_cupom_inativo_ou_vencido_nao_entra_na_mensagem(self):
+        from apps.scrapers.ofertas import _melhor_cupom_normalizado
+        inativo = self._cupom("a:OFF20", "OFF20", is_mar_aberto=True,
+                              discount_num=20, min_compra=0)
+        CupomNormalizado.objects.filter(pk=inativo.pk).update(estado="inativo")
+        vencido = self._cupom("a:OLD30", "OLD30", is_mar_aberto=True,
+                              discount_num=30, min_compra=0)
+        CupomNormalizado.objects.filter(pk=vencido.pk).update(
+            validade=timezone.now() - timedelta(days=1))
+
+        self.assertIsNone(_melhor_cupom_normalizado(self.produto))
+
+    def test_compra_minima_usa_o_preco_de_vitrine(self):
+        """A vitrine (R$ 100) é o que entra no carrinho, não a tabela (R$ 200)."""
+        from apps.scrapers.ofertas import _melhor_cupom_normalizado
+        self._cupom("a:MIN150", "MIN150", is_mar_aberto=True, discount_num=20,
+                    min_compra=150)
+
+        self.assertIsNone(_melhor_cupom_normalizado(self.produto))
+
+    def test_cupom_restrito_publica_com_linha_de_condicao(self):
+        from apps.scrapers.ofertas import montar_mensagem
+        restrito = self._cupom("a:APP10", "APP10", is_mar_aberto=True,
+                               discount_num=10, min_compra=0,
+                               escopo="Somente no app, primeira compra")
+        CupomNormalizado.objects.filter(pk=restrito.pk).update(restrito=True)
+
+        mensagem = montar_mensagem(self.produto, "https://meli.la/x", None)
+
+        self.assertIn("🎟️ *CUPOM: APP10*", mensagem)
+        self.assertIn("⚠️ *Condição:* Somente no app, primeira compra", mensagem)
+
+    def test_cupom_sem_restricao_nao_ganha_linha_de_condicao(self):
+        from apps.scrapers.ofertas import montar_mensagem
+        self._cupom("a:LIVRE10", "LIVRE10", is_mar_aberto=True, discount_num=10,
+                    min_compra=0)
+
+        mensagem = montar_mensagem(self.produto, "https://meli.la/x", None)
+
+        self.assertIn("🎟️ *CUPOM: LIVRE10*", mensagem)
+        self.assertNotIn("Condição", mensagem)
 
 
 class CasarCuponsContainerTests(TestCase):

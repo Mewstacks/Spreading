@@ -6,14 +6,14 @@ Fly (compartilhadas) e permite suspender, definir cotas e impersonar um usuário
 Uso é COMPUTADO das tabelas existentes — não há metering novo. Infra é compartilhada
 (uma máquina por serviço), então o painel Fly é global, não por usuário.
 """
-import logging
 from datetime import timedelta
-from urllib.parse import urlencode
 
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import get_user_model, login
+from django.db import transaction
 from django.db.models import Count, Max, Q
-from django.http import JsonResponse
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -23,13 +23,22 @@ from apps.scrapers import automacao_state as st
 from apps.scrapers.fly_infra import snapshot as fly_snapshot
 from apps.scrapers.models import (
     CanalMonitorado, ConfiguracaoEnvio, EventoOperacional, HistoricoEnvio,
-    IncidenteSaude, Publicacao,
+    Publicacao,
 )
-from apps.scrapers.saude import resumo as saude_resumo
 from apps.scrapers.views import superadmin_required
 
 User = get_user_model()
-logger = logging.getLogger(__name__)
+
+
+def _global_health_disabled():
+    response = HttpResponse(
+        "A saúde global está temporariamente disponível apenas pelo processo "
+        "auditável de sistema durante a Fase 0.",
+        status=503,
+        content_type="text/plain; charset=utf-8",
+    )
+    response["Retry-After"] = "3600"
+    return response
 
 # Chave da sessão que guarda o superadmin original durante a impersonação.
 IMPERSONATOR_KEY = "impersonator_id"
@@ -72,15 +81,72 @@ def _uso_usuario(user, *, agora=None) -> dict:
     }
 
 
+def _orgs_catalogo():
+    """Organizações + status para escolher a fonte do catálogo de cupons do ML.
+
+    A página de cupons do ML exige login, mas a tabela `Cupom` é compartilhada e o
+    conteúdo é igual para todos: uma conta declarada raspa uma vez para todo mundo.
+    Fica no painel (e não num comando) para não depender de terminal em produção.
+    """
+    from apps.accounts.models import MercadoLivreSession, Organization
+
+    com_sessao = set(MercadoLivreSession.objects.filter(
+        status="active").values_list("organization_id", flat=True))
+    return [
+        {"id": str(org.id), "slug": org.slug, "nome": org.name,
+         "status": org.status, "fonte": org.fonte_catalogo_ml,
+         "tem_sessao": org.id in com_sessao}
+        for org in Organization.objects.order_by("name")
+    ]
+
+
+@superadmin_required
+@require_POST
+def superadmin_catalogo_ml(request):
+    """Define (ou limpa) a organização que fornece a sessão do catálogo de cupons."""
+    from apps.accounts.models import MercadoLivreSession, Organization
+
+    org_id = (request.POST.get("organization") or "").strip()
+    if not org_id:
+        n = Organization.objects.filter(fonte_catalogo_ml=True).update(
+            fonte_catalogo_ml=False)
+        messages.success(request, f"Fonte do catálogo removida ({n}).")
+        return redirect("superadmin-usuarios")
+
+    org = Organization.objects.filter(pk=org_id, status="active").first()
+    if org is None:
+        messages.error(request, "Organização inexistente ou inativa.")
+        return redirect("superadmin-usuarios")
+    # Só uma fonte por vez: duas contas raspando o mesmo catálogo global apenas
+    # duplicariam trabalho e disputariam as mesmas linhas.
+    with transaction.atomic():
+        Organization.objects.filter(fonte_catalogo_ml=True).update(
+            fonte_catalogo_ml=False)
+        Organization.objects.filter(pk=org.pk).update(fonte_catalogo_ml=True)
+    if MercadoLivreSession.objects.filter(organization=org, status="active").exists():
+        messages.success(
+            request, f"'{org.name}' agora alimenta o catálogo de cupons do ML.")
+    else:
+        messages.warning(
+            request,
+            f"'{org.name}' definida, mas ainda SEM sessão do Mercado Livre. "
+            f"Conecte essa conta em Conexão Mercado Livre para a raspagem rodar.")
+    return redirect("superadmin-usuarios")
+
+
 @superadmin_required
 def superadmin_usuarios(request):
     """Tabela de todos os usuários + uso computado + saúde das conexões."""
     users = (User.objects.select_related("perfil")
              .order_by("-is_superuser", "-date_joined"))
     linhas = [_uso_usuario(u) for u in users]
+    orgs_catalogo = _orgs_catalogo()
     ctx = {
         "linhas": linhas,
         "total_users": len(linhas),
+        "orgs_catalogo": orgs_catalogo,
+        "catalogo_definido": next(
+            (o["nome"] for o in orgs_catalogo if o["fonte"]), ""),
         # Loops são globais (single-tenant em transição): heartbeat mostrado uma vez.
         "worker_scrape": st.worker_alive("scrape"),
         "worker_envio": st.worker_alive("envio"),
@@ -97,6 +163,13 @@ def superadmin_criar_usuario(request):
 
     Signup público exige e-mail de verificação; em prod o SMTP pode não estar
     configurado, então o superadmin cria a conta já pronta (pré-verificada)."""
+    if settings.SECURITY_FREEZE_NEW_TENANTS:
+        messages.error(
+            request,
+            "Criação de contas bloqueada durante a Fase 0 de segurança.",
+        )
+        return redirect("superadmin-usuarios")
+
     username = (request.POST.get("username") or "").strip()
     email = (request.POST.get("email") or "").strip()
     senha = request.POST.get("senha") or ""
@@ -140,25 +213,7 @@ def superadmin_saude(request):
     Período curto por padrão (24h) porque a pergunta que esta tela responde é "o que
     aconteceu desde ontem"; 7 dias serve para ver se algo é recorrente ou foi blip.
     """
-    horas, usuario, usuario_nome = _filtros_da_saude(request)
-    return render(request, "scrapers/superadmin/saude.html",
-                  {"r": saude_resumo(horas=horas, usuario=usuario,
-                                      usuario_nome=usuario_nome), "horas": horas,
-                   "usuario_busca": usuario_nome,
-                   "usuario_encontrado": usuario})
-
-
-def _filtros_da_saude(request):
-    """(horas, usuario, usuario_nome) da querystring. Compartilhado pela tela e o JSON."""
-    try:
-        horas = int(request.GET.get("horas", 24))
-    except (TypeError, ValueError):
-        horas = 24
-    horas = horas if horas in (24, 72, 168) else 24
-    usuario_nome = (request.GET.get("usuario") or "").strip()
-    usuario = (User.objects.filter(username__iexact=usuario_nome).first()
-               if usuario_nome else None)
-    return horas, usuario, usuario_nome
+    return _global_health_disabled()
 
 
 @superadmin_required
@@ -172,24 +227,7 @@ def superadmin_saude_json(request):
     worker `monitor`. Se voltar a escrever aqui, cada tela aberta reprocessa o lote
     a cada 15s.
     """
-    horas, usuario, usuario_nome = _filtros_da_saude(request)
-    r = saude_resumo(horas=horas, usuario=usuario, usuario_nome=usuario_nome)
-    return JsonResponse({
-        "estado": r["estado"], "texto": r["texto"],
-        "n_erros": r["n_erros"], "n_avisos": r["n_avisos"],
-        "atualizado_em": timezone.localtime(r["agora"]).strftime("%H:%M:%S"),
-        "conexoes": [{"servico": c["servico"], "conectado": c["conectado"],
-                      "motivo": c["motivo"]} for c in r["conexoes"]],
-        "workers": [{"job": w["job"], "nome": w["nome"], "ligado": w["ligado"],
-                     "vivo": w["vivo"], "alerta": w["alerta"], "fase": w["fase"],
-                     "ultima_msg": w["ultima_msg"]} for w in r["workers"]],
-        "problemas": [{"causa": p["causa"], "titulo": p["titulo"], "n": p["n"],
-                       "critico": p["critico"], "usuarios": p["usuarios"]}
-                      for p in r["problemas"]],
-        # A contagem move quando um reteste conclui algo: é o gatilho do reload.
-        "assinatura": f'{len(r["problemas"])}:{r["n_erros"]}:{r["n_avisos"]}:'
-                      f'{len(r["concluidos"])}',
-    })
+    return _global_health_disabled()
 
 
 def _retestar_incidente(incidente) -> dict:
@@ -298,44 +336,7 @@ def superadmin_saude_retest(request, incidente_id):
     Com várias contas afetadas pelo mesmo problema, não havia como marcar nada como
     resolvido, e a tela acumulava erro que ninguém conseguia baixar.
     """
-    from apps.scrapers.incidentes_saude import confirmar
-
-    base = get_object_or_404(IncidenteSaude.objects.select_related("usuario"), pk=incidente_id)
-    grupo = list(IncidenteSaude.objects.select_related("usuario").filter(
-        pipeline=base.pipeline, causa=base.causa, escopo=base.escopo, status="aberto"))
-    if not grupo:
-        grupo = [base]
-
-    concluidos, falhas, ultima_msg = 0, 0, ""
-    for incidente in grupo:
-        try:
-            resultado = _retestar_incidente(incidente)
-        except Exception as exc:
-            logger.warning("Reteste do incidente %s falhou: %s", incidente.pk, exc)
-            resultado = {"sucesso": False, "mensagem": f"Reteste falhou: {exc}"}
-        ultima_msg = resultado.get("mensagem") or ultima_msg
-        if resultado.get("sucesso"):
-            confirmar(incidente, resultado["mensagem"])
-            concluidos += 1
-        else:
-            falhas += 1
-
-    if concluidos and not falhas:
-        messages.success(request, f"Ajuste concluído: {ultima_msg}")
-    elif concluidos:
-        messages.warning(
-            request, f"{concluidos} conta(s) confirmada(s), {falhas} ainda com "
-                     f"problema. Última mensagem: {ultima_msg}")
-    else:
-        messages.error(request, ultima_msg or "O reteste não confirmou o ajuste.")
-
-    # Preserva o filtro: o redirect nu jogava o superadmin de volta em 24h/global,
-    # perdendo a conta que ele estava investigando.
-    destino = reverse("superadmin-saude")
-    filtros = urlencode({k: v for k, v in (
-        ("horas", request.POST.get("horas") or ""),
-        ("usuario", request.POST.get("usuario") or "")) if v})
-    return redirect(f"{destino}?{filtros}" if filtros else destino)
+    return _global_health_disabled()
 
 
 @superadmin_required

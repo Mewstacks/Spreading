@@ -15,6 +15,7 @@ from apps.scrapers.ml_conexao import (
     SCREENCAST, VIEW_H, VIEW_W, _SPECIAL_KEYS, _despachar_input,
 )
 from apps.scrapers.report_sessions import has_report_session, save_report_state
+from apps.accounts.tenant import organization_job
 
 LOGIN_URL = "https://associados.amazon.com.br/"
 REPORT_URL = "https://associados.amazon.com.br/home/reports"
@@ -58,6 +59,7 @@ def _logado(page) -> bool:
     return page.locator("input[type='password'], input[name*='password' i]").count() == 0
 
 
+@organization_job
 def _worker(user):
     from playwright.sync_api import sync_playwright
     from apps.scrapers.auxiliar import ua_aleatorio

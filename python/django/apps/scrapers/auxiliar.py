@@ -1,6 +1,5 @@
 import os
 import random
-import inspect
 import logging
 from contextlib import contextmanager
 from playwright.sync_api import sync_playwright
@@ -76,7 +75,7 @@ def _redirecionou_login(url: str) -> bool:
 
 @contextmanager
 def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
-                    validar_sessao=True, **context_kwargs):
+                    validar_sessao=True, session_user=None, **context_kwargs):
     """Servidor é headless: o login do ML é sempre pela web (Conexão Mercado Livre,
     browser remoto com live view). Aqui só validamos/usamos a sessão já salva; se
     ela caiu, sinalizamos SessaoExpirada p/ o monitor reportar 'desconectado'.
@@ -84,17 +83,32 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
     validar_sessao=False: pula a checagem de login (e a possível remoção do auth).
     Use para navegar páginas PÚBLICAS (ex: verificar link de afiliado) onde sessão
     é opcional — evita falso 'Sessão ML expirada' quando o auth do fluxo não existe."""
+    from apps.accounts.ml_session_crypto import MLSessionCryptoError
+    from apps.accounts.ml_sessions import (
+        delete_storage_state, load_storage_state, save_storage_state,
+    )
+
     context_kwargs.setdefault("user_agent", ua_aleatorio())
-    if auth_path is None:
-        caller_dir = os.path.dirname(os.path.abspath(inspect.stack()[1].filename))
-        auth_path = os.path.join(caller_dir, "auth.json")
-    tinha_auth = os.path.exists(auth_path)
+    storage_state = None
+    if session_user is not None:
+        try:
+            storage_state = load_storage_state(session_user)
+        except MLSessionCryptoError as exc:
+            raise BrowserError("Sessão ML cifrada inválida; reconecte a conta.") from exc
+    elif auth_path and os.path.isfile(auth_path):
+        # Compatibilidade local durante a migração; nunca resolve outro usuário.
+        storage_state = auth_path
+    tinha_auth = storage_state is not None
 
     if validar_sessao:
         with sync_playwright() as p:
             try:
                 browser = _iniciar_chromium(p, headless=True)
-                context = browser.new_context(storage_state=auth_path, **context_kwargs) if os.path.exists(auth_path) else browser.new_context(**context_kwargs)
+                context = (
+                    browser.new_context(storage_state=storage_state, **context_kwargs)
+                    if storage_state is not None
+                    else browser.new_context(**context_kwargs)
+                )
                 page = context.new_page()
             except Exception as e:
                 raise BrowserError(f"Erro ao iniciar o navegador para checar a sessão: {e}")
@@ -121,9 +135,10 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
                 browser.close()
 
             if deslogado:
-                # Sessão morta CONFIRMADA (redirect p/ login): apaga o arquivo (o monitor
-                # passa a reportar 'desconectado' e dispara o alerta) e aborta esta fonte.
-                if os.path.exists(auth_path):
+                # Sessão morta confirmada: revoga só a credencial deste tenant.
+                if session_user is not None:
+                    delete_storage_state(session_user)
+                elif auth_path and os.path.isfile(auth_path):
                     try:
                         os.remove(auth_path)
                     except OSError:
@@ -146,8 +161,8 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
         try:
             browser = _iniciar_chromium(p, headless=headless)
             
-            if os.path.exists(auth_path):
-                context = browser.new_context(storage_state=auth_path, **context_kwargs)
+            if storage_state is not None:
+                context = browser.new_context(storage_state=storage_state, **context_kwargs)
             else:
                 context = browser.new_context(**context_kwargs)
     
@@ -163,9 +178,14 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
             # (validar_sessao=False sem auth) não pode criar um auth.json fantasma.
             if tinha_auth:
                 try:
-                    context.storage_state(path=auth_path)
+                    refreshed_state = context.storage_state()
+                    if session_user is not None:
+                        save_storage_state(session_user, refreshed_state)
+                    elif auth_path:
+                        # Apenas compatibilidade de dev/migração.
+                        context.storage_state(path=auth_path)
                 except Exception:
-                    pass
+                    logger.exception("Falha ao persistir renovação da sessão ML.")
             context.close()
             browser.close()
 

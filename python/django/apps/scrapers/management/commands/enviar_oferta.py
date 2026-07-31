@@ -12,6 +12,7 @@ Uso:
   python manage.py enviar_oferta --macro Eletrônicos  # filtra macro-categoria
 """
 from django.core.management.base import BaseCommand
+from apps.accounts.tenant import system_job
 
 from apps.scrapers.ofertas import selecionar_item_para_grupo, enviar_oferta_de_produto
 
@@ -29,6 +30,7 @@ class Command(BaseCommand):
         parser.add_argument("--dry-run", action="store_true", help="Não envia nem grava histórico.")
         parser.add_argument("--no-verificar", action="store_true", help="Pula a verificação do link no browser.")
 
+    @system_job
     def handle(self, *args, **opts):
         dry = opts["dry_run"]
         verificar = not opts["no_verificar"]

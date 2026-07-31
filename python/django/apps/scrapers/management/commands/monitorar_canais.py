@@ -14,6 +14,7 @@ import traceback
 
 from django.conf import settings
 from django.core.management.base import BaseCommand
+from apps.accounts.tenant import system_job
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,12 @@ class Command(BaseCommand):
         parser.add_argument("--tick", type=int, default=60,
                             help="Segundos entre varreduras dos canais.")
 
+    @system_job
     def handle(self, *args, **opts):
+        if not settings.TELETHON_RELINK_ENABLED:
+            logger.info("Telethon/relink desativado por política; worker ocioso")
+            while True:
+                time.sleep(300)
         if not (settings.TELEGRAM_API_ID and settings.TELEGRAM_API_HASH
                 and settings.TELEGRAM_SESSION):
             logger.info("Telegram userbot nao configurado; worker ocioso")

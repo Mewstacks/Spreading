@@ -9,6 +9,7 @@ urlpatterns = [
     path("painel-admin/saude.json", views_admin.superadmin_saude_json, name="superadmin-saude-json"),
     path("painel-admin/saude/<int:incidente_id>/retestar/", views_admin.superadmin_saude_retest, name="superadmin-saude-retestar"),
     path("painel-admin/infra/", views_admin.superadmin_infra, name="superadmin-infra"),
+    path("painel-admin/catalogo-ml/", views_admin.superadmin_catalogo_ml, name="superadmin-catalogo-ml"),
     path("painel-admin/usuario/<int:user_id>/", views_admin.superadmin_usuario_detalhe, name="superadmin-usuario"),
     path("painel-admin/usuario/<int:user_id>/suspender/", views_admin.superadmin_suspender, name="superadmin-suspender"),
     path("painel-admin/usuario/<int:user_id>/cotas/", views_admin.superadmin_cotas, name="superadmin-cotas"),

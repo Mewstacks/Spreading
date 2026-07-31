@@ -108,7 +108,16 @@ class SourcePipelineTests(TestCase):
             marketplace="mercadolivre", nome="Produto", preco_sem_desconto=100,
             preco_com_cupom=80, link_produto="https://produto.example/item")
         CupomCodigo.objects.create(codigo="TESTE10", descricao="cupom ML (checkout)",
-                                   valor_desconto=10, ativo=True)
+                                   valor_desconto=10, ativo=True, automatico=True)
+        self.assertIsNone(_melhor_codigo(product))
+
+    def test_regex_discovered_coupon_stays_blocked_after_manual_edit(self):
+        """Renomear a descrição não pode reabilitar um código sem vínculo provado."""
+        product = Produto.objects.create(
+            marketplace="mercadolivre", nome="Produto", preco_sem_desconto=100,
+            preco_com_cupom=80, link_produto="https://produto.example/outro")
+        CupomCodigo.objects.create(codigo="TESTE20", descricao="Meu cupom favorito",
+                                   valor_desconto=20, ativo=True, automatico=True)
         self.assertIsNone(_melhor_codigo(product))
 
     @patch("apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper._salvar", return_value=1)

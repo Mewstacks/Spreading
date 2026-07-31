@@ -1,16 +1,14 @@
 """Sessões cifradas dos portais de relatório por usuário e marketplace.
 
 O storage state do Playwright contém cookies de autenticação. Para relatórios ele
-nunca fica em JSON legível no volume: o arquivo persistido usa Fernet e só é
-descrito em um arquivo temporário com permissão 0600 durante a execução.
+nunca fica em JSON legível no volume: o arquivo persistido usa Fernet e o
+plaintext é entregue ao Playwright somente como objeto em memória.
 """
 from __future__ import annotations
 
 import base64
 import json
 import os
-import tempfile
-from contextlib import contextmanager
 from pathlib import Path
 
 from django.conf import settings
@@ -43,13 +41,11 @@ def save_report_state(usuario, marketplace: str, state: dict) -> None:
     os.replace(tmp, target)
 
 
-@contextmanager
-def decrypted_state_file(usuario, marketplace: str):
-    """Entrega um caminho temporário para Playwright ou None quando não há sessão."""
+def load_report_state(usuario, marketplace: str) -> dict | None:
+    """Descriptografa em memória; nunca materializa cookies em arquivo temporário."""
     source = encrypted_state_path(usuario, marketplace)
     if not source.is_file():
-        yield None
-        return
+        return None
     try:
         encoded = decrypt(source.read_text(encoding="utf-8"))
         raw = base64.b64decode(encoded.encode()).decode()
@@ -59,14 +55,4 @@ def decrypted_state_file(usuario, marketplace: str):
     except Exception as exc:
         raise ValueError("sessão de relatórios ilegível; conecte novamente") from exc
 
-    fd, name = tempfile.mkstemp(prefix=f"{marketplace}-{usuario.id}-", suffix=".json")
-    try:
-        os.chmod(name, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(state, handle)
-        yield name
-    finally:
-        try:
-            os.unlink(name)
-        except FileNotFoundError:
-            pass
+    return state

@@ -1,7 +1,7 @@
 """
 Cliente HTTP fino para o serviço Node de WhatsApp (node.js/index.js).
 
-O Node expõe (todas exigem x-api-key):
+O Node expõe rotas privadas protegidas por capacidades Ed25519 curtas:
   POST /api/enviar         -> texto: {grupoid|numero, mensagem}
                               midia: {grupoid|numero, base64, mimetype, nomeArquivo, legenda}
   POST /api/sessoes        -> cria/revive a sessão do usuário
@@ -22,6 +22,7 @@ desconectado". Não adicione raise_for_status nem checagem de status_code aqui:
 o significado tem de vir do corpo.
 """
 import time
+import uuid
 
 import requests
 from django.conf import settings
@@ -78,16 +79,33 @@ def _base_url() -> str:
     return settings.WHATSAPP_API_URL.rstrip("/")
 
 
-def _headers() -> dict:
-    if not settings.WHATSAPP_API_KEY:
-        raise WhatsAppError("WHATSAPP_API_KEY não configurada no .env.")
-    return {"x-api-key": settings.WHATSAPP_API_KEY, "Content-Type": "application/json"}
+def _headers(session, action: str, *, single_use=False) -> dict:
+    """Capacidade curta por organização; não existe chave mestre de fallback."""
+    try:
+        from apps.accounts.wa_capabilities import issue_capability
+        token = issue_capability(session, [action], single_use=single_use)
+        return {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+    except Exception as exc:
+        raise WhatsAppError(
+            "Não foi possível autorizar a sessão WhatsApp."
+        ) from exc
 
 
-def _headers_opt() -> dict:
-    """api-key quando configurada. status/qrcode agora exigem chave (rota fechada)."""
-    key = settings.WHATSAPP_API_KEY
-    return {"x-api-key": key} if key else {}
+def _disabled_payload():
+    return {
+        "sucesso": False,
+        "conectado": False,
+        "fase": "indisponivel",
+        "mensagem": "WhatsApp Web está desativado para esta organização.",
+    }
+
+
+def _enabled(session=None):
+    from apps.accounts.feature_flags import enabled_for_whatsapp_session
+    return enabled_for_whatsapp_session(session)
 
 
 def _params(session=None) -> dict:
@@ -133,11 +151,13 @@ def status(session=None) -> dict:
     abertas isso derrubava o app inteiro. Cachear a resposta de erro é intencional:
     é justamente quando não se deve martelar o Node.
     """
+    if not _enabled(session):
+        return _disabled_payload()
     chave = _chave_status(session)
     cacheado = cache.get(chave)
     if cacheado is not None:
         return cacheado
-    data = _request_json("GET", "/api/status", headers=_headers_opt(),
+    data = _request_json("GET", "/api/status", headers=_headers(session, "status"),
                          params=_params(session), timeout=5)
     data.setdefault("conectado", False)
     cache.set(chave, data, timeout=_STATUS_TTL_S)
@@ -148,9 +168,11 @@ def iniciar_sessao(session) -> dict:
     """Inicia explicitamente o único runtime WhatsApp deste usuário."""
     if not session:
         return {"sucesso": False, "erro": "Sessão de usuário ausente."}
+    if not _enabled(session):
+        return _disabled_payload()
     invalidar_status(session)
     return _request_json(
-        "POST", "/api/sessoes", headers=_headers(),
+        "POST", "/api/sessoes", headers=_headers(session, "provision", single_use=True),
         json={"session": session}, timeout=10, attempts=1,
     )
 
@@ -159,12 +181,15 @@ def desconectar(session) -> dict:
     """Desfaz o pareamento: revoga no celular e apaga a credencial do volume."""
     if not session:
         return {"sucesso": False, "erro": "Sessão de usuário ausente."}
+    if not _enabled(session):
+        return _disabled_payload()
     invalidar_status(session)
     # timeout 25 > os 15s do client.logout no Node + margem do destroy.
     # attempts=1 de propósito: o retry cego de _request_json dobraria a espera
     # para 50s, e o Node já trata o logout como idempotente.
     return _request_json(
-        "POST", "/api/sessoes/logout", headers=_headers(),
+        "POST", "/api/sessoes/logout",
+        headers=_headers(session, "logout", single_use=True),
         json={"session": session}, timeout=25, attempts=1,
     )
 
@@ -173,12 +198,15 @@ def reiniciar_com_qr(session) -> dict:
     """Descarta a sessão atual e inicia uma sessão limpa para emitir novo QR."""
     if not session:
         return {"sucesso": False, "erro": "Sessão de usuário ausente."}
+    if not _enabled(session):
+        return _disabled_payload()
     invalidar_status(session)
     try:
         # attempts=1: repetir um reset cujo resultado se perdeu pode derrubar o
         # Chromium novo que já está gerando o QR. O Node coalesce concorrência.
         return _request_json(
-            "POST", "/api/sessoes/reset", headers=_headers(),
+            "POST", "/api/sessoes/reset",
+            headers=_headers(session, "reset", single_use=True),
             json={"session": session}, timeout=25, attempts=1,
         )
     finally:
@@ -189,7 +217,9 @@ def reiniciar_com_qr(session) -> dict:
 
 def qrcode(session=None) -> dict:
     """Retorna {conectado, qr?} do serviço Node. Exige api-key (rota fechada)."""
-    data = _request_json("GET", "/api/qrcode", headers=_headers_opt(),
+    if not _enabled(session):
+        return _disabled_payload()
+    data = _request_json("GET", "/api/qrcode", headers=_headers(session, "status"),
                          params=_params(session), timeout=8)
     data.setdefault("conectado", False)
     data.setdefault("qr", None)
@@ -198,7 +228,9 @@ def qrcode(session=None) -> dict:
 
 def listar_grupos(session=None) -> dict:
     """Lista grupos do WhatsApp conectado. Usado pelo dashboard para escolher destino."""
-    return _request_json("GET", "/api/grupos", headers=_headers(),
+    if not _enabled(session):
+        return _disabled_payload()
+    return _request_json("GET", "/api/grupos", headers=_headers(session, "groups"),
                          params=_params(session), timeout=15)
 
 
@@ -209,7 +241,10 @@ def refresh_grupos(session=None) -> dict:
     # um segundo refresh — e um segundo getChats no mesmo Chromium — além de
     # dobrar a espera do usuário para 60s. O Node já coalesce pedidos repetidos
     # num único repique (group_sync.js), então insistir aqui só custa.
-    data = _request_json("POST", "/api/grupos/refresh", headers=_headers(),
+    if not _enabled(session):
+        return _disabled_payload()
+    data = _request_json("POST", "/api/grupos/refresh",
+                         headers=_headers(session, "groups"),
                          params=_params(session), timeout=30, attempts=1)
     if "erro" in data:
         data.setdefault("sucesso", False)
@@ -221,8 +256,11 @@ def diagnosticar(session=None, grupoid: str = "") -> dict:
     if not session:
         return {"sucesso": False, "causa": "whatsapp_desconectado",
                 "mensagem": "Sessão WhatsApp do usuário ausente."}
+    if not _enabled(session):
+        return _disabled_payload()
     data = _request_json(
-        "POST", "/api/diagnostico", headers=_headers(), params=_params(session),
+        "POST", "/api/diagnostico", headers=_headers(session, "status"),
+        params=_params(session),
         json={"session": session, "grupoid": grupoid}, timeout=30, attempts=1,
     )
     if "erro" in data:
@@ -233,7 +271,7 @@ def diagnosticar(session=None, grupoid: str = "") -> dict:
 
 def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
                   mimetype: str = "image/jpeg", legenda: str = None,
-                  session=None) -> dict:
+                  session=None, idempotency_key: str = None) -> dict:
     """
     Envia uma oferta para um grupo (ou número) via serviço Node.
 
@@ -254,6 +292,13 @@ def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
     if not grupoid:
         return {"sucesso": False, "erro": "Nenhum grupoid informado.",
                 "classe": PERMANENTE}
+    if not _enabled(session):
+        return {**_disabled_payload(), "classe": TRANSITORIO}
+
+    idempotency_key = str(idempotency_key or uuid.uuid4())
+    if not 8 <= len(idempotency_key) <= 128:
+        return {"sucesso": False, "erro": "Identidade idempotente inválida.",
+                "classe": PERMANENTE}
 
     payload = {"grupoid": grupoid}
     if session:
@@ -270,8 +315,15 @@ def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
 
     try:
         inicio = time.monotonic()
-        r = requests.post(f"{_base_url()}/api/enviar", json=payload,
-                          headers=_headers(), timeout=_SEND_HTTP_TIMEOUT_S)
+        r = requests.post(
+            f"{_base_url()}/api/enviar",
+            json=payload,
+            headers={
+                **_headers(session, "send"),
+                "Idempotency-Key": idempotency_key,
+            },
+            timeout=_SEND_HTTP_TIMEOUT_S,
+        )
         try:
             corpo = r.json()
         except ValueError:
@@ -294,8 +346,7 @@ def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
         return {"sucesso": False, "status": r.status_code, **corpo, "classe": classe,
                 "duracao_ms": corpo.get("duracao_ms", round((time.monotonic() - inicio) * 1000))}
     except WhatsAppError as e:
-        # WHATSAPP_API_KEY ausente: nenhum envio de ninguém vai funcionar até
-        # alguém mexer no .env. Não é defeito da config do usuário.
+        # Falha no signer/vínculo não é defeito da configuração do usuário.
         return {"sucesso": False, "erro": str(e), "classe": TRANSITORIO}
     except (requests.Timeout, requests.ConnectionError) as e:
         # Os dois piores casos nunca chegam classificados: o Node não responde

@@ -81,7 +81,7 @@ def signup(request):
     # Cadastro público fechado por padrão: só o superadmin cria contas (pelo painel).
     # Sem isto, qualquer um se registra na máquina compartilhada. Reabra com
     # PERMITIR_CADASTRO_PUBLICO=1 se um dia quiser self-service.
-    if not settings.PERMITIR_CADASTRO_PUBLICO:
+    if settings.SECURITY_FREEZE_NEW_TENANTS or not settings.PERMITIR_CADASTRO_PUBLICO:
         from django.contrib import messages
         messages.info(request, "O cadastro é feito pelo administrador. "
                       "Fale com o suporte para liberar seu acesso.")

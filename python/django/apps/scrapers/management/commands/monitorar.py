@@ -16,6 +16,7 @@ com polling, cada carregamento inflaria as ocorrências.
 """
 import logging
 import time
+from apps.accounts.tenant import system_job
 
 from django.core.management.base import BaseCommand
 from django.db import DatabaseError, connections
@@ -35,6 +36,7 @@ class Command(BaseCommand):
         parser.add_argument("--tick", type=int, default=0,
                             help="Minutos entre checagens. 0 (default) = uma passada e sai.")
 
+    @system_job
     def handle(self, *args, **opts):
         tick = max(0, opts["tick"])
         if not tick:

@@ -9,7 +9,8 @@ import requests
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada, ua_aleatorio
 from apps.scrapers.coupon_rules import (
-    derivar_categoria_cupom, extrair_escopo_produtos, rotulo_anunciante)
+    derivar_categoria_cupom, extrair_escopo_produtos, rotulo_anunciante,
+    tem_restricao_publico)
 from apps.scrapers.models import Cupom, Produto, CupomNormalizado, FonteIngestao
 from apps.scrapers.progresso import emitir_progresso, emitir_fase
 from apps.scrapers.session_paths import ml_auth_path
@@ -67,20 +68,82 @@ def _extrair_payload_cupons(page):
 _CUPONS_URL = ("https://www.mercadolivre.com.br/cupons/filter"
                "?all=true&source_page=int_view_all&page={n}")
 
+_MESES_PT = {
+    "janeiro": 1, "fevereiro": 2, "marco": 3, "março": 3, "abril": 4, "maio": 5,
+    "junho": 6, "julho": 7, "agosto": 8, "setembro": 9, "outubro": 10,
+    "novembro": 11, "dezembro": 12,
+}
+_VENCE_RE = re.compile(r"vence\s+(\d{1,2})\s+de\s+([a-zç]+)", re.I)
 
-def _ml_http_session(caminho_auth):
+
+def _valor_ml(fractional, decimal=None):
+    """Par ``fractionalAmount``/``decimalAmount`` do ML -> float em reais.
+
+    A fonte manda o inteiro com ponto de milhar e os centavos separados:
+    ``("2.000", "0") -> 2000.0`` e ``("99", "9") -> 99.90``. O `float()` direto que
+    havia aqui lia "2.000" como 2.0, ou seja, uma compra mínima de R$ 2 mil virava
+    R$ 2 e o cupom passava a "valer" para qualquer item. Os centavos eram
+    descartados. Devolve None quando o campo não veio.
+    """
+    inteiro = str(fractional or "").strip().replace(".", "").replace(" ", "")
+    if not inteiro.isdigit():
+        return None
+    centavos = str(decimal if decimal is not None else "").strip()
+    centavos = centavos if centavos.isdigit() else "0"
+    return float(inteiro) + int(centavos.ljust(2, "0")[:2]) / 100.0
+
+
+def _validade_ml(texto, agora=None):
+    """"Vence 19 de maio" -> datetime do fim daquele dia. Caso contrário, None.
+
+    A página também escreve "Está esgotando!", "Termina em 3 horas!" e
+    "Vence em domingo": são avisos de estoque/urgência, não data. Sem ano no texto,
+    assume a próxima ocorrência (se o dia já passou neste ano, é do ano que vem).
+    """
+    match = _VENCE_RE.search(str(texto or ""))
+    if not match:
+        return None
+    mes = _MESES_PT.get(match.group(2).lower())
+    if not mes:
+        return None
+    agora = agora or timezone.now()
+    for ano in (agora.year, agora.year + 1):
+        try:
+            fim = agora.replace(year=ano, month=mes, day=int(match.group(1)),
+                                hour=23, minute=59, second=59, microsecond=0)
+        except ValueError:  # 31 de fevereiro e afins
+            return None
+        if fim >= agora:
+            return fim
+    return None
+
+
+def _ml_http_session(caminho_auth=None, *, session_user=None):
     """`requests.Session` com os cookies do storage_state do Playwright + headers de
     browser. Reusa a sessão já salva SEM subir Chromium — o payload de cupons é SSR,
     então um GET autenticado traz o mesmo `filteredCouponsData`. Cookies ausentes ou
     inválidos => o GET cai na página de login (sem payload) e o transporte alterna
     para o browser, que é quem sabe distinguir challenge de sessão expirada.
+
+    `session_user` lê a sessão cifrada da organização daquele usuário; `caminho_auth`
+    é o arquivo legado. Sem nenhum dos dois a sessão sai anônima — o que só serve
+    para página pública, pois /cupons/filter redireciona para o login.
     """
     sess = requests.Session()
-    try:
-        with open(caminho_auth, encoding="utf-8") as fh:
-            state = json.load(fh)
-    except (OSError, ValueError):
-        state = {}
+    state = {}
+    if session_user is not None:
+        from apps.accounts.ml_sessions import load_storage_state
+        try:
+            state = load_storage_state(session_user) or {}
+        except Exception as exc:
+            logger.warning("Não foi possível ler a sessão ML do catálogo: %s", exc)
+            state = {}
+    elif caminho_auth:
+        try:
+            with open(caminho_auth, encoding="utf-8") as fh:
+                state = json.load(fh)
+        except (OSError, ValueError):
+            state = {}
     for c in state.get("cookies", []):
         try:
             # Preserva o domínio como salvo (inclusive o ponto inicial): é ele que diz
@@ -100,7 +163,7 @@ def _ml_http_session(caminho_auth):
 
 
 @contextmanager
-def _transporte_cupons(caminho_auth):
+def _transporte_cupons(caminho_auth, session_user=None, erro_sessao=None):
     """Fornece `fetch(n) -> str|None` para /cupons/filter, agnóstico ao transporte.
 
     Tenta HTTP primeiro (rápido, sem Chromium). O caller liga `estado['forcar_browser']`
@@ -108,7 +171,7 @@ def _transporte_cupons(caminho_auth):
     o fetch serve via browser headless — que valida a sessão e levanta SessaoExpirada
     se o login caiu. O Chromium só é aberto se/quando o fallback ligar o flag.
     """
-    session = _ml_http_session(caminho_auth)
+    session = _ml_http_session(caminho_auth, session_user=session_user)
     estado = {"forcar_browser": False, "usou_browser": False, "_cm": None, "_page": None}
 
     def fetch(n):
@@ -121,7 +184,12 @@ def _transporte_cupons(caminho_auth):
                 logger.debug("Falha HTTP na pagina %s de cupons: %s", n, e)
                 return None
         if estado["_page"] is None:
-            cm = iniciar_browser(auth_path=caminho_auth, headless=True)
+            # Só aqui a falta de sessão vira erro: o GET anônimo pode bastar, e
+            # abortar antes trocaria uma raspagem que funciona por uma exceção.
+            if erro_sessao is not None:
+                raise erro_sessao
+            cm = iniciar_browser(auth_path=caminho_auth, headless=True,
+                                 session_user=session_user)
             page, _ctx = cm.__enter__()  # valida a sessão; SessaoExpirada propaga
             estado["_cm"] = cm
             estado["_page"] = page
@@ -140,7 +208,7 @@ def _transporte_cupons(caminho_auth):
         if estado["_cm"] is not None:
             estado["_cm"].__exit__(None, None, None)
 
-def mapear_cupons(n=1, faixa=None):
+def mapear_cupons(n=1, faixa=None, usuario=None):
     """Raspa /cupons/filter e popula a tabela Cupom. Retorna quantos foram salvos.
 
     Único caminho que preenche `Cupom`, e é dele que depende a geração de link de
@@ -155,6 +223,9 @@ def mapear_cupons(n=1, faixa=None):
 
     `faixa` (ini, fim) liga o progresso na tela; sem ela, o comportamento silencioso
     de antes (o ciclo automático não tem barra para alimentar).
+
+    `usuario` força a sessão de uma conta específica (clique manual na tela). Sem
+    ele, usa a conta de catálogo declarada — ver `accounts.ml_sessions`.
     """
     todos_os_cupons_limpos = []
     MAX_RETRIES = 2
@@ -169,10 +240,24 @@ def mapear_cupons(n=1, faixa=None):
     varredura_completa = False
     motivo_parada = ""
 
-    caminho_auth = ml_auth_path()
+    # /cupons/filter redireciona anônimo para o login: sem sessão esta raspagem não
+    # existe. Como `Cupom` é catálogo compartilhado, a sessão vem da organização
+    # declarada como fonte, não de um usuário qualquer.
+    from apps.accounts.ml_sessions import SemContaDeCatalogo, usuario_catalogo_ml
+    session_user, erro_sessao = usuario, None
+    if session_user is None:
+        try:
+            session_user = usuario_catalogo_ml()
+        except SemContaDeCatalogo as exc:
+            # Guardado, não levantado: o transporte tenta HTTP primeiro e só
+            # precisa de sessão se cair no browser.
+            erro_sessao = exc
+            logger.warning("Cupons de campanha sem conta de catálogo: %s", exc)
+    caminho_auth = ml_auth_path(session_user)
     logger.info("Iniciando raspagem e limpeza de cupons")
 
-    with _transporte_cupons(caminho_auth) as (fetch_html, _estado):
+    with _transporte_cupons(caminho_auth, session_user, erro_sessao) as (
+            fetch_html, _estado):
         while True:
             if n > MAX_PAGINAS:
                 logger.warning("Limite de %s páginas atingido na varredura de cupons; encerrando", MAX_PAGINAS)
@@ -300,31 +385,53 @@ def mapear_cupons(n=1, faixa=None):
                 if link_final:
                     link_final = link_final.replace("\u002F", "/").replace("\\/", "/")
 
-                desconto = None
-                if titulo_completo:
+                # O tipo (%/R$) só existe no texto, mas o VALOR tem campo próprio em
+                # `title.accessibility` — inclusive os centavos. O regex sobre o
+                # título fica como fallback para quando a acessibilidade não vier.
+                texto_titulo = titulo_final if isinstance(titulo_final, str) else ""
+                tipo_desconto = ""
+                if re.search(r'\d\s*%', texto_titulo or titulo_completo or ""):
+                    tipo_desconto = "porcentagem"
+                elif re.search(r'R\$', texto_titulo or titulo_completo or "", re.I):
+                    tipo_desconto = "fixo"
+
+                acess_titulo = ((titulo_bruto or {}).get("accessibility", {}).get("title", {})
+                                if isinstance(titulo_bruto, dict) else {})
+                valor_desconto = _valor_ml(acess_titulo.get("fractionalAmount"),
+                                           acess_titulo.get("decimalAmount"))
+                if valor_desconto is None and titulo_completo:
                     match_percent = re.search(r'(\d+(?:[.,]\d+)?)\s*%', titulo_completo)
                     match_fixed = re.search(r'R\$\s*(\d+(?:[.,]\d+)?)', titulo_completo, re.IGNORECASE)
                     if match_percent:
-                        desconto = {
-                            "valor": float(match_percent.group(1).replace(',', '.')),
-                            "tipo": "porcentagem"
-                        }
+                        valor_desconto = float(match_percent.group(1).replace(',', '.'))
+                        tipo_desconto = "porcentagem"
                     elif match_fixed:
-                        desconto = {
-                            "valor": float(match_fixed.group(1).replace(',', '.')),
-                            "tipo": "fixo"
-                        }
+                        valor_desconto = float(match_fixed.group(1).replace(',', '.'))
+                        tipo_desconto = "fixo"
+
+                desconto = ({"valor": valor_desconto, "tipo": tipo_desconto}
+                            if valor_desconto is not None and tipo_desconto else None)
 
                 codigo = cupom.get("code") or cupom.get("inputCode") or ""
 
-                # Extrai valor mínimo de compra (ex: Compra mínima R$399 → 399.0)
-                valor_minimo = 0.0
-                frac_minimo = (cupom.get("amount") or {}).get("accessibility", {}).get("minAmount", {}).get("fractionalAmount", "")
-                if frac_minimo:
-                    try:
-                        valor_minimo = float(str(frac_minimo).replace(",", "."))
-                    except ValueError:
-                        pass
+                # Compra mínima e teto de desconto ("Limite de R$ 50"): a página
+                # entrega os dois em `amount.accessibility`. O teto era ignorado, então
+                # um cupom de 10% limitado a R$ 10 era anunciado como 10% cheios.
+                acess_valores = (cupom.get("amount") or {}).get("accessibility", {})
+                minimo = acess_valores.get("minAmount", {})
+                teto = acess_valores.get("capAmount", {})
+                valor_minimo = _valor_ml(minimo.get("fractionalAmount"),
+                                         minimo.get("decimalAmount")) or 0.0
+                desconto_maximo = _valor_ml(teto.get("fractionalAmount"),
+                                            teto.get("decimalAmount"))
+
+                # `status.id` é a única fonte confiável de que o cupom ainda está de
+                # pé: a listagem devolve os inativos junto com os ativos.
+                # Campo AUSENTE não vira "inativo": se o ML renomear a chave, o
+                # catálogo inteiro sairia do ar de uma vez. Só desliga quando o
+                # próprio payload diz que não está ativo.
+                status = str((cupom.get("status") or {}).get("id") or "").upper()
+                validade = _validade_ml((cupom.get("expirationDate") or {}).get("text"))
 
                 cupom_limpo = {
                     "campaignId": camp_id,
@@ -333,6 +440,10 @@ def mapear_cupons(n=1, faixa=None):
                     "link_produtos": link_final,
                     "codigo": codigo,
                     "valor_minimo": valor_minimo,
+                    "desconto_maximo": desconto_maximo,
+                    "estado": "inativo" if status and status != "ACTIVE" else "ativo",
+                    "validade": validade,
+                    "restrito": tem_restricao_publico(titulo_completo),
                 }
                 
                 todos_os_cupons_limpos.append(cupom_limpo)
@@ -362,11 +473,14 @@ def mapear_cupons(n=1, faixa=None):
                 tipo_desconto=(c.get("desconto") or {}).get("tipo", ""),
                 valor_desconto=(c.get("desconto") or {}).get("valor", 0.0),
                 valor_minimo=c.get("valor_minimo") or 0.0,
+                desconto_maximo=c.get("desconto_maximo"),
                 link_original=c.get("link_produtos") or "",
                 codigo=c.get("codigo") or "",
                 fonte="mercadolivre-cupom",
                 ultima_verificacao=timezone.now(),
-                estado="ativo",
+                validade=c.get("validade"),
+                restrito=bool(c.get("restrito")),
+                estado=c.get("estado") or "ativo",
             )
             for c in todos_os_cupons_limpos
         ]
@@ -376,10 +490,11 @@ def mapear_cupons(n=1, faixa=None):
             unique_fields=["campanha_id"],
             update_fields=[
                 "titulo", "tipo_desconto", "valor_desconto", "valor_minimo",
-                "link_original", "codigo", "fonte", "ultima_verificacao", "estado",
+                "desconto_maximo", "link_original", "codigo", "fonte",
+                "ultima_verificacao", "validade", "restrito", "estado",
             ],
         )
-        ids_ativos = {c["campaignId"] for c in todos_os_cupons_limpos}
+        ids_vistos = {c["campaignId"] for c in todos_os_cupons_limpos}
         # Expirar o que não apareceu só é válido se a varredura chegou ao fim. Quando
         # ela para no meio (payload some na página 3), o que veio é uma FATIA do
         # catálogo — e expirar "todo o resto" apagava a aba Cupons inteira por causa
@@ -390,7 +505,7 @@ def mapear_cupons(n=1, faixa=None):
                 "Nada foi expirado.", len(todos_os_cupons_limpos), n - 1,
                 motivo_parada or "interrompida")
         else:
-            expirados = Cupom.objects.exclude(campanha_id__in=ids_ativos).update(
+            expirados = Cupom.objects.exclude(campanha_id__in=ids_vistos).update(
                 estado="expirado", ultima_verificacao=timezone.now())
             if expirados:
                 logger.info("%s cupom(ns) marcado(s) como expirado(s)", expirados)
@@ -399,7 +514,7 @@ def mapear_cupons(n=1, faixa=None):
             prods_expirados = (
                 Produto.objects
                 .filter(marketplace="mercadolivre", owner__isnull=True, origem="cupom")
-                .exclude(campanha_id__in=ids_ativos)
+                .exclude(campanha_id__in=ids_vistos)
                 .update(
                     estado="expirado",
                     falha_verificacao="Cupom não observado na última sincronização",
@@ -408,7 +523,10 @@ def mapear_cupons(n=1, faixa=None):
             )
             if prods_expirados:
                 logger.info("%s produto(s) de cupons marcados como expirados", prods_expirados)
-        logger.info("%s cupons salvos/atualizados", len(todos_os_cupons_limpos))
+        n_ativos = sum(1 for c in todos_os_cupons_limpos if c.get("estado") == "ativo")
+        logger.info("%s cupons salvos/atualizados (%s ativo(s), %s inativo(s) no ML)",
+                    len(todos_os_cupons_limpos), n_ativos,
+                    len(todos_os_cupons_limpos) - n_ativos)
     else:
         # Guarda anti-wipe: coleta vazia não expira nada (o bloco acima nem roda).
         # Mesmo contrato de mapear_cupons_codigo e mapear_ofertas.
@@ -457,7 +575,10 @@ def projetar_catalogo_cupons(faixa=None):
         slug="mercadolivre-web", defaults={
             "marketplace": "mercadolivre", "nome": "Mercado Livre — páginas públicas"})
 
-    ativos = list(Cupom.objects.filter(estado="ativo"))
+    # Os inativos também são projetados: continuam visíveis na aba Cupons (com o
+    # estado espelhado) para auditoria, e todo caminho de envio filtra estado="ativo".
+    projetaveis = list(Cupom.objects.filter(estado__in=["ativo", "inativo"]))
+    ativos = [c for c in projetaveis if c.estado == "ativo"]
     # Anti-wipe: sem cupom ativo, não desativa o catálogo (a coleta pode ter caído).
     if not ativos:
         logger.warning("Nenhum cupom de campanha ativo; catálogo de cupons preservado")
@@ -466,14 +587,15 @@ def projetar_catalogo_cupons(faixa=None):
     # Categoria dominante dos produtos de cada campanha (UMA query) — fallback do
     # rótulo do anunciante quando o título é genérico. É o que diz "de que se trata".
     dominante_por_campanha = _categoria_dominante_por_campanha(
-        [c.campanha_id for c in ativos])
+        [c.campanha_id for c in projetaveis])
 
     externos_vistos = set()
-    for i, c in enumerate(ativos, 1):
+    for i, c in enumerate(projetaveis, 1):
         # São milhares de update_or_create: sem um pulso aqui a barra congelava na
         # última linha da etapa anterior por minutos.
         if faixa and (i % 50 == 0 or i == 1):
-            emitir_fase(f"Catalogando campanhas {i}/{len(ativos)}", i / len(ativos), faixa)
+            emitir_fase(f"Catalogando campanhas {i}/{len(projetaveis)}",
+                        i / len(projetaveis), faixa)
         ext = f"campanha:{c.campanha_id}"
         externos_vistos.add(ext)
         if c.tipo_desconto == "fixo":
@@ -489,7 +611,7 @@ def projetar_catalogo_cupons(faixa=None):
                         else c.tipo_desconto),
                   "valor_desconto": c.valor_desconto,
                   "valor_minimo": c.valor_minimo,
-                  "desconto_maximo": None,
+                  "desconto_maximo": c.desconto_maximo,
                   "modo_resgate": "ativacao",
                   "escopo": escopo_produtos,
                   "container_url": "",
@@ -515,7 +637,10 @@ def projetar_catalogo_cupons(faixa=None):
                 "link": c.link_original or "https://www.mercadolivre.com.br/cupons",
                 "validade": c.validade,
                 "confianca": "media",
-                "estado": "ativo",
+                # Espelha o estado da campanha: o ML devolve INACTIVE junto com os
+                # ativos, e publicar um deles é o cupom que "não funciona".
+                "estado": c.estado,
+                "restrito": c.restrito,
                 "regras": regras,
                 "evidencia": {"transport": "public-web", "association": "campaign",
                               "token_ativacao": c.codigo or ""},
@@ -528,14 +653,15 @@ def projetar_catalogo_cupons(faixa=None):
     # deixam de aparecer. Só mexe nas projeções de campanha (external_id
     # "campanha:"), nunca nos cupons de checkout ("checkout:").
     obsoletos = (CupomNormalizado.objects
-                 .filter(fonte=fonte, estado="ativo", external_id__startswith="campanha:")
+                 .filter(fonte=fonte, estado__in=["ativo", "inativo"],
+                         external_id__startswith="campanha:")
                  .exclude(external_id__in=externos_vistos))
     n_obsoletos = obsoletos.update(estado="expirado")
     if n_obsoletos:
         logger.info("%s cupom(ns) de campanha expirado(s) no catálogo", n_obsoletos)
     logger.info(
-        "Catálogo interno: %s campanha(s) personalizada(s), não contadas como "
-        "cupom público", len(ativos))
+        "Catálogo interno: %s campanha(s) personalizada(s) (%s ativa(s)), não "
+        "contadas como cupom público", len(projetaveis), len(ativos))
     return len(ativos)
 
 
@@ -684,6 +810,10 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
                 else:
                     preco_antigo_float = preco_atual_float
 
+                # Este preço pós-cupom serve só de FILTRO (sanidade e compra mínima).
+                # Quem publica é `ProdutoCupom.preco_final`, calculado em Decimal por
+                # `coupon_products.calcular_precos`; persistir este valor no Produto
+                # é o que gerava desconto em dobro.
                 desconto = cupom.get("desconto")
                 preco_com_cupom = preco_atual_float
 
@@ -789,10 +919,15 @@ def _sincronizar_produtos_no_banco(cupons_com_produtos):
                     campanha_id=camp_id,
                     fonte="mercadolivre-cupom",
                     nome=p["nome_produto"][:255],
-                    preco_sem_desconto=float(p["preco_vitrine_atual"]),
-                    preco_com_cupom=float(p["preco_final_com_cupom"]),
+                    # Contrato dos campos de preço (ver Produto.preco_com_cupom):
+                    # `preco_sem_desconto` = tabela riscada, `preco_com_cupom` =
+                    # vitrine SEM o cupom. Aqui gravava-se a vitrine no primeiro e o
+                    # preço JÁ com cupom no segundo, então `calcular_precos` subtraía
+                    # o cupom de novo e o item era anunciado com desconto em dobro.
+                    preco_sem_desconto=float(p["preco_original_sem_desconto"]),
+                    preco_com_cupom=float(p["preco_vitrine_atual"]),
                     preco_fonte=float(p["preco_vitrine_atual"]),
-                    preco_efetivo=float(p["preco_final_com_cupom"]),
+                    preco_efetivo=float(p["preco_vitrine_atual"]),
                     link_produto=p.get("link_produto") or "",
                     imagem_url=p.get("imagem_url") or "",
                     categoria=p.get("categoria", "DESCONHECIDO"),
@@ -807,19 +942,26 @@ def _sincronizar_produtos_no_banco(cupons_com_produtos):
     return processados
 
 
-def main():
-    mapear_cupons()
+def main(usuario=None):
+    """Raspagem completa (botão Scraper). `usuario` = conta que dispara, quando há.
+
+    Sem `usuario` cai na conta de catálogo declarada, igual ao ciclo automático.
+    """
+    mapear_cupons(usuario=usuario)
     # A aba Cupons lê o CupomNormalizado: projeta já aqui para os cupons aparecerem
     # mesmo quando este fluxo roda fora do ciclo automático (scrape_all).
     try:
         projetar_catalogo_cupons()
     except Exception as e:
         logger.warning("Projeção do catálogo de cupons falhou: %s", e)
-    cupons_qs = Cupom.objects.all().values(
-        "campanha_id", "titulo", "tipo_desconto", "valor_desconto", "valor_minimo", "link_original"
+    # Só campanha ativa: raspar produtos de cupom inativo gasta browser e enche o
+    # pool com itens que nunca poderão ser publicados com aquele cupom.
+    cupons_qs = Cupom.objects.filter(estado="ativo").values(
+        "campanha_id", "titulo", "tipo_desconto", "valor_desconto", "valor_minimo",
+        "desconto_maximo", "link_original",
     )
     if not cupons_qs.exists():
-        logger.warning("Nenhum cupom encontrado no banco")
+        logger.warning("Nenhum cupom ativo encontrado no banco")
         return
 
     # Cupons que já têm produtos scraped — podem ser pulados
@@ -842,6 +984,7 @@ def main():
             "desconto": desconto,
             "link_produtos": c["link_original"],
             "valor_minimo": c.get("valor_minimo") or 0.0,
+            "desconto_maximo": c.get("desconto_maximo"),
         })
 
     logger.info("%s cupons ja processados anteriormente; pulando", pulados)
@@ -851,11 +994,16 @@ def main():
         logger.info("Nada a fazer; todos os cupons ja tem produtos")
         return
 
-    caminho_auth = ml_auth_path()
+    # Aqui o browser é obrigatório (listagem de produtos do cupom), então a falta
+    # de conta de catálogo é erro imediato — com a instrução do que fazer.
+    from apps.accounts.ml_sessions import usuario_catalogo_ml
+    session_user = usuario if usuario is not None else usuario_catalogo_ml()
+    caminho_auth = ml_auth_path(session_user)
 
     resultados_pendentes = []
     total = len(cupons_pendentes)
-    with iniciar_browser(auth_path=caminho_auth, headless=True) as (page, context):
+    with iniciar_browser(auth_path=caminho_auth, headless=True,
+                         session_user=session_user) as (page, context):
         for i, cupom in enumerate(cupons_pendentes, 1):
             emitir_progresso(f"[PROGRESSO] Cupom {i}/{total} ({i*100//total}%)")
             resultado = listar_itens_por_cupom(cupom, page)

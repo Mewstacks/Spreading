@@ -21,6 +21,7 @@ from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_GET, require_POST
 
+from apps.accounts.tenant import organization_callable
 from apps.scrapers.models import (
     CliquePublicacao, ConfiguracaoEnvio, Cupom, LinkAfiliadoUsuario, Produto,
     Publicacao, ReceitaAfiliado, RelatorioSync, FonteIngestao, CupomNormalizado,
@@ -1220,7 +1221,10 @@ def enviar_agora_stream(request):
                 writer.flush()
                 q.put(None)
 
-        thread = threading.Thread(target=_run, daemon=True)
+        thread = threading.Thread(
+            target=organization_callable(request.organization.pk, _run),
+            daemon=True,
+        )
         thread.start()
         while True:
             line = q.get()
@@ -1303,7 +1307,7 @@ def enviar_produto_stream(request):
             elif r.get("precisa_login_wa"):
                 print("__WA_LOGIN__")  # a UI troca por "Reconectar WhatsApp"
 
-    return _sse_runner(_job)
+    return _sse_runner(_job, request.organization)
 
 
 @require_POST
@@ -1351,7 +1355,7 @@ def enviar_cupom_stream(request):
             elif resultado.get("precisa_login_wa"):
                 print("__WA_LOGIN__")  # a UI troca por "Reconectar WhatsApp"
 
-    return _sse_runner(_job)
+    return _sse_runner(_job, request.organization)
 
 
 @require_GET
@@ -1386,7 +1390,7 @@ def buscar_promocoes_stream(request):
                 print(f"  {slug} falhou: {e}")
         print(f"Concluído. {total} item(ns) novos no total.")
 
-    return _sse_runner(_job)
+    return _sse_runner(_job, request.organization)
 
 
 # Itens por tela em Promoções (ofertas e cupons).
@@ -1747,6 +1751,10 @@ def top_promocoes(request):
 def run_scraper_stream(request):
     """SSE endpoint — streams every print() from the scraper to the browser."""
 
+    # Resolve fora da thread: lá dentro não há request, e avaliar o SimpleLazyObject
+    # de `request.user` depois não é seguro.
+    usuario = request.user
+
     def _event_stream():
         q: queue.Queue = queue.Queue()
         writer = _QueueWriter(q)
@@ -1759,7 +1767,10 @@ def run_scraper_stream(request):
             asyncio.set_event_loop(asyncio.new_event_loop())
             try:
                 with redirect_stdout(writer):
-                    scrapper_main()
+                    # A raspagem de cupons de campanha exige sessão ML. No clique
+                    # manual usa a conta de quem clicou; no ciclo automático, a
+                    # conta de catálogo declarada.
+                    scrapper_main(usuario=usuario)
             except Exception:
                 logger.exception("Falha inesperada no scraper principal")
                 q.put("[ERRO] Falha inesperada ao processar a solicitação.")
@@ -1767,7 +1778,10 @@ def run_scraper_stream(request):
                 writer.flush()
                 q.put(None)  # sentinel
 
-        thread = threading.Thread(target=_run, daemon=True)
+        thread = threading.Thread(
+            target=organization_callable(request.organization.pk, _run),
+            daemon=True,
+        )
         thread.start()
 
         while True:
@@ -1830,7 +1844,10 @@ def scrape_ofertas_stream(request):
                 writer.flush()
                 q.put(None)
 
-        thread = threading.Thread(target=_run, daemon=True)
+        thread = threading.Thread(
+            target=organization_callable(request.organization.pk, _run),
+            daemon=True,
+        )
         thread.start()
         while True:
             line = q.get()
@@ -1845,7 +1862,7 @@ def scrape_ofertas_stream(request):
     return response
 
 
-def _sse_runner(fn):
+def _sse_runner(fn, organization):
     """Roda fn() capturando prints e streamando via SSE (reusa o padrão _QueueWriter)."""
     def _event_stream():
         q: queue.Queue = queue.Queue()
@@ -1864,7 +1881,10 @@ def _sse_runner(fn):
                 writer.flush()
                 q.put(None)
 
-        threading.Thread(target=_run, daemon=True).start()
+        threading.Thread(
+            target=organization_callable(organization, _run),
+            daemon=True,
+        ).start()
         while True:
             line = q.get()
             if line is None:
@@ -2041,7 +2061,7 @@ def scrape_cupons_codigo_stream(request):
                     print(f"Aviso: geração de links em {slug} falhou ({exc}).")
         print(frase_resumo_afiliacao(usuario))
 
-    return _sse_runner(_job)
+    return _sse_runner(_job, request.organization)
 
 
 def _produtos_sem_link(usuario, origens=None, limite=80, macros=None):
@@ -2087,7 +2107,7 @@ def buscar_termo_stream(request):
         mp.buscar_por_termo(cfg.termo_busca, min_desconto=int(cfg.min_desconto_percent),
                             macro=macro, usuario=cfg.owner)
 
-    return _sse_runner(_job)
+    return _sse_runner(_job, request.organization)
 
 
 @require_GET
@@ -2143,4 +2163,4 @@ def gerar_links_stream(request):
                 print(f"Aviso: geração de links em {slug} falhou ({exc}).")
         print(frase_resumo_afiliacao(usuario))
 
-    return _sse_runner(_job)
+    return _sse_runner(_job, request.organization)

@@ -20,6 +20,53 @@ def response(status, payload, headers=None):
     return result
 
 
+class ParserDeDinheiroTests(TestCase):
+    """Ponto/vírgula em texto brasileiro: a origem dos "valores incompatíveis"."""
+
+    def test_ponto_de_milhar_nao_vira_decimal(self):
+        from apps.scrapers.coupon_rules import numero_br
+
+        self.assertEqual(numero_br("1.199"), 1199.0)
+        self.assertEqual(numero_br("R$ 2.000"), 2000.0)
+        self.assertEqual(numero_br("10.000"), 10000.0)
+        self.assertEqual(numero_br("1.234,56"), 1234.56)
+        self.assertEqual(numero_br("R$ 1.234.567,89"), 1234567.89)
+
+    def test_decimal_com_ponto_continua_decimal(self):
+        """Feed do Google manda '129.90': dois dígitos, não é milhar."""
+        from apps.scrapers.coupon_rules import numero_br
+
+        self.assertEqual(numero_br("129.90"), 129.90)
+        self.assertEqual(numero_br("99,90"), 99.90)
+        self.assertEqual(numero_br("50"), 50.0)
+        self.assertEqual(numero_br("1.5"), 1.5)
+        self.assertIsNone(numero_br(""))
+        self.assertIsNone(numero_br(None))
+
+    def test_preco_do_feed_le_o_numero_inteiro(self):
+        from apps.scrapers.awin import _preco_feed
+
+        # O regex antigo parava em "1.234" e o produto entrava valendo R$ 1,23.
+        self.assertEqual(_preco_feed("1.234,56 BRL"), 1234.56)
+        self.assertEqual(_preco_feed("129.90 BRL"), 129.90)
+        self.assertEqual(_preco_feed(89.9), 89.9)
+        self.assertEqual(_preco_feed(""), 0.0)
+
+    def test_regra_de_cupom_awin_le_minimo_em_milhar(self):
+        from apps.scrapers.awin import _discount
+        from apps.scrapers.coupon_rules import normalizar_regras_cupom
+
+        kind, value, minimum = _discount(
+            "r$ 150 off em tvs acima de r$ 2.499 para novos clientes")
+        regras = normalizar_regras_cupom(
+            {"tipo_desconto": kind, "valor_desconto": value,
+             "valor_minimo": minimum})
+
+        self.assertEqual(regras["tipo_desconto"], "fixo")
+        self.assertEqual(regras["valor_desconto"], 150.0)
+        self.assertEqual(regras["valor_minimo"], 2499.0)
+
+
 @override_settings(SECRETS_FERNET_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                    AWIN_INTEGRATION_ENABLED=True)
 class AwinCatalogTests(TestCase):

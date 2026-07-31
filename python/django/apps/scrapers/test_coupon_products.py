@@ -167,6 +167,64 @@ class CouponPreparationTests(TestCase):
                     "valor_minimo": 101, "modo_resgate": "codigo"})
         self.assertIsNone(calcular_precos(minimo, produto))
 
+    def test_teto_do_payload_limita_o_desconto_anunciado(self):
+        """10% num item de R$ 500 com "Limite de R$ 10" abatem R$ 10, não R$ 50."""
+        from apps.scrapers.coupon_products import calcular_precos
+
+        produto = self._product(self.user, preco_sem_desconto=600,
+                                preco_com_cupom=500)
+        cupom = self._coupon(
+            codigo="CASA10", external_id="teto-real",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 10,
+                    "desconto_maximo": 10, "valor_minimo": 89.90,
+                    "modo_resgate": "codigo"})
+        self.assertEqual(calcular_precos(cupom, produto)[2], Decimal("490.00"))
+
+    def test_compra_minima_em_milhar_bloqueia_item_barato(self):
+        """R$ 2.000 de mínimo lidos como R$ 2,00 liberavam qualquer produto."""
+        from apps.scrapers.coupon_products import calcular_precos
+
+        produto = self._product(self.user, preco_sem_desconto=350,
+                                preco_com_cupom=300)
+        cupom = self._coupon(
+            codigo="APPLE250", external_id="minimo-milhar",
+            regras={"tipo_desconto": "fixo", "valor_desconto": 250,
+                    "valor_minimo": 2000.0, "modo_resgate": "codigo"})
+        self.assertIsNone(calcular_precos(cupom, produto))
+
+    def test_preco_base_do_cupom_e_a_vitrine_e_nao_acumula_desconto(self):
+        """`preco_com_cupom` é a vitrine; o cupom só pode ser descontado uma vez."""
+        from apps.scrapers.coupon_products import calcular_precos
+
+        produto = self._product(self.user, origem="cupom",
+                                preco_sem_desconto=200, preco_com_cupom=150)
+        cupom = self._coupon(
+            codigo="MEIA20", external_id="sem-duplo",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 20,
+                    "modo_resgate": "codigo"})
+        original, atual, final = calcular_precos(cupom, produto)
+        self.assertEqual((original, atual, final),
+                         (Decimal("200.00"), Decimal("150.00"), Decimal("120.00")))
+
+    def test_codigo_precisa_aparecer_como_palavra_inteira(self):
+        from apps.scrapers.coupon_products import _promocao_confirma_codigo
+
+        cupom = self._coupon(codigo="PET15", external_id="palavra-inteira")
+        curto = self._coupon(codigo="PET", external_id="curto-demais")
+        dentro = self._product(
+            self.user, asin="ASINSUB",
+            link_produto="https://www.amazon.com.br/dp/ASINSUB",
+            evidencia={"promotional_text": "Oferta CARPET15 por tempo limitado"})
+        exato = self._product(
+            self.user, asin="ASINEXATO",
+            link_produto="https://www.amazon.com.br/dp/ASINEXATO",
+            evidencia={"promotional_text": "Use o cupom PET15 no carrinho"})
+
+        self.assertFalse(_promocao_confirma_codigo(cupom, dentro))
+        self.assertTrue(_promocao_confirma_codigo(cupom, exato))
+        # Código de 3 letras não prova associação nenhuma.
+        self.assertFalse(_promocao_confirma_codigo(curto, exato))
+
     def test_lote_nao_e_bloqueado_por_promocoes_sem_codigo(self):
         from apps.scrapers.coupon_products import preparar_lote
 
@@ -204,7 +262,8 @@ class CouponMessageTests(SimpleTestCase):
             preco_sem_desconto=197.90, preco_com_cupom=100,
         )
         relacao = SimpleNamespace(
-            preco_original=Decimal("197.90"), preco_final=Decimal("83.54"))
+            preco_original=Decimal("197.90"), preco_atual=Decimal("100.00"),
+            preco_final=Decimal("83.54"))
         return cupom, [{"produto": produto, "relacao": relacao,
                         "link": "https://meli.la/1GWNQCg"}]
 
@@ -216,7 +275,9 @@ class CouponMessageTests(SimpleTestCase):
 
         self.assertTrue(mensagem.startswith("*Cupom Mercado Livre*"))
         self.assertIn("📖 Livro Chama de Ferro Capa Dura Edição Especial", mensagem)
-        self.assertIn("🛒 De R$197,90 por R$83,54", mensagem)
+        # "De" é o preço de VITRINE (100), não o de tabela (197,90): a diferença
+        # anunciada tem que ser exatamente o que o cupom abate no checkout.
+        self.assertIn("🛒 De R$100 por R$83,54", mensagem)
         self.assertIn("➡️ https://meli.la/1GWNQCg", mensagem)
         self.assertTrue(mensagem.endswith("🎟 Use o cupom *PRESENTE*"))
         self.assertEqual(mensagem.count("*"), 4)

@@ -23,6 +23,61 @@
   </form>
 </details>
 
+<details class="card" style="margin-bottom:1.1rem;" {% if not catalogo_definido %}open{% endif %}>
+  <summary style="cursor:pointer;font-weight:600;font-size:.95rem;display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;">
+    <i data-lucide="ticket"></i> Catálogo de cupons do Mercado Livre
+    {% if catalogo_definido %}
+      <span class="dot on"></span><span style="font-weight:400;color:var(--muted);font-size:.85rem;">{{ catalogo_definido }}</span>
+    {% else %}
+      <span class="dot off"></span><span style="font-weight:400;color:var(--muted);font-size:.85rem;">nenhuma conta definida</span>
+    {% endif %}
+  </summary>
+
+  <p style="margin:.9rem 0;font-size:.85rem;color:var(--muted);line-height:1.5;">
+    A página de cupons do ML exige login, mas a lista de cupons é a mesma para todas
+    as contas. Escolha UMA organização: a sessão dela raspa o catálogo uma vez para
+    todo mundo. Sem isso, a raspagem de cupons de campanha não roda.
+  </p>
+
+  <form method="post" action="{% url 'superadmin-catalogo-ml' %}"
+        style="display:flex;flex-direction:column;gap:.6rem;">
+    {% csrf_token %}
+    {% for org in orgs_catalogo %}
+    <label style="display:flex;align-items:center;gap:.6rem;padding:.7rem;min-height:44px;
+                  border:1px solid var(--border);border-radius:8px;cursor:pointer;
+                  font-size:.9rem;{% if org.fonte %}border-color:var(--green,#22c55e);{% endif %}">
+      <input type="radio" name="organization" value="{{ org.id }}"
+             {% if org.fonte %}checked{% endif %}
+             {% if org.status != 'active' %}disabled{% endif %}>
+      <span style="flex:1;min-width:0;">
+        <strong style="display:block;overflow:hidden;text-overflow:ellipsis;">{{ org.nome }}</strong>
+        <span style="color:var(--muted);font-size:.8rem;">{{ org.slug }}</span>
+      </span>
+      {% if org.tem_sessao %}
+        <span class="dot on" title="Sessão ML ativa"></span>
+      {% else %}
+        <span class="dot off" title="Sem sessão do Mercado Livre"></span>
+      {% endif %}
+    </label>
+    {% endfor %}
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.3rem;">
+      <button class="btn btn-sm btn-green" type="submit" style="min-height:44px;">
+        <i data-lucide="check"></i> Definir fonte
+      </button>
+      <button class="btn btn-sm btn-ghost" type="submit" name="organization" value=""
+              style="min-height:44px;">
+        <i data-lucide="x"></i> Limpar
+      </button>
+    </div>
+  </form>
+
+  <p style="margin:.9rem 0 0;font-size:.82rem;color:var(--muted);line-height:1.5;">
+    O ponto verde indica sessão do ML ativa. Se a conta escolhida estiver sem
+    sessão, conecte-a em <strong>Conexão Mercado Livre</strong> — a raspagem passa a
+    rodar sozinha no ciclo automático.
+  </p>
+</details>
+
 <div class="card">
   <div class="card-head">
     <h2><i data-lucide="users"></i> Usuários</h2>
