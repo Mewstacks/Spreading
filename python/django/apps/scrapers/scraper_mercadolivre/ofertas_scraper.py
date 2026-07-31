@@ -14,9 +14,9 @@ import logging
 from django.db import OperationalError, connections
 
 from apps.scrapers.auxiliar import iniciar_browser, pausa_humana
+from apps.scrapers.ml_auth import storage_state
 from apps.scrapers.models import Produto
 from apps.scrapers.progresso import emitir_progresso
-from apps.scrapers.session_paths import ml_auth_path
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 logger = logging.getLogger(__name__)
@@ -226,6 +226,16 @@ SUBNICHOS = {
 }
 
 
+# Páginas seguidas sem nenhum card antes de considerar o feed encerrado.
+#
+# Uma página em branco NÃO é o fim do feed: /ofertas devolve ~40 cards por página até
+# a 40ª, e quando vem vazia é quase sempre challenge do anti-bot (o IP de datacenter da
+# Fly é desafiado — ver auxiliar.iniciar_browser) ou render que não completou. Parar na
+# primeira vazia jogava fora todo o resto da varredura: um soluço na página 3 custava
+# ~1.480 ofertas. Só encerramos depois desta quantidade de vazias CONSECUTIVAS.
+VAZIAS_PARA_PARAR = 3
+
+
 def _preco_float(texto_frac, texto_cents="0"):
     frac = (texto_frac or "0").replace(".", "").strip()
     cents = (texto_cents or "0").strip() or "0"
@@ -408,15 +418,18 @@ def _upsert_ofertas(coletados):
     return n
 
 
-def mapear_ofertas(max_paginas=40, substituir=True):
+def mapear_ofertas(max_paginas=40, substituir=True, usuario=None):
     """Raspa N páginas de /ofertas. substituir=True (lane LENTA): regrava todo o feed.
-    substituir=False (lane RÁPIDA/flash, B3): upsert por link, sem zerar o feed."""
+    substituir=False (lane RÁPIDA/flash, B3): upsert por link, sem zerar o feed.
+
+    /ofertas é público: a sessão aqui é opcional (melhora preço/frete
+    personalizado quando existe), não requisito — por isso não avisamos quando
+    falta, ao contrário da raspagem de cupons."""
     logger.info("Iniciando raspagem de ofertas ML (%s)", "full" if substituir else "flash")
     coletados = []
-    caminho_auth = ml_auth_path()
 
-    with iniciar_browser(auth_path=caminho_auth, headless=True,
-                         validar_sessao=False) as (page, context):
+    vazias_seguidas = 0
+    with iniciar_browser(storage_state=storage_state(usuario), headless=True) as (page, context):
         for n in range(1, max_paginas + 1):
             emitir_progresso(f"[PROGRESSO] Ofertas página {n}/{max_paginas} ({n*100//max_paginas}%)")
             try:
@@ -428,11 +441,25 @@ def mapear_ofertas(max_paginas=40, substituir=True):
                     pass
             except Exception as e:
                 logger.warning("Erro ao carregar pagina de ofertas ML %s: %s", n, e)
+                # Falha de carregamento entra na mesma contagem das vazias: um
+                # bloqueio total encerra em 3 páginas em vez de gastar 40 timeouts.
+                vazias_seguidas += 1
+                if vazias_seguidas >= VAZIAS_PARA_PARAR:
+                    logger.warning("%s páginas seguidas sem ofertas; encerrando na %s",
+                                   vazias_seguidas, n)
+                    break
                 continue
             cards = _coletar_cards(page)
             if not cards:
-                logger.info("Pagina %s sem ofertas; parando", n)
-                break
+                vazias_seguidas += 1
+                if vazias_seguidas >= VAZIAS_PARA_PARAR:
+                    logger.info("%s páginas seguidas sem ofertas; fim do feed na %s",
+                                vazias_seguidas, n)
+                    break
+                logger.info("Pagina %s sem ofertas; seguindo para a proxima", n)
+                pausa_humana()
+                continue
+            vazias_seguidas = 0
             coletados.extend(cards)
             pausa_humana()  # ritmo humano entre páginas (anti-bloqueio)
 
@@ -451,24 +478,26 @@ def _slug_busca(termo):
     return re.sub(r"[^a-z0-9]+", "-", t).strip("-")
 
 
-def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None):
+def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None,
+                     usuario=None):
     """
     Para cada termo (lista separada por vírgula) raspa a BUSCA do ML com filtro de
     desconto e salva como origem='busca'. Atualiza só os itens 'busca' que casam com
     estes termos (não mexe no feed nem nos cupons-código).
+
+    A busca é pública; a sessão é opcional (ver mapear_ofertas).
     """
     termos = [t.strip() for t in (termo_busca or "").split(",") if t.strip()]
     if not termos:
         return 0
-    caminho_auth = ml_auth_path()
     coletados = []
 
-    with iniciar_browser(auth_path=caminho_auth, headless=True,
-                         validar_sessao=False) as (page, context):
+    with iniciar_browser(storage_state=storage_state(usuario), headless=True) as (page, context):
         for termo in termos:
             slug = _slug_busca(termo)
             if not slug:
                 continue
+            vazias_seguidas = 0  # a tolerância é POR TERMO
             for p in range(max_paginas):
                 desde = p * 50 + 1
                 url = f"https://lista.mercadolivre.com.br/{slug}_Discount_{int(min_desconto)}-100"
@@ -483,10 +512,20 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None):
                         pass
                 except Exception as e:
                     logger.warning("Erro na busca ML por termo '%s': %s", termo, e)
-                    break
+                    vazias_seguidas += 1
+                    if vazias_seguidas >= VAZIAS_PARA_PARAR:
+                        break
+                    continue
                 cards = _coletar_cards(page)
                 if not cards:
-                    break
+                    # Mesma razão de mapear_ofertas: a 1ª página em branco costuma ser
+                    # bloqueio/render, não fim dos resultados do termo.
+                    vazias_seguidas += 1
+                    if vazias_seguidas >= VAZIAS_PARA_PARAR:
+                        break
+                    pausa_humana()
+                    continue
+                vazias_seguidas = 0
                 coletados.extend(cards)
                 pausa_humana()  # ritmo humano entre páginas (anti-bloqueio)
 

@@ -3,32 +3,33 @@
 
 {% block head_extra %}
 <style>
-  .auth-wrap { max-width: 26rem; margin: 2rem auto; }
-  .auth-head { text-align: center; margin-bottom: 1.4rem; }
-  .auth-head h1 { font-size: 1.5rem; margin: 0 0 .3rem; font-weight: 700; letter-spacing: -.02em; }
-  .auth-head p { color: var(--muted); font-size: .9rem; margin: 0; }
+  .auth-wrap { max-width: 26.5rem; margin: 2.5rem auto; }
+  .auth-head { text-align: center; margin-bottom: 1.5rem; }
+  .auth-head h1 { margin: .55rem 0 0; font-size: 1.55rem; font-weight: 600; letter-spacing: -.025em; line-height: 1.15; text-wrap: balance; }
+  .auth-head h1 em { font-family: var(--serif); font-style: italic; font-weight: 400; }
+  .auth-head .sub { color: var(--muted); font-size: 13.5px; margin: .45rem 0 0; line-height: 1.5; text-wrap: pretty; }
+  .auth-card { padding: 1.5rem 1.6rem; }
   .auth-field { margin-bottom: 1rem; }
-  .auth-field label { font-size: .8rem; }
-  .auth-foot { margin-top: 1.2rem; text-align: center; font-size: .85rem; color: var(--muted); }
-  .auth-foot a { color: var(--accent); text-decoration: none; font-weight: 600; }
-  .field-err { color: var(--red); font-size: .78rem; margin-top: .3rem; }
-  .btn-block { width: 100%; }
+  .auth-foot { margin-top: 1.3rem; text-align: center; font-size: 13px; color: var(--muted); }
+  .auth-foot a { color: var(--accent); text-decoration: none; font-weight: 500; }
+  .auth-foot a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .btn-block { width: 100%; margin-top: .35rem; }
+  .field-err { display: flex; align-items: flex-start; gap: .45rem; color: var(--red); font-size: 12.5px; margin-top: .35rem; line-height: 1.45; }
+  .field-err::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--red); flex: none; margin-top: .45em; }
 </style>
 {% endblock %}
 
 {% block content %}
 <div class="auth-wrap">
   <div class="auth-head">
-    <h1>Entrar</h1>
-    <p>Acesse seu painel Spreading.</p>
+    <span class="eyebrow">Acesso</span>
+    <h1>Entrar no <em>painel</em></h1>
+    <p class="sub">Acesse sua conta Spreading para gerenciar seus envios.</p>
   </div>
 
-  <div class="card">
-    {% if messages %}
-      {% for m in messages %}<div class="alert alert-warn"><i data-lucide="alert-triangle"></i>{{ m }}</div>{% endfor %}
-    {% endif %}
+  <div class="card auth-card">
     {% if form.non_field_errors %}
-      <div class="alert alert-warn"><i data-lucide="alert-triangle"></i>Usuário ou senha inválidos.</div>
+      <div class="alert alert-error"><i data-lucide="alert-circle"></i><span><strong>Não foi possível entrar.</strong> Usuário ou senha inválidos.</span></div>
     {% endif %}
 
     <form method="post" novalidate>
@@ -37,19 +38,23 @@
         <label for="{{ form.username.id_for_label }}">Usuário</label>
         <input type="text" name="username" id="{{ form.username.id_for_label }}"
                autocomplete="username" autofocus required value="{{ form.username.value|default:'' }}">
+        {% for e in form.username.errors %}<div class="field-err">{{ e }}</div>{% endfor %}
       </div>
       <div class="auth-field">
         <label for="{{ form.password.id_for_label }}">Senha</label>
         <input type="password" name="password" id="{{ form.password.id_for_label }}"
                autocomplete="current-password" required>
+        {% for e in form.password.errors %}<div class="field-err">{{ e }}</div>{% endfor %}
       </div>
       <input type="hidden" name="next" value="{{ next }}">
-      <button type="submit" class="btn btn-blue btn-block"><i data-lucide="log-in"></i> Entrar</button>
+      <button type="submit" class="btn btn-accent btn-block"><i data-lucide="log-in"></i> Entrar</button>
     </form>
+  </div>
 
-    <div class="auth-foot">
-      <a href="{% url 'password_reset' %}">Esqueci a senha</a>
-    </div>
+  <div class="auth-foot">
+    <a href="{% url 'password_reset' %}">Esqueci a senha</a>
+    <span aria-hidden="true"> · </span>
+    <a href="{% url 'signup' %}">Criar conta</a>
   </div>
 </div>
 {% endblock %}

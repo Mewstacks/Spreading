@@ -2,7 +2,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from apps.scrapers.models import (
@@ -76,6 +76,14 @@ class SourcePipelineTests(TestCase):
         self.assertEqual(len(offers), 2)
         self.assertEqual(offers[0].image_url, "https://m.media-amazon.com/a.jpg")
         self.assertEqual(offers[0].evidence["coupon_final_price"], 90.0)
+        # A vitrine e o preço pago viajam em campos distintos: 'current' alimenta
+        # os gates de desconto, 'effective' é o que a mensagem publica.
+        self.assertEqual(offers[0].current_price, 100.0)
+        self.assertEqual(offers[0].effective_price, 90.0)
+        persist_items([offers[0]], owner=self.user)
+        produto = Produto.objects.get(owner=self.user, asin="B012345678")
+        self.assertEqual(produto.preco_com_cupom, 100.0)
+        self.assertEqual(produto.preco_efetivo, 90.0)
         self.assertEqual(len(coupons), 1)
         self.assertEqual(coupons[0].evidence["asins"], ["B012345678", "B087654321"])
         self.assertEqual(coupons[0].coupon_rules["modo_resgate"], "ativacao")
@@ -329,3 +337,432 @@ class SourcePipelineTests(TestCase):
             result = _rodar_scrape()
         self.assertEqual(result, {"sucessos": 1, "falhas": ["amazon"]})
         expire.assert_called_once()
+
+
+class CouponPagePayloadTests(TestCase):
+    """A página /ofertas/cupons virou 'smart-coupon' renderizado no cliente: o DOM
+    hidratado não tem mais `.poly-card`, então a coleta tem de vir do payload SSR."""
+
+    # Recorte fiel de um cupom do carrossel oficial (campos e grafia reais).
+    CUPOM = {
+        "campaign_id": "13975432",
+        "title": {"text": "60% OFF"},
+        "category": "Itens para Casa",
+        "benefit_mode": "PERCENT",
+        "status": {"id": "ACTIVE"},
+        "expiration_date": "2026-08-31T02:59:00Z",
+        "amount": {"min_amount": "Compra mínima R$ 1.099",
+                   "cap_amount": "Limite de desconto R$ 63"},
+        "action": {"type": "link", "value": (
+            "https://lista.mercadolivre.com.br/_Container_13975432"
+            "?coupon_campaign_id=13975432#navigation_id=coupons-carousel-1_x")},
+        "segmentations": {"container": {"id": "1708749", "name": "13975432"},
+                          "total_items": 30},
+    }
+
+    def _html(self, *cupons):
+        import json
+        payload = {"appProps": {"pageProps": {"floxPreloadedState": {
+            "@meli/web/flox/FLOX_STATE": {"brickStack": {
+                # A chave carrega um timestamp que muda a cada render — o parser
+                # não pode depender dela.
+                "coupons-carousel-1780432282667": {"data": {"coupons": list(cupons)}},
+            }}}}}}
+        return ('<script id="__NORDIC_RENDERING_CTX__">_n.ctx.r='
+                + json.dumps(payload)
+                + ';_n.ctx.r.assets.manifest=new Map([]);</script>')
+
+    def test_payload_yields_coupon_with_container_url(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import (
+            _cupons_do_payload, _normalizar_cupom, _payload_nordic,
+        )
+        dados = _payload_nordic(self._html(self.CUPOM))
+        brutos = _cupons_do_payload(dados)
+        self.assertEqual(len(brutos), 1)
+
+        cupom = _normalizar_cupom(brutos[0])
+        self.assertEqual(cupom["campanha_id"], "13975432")
+        self.assertEqual(cupom["tipo_desconto"], "porcentagem")
+        self.assertEqual(cupom["valor_desconto"], 60.0)
+        self.assertEqual(cupom["valor_minimo"], 1099.0)   # "R$ 1.099" é milhar, não 1,099
+        self.assertEqual(cupom["desconto_maximo"], 63.0)
+        # O fragmento de telemetria do carrossel não pode entrar na URL do container:
+        # é ele que casar_cupons_container abre para descobrir os produtos.
+        self.assertEqual(
+            cupom["container_url"],
+            "https://lista.mercadolivre.com.br/_Container_13975432?coupon_campaign_id=13975432")
+
+    def test_finished_or_non_listing_coupons_are_dropped(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import _normalizar_cupom
+        self.assertIsNone(_normalizar_cupom({**self.CUPOM, "status": {"id": "FINISHED"}}))
+        # Vitrine social não é lista de produtos: publicar levaria a clique sem desconto.
+        self.assertIsNone(_normalizar_cupom({**self.CUPOM, "action": {
+            "type": "link", "value": "https://www.mercadolivre.com.br/social/loja"}}))
+
+    def test_condicao_de_publico_e_persistida(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import (
+            _normalizar_cupom, _salvar_cupons_smart,
+        )
+
+        bruto = {
+            **self.CUPOM,
+            "campaign_id": "restrito-app",
+            "title": {"text": "20% OFF somente no app para novos clientes"},
+        }
+        normalizado = _normalizar_cupom(bruto)
+        self.assertTrue(normalizado["restrito"])
+        _salvar_cupons_smart([normalizado])
+        self.assertTrue(
+            CupomNormalizado.objects.get(external_id="campanha:restrito-app").restrito,
+        )
+
+    def test_malformed_page_never_raises(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import _payload_nordic
+        self.assertIsNone(_payload_nordic("<html>sem script</html>"))
+        self.assertIsNone(_payload_nordic(object()))
+        self.assertIsNone(_payload_nordic(
+            '<script id="__NORDIC_RENDERING_CTX__">_n.ctx.r={quebrado;_n.ctx.r.assets</script>'))
+
+    def test_coupons_are_persisted_with_container_rules(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import (
+            _cupons_do_payload, _normalizar_cupom, _payload_nordic, _salvar_cupons_smart,
+        )
+        brutos = _cupons_do_payload(_payload_nordic(self._html(self.CUPOM)))
+        total = _salvar_cupons_smart([_normalizar_cupom(b) for b in brutos])
+
+        self.assertEqual(total, 1)
+        cupom = CupomNormalizado.objects.get(external_id="campanha:13975432")
+        self.assertEqual(cupom.estado, "ativo")
+        # Token opaco de ativação nunca vira "código para digitar no checkout".
+        self.assertEqual(cupom.codigo, "")
+        self.assertEqual(cupom.regras["modo_resgate"], "ativacao")
+        self.assertFalse(cupom.regras["is_mar_aberto"])
+        self.assertTrue(cupom.regras["container_url"].endswith("coupon_campaign_id=13975432"))
+
+
+class OfferFeedPaginationTests(TestCase):
+    """O feed /ofertas tem ~40 páginas cheias; uma página em branco é quase sempre
+    challenge do anti-bot, não fim do catálogo."""
+
+    def _rodar(self, paginas_de_cards, max_paginas=6):
+        from contextlib import contextmanager
+        from unittest.mock import MagicMock
+        from apps.scrapers.scraper_mercadolivre import ofertas_scraper as mod
+
+        @contextmanager
+        def fake_browser(*a, **kw):
+            yield MagicMock(), MagicMock()
+
+        with patch.object(mod, "iniciar_browser", fake_browser), \
+             patch.object(mod, "pausa_humana"), \
+             patch.object(mod, "storage_state", return_value=None), \
+             patch.object(mod, "_coletar_cards", side_effect=paginas_de_cards), \
+             patch.object(mod, "_salvar", side_effect=lambda c, **kw: len(c)) as salvar:
+            total = mod.mapear_ofertas(max_paginas=max_paginas)
+        return total, salvar
+
+    def _card(self, i):
+        return {"link_produto": f"https://ml/{i}", "nome": f"Item {i}"}
+
+    def test_single_blank_page_does_not_truncate_the_feed(self):
+        # Antes: a página 2 vazia encerrava tudo e o feed vinha com 1 item.
+        paginas = [[self._card(1)], [], [self._card(2)], [self._card(3)],
+                   [self._card(4)], [self._card(5)]]
+        total, _ = self._rodar(paginas)
+        self.assertEqual(total, 5)
+
+    def test_three_blank_pages_in_a_row_end_the_scan(self):
+        paginas = [[self._card(1)], [], [], [], [self._card(9)], [self._card(10)]]
+        total, salvar = self._rodar(paginas)
+        self.assertEqual(total, 1)
+        # Parou na 4ª página: não gastou as duas restantes.
+        self.assertEqual(len(salvar.call_args[0][0]), 1)
+
+
+class AmazonDiscountRecoveryTests(TestCase):
+    """`savingBasis` é opcional no catalog/v1; sem reconstruir o 'De:' o feed
+    descartava ofertas que a própria API já filtrou por minSavingPercent."""
+
+    def _item(self, price):
+        return {"asin": "B0RECOVER1",
+                "itemInfo": {"title": {"displayValue": "Fone"}},
+                "offersV2": {"listings": [{"price": price}]}}
+
+    def test_percentage_only_item_keeps_its_discount(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+        m = az._mapear_item(self._item({"money": {"amount": 80},
+                                        "savings": {"percentage": 20}}))
+        self.assertEqual(m["preco_com_cupom"], 80)
+        self.assertEqual(round(m["preco_sem_desconto"], 2), 100.0)
+
+    def test_absolute_savings_item_keeps_its_discount(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+        m = az._mapear_item(self._item({"money": {"amount": 80},
+                                        "savings": {"money": {"amount": 20}}}))
+        self.assertEqual(m["preco_sem_desconto"], 100)
+
+    def test_item_without_any_discount_signal_stays_flat(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+        m = az._mapear_item(self._item({"money": {"amount": 80}}))
+        self.assertEqual(m["preco_sem_desconto"], m["preco_com_cupom"])
+
+    def test_saving_basis_still_wins_when_present(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+        m = az._mapear_item(self._item({"money": {"amount": 80},
+                                        "savingBasis": {"money": {"amount": 100}},
+                                        "savings": {"percentage": 20}}))
+        self.assertEqual(m["preco_sem_desconto"], 100)
+
+
+class VerificacaoDeLinksEhLanePropriaTests(TestCase):
+    """A verificação NÃO pode depender de haver link novo para gerar.
+
+    Era um passageiro de _rodar_links: ficava depois do `if not pendentes: continue`,
+    então bastava a fila de geração esvaziar (todo produto já com link) para a
+    verificação nunca mais rodar. Em homologação isso deixou 287 links gerados com
+    6 verificados — e a tela de Promoções só lista item com verificado_ok=True.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("verificador", password="test")
+        self.user.perfil.marcar_verificado()
+
+    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_links_pendentes")
+    def test_verifica_mesmo_sem_nenhum_produto_para_gerar(self, verificar):
+        """O caso exato do bug: fila de geração vazia."""
+        from apps.scrapers.management.commands.automacao import _rodar_verificacao_links
+        verificar.return_value = {"aprovados": 3, "reprovados": 1, "transitorios": 0}
+
+        total = _rodar_verificacao_links(limite=40)
+
+        verificar.assert_called_once()
+        self.assertEqual(total["aprovados"], 3)
+
+    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_links_pendentes")
+    def test_nao_exige_sessao_do_mercado_livre(self, verificar):
+        """Sem sessão ML o usuário ainda tem centenas de links esperando veredito.
+        A verificação abre a página pública do destino — exigir sessão os manteria
+        invisíveis sem motivo (a geração é que precisa do Link Builder logado)."""
+        from apps.scrapers.management.commands.automacao import _rodar_verificacao_links
+        verificar.return_value = {"aprovados": 1, "reprovados": 0, "transitorios": 0}
+
+        with patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=False):
+            total = _rodar_verificacao_links(limite=40)
+
+        verificar.assert_called_once()
+        self.assertEqual(total["aprovados"], 1)
+
+    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_links_pendentes")
+    def test_falha_de_um_usuario_nao_derruba_os_outros(self, verificar):
+        from apps.scrapers.management.commands.automacao import _rodar_verificacao_links
+        outro = get_user_model().objects.create_user("outro-verif", password="test")
+        outro.perfil.marcar_verificado()
+        verificar.side_effect = [
+            RuntimeError("browser caiu"),
+            {"aprovados": 2, "reprovados": 0, "transitorios": 0},
+        ]
+
+        total = _rodar_verificacao_links(limite=40)
+
+        self.assertEqual(verificar.call_count, 2)
+        self.assertEqual(total["aprovados"], 2)
+
+    def test_geracao_nao_verifica_mais(self):
+        """_rodar_links cuida só de gerar; quem verifica é a lane própria. Se alguém
+        reintroduzir a chamada lá dentro, o acoplamento volta."""
+        import inspect
+        from apps.scrapers.management.commands import automacao
+        fonte = inspect.getsource(automacao._rodar_links)
+        self.assertNotIn("verificar_links_pendentes", fonte)
+
+
+class GerarLinksNaoSeguraTransacaoTests(TestCase):
+    """O job de gerar links passa MINUTOS no Link Builder sem tocar no banco.
+
+    Se o tenant for instalado com `transaction.atomic()` aberto (o padrão de
+    organization_context), essa transação fica `idle in transaction` o tempo todo e
+    o proxy da Fly derruba o socket. E o pior: dentro de uma transação o Django NÃO
+    fecha a conexão — só marca `closed_in_transaction` — então nenhuma tentativa de
+    renovar tem efeito, e toda query seguinte estoura "the connection is closed".
+
+    A saída é a mesma que o live view do ML já usava: escopo apenas anotado, e cada
+    ida ao banco reinstalando o tenant numa transação de milissegundos.
+    """
+
+    def test_job_de_links_nao_segura_transacao(self):
+        import inspect
+        from apps.scrapers import views
+        fonte = inspect.getsource(views.gerar_links_stream)
+        self.assertIn("segurar_transacao=False", fonte)
+
+    def test_idas_ao_banco_passam_por_executar_no_tenant(self):
+        """Sem transação não há GUC de tenant: leitura direta seria filtrada pela
+        RLS e devolveria zero produto."""
+        import inspect
+        from apps.scrapers import views
+        fonte = inspect.getsource(views.gerar_links_stream)
+        codigo = " ".join(l for l in fonte.split("\n")
+                          if not l.strip().startswith("#")).split()
+        codigo = " ".join(codigo)   # normaliza quebras de linha da chamada
+        self.assertIn("executar_no_tenant( _produtos_sem_link", codigo)
+        self.assertIn("executar_no_tenant(frase_resumo_afiliacao", codigo)
+
+    def test_modo_sem_transacao_apenas_anota_o_escopo(self):
+        """No modo sem transação o tenant fica SUSPENSO, não instalado: nenhum GUC
+        e nenhuma transação presos durante os minutos de browser. Quem grava o
+        reinstala via executar_no_tenant.
+
+        (Não dá para medir `in_atomic_block` aqui: o próprio TestCase envolve tudo
+        numa transação. O que se observa é o modo do escopo.)"""
+        from apps.accounts.tenant import (
+            current_organization_id, organization_callable, _tenant_suspenso,
+        )
+        from apps.accounts.models import organization_for_user
+
+        user = get_user_model().objects.create_user("semtrans", password="test")
+        org = organization_for_user(user)
+        visto = {}
+
+        def _corpo():
+            visto["instalado"] = current_organization_id()
+            visto["suspenso"] = (_tenant_suspenso.get() or (None, None))[0]
+
+        organization_callable(org.pk, _corpo, segurar_transacao=False)()
+        self.assertIsNone(visto["instalado"])
+        self.assertEqual(visto["suspenso"], str(org.pk))
+
+        organization_callable(org.pk, _corpo, segurar_transacao=True)()
+        self.assertEqual(visto["instalado"], str(org.pk))
+
+
+class MensagensDoGerarLinksTests(TransactionTestCase):
+    """Anti-bot e sessão morta pedem AÇÕES DIFERENTES do usuário: esperar vs
+    reconectar. Unificar os dois num "[ERRO] sessão expirada" com link de
+    Reconectar fazia o usuário refazer um login que estava perfeito.
+
+    TransactionTestCase (e não TestCase) porque o job SSE roda em thread própria:
+    dentro da transação do TestCase o SQLite trava a tabela para a outra thread.
+    Mesmo motivo de EndpointsEnvioPostTests.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("msg-links", password="test")
+        self.user.perfil.marcar_verificado()
+        self.client.force_login(self.user)
+        self.produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Item", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=70,
+            link_produto="https://produto.mercadolivre.com.br/MLB-999999")
+
+    def _corpo(self, excecao):
+        from apps.scrapers.marketplaces.mercadolivre import MercadoLivre
+        with patch.object(MercadoLivre, "prefetch_links", side_effect=excecao):
+            resp = self.client.get("/scrapers/gerar-links/")
+            return b"".join(resp.streaming_content).decode()
+
+    def test_antibot_nao_manda_reconectar(self):
+        from apps.scrapers.scraper_mercadolivre.link import AntiBotError
+        corpo = self._corpo(AntiBotError("verificação"))
+        self.assertIn("verificação de segurança", corpo)
+        self.assertNotIn("__ML_LOGIN__", corpo)
+        self.assertNotIn("expirou", corpo)
+        self.assertIn("[AVISO]", corpo)
+
+    def test_sessao_morta_continua_mandando_reconectar(self):
+        """O caminho legítimo não pode regredir."""
+        from apps.scrapers.scraper_mercadolivre.link import LoginError
+        corpo = self._corpo(LoginError("Sua sessão do Mercado Livre expirou."))
+        self.assertIn("__ML_LOGIN__", corpo)
+        self.assertIn("[ERRO]", corpo)
+
+    def test_ml_fora_do_ar_nao_manda_reconectar(self):
+        from apps.scrapers.scraper_mercadolivre.link import AuthError
+        corpo = self._corpo(AuthError("sem resposta"))
+        self.assertNotIn("__ML_LOGIN__", corpo)
+        self.assertIn("[AVISO]", corpo)
+
+    def test_progresso_do_lote_chega_na_tela(self):
+        """O emitir_fase já existia em gerar_links_em_lote, mas ia só para o logger:
+        o usuário via a primeira linha e nada mais por ~4 minutos."""
+        from apps.scrapers.marketplaces.mercadolivre import MercadoLivre
+        from apps.scrapers.progresso import emitir_fase
+
+        def _fingir(produtos, usuario=None, faixa=None):
+            emitir_fase("Link 1/2", 0.5, (0, 100))
+            return (1, 0)
+
+        with patch.object(MercadoLivre, "prefetch_links", side_effect=_fingir):
+            resp = self.client.get("/scrapers/gerar-links/")
+            corpo = b"".join(resp.streaming_content).decode()
+        self.assertIn("Link 1/2", corpo)
+
+
+class BotaoDisputaOLockDoWorkerTests(TransactionTestCase):
+    """A causa raiz: o botão manual não pegava o advisory lock que o worker pega."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("lock-links", password="test")
+        self.user.perfil.marcar_verificado()
+        self.client.force_login(self.user)
+        Produto.objects.create(
+            marketplace="mercadolivre", nome="Item ML", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=70,
+            link_produto="https://produto.mercadolivre.com.br/MLB-111111")
+
+    def _corpo(self, conseguiu):
+        from contextlib import contextmanager
+        from apps.scrapers.marketplaces.mercadolivre import MercadoLivre
+
+        @contextmanager
+        def _lock(*a, **kw):
+            yield conseguiu
+
+        # O import em gerar_links_stream é local, então o patch vai no módulo de
+        # origem — é ele que a chamada resolve em tempo de execução.
+        with patch("apps.scrapers.carga.operacao_pesada_com_espera", _lock), \
+             patch.object(MercadoLivre, "prefetch_links",
+                          return_value=(1, 0)) as prefetch:
+            resp = self.client.get("/scrapers/gerar-links/")
+            corpo = b"".join(resp.streaming_content).decode()
+        return corpo, prefetch
+
+    def test_sem_lock_nao_abre_navegador_e_avisa_a_fila(self):
+        corpo, prefetch = self._corpo(False)
+        prefetch.assert_not_called()          # nada de segundo Chromium
+        self.assertIn("__LINKS_OCUPADO__", corpo)
+        self.assertIn("continuam na fila", corpo)
+        # Fila não é problema de conta: não pode oferecer "Reconectar".
+        self.assertNotIn("__ML_LOGIN__", corpo)
+        self.assertNotIn("expirada", corpo)
+
+    def test_com_lock_gera_normalmente(self):
+        corpo, prefetch = self._corpo(True)
+        prefetch.assert_called_once()
+        self.assertNotIn("__LINKS_OCUPADO__", corpo)
+
+    def test_amazon_nao_espera_o_lock(self):
+        """A Amazon é Python puro e não abre navegador — fazer um usuário
+        só-Amazon esperar o worker seria dano gratuito."""
+        from contextlib import contextmanager
+        from apps.scrapers.marketplaces.amazon import Amazon
+
+        Produto.objects.filter(marketplace="mercadolivre").delete()
+        Produto.objects.create(
+            marketplace="amazon", owner=self.user, asin="B0LOCK0001",
+            nome="Item Amazon", origem="oferta", preco_sem_desconto=100,
+            preco_com_cupom=70, link_produto="https://www.amazon.com.br/dp/B0LOCK0001")
+
+        pediu_lock = {"sim": False}
+
+        @contextmanager
+        def _lock(*a, **kw):
+            pediu_lock["sim"] = True
+            yield False
+
+        with patch("apps.scrapers.carga.operacao_pesada_com_espera", _lock), \
+             patch.object(Amazon, "prefetch_links", return_value=(1, 0)) as prefetch:
+            resp = self.client.get("/scrapers/gerar-links/")
+            b"".join(resp.streaming_content)
+
+        prefetch.assert_called_once()
+        self.assertFalse(pediu_lock["sim"])

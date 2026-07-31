@@ -6,7 +6,8 @@
   "scripts": {
     "start": "sh start-local.sh",
     "check": "node --check index.js",
-    "test": "npm run check && node --test"
+    "test": "npm run check && node --test",
+    "audit:production": "npm audit --omit=dev --omit=optional --audit-level=high"
   },
   "keywords": [],
   "author": "",
@@ -17,6 +18,7 @@
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.3.0",
+    "jose": "^6.2.3",
     "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "https://github.com/wwebjs/whatsapp-web.js/archive/1780711a1c86dfeca7c5ba6a66f950eac93dde28.tar.gz"
   }

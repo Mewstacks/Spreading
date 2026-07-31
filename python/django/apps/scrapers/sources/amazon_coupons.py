@@ -17,7 +17,7 @@ from django.utils import timezone
 from apps.scrapers.auxiliar import iniciar_browser
 from apps.scrapers.coupon_rules import normalizar_regras_cupom
 
-from .base import IngestedItem, SourceAdapter
+from .base import IngestedItem, SourceAdapter, normalizar_dinheiro
 
 
 COUPONS_URL = (
@@ -35,11 +35,7 @@ def _money(texto):
     match = _MONEY_RE.search((texto or "").replace("\xa0", " "))
     if not match:
         return 0.0
-    raw = match.group(1).replace(" ", "").replace(".", "").replace(",", ".")
-    try:
-        return round(float(raw), 2)
-    except ValueError:
-        return 0.0
+    return normalizar_dinheiro(match.group(1))
 
 
 def _canonical_product_url(url, asin):
@@ -68,7 +64,7 @@ class AmazonCouponsSource(SourceAdapter):
             return list(self._cache)
 
         rows = []
-        with iniciar_browser(headless=True, validar_sessao=False) as (page, _):
+        with iniciar_browser(headless=True) as (page, _):
             page.goto(COUPONS_URL, wait_until="domcontentloaded", timeout=45000)
             page.wait_for_timeout(1800)
             body = page.locator("body").inner_text(timeout=10000)
@@ -142,6 +138,10 @@ class AmazonCouponsSource(SourceAdapter):
                 canonical_url=row["url"],
                 title=row["title"],
                 current_price=row["current"],
+                # 'current' é a vitrine, antes de ativar o cupom; 'final' é o que
+                # o cliente paga. calcular_precos() depende do par (current, final)
+                # para validar o desconto, então os dois viajam juntos.
+                effective_price=row["final"],
                 reference_price=row["reference"],
                 image_url=row["image_url"],
                 observed_at=observed,

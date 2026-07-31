@@ -73,12 +73,32 @@ ML_LINK_BUILDER_ENABLED = os.getenv(
 ML_BROWSER_REPORTS_ENABLED = os.getenv(
     "ML_BROWSER_REPORTS_ENABLED", _AUTOMATION_DEFAULT,
 ) == "1"
+# A tela de login da Amazon era a única das três sem kill-switch: um problema no
+# gateway da Amazon não tinha como ser contido sem deploy.
+AMAZON_BROWSER_LOGIN_ENABLED = os.getenv(
+    "AMAZON_BROWSER_LOGIN_ENABLED", _AUTOMATION_DEFAULT,
+) == "1"
 TELETHON_RELINK_ENABLED = os.getenv(
     "TELETHON_RELINK_ENABLED", "0",
 ) == "1"
 WHATSAPP_WEB_ENABLED = os.getenv(
     "WHATSAPP_WEB_ENABLED", _AUTOMATION_DEFAULT,
 ) == "1"
+# Transporte da verificação de destino do link de afiliado: "browser" (padrão) ou
+# "http". O HTTP seria ~1s por link contra ~6s do browser, mas foi MEDIDO como
+# inviável: o ML responde `/gz/account-verification` a qualquer cliente sem
+# fingerprint de browser (TLS/JA3), tanto do IP de casa quanto do datacenter da Fly.
+# Nem User-Agent completo, nem cookies aquecidos pela home contornam. O módulo
+# link_http fica pronto e testado caso o ML afrouxe — trocar aqui não exige deploy.
+ML_VERIFICACAO_TRANSPORTE = os.getenv("ML_VERIFICACAO_TRANSPORTE", "browser")
+# Verificações simultâneas. É I/O puro (o GIL não atrapalha), mas são requisições
+# ao ML a partir de um IP de datacenter: subir demais convida rate-limit.
+ML_VERIFICACAO_THREADS = int(os.getenv("ML_VERIFICACAO_THREADS", "4"))
+# Cupons de ATIVAÇÃO do Mercado Livre (clique no container público, sem código
+# digitável). Nasce DESLIGADA: ligar faz milhares de cupons entrarem no ranking
+# automático de envio de uma vez, e o worker publica em grupo real. Ligue numa
+# organização (PILOT_ORGANIZATION_IDS), observe, e só então generalize.
+ML_CUPONS_ATIVACAO_ENABLED = os.getenv("ML_CUPONS_ATIVACAO_ENABLED", "0") == "1"
 PILOT_ORGANIZATION_IDS = {
     value.strip() for value in os.getenv("PILOT_ORGANIZATION_IDS", "").split(",")
     if value.strip()
@@ -242,7 +262,10 @@ if _DATABASE_URL:
     DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
     # Falha do proxy/VM não pode manter uma request (especialmente /healthz) presa
     # no timeout TCP do sistema. O valor também protege reconexões dos workers.
-    DATABASES["default"].setdefault("OPTIONS", {}).setdefault("connect_timeout", 3)
+    if DATABASES["default"].get("ENGINE") == "django.db.backends.postgresql":
+        DATABASES["default"].setdefault("OPTIONS", {}).setdefault(
+            "connect_timeout", 3,
+        )
     if (
         APP_ENV in {"staging", "production"}
         and DATABASES["default"].get("ENGINE") != "django.db.backends.postgresql"
@@ -346,6 +369,21 @@ AFILIADO_TAG = os.getenv("AFILIADO_TAG", "")
 # Recusar envio quando o link não carrega a tag? (1=recusa, 0=envia c/ aviso)
 AFILIADO_EXIGIR = os.getenv("AFILIADO_EXIGIR", "1") == "1"
 
+# Conferir o preço ao vivo logo antes de publicar. O catálogo tolera até 48h de
+# idade (expire_stale), e era essa janela que fazia a mensagem anunciar um valor
+# diferente do que a página cobra. Desligável por secret, sem deploy.
+PRECO_REVALIDA_ANTES_ENVIO = os.getenv("PRECO_REVALIDA_ANTES_ENVIO", "1") == "1"
+# Fallback por raspagem da PDP quando a Creators API não responde. É Playwright:
+# custa segundos e uma das threads do gunicorn, por isso nasce desligado.
+PRECO_REVALIDA_PLAYWRIGHT = os.getenv("PRECO_REVALIDA_PLAYWRIGHT", "0") == "1"
+# Flag PRÓPRIA do Mercado Livre, separada da Amazon de propósito: o ML depende do
+# anti-bot deixar passar o GET autenticado. Se ele apertar, desliga só o ML sem
+# levar junto a revalidação da Amazon, que não depende disso.
+PRECO_REVALIDA_ML = os.getenv("PRECO_REVALIDA_ML", "1") == "1"
+# Teto de tempo para revalidar a colagem inteira de um cupom (até 9 itens em
+# paralelo). Estourar o orçamento nunca reprova: o que não voltou fica inconclusivo.
+PRECO_REVALIDA_ORCAMENTO_S = float(os.getenv("PRECO_REVALIDA_ORCAMENTO_S", "6"))
+
 
 # ─────────────────────────────────────────────────────────────
 # Amazon — Associates (BR) + Creators API (sucessor da PA-API 5.0, desligada
@@ -362,6 +400,10 @@ AMAZON_CREATORS_HOST = os.getenv("AMAZON_CREATORS_HOST", "")
 AMAZON_MARKETPLACE = os.getenv("AMAZON_MARKETPLACE", "www.amazon.com.br")
 # Desconto mínimo (%) para um item entrar no feed de ofertas Amazon.
 AMAZON_MIN_SAVINGS_PCT = float(os.getenv("AMAZON_MIN_SAVINGS_PCT", "15"))
+# Páginas de busca varridas por keyword. A Creators API devolve no máximo 10 itens por
+# página, então este número multiplica o teto do feed (5 -> até 50 itens por keyword).
+# Cada página é uma chamada com throttle de ~1 TPS: subir muito alonga o ciclo.
+AMAZON_FEED_PAGES = int(os.getenv("AMAZON_FEED_PAGES", "5"))
 AMAZON_PUBLIC_FALLBACK = os.getenv("AMAZON_PUBLIC_FALLBACK", "1") == "1"
 AFFILIATE_FEED_URL = os.getenv("AFFILIATE_FEED_URL", "")
 AFFILIATE_FEED_TOKEN = os.getenv("AFFILIATE_FEED_TOKEN", "")
@@ -395,7 +437,9 @@ TELEGRAM_SESSION = os.getenv("TELEGRAM_SESSION", "")  # StringSession do userbot
 # ─────────────────────────────────────────────────────────────
 LLM_ATIVO = os.getenv("LLM_ATIVO", "1") == "1"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-LLM_MODELO = os.getenv("LLM_MODELO", "claude-haiku-4-5")
+# Sonnet é o padrão para títulos e nomes curtos. A variável continua permitindo
+# fixar outro snapshot sem alterar código em ambientes específicos.
+LLM_MODELO = os.getenv("LLM_MODELO", "claude-sonnet-5")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -522,8 +566,9 @@ else:
 
 # Cooldown (horas) entre alertas repetidos de conexão caída p/ não floodar e-mail.
 ALERTA_CONEXAO_COOLDOWN_H = int(os.getenv("ALERTA_CONEXAO_COOLDOWN_H", "6"))
-# Dias sem atualizar o auth.json do ML antes de considerar a sessão "stale" (caída).
-ML_AUTH_STALE_DIAS = int(os.getenv("ML_AUTH_STALE_DIAS", "7"))
+# (ML_AUTH_STALE_DIAS saiu: a idade do arquivo deixou de ser critério de sessão viva
+# quando conexoes.py passou a perguntar ao próprio ML, e o único leitor da variável
+# já era código morto.)
 
 # ─────────────────────────────────────────────────────────────
 # Sessões do ML (auth.json / auth_{id}.json). Precisa ser PERSISTENTE: no Fly o
@@ -561,6 +606,14 @@ ML_LEGACY_SESSION_READ_ENABLED = os.getenv(
     "ML_LEGACY_SESSION_READ_ENABLED",
     "0" if APP_ENV in {"staging", "production"} else "1",
 ) == "1"
+
+# Organização cuja sessão ML alimenta a raspagem do CATÁLOGO COMPARTILHADO
+# (Produto/Cupom têm owner=None; ver MIXED_TENANT_TABLES em accounts/rls.py).
+# O loop de automação roda como @system_job, sem usuário — sem isto ele raspava
+# anônimo e a tabela Cupom ficava vazia, o que travava a geração de link em
+# link.py. Escolha explícita e auditável: nunca varremos tenants atrás de uma
+# credencial. Vazio = a raspagem automática não usa sessão e avisa no log.
+ML_SYSTEM_ORGANIZATION_ID = os.getenv("ML_SYSTEM_ORGANIZATION_ID", "").strip()
 
 # ─────────────────────────────────────────────────────────────
 # Cotas por usuário (default global; Perfil pode sobrescrever por usuário).

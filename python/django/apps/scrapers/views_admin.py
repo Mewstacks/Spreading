@@ -11,9 +11,8 @@ from datetime import timedelta
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import get_user_model, login
-from django.db import transaction
 from django.db.models import Count, Max, Q
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -25,6 +24,7 @@ from apps.scrapers.models import (
     CanalMonitorado, ConfiguracaoEnvio, EventoOperacional, HistoricoEnvio,
     Publicacao,
 )
+from apps.scrapers.saude import resumo as saude_resumo
 from apps.scrapers.views import superadmin_required
 
 User = get_user_model()
@@ -39,6 +39,27 @@ def _global_health_disabled():
     )
     response["Retry-After"] = "3600"
     return response
+
+
+def _horas_da_saude(request):
+    try:
+        horas = int(request.GET.get("horas", 24))
+    except (TypeError, ValueError):
+        horas = 24
+    return horas if horas in (24, 72, 168) else 24
+
+
+def _saude_da_conta(request, horas):
+    """Resumo somente da organização/conta autenticada.
+
+    A role do processo web continua sem bypass de RLS. Assim a tela volta a ser
+    útil durante a Fase 0 sem reabrir a antiga leitura global cross-tenant.
+    Retestes permanecem no processo auditável de sistema.
+    """
+    resumo = saude_resumo(horas=horas, usuario=request.user)
+    for problema in resumo["problemas"]:
+        problema["retestavel"] = False
+    return resumo
 
 # Chave da sessão que guarda o superadmin original durante a impersonação.
 IMPERSONATOR_KEY = "impersonator_id"
@@ -81,72 +102,15 @@ def _uso_usuario(user, *, agora=None) -> dict:
     }
 
 
-def _orgs_catalogo():
-    """Organizações + status para escolher a fonte do catálogo de cupons do ML.
-
-    A página de cupons do ML exige login, mas a tabela `Cupom` é compartilhada e o
-    conteúdo é igual para todos: uma conta declarada raspa uma vez para todo mundo.
-    Fica no painel (e não num comando) para não depender de terminal em produção.
-    """
-    from apps.accounts.models import MercadoLivreSession, Organization
-
-    com_sessao = set(MercadoLivreSession.objects.filter(
-        status="active").values_list("organization_id", flat=True))
-    return [
-        {"id": str(org.id), "slug": org.slug, "nome": org.name,
-         "status": org.status, "fonte": org.fonte_catalogo_ml,
-         "tem_sessao": org.id in com_sessao}
-        for org in Organization.objects.order_by("name")
-    ]
-
-
-@superadmin_required
-@require_POST
-def superadmin_catalogo_ml(request):
-    """Define (ou limpa) a organização que fornece a sessão do catálogo de cupons."""
-    from apps.accounts.models import MercadoLivreSession, Organization
-
-    org_id = (request.POST.get("organization") or "").strip()
-    if not org_id:
-        n = Organization.objects.filter(fonte_catalogo_ml=True).update(
-            fonte_catalogo_ml=False)
-        messages.success(request, f"Fonte do catálogo removida ({n}).")
-        return redirect("superadmin-usuarios")
-
-    org = Organization.objects.filter(pk=org_id, status="active").first()
-    if org is None:
-        messages.error(request, "Organização inexistente ou inativa.")
-        return redirect("superadmin-usuarios")
-    # Só uma fonte por vez: duas contas raspando o mesmo catálogo global apenas
-    # duplicariam trabalho e disputariam as mesmas linhas.
-    with transaction.atomic():
-        Organization.objects.filter(fonte_catalogo_ml=True).update(
-            fonte_catalogo_ml=False)
-        Organization.objects.filter(pk=org.pk).update(fonte_catalogo_ml=True)
-    if MercadoLivreSession.objects.filter(organization=org, status="active").exists():
-        messages.success(
-            request, f"'{org.name}' agora alimenta o catálogo de cupons do ML.")
-    else:
-        messages.warning(
-            request,
-            f"'{org.name}' definida, mas ainda SEM sessão do Mercado Livre. "
-            f"Conecte essa conta em Conexão Mercado Livre para a raspagem rodar.")
-    return redirect("superadmin-usuarios")
-
-
 @superadmin_required
 def superadmin_usuarios(request):
     """Tabela de todos os usuários + uso computado + saúde das conexões."""
     users = (User.objects.select_related("perfil")
              .order_by("-is_superuser", "-date_joined"))
     linhas = [_uso_usuario(u) for u in users]
-    orgs_catalogo = _orgs_catalogo()
     ctx = {
         "linhas": linhas,
         "total_users": len(linhas),
-        "orgs_catalogo": orgs_catalogo,
-        "catalogo_definido": next(
-            (o["nome"] for o in orgs_catalogo if o["fonte"]), ""),
         # Loops são globais (single-tenant em transição): heartbeat mostrado uma vez.
         "worker_scrape": st.worker_alive("scrape"),
         "worker_envio": st.worker_alive("envio"),
@@ -213,7 +177,18 @@ def superadmin_saude(request):
     Período curto por padrão (24h) porque a pergunta que esta tela responde é "o que
     aconteceu desde ontem"; 7 dias serve para ver se algo é recorrente ou foi blip.
     """
-    return _global_health_disabled()
+    horas = _horas_da_saude(request)
+    return render(
+        request,
+        "scrapers/superadmin/saude.html",
+        {
+            "r": _saude_da_conta(request, horas),
+            "horas": horas,
+            "usuario_busca": "",
+            "usuario_encontrado": request.user,
+            "saude_escopo_tenant": True,
+        },
+    )
 
 
 @superadmin_required
@@ -227,7 +202,51 @@ def superadmin_saude_json(request):
     worker `monitor`. Se voltar a escrever aqui, cada tela aberta reprocessa o lote
     a cada 15s.
     """
-    return _global_health_disabled()
+    horas = _horas_da_saude(request)
+    resumo = _saude_da_conta(request, horas)
+    return JsonResponse({
+        "estado": resumo["estado"],
+        "texto": resumo["texto"],
+        "n_erros": resumo["n_erros"],
+        "n_avisos": resumo["n_avisos"],
+        "atualizado_em": timezone.localtime(
+            resumo["agora"],
+        ).strftime("%H:%M:%S"),
+        "conexoes": [
+            {
+                "servico": conexao["servico"],
+                "conectado": conexao["conectado"],
+                "motivo": conexao["motivo"],
+            }
+            for conexao in resumo["conexoes"]
+        ],
+        "workers": [
+            {
+                "job": worker["job"],
+                "nome": worker["nome"],
+                "ligado": worker["ligado"],
+                "vivo": worker["vivo"],
+                "alerta": worker["alerta"],
+                "fase": worker["fase"],
+                "ultima_msg": worker["ultima_msg"],
+            }
+            for worker in resumo["workers"]
+        ],
+        "problemas": [
+            {
+                "causa": problema["causa"],
+                "titulo": problema["titulo"],
+                "n": problema["n"],
+                "critico": problema["critico"],
+                "usuarios": problema["usuarios"],
+            }
+            for problema in resumo["problemas"]
+        ],
+        "assinatura": (
+            f'{len(resumo["problemas"])}:{resumo["n_erros"]}:'
+            f'{resumo["n_avisos"]}:{len(resumo["concluidos"])}'
+        ),
+    })
 
 
 def _retestar_incidente(incidente) -> dict:

@@ -23,6 +23,12 @@ def _motivo_publico_transporte(resultado) -> str:
     classe = resultado.get("classe")
     erro = str(resultado.get("erro") or "").lower()
     if classe == "transitorio":
+        # Reconexão é automática (o worker vigia o WAState e religa sozinho, e o
+        # próprio envio espera por ela). Dizer só "indisponível" fazia o usuário
+        # procurar o que reconectar — não há nada para ele fazer aqui.
+        if any(p in erro for p in ("reconect", "não está conectado", "nao esta conectado")):
+            return ("O WhatsApp estava reconectando neste instante. A conexão volta "
+                    "sozinha — tente novamente em alguns segundos.")
         return "O canal está temporariamente indisponível. Tente novamente mais tarde."
     if classe == "permanente":
         if any(p in erro for p in ("destino", "grupo", "chat", "@g.us", "@canal")):
@@ -56,24 +62,74 @@ def _canal_pronto_ou_erro(canal, usuario) -> dict | None:
     estado = estado_whatsapp(usuario, session=sessao)
     if estado.conectado:
         return None
-    # 'inativo': o worker tem a credencial mas ela saiu do Map (restore pulado no
-    # boot, runtime destruído). Religar é seguro e não precisa de QR — este clique
-    # não envia, mas o próximo já encontra a sessão de pé.
+    # Reconexão em curso: ESPERA em vez de recusar o envio. A queda de segundos é o
+    # caso comum (oscilação de rede, CONFLICT, reciclagem do Chromium) e o worker
+    # religa sozinho — recusar na hora era o que fazia "estou enviando e do nada o
+    # canal não é mais válido" aparecer no meio de uma fila.
     if estado.detalhe in ("conectando", "capacidade"):
+        estado = _esperar_wa_reconectar(usuario, sessao)
+        if estado.conectado:
+            return None
         return {"sucesso": False,
                 "motivo": estado.motivo
                 or "WhatsApp reativando a conexão — tente novamente em instantes.",
                 "classe": TRANSITORIO}
+    # 'inativo': o worker tem a credencial mas ela saiu do Map (restore pulado no
+    # boot, runtime destruído). Religar é seguro e não precisa de QR.
+    religou = False
     try:
         bruto = whatsapp_client.status(sessao)
         if not bruto.get("conectado") and bruto.get("fase") == "inativo":
             whatsapp_client.iniciar_sessao(sessao)
+            religou = True
     except Exception:
         pass
+    if religou:
+        # Antes o clique que religava a sessão nunca era o que enviava: devolvia erro
+        # e só a tentativa SEGUINTE encontrava a sessão de pé.
+        estado = _esperar_wa_reconectar(usuario, sessao)
+        if estado.conectado:
+            return None
     return {"sucesso": False,
             "motivo": estado.motivo
             or "WhatsApp desconectado. Reconecte sua conta para enviar.",
             "classe": TRANSITORIO, "precisa_login_wa": True}
+
+
+# Orçamento da espera por reconexão dentro de um request. 20s é o teto: a thread do
+# gunicorn fica presa aqui, e o worker religa com backoff a partir de 5s — então
+# isto cobre a primeira e a segunda tentativa dele sem transformar o envio numa
+# requisição pendurada.
+_WA_ESPERA_RECONEXAO_S = 20
+_WA_ESPERA_INTERVALO_S = 2.5
+
+
+def _esperar_wa_reconectar(usuario, sessao):
+    """Reconsulta o estado do WhatsApp até ele voltar ou o orçamento acabar.
+
+    Devolve o último Estado lido (nunca None), para o chamador reaproveitar o
+    `motivo` já calculado pela fonte única. Invalida o cache de 5s do
+    whatsapp_client entre as leituras — sem isso as reconsultas devolveriam o mesmo
+    payload velho e a espera não observaria nada.
+    """
+    import time
+
+    from apps.scrapers import whatsapp_client
+    from apps.scrapers.conexoes import estado_whatsapp
+
+    limite = time.monotonic() + _WA_ESPERA_RECONEXAO_S
+    estado = estado_whatsapp(usuario, session=sessao)
+    while not estado.conectado and time.monotonic() < limite:
+        # Estados terminais não voltam sozinhos: esperar por eles só queima o
+        # orçamento do request e atrasa a mensagem que pede ação do usuário.
+        if estado.detalhe in ("sem_pareamento", "recuperacao_pausada", "servico_fora"):
+            break
+        time.sleep(_WA_ESPERA_INTERVALO_S)
+        whatsapp_client.invalidar_status(sessao)
+        estado = estado_whatsapp(usuario, session=sessao)
+    if estado.conectado:
+        logger.info("WhatsApp voltou durante a espera do envio (sessão %s).", sessao)
+    return estado
 
 
 def esta_vivo(produto):
@@ -180,15 +236,15 @@ def _selecionar_item_legacy(macros_selecionadas=None, categorias_selecionadas=No
             continue
 
         # PONTUAÇÃO BASE: O peso foca bastante no Desconto Percentual
-        score = prod.desconto_percent * 2.0 
-        
+        score = prod.desconto_percent * 2.0
+
         # BÔNUS ECONOMIA (R$): Ajuda produtos caros com bom desconto em R$
         score += (prod.economia_rs / 20.0)
-        
+
         # BÔNUS TICKET BAIXO: Produtos baratos (<R$30) recebem mais chance
         if prod.preco_com_cupom < 30.0:
             score += 20.0
-            
+
         # BÔNUS URGÊNCIA: Cupom novo (criado nas últimas 12h) recebe Boost de 50%
         if cupom and cupom.data_criacao >= timezone.now() - timedelta(hours=12):
             score *= 1.5
@@ -214,7 +270,7 @@ def _selecionar_item_legacy(macros_selecionadas=None, categorias_selecionadas=No
     vencedores = []
     tentativas = 0
     max_tentativas = limite_envio * 10 # proteção contra loop infinito
-    
+
     while len(vencedores) < limite_envio and opcoes_sorteio and tentativas < max_tentativas:
         tentativas += 1
         escolhido = random.choices(population=opcoes_sorteio, weights=pesos_sorteio, k=1)[0]
@@ -375,8 +431,12 @@ def _texto_ia_sem_formatacao(texto, limite=120):
     return limpo[:limite].rstrip(" -–—,;|/")
 
 
-def _salvar_cache_ia(produto, *, titulo="", nome_curto=""):
-    """Atualiza somente os campos realmente gerados e tolera objetos sem ORM."""
+def _salvar_cache_ia(produto, *, titulo="", nome_curto="", persistir=True):
+    """Atualiza cache de IA sem deixar uma falha de escrita quebrar a transação.
+
+    No envio de cupom público os valores servem apenas para compor a mensagem e
+    ficam em memória; o catálogo compartilhado só é escrito pelo worker.
+    """
     campos = []
     if titulo and titulo != (getattr(produto, "frase_llm", "") or ""):
         produto.frase_llm = titulo
@@ -384,15 +444,20 @@ def _salvar_cache_ia(produto, *, titulo="", nome_curto=""):
     if nome_curto and nome_curto != (getattr(produto, "nome_llm", "") or ""):
         produto.nome_llm = nome_curto
         campos.append("nome_llm")
-    if not campos or not hasattr(produto, "save") or not getattr(produto, "pk", None):
+    if (not campos or not persistir or not hasattr(produto, "save")
+            or not getattr(produto, "pk", None)):
         return
     try:
-        produto.save(update_fields=campos)
+        # Savepoint obrigatório: DatabaseError capturado dentro de um atomic
+        # externo (RLS, timeout etc.) não pode contaminar o envio inteiro.
+        with transaction.atomic():
+            produto.save(update_fields=campos)
     except Exception:
-        pass
+        logger.warning("Cache de IA não foi persistido para o produto %s",
+                       getattr(produto, "pk", "?"), exc_info=True)
 
 
-def _conteudo_marketing(produto):
+def _conteudo_marketing(produto, *, persistir_cache=True):
     """Chamada e nome curto, com uma única ida à IA e cache por produto."""
     titulo_cache = _texto_ia_sem_formatacao(
         getattr(produto, "frase_llm", ""), 80
@@ -406,7 +471,9 @@ def _conteudo_marketing(produto):
         return {"titulo": titulo_cache, "nome_curto": nome_cache or nome_fallback}
 
     from apps.scrapers.llm import gerar_conteudo
-    preco = getattr(produto, "preco_com_cupom", None)
+    # A IA cita o preço no texto: precisa receber o mesmo valor que a mensagem
+    # publica, senão o título gerado contradiz a linha "POR".
+    preco = preco_publicavel(produto)
     de = getattr(produto, "preco_sem_desconto", 0) or 0
     desconto = ((de - preco) / de) * 100 if preco and de and de > preco else None
     gerado = gerar_conteudo(
@@ -419,7 +486,8 @@ def _conteudo_marketing(produto):
     nome_curto = nome_cache or nome_gerado or nome_fallback
     # O fallback mecânico mantém a mensagem bonita quando a API oscila, mas não
     # ocupa o cache da IA: uma tentativa futura ainda poderá produzir nome melhor.
-    _salvar_cache_ia(produto, titulo=titulo, nome_curto=nome_gerado)
+    _salvar_cache_ia(produto, titulo=titulo, nome_curto=nome_gerado,
+                     persistir=persistir_cache)
     return {"titulo": titulo, "nome_curto": nome_curto}
 
 
@@ -433,7 +501,7 @@ def _preparar_conteudo_ia_cupom(itens):
     if not itens:
         return
     # A chamada do cupom acompanha o principal produto exibido na colagem.
-    _conteudo_marketing(itens[0]["produto"])
+    _conteudo_marketing(itens[0]["produto"], persistir_cache=False)
 
     pendentes = []
     for item in itens:
@@ -449,7 +517,7 @@ def _preparar_conteudo_ia_cupom(itens):
     resumidos = gerar_nomes_curtos([produto.nome for produto in pendentes], timeout=10)
     for produto, nome_curto in zip(pendentes, resumidos):
         if nome_curto:
-            _salvar_cache_ia(produto, nome_curto=nome_curto)
+            _salvar_cache_ia(produto, nome_curto=nome_curto, persistir=False)
 
 
 def _nome_loja(marketplace, cupom=None) -> str:
@@ -635,23 +703,45 @@ def produtos_do_cupom(cupom, limite=9, macro=None):
     return []
 
 
-def _preparar_itens_cupom(cupom, usuario, limite=9, macro=None):
-    """([{produto, link}], sessao_caiu) com link afiliado válido + foto p/ a colagem.
+def _motivo_navegador(texto: str, generico: str = "Não foi possível preparar o link afiliado.") -> str:
+    """Mensagem de BrowserError que o usuário deve ler.
+
+    Alguns BrowserError já são escritos para o usuário e dizem exatamente o que
+    resolver — o principal é "Link Builder por navegador está desativado para esta
+    organização", que em produção é o estado DEFAULT (as flags de automação nascem
+    desligadas, ver core/settings.py). Substituí-los por um genérico — ou pior, por
+    "Sessão expirada, reconecte" — mandava o usuário reconectar em looping uma
+    sessão que estava perfeita. Falha técnica de navegador continua genérica: o
+    traceback não é texto de tela.
+    """
+    texto = (texto or "").strip()
+    return texto if texto.startswith("Link Builder") else generico
+
+
+def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
+    """([{produto, link}], bloqueio) com link afiliado válido + foto p/ a colagem.
 
     Cada produto leva o PRÓPRIO link comissionado (como na imagem-modelo). Usa o
     cache em lote (`situacao_dos_links`) e, só p/ quem não tem, gera via Link
     Builder. Se a sessão do ML cair, para de tentar (evita N falhas lentas) e
-    devolve o que houver mais `sessao_caiu=True` — o chamador transforma isso na
-    mensagem de reconexão em vez de "cupom sem produtos".
-    `macro`: categoria escolhida no envio (repassada a `produtos_do_cupom`).
+    devolve o que houver mais o motivo.
+
+    `bloqueio` é None ou um dict {mensagem, precisa_login_ml}. São dois casos
+    diferentes que antes se confundiam: sessão do ML caída (o usuário reconecta e
+    resolve) e Link Builder indisponível — tipicamente a feature flag
+    ML_LINK_BUILDER_ENABLED desligada, que em produção é o DEFAULT. Mandar
+    "Sessão expirada. Reconecte sua conta." para o segundo caso fazia o usuário
+    reconectar em looping sobre uma sessão perfeita, sem nunca saber que o
+    problema era uma variável de ambiente.
+    `relacoes` vem do predicado de leitura de preparo fresco. O envio manual não
+    chama preparar_cupom: esse caminho pode escrever no catálogo público e é
+    reservado ao worker de preparação.
     """
     from apps.scrapers.marketplaces.registry import get_marketplace
     from apps.scrapers.afiliado import situacao_dos_links, salvar_cache
     from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
     from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
 
-    from apps.scrapers.coupon_products import preparar_cupom
-    relacoes = preparar_cupom(cupom, usuario=usuario)
     if not relacoes:
         return [], False
     produtos = [r.produto for r in relacoes]
@@ -659,20 +749,31 @@ def _preparar_itens_cupom(cupom, usuario, limite=9, macro=None):
     mp = get_marketplace(mkt)
     situacao = situacao_dos_links(usuario, produtos)
 
-    itens, sessao_caiu = [], False
+    itens, bloqueio = [], None
     relacao_por_produto = {r.produto_id: r for r in relacoes}
     for p in produtos:
         if len(itens) >= limite:
             break
         link = ((situacao.get(p.id) or {}).get("link_afiliado")
                 or getattr(p, "link_afiliado", "") or "")
-        if not link and not sessao_caiu:
+        if not link and bloqueio is None:
             try:
                 info = mp.build_affiliate_link(p, usuario=usuario)
-            except (LoginError, AuthError, SessaoExpirada, BrowserError) as exc:
+            except (LoginError, AuthError, SessaoExpirada) as exc:
                 logger.warning("Sessão/navegador ao afiliar produto %s do cupom %s: %s",
                                getattr(p, "id", "?"), getattr(cupom, "pk", "?"), exc)
-                sessao_caiu = True
+                bloqueio = {"mensagem": "Sessão do Mercado Livre expirada. "
+                                        "Reconecte sua conta.",
+                            "precisa_login_ml": True}
+                info = None
+            except BrowserError as exc:
+                # Navegador/Link Builder fora — NÃO é sessão. Repassa o texto real
+                # (ex.: "Link Builder por navegador está desativado para esta
+                # organização"), que diz o que de fato precisa ser resolvido.
+                logger.warning("Link Builder indisponível ao afiliar produto %s do "
+                               "cupom %s: %s", getattr(p, "id", "?"),
+                               getattr(cupom, "pk", "?"), exc)
+                bloqueio = {"mensagem": str(exc), "precisa_login_ml": False}
                 info = None
             except Exception as exc:
                 logger.debug("Falha ao afiliar produto %s do cupom: %s",
@@ -687,7 +788,7 @@ def _preparar_itens_cupom(cupom, usuario, limite=9, macro=None):
         if link:
             itens.append({"produto": p, "link": link,
                           "relacao": relacao_por_produto[p.id]})
-    return itens, sessao_caiu
+    return itens, bloqueio
 
 
 def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
@@ -882,74 +983,157 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     if erro_canal:
         return erro_canal
     agora = timezone.now()
+    cupom_id = getattr(cupom, "pk", None)
+    if not cupom_id:
+        return {"sucesso": False,
+                "motivo": "Este cupom foi atualizado e não está mais disponível. Atualize a tela e tente outro.",
+                "classe": "permanente", "cupom_atualizado": True}
     if cupom.estado != "ativo" or (cupom.validade and cupom.validade < agora):
         return {"sucesso": False, "motivo": "Cupom não encontrado, inativo ou vencido.",
                 "classe": "permanente"}
 
-    desde = agora - timedelta(hours=24)
-    with transaction.atomic():
-        get_user_model().objects.select_for_update().get(pk=usuario.pk)
-        cupom = type(cupom).objects.select_for_update().get(pk=cupom.pk)
-        if cupom.estado != "ativo" or (cupom.validade and cupom.validade < agora):
-            return {"sucesso": False,
-                    "motivo": "Cupom não encontrado, inativo ou vencido.",
-                    "classe": "permanente"}
-        recente = Publicacao.objects.filter(
-            usuario=usuario, origem="cupom", cupom_normalizado=cupom,
-            canal=canal, destino_id=grupo_id,
-        ).filter(
-            Q(status="pendente", criada_em__gte=agora - timedelta(minutes=30))
-            | Q(status="enviado", enviada_em__gte=desde)
-            | Q(status="incerto", criada_em__gte=desde)
-        ).order_by("-criada_em").first()
-        if recente:
-            motivo = ("Este cupom já está sendo enviado para o destino."
-                      if recente.status == "pendente"
-                      else "Este destino já recebeu o cupom nas últimas 24h.")
-            return {"sucesso": False, "motivo": motivo, "duplicado": True,
-                    "classe": "permanente"}
-
-        perfil = getattr(usuario, "perfil", None)
-        if perfil and perfil.bloqueado:
-            return {"sucesso": False, "motivo": "Conta bloqueada para envios.",
-                    "classe": "permanente"}
-        inicio_dia = timezone.localtime(agora).replace(hour=0, minute=0, second=0,
-                                                       microsecond=0)
-        limite = perfil.cota_max_envios_dia() if perfil else 0
-        usados = Publicacao.objects.filter(
-            usuario=usuario, criada_em__gte=inicio_dia,
-            status__in=("pendente", "enviado", "incerto"),
-        ).count()
-        if limite and usados >= limite:
-            return {"sucesso": False, "motivo": "Limite diário de envios atingido.",
-                    "classe": "permanente"}
-        publicacao = Publicacao.objects.create(
-            usuario=usuario, origem="cupom", cupom_normalizado=cupom,
-            configuracao=configuracao,
-            canal=canal, destino_id=str(grupo_id)[:100],
-            destino_nome=str(destino_nome or "")[:255],
-            cupom=str(codigo_publicavel(cupom) or cupom.titulo or "")[:255],
-            categoria="Cupom", score=float(score or 0),
-            motivos_score=list(motivos_score or []),
+    # A página só oferece cupons preparados, mas o catálogo pode mudar entre o
+    # render e o clique. Validar novamente é leitura pura: nunca re-prepara nem
+    # escreve em linhas públicas sob o contexto RLS do usuário.
+    from apps.scrapers.coupon_products import (
+        relacoes_preparadas_para_envio, relacoes_prontas_para_envio,
+    )
+    relacoes_preparadas = relacoes_preparadas_para_envio(cupom, usuario)
+    if not relacoes_preparadas:
+        log_event(
+            "publicacao", "coupon_not_ready",
+            "Cupom aguardando preparação ou atualização.", level="warning",
+            usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                       "destino": destino_nome or grupo_id},
         )
+        return {"sucesso": False,
+                "motivo": "Este cupom está sendo atualizado e ainda não está disponível para envio.",
+                "classe": "transitorio", "cupom_em_preparo": True}
+    relacoes_prontas = relacoes_prontas_para_envio(cupom, usuario)
+    if not relacoes_prontas:
+        log_event(
+            "publicacao", "coupon_link_pending",
+            "Cupom preparado sem link afiliado utilizável.", level="warning",
+            usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                       "destino": destino_nome or grupo_id},
+        )
+        return {"sucesso": False,
+                "motivo": "Os links afiliados deste cupom ainda estão sendo preparados. Aguarde alguns instantes.",
+                "classe": "transitorio", "link_afiliado_pendente": True}
+
+    desde = agora - timedelta(hours=24)
+    publicacao = None
+    try:
+        with transaction.atomic():
+            # O lock do usuário serializa cota e deduplicação por destino. Um cupom
+            # público, porém, só é legível pelo tenant: `FOR UPDATE` exige a policy
+            # de escrita e o PostgreSQL o esconde como se não existisse. Não há
+            # escrita no cupom neste fluxo, portanto buscá-lo sem lock é suficiente.
+            get_user_model().objects.select_for_update().get(pk=usuario.pk)
+            cupom_qs = type(cupom).objects.filter(
+                pk=cupom_id, estado="ativo",
+            ).filter(Q(validade__isnull=True) | Q(validade__gte=agora))
+            if getattr(cupom, "owner_id", None) is None:
+                cupom = cupom_qs.filter(owner__isnull=True).first()
+            else:
+                cupom = cupom_qs.filter(owner=usuario).select_for_update().first()
+            if not cupom:
+                log_event(
+                    "publicacao", "coupon_unavailable",
+                    "Cupom atualizado antes da reserva do envio.", level="warning",
+                    usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                               "destino": destino_nome or grupo_id},
+                )
+                return {"sucesso": False,
+                        "motivo": "Este cupom foi atualizado e não está mais disponível. Atualize a tela e tente outro.",
+                        "classe": "permanente", "cupom_atualizado": True}
+            recente = Publicacao.objects.filter(
+                usuario=usuario, origem="cupom", cupom_normalizado=cupom,
+                canal=canal, destino_id=grupo_id,
+            ).filter(
+                Q(status="pendente", criada_em__gte=agora - timedelta(minutes=30))
+                | Q(status="enviado", enviada_em__gte=desde)
+                | Q(status="incerto", criada_em__gte=desde)
+            ).order_by("-criada_em").first()
+            if recente:
+                motivo = ("Este cupom já está sendo enviado para o destino."
+                          if recente.status == "pendente"
+                          else "Este destino já recebeu o cupom nas últimas 24h.")
+                return {"sucesso": False, "motivo": motivo, "duplicado": True,
+                        "classe": "permanente"}
+
+            perfil = getattr(usuario, "perfil", None)
+            if perfil and perfil.bloqueado:
+                return {"sucesso": False, "motivo": "Conta bloqueada para envios.",
+                        "classe": "permanente"}
+            inicio_dia = timezone.localtime(agora).replace(hour=0, minute=0, second=0,
+                                                           microsecond=0)
+            limite = perfil.cota_max_envios_dia() if perfil else 0
+            usados = Publicacao.objects.filter(
+                usuario=usuario, criada_em__gte=inicio_dia,
+                status__in=("pendente", "enviado", "incerto"),
+            ).count()
+            if limite and usados >= limite:
+                return {"sucesso": False, "motivo": "Limite diário de envios atingido.",
+                        "classe": "permanente"}
+            publicacao = Publicacao.objects.create(
+                usuario=usuario, origem="cupom", cupom_normalizado=cupom,
+                configuracao=configuracao,
+                canal=canal, destino_id=str(grupo_id)[:100],
+                destino_nome=str(destino_nome or "")[:255],
+                cupom=str(codigo_publicavel(cupom) or cupom.titulo or "")[:255],
+                categoria="Cupom", score=float(score or 0),
+                motivos_score=list(motivos_score or []),
+            )
+    except Exception as exc:
+        logger.exception("Falha ao reservar envio do cupom %s", cupom_id)
+        log_event(
+            "publicacao", "coupon_reservation_failed",
+            "Não foi possível reservar o envio do cupom.", level="error",
+            usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                       "destino": destino_nome or grupo_id}, exc=exc,
+        )
+        return {"sucesso": False,
+                "motivo": "Não foi possível reservar este cupom para envio. Atualize a tela e tente novamente.",
+                "classe": "transitorio", "causa": type(exc).__name__}
+
+    log_event(
+        "publicacao", "send_started", "Preparando envio do cupom.",
+        usuario=usuario, contexto={"publicacao_id": publicacao.id, "cupom_id": cupom.id,
+                                   "canal": canal, "destino": destino_nome or grupo_id},
+    )
 
     def falhar(motivo, **extra):
         erro_tecnico = extra.pop("_erro_tecnico", "")
         incerto = extra.get("resultado") == "incerto"
-        Publicacao.objects.filter(pk=publicacao.pk, status="pendente").update(
-            status="incerto" if incerto else "falhou", erro=str(motivo)[:500])
-        log_event("publicacao", "send_failed", str(motivo), level="warning",
-                  usuario=usuario, contexto={"publicacao_id": publicacao.id,
-                                             "cupom_id": cupom.id, "canal": canal,
-                                             "destino": destino_nome or grupo_id,
-                                             "erro_tecnico": erro_tecnico, **extra})
+        try:
+            with transaction.atomic():
+                Publicacao.objects.filter(pk=publicacao.pk, status="pendente").update(
+                    status="incerto" if incerto else "falhou", erro=str(motivo)[:500])
+            log_event("publicacao", "send_failed", str(motivo), level="warning",
+                      usuario=usuario, contexto={"publicacao_id": publicacao.id,
+                                                 "cupom_id": cupom.id, "canal": canal,
+                                                 "destino": destino_nome or grupo_id,
+                                                 "erro_tecnico": erro_tecnico, **extra})
+        except Exception:
+            logger.exception("Falha ao fechar publicação de cupom %s", publicacao.pk)
         return {"sucesso": False, "motivo": str(motivo), **extra}
 
     try:
         # Cupom publicavel exige produtos comprovados. Nao existe mais fallback de
         # texto puro nem foto manual que burle a associacao cupom-produto.
-        itens_cupom, sessao_ml_caiu = _preparar_itens_cupom(cupom, usuario)
+        itens_cupom, bloqueio_afiliacao = _preparar_itens_cupom(
+            cupom, usuario, relacoes_prontas)
         img_kwargs = {}
+        if itens_cupom and getattr(settings, "PRECO_REVALIDA_ANTES_ENVIO", True):
+            # Antes da IA (para a chamada nascer do preço fresco), antes do corte
+            # do Telegram e antes da colagem — que é quem garante foto↔texto.
+            from apps.scrapers import preco_ao_vivo
+            itens_cupom, _removidos = preco_ao_vivo.revalidar_colagem(
+                cupom, itens_cupom, usuario=usuario)
+            if not itens_cupom:
+                return falhar("Os preços deste cupom mudaram; nenhum produto "
+                              "continua dentro das regras dele.", classe="transitorio")
         if itens_cupom:
             _preparar_conteudo_ia_cupom(itens_cupom)
             # Telegram limita legendas de foto a 1024 caracteres. Como a regra e
@@ -967,13 +1151,13 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 cupom, itens_cupom, markup=sender.markup)
             link_registro = itens_cupom[0]["link"]
             img_kwargs = {"imagem_b64": colagem_b64, "mimetype": colagem_mime}
-        elif sessao_ml_caiu:
+        elif bloqueio_afiliacao:
             # Havia produtos comprovados, mas a sessão do Mercado Livre caiu na
             # hora de gerar os links afiliados. Não é "cupom sem produtos": é
             # reconexão. Transitório para não pausar a automação por queda de
             # sessão, e com o flag que a UI usa para oferecer o botão de reconectar.
-            return falhar("Sessão do Mercado Livre expirada. Reconecte sua conta.",
-                          classe="transitorio", precisa_login_ml=True)
+            return falhar(bloqueio_afiliacao["mensagem"], classe="transitorio",
+                          precisa_login_ml=bloqueio_afiliacao["precisa_login_ml"])
         else:
             return falhar("Cupom sem produtos comprovadamente aplicáveis, com foto e link afiliado.",
                           classe="permanente")
@@ -1020,7 +1204,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     except Exception as exc:
         logger.exception("Erro inesperado ao enviar cupom %s", cupom.pk)
         return falhar("Falha inesperada ao preparar o cupom.", classe="desconhecido",
-                      causa=type(exc).__name__)
+                      causa=type(exc).__name__, _erro_tecnico=str(exc))
 
 
 # Emoji por macro-categoria p/ a linha do produto na mensagem curta. Fallback 🛍️.
@@ -1070,14 +1254,44 @@ def _nome_principal_produto(nome, limite=70) -> str:
 
 
 def _preco_br(valor) -> str:
-    """R$ no formato brasileiro sem 'R$' e sem centavos zerados: 49,90 / 352."""
+    """R$ no formato brasileiro sem 'R$' e sem centavos zerados: 49,90 / 1.352."""
     try:
         numero = float(valor)
     except (TypeError, ValueError):
         return ""
-    if numero.is_integer():
-        return str(int(numero))
-    return f"{numero:.2f}".replace(".", ",")
+    bruto = f"{numero:,.0f}" if numero.is_integer() else f"{numero:,.2f}"
+    # en-US -> pt-BR: 1,299.90 vira 1.299,90 (o X é ponte para não trocar duas vezes).
+    return bruto.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def preco_publicavel(produto) -> float:
+    """Preço que o cliente realmente paga na página.
+
+    `preco_com_cupom` guarda a vitrine; em fontes onde o desconto só se aplica ao
+    ativar um cupom (página oficial de cupons da Amazon), o valor pago fica em
+    `preco_efetivo`. Anunciar a vitrine junto de "ative o cupom" faz a mensagem
+    prometer um número que a página não cobra.
+    """
+    atual = getattr(produto, "preco_com_cupom", 0) or 0
+    efetivo = getattr(produto, "preco_efetivo", 0) or 0
+    return efetivo if 0 < efetivo < atual else atual
+
+
+def anotacao_preco_publicado():
+    """`preco_publicavel` em SQL, para a tela anotar o mesmo número da mensagem.
+
+    Existe para que haja UMA definição de "preço publicado". A tela mostrava
+    `preco_com_cupom` enquanto a mensagem publicava `preco_publicavel()`, e o item
+    aparecia com um valor na lista e saía com outro no WhatsApp.
+    """
+    from django.db.models import F, FloatField, Value
+    from django.db.models.functions import Coalesce, Least, NullIf
+
+    return Least(
+        F("preco_com_cupom"),
+        Coalesce(NullIf(F("preco_efetivo"), Value(0.0)), F("preco_com_cupom")),
+        output_field=FloatField(),
+    )
 
 
 def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
@@ -1093,7 +1307,8 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     m = markup or WhatsAppMarkup()
     esc = m.escape
 
-    economia_rs = produto.preco_sem_desconto - produto.preco_com_cupom
+    preco_final = preco_publicavel(produto)
+    economia_rs = produto.preco_sem_desconto - preco_final
     desconto_percent = (economia_rs / produto.preco_sem_desconto) * 100 if produto.preco_sem_desconto else 0
     perfil = getattr(usuario, "perfil", None) if usuario else None
     marca = (
@@ -1120,7 +1335,7 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         try:
             return template.format(
                 marca=marca, nome=nome_exibicao,
-                preco=f"R$ {produto.preco_com_cupom:.2f}",
+                preco=f"R$ {preco_final:.2f}",
                 desconto=f"{desconto_percent:.0f}%", link=link_afiliado,
             )
         except (KeyError, ValueError):
@@ -1144,8 +1359,8 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     # Guarda final: desconto >= 90% (ou "De:" <= "Por:") indica preço corrompido
     # (ex.: savingBasis em escala errada). Em vez de imprimir "100% OFF" absurdo,
     # esconde a parte "DE" e mostra só o "POR".
-    desconto_valido = 0 < desconto_percent < 90 and produto.preco_sem_desconto > produto.preco_com_cupom
-    por = _preco_br(produto.preco_com_cupom)
+    desconto_valido = 0 < desconto_percent < 90 and produto.preco_sem_desconto > preco_final
+    por = _preco_br(preco_final)
     if desconto_valido:
         de = _preco_br(produto.preco_sem_desconto)
         linhas.append(f"🔥 DE {m.strike(de)} | {m.bold(f'POR {por}')}")
@@ -1385,50 +1600,87 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
     if usuario is not None:
         from django.contrib.auth import get_user_model
         agora_abertura = timezone.now()
-        with transaction.atomic():
-            get_user_model().objects.select_for_update().get(pk=usuario.pk)
-            Produto.objects.select_for_update().get(pk=produto.pk)
-            perfil = getattr(usuario, "perfil", None)
-            inicio_dia = timezone.localtime(agora_abertura).replace(
-                hour=0, minute=0, second=0, microsecond=0)
-            limite = perfil.cota_max_envios_dia() if perfil else 0
-            usados = Publicacao.objects.filter(
-                usuario=usuario, criada_em__gte=inicio_dia,
-                status__in=("pendente", "enviado", "incerto"),
-            ).count()
-            if perfil and perfil.bloqueado:
-                return {"sucesso": False, "motivo": "Conta bloqueada para envios.",
-                        "classe": "permanente"}
-            if limite and usados >= limite:
-                return {"sucesso": False, "motivo": "Limite diário de envios atingido.",
-                        "classe": "permanente"}
-            desde = agora_abertura - timedelta(hours=24)
-            recente = Publicacao.objects.filter(
-                usuario=usuario, origem="produto", produto=produto,
-                canal=canal, destino_id=grupo_id,
-            ).filter(
-                Q(status="pendente", criada_em__gte=agora_abertura - timedelta(minutes=30))
-                | Q(status="enviado", enviada_em__gte=desde)
-                | Q(status="incerto", criada_em__gte=desde)
-            ).order_by("-criada_em").first()
-            if recente and produto.preco_com_cupom > recente.preco_final * .95:
-                motivo = ("Esta oferta já está sendo enviada para o destino."
-                          if recente.status == "pendente"
-                          else "Este destino recebeu a oferta nas últimas 24h.")
-                return {"sucesso": False, "motivo": motivo, "duplicado": True,
-                        "classe": "permanente"}
-            publicacao = Publicacao.objects.create(
-                usuario=usuario, origem="produto", produto=produto,
-                configuracao=configuracao, canal=canal,
-                destino_id=str(grupo_id or "")[:100],
-                destino_nome=str(destino_nome or "")[:255],
-                preco_original=produto.preco_sem_desconto,
-                preco_final=produto.preco_com_cupom,
-                categoria=produto.macro_categoria or produto.categoria or "",
-                score=getattr(produto, "score_oferta", 0),
-                motivos_score=getattr(produto, "motivos_score", []),
-            )
+        # Reservar o envio é escrita em banco: se falhar, o usuário precisa de um
+        # motivo, não do erro genérico do runner SSE (nada foi enviado aqui).
+        try:
+            with transaction.atomic():
+                get_user_model().objects.select_for_update().get(pk=usuario.pk)
+                # O lock do usuário já serializa cota e deduplicação. O catálogo do ML,
+                # porém, é pool COMPARTILHADO (owner=None): o RLS o deixa legível por
+                # qualquer tenant, mas `FOR UPDATE` exige a policy de ESCRITA e o
+                # PostgreSQL esconde a linha como se não existisse — era isto que
+                # derrubava TODO envio de oferta do ML com o erro genérico do SSE.
+                # Este fluxo não escreve no produto: relê só p/ confirmar que ele ainda
+                # existe e bloqueia apenas o item privado (Amazon do próprio usuário).
+                # É o mesmo tratamento que o caminho de cupom já recebeu acima.
+                produto_qs = Produto.objects.filter(pk=produto.pk)
+                if getattr(produto, "owner_id", None) is None:
+                    atual = produto_qs.filter(owner__isnull=True).first()
+                else:
+                    atual = produto_qs.filter(
+                        owner_id=produto.owner_id).select_for_update().first()
+                if not atual:
+                    return {"sucesso": False,
+                            "motivo": "Esta oferta foi atualizada e não está mais "
+                                      "disponível. Atualize a tela e tente outra.",
+                            "classe": "permanente", "produto_atualizado": True}
+                perfil = getattr(usuario, "perfil", None)
+                inicio_dia = timezone.localtime(agora_abertura).replace(
+                    hour=0, minute=0, second=0, microsecond=0)
+                limite = perfil.cota_max_envios_dia() if perfil else 0
+                usados = Publicacao.objects.filter(
+                    usuario=usuario, criada_em__gte=inicio_dia,
+                    status__in=("pendente", "enviado", "incerto"),
+                ).count()
+                if perfil and perfil.bloqueado:
+                    return {"sucesso": False, "motivo": "Conta bloqueada para envios.",
+                            "classe": "permanente"}
+                if limite and usados >= limite:
+                    return {"sucesso": False, "motivo": "Limite diário de envios atingido.",
+                            "classe": "permanente"}
+                desde = agora_abertura - timedelta(hours=24)
+                recente = Publicacao.objects.filter(
+                    usuario=usuario, origem="produto", produto=produto,
+                    canal=canal, destino_id=grupo_id,
+                ).filter(
+                    Q(status="pendente", criada_em__gte=agora_abertura - timedelta(minutes=30))
+                    | Q(status="enviado", enviada_em__gte=desde)
+                    | Q(status="incerto", criada_em__gte=desde)
+                ).order_by("-criada_em").first()
+                if recente and preco_publicavel(produto) > recente.preco_final * .95:
+                    motivo = ("Esta oferta já está sendo enviada para o destino."
+                              if recente.status == "pendente"
+                              else "Este destino recebeu a oferta nas últimas 24h.")
+                    return {"sucesso": False, "motivo": motivo, "duplicado": True,
+                            "classe": "permanente"}
+                publicacao = Publicacao.objects.create(
+                    usuario=usuario, origem="produto", produto=produto,
+                    configuracao=configuracao, canal=canal,
+                    destino_id=str(grupo_id or "")[:100],
+                    destino_nome=str(destino_nome or "")[:255],
+                    preco_original=produto.preco_sem_desconto,
+                    preco_final=preco_publicavel(produto),
+                    categoria=produto.macro_categoria or produto.categoria or "",
+                    score=getattr(produto, "score_oferta", 0),
+                    motivos_score=getattr(produto, "motivos_score", []),
+                )
 
+        except Exception as exc:
+            logger.exception("Falha ao reservar envio do produto %s", produto.pk)
+            log_event(
+                "publicacao", "offer_reservation_failed",
+                "Não foi possível reservar o envio da oferta.", level="error",
+                usuario=usuario, contexto={
+                    "produto_id": getattr(produto, "id", None),
+                    "marketplace": getattr(produto, "marketplace", ""),
+                    "canal": canal, "destino": destino_nome or grupo_id,
+                    "causa": type(exc).__name__,
+                }, exc=exc,
+            )
+            return {"sucesso": False,
+                    "motivo": "Não foi possível reservar esta oferta para envio. "
+                              "Atualize a tela e tente novamente.",
+                    "classe": "transitorio", "causa": type(exc).__name__}
     def falhar(motivo, **extra):
         erro_tecnico = extra.pop("_erro_tecnico", "")
         texto_motivo = str(motivo).lower()
@@ -1492,7 +1744,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             precisa_login = "LOGIN_REQUIRED" in texto
             return falhar(
                 "Sessão do Mercado Livre expirada. Reconecte sua conta."
-                if precisa_login else "Não foi possível preparar o link afiliado.",
+                if precisa_login else _motivo_navegador(texto),
                 precisa_login_ml=precisa_login, _erro_tecnico=texto)
         if not info:
             return falhar("falha ao gerar link de afiliado "
@@ -1545,7 +1797,8 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                 precisa_login = "LOGIN_REQUIRED" in texto
                 return falhar(
                     "Sessão do Mercado Livre expirada. Reconecte sua conta."
-                    if precisa_login else "Não foi possível verificar a oferta.",
+                    if precisa_login
+                    else _motivo_navegador(texto, "Não foi possível verificar a oferta."),
                     precisa_login_ml=precisa_login, _erro_tecnico=texto)
             # Persiste o veredito na fonte única (self-heal): um link que reprova ao
             # vivo é marcado como inválido e some da tela de envio; um que aprova
@@ -1559,6 +1812,22 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                     usuario, produto, motivo_reprovacao(verificacao, confiar))
                 return falhar("link reprovado na verificação",
                               link=link, verificacao=verificacao)
+
+        # Preço ao vivo: depois da verificação (não faz sentido revalidar link
+        # reprovado) e ANTES de montar a mensagem, para o texto gravado na
+        # Publicacao ser exatamente o que foi enviado.
+        #
+        # Roda mesmo no caminho de cache acima (verificado_ok is True), e é isso que
+        # tira o envio do "zero contato com a página": o veredito do LINK continua
+        # vindo da fonte única, mas o PREÇO é medido agora, no `link` publicado —
+        # um GET segue meli.la -> PDP e mede a página que o assinante vai abrir.
+        if getattr(settings, "PRECO_REVALIDA_ANTES_ENVIO", True):
+            from apps.scrapers import preco_ao_vivo
+            checagem = preco_ao_vivo.revalidar(
+                produto, usuario=usuario, configuracao=configuracao, url=link)
+            if not checagem["ok"]:
+                return falhar(f"preço mudou antes do envio: {checagem['motivo']}",
+                              link=link)
 
         # Ofertas (origem='oferta') não têm Cupom; só busca quando há campanha_id
         cupom = None
@@ -1578,8 +1847,13 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             publicacao.link_rastreado = link_publicado
             publicacao.cupom = (
                 cupom.titulo if cupom else getattr(produto, "codigo_checkout", "") or "")
+            # preco_final foi gravado antes da revalidação; realinhar aqui mantém
+            # o registro igual ao número que a mensagem anuncia.
+            publicacao.preco_final = preco_publicavel(produto)
+            publicacao.preco_original = produto.preco_sem_desconto
             publicacao.save(update_fields=[
-                "variante", "link_afiliado", "link_rastreado", "cupom"])
+                "variante", "link_afiliado", "link_rastreado", "cupom",
+                "preco_final", "preco_original"])
         mensagem = montar_mensagem(
             produto, link_publicado, cupom, markup=sender.markup, usuario=usuario,
             configuracao=configuracao, variante=variante)

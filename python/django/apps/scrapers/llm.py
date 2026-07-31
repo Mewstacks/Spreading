@@ -6,6 +6,8 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
+_MODELO_PADRAO = "claude-sonnet-5"
+
 _PROMPT = """Você é um vendedor brasileiro especialista em grupos de WhatsApp. Seu estilo é direto, malandro e muito bem-humorado.
 Crie a chamada da promoção e um nome curto e claro para o produto.
 
@@ -118,8 +120,12 @@ def gerar_conteudo(nome: str, timeout: int = 30, preco=None,
     try:
         contexto = _bloco_contexto(nome, preco, desconto_percent, categoria)
         resposta = _cliente(timeout).messages.create(
-            model=getattr(settings, "LLM_MODELO", "claude-haiku-4-5"),
+            model=getattr(settings, "LLM_MODELO", _MODELO_PADRAO),
             max_tokens=180,
+            # Sonnet 5 habilita pensamento adaptativo por padrão. Estas respostas
+            # são JSON curto e determinístico; desativá-lo preserva latência e
+            # deixa todo o orçamento de saída disponível para o conteúdo.
+            thinking={"type": "disabled"},
             messages=[{"role": "user", "content": _PROMPT.format(contexto=contexto)}],
         )
         dados = _json_resposta(_texto_resposta(resposta))
@@ -146,8 +152,9 @@ def gerar_nomes_curtos(nomes, timeout: int = 10) -> list[str]:
             f"{indice + 1}. {nome}" for indice, nome in enumerate(nomes)
         )
         resposta = _cliente(timeout).messages.create(
-            model=getattr(settings, "LLM_MODELO", "claude-haiku-4-5"),
+            model=getattr(settings, "LLM_MODELO", _MODELO_PADRAO),
             max_tokens=max(180, len(nomes) * 60),
+            thinking={"type": "disabled"},
             messages=[{
                 "role": "user",
                 "content": _PROMPT_NOMES.format(produtos=produtos),

@@ -9,22 +9,29 @@ site principal ele pode exigir novo login. Reusar a sessão principal para ler
 relatório era a causa do loop "reconecte o ML" que nunca se resolvia — reconectar
 o site principal não tocava na sessão que o relatório de fato precisa.
 
-A senha é digitada na página REAL do ML dentro do Chromium remoto e nunca passa
-pelo Django. O storage_state é salvo cifrado via report_sessions.save_report_state.
+Os eventos de entrada são retransmitidos ao Chromium e nunca são persistidos ou
+registrados em logs. O storage_state é salvo cifrado via report_sessions.
 """
+import logging
 import queue
 import threading
 import time
+from urllib.parse import urlparse
 
 from django.conf import settings
 from django.core.cache import cache
 
+from apps.scrapers.erros_conexao import mensagem_de_erro, novo_codigo
 from apps.scrapers.ml_conexao import (
     GOTO_TIMEOUT_MS, LOGIN_DEADLINE_S, LOOP_MS, MAX_EVENTOS_POR_POST,
-    SCREENCAST, VIEW_H, VIEW_W, _SPECIAL_KEYS, _despachar_input,
+)
+from apps.scrapers.ml_live_transport import (
+    ActivePage, LiveTransport, despachar_input,
 )
 from apps.scrapers.report_sessions import has_report_session, save_report_state
-from apps.accounts.tenant import organization_job
+from apps.accounts.tenant import organization_job_sem_transacao
+
+logger = logging.getLogger(__name__)
 
 # Portal de afiliados. O usuário loga aqui dentro do live view.
 LOGIN_URL = "https://www.mercadolivre.com.br/afiliados/"
@@ -41,6 +48,7 @@ def _report_url() -> str:
 
 _threads, _frames, _inputs = {}, {}, {}
 _lock = threading.Lock()
+_transport = LiveTransport("mercado_livre_relatorios")
 
 
 def _key(user_id):
@@ -60,6 +68,7 @@ def status(user_id):
     from django.contrib.auth import get_user_model
     user = get_user_model().objects.filter(pk=user_id).first()
     state["auth_valido"] = bool(user and has_report_session(user, "mercadolivre"))
+    state.update(_transport.status(user_id))
     return state
 
 
@@ -69,166 +78,210 @@ def _logado(page) -> bool:
     A landing /afiliados/ é pública; por isso a validação real acontece ao navegar
     para a página de relatório (_report_url) e confirmar a ausência de campo de
     senha — o mesmo cuidado do fluxo Amazon."""
-    value = (page.url or "").lower()
-    if any(x in value for x in ("signin", "/login", "lgz", "loginhub", "msl/login")):
+    try:
+        value = (page.url or "").lower()
+        if any(x in value for x in ("signin", "/login", "lgz", "loginhub", "msl/login")):
+            return False
+        expected = urlparse(_report_url())
+        current = urlparse(value)
+        if current.netloc != expected.netloc.lower():
+            return False
+        expected_path = expected.path.rstrip("/")
+        if not current.path.rstrip("/").startswith(expected_path):
+            return False
+        return page.locator("input[type='password'], input[name*='password' i]").count() == 0
+    except Exception:
+        # Consulta ao DOM durante uma navegação levanta; aqui isso significa
+        # "ainda não confirmado", e não pode derrubar o worker.
         return False
-    if "/afiliados/" not in value:
-        return False
-    return page.locator("input[type='password'], input[name*='password' i]").count() == 0
 
 
-@organization_job
+# Sem transação: organization_job envolveria os até 10 min do live view num
+# transaction.atomic(), deixando uma conexão `idle in transaction` enquanto o
+# usuário digita a senha.
+@organization_job_sem_transacao
 def _worker(user):
     from playwright.sync_api import sync_playwright
-    from apps.scrapers.auxiliar import ua_aleatorio
+    from apps.scrapers.contexto_login import (
+        LAUNCH_ARGS, habilitar_foco, opcoes_de_contexto,
+    )
 
     uid = user.id
-    fila = queue.Queue(maxsize=2000)
-    with _lock:
-        _inputs[uid] = fila
-        _frames.pop(uid, None)
+    runtime = _transport.get(uid) or _transport.create(uid)
+    estado_capturado = None
     try:
         _set(uid, fase="iniciando", erro="")
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"])
-            context = browser.new_context(viewport={"width": VIEW_W, "height": VIEW_H}, user_agent=ua_aleatorio())
-            page = context.new_page()
-            cdp = context.new_cdp_session(page)
-
-            def on_frame(params):
-                _frames[uid] = params.get("data", "")
-                try:
-                    cdp.send("Page.screencastFrameAck", {"sessionId": params.get("sessionId")})
-                except Exception:
-                    pass
-
-            cdp.send("Page.enable")
-            cdp.on("Page.screencastFrame", on_frame)
+            browser = p.chromium.launch(headless=True, args=LAUNCH_ARGS)
             try:
-                cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
-            except Exception:
-                pass
-            page.goto(LOGIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
-            cdp.send("Page.startScreencast", SCREENCAST)
-            _set(uid, fase="aguardando_login", erro="")
-            deadline, logged = time.time() + LOGIN_DEADLINE_S, False
-            while time.time() < deadline:
-                state = cache.get(_key(uid)) or {}
-                if state.get("cancelar"):
-                    _set(uid, fase="idle", erro="")
-                    break
-                for _ in range(MAX_EVENTOS_POR_POST * 4):
-                    try:
-                        _despachar_input(cdp, page, fila.get_nowait())
-                    except queue.Empty:
+                context = browser.new_context(
+                    **opcoes_de_contexto(browser, runtime.viewport),
+                )
+                page = context.new_page()
+                habilitar_foco(context, page)
+                active_page = ActivePage(context, page, runtime)
+                # Abrir o destino autenticado preserva o redirect de retorno do SSO:
+                # depois do SMS/QR, o ML volta para a página que podemos validar.
+                page.goto(
+                    _report_url(), wait_until="domcontentloaded",
+                    timeout=GOTO_TIMEOUT_MS,
+                )
+                _transport.capture(runtime, page, active=True)
+                _set(
+                    uid, fase="aguardando_login", erro="", aviso="",
+                    session_id=runtime.session_id, viewport=runtime.viewport,
+                )
+                deadline, logged = time.time() + LOGIN_DEADLINE_S, False
+                # O laço gira a 20Hz (LOOP_MS=50) para drenar input e publicar frames,
+                # mas nem o cache nem o DOM mudam nessa escala. Ler os dois a cada volta
+                # custava, POR SEGUNDO, 20 idas ao cache e 20 consultas de seletor via
+                # CDP dentro do processo do gunicorn, segurando a GIL. `ml_conexao` e
+                # `amazon_conexao` já desacoplavam isso; este worker nunca recebeu a
+                # correção e era o mais caro dos três. Meio segundo de latência num
+                # clique de cancelar ninguém percebe.
+                state = {}
+                proxima_leitura = 0.0
+                proxima_checagem = 0.0
+                while time.time() < deadline:
+                    agora = time.time()
+                    if agora >= proxima_leitura:
+                        state = cache.get(_key(uid)) or {}
+                        proxima_leitura = agora + 0.5
+                    if state.get("cancelar"):
+                        _set(uid, fase="idle", erro="")
                         break
-                if state.get("salvar_agora"):
-                    # O botão "Já entrei" valida a sessão na página que o
-                    # sincronizador vai usar, sem depender da URL da landing.
-                    page.goto(_report_url(), wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
-                    _set(uid, salvar_agora=False)
-                if _logado(page):
-                    logged = True
-                    break
-                page.wait_for_timeout(LOOP_MS)
-            if logged:
-                _set(uid, fase="salvando")
-                save_report_state(user, "mercadolivre", context.storage_state())
-                _set(uid, fase="conectado", erro="", salvar_agora=False)
-            elif (cache.get(_key(uid)) or {}).get("fase") != "idle":
-                _set(uid, fase="erro", erro="Tempo esgotado esperando o login do portal de afiliados.")
-            browser.close()
+                    current_page = active_page.current()
+                    if current_page is None:
+                        raise RuntimeError("A janela do portal de afiliados foi fechada.")
+                    had_input = False
+                    for _ in range(MAX_EVENTOS_POR_POST * 4):
+                        try:
+                            event = runtime.input_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        despachar_input(current_page, event)
+                        had_input = True
+                    _transport.capture(runtime, current_page, active=had_input)
+
+                    validate_now = bool(
+                        state.get("validar_agora") or state.get("salvar_agora")
+                    )
+                    if validate_now:
+                        _set(
+                            uid, fase="validando", validar_agora=False,
+                            salvar_agora=False, aviso="",
+                        )
+                        # Zera também a cópia local: o cache só é relido a cada 0,5s e
+                        # sem isto o pedido continuaria "ligado" por várias voltas,
+                        # repetindo o goto do portal a cada 50ms.
+                        state["validar_agora"] = False
+                        state["salvar_agora"] = False
+                        current_page.goto(
+                            _report_url(), wait_until="domcontentloaded",
+                            timeout=GOTO_TIMEOUT_MS,
+                        )
+                        _transport.capture(runtime, current_page, active=True)
+                        proxima_checagem = 0.0  # navegou: confere já
+
+                    if agora < proxima_checagem:
+                        current_page.wait_for_timeout(LOOP_MS)
+                        continue
+                    proxima_checagem = agora + 1.0
+                    authenticated = _logado(current_page)
+                    if validate_now or authenticated:
+                        logger.info(
+                            "ml_login_metric transport=mercado_livre_relatorios "
+                            "user=%s validation=%s",
+                            uid, "conectado" if authenticated else "expirado",
+                        )
+                    if authenticated:
+                        logged = True
+                        break
+                    if validate_now:
+                        _set(
+                            uid, fase="aguardando_login", erro="",
+                            aviso=(
+                                "O portal ainda pede autenticação. Conclua a etapa "
+                                "aberta no Mercado Livre e verifique novamente."
+                            ),
+                        )
+                    current_page.wait_for_timeout(LOOP_MS)
+                if logged:
+                    _set(uid, fase="salvando")
+                    # Só a leitura fica aqui. Gravar depois do bloco mantém o mesmo
+                    # formato dos outros workers e garante que a fase só vire
+                    # 'conectado' quando a sessão estiver de fato no disco.
+                    estado_capturado = context.storage_state()
+                elif (cache.get(_key(uid)) or {}).get("fase") != "idle":
+                    _set(uid, fase="erro", erro="Tempo esgotado esperando o login do portal de afiliados.")
+            finally:
+                # Em finally: solto no fim do bloco, o close não era alcançado
+                # em nenhuma exceção e o Chromium ficava órfão.
+                try:
+                    browser.close()
+                except Exception:
+                    logger.warning("Chromium do login do portal de afiliados ML não fechou "
+                                   "limpo (user %s).", uid, exc_info=True)
+
+        if estado_capturado is not None:
+            save_report_state(user, "mercadolivre", estado_capturado)
+            _set(
+                uid, fase="conectado", erro="", aviso="",
+                salvar_agora=False, validar_agora=False,
+            )
     except Exception as exc:
-        _set(uid, fase="erro", erro=f"Falha na conexão do portal de afiliados ML: {exc}")
+        codigo = novo_codigo()
+        logger.exception("Conexão do portal de afiliados ML falhou (user=%s codigo=%s)",
+                         uid, codigo)
+        _set(uid, fase="erro", codigo_erro=codigo,
+             erro=mensagem_de_erro(exc, codigo,
+                                   servico="O portal de afiliados do Mercado Livre"))
     finally:
+        _transport.finish(uid, runtime)
         with _lock:
             _threads.pop(uid, None)
             _inputs.pop(uid, None)
             _frames.pop(uid, None)
 
 
-def criar_sessao(user):
+def criar_sessao(user, client: dict | None = None):
     from apps.accounts.feature_flags import enabled_for_user
     if not enabled_for_user("ML_BROWSER_REPORTS_ENABLED", user):
+        # Persistido, e não só retornado: o poll de 5s do front relê o cache e um
+        # estado efêmero seria imediatamente apagado pela fase antiga (ver a mesma
+        # correção em ml_conexao.criar_sessao).
         return {
-            "fase": "indisponivel",
-            "erro": "Login do portal de relatórios está desativado para esta organização.",
+            **_set(user.id, fase="indisponivel", cancelar=False, salvar_agora=False,
+                   erro="Login do portal de relatórios está desativado para esta organização."),
             "auth_valido": False,
         }
     with _lock:
         running = _threads.get(user.id)
         if running and running.is_alive():
             return status(user.id)
-        _set(user.id, fase="iniciando", erro="", cancelar=False, salvar_agora=False)
+        runtime = _transport.create(user.id, client)
+        _set(
+            user.id, fase="iniciando", erro="", aviso="", cancelar=False,
+            salvar_agora=False, validar_agora=False, session_id=runtime.session_id,
+            viewport=runtime.viewport,
+        )
         thread = threading.Thread(target=_worker, args=(user,), daemon=True)
         _threads[user.id] = thread
         thread.start()
     return status(user.id)
 
 
-def frames(user_id):
-    previous, waiting = None, 0
-    while waiting < 600:
-        if user_id not in _inputs:
-            waiting += 1
-            time.sleep(.05)
-            continue
-        frame = _frames.get(user_id)
-        if frame and frame != previous:
-            previous, waiting = frame, 0
-            yield frame
-        else:
-            waiting += 1
-        time.sleep(.05)
+def frames(user_id, session_id=None):
+    yield from _transport.frames(user_id, session_id)
 
 
-def enfileirar_input(user_id, eventos):
-    queue_ = _inputs.get(user_id)
-    if queue_ is None:
-        return {"ok": False, "erro": "sessao_inativa"}
-    if not isinstance(eventos, list):
-        return {"ok": False, "erro": "payload_invalido"}
-    accepted = 0
-    for event in eventos[:MAX_EVENTOS_POR_POST]:
-        if not isinstance(event, dict):
-            continue
-        kind = event.get("t")
-        clean = {"t": kind}
-        if kind in {"move", "down", "up", "wheel"}:
-            try:
-                clean["x"] = max(0, min(VIEW_W, int(event.get("x", 0))))
-                clean["y"] = max(0, min(VIEW_H, int(event.get("y", 0))))
-            except (TypeError, ValueError):
-                continue
-            if kind in {"down", "up"}:
-                clean["button"] = event.get("button") if event.get("button") in {"left", "right", "middle"} else "left"
-                clean["clickCount"] = event.get("clickCount", 1)
-            elif kind == "wheel":
-                clean["dx"] = event.get("dx", 0)
-                clean["dy"] = event.get("dy", 0)
-            else:
-                clean["buttons"] = event.get("buttons", 0)
-        elif kind == "char":
-            clean["text"] = str(event.get("text", ""))[:8]
-            if not clean["text"]:
-                continue
-        elif kind == "key":
-            if event.get("key") not in _SPECIAL_KEYS:
-                continue
-            clean["key"] = event["key"]
-        else:
-            continue
-        try:
-            queue_.put_nowait(clean)
-            accepted += 1
-        except queue.Full:
-            break
-    return {"ok": True, "aceitos": accepted}
+def enfileirar_input(user_id, session_id, eventos):
+    return _transport.enqueue(user_id, session_id, eventos)
 
 
 def salvar_agora(user_id):
-    _set(user_id, salvar_agora=True)
+    _set(user_id, validar_agora=True, salvar_agora=False, aviso="")
 
 
 def cancelar(user_id):
-    _set(user_id, cancelar=True)
+    _set(user_id, cancelar=True, fase="idle", aviso="", erro="")

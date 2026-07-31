@@ -5,10 +5,13 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
+from django.utils import timezone
 
+from apps.scrapers.coupon_rules import cupom_publicavel
 from apps.scrapers.models import (
-    CupomNormalizado, CupomPreparacao, FonteIngestao, Produto,
+    CupomNormalizado, CupomPreparacao, FonteIngestao, LinkAfiliadoUsuario, Produto,
+    ProdutoCupom,
 )
 
 
@@ -40,10 +43,18 @@ class CouponPreparationTests(TestCase):
             "nome": "Livro selecionado", "origem": "oferta", "estado": "ativo",
             "preco_sem_desconto": 120, "preco_com_cupom": 100,
             "link_produto": "https://www.amazon.com.br/dp/ASINTEST",
+            "link_afiliado": "https://amzn.to/coupon-products-test",
             "imagem_url": "https://images.example/livro.jpg", "evidencia": {},
         }
         values.update(overrides)
         return Produto.objects.create(**values)
+
+    def _verified(self, owner, product):
+        return LinkAfiliadoUsuario.objects.create(
+            usuario=owner, produto=product, afiliado_ok=True, estado="pronto",
+            link_afiliado=f"https://affiliate.example/{owner.id}/{product.id}",
+            verificado_ok=True, verificado_em=timezone.now(),
+        )
 
     def test_tema_parecido_nao_cria_associacao_mas_codigo_no_item_cria(self):
         from apps.scrapers.coupon_products import preparar_cupom
@@ -68,17 +79,20 @@ class CouponPreparationTests(TestCase):
         from apps.scrapers.coupon_products import ids_cupons_prontos, preparar_cupom
 
         cupom = self._coupon()
-        self._product(self.user, evidencia={"promotional_text": "Use LIVRO20"})
-        self._product(
+        own = self._product(
+            self.user, evidencia={"promotional_text": "Use LIVRO20"})
+        other = self._product(
             self.other, asin="ASINOTHER",
             link_produto="https://www.amazon.com.br/dp/ASINOTHER",
             evidencia={"promotional_text": "Use LIVRO20"})
 
         preparar_cupom(cupom, self.user, force=True, permitir_rede=False)
+        self._verified(self.user, own)
         self.assertEqual(ids_cupons_prontos(self.user, [cupom]), {cupom.id})
         self.assertEqual(ids_cupons_prontos(self.other, [cupom]), set())
 
         preparar_cupom(cupom, self.other, force=True, permitir_rede=False)
+        self._verified(self.other, other)
         self.assertEqual(ids_cupons_prontos(self.other, [cupom]), {cupom.id})
 
     def test_ativacao_amazon_oficial_e_publicavel_com_preco_final(self):
@@ -116,8 +130,10 @@ class CouponPreparationTests(TestCase):
         from apps.scrapers.coupon_products import ids_cupons_prontos, preparar_cupom
 
         cupom = self._coupon()
-        self._product(self.user, evidencia={"promotion_text": "LIVRO20"})
+        product = self._product(
+            self.user, evidencia={"promotion_text": "LIVRO20"})
         preparar_cupom(cupom, self.user, force=True, permitir_rede=False)
+        self._verified(self.user, product)
         self.assertEqual(ids_cupons_prontos(self.user, [cupom]), {cupom.id})
 
         cupom.regras = {**cupom.regras, "valor_desconto": 25}
@@ -136,8 +152,10 @@ class CouponPreparationTests(TestCase):
             CACHE_HORAS, ids_cupons_prontos, preparar_cupom)
 
         cupom = self._coupon()
-        self._product(self.user, evidencia={"promotion_text": "LIVRO20"})
+        product = self._product(
+            self.user, evidencia={"promotion_text": "LIVRO20"})
         preparar_cupom(cupom, self.user, force=True, permitir_rede=False)
+        self._verified(self.user, product)
         self.assertEqual(ids_cupons_prontos(self.user, [cupom]), {cupom.id})
 
         vencido = timezone.now() - timedelta(hours=CACHE_HORAS, minutes=1)
@@ -248,6 +266,67 @@ class CouponPreparationTests(TestCase):
             CupomPreparacao.objects.get(cupom=publicavel, usuario=self.user).status,
             "pronto",
         )
+
+    def test_lote_prioriza_cupom_ainda_nao_preparado(self):
+        """Um cupom fresco não pode deixar o restante da fila sem vez."""
+        from apps.scrapers.coupon_products import (
+            atualizar_chave_cupom, preparar_lote,
+        )
+
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-priority-tests", marketplace="mercadolivre", nome="Cupons ML",
+        )
+        fresco = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="fresco", marketplace="mercadolivre",
+            titulo="Cupom fresco", codigo="FRESCO",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 10}, estado="ativo",
+        )
+        pendente = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="pendente", marketplace="mercadolivre",
+            titulo="Cupom pendente", codigo="PENDENTE",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 10}, estado="ativo",
+        )
+        CupomPreparacao.objects.create(
+            cupom=fresco, usuario=None, status="pronto",
+            produtos_chave=atualizar_chave_cupom(fresco), verificado_em=timezone.now(),
+        )
+
+        with patch("apps.scrapers.coupon_products.preparar_cupom", return_value=[object()]) as preparar:
+            resultado = preparar_lote(limite=1)
+
+        self.assertEqual(resultado, {"processados": 1, "prontos": 1})
+        self.assertEqual(preparar.call_args.args[0].id, pendente.id)
+
+    def test_limite_padrao_de_preparacao_e_doze(self):
+        from apps.scrapers.coupon_products import PREPARO_LOTE_POR_CICLO
+
+        self.assertEqual(PREPARO_LOTE_POR_CICLO, 12)
+
+    @patch("apps.scrapers.auxiliar.iniciar_browser")
+    @patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session")
+    @patch("apps.scrapers.ml_auth.storage_state", return_value=None)
+    @patch("apps.scrapers.ml_auth.avisar_sem_sessao")
+    def test_container_sem_sessao_nao_abre_browser(
+        self, _avisar, _storage, http_session, iniciar_browser,
+    ):
+        from apps.scrapers.coupon_products import _coletar_ml_remoto
+
+        resposta = Mock(text="<html>sem produtos</html>")
+        resposta.raise_for_status.return_value = None
+        http_session.return_value.get.return_value = resposta
+        cupom = self._coupon(
+            marketplace="mercadolivre",
+            link="https://www.mercadolivre.com.br/ofertas/cupons/teste",
+            regras={
+                "container_url":
+                    "https://www.mercadolivre.com.br/ofertas/cupons/teste",
+            },
+        )
+
+        self.assertEqual(_coletar_ml_remoto(cupom), 0)
+        iniciar_browser.assert_not_called()
 
 
 class CouponMessageTests(SimpleTestCase):
@@ -413,9 +492,14 @@ class MercadoLivreCouponHTMLTests(SimpleTestCase):
 
 
 class CouponCollageTests(SimpleTestCase):
-    def _items(self, n):
-        return [{"produto": SimpleNamespace(imagem_url=f"https://img.example/{i}.jpg")}
-                for i in range(n)]
+    def _items(self, n, marketplace="mercadolivre"):
+        return [
+            {"produto": SimpleNamespace(
+                imagem_url=f"https://img.example/{i}.jpg",
+                marketplace=marketplace,
+            )}
+            for i in range(n)
+        ]
 
     def test_colagens_de_1_5_e_9_fotos_sao_jpeg_quadrado_1080(self):
         from PIL import Image
@@ -442,6 +526,71 @@ class CouponCollageTests(SimpleTestCase):
         ]):
             _b64, _mime, validos = montar_colagem_itens(itens)
         self.assertEqual(validos, [itens[0], itens[2]])
+
+    def test_produto_amazon_ocupa_o_card_sem_perder_o_fundo_branco(self):
+        from PIL import Image, ImageDraw
+        from apps.scrapers.colagem import montar_colagem_itens
+
+        origem = Image.new("RGB", (1000, 1000), "white")
+        ImageDraw.Draw(origem).rectangle((400, 400, 600, 600), fill="black")
+
+        with patch("apps.scrapers.colagem._baixar_imagem", return_value=origem):
+            b64, _mime, _validos = montar_colagem_itens(
+                self._items(1, marketplace="amazon"))
+
+        imagem = Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
+        pixels_escuros = imagem.convert("L").point(lambda pixel: 255 if pixel < 64 else 0)
+        esquerda, topo, direita, base = pixels_escuros.getbbox()
+
+        self.assertGreater(direita - esquerda, 800)
+        self.assertGreater(base - topo, 800)
+        self.assertGreaterEqual(imagem.getpixel((0, 0))[0], 250)
+
+    def test_miniaturas_pequenas_da_amazon_sao_ampliadas_na_grade(self):
+        from PIL import Image, ImageDraw
+        from apps.scrapers.colagem import montar_colagem_itens
+
+        miniaturas = []
+        for caixa in ((65, 65, 160, 160), (92, 92, 133, 133)):
+            miniatura = Image.new("RGB", (226, 226), "white")
+            desenho = ImageDraw.Draw(miniatura)
+            desenho.rectangle(caixa, fill="black")
+            # Artefatos escuros isolados na borda não podem impedir o recorte do
+            # espaço branco — é o padrão observado nas miniaturas reais.
+            desenho.point(((0, 0), (225, 0), (0, 225), (225, 225)), fill="black")
+            miniaturas.append(miniatura)
+
+        with patch("apps.scrapers.colagem._baixar_imagem", side_effect=miniaturas):
+            b64, _mime, _validos = montar_colagem_itens(
+                self._items(2, marketplace="amazon"))
+
+        imagem = Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
+        larguras = []
+        for esquerda_celula in (0, 540):
+            celula = imagem.crop((esquerda_celula, 0, esquerda_celula + 540, 1080))
+            pixels_escuros = celula.convert("L").point(
+                lambda pixel: 255 if pixel < 64 else 0)
+            esquerda, _topo, direita, _base = pixels_escuros.getbbox()
+            larguras.append(direita - esquerda)
+
+        self.assertGreater(min(larguras), 400)
+        self.assertLess(max(larguras) - min(larguras), 40)
+
+    def test_margem_branca_de_outros_marketplaces_nao_e_recortada(self):
+        from PIL import Image, ImageDraw
+        from apps.scrapers.colagem import montar_colagem_itens
+
+        origem = Image.new("RGB", (1000, 1000), "white")
+        ImageDraw.Draw(origem).rectangle((400, 400, 600, 600), fill="black")
+
+        with patch("apps.scrapers.colagem._baixar_imagem", return_value=origem):
+            b64, _mime, _validos = montar_colagem_itens(self._items(1))
+
+        imagem = Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
+        pixels_escuros = imagem.convert("L").point(lambda pixel: 255 if pixel < 64 else 0)
+        esquerda, _topo, direita, _base = pixels_escuros.getbbox()
+
+        self.assertLess(direita - esquerda, 300)
 
     def test_urls_locais_e_nao_https_sao_rejeitadas(self):
         from apps.scrapers.colagem import _url_publica
@@ -473,3 +622,522 @@ class TelegramCouponMediaTests(SimpleTestCase):
         self.assertEqual(kwargs["data"]["caption"], "legenda completa")
         self.assertEqual(kwargs["files"]["photo"][1], b"jpeg-bytes")
         self.assertEqual(kwargs["files"]["photo"][2], "image/jpeg")
+
+
+@override_settings(ML_CUPONS_ATIVACAO_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
+class CupomAtivacaoMercadoLivreTests(TestCase):
+    """O ML migrou /ofertas/cupons para cupons de ATIVAÇÃO (clique, sem código
+    digitável). Sem este ramo, 2357 de 2379 cupons ficavam inpublicáveis."""
+
+    def setUp(self):
+        self.fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML público"})
+
+    def _cupom(self, **kw):
+        regras = {"tipo_desconto": "porcentagem", "valor_desconto": 60,
+                  "valor_minimo": None, "desconto_maximo": None,
+                  "modo_resgate": "ativacao", "escopo": "Itens para Casa",
+                  "container_url": "https://lista.mercadolivre.com.br/_Container_13975432",
+                  "container_name": "13975432", "is_mar_aberto": False,
+                  "dia_inicio": "", "dia_fim": ""}
+        regras.update(kw.pop("regras", {}))
+        campos = {"fonte": self.fonte, "external_id": "campanha:13975432",
+                  "marketplace": "mercadolivre", "titulo": "60% OFF — Itens para Casa",
+                  "codigo": "", "regras": regras, "estado": "ativo"}
+        campos.update(kw)
+        return CupomNormalizado.objects.create(**campos)
+
+    def test_campanha_com_container_publico_e_publicavel(self):
+        self.assertTrue(cupom_publicavel(self._cupom()))
+
+    def test_site_wide_nunca_e_publicavel(self):
+        """Sem escopo não há como provar que o desconto se aplica ao item."""
+        cupom = self._cupom(regras={"is_mar_aberto": True})
+        self.assertFalse(cupom_publicavel(cupom))
+
+    def test_sem_container_nao_e_publicavel(self):
+        self.assertFalse(cupom_publicavel(self._cupom(regras={"container_url": ""})))
+
+    def test_sem_valor_de_desconto_nao_e_publicavel(self):
+        """Sem valor não há promessa a fazer na mensagem."""
+        self.assertFalse(cupom_publicavel(self._cupom(regras={"valor_desconto": None})))
+
+    def test_sem_campanha_no_external_id_nao_e_publicavel(self):
+        self.assertFalse(cupom_publicavel(self._cupom(external_id="checkout:XPTO10")))
+
+    @override_settings(ML_CUPONS_ATIVACAO_ENABLED=False)
+    def test_flag_desligada_mantem_comportamento_anterior(self):
+        """A flag nasce desligada: ligar joga milhares de cupons no ranking de envio
+        de uma vez, e o worker publica em grupo real."""
+        self.assertFalse(cupom_publicavel(self._cupom()))
+
+    def test_amazon_continua_intacta(self):
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="amazon-public-coupons",
+            defaults={"marketplace": "amazon", "nome": "Amazon"})
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="promo:1", marketplace="amazon",
+            titulo="Cupom Amazon", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao"},
+            evidencia={"association": "amazon-official-coupon-page",
+                       "promotion_id": "P1", "asins": ["B01"]})
+        self.assertTrue(cupom_publicavel(cupom))
+
+
+@override_settings(ML_CUPONS_ATIVACAO_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
+class ProdutoDeCupomPrecisaCarregarACampanhaTests(TestCase):
+    """O link enviado é o do PRODUTO, e ele só carrega coupon_campaign_id quando
+    produto.campanha_id está preenchido. Produto casado só pelo container vem do
+    feed com campanha vazia: divulgá-lo diria "ative o cupom" e a pessoa cairia
+    numa página sem cupom nenhum."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("cupomml", password="test")
+        self.fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML público"})
+        self.cupom = CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id="campanha:777", marketplace="mercadolivre",
+            titulo="20% OFF", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao", "valor_desconto": 20,
+                    "tipo_desconto": "porcentagem", "is_mar_aberto": False,
+                    "container_url": "https://lista.mercadolivre.com.br/_Container_777"})
+
+    def _produto(self, nome, campanha_id):
+        return Produto.objects.create(
+            marketplace="mercadolivre", nome=nome, origem="cupom",
+            campanha_id=campanha_id, preco_sem_desconto=100, preco_com_cupom=80,
+            imagem_url="https://img/x.jpg",
+            link_produto=f"https://www.mercadolivre.com.br/p/MLB{nome}")
+
+    def test_produto_da_pagina_oficial_entra(self):
+        from apps.scrapers.coupon_products import _base_produtos
+        certo = self._produto("111111", "777")
+        self.assertIn(certo, _base_produtos(self.cupom, self.user))
+
+    def test_produto_casado_so_pelo_container_fica_de_fora(self):
+        from apps.scrapers.coupon_products import _base_produtos
+        do_feed = self._produto("222222", "")           # veio do /ofertas
+        ProdutoCupom.objects.create(                    # casar_cupons_container
+            produto=do_feed, cupom=self.cupom, status="confirmado",
+            evidencia={"regra": "container"})
+        self.assertNotIn(do_feed, _base_produtos(self.cupom, self.user))
+
+    def test_cupom_de_codigo_nao_exige_campanha_no_produto(self):
+        """Com código digitável o desconto é aplicado no checkout: o link não
+        precisa carregar a campanha."""
+        from apps.scrapers.coupon_products import _base_produtos
+        self.cupom.codigo = "TECH20"
+        self.cupom.regras = {**self.cupom.regras, "modo_resgate": "codigo"}
+        self.cupom.save()
+        do_feed = self._produto("333333", "")
+        ProdutoCupom.objects.create(produto=do_feed, cupom=self.cupom,
+                                    status="confirmado", evidencia={"regra": "container"})
+        self.assertIn(do_feed, _base_produtos(self.cupom, self.user))
+
+
+@override_settings(ML_CUPONS_ATIVACAO_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
+class MensagemDeCupomDeAtivacaoTests(TestCase):
+    """Cupom sem código digitável não pode instruir o leitor a digitar nada."""
+
+    def test_mensagem_manda_ativar_e_nunca_oferece_codigo(self):
+        from apps.scrapers.ofertas import montar_mensagem_cupom
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML público"})
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:999", marketplace="mercadolivre",
+            titulo="30% OFF — Tecnologia", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao", "valor_desconto": 30,
+                    "tipo_desconto": "porcentagem", "is_mar_aberto": False,
+                    "container_url": "https://lista.mercadolivre.com.br/_Container_999"})
+
+        texto = montar_mensagem_cupom(cupom)
+
+        self.assertIn("Ative o cupom no link", texto)
+        self.assertNotIn("Use o cupom", texto)
+
+
+class CasamentoDeContainerTests(TestCase):
+    """A varredura pegava TODOS os cupons ativos com container (2357 em
+    homologação), a 2 páginas cada, dentro de um try/except que só loga — ela não
+    falhava, ela virava o ciclo inteiro."""
+
+    def setUp(self):
+        self.fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML público"})
+        Produto.objects.create(
+            marketplace="mercadolivre", nome="Item", origem="oferta", estado="ativo",
+            preco_sem_desconto=100, preco_com_cupom=80,
+            link_produto="https://produto.mercadolivre.com.br/MLB-123456")
+
+    def _cupons(self, quantos):
+        for i in range(quantos):
+            CupomNormalizado.objects.create(
+                fonte=self.fonte, external_id=f"campanha:{i}", marketplace="mercadolivre",
+                titulo=f"Cupom {i}", codigo="", estado="ativo",
+                regras={"container_url": f"https://lista.mercadolivre.com.br/_Container_{i}",
+                        "is_mar_aberto": False, "modo_resgate": "ativacao"})
+
+    def test_limite_de_cupons_por_passada(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_container import casar_cupons_container
+        self._cupons(30)
+        chamadas = []
+
+        def coletor(url, paginas):
+            chamadas.append(url)
+            return set()
+
+        casar_cupons_container(coletor=coletor, limite_cupons=10)
+        self.assertEqual(len(chamadas), 10)
+
+    def test_orcamento_de_tempo_interrompe(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_container import casar_cupons_container
+        self._cupons(10)
+        chamadas = []
+
+        def coletor(url, paginas):
+            chamadas.append(url)
+            return set()
+
+        casar_cupons_container(coletor=coletor, orcamento_s=0)
+        self.assertEqual(chamadas, [])
+
+    def test_nunca_casados_vem_primeiro(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_container import _cupons_de_container
+        self._cupons(3)
+        antigo = CupomNormalizado.objects.get(external_id="campanha:0")
+        produto = Produto.objects.first()
+        ProdutoCupom.objects.create(
+            produto=produto, cupom=antigo, status="confirmado",
+            verificado_em=timezone.now(), evidencia={"regra": "container"})
+
+        ordem = _cupons_de_container(limite=3)
+
+        # O já casado vai para o fim; os nunca casados na frente.
+        self.assertEqual(ordem[-1].id, antigo.id)
+
+    def test_extrai_ids_do_html_sem_browser(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_container import _ids_do_html
+        html = ('<a href="https://produto.mercadolivre.com.br/MLB-123456-x">a</a>'
+                '<a href="/p/MLB987654?ref=1">b</a>'
+                '<a href="https://exemplo.com/nada">c</a>')
+        self.assertEqual(_ids_do_html(html), {"MLB123456", "MLB987654"})
+
+
+class MapaDeRelacoesEmLoteTests(TestCase):
+    """A tela chamava relacoes_prontas_para_envio (3 queries) por cupom do catálogo
+    inteiro — ~7 mil queries com os 2379 de homologação, quase todas descartadas
+    logo depois pelo filtro de publicáveis."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("lote", password="test")
+        self.fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML público"})
+
+    def _cupom_pronto(self, sufixo, *, com_link=True, preparado=True):
+        from apps.scrapers.coupon_products import chave_produtos_cupom
+        cupom = CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id=f"campanha:{sufixo}",
+            marketplace="mercadolivre", titulo=f"Cupom {sufixo}", codigo=f"COD{sufixo}",
+            estado="ativo", regras={"modo_resgate": "codigo", "valor_desconto": 10})
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", nome=f"Produto {sufixo}", origem="cupom",
+            preco_sem_desconto=100, preco_com_cupom=80,
+            imagem_url="https://img/x.jpg",
+            link_produto=f"https://www.mercadolivre.com.br/p/MLB{sufixo}")
+        ProdutoCupom.objects.create(
+            produto=produto, cupom=cupom, status="confirmado",
+            preco_original=Decimal("100.00"), preco_atual=Decimal("90.00"),
+            preco_final=Decimal("80.00"))
+        if preparado:
+            CupomPreparacao.objects.create(
+                cupom=cupom, usuario=None, status="pronto",
+                produtos_chave=chave_produtos_cupom(cupom),
+                verificado_em=timezone.now())
+        if com_link:
+            LinkAfiliadoUsuario.objects.create(
+                usuario=self.user, produto=produto, estado="pronto",
+                link_afiliado=f"https://meli.la/{sufixo}", afiliado_ok=True,
+                verificado_ok=True)
+        return cupom
+
+    def test_numero_de_queries_nao_cresce_com_a_quantidade(self):
+        from apps.scrapers.coupon_products import mapa_relacoes_prontas
+        poucos = [self._cupom_pronto(f"1{i}") for i in range(2)]
+        with self.assertNumQueries(3):
+            mapa_relacoes_prontas(self.user, poucos)
+
+        muitos = poucos + [self._cupom_pronto(f"2{i}") for i in range(20)]
+        with self.assertNumQueries(3):
+            mapa_relacoes_prontas(self.user, muitos)
+
+    def test_paridade_com_a_versao_por_cupom(self):
+        """A versão single é a fonte do ENVIO. Se as duas divergirem, a tela oferece
+        o que o envio recusa — exatamente o defeito que link_validacao documenta ter
+        custado caro antes."""
+        from apps.scrapers.coupon_products import (
+            mapa_relacoes_prontas, relacoes_prontas_para_envio,
+        )
+        casos = [
+            self._cupom_pronto("31"),                        # pronto
+            self._cupom_pronto("32", com_link=False),        # preparado, sem link
+            self._cupom_pronto("33", preparado=False),       # nem preparado
+        ]
+        _, prontas = mapa_relacoes_prontas(self.user, casos)
+        for cupom in casos:
+            esperado = bool(relacoes_prontas_para_envio(cupom, self.user))
+            self.assertEqual(cupom.id in prontas, esperado,
+                             f"divergência no cupom {cupom.external_id}")
+
+    def test_preparados_inclui_quem_ainda_nao_tem_link(self):
+        """A tela usa os preparados-sem-link para dizer 'aguardando link'."""
+        from apps.scrapers.coupon_products import mapa_relacoes_prontas
+        sem_link = self._cupom_pronto("41", com_link=False)
+        preparadas, prontas = mapa_relacoes_prontas(self.user, [sem_link])
+        self.assertIn(sem_link.id, preparadas)
+        self.assertNotIn(sem_link.id, prontas)
+
+
+class SemanticaDePrecoDoCatalogoMLTests(TestCase):
+    """`preco_com_cupom` é a VITRINE, nos dois produtores do catálogo de cupom.
+
+    O caminho legado gravava aqui o preço JÁ descontado e a vitrine no campo do
+    preço de lista; `calcular_precos` então descontava o cupom outra vez e a
+    mensagem anunciava um valor que loja nenhuma cobrava.
+    """
+
+    ROW = {
+        "nome_produto": "Cafeteira Expresso",
+        "categoria": "CASA",
+        "link_produto": "https://www.mercadolivre.com.br/cafeteira/p/MLB1",
+        "imagem_url": "https://http2.mlstatic.com/foto.jpg",
+        "preco_original_sem_desconto": "250.00",   # preço de lista riscado
+        "preco_vitrine_atual": "100.00",           # o que a página mostra
+        "preco_final_com_cupom": "80.00",          # 20% do cupom, só p/ filtrar
+    }
+
+    def _sincronizar(self):
+        from apps.scrapers.scraper_mercadolivre.scraper import (
+            _sincronizar_produtos_no_banco,
+        )
+        _sincronizar_produtos_no_banco([
+            {"campaignId": "13975432", "produtos_aplicaveis": [dict(self.ROW)]},
+        ])
+        return Produto.objects.get(link_produto=self.ROW["link_produto"])
+
+    def test_grava_a_vitrine_e_o_preco_de_lista_nos_campos_certos(self):
+        produto = self._sincronizar()
+        self.assertEqual(produto.preco_com_cupom, 100.0)   # vitrine
+        self.assertEqual(produto.preco_efetivo, 100.0)
+        self.assertEqual(produto.preco_sem_desconto, 250.0)  # lista, não a vitrine
+        # O preço pós-cupom NÃO é persistido: ele é recalculado na publicação.
+        self.assertNotEqual(produto.preco_com_cupom, 80.0)
+
+    def test_cupom_desconta_uma_vez_so(self):
+        """O bug: 20% sobre 100 tem de dar 80, não 64."""
+        from apps.scrapers.coupon_products import calcular_precos
+
+        produto = self._sincronizar()
+        cupom = SimpleNamespace(
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 20},
+            marketplace="mercadolivre", codigo="", evidencia={})
+        original, atual, final = calcular_precos(cupom, produto)
+
+        self.assertEqual(atual, Decimal("100.00"))
+        self.assertEqual(final, Decimal("80.00"))
+        self.assertEqual(original, Decimal("250.00"))
+
+    def test_paridade_com_o_produtor_novo(self):
+        """Os dois caminhos gravam os MESMOS campos — foi a divergência entre eles
+        que deixou o desconto ser aplicado duas vezes."""
+        from apps.scrapers.coupon_products import _produtos_ml_do_html
+
+        produto_legado = self._sincronizar()
+        # O produtor novo lê os cards SSR; monta um card com os mesmos números.
+        html = (
+            '<div class="poly-card">'
+            '<a class="poly-component__title" href="https://ml.com.br/x/p/MLB2">Cafeteira</a>'
+            '<img class="poly-component__picture" src="https://http2.mlstatic.com/f.jpg">'
+            '<s class="andes-money-amount--previous">'
+            '<span class="andes-money-amount__fraction">250</span></s>'
+            '<div class="poly-price__current">'
+            '<span class="andes-money-amount__fraction">100</span></div>'
+            '</div>')
+        rows = _produtos_ml_do_html(html, limite=1)
+        self.assertTrue(rows, "o card de referência precisa ser parseável")
+        row = rows[0]
+        self.assertEqual(float(row["preco_vitrine_atual"]), produto_legado.preco_com_cupom)
+        self.assertEqual(float(row["preco_original_sem_desconto"]),
+                         produto_legado.preco_sem_desconto)
+
+
+class RevalidacaoDaColagemTests(TestCase):
+    """A colagem anuncia "De X por Y" por item, com Y calculado sobre a vitrine
+    que estava no banco (até 3h atrás). Aqui ela é medida ao vivo."""
+
+    def setUp(self):
+        from apps.scrapers import preco_ao_vivo
+        self.preco_ao_vivo = preco_ao_vivo
+        self.user = get_user_model().objects.create_user("colagem-user")
+        self.fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML público"})
+        self.cupom = CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id="campanha:99", marketplace="mercadolivre",
+            titulo="20% OFF", codigo="", estado="ativo",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 20,
+                    "valor_minimo": 50, "modo_resgate": "ativacao"})
+        self.produto = Produto.objects.create(
+            owner=None, marketplace="mercadolivre", nome="Cafeteira",
+            origem="cupom", campanha_id="99", fonte="mercadolivre-cupom",
+            estado="ativo", link_produto="https://ml.com.br/cafeteira/p/MLB1",
+            imagem_url="https://http2.mlstatic.com/f.jpg",
+            preco_sem_desconto=250.0, preco_com_cupom=100.0, preco_efetivo=100.0)
+        self.relacao = ProdutoCupom.objects.create(
+            produto=self.produto, cupom=self.cupom, status="confirmado",
+            verificado_em=timezone.now(), preco_original=Decimal("250.00"),
+            preco_atual=Decimal("100.00"), preco_final=Decimal("80.00"))
+        self.itens = [{"produto": self.produto, "relacao": self.relacao,
+                       "link": "https://meli.la/abc"}]
+
+    def _revalidar(self, relatorio):
+        with patch.object(self.preco_ao_vivo, "sessao_ml", return_value=object()), \
+             patch("apps.scrapers.scraper_mercadolivre.link_http.relatorio_de_preco",
+                   return_value=relatorio):
+            return self.preco_ao_vivo.revalidar_colagem(
+                self.cupom, self.itens, usuario=self.user)
+
+    def test_preco_que_caiu_recalcula_a_linha_e_mantem_o_item(self):
+        mantidos, removidos = self._revalidar(
+            {"preco": 90.0, "preco_de": 250.0, "bloqueio": "", "morto": False})
+
+        self.assertEqual(len(mantidos), 1)
+        self.assertEqual(removidos, [])
+        # 20% sobre a vitrine viva de 90 -> 72, não os 80 do preparo.
+        self.assertEqual(mantidos[0]["relacao"].preco_final, Decimal("72.00"))
+        self.assertEqual(mantidos[0]["relacao"].preco_atual, Decimal("90.00"))
+
+    def test_nao_escreve_no_catalogo_compartilhado(self):
+        """RLS: sob o contexto do usuário estas linhas não são graváveis. A
+        correção tem de vir da mutação em memória."""
+        self._revalidar({"preco": 90.0, "preco_de": 250.0, "bloqueio": "", "morto": False})
+
+        self.relacao.refresh_from_db()
+        self.produto.refresh_from_db()
+        self.assertEqual(self.relacao.preco_final, Decimal("80.00"))
+        self.assertEqual(self.produto.preco_com_cupom, 100.0)
+
+    def test_item_que_sai_das_regras_do_cupom_e_removido(self):
+        """Abaixo do valor mínimo não existe linha "De X por Y" verdadeira."""
+        mantidos, removidos = self._revalidar(
+            {"preco": 40.0, "preco_de": 250.0, "bloqueio": "", "morto": False})
+
+        self.assertEqual(mantidos, [])
+        self.assertEqual(len(removidos), 1)
+
+    def test_anuncio_morto_e_removido(self):
+        mantidos, removidos = self._revalidar(
+            {"preco": 0.0, "preco_de": 0.0, "bloqueio": "", "morto": True})
+        self.assertEqual(mantidos, [])
+        self.assertEqual(len(removidos), 1)
+
+    def test_bloqueio_mantem_a_linha_preparada(self):
+        """Inconclusivo nunca reprova — challenge do ML não pode esvaziar a colagem."""
+        mantidos, removidos = self._revalidar(
+            {"preco": 0.0, "preco_de": 0.0, "bloqueio": "challenge", "morto": False})
+
+        self.assertEqual(len(mantidos), 1)
+        self.assertEqual(removidos, [])
+        self.assertEqual(mantidos[0]["relacao"].preco_final, Decimal("80.00"))
+
+    def test_sem_sessao_do_ml_mantem_tudo(self):
+        with patch.object(self.preco_ao_vivo, "sessao_ml", return_value=None):
+            mantidos, removidos = self.preco_ao_vivo.revalidar_colagem(
+                self.cupom, self.itens, usuario=self.user)
+        self.assertEqual(len(mantidos), 1)
+        self.assertEqual(removidos, [])
+
+    def test_orcamento_estourado_mantem_o_item(self):
+        import time as _time
+
+        def lento(*args, **kwargs):
+            _time.sleep(1.5)
+            return {"preco": 90.0, "preco_de": 250.0, "bloqueio": "", "morto": False}
+
+        with patch.object(self.preco_ao_vivo, "sessao_ml", return_value=object()), \
+             patch("apps.scrapers.scraper_mercadolivre.link_http.relatorio_de_preco",
+                   side_effect=lento):
+            inicio = _time.monotonic()
+            mantidos, removidos = self.preco_ao_vivo.revalidar_colagem(
+                self.cupom, self.itens, usuario=self.user, orcamento_s=0.2)
+            decorrido = _time.monotonic() - inicio
+
+        self.assertEqual(len(mantidos), 1)
+        self.assertEqual(removidos, [])
+        self.assertLess(decorrido, 1.4, "o orçamento não segurou o envio")
+
+
+class BackfillDoDescontoDuplicadoTests(TestCase):
+    """A migration 0054 conserta o que já está gravado errado.
+
+    A re-raspagem não resolve: `scraper.main` pula toda campanha que já tenha
+    produto, então as linhas ficam congeladas com o desconto aplicado duas vezes.
+    """
+
+    def _corrigir(self):
+        import importlib
+
+        from django.apps import apps as django_apps
+
+        migracao = importlib.import_module(
+            "apps.scrapers.migrations.0054_backfill_preco_cupom_duplicado")
+        migracao.desfazer_desconto_duplicado(django_apps, None)
+
+    def _produto(self, sufixo, **kw):
+        campos = {
+            "owner": None, "marketplace": "mercadolivre", "origem": "cupom",
+            "fonte": "mercadolivre-cupom", "nome": f"Item {sufixo}",
+            "estado": "ativo", "campanha_id": "99",
+            "link_produto": f"https://ml.com.br/i{sufixo}/p/MLB{sufixo}",
+        }
+        campos.update(kw)
+        return Produto.objects.create(**campos)
+
+    def test_linha_legada_volta_para_a_vitrine(self):
+        # Vitrine 100 no campo do preço de lista, pós-cupom 80 na vitrine.
+        legado = self._produto(
+            "1", preco_sem_desconto=100.0, preco_com_cupom=80.0,
+            preco_fonte=100.0, preco_efetivo=80.0)
+
+        self._corrigir()
+
+        legado.refresh_from_db()
+        self.assertEqual(legado.preco_com_cupom, 100.0)
+        self.assertEqual(legado.preco_efetivo, 100.0)
+
+    def test_linha_do_produtor_novo_fica_intacta(self):
+        novo = self._produto(
+            "2", preco_sem_desconto=250.0, preco_com_cupom=100.0,
+            preco_fonte=100.0, preco_efetivo=100.0)
+
+        self._corrigir()
+
+        novo.refresh_from_db()
+        self.assertEqual(novo.preco_com_cupom, 100.0)
+        self.assertEqual(novo.preco_sem_desconto, 250.0)
+
+    def test_oferta_comum_nao_e_tocada(self):
+        """origem='oferta' tem de/por legítimos: `por` menor que `de` é normal."""
+        oferta = self._produto(
+            "3", origem="oferta", fonte="mercadolivre-web",
+            preco_sem_desconto=100.0, preco_com_cupom=80.0,
+            preco_fonte=100.0, preco_efetivo=80.0)
+
+        self._corrigir()
+
+        oferta.refresh_from_db()
+        self.assertEqual(oferta.preco_com_cupom, 80.0)

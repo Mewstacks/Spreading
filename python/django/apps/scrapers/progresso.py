@@ -1,10 +1,35 @@
-import sys
+import logging
+import re
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+
+logger = logging.getLogger(__name__)
+_reporter = ContextVar("scraper_progress_reporter", default=None)
+_PCT_RE = re.compile(r"\((\d{1,3})%\)")
+
+
+@contextmanager
+def usar_reporter(reporter):
+    """Direciona progresso para o job atual sem trocar ``sys.stdout`` global."""
+    token = _reporter.set(reporter)
+    try:
+        yield
+    finally:
+        _reporter.reset(token)
 
 
 def emitir_progresso(mensagem: str) -> None:
-    """Emite mensagens consumidas pelos endpoints SSE sem espalhar print() nos scrapers."""
-    sys.stdout.write(f"{mensagem}\n")
-    sys.stdout.flush()
+    """Emite progresso estruturado; fora de job, usa o logger do worker."""
+    reporter = _reporter.get()
+    if reporter is not None:
+        match = _PCT_RE.search(mensagem or "")
+        reporter(
+            mensagem,
+            progresso=min(100, int(match.group(1))) if match else None,
+        )
+        return
+    logger.info("%s", mensagem)
 
 
 def emitir_fase(rotulo: str, fracao: float = 0.0, faixa=None) -> None:

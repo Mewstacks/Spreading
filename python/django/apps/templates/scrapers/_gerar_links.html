@@ -1,0 +1,26 @@
+{% comment %}
+Ação de gerar links de afiliado da fila DESTE usuário.
+
+Sem dropdown de propósito. A versão anterior era um <details class="dd"> cujo painel
+tinha a classe `.dd-panel`, que é `display:none` e só aparece com `.open` — classe
+adicionada pelo `toggleDD()` dos filtros de categoria, que este controle nunca
+chamava. Resultado: o <details> abria e o painel (com o botão "Gerar" dentro)
+continuava invisível, então a ação era literalmente inalcançável pelo mouse.
+
+Agora o seletor e o botão ficam sempre visíveis. O botão carrega a fila para o
+usuário saber que há trabalho a fazer sem precisar caçar o número na faixa de Fontes.
+{% endcomment %}
+<span class="links-acao">
+  <select id="links-macro" class="btn-sm acao-sm links-macro"
+          aria-label="Categoria para gerar links de afiliado">
+    <option value="">Todas as categorias</option>
+    {% for mc in macro_categorias %}<option value="{{ mc }}">{{ mc }}</option>{% endfor %}
+  </select>
+  <button type="button"
+          class="btn {% if afiliacao.pendente %}btn-accent{% else %}btn-ghost{% endif %} btn-sm acao-sm js-links-btn"
+          onclick="gerarLinks()"
+          {% if not afiliacao.pendente %}title="Todos os produtos visíveis já têm link de afiliado."{% endif %}>
+    <i data-lucide="link"></i> Gerar links de afiliado
+    {% if afiliacao.pendente %}<span class="links-fila">{{ afiliacao.pendente }}</span>{% endif %}
+  </button>
+</span>

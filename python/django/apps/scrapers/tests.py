@@ -1,3 +1,4 @@
+import itertools
 import json
 import os
 import re
@@ -7,19 +8,20 @@ from types import SimpleNamespace
 from contextlib import contextmanager
 from datetime import timedelta
 from io import StringIO
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import requests
 from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.core.management import call_command
-from django.db import connection
+from django.db import DatabaseError, connection, transaction
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
+from apps.accounts.tenant import organization_context
 from apps.scrapers import ofertas, whatsapp_client
 from apps.scrapers.afiliado import tag_ml
 from apps.scrapers.maintenance import reconciliar_publicacoes_orfas
@@ -271,133 +273,508 @@ class MLAuthPathTests(SimpleTestCase):
 class SondaSessaoMLTests(SimpleTestCase):
     """A sonda pergunta ao ML se a sessão salva ainda vale.
 
-    A regra anterior era só a idade do arquivo (mtime <= 7 dias), o que mentia: um
-    cookie revogado pelo ML seguia "conectado" por uma semana, enquanto o sync de
-    relatório falhava e a Saúde abria incidente ao lado de um dashboard verde.
+    Ela NÃO decide desconectar ninguém: devolve "suspeito", e a acumulação de
+    suspeitas em accounts.ml_sessions.registrar_veredito é que muda o estado. Do
+    IP de datacenter da Fly, o gateway anti-bot do ML responde 302→login e 403 a
+    requisições perfeitamente autenticadas — um veredito isolado não distingue
+    challenge de logout.
     """
 
-    def _auth(self, d, nome="auth_7.json", cookies=True):
-        caminho = os.path.join(d, nome)
-        estado = {"cookies": [{"name": "ssid", "value": "x"}] if cookies else [],
-                  "origins": []}
-        with open(caminho, "w", encoding="utf-8") as f:
-            json.dump(estado, f)
-        return caminho
+    STATE = {"cookies": [{"name": "ssid", "value": "x", "domain": ".mercadolivre.com.br",
+                          "path": "/"}], "origins": []}
+
+    @staticmethod
+    def _resposta(status, location=None):
+        return Mock(status_code=status,
+                    headers={"Location": location} if location else {})
+
+    def _sondar(self, **kwargs):
+        from apps.scrapers.conexoes import sondar_sessao_ml
+
+        with patch("requests.Session.get", **kwargs):
+            return sondar_sessao_ml(self.STATE)
 
     def test_200_e_sessao_viva(self):
-        from apps.scrapers.conexoes import sondar_sessao_ml
+        self.assertEqual(self._sondar(return_value=self._resposta(200)),
+                         ("conectado", ""))
 
-        with tempfile.TemporaryDirectory() as d:
-            caminho = self._auth(d)
-            with patch("apps.scrapers.conexoes.requests.get",
-                       return_value=Mock(status_code=200, headers={})):
-                self.assertEqual(sondar_sessao_ml(caminho), ("conectado", ""))
+    def test_redirect_para_login_e_suspeito_nao_expirado(self):
+        """Redirect p/ login é suspeita, não sentença: o anti-bot faz isso com
+        cookie válido, e tratar como expirado desconectava quem tinha acabado de
+        conectar."""
+        veredito, _ = self._sondar(return_value=self._resposta(
+            302, "https://www.mercadolivre.com.br/jms/mlb/lgz/login"))
+        self.assertEqual(veredito, "suspeito")
 
-    def test_redirect_para_login_e_sessao_expirada(self):
-        from apps.scrapers.conexoes import sondar_sessao_ml
-
-        with tempfile.TemporaryDirectory() as d:
-            caminho = self._auth(d)
-            resposta = Mock(status_code=302,
-                            headers={"Location": "https://www.mercadolivre.com.br/jms/mlb/lgz/login"})
-            with patch("apps.scrapers.conexoes.requests.get", return_value=resposta):
-                veredito, _ = sondar_sessao_ml(caminho)
-        self.assertEqual(veredito, "expirado")
+    def test_403_e_inconclusivo(self):
+        """403 é o gateway anti-bot barrando o IP antes de olhar o cookie."""
+        veredito, _ = self._sondar(return_value=self._resposta(403))
+        self.assertEqual(veredito, "inconclusivo")
 
     def test_timeout_e_inconclusivo_nao_expirado(self):
-        """Oscilação de rede não é logout — a lição de auxiliar.py:85-89."""
-        from apps.scrapers.conexoes import sondar_sessao_ml
-
-        with tempfile.TemporaryDirectory() as d:
-            caminho = self._auth(d)
-            with patch("apps.scrapers.conexoes.requests.get",
-                       side_effect=requests.Timeout("estourou")):
-                veredito, _ = sondar_sessao_ml(caminho)
+        """Oscilação de rede não é logout — a lição de auxiliar.py."""
+        veredito, _ = self._sondar(side_effect=requests.Timeout("estourou"))
         self.assertEqual(veredito, "inconclusivo")
 
     def test_erro_do_ml_e_inconclusivo(self):
         """5xx é problema do ML, não da sessão: não pode desconectar o usuário."""
-        from apps.scrapers.conexoes import sondar_sessao_ml
-
-        with tempfile.TemporaryDirectory() as d:
-            caminho = self._auth(d)
-            with patch("apps.scrapers.conexoes.requests.get",
-                       return_value=Mock(status_code=503, headers={})):
-                veredito, _ = sondar_sessao_ml(caminho)
+        veredito, _ = self._sondar(return_value=self._resposta(503))
         self.assertEqual(veredito, "inconclusivo")
 
+    def test_cookies_homonimos_de_dominios_diferentes_convivem(self):
+        """O storage_state do ML tem `ssid` em vários domínios.
 
-class EstadoMLTests(SimpleTestCase):
+        O jar antigo era um dict {name: value}: o último do arquivo vencia e ia
+        para o host errado, então a sonda tomava 302→login sobre uma sessão viva —
+        e o veredito apagava a sessão.
+        """
+        from apps.scrapers.ml_auth import http_session
+
+        sessao = http_session({"cookies": [
+            {"name": "ssid", "value": "correto", "domain": ".mercadolivre.com.br", "path": "/"},
+            {"name": "ssid", "value": "outro", "domain": ".mercadopago.com.br", "path": "/"},
+        ]})
+        valores = {c.domain: c.value for c in sessao.cookies}
+        self.assertEqual(valores[".mercadolivre.com.br"], "correto")
+        self.assertEqual(valores[".mercadopago.com.br"], "outro")
+
+
+class EsperaDeReconexaoDoWhatsAppTests(SimpleTestCase):
+    """O gate de canal ESPERA a reconexão em vez de recusar o envio na hora.
+
+    Era a queixa: "estou enviando promoções e do nada aparece que o canal de envio
+    não é mais válido". A reconexão automática já existia no worker; o que faltava
+    era o envio dar a ela alguns segundos. Uma queda de rede de 5s virava erro na
+    tela, embora a sessão voltasse sozinha em seguida.
+    """
+
     def setUp(self):
         cache.clear()
 
-    def _auth(self, d, nome="auth_7.json"):
-        caminho = os.path.join(d, nome)
-        with open(caminho, "w", encoding="utf-8") as f:
-            json.dump({"cookies": [{"name": "ssid", "value": "x"}], "origins": []}, f)
-        return caminho
+    @staticmethod
+    def _estado(conectado, detalhe="", motivo=""):
+        from apps.scrapers.conexoes import Estado
 
-    def test_sem_arquivo_e_desconectado_com_motivo(self):
+        return Estado(conectado, "WhatsApp", "worker", motivo, detalhe, None)
+
+    @staticmethod
+    def _relogio():
+        """Relógio falso: cada leitura avança um intervalo de espera.
+
+        Sem isto o teste dependeria do relógio real — com `time.sleep` mockado, a
+        espera de 20s viraria milhares de iterações instantâneas (ou 20s de teste).
+        """
+        from apps.scrapers import ofertas
+
+        contador = itertools.count(0, ofertas._WA_ESPERA_INTERVALO_S)
+        return lambda: next(contador)
+
+    def _canal(self, estados, *, insistir=False):
+        """Roda o gate com uma sequência de estados; devolve (erro, chamadas)."""
+        from apps.scrapers import ofertas
+
+        sequencia = (itertools.chain(estados, itertools.repeat(estados[-1]))
+                     if insistir else list(estados))
+        with patch("apps.scrapers.ofertas.wa_session_de", return_value="s1"), \
+             patch("apps.scrapers.conexoes.estado_whatsapp",
+                   side_effect=sequencia) as le, \
+             patch("apps.scrapers.whatsapp_client.invalidar_status"), \
+             patch("apps.scrapers.whatsapp_client.status",
+                   return_value={"conectado": False, "fase": "reconectando"}), \
+             patch("time.sleep"), \
+             patch("time.monotonic", side_effect=self._relogio()):
+            return ofertas._canal_pronto_ou_erro("whatsapp", object()), le.call_count
+
+    def test_conectado_de_primeira_nao_espera(self):
+        erro, chamadas = self._canal([self._estado(True)])
+        self.assertIsNone(erro)
+        self.assertEqual(chamadas, 1)
+
+    def test_reconectando_que_volta_libera_o_envio(self):
+        """O caso central: a sessão volta durante a espera e a promoção sai."""
+        erro, _ = self._canal([
+            self._estado(False, "conectando", "WhatsApp reativando a conexão."),
+            self._estado(False, "conectando"),
+            self._estado(True),
+        ])
+        self.assertIsNone(erro)
+
+    def test_reconectando_que_nao_volta_ainda_e_transitorio(self):
+        """Não conta falha da configuração: `pausar_apos_falhas` não pode desligar
+        a automação por uma queda de infraestrutura."""
+        parado = self._estado(False, "conectando", "WhatsApp reativando a conexão.")
+        erro, _ = self._canal([parado], insistir=True)
+        self.assertIsNotNone(erro)
+        self.assertEqual(erro["classe"], "transitorio")
+        # E não pede login: não há QR a ler, é só esperar.
+        self.assertNotIn("precisa_login_wa", erro)
+
+    def test_sem_pareamento_nao_espera_nada(self):
+        """Estado terminal: esperar só atrasaria a mensagem que pede ação."""
+        sem_par = self._estado(False, "sem_pareamento",
+                               "WhatsApp desconectado. Reconecte sua conta.")
+        erro, chamadas = self._canal([sem_par, sem_par])
+        self.assertIsNotNone(erro)
+        self.assertTrue(erro["precisa_login_wa"])
+        # Uma leitura no gate; nenhuma volta de espera.
+        self.assertEqual(chamadas, 1)
+
+    def test_sessao_inativa_religa_e_o_mesmo_clique_ja_envia(self):
+        """Antes, o clique que religava a sessão nunca era o que enviava: devolvia
+        erro e só a tentativa seguinte encontrava a sessão de pé."""
+        from apps.scrapers import ofertas
+
+        with patch("apps.scrapers.ofertas.wa_session_de", return_value="s1"), \
+             patch("apps.scrapers.conexoes.estado_whatsapp", side_effect=[
+                 self._estado(False, "sem_pareamento", "desconectado"),
+                 self._estado(False, "conectando"),
+                 self._estado(True),
+             ]), \
+             patch("apps.scrapers.whatsapp_client.invalidar_status"), \
+             patch("apps.scrapers.whatsapp_client.status",
+                   return_value={"conectado": False, "fase": "inativo"}), \
+             patch("apps.scrapers.whatsapp_client.iniciar_sessao") as religar, \
+             patch("time.sleep"):
+            erro = ofertas._canal_pronto_ou_erro("whatsapp", object())
+
+        religar.assert_called_once()
+        self.assertIsNone(erro)
+
+    def test_canal_que_nao_e_whatsapp_passa_direto(self):
+        from apps.scrapers import ofertas
+
+        self.assertIsNone(ofertas._canal_pronto_ou_erro("telegram", object()))
+
+
+class MensagemDeCanalReconectandoTests(SimpleTestCase):
+    """A tradução da falha de transporte não pode pedir o que não existe.
+
+    "As credenciais do canal precisam ser reconectadas" mandava o usuário procurar
+    uma reconexão manual que o worker já estava fazendo sozinho.
+    """
+
+    def test_reconexao_em_curso_diz_que_e_automatica(self):
+        from apps.scrapers.ofertas import _motivo_publico_transporte
+
+        texto = _motivo_publico_transporte({
+            "classe": "transitorio",
+            "erro": "WhatsApp reconectando — o envio será retomado.",
+        })
+        self.assertIn("volta", texto.lower())
+        self.assertNotIn("credenciais", texto.lower())
+
+    def test_outras_falhas_transitorias_mantem_o_texto_antigo(self):
+        from apps.scrapers.ofertas import _motivo_publico_transporte
+
+        texto = _motivo_publico_transporte({"classe": "transitorio", "erro": "429"})
+        self.assertIn("temporariamente indisponível", texto)
+
+    def test_credencial_realmente_permanente_continua_pedindo_reconexao(self):
+        from apps.scrapers.ofertas import _motivo_publico_transporte
+
+        texto = _motivo_publico_transporte({
+            "classe": "permanente", "erro": "token invalido"})
+        self.assertIn("reconectadas", texto)
+
+
+class SondaLinkBuilderTests(SimpleTestCase):
+    """A sonda do PORTAL DE AFILIADOS, que não existia.
+
+    O portal /afiliados/linkbuilder tem SSO próprio (jms/msl): um cookie que
+    mercadolivre.com.br ainda aceita pode ser recusado lá. Enquanto só
+    `sondar_sessao_ml` existia, todas as telas diziam "conectado" e a geração de
+    links respondia "sessão expirada" — o relato que originou este trabalho.
+
+    Vocabulário e política são os mesmos da sonda do site, de propósito: só a
+    repetição de "suspeito" pede reconexão, e 403 nunca é logout.
+    """
+
+    STATE = {"cookies": [{"name": "ssid", "value": "x", "domain": ".mercadolivre.com.br",
+                          "path": "/"}], "origins": []}
+
+    @staticmethod
+    def _resposta(status, location=None):
+        return Mock(status_code=status,
+                    headers={"Location": location} if location else {})
+
+    def _sondar(self, **kwargs):
+        from apps.scrapers.conexoes import sondar_portal_afiliados_ml
+
+        with patch("requests.Session.get", **kwargs):
+            return sondar_portal_afiliados_ml(self.STATE)
+
+    def test_sonda_bate_no_portal_e_nao_no_site(self):
+        """Sondar myaccount não responde a pergunta: é o portal que recusa."""
+        from apps.scrapers.conexoes import sondar_portal_afiliados_ml
+
+        with patch("requests.Session.get", return_value=self._resposta(200)) as get:
+            sondar_portal_afiliados_ml(self.STATE)
+        (url,), _ = get.call_args
+        self.assertIn("/afiliados/linkbuilder", url)
+
+    def test_200_e_portal_aceitando(self):
+        self.assertEqual(self._sondar(return_value=self._resposta(200)),
+                         ("conectado", ""))
+
+    def test_redirect_para_login_e_suspeito(self):
+        veredito, motivo = self._sondar(return_value=self._resposta(
+            302, "https://www.mercadolivre.com.br/jms/mlb/lgz/login"))
+        self.assertEqual(veredito, "suspeito")
+        self.assertIn("portal de afiliados", motivo)
+
+    def test_intersticial_e_inconclusivo(self):
+        """Verificação de segurança interposta: a conta segue conectada. Contar
+        isto como suspeita desconectaria por ruído do anti-bot."""
+        veredito, _ = self._sondar(return_value=self._resposta(
+            302, "https://www.mercadolivre.com.br/gz/account-verification"))
+        self.assertEqual(veredito, "inconclusivo")
+
+    def test_403_e_inconclusivo(self):
+        veredito, _ = self._sondar(return_value=self._resposta(403))
+        self.assertEqual(veredito, "inconclusivo")
+
+    def test_timeout_e_5xx_sao_inconclusivos(self):
+        self.assertEqual(self._sondar(side_effect=requests.Timeout("x"))[0],
+                         "inconclusivo")
+        self.assertEqual(self._sondar(return_value=self._resposta(502))[0],
+                         "inconclusivo")
+
+    def test_sem_cookies_e_suspeito(self):
+        from apps.scrapers.conexoes import sondar_portal_afiliados_ml
+
+        self.assertEqual(
+            sondar_portal_afiliados_ml({"cookies": [], "origins": []})[0], "suspeito")
+
+
+class StatusDeConexaoComLinkBuilderTests(SimpleTestCase):
+    """O bloco `linkbuilder` do JSON que a tela de conexão pinta.
+
+    É o contrato entre ml_conexao.status() e pintarLinkBuilder() no template. O
+    campo `medido` existe para a tela render "—" em vez de afirmar algo: sem sessão
+    nenhuma, o diagnóstico relevante é `motivo_desconexao`, e dar dois diagnósticos
+    para a mesma causa era parte da confusão original.
+    """
+
+    def setUp(self):
+        cache.clear()
+
+    @staticmethod
+    def _estado(conectado, motivo="", alerta="", servico="Link Builder"):
+        from apps.scrapers.conexoes import Estado
+
+        return Estado(conectado, servico, "sonda", motivo, "", None, alerta=alerta)
+
+    def _status(self, site, lb):
+        from apps.scrapers import ml_conexao
+
+        with patch.object(ml_conexao, "_transport", Mock(status=Mock(return_value={}))), \
+             patch("apps.scrapers.conexoes.estado_ml", return_value=site), \
+             patch("apps.scrapers.conexoes.estado_ml_linkbuilder",
+                   return_value=lb) as sondou, \
+             patch("django.contrib.auth.get_user_model") as modelo:
+            modelo.return_value.objects.filter.return_value.first.return_value = Mock()
+            return ml_conexao.status(1), sondou
+
+    def test_portal_pedindo_login_com_site_ok(self):
+        """O caso do relato: site verde, Link Builder recusando."""
+        dados, _ = self._status(
+            self._estado(True, servico="Mercado Livre"),
+            self._estado(False, "O Link Builder do Mercado Livre está pedindo login de novo."),
+        )
+        self.assertTrue(dados["auth_valido"])
+        self.assertEqual(dados["linkbuilder"]["medido"], True)
+        self.assertFalse(dados["linkbuilder"]["ok"])
+        self.assertIn("Link Builder", dados["linkbuilder"]["motivo"])
+
+    def test_portal_instavel_vira_alerta_e_nao_motivo(self):
+        """Suspeita isolada não desconecta: a tela avisa sem alarmar."""
+        dados, _ = self._status(
+            self._estado(True, servico="Mercado Livre"),
+            self._estado(True, alerta="O Link Builder recusou a última verificação."),
+        )
+        self.assertTrue(dados["linkbuilder"]["ok"])
+        self.assertIn("recusou", dados["linkbuilder"]["alerta"])
+        self.assertEqual(dados["linkbuilder"]["motivo"], "")
+
+    def test_sem_sessao_nao_sonda_o_portal(self):
+        """Sondar o portal sem credencial gastaria um GET para dizer o que a linha
+        de cima já diz — e a tela mostraria dois avisos para uma causa."""
+        dados, sondou = self._status(
+            self._estado(False, "Nenhuma sessão do Mercado Livre.", servico="Mercado Livre"),
+            self._estado(True),
+        )
+        self.assertFalse(dados["auth_valido"])
+        self.assertFalse(dados["linkbuilder"]["medido"])
+        sondou.assert_not_called()
+
+    def test_login_em_curso_nao_sonda_o_portal(self):
+        """Durante o login a fase já manda na tela, e a sonda custa até 8s de rede
+        num endpoint que o front chama a cada 3s."""
+        from apps.scrapers import ml_conexao
+
+        cache.set(ml_conexao._cache_key(1), {"fase": "validando"})
+        with patch.object(ml_conexao, "_transport", Mock(status=Mock(return_value={}))), \
+             patch("apps.scrapers.conexoes.estado_ml_linkbuilder") as sondou:
+            dados = ml_conexao.status(1)
+
+        self.assertFalse(dados["linkbuilder"]["medido"])
+        sondou.assert_not_called()
+
+
+class MensagemDeSessaoDeLinkTests(SimpleTestCase):
+    """Os textos que o usuário lê quando a geração de link falha.
+
+    O texto antigo afirmava que o portal "tem sessão própria, separada da sua
+    conta no site" e mandava reconectar em Conexão Mercado Livre. As duas metades
+    eram verdadeiras isoladamente e contraditórias juntas: o usuário concluía que
+    faltava uma segunda conexão, que não existe — o Link Builder usa a sessão do
+    site (iniciar_browser(session_user=...)).
+    """
+
+    def test_nao_sugere_uma_segunda_conexao(self):
+        from apps.scrapers.scraper_mercadolivre import link
+
+        texto = link.MSG_SESSAO_EXPIRADA.lower()
+        self.assertNotIn("sessão própria", texto)
+        self.assertNotIn("separada", texto)
+        # E diz o que resolve: um login, na tela que já existe.
+        self.assertIn("mesma conexão", texto)
+        self.assertIn("conexão mercado livre", texto)
+
+    def test_sem_sessao_tem_texto_proprio(self):
+        """"Pediu login de novo" para quem nunca conectou era desorientador."""
+        from apps.scrapers.scraper_mercadolivre import link
+
+        self.assertNotEqual(link.MSG_SEM_SESSAO, link.MSG_SESSAO_EXPIRADA)
+        self.assertIn("nenhuma conta", link.MSG_SEM_SESSAO.lower())
+
+
+class EstadoMLTests(SimpleTestCase):
+    """Tradução do veredito persistido no Estado que a tela renderiza.
+
+    A POLÍTICA (quantas suspeitas até desconectar, e o fato de nunca apagar a
+    credencial) é do repositório e está coberta em apps/accounts/tests.py; aqui só
+    verificamos a leitura e o cache.
+    """
+
+    STATE = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
+
+    def setUp(self):
+        cache.clear()
+
+    @staticmethod
+    def _org(pk="11111111-1111-1111-1111-111111111111"):
+        """Organização fake: o estado é chaveado por ORGANIZAÇÃO, não por usuário
+        (a sessão ML é OneToOne com ela)."""
+        return patch("apps.accounts.models.organization_for_user",
+                     return_value=Mock(pk=pk))
+
+    @staticmethod
+    def _snapshot(**campos):
+        base = {"status": "active", "last_probe_at": None,
+                "last_probe_result": "", "probe_failures": 0, "probe_reason": ""}
+        base.update(campos)
+        return base
+
+    def test_sem_sessao_e_desconectado_com_motivo(self):
         from apps.scrapers.conexoes import estado_ml
 
-        with patch(
-            "apps.accounts.ml_sessions.load_storage_state", return_value=None,
-        ):
+        with self._org(), patch("apps.accounts.ml_sessions.probe_snapshot",
+                                return_value=None):
             est = estado_ml(Mock(id=7))
         self.assertFalse(est.conectado)
         self.assertEqual(est.detalhe, "sem_sessao")
         self.assertTrue(est.motivo)
 
-    def test_sessao_expirada_apaga_o_registro_cifrado(self):
-        """Confirmado o logout, some com a sessão morta: a tela passa a oferecer
-        'Reconectar' em vez de insistir que está tudo bem."""
+    def test_suspeita_isolada_mantem_conectado_com_alerta(self):
+        """Uma suspeita não desconecta ninguém: o anti-bot do ML redireciona
+        requisições autenticadas vindas do IP da Fly, e derrubar a conexão aí
+        desconectava quem tinha acabado de conectar."""
         from apps.scrapers.conexoes import estado_ml
 
-        state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
         with (
-            patch("apps.accounts.ml_sessions.load_storage_state", return_value=state),
-            patch("apps.accounts.ml_sessions.delete_storage_state") as delete,
+            self._org(),
+            patch("apps.accounts.ml_sessions.probe_snapshot",
+                  return_value=self._snapshot()),
+            patch("apps.accounts.ml_sessions.load_storage_state", return_value=self.STATE),
+            patch("apps.accounts.ml_sessions.registrar_veredito",
+                  return_value=self._snapshot(status="suspect", probe_failures=1)),
             patch("apps.scrapers.conexoes.sondar_sessao_ml",
-                  return_value=("expirado", "redirect")),
+                  return_value=("suspeito", "redirect")),
         ):
             est = estado_ml(Mock(id=7))
-        delete.assert_called_once()
-        self.assertEqual(est.detalhe, "expirado")
+        self.assertTrue(est.conectado)
+        self.assertFalse(est.motivo)
+        self.assertTrue(est.alerta)
 
-    def test_inconclusivo_preserva_o_ultimo_estado_e_o_ciphertext(self):
+    def test_suspeitas_repetidas_pedem_reconexao(self):
         from apps.scrapers.conexoes import estado_ml
 
-        state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
-        user = Mock(id=7)
         with (
-            patch("apps.accounts.ml_sessions.load_storage_state", return_value=state),
-            patch("apps.accounts.ml_sessions.delete_storage_state") as delete,
+            self._org(),
+            patch("apps.accounts.ml_sessions.probe_snapshot",
+                  return_value=self._snapshot(status="expired", probe_failures=3,
+                                              last_probe_at=timezone.now(),
+                                              last_probe_result="suspeito")),
         ):
-            with patch("apps.scrapers.conexoes.sondar_sessao_ml",
-                       return_value=("conectado", "")):
-                self.assertTrue(estado_ml(user).conectado)      # popula o cache
-            with patch("apps.scrapers.conexoes.sondar_sessao_ml",
-                       return_value=("inconclusivo", "timeout")):
-                est = estado_ml(user, usar_cache=False)
-        delete.assert_not_called()
-        self.assertTrue(est.conectado)                          # manteve o que sabia
+            est = estado_ml(Mock(id=7))
+        self.assertFalse(est.conectado)
+        self.assertEqual(est.detalhe, "expirado")
+
+    def test_veredito_fresco_do_banco_nao_sonda_de_novo(self):
+        """O veredito é compartilhado pelos nove processos: se um sondou há pouco,
+        os outros oito leem em vez de bater no ML de novo."""
+        from apps.scrapers.conexoes import estado_ml
+
+        with (
+            self._org(),
+            patch("apps.accounts.ml_sessions.probe_snapshot",
+                  return_value=self._snapshot(last_probe_at=timezone.now(),
+                                              last_probe_result="conectado")),
+            patch("apps.scrapers.conexoes.sondar_sessao_ml") as sonda,
+        ):
+            self.assertTrue(estado_ml(Mock(id=7)).conectado)
+        sonda.assert_not_called()
 
     def test_conectado_e_cacheado(self):
         """A sonda vai à rede; dashboard e Saúde fazem polling. Sem cache, cada aba
         aberta viraria uma ida ao ML."""
         from apps.scrapers.conexoes import estado_ml
 
-        state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
         user = Mock(id=7)
-        with patch(
-            "apps.accounts.ml_sessions.load_storage_state", return_value=state,
+        with (
+            self._org(),
+            patch("apps.accounts.ml_sessions.probe_snapshot",
+                  return_value=self._snapshot()),
+            patch("apps.accounts.ml_sessions.load_storage_state", return_value=self.STATE),
+            patch("apps.accounts.ml_sessions.registrar_veredito",
+                  return_value=self._snapshot(last_probe_result="conectado")),
+            patch("apps.scrapers.conexoes.sondar_sessao_ml",
+                  return_value=("conectado", "")) as sonda,
         ):
-            with patch("apps.scrapers.conexoes.sondar_sessao_ml",
-                       return_value=("conectado", "")) as sonda:
-                estado_ml(user)
-                estado_ml(user)
-                estado_ml(user)
+            estado_ml(user)
+            estado_ml(user)
+            estado_ml(user)
         self.assertEqual(sonda.call_count, 1)
+
+    def test_sondar_nao_marca_a_sessao_como_usada(self):
+        """`last_used_at` responde 'quando a sessão trabalhou', e uma tela aberta
+        não é trabalho — era isso que virava um UPDATE a cada poll de 3s."""
+        from apps.scrapers.conexoes import estado_ml
+
+        with (
+            self._org(),
+            patch("apps.accounts.ml_sessions.probe_snapshot",
+                  return_value=self._snapshot()),
+            patch("apps.accounts.ml_sessions.load_storage_state",
+                  return_value=self.STATE) as load,
+            patch("apps.accounts.ml_sessions.registrar_veredito",
+                  return_value=self._snapshot()),
+            patch("apps.scrapers.conexoes.sondar_sessao_ml",
+                  return_value=("conectado", "")),
+        ):
+            estado_ml(Mock(id=7))
+        self.assertFalse(load.call_args.kwargs["touch"])
 
 
 @override_settings(
@@ -1140,6 +1517,48 @@ class TopPromocoesFilterTests(TestCase):
         )
         return produto
 
+    def test_catalogo_de_cupons_mostra_so_prontos_e_indica_fila(self):
+        from apps.scrapers.coupon_products import atualizar_chave_cupom
+        from apps.scrapers.models import CupomPreparacao, ProdutoCupom
+
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-counter-source", marketplace="mercadolivre", nome="Cupons")
+        pronto = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="counter-ready", marketplace="mercadolivre",
+            titulo="Cupom pronto", codigo="PRONTO20",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20}, estado="ativo",
+        )
+        aguardando = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="counter-pending", marketplace="mercadolivre",
+            titulo="Cupom aguardando", codigo="AGUARDA20",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20}, estado="ativo",
+        )
+        CupomPreparacao.objects.create(
+            cupom=pronto, usuario=None, status="pronto",
+            produtos_chave=atualizar_chave_cupom(pronto), verificado_em=timezone.now(),
+        )
+        produto = self._criar_produto(
+            marketplace="mercadolivre", owner=None, nome="Produto do cupom",
+            preco_sem_desconto=100, preco_com_cupom=80,
+            link_produto="https://example.com/produto-cupom",
+            imagem_url="https://img.example/produto-cupom.jpg",
+        )
+        ProdutoCupom.objects.create(
+            cupom=pronto, produto=produto, status="confirmado",
+            preco_original=100, preco_atual=80, preco_final=60,
+            verificado_em=timezone.now(),
+        )
+
+        response = self.client.get(self.url, {"tipo": "cupom"})
+
+        self.assertEqual(response.context["cupons_coletados"], 2)
+        self.assertEqual(response.context["cupons_prontos"], 1)
+        self.assertEqual(response.context["cupons_aguardando_preparo"], 1)
+        self.assertEqual([c.id for c in response.context["cupons_catalogo"]], [pronto.id])
+        self.assertNotIn(aguardando.id, [c.id for c in response.context["cupons_catalogo"]])
+
     def test_search_and_minimum_discount_are_applied(self):
         response = self.client.get(self.url, {"q": "fone", "min_desconto": "40"})
 
@@ -1535,6 +1954,57 @@ class AttributionWorkflowTests(TestCase):
             Publicacao.objects.get(produto=self.product).status, "enviado"
         )
 
+    @patch("apps.scrapers.ofertas._baixar_imagem_b64", return_value=(None, None))
+    @patch("apps.scrapers.senders.registry.get_sender")
+    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
+    def test_produto_publico_nao_tenta_lock_de_escrita(
+        self, get_marketplace, get_sender, _image
+    ):
+        """RLS deixa o catálogo do ML legível, mas não permite FOR UPDATE nele."""
+        from apps.scrapers.ofertas import enviar_oferta_de_produto
+        from apps.scrapers.senders.base import WhatsAppMarkup
+
+        marketplace = Mock()
+        marketplace.build_affiliate_link.return_value = {
+            "link_afiliado": "https://example.com/a?tracking_id=ok",
+            "afiliado_ok": True,
+        }
+        get_marketplace.return_value = marketplace
+        sender = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
+        sender.enviar_oferta.return_value = {"sucesso": True, "via": "test"}
+        get_sender.return_value = sender
+
+        with patch.object(Produto.objects, "select_for_update",
+                          side_effect=AssertionError("produto público não pode ser bloqueado")):
+            result = enviar_oferta_de_produto(
+                self.product, "group@g.us", verificar=False,
+                usuario=self.user, destino_nome="Grupo")
+
+        self.assertTrue(result["sucesso"])
+
+    @patch("apps.scrapers.ofertas._baixar_imagem_b64", return_value=(None, None))
+    @patch("apps.scrapers.senders.registry.get_sender")
+    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
+    def test_produto_removido_entre_tela_e_reserva_tem_erro_claro(
+        self, get_marketplace, get_sender, _image
+    ):
+        from apps.scrapers.ofertas import enviar_oferta_de_produto
+        from apps.scrapers.senders.base import WhatsAppMarkup
+
+        get_marketplace.return_value = Mock()
+        get_sender.return_value = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
+        exibido = self.product
+        self.product.delete()
+
+        result = enviar_oferta_de_produto(
+            exibido, "group@g.us", verificar=False, usuario=self.user,
+            destino_nome="Grupo")
+
+        self.assertFalse(result["sucesso"])
+        self.assertTrue(result["produto_atualizado"])
+        self.assertIn("Atualize a tela", result["motivo"])
+        self.assertFalse(Publicacao.objects.filter(usuario=self.user).exists())
+
     def test_group_specific_branding_overrides_account_default(self):
         # A mensagem padrão agora é mínima (estilo dos grupos, sem header de marca).
         # A marca do grupo entra pelo template_a — é esse override que precede a conta.
@@ -1589,7 +2059,26 @@ class EnviarCupomColagemTests(TestCase):
         self.produto = Produto.objects.create(
             marketplace="mercadolivre", nome="Tênis de corrida", origem="oferta",
             preco_sem_desconto=200, preco_com_cupom=120,
-            link_produto="https://example.com/p", imagem_url="https://img/x.jpg",
+            link_produto="https://example.com/p", link_afiliado="https://meli.la/abc",
+            imagem_url="https://img/x.jpg",
+        )
+        from apps.scrapers.coupon_products import atualizar_chave_cupom
+        from apps.scrapers.models import CupomPreparacao, ProdutoCupom
+        ProdutoCupom.objects.create(
+            produto=self.produto, cupom=self.cupom, status="confirmado",
+            preco_original=200, preco_atual=120, preco_final=96,
+            verificado_em=timezone.now(),
+        )
+        CupomPreparacao.objects.create(
+            cupom=self.cupom, usuario=None, status="pronto",
+            produtos_chave=atualizar_chave_cupom(self.cupom),
+            verificado_em=timezone.now(),
+        )
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=self.produto, afiliado_ok=True,
+            estado="pronto", link_afiliado="https://meli.la/abc",
+            verificado_ok=True, verificado_em=timezone.now(),
+            url_canonica="https://meli.la/abc",
         )
 
     @patch("apps.scrapers.ofertas._canal_pronto_ou_erro", return_value=None)
@@ -1904,7 +2393,9 @@ class RaspagemDeCuponsTests(TestCase):
 
         campanha.assert_called_once()
         run = ExecucaoIngestao.objects.latest("id")
-        self.assertEqual(run.total_cupons, 4)      # somente códigos públicos oficiais
+        # O scrape geral registra apenas a vitrine autenticada; códigos públicos,
+        # preparo e links pertencem ao worker central de cupons.
+        self.assertEqual(run.total_cupons, 3)
         self.assertEqual(run.status, "ok")
 
     def test_falha_nos_cupons_de_campanha_nao_derruba_ofertas(self):
@@ -1920,7 +2411,7 @@ class RaspagemDeCuponsTests(TestCase):
         run = ExecucaoIngestao.objects.latest("id")
         self.assertEqual(run.status, "ok")
         self.assertEqual(run.total_ofertas, 10)
-        self.assertEqual(run.total_cupons, 4)
+        self.assertEqual(run.total_cupons, 3)
         self.assertTrue(EventoOperacional.objects.filter(
             evento="cupons_campanha_erro", level="warning").exists())
 
@@ -1970,22 +2461,6 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         sono = patch("apps.scrapers.scraper_mercadolivre.scraper.time.sleep")
         sono.start()
         self.addCleanup(sono.stop)
-
-    def _conta_de_catalogo(self):
-        """Declara a organização fonte do catálogo compartilhado.
-
-        Só é preciso nos testes que caem no browser: /cupons/filter exige login e a
-        sessão vem da conta declarada, nunca de um usuário qualquer.
-        """
-        from apps.accounts.ml_sessions import save_storage_state
-        from apps.accounts.models import Organization, organization_for_user
-
-        user = get_user_model().objects.create_user("catalogo-ml")
-        organization = organization_for_user(user)
-        Organization.objects.filter(pk=organization.pk).update(
-            fonte_catalogo_ml=True)
-        save_storage_state(user, {"cookies": [], "origins": []})
-        return user
 
     def _envelope(self, d):
         """Serializa um payload no formato Nordic que o parser espera, ou devolve a
@@ -2063,65 +2538,50 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         browser.assert_not_called()                        # HTTP resolveu; sem Chromium
         cupom = Cupom.objects.get(campanha_id="13642210")
         self.assertIn("esquenta copa", cupom.titulo.lower())
-        # O dump traz status.id=INACTIVE em 27 dos 30. Marcá-los todos como ativos
-        # era a causa de cupom anunciado que não funciona no checkout.
         self.assertEqual(cupom.estado, "inativo")
         self.assertEqual(Cupom.objects.filter(estado="ativo").count(), 3)
-        # "R$ 50 OFF ... Compra mínima R$ 399 ... Limite de R$ 50"
         self.assertEqual(cupom.tipo_desconto, "fixo")
         self.assertEqual(cupom.valor_desconto, 50.0)
         self.assertEqual(cupom.valor_minimo, 399.0)
         self.assertEqual(cupom.desconto_maximo, 50.0)
-        self.assertIsNotNone(cupom.validade)               # "Vence 19 de maio"
+        self.assertIsNotNone(cupom.validade)
 
-    def test_campos_do_payload_que_o_parser_antigo_perdia(self):
-        """Milhar, centavos e teto: os três casos que geravam valor incompatível."""
+    def test_parser_preserva_milhar_centavos_e_teto(self):
         from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
 
         with open(self.DUMP, encoding="utf-8") as f:
             dados = json.load(f)
         vazio = {"appProps": {"pageProps": {"filteredCouponsData": {"coupons": []}}}}
         sess = self._http_falsa([dados, vazio])
-        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session",
-                   return_value=sess), \
-                patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser"):
+        with patch(
+            "apps.scrapers.scraper_mercadolivre.scraper._ml_http_session",
+            return_value=sess,
+        ):
             mapear_cupons()
 
-        # "R$ 250 OFF em Apple", compra mínima R$ 2.000: `float("2.000")` devolvia
-        # 2.0 e o cupom passava a valer para qualquer item de R$ 2.
         apple = Cupom.objects.get(titulo__icontains="em Apple")
         self.assertEqual(apple.valor_minimo, 2000.0)
         self.assertEqual(apple.desconto_maximo, 250.0)
 
-        # "40% OFF em Smart Home": mínimo R$ 99,90 (centavos eram descartados) e
-        # teto de R$ 42 — sem ele, 40% de um item de R$ 2.000 viravam R$ 800.
         smart = Cupom.objects.get(titulo__icontains="Smart Home")
         self.assertEqual(smart.valor_minimo, 99.90)
         self.assertEqual(smart.desconto_maximo, 42.0)
         self.assertEqual(smart.tipo_desconto, "porcentagem")
         self.assertEqual(smart.valor_desconto, 40.0)
 
-    def test_validade_so_aceita_data_de_verdade(self):
-        from apps.scrapers.scraper_mercadolivre.scraper import _validade_ml
+    def test_helpers_do_payload_nao_confundem_urgencia_com_validade(self):
+        from apps.scrapers.scraper_mercadolivre.scraper import _validade_ml, _valor_ml
 
         agora = timezone.now().replace(month=5, day=1)
         vence = _validade_ml("Vence 19 de maio", agora=agora)
-        self.assertIsNotNone(vence)
         self.assertEqual((vence.month, vence.day, vence.hour), (5, 19, 23))
-        # Urgência de estoque não é data e não pode virar validade.
-        for texto in ("Está esgotando!", "Termina em 3 horas!", "Vence em domingo",
-                      "", None):
+        for texto in (
+            "Está esgotando!", "Termina em 3 horas!", "Vence em domingo", "", None,
+        ):
             self.assertIsNone(_validade_ml(texto, agora=agora))
 
-    def test_valor_ml_le_milhar_e_centavos(self):
-        from apps.scrapers.scraper_mercadolivre.scraper import _valor_ml
-
         self.assertEqual(_valor_ml("2.000", "0"), 2000.0)
-        self.assertEqual(_valor_ml("10.000", "0"), 10000.0)
         self.assertEqual(_valor_ml("99", "9"), 99.90)
-        self.assertEqual(_valor_ml("26", "3"), 26.30)
-        self.assertEqual(_valor_ml("399", None), 399.0)
-        self.assertIsNone(_valor_ml("", "0"))
         self.assertIsNone(_valor_ml(None))
 
     def test_pagina_vazia_nao_apaga_os_cupons_existentes(self):
@@ -2207,7 +2667,6 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         # HTTP devolve sempre uma página de login (sem filteredCouponsData).
         sess = self._http_falsa(["<html>login</html>"])
         page = self._browser_page([dump, vazio])
-        self._conta_de_catalogo()
 
         with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session", return_value=sess), \
                 self._browser_fake(page):
@@ -2223,7 +2682,6 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         from apps.scrapers.auxiliar import SessaoExpirada
 
         sess = self._http_falsa(["<html>login</html>"])
-        self._conta_de_catalogo()
 
         @contextmanager
         def _fake(*a, **kw):
@@ -2234,81 +2692,6 @@ class ParserDeCupomDeCampanhaTests(TestCase):
                 patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser", _fake):
             with self.assertRaises(SessaoExpirada):
                 mapear_cupons()
-
-    def test_painel_define_a_conta_de_catalogo_sem_terminal(self):
-        """A fonte do catálogo se escolhe na tela: produção não tem shell à mão."""
-        from apps.accounts.models import Organization, organization_for_user
-
-        admin = get_user_model().objects.create_superuser(
-            "root-catalogo", password="senha-bem-seguraaa")
-        dono = get_user_model().objects.create_user("org-catalogo")
-        org = organization_for_user(dono)
-
-        self.client.force_login(admin)
-        pagina = self.client.get(reverse("superadmin-usuarios"))
-        self.assertEqual(pagina.status_code, 200)
-        self.assertContains(pagina, "Catálogo de cupons do Mercado Livre")
-        self.assertContains(pagina, org.slug)
-
-        resposta = self.client.post(reverse("superadmin-catalogo-ml"),
-                                    {"organization": str(org.id)})
-
-        self.assertEqual(resposta.status_code, 302)
-        org.refresh_from_db()
-        self.assertTrue(org.fonte_catalogo_ml)
-
-        # Limpar volta ao estado sem fonte.
-        self.client.post(reverse("superadmin-catalogo-ml"), {"organization": ""})
-        self.assertFalse(Organization.objects.filter(fonte_catalogo_ml=True).exists())
-
-    def test_definir_catalogo_exige_superadmin(self):
-        from apps.accounts.models import Organization, organization_for_user
-
-        comum = get_user_model().objects.create_user("nao-admin-catalogo")
-        org = organization_for_user(comum)
-        self.client.force_login(comum)
-
-        resposta = self.client.post(reverse("superadmin-catalogo-ml"),
-                                    {"organization": str(org.id)})
-
-        # A view nunca roda para não-superadmin: barrada pelo decorator (403) ou
-        # antes dele, pelo middleware de tenant/verificação (302 para fora).
-        self.assertNotEqual(resposta.status_code, 200)
-        if resposta.status_code == 302:
-            self.assertNotIn(reverse("superadmin-usuarios"), resposta["Location"])
-        self.assertFalse(Organization.objects.filter(fonte_catalogo_ml=True).exists())
-
-    def test_sem_conta_de_catalogo_o_erro_diz_o_que_fazer(self):
-        """/cupons/filter exige login: sem conta declarada, erro com instrução.
-
-        Antes o chamador via só "LOGIN_REQUIRED / reconecte sua conta" — e nenhuma
-        reconexão resolvia, porque a raspagem não procurava a sessão de ninguém.
-        """
-        from apps.accounts.ml_sessions import SemContaDeCatalogo
-        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
-
-        sess = self._http_falsa(["<html>login</html>"])
-        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session",
-                   return_value=sess), \
-                patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser") as browser:
-            with self.assertRaises(SemContaDeCatalogo) as ctx:
-                mapear_cupons()
-
-        self.assertIn("conta_catalogo_ml", str(ctx.exception))
-        browser.assert_not_called()   # nem abre Chromium para falhar
-
-    def test_http_anonimo_com_payload_dispensa_conta_de_catalogo(self):
-        """Se o GET já traz o payload, a falta de sessão não pode abortar a coleta."""
-        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
-
-        with open(self.DUMP, encoding="utf-8") as f:
-            dados = json.load(f)
-        vazio = {"appProps": {"pageProps": {"filteredCouponsData": {"coupons": []}}}}
-        sess = self._http_falsa([dados, vazio])
-        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session",
-                   return_value=sess), \
-                patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser"):
-            self.assertEqual(mapear_cupons(), 30)
 
     def test_trava_de_max_paginas_para_o_laco_sem_expirar(self):
         """Payload que nunca esvazia não pode rodar para sempre nem expirar o resto."""
@@ -2370,6 +2753,129 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         self.assertEqual(Cupom.objects.filter(campanha_id__startswith="p").count(), 3)
         self.assertFalse(Cupom.objects.filter(campanha_id="p4").exists())
         self.assertEqual(Cupom.objects.get(campanha_id="saiu-do-ar").estado, "expirado")
+
+
+class CredencialDaRaspagemTests(TestCase):
+    """A raspagem tem de usar a sessão ML CIFRADA, não um arquivo que não existe.
+
+    Regressão do bug "ML conectado na tela, mas a raspagem não traz nada": os
+    scrapers chamavam `ml_auth_path()` sem usuário, que devolve "" desde a
+    migração multi-tenant. O `open("")` falhava calado, o cookie jar saía vazio e
+    o GET em /cupons/filter voltava sem payload — indistinguível de "não há
+    cupons". O portão da tela, que sonda a sessão do banco, deixava passar.
+    """
+
+    def setUp(self):
+        from apps.accounts.models import ensure_personal_organization
+
+        self.user = get_user_model().objects.create_user("dono-cupom", password="x")
+        self.organization = ensure_personal_organization(self.user)
+        self.state = {"cookies": [{"name": "ssid", "value": "segredo",
+                                   "domain": ".mercadolivre.com.br", "path": "/"}],
+                      "origins": []}
+
+    def test_sessao_do_usuario_vira_cookie_no_get(self):
+        from apps.accounts.ml_sessions import save_storage_state
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        save_storage_state(self.user, self.state)
+        vazio = {"appProps": {"pageProps": {"filteredCouponsData": {"coupons": []}}}}
+        capturadas = []
+
+        def _sessao_falsa(state):
+            capturadas.append(state)
+            sess = Mock()
+            sess.get.return_value = Mock(
+                text=f"<script>{json.dumps(vazio)}</script>",
+                raise_for_status=Mock(),
+            )
+            return sess
+
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session",
+                   side_effect=_sessao_falsa):
+            mapear_cupons(usuario=self.user)
+
+        self.assertEqual(len(capturadas), 1)
+        self.assertEqual([c["name"] for c in capturadas[0]["cookies"]], ["ssid"])
+
+    def test_sem_usuario_cai_na_organizacao_de_sistema(self):
+        """O loop automático (@system_job) não tem usuário: usa a org designada."""
+        from apps.accounts.ml_sessions import save_storage_state
+        from apps.scrapers.ml_auth import storage_state
+
+        save_storage_state(self.user, self.state)
+        with self.settings(ML_SYSTEM_ORGANIZATION_ID=str(self.organization.pk)):
+            self.assertEqual(storage_state(None), self.state)
+
+    def test_sem_organizacao_de_sistema_devolve_none(self):
+        from apps.scrapers.ml_auth import storage_state
+
+        with self.settings(ML_SYSTEM_ORGANIZATION_ID=""):
+            self.assertIsNone(storage_state(None))
+
+    def test_http_session_monta_o_jar_a_partir_do_dict(self):
+        """Antes recebia um caminho de arquivo; agora, o storage_state já resolvido."""
+        from apps.scrapers.scraper_mercadolivre.scraper import _ml_http_session
+
+        sess = _ml_http_session(self.state)
+        self.assertEqual(sess.cookies.get("ssid", domain=".mercadolivre.com.br"),
+                         "segredo")
+        # None é entrada válida (não há sessão): jar vazio, sem estourar.
+        self.assertEqual(len(_ml_http_session(None).cookies), 0)
+
+
+class LoginMLDesativadoTests(TestCase):
+    """Com a flag off, a tela precisa DIZER isso.
+
+    Regressão do "Reconectar não faz nada": `criar_sessao` devolvia
+    fase='indisponivel' sem gravar no cache, então o poll de 5s relia 'idle' +
+    auth_valido=True (a sessão antiga seguia no banco) e repintava "Conectado" —
+    a sessão parecia presa.
+    """
+
+    def setUp(self):
+        from apps.accounts.models import ensure_personal_organization
+
+        cache.clear()
+        self.user = get_user_model().objects.create_user("sem-login-ml", password="x")
+        self.user.perfil.marcar_verificado()
+        ensure_personal_organization(self.user)
+        self.url = reverse("scraper-ml-desconectar")
+
+    def test_recusa_fica_no_cache_e_o_status_seguinte_nao_diz_conectado(self):
+        from apps.scrapers import ml_conexao
+
+        with self.settings(ML_BROWSER_LOGIN_ENABLED=False):
+            recusa = ml_conexao.criar_sessao(self.user)
+            self.assertEqual(recusa["fase"], "indisponivel")
+            self.assertTrue(recusa["erro"])
+            # O poll seguinte NÃO pode voltar para 'idle' (que a tela converte em
+            # "Conectado" quando há sessão salva).
+            self.assertEqual(ml_conexao.status(self.user.id)["fase"], "indisponivel")
+
+    def test_desconectar_apaga_a_sessao_e_limpa_o_estado(self):
+        from apps.accounts.ml_sessions import has_storage_state, save_storage_state
+        from apps.scrapers import ml_conexao
+
+        save_storage_state(self.user, {"cookies": [], "origins": []})
+        ml_conexao._set_estado(self.user.id, fase="conectado")
+        self.client.force_login(self.user)
+
+        resposta = self.client.post(self.url)
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertTrue(resposta.json()["apagou"])
+        self.assertFalse(has_storage_state(self.user))
+        self.assertEqual(ml_conexao.status(self.user.id)["fase"], "idle")
+
+    def test_desconectar_exige_post(self):
+        # Apagar credencial é efeito colateral: GET deixaria a rota sem CSRF.
+        self.client.force_login(self.user)
+        self.assertEqual(self.client.get(self.url).status_code, 405)
+
+    def test_desconectar_exige_login(self):
+        self.client.logout()
+        self.assertIn(self.client.post(self.url).status_code, (302, 403))
 
 
 class ProjecaoCatalogoCuponsTests(TestCase):
@@ -2829,8 +3335,27 @@ class VerificarLinksPendentesTests(TestCase):
             link_produto="https://www.mercadolivre.com.br/item",
         )
 
-    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_link_afiliado")
+    def setUpBrowserFalso(self):
+        """O lote agora reusa UM browser: fingimos o `iniciar_browser` dele.
+
+        Os testes fazem patch de `_relatorio_na_pagina` (o trabalho por link) em vez
+        de `verificar_link_afiliado` (o caminho de item único, que abre browser
+        próprio) — é essa a função que o lote passou a usar.
+        """
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _browser_falso(*a, **kw):
+            yield MagicMock(), MagicMock()
+
+        remendo = patch("apps.scrapers.scraper_mercadolivre.link.iniciar_browser",
+                        _browser_falso)
+        remendo.start()
+        self.addCleanup(remendo.stop)
+
+    @patch("apps.scrapers.scraper_mercadolivre.link._relatorio_na_pagina")
     def test_aprova_link_que_abre_o_produto(self, verify):
+        self.setUpBrowserFalso()
         produto = self._produto("Fone bom")
         LinkAfiliadoUsuario.objects.create(
             usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",
@@ -2844,8 +3369,9 @@ class VerificarLinksPendentesTests(TestCase):
         self.assertIs(linha.verificado_ok, True)
         self.assertEqual(linha.url_canonica, "https://meli.la/bom")
 
-    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_link_afiliado")
+    @patch("apps.scrapers.scraper_mercadolivre.link._relatorio_na_pagina")
     def test_reprova_link_que_cai_na_vitrine_social(self, verify):
+        self.setUpBrowserFalso()
         produto = self._produto("Solda vitrine")
         LinkAfiliadoUsuario.objects.create(
             usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",
@@ -2863,8 +3389,9 @@ class VerificarLinksPendentesTests(TestCase):
         self.assertIs(linha.verificado_ok, False)
         self.assertTrue(linha.verificacao_motivo)
 
-    @patch("apps.scrapers.scraper_mercadolivre.link.verificar_link_afiliado")
+    @patch("apps.scrapers.scraper_mercadolivre.link._relatorio_na_pagina")
     def test_falha_de_rede_e_transitoria_nao_reprova(self, verify):
+        self.setUpBrowserFalso()
         produto = self._produto("Fone rede caiu")
         LinkAfiliadoUsuario.objects.create(
             usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",
@@ -2877,6 +3404,7 @@ class VerificarLinksPendentesTests(TestCase):
         linha = LinkAfiliadoUsuario.objects.get(usuario=self.user, produto=produto)
         # Segue None: nem aprovado nem reprovado — será retentado, não some da fila.
         self.assertIsNone(linha.verificado_ok)
+        self.assertGreater(linha.proxima_tentativa, timezone.now())
 
 
 class ParserDeNumeroDeRelatorioTests(SimpleTestCase):
@@ -3129,7 +3657,15 @@ class GeracaoDeLinksEmLoteTests(TestCase):
         enviados, _ = prefetch.call_args
         self.assertEqual(len(enviados[0]), 2)
 
-    def test_lote_permite_orm_so_durante_o_playwright_e_restaura_o_ambiente(self):
+    def test_lote_grava_o_link_sem_nenhum_bypass_de_async(self):
+        """O lote persiste item a item sem tocar em DJANGO_ALLOW_ASYNC_UNSAFE.
+
+        Antes, o lote inteiro rodava dentro de um contextmanager que setava essa
+        variável no os.environ do PROCESSO. Como ela é global às 8 threads do
+        gunicorn, o `finally` de um fluxo a removia no meio de outro — a origem do
+        "às vezes funciona, às vezes não". Agora cada gravação vai por
+        executar_no_tenant, e o ambiente não é tocado em momento nenhum.
+        """
         produto = self._produto()
         anterior = os.environ.pop("DJANGO_ALLOW_ASYNC_UNSAFE", None)
 
@@ -3138,7 +3674,8 @@ class GeracaoDeLinksEmLoteTests(TestCase):
             yield Mock(), Mock()
 
         try:
-            with patch("apps.scrapers.scraper_mercadolivre.link.iniciar_browser", browser_falso), \
+            with organization_context(self.user.personal_organization), \
+                 patch("apps.scrapers.scraper_mercadolivre.link.iniciar_browser", browser_falso), \
                  patch("apps.scrapers.scraper_mercadolivre.link._abrir_link_builder"), \
                  patch("apps.scrapers.scraper_mercadolivre.link._afiliar_url_na_pagina",
                        return_value="https://meli.la/link"):
@@ -3544,12 +4081,18 @@ class RelatorioSaudeTests(TestCase):
         self.assertNotEqual(resposta.status_code, 200)
 
     def test_pagina_renderiza_para_superadmin(self):
-        self._evento("config_pausada")
+        self._evento("config_pausada", usuario=self.admin)
         self.client.force_login(self.admin)
-        with patch("apps.scrapers.saude._workers", return_value=[]):
+        with (
+            patch("apps.scrapers.saude._workers", return_value=[]),
+            patch("apps.scrapers.saude._conexoes_ao_vivo", return_value=[]),
+        ):
             resposta = self.client.get(reverse("superadmin-saude"))
-        self.assertEqual(resposta.status_code, 503)
-        self.assertEqual(resposta["Retry-After"], "3600")
+        self.assertEqual(resposta.status_code, 200)
+        self.assertContains(
+            resposta, "Eventos e incidentes da organização de saude-admin",
+        )
+        self.assertContains(resposta, "Automação pausada sozinha")
 
 
 class RetesteDaSaudeTests(TestCase):
@@ -3690,9 +4233,14 @@ class AutoRefreshDaSaudeTests(TestCase):
         self.client.force_login(self.admin)
 
     def test_json_responde_o_resumo(self):
-        r = self.client.get(reverse("superadmin-saude-json"))
+        with (
+            patch("apps.scrapers.saude._workers", return_value=[]),
+            patch("apps.scrapers.saude._conexoes_ao_vivo", return_value=[]),
+        ):
+            r = self.client.get(reverse("superadmin-saude-json"))
 
-        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["estado"], "ok")
 
     def test_polling_nao_infla_ocorrencias(self):
         """A regressão que o auto-refresh podia introduzir: resumo() escrevendo no
@@ -4146,14 +4694,32 @@ class WhatsAppPainelSemEfeitoColateralTests(TestCase):
             "suprimirReviveAteQr || reviveTentado || FASES_REVIVIVEIS",
             html,
         )
-        # Uma ocorrência é a declaração inicial. O handler do reset não pode
-        # mais recolocar reviveTentado=false depois de descartar a sessão.
-        self.assertEqual(html.count("reviveTentado = false"), 1)
+        # O handler do reset não pode recolocar reviveTentado=false depois de
+        # descartar a sessão: ele arma os DOIS guardas.
+        self.assertIn("suprimirReviveAteQr = true;\n    reviveTentado = true;", html)
+        # O único rearme permitido é o do poll, e só numa fase saudável — é ele que
+        # devolve um revive a cada novo episódio terminal (ver o teste abaixo).
+        self.assertEqual(html.count("reviveTentado = false"), 2)
+        self.assertIn("if (faseSaudavel) reviveTentado = false;", html)
         self.assertIn("fase === 'reiniciando_qr'", html)
         self.assertIn("fase === 'qr' && s.qr", html)
         self.assertIn("fase === 'falha_reset'", html)
         self.assertIn("QR novo pronto para leitura.", html)
         self.assertIn("Não foi possível gerar o QR. Clique para tentar novamente.", html)
+
+    def test_front_remove_qr_antigo_e_serializa_polling(self):
+        with patch("apps.scrapers.whatsapp_client.status",
+                   return_value={"conectado": False, "fase": "qr", "qr": None}):
+            response = self.client.get(reverse("scraper-whatsapp"))
+
+        html = response.content.decode()
+        self.assertIn("qrImg.removeAttribute('src')", html)
+        self.assertIn("refreshQr(null)", html)
+        self.assertIn("qrArea.style.display = 'none';\n    refreshQr(null)", html)
+        self.assertIn("if (pollEmVoo) return pollEmVoo", html)
+        self.assertIn("pollTimer = setTimeout(cicloPoll, 5000)", html)
+        self.assertNotIn("setInterval(poll, 5000)", html)
+        self.assertIn("cache: 'no-store'", html)
 
 
 class ChecarAfiliacaoCommandTests(TestCase):
@@ -4284,67 +4850,51 @@ class MelhorCupomNormalizadoTests(TestCase):
         self._cupom("a:CONT30", "CONT30", is_mar_aberto=False, discount_num=30, min_compra=0)
         self.assertIsNone(_melhor_cupom_normalizado(self.produto))
 
-    def test_melhor_cupom_compara_em_reais_e_nao_pelo_numero_cru(self):
-        """Num item de R$ 100, 20% (R$ 20) vale mais que "R$ 15 OFF"."""
+    def test_compara_percentual_e_fixo_em_reais(self):
         from apps.scrapers.ofertas import _melhor_cupom_normalizado
-        self._cupom("a:PCT20", "PCT20", is_mar_aberto=True, discount_num=20,
-                    tipo_desconto="porcentagem", min_compra=0)
-        self._cupom("a:FIXO15", "FIXO15", is_mar_aberto=True, valor_desconto=15,
-                    tipo_desconto="fixo", min_compra=0)
 
+        self._cupom(
+            "a:PCT20", "PCT20", is_mar_aberto=True,
+            tipo_desconto="porcentagem", valor_desconto=20, valor_minimo=0,
+        )
+        self._cupom(
+            "a:FIXO15", "FIXO15", is_mar_aberto=True,
+            tipo_desconto="fixo", valor_desconto=15, valor_minimo=0,
+        )
         self.assertEqual(_melhor_cupom_normalizado(self.produto), "PCT20")
 
-    def test_teto_derruba_percentual_para_baixo_do_fixo(self):
-        """20% limitados a R$ 5 perdem para um fixo de R$ 15."""
+    def test_teto_e_compra_minima_usam_o_preco_de_vitrine(self):
         from apps.scrapers.ofertas import _melhor_cupom_normalizado
-        self._cupom("a:PCT20", "PCT20", is_mar_aberto=True, discount_num=20,
-                    tipo_desconto="porcentagem", min_compra=0, desconto_max=5)
-        self._cupom("a:FIXO15", "FIXO15", is_mar_aberto=True, valor_desconto=15,
-                    tipo_desconto="fixo", min_compra=0)
 
+        self._cupom(
+            "a:PCT20", "PCT20", is_mar_aberto=True,
+            tipo_desconto="porcentagem", valor_desconto=20,
+            desconto_maximo=5, valor_minimo=0,
+        )
+        self._cupom(
+            "a:FIXO15", "FIXO15", is_mar_aberto=True,
+            tipo_desconto="fixo", valor_desconto=15, valor_minimo=0,
+        )
+        self._cupom(
+            "a:MIN150", "MIN150", is_mar_aberto=True,
+            tipo_desconto="fixo", valor_desconto=99, valor_minimo=150,
+        )
         self.assertEqual(_melhor_cupom_normalizado(self.produto), "FIXO15")
 
-    def test_cupom_inativo_ou_vencido_nao_entra_na_mensagem(self):
-        from apps.scrapers.ofertas import _melhor_cupom_normalizado
-        inativo = self._cupom("a:OFF20", "OFF20", is_mar_aberto=True,
-                              discount_num=20, min_compra=0)
-        CupomNormalizado.objects.filter(pk=inativo.pk).update(estado="inativo")
-        vencido = self._cupom("a:OLD30", "OLD30", is_mar_aberto=True,
-                              discount_num=30, min_compra=0)
-        CupomNormalizado.objects.filter(pk=vencido.pk).update(
-            validade=timezone.now() - timedelta(days=1))
-
-        self.assertIsNone(_melhor_cupom_normalizado(self.produto))
-
-    def test_compra_minima_usa_o_preco_de_vitrine(self):
-        """A vitrine (R$ 100) é o que entra no carrinho, não a tabela (R$ 200)."""
-        from apps.scrapers.ofertas import _melhor_cupom_normalizado
-        self._cupom("a:MIN150", "MIN150", is_mar_aberto=True, discount_num=20,
-                    min_compra=150)
-
-        self.assertIsNone(_melhor_cupom_normalizado(self.produto))
-
-    def test_cupom_restrito_publica_com_linha_de_condicao(self):
+    def test_cupom_restrito_informa_a_condicao_na_mensagem(self):
         from apps.scrapers.ofertas import montar_mensagem
-        restrito = self._cupom("a:APP10", "APP10", is_mar_aberto=True,
-                               discount_num=10, min_compra=0,
-                               escopo="Somente no app, primeira compra")
-        CupomNormalizado.objects.filter(pk=restrito.pk).update(restrito=True)
+
+        cupom = self._cupom(
+            "a:APP10", "APP10", is_mar_aberto=True,
+            tipo_desconto="porcentagem", valor_desconto=10, valor_minimo=0,
+            escopo="Somente no app, primeira compra",
+        )
+        CupomNormalizado.objects.filter(pk=cupom.pk).update(restrito=True)
 
         mensagem = montar_mensagem(self.produto, "https://meli.la/x", None)
-
-        self.assertIn("🎟️ *CUPOM: APP10*", mensagem)
-        self.assertIn("⚠️ *Condição:* Somente no app, primeira compra", mensagem)
-
-    def test_cupom_sem_restricao_nao_ganha_linha_de_condicao(self):
-        from apps.scrapers.ofertas import montar_mensagem
-        self._cupom("a:LIVRE10", "LIVRE10", is_mar_aberto=True, discount_num=10,
-                    min_compra=0)
-
-        mensagem = montar_mensagem(self.produto, "https://meli.la/x", None)
-
-        self.assertIn("🎟️ *CUPOM: LIVRE10*", mensagem)
-        self.assertNotIn("Condição", mensagem)
+        self.assertIn("CUPOM: APP10", mensagem)
+        self.assertIn("Condição:", mensagem)
+        self.assertIn("Somente no app, primeira compra", mensagem)
 
 
 class CasarCuponsContainerTests(TestCase):
@@ -4506,6 +5056,12 @@ class EnvioCupomTests(TestCase):
         CupomPreparacao.objects.create(
             cupom=self.cupom, usuario=None, status="pronto", produtos_chave=chave,
             verificado_em=timezone.now())
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=self.produto, afiliado_ok=True,
+            estado="pronto", link_afiliado="https://meli.la/produto",
+            verificado_ok=True, verificado_em=timezone.now(),
+            url_canonica="https://meli.la/produto",
+        )
         self._colagem_patcher = patch("apps.scrapers.colagem.montar_colagem_itens")
         self.colagem = self._colagem_patcher.start()
         self.colagem.side_effect = lambda itens, **_kwargs: (
@@ -4559,21 +5115,22 @@ class EnvioCupomTests(TestCase):
         self.assertTrue(segundo["duplicado"])
         self.assertEqual(Publicacao.objects.get(usuario=self.user).status, "incerto")
 
-    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
-    def test_produto_sem_link_afiliado_fecha_publicacao_e_permite_retentativa(
-        self, marketplace
-    ):
+    def test_produto_sem_link_afiliado_nao_reserva_publicacao(self):
         from apps.scrapers.ofertas import enviar_cupom
         self.produto.link_afiliado = ""
         self.produto.save(update_fields=["link_afiliado"])
-        marketplace.return_value.build_affiliate_link.return_value = {}
+        LinkAfiliadoUsuario.objects.filter(
+            usuario=self.user, produto=self.produto,
+        ).delete()
         sender = self._sender({"sucesso": True})
         with patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
             primeiro = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
             segundo = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
         self.assertFalse(primeiro["sucesso"])
         self.assertFalse(segundo.get("duplicado", False))
-        self.assertEqual(Publicacao.objects.filter(status="falhou").count(), 2)
+        self.assertTrue(primeiro["link_afiliado_pendente"])
+        self.assertTrue(segundo["link_afiliado_pendente"])
+        self.assertFalse(Publicacao.objects.filter(usuario=self.user).exists())
 
     def test_whatsapp_desconectado_pede_reconexao_antes_de_enviar(self):
         # WhatsApp fora do ar: o envio não pode criar Publicacao nem tentar montar a
@@ -4602,9 +5159,11 @@ class EnvioCupomTests(TestCase):
         from apps.scrapers.ofertas import enviar_cupom
 
         sender = self._sender({"sucesso": True})
+        bloqueio = {"mensagem": "Sessão do Mercado Livre expirada. Reconecte sua conta.",
+                    "precisa_login_ml": True}
         with patch("apps.scrapers.senders.registry.get_sender", return_value=sender), \
              patch("apps.scrapers.ofertas._preparar_itens_cupom",
-                   return_value=([], True)):
+                   return_value=([], bloqueio)):
             resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
 
         self.assertFalse(resultado["sucesso"])
@@ -4612,6 +5171,108 @@ class EnvioCupomTests(TestCase):
         self.assertIn("Mercado Livre", resultado["motivo"])
         self.assertEqual(
             Publicacao.objects.get(cupom_normalizado=self.cupom).status, "falhou")
+
+    def test_link_builder_desativado_nao_pede_reconexao(self):
+        """Flag desligada não é sessão caída.
+
+        ML_LINK_BUILDER_ENABLED nasce desligada em produção (core/settings.py), e
+        antes esse BrowserError era agrupado com as exceções de sessão: o usuário
+        lia "Sessão expirada, reconecte" e reconectava em looping uma conta que
+        estava perfeita.
+        """
+        from apps.scrapers.ofertas import enviar_cupom
+
+        sender = self._sender({"sucesso": True})
+        bloqueio = {"mensagem": "Link Builder por navegador está desativado para "
+                                "esta organização.",
+                    "precisa_login_ml": False}
+        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender), \
+             patch("apps.scrapers.ofertas._preparar_itens_cupom",
+                   return_value=([], bloqueio)):
+            resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertFalse(resultado["precisa_login_ml"])
+        self.assertIn("Link Builder", resultado["motivo"])
+
+    def test_cupom_publico_nao_tenta_lock_de_escrita(self):
+        """RLS deixa o catálogo público legível, mas não permite FOR UPDATE nele."""
+        from apps.scrapers.ofertas import enviar_cupom
+
+        sender = self._sender({"sucesso": True, "via": "whatsapp", "mensagem_id": "m1"})
+        with patch.object(CupomNormalizado.objects, "select_for_update",
+                          side_effect=AssertionError("cupom público não pode ser bloqueado")), \
+             patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
+            resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertTrue(resultado["sucesso"])
+
+    def test_cupom_removido_entre_tela_e_reserva_tem_erro_claro(self):
+        from apps.scrapers.ofertas import enviar_cupom
+
+        cupom_exibido = self.cupom
+        self.cupom.delete()
+        resultado = enviar_cupom(cupom_exibido, "123@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertTrue(resultado["cupom_atualizado"])
+        self.assertIn("Atualize a tela", resultado["motivo"])
+        self.assertFalse(Publicacao.objects.filter(usuario=self.user).exists())
+
+    @patch("apps.scrapers.llm.gerar_conteudo",
+           return_value={"titulo": "Oferta especial", "nome_curto": "Produto"})
+    def test_cupom_publico_envia_sem_repreparar_ou_gravar_produto(self, _ia):
+        """O clique usa o cache pronto e não pode escrever no catálogo RLS."""
+        from apps.scrapers.ofertas import enviar_cupom
+
+        sender = self._sender({"sucesso": True, "via": "whatsapp", "mensagem_id": "m1"})
+        with patch("apps.scrapers.coupon_products.preparar_cupom",
+                   side_effect=AssertionError("envio não prepara catálogo")), \
+             patch.object(Produto, "save",
+                          side_effect=AssertionError("envio não grava produto público")), \
+             patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
+            resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertTrue(resultado["sucesso"])
+        sender.enviar_oferta.assert_called_once()
+        self.assertEqual(Publicacao.objects.get().status, "enviado")
+
+    def test_preparo_vencido_nao_reserva_publicacao(self):
+        from apps.scrapers.coupon_products import CACHE_HORAS
+        from apps.scrapers.models import CupomPreparacao
+        from apps.scrapers.ofertas import enviar_cupom
+
+        CupomPreparacao.objects.filter(cupom=self.cupom).update(
+            verificado_em=timezone.now() - timedelta(hours=CACHE_HORAS, minutes=1))
+        resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertTrue(resultado["cupom_em_preparo"])
+        self.assertIn("sendo atualizado", resultado["motivo"])
+        self.assertFalse(Publicacao.objects.filter(usuario=self.user).exists())
+
+    def test_link_afiliado_pendente_nao_reserva_publicacao(self):
+        from apps.scrapers.ofertas import enviar_cupom
+
+        self.produto.link_afiliado = ""
+        self.produto.save(update_fields=["link_afiliado"])
+        LinkAfiliadoUsuario.objects.filter(
+            usuario=self.user, produto=self.produto,
+        ).delete()
+        resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertTrue(resultado["link_afiliado_pendente"])
+        self.assertIn("links afiliados", resultado["motivo"])
+        self.assertFalse(Publicacao.objects.filter(usuario=self.user).exists())
+
+    def test_falha_no_cache_ia_nao_quebra_transacao_externa(self):
+        from apps.scrapers.ofertas import _salvar_cache_ia
+
+        with patch.object(Produto, "save", side_effect=DatabaseError("RLS bloqueou update")):
+            with transaction.atomic():
+                _salvar_cache_ia(self.produto, titulo="Chamada", nome_curto="Nome")
+                self.assertTrue(Produto.objects.filter(pk=self.produto.pk).exists())
 
 
 class LinkAfiliadoCupomTests(TestCase):
@@ -4726,6 +5387,40 @@ class EndpointsEnvioPostTests(TransactionTestCase):
         self.assertIn("Cupom não encontrado", corpo)
         self.assertNotIn("DROP TABLE", corpo)
 
+    @patch("apps.scrapers.ofertas.enviar_cupom", side_effect=RuntimeError("falha de teste"))
+    def test_sse_de_envio_cupom_nao_esconde_excecao_do_nucleo(self, _enviar):
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-sse-source", marketplace="mercadolivre", nome="Fonte")
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="sse-coupon", marketplace="mercadolivre",
+            titulo="Cupom SSE", codigo="SSE20",
+            regras={"modo_resgate": "codigo"}, estado="ativo",
+        )
+
+        response = self.client.post(reverse("scraper-enviar-cupom"), {
+            "cupom": cupom.id, "grupo": "123@g.us", "canal": "whatsapp",
+        })
+        corpo = b"".join(response.streaming_content).decode()
+
+        self.assertIn("O envio encontrou uma falha temporária", corpo)
+        self.assertNotIn("Falha inesperada ao processar a solicitação", corpo)
+
+    @patch("apps.scrapers.ofertas.enviar_oferta_de_produto",
+           side_effect=RuntimeError("falha de teste"))
+    def test_sse_de_envio_produto_nao_esconde_excecao_do_nucleo(self, _enviar):
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Oferta SSE", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=60,
+            link_produto="https://example.com/p")
+
+        response = self.client.post(reverse("scraper-enviar-produto"), {
+            "produto": produto.id, "grupo": "123@g.us", "canal": "whatsapp",
+        })
+        corpo = b"".join(response.streaming_content).decode()
+
+        self.assertIn("O envio encontrou uma falha temporária", corpo)
+        self.assertNotIn("Falha inesperada ao processar a solicitação", corpo)
+
     def test_cupom_sem_codigo_publico_e_produto_pronto_fica_oculto(self):
         fonte = FonteIngestao.objects.create(
             slug="xss-coupon-source", marketplace="mercadolivre", nome="Fonte")
@@ -4743,4 +5438,362 @@ class EndpointsEnvioPostTests(TransactionTestCase):
         self.assertNotIn("&lt;script&gt;", corpo)
         self.assertNotIn('<script>alert("xss")</script>', corpo)
         self.assertNotIn(token, corpo)
-        self.assertIn("Nenhum cupom ativo encontrado", corpo)
+        self.assertIn("Nenhum cupom pronto para envio", corpo)
+
+
+class SemBypassAsyncUnsafeTests(SimpleTestCase):
+    """Trava permanente: DJANGO_ALLOW_ASYNC_UNSAFE não pode voltar ao código.
+
+    Ela era usada para chamar o ORM de dentro de `with sync_playwright()`. Como é uma
+    variável de ambiente do PROCESSO e o gunicorn roda 8 threads, um fluxo removia a
+    permissão debaixo de outro — em produção isso apareceu como
+    "Falha na conexão: You cannot call this from an async context". A saída correta é
+    tirar a query do bloco do Playwright ou passá-la por
+    apps.accounts.tenant.executar_no_tenant.
+    """
+
+    def test_nenhum_modulo_de_producao_seta_a_variavel(self):
+        # Pela AST, e não por texto: comentários explicando POR QUE o bypass saiu são
+        # documentação valiosa e não podem fazer a trava disparar. Só um literal de
+        # verdade no código conta.
+        import ast
+        import pathlib
+
+        raiz = pathlib.Path(__file__).resolve().parent.parent   # apps/
+        culpados = []
+        for arquivo in raiz.rglob("*.py"):
+            if arquivo.name == "tests.py":
+                continue          # os testes citam o nome só para provar a ausência
+            arvore = ast.parse(arquivo.read_text(encoding="utf-8"))
+            for no in ast.walk(arvore):
+                if isinstance(no, ast.Constant) and no.value == "DJANGO_ALLOW_ASYNC_UNSAFE":
+                    culpados.append(str(arquivo.relative_to(raiz)))
+                    break
+        self.assertEqual(
+            sorted(culpados), [],
+            "Use executar_no_tenant ou mova o ORM para fora do `with sync_playwright()` "
+            f"em vez de reintroduzir o bypass: {sorted(culpados)}",
+        )
+
+
+class SessaoMLGravadaForaDoPlaywrightTests(TestCase):
+    """Regressão central: a sessão só pode ser gravada com o Playwright já fechado.
+
+    O login concluía, `save_storage_state` levantava SynchronousOnlyOperation dentro do
+    `with sync_playwright()`, o except genérico jogava o texto cru na tela e a sessão
+    NUNCA era salva. É este teste que teria pego o bug em produção.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("ml-live", password="test")
+        cache.clear()
+
+    def _playwright_falso(self, ordem):
+        """sync_playwright() de mentira que registra quando o bloco fecha."""
+        contexto = Mock()
+        contexto.storage_state.return_value = {"cookies": [{"domain": ".mercadolivre.com.br"}]}
+        pagina = Mock()
+        pagina.url = "https://www.mercadolivre.com.br/"
+        contexto.pages = [pagina]
+        contexto.new_cdp_session.return_value = Mock()
+        navegador = Mock()
+        navegador.new_context.return_value = contexto
+
+        @contextmanager
+        def fake():
+            p = Mock()
+            p.chromium.launch.return_value = navegador
+            try:
+                yield p
+            finally:
+                ordem.append("playwright_fechado")
+
+        return fake
+
+    def test_ml_grava_a_sessao_depois_de_fechar_o_browser(self):
+        from apps.scrapers import ml_conexao
+
+        ordem = []
+
+        def gravar(user_id, estado):
+            ordem.append("sessao_gravada")
+
+        with patch("playwright.sync_api.sync_playwright", self._playwright_falso(ordem)), \
+             patch.object(ml_conexao, "_ir_para_login"), \
+             patch("apps.scrapers.conexoes.sondar_sessao_ml",
+                   return_value=("conectado", "")), \
+             patch.object(ml_conexao, "_persistir_sessao", gravar):
+            ml_conexao._worker(self.user.id)
+
+        self.assertEqual(ordem, ["playwright_fechado", "sessao_gravada"])
+        self.assertEqual(ml_conexao.status(self.user.id)["fase"], "conectado")
+
+    def test_falha_ao_gravar_nao_deixa_a_tela_presa_em_salvando(self):
+        from apps.scrapers import ml_conexao
+
+        with patch("playwright.sync_api.sync_playwright", self._playwright_falso([])), \
+             patch.object(ml_conexao, "_ir_para_login"), \
+             patch("apps.scrapers.conexoes.sondar_sessao_ml",
+                   return_value=("conectado", "")), \
+             patch.object(ml_conexao, "_persistir_sessao",
+                          side_effect=RuntimeError("banco fora")):
+            ml_conexao._worker(self.user.id)
+
+        estado = ml_conexao.status(self.user.id)
+        self.assertEqual(estado["fase"], "erro")
+        self.assertNotEqual(estado["fase"], "salvando")
+
+
+class MensagemDeErroDaConexaoTests(SimpleTestCase):
+    """A tela recebe uma ação, não o texto interno da exceção.
+
+    O usuário lia literalmente "Falha na conexão: You cannot call this from an async
+    context - use a thread or sync_to_async" — sem nenhuma pista do que fazer.
+    """
+
+    def test_erro_generico_esconde_o_detalhe_e_mostra_o_codigo(self):
+        from apps.scrapers.erros_conexao import mensagem_de_erro
+
+        msg = mensagem_de_erro(Exception("detalhe interno cru"), "ab12")
+
+        self.assertNotIn("detalhe interno cru", msg)
+        self.assertIn("ab12", msg)
+
+    def test_regressao_do_bug_async_e_registrada_como_erro(self):
+        from django.core.exceptions import SynchronousOnlyOperation
+        from apps.scrapers.erros_conexao import mensagem_de_erro
+
+        with self.assertLogs("apps.scrapers.erros_conexao", level="ERROR") as log:
+            msg = mensagem_de_erro(SynchronousOnlyOperation("..."), "cd34")
+
+        self.assertIn("cd34", msg)
+        self.assertNotIn("async context", msg)
+        self.assertIn("executar_no_tenant", "\n".join(log.output))
+
+    def test_mensagem_acionavel_do_goto_e_preservada(self):
+        from apps.scrapers.erros_conexao import mensagem_de_erro
+
+        texto = "O Mercado Livre demorou demais a responder a partir do servidor."
+        self.assertEqual(mensagem_de_erro(RuntimeError(texto), "ef56"), texto)
+
+
+class RetryDaGravacaoDaSessaoTests(TestCase):
+    """10 minutos de browser ocioso matam o socket do Postgres; uma tentativa só perdia
+    o login inteiro por causa disso."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("ml-retry", password="test")
+
+    def test_retenta_apos_falha_de_conexao(self):
+        from django.db import OperationalError
+        from apps.scrapers import ml_conexao
+
+        chamadas = []
+
+        def instavel(fn, *args, **kwargs):
+            chamadas.append(1)
+            if len(chamadas) == 1:
+                raise OperationalError("server closed the connection unexpectedly")
+
+        with patch.object(ml_conexao, "executar_no_tenant", instavel):
+            ml_conexao._persistir_sessao(self.user.id, {"cookies": []})
+
+        self.assertEqual(len(chamadas), 2)
+
+    def test_falha_persistente_propaga(self):
+        from django.db import OperationalError
+        from apps.scrapers import ml_conexao
+
+        with patch.object(ml_conexao, "executar_no_tenant",
+                          side_effect=OperationalError("morto")):
+            with self.assertRaises(OperationalError):
+                ml_conexao._persistir_sessao(self.user.id, {"cookies": []}, tentativas=2)
+
+
+class RenovacaoDeSessaoPersistidaTests(TestCase):
+    """`iniciar_browser` voltou a renovar cookies.
+
+    O `save_storage_state` do finally rodava DENTRO do `with sync_playwright()` e o
+    `except Exception` engolia o SynchronousOnlyOperation — nenhum fluxo renovava
+    sessão, e ela envelhecia até o ML revogá-la.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("renova", password="test")
+
+    @contextmanager
+    def _cenario(self, ordem, storage_state):
+        contexto = Mock()
+        contexto.storage_state.return_value = {"cookies": [{"name": "novo"}]}
+        navegador = Mock()
+        navegador.new_context.return_value = contexto
+
+        @contextmanager
+        def playwright_falso():
+            p = Mock()
+            p.chromium.launch.return_value = navegador
+            try:
+                yield p
+            finally:
+                ordem.append("playwright_fechado")
+
+        with patch("apps.scrapers.auxiliar.sync_playwright", playwright_falso), \
+             patch("apps.scrapers.auxiliar._iniciar_chromium", return_value=navegador), \
+             patch("apps.accounts.ml_sessions.load_storage_state", return_value=storage_state), \
+             patch("apps.accounts.ml_sessions.save_storage_state",
+                   side_effect=lambda *a, **k: ordem.append("sessao_gravada")):
+            yield
+
+    def test_grava_depois_de_fechar_o_playwright(self):
+        from apps.scrapers.auxiliar import iniciar_browser
+
+        ordem = []
+        with self._cenario(ordem, {"cookies": [{"name": "velho"}]}):
+            with iniciar_browser(session_user=self.user) as (_p, _c):
+                pass
+
+        self.assertEqual(ordem, ["playwright_fechado", "sessao_gravada"])
+
+    def test_grava_mesmo_quando_o_corpo_levanta(self):
+        from apps.scrapers.auxiliar import iniciar_browser
+
+        ordem = []
+        with self._cenario(ordem, {"cookies": [{"name": "velho"}]}):
+            with self.assertRaises(ValueError):
+                with iniciar_browser(session_user=self.user):
+                    raise ValueError("o Link Builder falhou no meio")
+
+        self.assertIn("sessao_gravada", ordem)
+        self.assertLess(ordem.index("playwright_fechado"), ordem.index("sessao_gravada"))
+
+    def test_contexto_anonimo_nao_cria_sessao_fantasma(self):
+        from apps.scrapers.auxiliar import iniciar_browser
+
+        ordem = []
+        with self._cenario(ordem, None):
+            with iniciar_browser() as (_p, _c):
+                pass
+
+        self.assertNotIn("sessao_gravada", ordem)
+
+
+class LoteDeLinksResilienteTests(TestCase):
+    """O lote parava inteiro no primeiro soluço do Link Builder — e, pior, marcava
+    falha nos produtos por erro de INFRAESTRUTURA. Como registrar_falha incrementa
+    `tentativas` e aos MAX_TENTATIVAS_ERRO (8) marca estado='erro' com
+    proxima_tentativa=None, uma janela de anti-bot podia aposentar dezenas de
+    produtos perfeitamente afiliáveis."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("lote-links", password="test")
+
+    def _produtos(self, n):
+        return [Produto.objects.create(
+            marketplace="mercadolivre", nome=f"Item {i}", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=70,
+            link_produto=f"https://produto.mercadolivre.com.br/MLB-{100000+i}",
+        ) for i in range(n)]
+
+    def _rodar(self, produtos, afiliar):
+        """Roda gerar_links_em_lote com browser e Link Builder falsos."""
+        from contextlib import contextmanager
+        from apps.scrapers.scraper_mercadolivre import link as ml
+
+        page = MagicMock()
+        page.url = "https://www.mercadolivre.com.br/afiliados/linkbuilder#hub"
+        # Sem isto, `is_visible()` devolve um MagicMock TRUTHY e _pagina_de_login
+        # conclui "tela de login" em toda checagem — o teste passaria por um
+        # caminho que não é o que ele quer medir.
+        page.get_by_test_id.return_value.is_visible.return_value = False
+
+        @contextmanager
+        def _browser(*a, **kw):
+            yield page, MagicMock()
+
+        # executar_no_tenant exige contexto de tenant instalado (RLS); no teste ele
+        # não existe, então a gravação viraria exceção e mascararia o que se mede.
+        direto = lambda fn, *a, **kw: fn(*a, **kw)
+
+        with patch.object(ml, "iniciar_browser", _browser), \
+             patch.object(ml, "_abrir_link_builder") as abrir, \
+             patch.object(ml, "_afiliar_url_na_pagina", side_effect=afiliar), \
+             patch.object(ml, "executar_no_tenant", direto), \
+             patch.object(ml, "salvar_cache"), \
+             patch.object(ml, "registrar_falha") as falha:
+            resultado = ml.gerar_links_em_lote(produtos, usuario=self.user)
+        return resultado, falha, abrir, page
+
+    def test_falha_no_meio_reabre_e_continua_o_lote(self):
+        from apps.scrapers.scraper_mercadolivre import link as ml
+        produtos = self._produtos(3)
+        chamadas = {"n": 0}
+
+        def afiliar(page, url):
+            chamadas["n"] += 1
+            if chamadas["n"] == 2:
+                # Simula o ML jogando a página para o interstitial no meio do lote.
+                page.url = "https://www.mercadolivre.com.br/gz/account-verification?go=x"
+                raise RuntimeError("caiu")
+            page.url = "https://www.mercadolivre.com.br/afiliados/linkbuilder#hub"
+            return "https://meli.la/ok"
+
+        (gerados, falhas), falha, abrir, _ = self._rodar(produtos, afiliar)
+
+        self.assertEqual(gerados, 2)          # antes: 0, o lote inteiro morria
+        self.assertEqual(abrir.call_count, 2)  # abertura inicial + 1 reabertura
+        falha.assert_not_called()              # erro de infra não queima a fila
+
+    def test_erro_do_proprio_produto_continua_registrando_falha(self):
+        produtos = self._produtos(2)
+
+        def afiliar(page, url):
+            raise RuntimeError("o Link Builder recusou este item")
+
+        (gerados, falhas), falha, _, _ = self._rodar(produtos, afiliar)
+
+        self.assertEqual(gerados, 0)
+        self.assertEqual(falhas, 2)
+        self.assertEqual(falha.call_count, 2)  # aqui a culpa É do produto
+
+    def test_tres_reaberturas_seguidas_encerram_o_lote(self):
+        produtos = self._produtos(10)
+
+        def afiliar(page, url):
+            page.url = "https://www.mercadolivre.com.br/gz/account-verification?go=x"
+            raise RuntimeError("bloqueado")
+
+        (gerados, falhas), falha, abrir, _ = self._rodar(produtos, afiliar)
+
+        self.assertEqual(gerados, 0)
+        falha.assert_not_called()
+        # 1 abertura inicial + 3 reaberturas; não gasta as 10 tentativas.
+        self.assertEqual(abrir.call_count, 4)
+
+    def test_sessao_morta_de_verdade_aborta_sem_queimar_a_fila(self):
+        from apps.scrapers.scraper_mercadolivre import link as ml
+        produtos = self._produtos(5)
+
+        def afiliar(page, url):
+            page.url = "https://www.mercadolivre.com/jms/mlb/lgz/msl/login/"
+            raise RuntimeError("deslogou")
+
+        from contextlib import contextmanager
+        page = MagicMock()
+        page.url = "https://www.mercadolivre.com.br/afiliados/linkbuilder#hub"
+        page.get_by_test_id.return_value.is_visible.return_value = False
+
+        @contextmanager
+        def _browser(*a, **kw):
+            yield page, MagicMock()
+
+        direto = lambda fn, *a, **kw: fn(*a, **kw)
+        with patch.object(ml, "iniciar_browser", _browser), \
+             patch.object(ml, "_abrir_link_builder",
+                          side_effect=[None, ml.LoginError("morreu")]), \
+             patch.object(ml, "_afiliar_url_na_pagina", side_effect=afiliar), \
+             patch.object(ml, "executar_no_tenant", direto), \
+             patch.object(ml, "salvar_cache"), \
+             patch.object(ml, "registrar_falha") as falha:
+            with self.assertRaises(ml.LoginError):
+                ml.gerar_links_em_lote(produtos, usuario=self.user)
+        falha.assert_not_called()

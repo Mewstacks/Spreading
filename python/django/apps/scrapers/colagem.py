@@ -23,6 +23,8 @@ _TELA = 1080          # lado da imagem final (quadrada, padrão de card)
 _MARGEM = 12          # respiro branco entre as células
 _FUNDO = (255, 255, 255)
 _MAX_BYTES = 8 * 1024 * 1024
+_LIMIAR_FUNDO_BRANCO = 12
+_RESPIRO_PRODUTO = 0.06
 
 
 def _url_publica(url):
@@ -120,10 +122,59 @@ def montar_colagem_itens(itens, max_itens=9):
         produto = item.get("produto")
         img = _baixar_imagem(getattr(produto, "imagem_url", ""))
         if img is not None:
+            if str(getattr(produto, "marketplace", "")).casefold() == "amazon":
+                img = _enquadrar_produto_amazon(img)
             imagens.append(img)
             validos.append(item)
     b64, mime = _montar_imagens(imagens)
     return b64, mime, validos
+
+
+def _enquadrar_produto_amazon(img):
+    """Amplia a miniatura e remove o excesso de branco sem cortar o produto.
+
+    A Amazon pode devolver arquivos de apenas 226 px. ``thumbnail`` (usado na
+    colagem) só reduz e, por isso, essas imagens ficavam no tamanho original dentro
+    de células com mais de 500 px. O canvas quadrado em alta resolução permite a
+    ampliação proporcional e mantém o fundo branco uniforme em qualquer grade.
+    """
+    from PIL import Image, ImageChops, ImageFilter
+
+    rgb = img.convert("RGB")
+    branco = Image.new("RGB", rgb.size, _FUNDO)
+    diferenca = ImageChops.difference(rgb, branco).convert("L")
+    mascara = diferenca.point(
+        lambda pixel: 255 if pixel > _LIMIAR_FUNDO_BRANCO else 0,
+    ).filter(ImageFilter.MedianFilter(size=5))
+    bbox = mascara.getbbox()
+    recorte = rgb
+    if bbox:
+        esquerda, topo, direita, base = bbox
+        largura = direita - esquerda
+        altura = base - topo
+        respiro_x = max(4, round(largura * _RESPIRO_PRODUTO))
+        respiro_y = max(4, round(altura * _RESPIRO_PRODUTO))
+        caixa = (
+            max(0, esquerda - respiro_x),
+            max(0, topo - respiro_y),
+            min(rgb.width, direita + respiro_x),
+            min(rgb.height, base + respiro_y),
+        )
+        recorte = rgb.crop(caixa)
+
+    alvo = _TELA - 2 * _MARGEM
+    escala = min(alvo / recorte.width, alvo / recorte.height)
+    tamanho = (
+        max(1, round(recorte.width * escala)),
+        max(1, round(recorte.height * escala)),
+    )
+    ampliado = recorte.resize(tamanho, Image.Resampling.LANCZOS)
+    enquadrada = Image.new("RGB", (_TELA, _TELA), _FUNDO)
+    enquadrada.paste(
+        ampliado,
+        ((_TELA - ampliado.width) // 2, (_TELA - ampliado.height) // 2),
+    )
+    return enquadrada
 
 
 def _montar_imagens(imagens):

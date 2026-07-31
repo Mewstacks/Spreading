@@ -8,6 +8,10 @@ Idempotente: seguro rodar em TODO deploy (via release_command). Lê:
 Sem username+password, é no-op silencioso (dev não precisa). O env é a fonte da
 verdade da conta admin: se a senha no secret mudar, o próximo deploy sincroniza.
 Superusuário nasce/vira verificado (passa direto pelo EmailVerificadoMiddleware).
+
+@system_job: toda criação/edição do User dispara o signal `criar_perfil`, que cria a
+Organization pessoal (tabela sob RLS). Sem contexto de sistema o INSERT é barrado —
+por isso o release_command precisa rodar esta etapa com TENANT_SYSTEM_PROCESS=1.
 """
 import os
 
@@ -15,10 +19,13 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
+from apps.accounts.tenant import system_job
+
 
 class Command(BaseCommand):
     help = "Cria/atualiza o superusuário a partir de DJANGO_SUPERUSER_* (idempotente)."
 
+    @system_job
     def handle(self, *args, **opts):
         username = os.getenv("DJANGO_SUPERUSER_USERNAME", "").strip()
         email = os.getenv("DJANGO_SUPERUSER_EMAIL", "").strip()
@@ -30,20 +37,18 @@ class Command(BaseCommand):
         User = get_user_model()
         user, created = User.objects.get_or_create(username=username, defaults={"email": email})
 
-        changed = created
         if email and user.email != email:
             user.email = email
-            changed = True
         if not (user.is_staff and user.is_superuser):
             user.is_staff = True
             user.is_superuser = True
-            changed = True
         # Só reescreve o hash se a senha do secret não bater com a atual (evita write à toa).
         if not user.check_password(password):
             user.set_password(password)
-            changed = True
-        if changed:
-            user.save()
+        # Sempre salva (não só quando `changed`): dispara o signal `criar_perfil`, que
+        # garante org/perfil de forma idempotente — inclusive quando um deploy anterior
+        # criou o User mas travou antes do signal terminar (ex.: RLS sem system_context).
+        user.save()
 
         perfil = getattr(user, "perfil", None)
         if perfil and not perfil.email_verificado:

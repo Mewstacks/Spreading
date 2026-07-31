@@ -254,6 +254,9 @@ WORKERS = (
     ("scrape", "scrape", "Raspagem de ofertas"),
     ("scrape_rapido", "scrape", "Feed rápido de ofertas"),
     ("links", "scrape", "Links de afiliado"),
+    # O pipeline de cupons mantém a janela de preparo mesmo com a raspagem geral
+    # desligada, portanto sua saúde não pode herdar a flag de ``scrape``.
+    ("cupons", None, "Manutenção de cupons"),
     ("envio", "envio", "Envio de ofertas"),
     ("relatorios", "relatorios", "Relatórios de comissão"),
     # Sem flag de propósito: monitorar conexão não pode depender de a automação
@@ -384,7 +387,50 @@ def _conexoes_ao_vivo(usuario=None) -> list[dict]:
     except Exception as e:
         logger.warning("Não foi possível ler as conexões de %s: %s", usuario, e)
         return []
-    return [estados["whatsapp"].as_dict(), estados["mercadolivre"].as_dict()]
+    # Os quatro escopos, não dois: `ml_linkbuilder` (portal de afiliados, SSO
+    # próprio) e as sessões de relatório eram calculadas por estados_do_usuario e
+    # descartadas aqui. O painel que existe para acabar com divergência de tela era
+    # justamente o que não mostrava a conexão cuja queda ninguém enxergava.
+    return [estados["whatsapp"].as_dict(), estados["mercadolivre"].as_dict(),
+            estados["ml_linkbuilder"].as_dict(), estados["ml_relatorios"].as_dict(),
+            estados["amazon_relatorios"].as_dict()]
+
+
+def _configuracao_silenciosa() -> list[dict]:
+    """Variáveis de ambiente que desligam funcionalidades SEM gerar erro nenhum.
+
+    Cada uma destas produz um sintoma que aponta para o lugar errado: o usuário vê
+    "0 cupons prontos" ou "sessão expirada" e vai reconectar o Mercado Livre — que
+    está perfeito. Nada disso aparece em log de erro, porque do ponto de vista do
+    código não houve falha: o fluxo simplesmente não rodou.
+    """
+    from django.conf import settings
+
+    avisos = []
+    if not getattr(settings, "ML_SYSTEM_ORGANIZATION_ID", ""):
+        avisos.append({
+            "chave": "ML_SYSTEM_ORGANIZATION_ID",
+            "efeito": "Cupons públicos do Mercado Livre nunca ficam prontos: o "
+                      "preparo deles roda sem credencial e o container volta vazio.",
+        })
+    if not getattr(settings, "ML_LINK_BUILDER_ENABLED", False):
+        avisos.append({
+            "chave": "ML_LINK_BUILDER_ENABLED",
+            "efeito": "Nenhum link de afiliado do Mercado Livre é gerado; a tela de "
+                      "Promoções mostra tudo como pendente.",
+        })
+    if not getattr(settings, "ML_BROWSER_LOGIN_ENABLED", False):
+        avisos.append({
+            "chave": "ML_BROWSER_LOGIN_ENABLED",
+            "efeito": "A tela de Conexão Mercado Livre não abre o login.",
+        })
+    if not getattr(settings, "ML_BROWSER_REPORTS_ENABLED", False):
+        avisos.append({
+            "chave": "ML_BROWSER_REPORTS_ENABLED",
+            "efeito": "O portal de afiliados não pode ser conectado; a sincronização "
+                      "de comissões fica parada.",
+        })
+    return avisos
 
 
 def _incidentes(usuario, desde):
@@ -489,5 +535,6 @@ def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") ->
         "n_erros": n_erros, "n_avisos": n_avisos,
         "sinais": sinais, "workers": workers,
         "conexoes": _conexoes_ao_vivo(usuario),
+        "configuracao": _configuracao_silenciosa(),
         "total": qs.count(),
     }

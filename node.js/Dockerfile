@@ -19,7 +19,11 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Copia só os arquivos de dependências primeiro (melhor cache de build)
 COPY package*.json ./
-RUN npm ci --omit=dev
+# RemoteAuth não é usado: as sessões ficam em LocalAuth no volume. Omitir suas
+# dependências opcionais remove o caminho de arquivamento vulnerável do artefato
+# executável (archiver/glob/minimatch) sem alterar o runtime usado.
+RUN npm ci --omit=dev --omit=optional \
+    && npm audit --omit=dev --omit=optional --audit-level=high
 
 # Copia o código da aplicação. Contexto inteiro de propósito: um allowlist por
 # arquivo deixou payloads.js e auth_store.js de fora e derrubou o boot em

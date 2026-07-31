@@ -1,0 +1,17 @@
+# Finais de linha normalizados no repositório.
+#
+# Sem isto, arquivos como core/settings.py, views.py e ofertas.py tinham CRLF e LF
+# MISTURADOS dentro do mesmo arquivo. As consequências eram concretas e recorrentes:
+# uma alteração de 5 linhas aparecia no `git diff` como 293, e todo merge entre
+# branches virava conflito de ARQUIVO INTEIRO (o git não conseguia casar nenhuma
+# linha), o que travou a integração da branch de homologação com a main.
+* text=auto eol=lf
+# Binários preservados.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary

@@ -34,12 +34,8 @@ class Amazon(Marketplace):
             self._scrape_publico([p.user for p in fallback], termos=termos)
         elif not conectados:
             logger.info("Nenhum usuario com tag Amazon; pulando")
-        # Os cupons de ativação não fazem parte do schema OffersV2 da Creators API.
-        # A página oficial de Ofertas, porém, publica um filtro de cupons com ASIN,
-        # promoção e preço final. A coleta é única e o catálogo é copiado por usuário
-        # para que cada link continue usando a tag Associates correta.
-        if candidatos:
-            self._scrape_cupons_publicos([p.user for p in candidatos])
+        # Cupons públicos, preparo e links são mantidos pelo pipeline central de
+        # cupons, independente do toggle desta raspagem geral.
 
     def _scrape_usuario(self, usuario) -> bool:
         from apps.scrapers.models import ConfiguracaoEnvio
@@ -91,11 +87,6 @@ class Amazon(Marketplace):
             return
         for usuario in usuarios:
             persist_items(itens, owner=usuario)
-        try:
-            from apps.scrapers.coupon_products import preparar_lote
-            preparar_lote(limite=max(8, len(resultado.get("coupons", []))))
-        except Exception:
-            logger.exception("Preparação dos cupons públicos Amazon falhou")
 
     @staticmethod
     def _marcar_elegibilidade(usuario, elegivel, msg):
@@ -173,7 +164,29 @@ class Amazon(Marketplace):
         if not itens:
             return False
         listing = (itens[0].get("offersV2", {}) or {}).get("listings") or []
-        return True if listing else False
+        if not listing:
+            return False
+        # A mesma resposta já traz preço fresco; descartá-lo era o que deixava a
+        # mensagem publicar valor de até 48h atrás (a idade que expire_stale tolera).
+        from apps.scrapers.scraper_amazon.ofertas_scraper import _mapear_item
+        try:
+            mapeado = _mapear_item(itens[0])
+        except Exception:
+            mapeado = None
+        if mapeado and mapeado.get("preco_com_cupom", 0) > 0:
+            from django.utils import timezone
+            from apps.scrapers import precos
+            produto.preco_com_cupom = mapeado["preco_com_cupom"]
+            produto.preco_sem_desconto = mapeado["preco_sem_desconto"]
+            produto.preco_efetivo = mapeado["preco_com_cupom"]
+            produto.ultima_verificacao = timezone.now()
+            produto.save(update_fields=[
+                "preco_com_cupom", "preco_sem_desconto", "preco_efetivo",
+                "ultima_verificacao",
+            ])
+            precos.registrar("amazon", asin, produto.link_produto,
+                             mapeado["preco_com_cupom"])
+        return True
 
     def buscar_por_termo(self, termo_busca, min_desconto=15, macro=None, usuario=None):
         from apps.scrapers.scraper_amazon.ofertas_scraper import buscar_por_termo
@@ -217,14 +230,20 @@ class Amazon(Marketplace):
         # `faixa` não se aplica: o link Amazon é montado em memória (tag + ASIN), a
         # etapa é instantânea e não tem o que reportar numa barra.
         from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_para_produto
+        from apps.scrapers.afiliado import registrar_falha
         gerados = falhas = 0
         for p in produtos:
             try:
                 if gerar_link_afiliado_para_produto(p, usuario=usuario):
                     gerados += 1
                 else:
+                    registrar_falha(
+                        usuario, p,
+                        "Tag Amazon ou URL canônica não configurada.",
+                    )
                     falhas += 1
             except Exception as e:
                 logger.warning("Falha ao gerar link Amazon para ASIN %s: %s", getattr(p, "asin", "?"), e)
+                registrar_falha(usuario, p, str(e))
                 falhas += 1
         return (gerados, falhas)

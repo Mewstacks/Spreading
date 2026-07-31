@@ -4,14 +4,25 @@ primary_region = "gru"
 [build]
   dockerfile = "Dockerfile"
 
+[[restart]]
+  policy = "always"
+
 [env]
   PORT = "3000"
+  WA_CAPABILITY_ISSUER = "spreading-web"
+  WA_CAPABILITY_AUDIENCE = "spreading-wa"
   MAX_WHATSAPP_SESSIONS = "1"
   SESSION_START_STAGGER_MS = "12000"
   SESSION_INIT_TIMEOUT_MS = "90000"
+  WA_AUTH_TIMEOUT_MS = "60000"
   QR_BOOTSTRAP_TIMEOUT_MS = "90000"
-  QR_BOOTSTRAP_MAX_ATTEMPTS = "2"
+  # O Chromium frio pode precisar de mais de duas hidratações até WWebJS ficar
+  # disponível. O código já usa 4 como padrão; manter 2 aqui anulava a correção
+  # justamente no ambiente em que o QR estava falhando.
+  QR_BOOTSTRAP_MAX_ATTEMPTS = "4"
   QR_BOOTSTRAP_RETRY_MS = "2000"
+  GROUP_SYNC_TIMEOUT_MS = "45000"
+  QR_IDLE_DESTROY_MS = "180000"
   SEND_TIMEOUT_MS = "60000"
   SEND_REQUEST_TIMEOUT_MS = "55000"
 
@@ -19,17 +30,22 @@ primary_region = "gru"
   source = "wa_data_staging"
   destination = "/app/.wwebjs_auth"
 
-[[services]]
-  internal_port = 3000
-  protocol = "tcp"
-  auto_stop_machines = false
-  auto_start_machines = true
-  min_machines_running = 1
-
-[[services.ports]]
-  port = 80
-  handlers = ["http"]
+[checks]
+  [checks.health]
+    type = "http"
+    port = 3000
+    interval = "15s"
+    timeout = "10s"
+    grace_period = "60s"
+    method = "get"
+    path = "/health"
 
 [[vm]]
-  size = "shared-cpu-2x"
+  # CPU dedicado, nao compartilhado. Medido em 30/07: com shared-cpu-2x o
+  # /proc/stat acusava steal de ~70% de todo o CPU do periodo, loadavg 5.7 e
+  # tempo util de ~3%. O Chromium ficava tao sem CPU que TODO page.evaluate
+  # falhava — o diagnostico do bootstrap voltava title/readyState/wwebVersion
+  # nulos com o browser vivo. shared-cpu so entrega burst, e Chromium + WA Web
+  # com centenas de chats e carga sustentada: o burst acaba e a pagina trava.
+  size = "performance-1x"
   memory = "2gb"

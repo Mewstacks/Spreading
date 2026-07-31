@@ -1,8 +1,14 @@
 import sys
 import os
 import re
+import time
 import logging
-from contextlib import contextmanager
+from datetime import timedelta
+
+from django.conf import settings
+from django.db.models import F, Q
+from django.utils import timezone
+
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 caminho_django = os.path.dirname(os.path.dirname(os.path.dirname(caminho_atual)))
 sys.path.append(caminho_django)
@@ -16,27 +22,17 @@ from apps.scrapers.link_validacao import (
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
 from apps.scrapers.progresso import emitir_fase
 from apps.accounts.ml_sessions import has_storage_state
+from apps.accounts.tenant import executar_no_tenant
 
 logger = logging.getLogger(__name__)
 
 
-@contextmanager
-def _orm_permitido_no_playwright():
-    """Permite a gravação síncrona do cache só no trecho do Playwright sync.
-
-    A API sync do Playwright mantém um loop interno ativo enquanto executa ações;
-    Django 6 bloqueia ORM nesse ponto, embora este worker seja serial e dedicado.
-    Restaurar a variável ao sair evita afrouxar a proteção no processo inteiro.
-    """
-    anterior = os.environ.get("DJANGO_ALLOW_ASYNC_UNSAFE")
-    os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-    try:
-        yield
-    finally:
-        if anterior is None:
-            os.environ.pop("DJANGO_ALLOW_ASYNC_UNSAFE", None)
-        else:
-            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = anterior
+def _salvar_link_global(prod, url_isca, link):
+    """Grava o link no catálogo compartilhado (worker de sistema, sem usuário)."""
+    prod.url_isca = url_isca
+    prod.link_afiliado = link
+    prod.afiliado_ok = True
+    prod.save(update_fields=["url_isca", "link_afiliado", "afiliado_ok"])
 
 
 class LoginError(Exception):
@@ -48,6 +44,21 @@ class AuthError(Exception):
     pass
 
 
+class AntiBotError(Exception):
+    """O ML pediu verificação antes de mostrar a página — ela NUNCA foi vista.
+
+    Semanticamente diferente de LoginError: aqui a conta está boa e não há nada
+    para o usuário corrigir. É o gateway anti-bot reagindo ao IP de datacenter da
+    Fly (ver auxiliar.iniciar_browser e ml_conexao._ir_para_login, que já
+    documentam o mesmo comportamento).
+
+    Existe para quebrar o vínculo falso entre "não abriu" e "reconecte sua conta":
+    tratar challenge como sessão morta manda o usuário refazer um login que estava
+    perfeito, e — pior — fazia o lote inteiro ser descartado.
+    """
+    pass
+
+
 
 
 
@@ -56,8 +67,45 @@ class UrlNaoPermitidaError(Exception):
     pass
 
 
-MSG_SESSAO_EXPIRADA = ("Sua sessão do Mercado Livre expirou. "
-                       "Reconecte em Conexão Mercado Livre para gerar os links de afiliado.")
+# O portal de afiliados tem SSO PRÓPRIO (jms/msl), separado do site principal — o
+# mesmo desenho já reconhecido em ml_relatorio_conexao.py. Cookie bom em
+# mercadolivre.com.br não implica Link Builder logado.
+#
+# A mensagem NÃO diz mais "ele tem sessão própria": era verdade sobre o SSO e
+# mentira sobre o que o usuário precisa fazer. A geração de link usa a sessão do
+# SITE (iniciar_browser(session_user=...), abaixo), não a de report_sessions —
+# então um único login em Conexão Mercado Livre resolve, e sugerir uma segunda
+# conexão só produzia a dúvida "onde é a outra?". A assimetria do SSO agora é
+# medida por conexoes.sondar_portal_afiliados_ml e aparece na tela ANTES do clique;
+# _registrar_veredito_lb, abaixo, alimenta essa medição com o sinal real daqui.
+MSG_SESSAO_EXPIRADA = ("O Mercado Livre pediu login de novo ao abrir o Link Builder. "
+                       "É a mesma conexão da sua conta: reconecte em Conexão Mercado "
+                       "Livre e a geração de links volta a funcionar.")
+
+MSG_SEM_SESSAO = ("Nenhuma conta do Mercado Livre conectada. Conecte em Conexão "
+                  "Mercado Livre para gerar links de afiliado.")
+
+
+def _registrar_veredito_lb(usuario, veredito: str, motivo: str = "") -> None:
+    """Publica no estado compartilhado o que ACABOU de acontecer com o portal.
+
+    Vale mais que a sonda HTTP de conexoes.py: aqui o Chromium realmente abriu (ou
+    não) o Link Builder com a sessão do usuário. Sem isto, a tela só descobriria a
+    falha no próximo ciclo de sonda — e o usuário já teria visto o erro no stream.
+
+    Falha de escrita nunca derruba a geração de link: isto é telemetria de estado.
+    """
+    if usuario is None:
+        return
+    try:
+        from apps.accounts.ml_sessions import registrar_veredito_linkbuilder_para_usuario
+        from apps.scrapers.conexoes import invalidar_ml
+
+        registrar_veredito_linkbuilder_para_usuario(usuario, veredito, motivo)
+        invalidar_ml(usuario)
+    except Exception:
+        logger.warning("Não foi possível registrar o veredito do Link Builder.",
+                       exc_info=True)
 
 
 def e_catalogo_universal(url: str) -> bool:
@@ -82,28 +130,89 @@ def _pagina_de_login(page) -> bool:
         return False
 
 
-def _abrir_link_builder(page):
+def _pagina_intersticial(page) -> bool:
+    """True se o ML interpôs uma verificação (/gz/account-verification, captcha).
+
+    Reusa a mesma lista da verificação de destino (link_http), onde ela nasceu de
+    uma medição: o interstitial responde 200 com corpo grande, então sem
+    reconhecê-lo o código conclui "não é página válida" e culpa a sessão.
     """
-    Abre o Link Builder e falha CEDO com LoginError se a sessão caiu.
+    from apps.scrapers.scraper_mercadolivre.link_http import _CAMINHOS_INTERSTICIAIS
+    url = (getattr(page, "url", "") or "").lower()
+    return any(p in url for p in _CAMINHOS_INTERSTICIAIS)
+
+
+_LB_URL = "https://www.mercadolivre.com.br/afiliados/linkbuilder#hub"
+# Mesma forma de ml_conexao._ir_para_login, e pelo mesmo motivo declarado lá: "em
+# prod o IP de datacenter da Fly bate no gateway anti-bot da ML". Uma tentativa só
+# transformava um soluço do gateway em "sessão expirada".
+_LB_TENTATIVAS = 2
+_LB_TIMEOUT_MS = 60000
+# Reaberturas seguidas do Link Builder antes de desistir do lote. Uma reabertura
+# isolada é o gateway anti-bot piscando; três seguidas é o ML recusando o IP, e
+# aí insistir só queima tempo.
+_MAX_FALHAS_CONSECUTIVAS = 3
+
+
+def _abrir_link_builder(page, usuario=None):
+    """Abre o Link Builder, distinguindo anti-bot de sessão realmente caída.
 
     O portal de afiliados usa SSO próprio (jms/msl): mesmo com cookies válidos no
     site principal, ele pode redirecionar pro login. O redirect leva alguns
     segundos, então espera a navegação assentar ANTES de checar a URL — checar
     só o campo de login imediatamente após o goto dá falso negativo e o erro
     real só apareceria como timeout genérico no fill() seguinte.
+
+    Levanta AntiBotError (verificação interposta), LoginError (sessão morta de
+    verdade) ou AuthError (o ML não respondeu). São três causas com três ações
+    diferentes: esperar, reconectar, tentar mais tarde. `usuario` só serve para
+    publicar o veredito no estado que as telas leem — ver _registrar_veredito_lb.
     """
-    try:
-        page.goto("https://www.mercadolivre.com.br/afiliados/linkbuilder#hub",
-                  wait_until="domcontentloaded", timeout=45000)
+    ultimo_erro = None
+    navegou = False
+    for tentativa in range(1, _LB_TENTATIVAS + 1):
         try:
-            page.wait_for_load_state("networkidle", timeout=10000)
-        except Exception:
-            pass
-    except Exception:
-        raise AuthError("Não foi possível acessar o Link Builder do Mercado Livre. "
-                        "Reconecte sua conta em Conexão Mercado Livre e tente de novo.")
+            page.goto(_LB_URL, wait_until="domcontentloaded", timeout=_LB_TIMEOUT_MS)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            navegou, ultimo_erro = True, None
+        except Exception as exc:
+            ultimo_erro = exc
+            logger.warning("Link Builder: navegação falhou (tentativa %s/%s): %s",
+                           tentativa, _LB_TENTATIVAS, exc)
+            continue
+
+        if not _pagina_intersticial(page):
+            break
+        # O gateway costuma liberar na segunda passada; só insiste se ainda sobra
+        # tentativa.
+        logger.info("Link Builder: verificação anti-bot interposta (tentativa %s/%s)",
+                    tentativa, _LB_TENTATIVAS)
+        if tentativa < _LB_TENTATIVAS:
+            time.sleep(3)
+
+    # Três causas, três ações do usuário: tentar mais tarde, esperar, reconectar.
+    # O veredito acompanha essa mesma divisão — só o login é "suspeito"; anti-bot e
+    # ML fora do ar são "inconclusivo", porque a conexão segue valendo e contá-los
+    # como falha desconectaria o usuário por ruído de infraestrutura.
+    if not navegou:
+        _registrar_veredito_lb(usuario, "inconclusivo", "o ML não respondeu")
+        raise AuthError(
+            "O Mercado Livre não respondeu ao abrir o Link Builder. "
+            "Tente de novo em alguns minutos."
+        ) from ultimo_erro
+    if _pagina_intersticial(page):
+        _registrar_veredito_lb(usuario, "inconclusivo", "verificação de segurança interposta")
+        raise AntiBotError(
+            "O Mercado Livre pediu verificação de segurança antes de abrir o Link "
+            "Builder. A conta segue conectada."
+        )
     if _pagina_de_login(page):
+        _registrar_veredito_lb(usuario, "suspeito", "o portal de afiliados pediu login")
         raise LoginError(MSG_SESSAO_EXPIRADA)
+    _registrar_veredito_lb(usuario, "conectado")
 
 
 # Campo de resultado do Link Builder — é a fonte do botão "Copiar" (ele copia
@@ -210,9 +319,9 @@ def afiliate_link_builder(link_base, auth_path=None, usuario=None):
     with iniciar_browser(
         auth_path=auth_path,
         session_user=usuario,
-        headless=True,
+        headless=True
     ) as (page, context):
-        _abrir_link_builder(page)
+        _abrir_link_builder(page, usuario=usuario)
 
         try:
             link_final = _afiliar_url_na_pagina(page, link_base)
@@ -227,6 +336,8 @@ def afiliate_link_builder(link_base, auth_path=None, usuario=None):
             # O ML pode derrubar a sessão NO MEIO da interação: o fill/click estoura
             # timeout enquanto a página redireciona pro login. Não engolir isso.
             if _pagina_de_login(page):
+                _registrar_veredito_lb(usuario, "suspeito",
+                                       "sessão caiu durante a geração do link")
                 raise LoginError(MSG_SESSAO_EXPIRADA)
             logger.warning("Erro ao gerar link de afiliado ML: %s", e)
             return None
@@ -350,64 +461,101 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
     gerados = 0
     falhas = 0
     ultimo_erro = None
-    with _orm_permitido_no_playwright():
-        with iniciar_browser(
-            session_user=usuario,
-            headless=True,
-        ) as (page, context):
-            _abrir_link_builder(page)
+    consecutivas = 0      # reaberturas seguidas do Link Builder
+    interrompido = None   # erro que encerrou o lote antes do fim
+    # Sem guarda global de ORM: cada gravação vai por executar_no_tenant, que a
+    # desvia para uma thread sem event loop. O `with` que existia aqui setava
+    # DJANGO_ALLOW_ASYNC_UNSAFE no os.environ do PROCESSO — global às 8 threads do
+    # gunicorn — e o `finally` dele removia a permissão debaixo de outro fluxo que
+    # ainda estava usando. Era a origem do "às vezes funciona".
+    with iniciar_browser(
+        session_user=usuario,
+        headless=True
+    ) as (page, context):
+        _abrir_link_builder(page, usuario=usuario)
 
-            total_lote = len(pendentes)
-            logger.info("Gerando links afiliados ML em lote para %s produtos", total_lote)
-            for i, prod in enumerate(pendentes, 1):
-                emitir_fase(f"Link {i}/{total_lote}", i / total_lote,
-                            faixa or (0, 100))
-                # Ofertas do feed têm campanha_id vazio: _montar_url_isca trata isso e só
-                # injeta coupon_campaign_id quando há campanha. Só pulamos quando a URL
-                # não é afiliável (catálogo/perfil) -> None.
-                url_isca = _montar_url_isca(prod.link_produto, prod.campanha_id)
-                if not url_isca:
-                    # Este era o ponto cego central: contava a falha e seguia, sem
-                    # log nem registro. O produto ficava "pendente" para sempre e
-                    # não havia como saber por quê.
-                    motivo = _motivo_url_recusada(prod.link_produto)
-                    logger.info("Produto %s não é afiliável: %s", getattr(prod, "id", None), motivo)
-                    registrar_falha(usuario, prod, motivo, terminal=True)
-                    falhas += 1
+        total_lote = len(pendentes)
+        logger.info("Gerando links afiliados ML em lote para %s produtos", total_lote)
+        for i, prod in enumerate(pendentes, 1):
+            emitir_fase(f"Link {i}/{total_lote}", i / total_lote,
+                        faixa or (0, 100))
+            # Ofertas do feed têm campanha_id vazio: _montar_url_isca trata isso e só
+            # injeta coupon_campaign_id quando há campanha. Só pulamos quando a URL
+            # não é afiliável (catálogo/perfil) -> None.
+            url_isca = _montar_url_isca(prod.link_produto, prod.campanha_id)
+            if not url_isca:
+                # Este era o ponto cego central: contava a falha e seguia, sem
+                # log nem registro. O produto ficava "pendente" para sempre e
+                # não havia como saber por quê.
+                motivo = _motivo_url_recusada(prod.link_produto)
+                logger.info("Produto %s não é afiliável: %s", getattr(prod, "id", None), motivo)
+                executar_no_tenant(registrar_falha, usuario, prod, motivo, terminal=True)
+                falhas += 1
+                continue
+            try:
+                link = _afiliar_url_na_pagina(page, url_isca)
+                # Persistir item a item (e não em lote no fim) é deliberado: se o ML
+                # derrubar a sessão no produto 30 de 80, os 29 anteriores ficam salvos.
+                if usuario is not None:
+                    executar_no_tenant(salvar_cache, usuario, prod, link, url_isca, True)
+                else:
+                    executar_no_tenant(_salvar_link_global, prod, url_isca, link)
+                gerados += 1
+            except UrlNaoPermitidaError as e:
+                # O Programa recusou explicitamente: retentar não muda nada.
+                logger.info("Link Builder recusou o produto %s: %s",
+                            getattr(prod, "id", None), e)
+                executar_no_tenant(registrar_falha, usuario, prod, str(e), terminal=True)
+                falhas += 1
+            except Exception as e:
+                ultimo_erro = e
+                # A página caiu fora do Link Builder (login ou verificação
+                # anti-bot). Antes isso levantava LoginError na hora e MATAVA o
+                # lote inteiro no primeiro soluço. Agora tenta reabrir UMA vez e
+                # segue de onde parou — os itens já gerados ficam salvos.
+                if _pagina_de_login(page) or _pagina_intersticial(page):
+                    try:
+                        _abrir_link_builder(page, usuario=usuario)
+                    except AntiBotError:
+                        interrompido = e
+                        break
+                    except (LoginError, AuthError):
+                        # Sessão morta de verdade: não vale queimar 50 × 60s.
+                        raise
+                    # Reabriu: este item não foi culpa do produto, não registra
+                    # falha nele e não conta para o teto — ele volta ao topo da fila.
+                    consecutivas += 1
+                    if consecutivas >= _MAX_FALHAS_CONSECUTIVAS:
+                        interrompido = e
+                        break
                     continue
-                try:
-                    link = _afiliar_url_na_pagina(page, url_isca)
-                    if usuario is not None:
-                        salvar_cache(usuario, prod, link, url_isca, True)
-                    else:
-                        prod.url_isca = url_isca
-                        prod.link_afiliado = link
-                        prod.afiliado_ok = True
-                        prod.save(update_fields=["url_isca", "link_afiliado", "afiliado_ok"])
-                    gerados += 1
-                except UrlNaoPermitidaError as e:
-                    # O Programa recusou explicitamente: retentar não muda nada.
-                    logger.info("Link Builder recusou o produto %s: %s",
-                                getattr(prod, "id", None), e)
-                    registrar_falha(usuario, prod, str(e), terminal=True)
-                    falhas += 1
-                except Exception as e:
-                    if _pagina_de_login(page):
-                        raise LoginError(MSG_SESSAO_EXPIRADA)
-                    ultimo_erro = e
-                    logger.warning("Falha ao gerar link afiliado ML em lote para produto %s: %s", getattr(prod, "id", None), e)
-                    registrar_falha(usuario, prod, str(e))
-                    falhas += 1
+                consecutivas = 0
+                logger.warning("Falha ao gerar link afiliado ML em lote para produto %s: %s", getattr(prod, "id", None), e)
+                # Só erro DO PRODUTO conta tentativa. Erro de infraestrutura passar
+                # por aqui aposentava o item: registrar_falha incrementa `tentativas`
+                # e, aos MAX_TENTATIVAS_ERRO, marca estado="erro" com
+                # proxima_tentativa=None — fora da fila para sempre. Uma janela de
+                # anti-bot poderia aposentar dezenas de produtos afiliáveis.
+                executar_no_tenant(registrar_falha, usuario, prod, str(e))
+                falhas += 1
 
+    if interrompido is not None:
+        logger.warning("Lote de links ML interrompido após %s gerado(s): %s",
+                       gerados, interrompido)
     logger.info("Links afiliados ML em lote: %s gerados, %s falhas", gerados, falhas)
-    if falhas and usuario is not None:
+    if (falhas or interrompido) and usuario is not None:
         from apps.scrapers.eventos import log_event
         log_event(
             "scraper", "links_erro",
-            f"Lote de links ML: {gerados} gerado(s), {falhas} falha(s).",
+            f"Lote de links ML: {gerados} gerado(s), {falhas} falha(s)."
+            + (" Interrompido por instabilidade do Mercado Livre."
+               if interrompido else ""),
             level="warning", usuario=usuario,
-            contexto={"gerados": gerados, "falhas": falhas, "total": len(pendentes)},
-            exc=ultimo_erro,
+            # `interrompido` separa "o produto não afilia" de "o ML não deixou
+            # trabalhar" — é o que vai permitir medir se a serialização resolveu.
+            contexto={"gerados": gerados, "falhas": falhas, "total": len(pendentes),
+                      "interrompido": bool(interrompido)},
+            exc=interrompido or ultimo_erro,
         )
     return (gerados, falhas)
 
@@ -428,8 +576,8 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
                             nome_esperado: str = None, confiar_desconto: bool = False,
                             usuario=None) -> dict:
     """
-    Abre o link de afiliado num browser real, segue o redirect (meli.la -> destino)
-    e checa se a oferta certa aparece com cupom/afiliado ativos.
+    Segue o redirect do link de afiliado (meli.la -> destino) e checa se a oferta
+    certa aparece com cupom/afiliado ativos.
 
     Aceita DOIS destinos válidos:
       - página de produto (produto.mercadolivre / /p/MLB / /MLB-id)
@@ -437,9 +585,47 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
     Em ambos confirma: produto não inativo, preço visível e (se nome_esperado dado)
     que o nome do produto bate com a página.
 
+    Transporte: HTTP por padrão (link_http), ~1s por link. O caminho com Chromium
+    custava ~20-30s e não interage com a página — só lê URL final e HTML, que vêm
+    no SSR. `ML_VERIFICACAO_TRANSPORTE=browser` volta ao antigo sem deploy de
+    código; `screenshot_path` força o browser, porque só ele tira print.
+
     Retorna dict-relatório com ok/url_final/is_pagina_produto/is_landing_afiliado/
     cupom_detectado/preco_visivel/nome_confere/erros.
     """
+    if not screenshot_path and getattr(
+            settings, "ML_VERIFICACAO_TRANSPORTE", "http") != "browser":
+        from apps.scrapers.scraper_mercadolivre.link_http import relatorio_por_http
+        return relatorio_por_http(link_afiliado, nome_esperado, confiar_desconto)
+    return _verificar_com_browser(
+        link_afiliado, screenshot_path, nome_esperado, confiar_desconto)
+
+
+def _verificar_com_browser(link_afiliado: str, screenshot_path: str = None,
+                           nome_esperado: str = None,
+                           confiar_desconto: bool = False) -> dict:
+    """Verifica UM link abrindo um browser próprio.
+
+    Caminho de item único (envio, backfill manual). O lote usa
+    `_relatorio_na_pagina` com uma página só — abrir e fechar um Chromium por link
+    custava ~2s de processo antes de qualquer trabalho útil.
+    """
+    if not link_afiliado:
+        return {
+            "ok": False, "url_final": None, "is_pagina_produto": False,
+            "is_landing_afiliado": False, "cupom_detectado": False,
+            "preco_visivel": None, "nome_confere": None,
+            "erros": ["link_afiliado vazio."],
+        }
+    with iniciar_browser(headless=True) as (page, context):
+        return _relatorio_na_pagina(page, link_afiliado, screenshot_path,
+                                    nome_esperado, confiar_desconto)
+
+
+def _relatorio_na_pagina(page, link_afiliado: str, screenshot_path: str = None,
+                         nome_esperado: str = None,
+                         confiar_desconto: bool = False) -> dict:
+    """Faz a verificação numa página JÁ aberta — o que permite reusar o browser."""
     relatorio = {
         "ok": False, "url_final": None, "is_pagina_produto": False,
         "is_landing_afiliado": False, "cupom_detectado": False,
@@ -449,51 +635,65 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
         relatorio["erros"].append("link_afiliado vazio.")
         return relatorio
 
-    # validar_sessao=False: o destino é página pública — verificar não exige login e
-    # não pode derrubar/apagar sessão (era a causa do falso 'Sessão ML expirada'
-    # logo após o link ser gerado com sucesso).
-    with iniciar_browser(
-        headless=True,
-        validar_sessao=False,
-    ) as (page, context):
+    try:
+        page.goto(link_afiliado, wait_until="domcontentloaded", timeout=45000)
+        # 3s, não 15s: a PDP do ML nunca fica ociosa (ads/tracking), então o
+        # networkidle estourava o timeout inteiro em todo link — 15s de espera por
+        # nada. Tudo que lemos aqui (URL final, HTML, preço) já está no DOM logo
+        # após o domcontentloaded.
         try:
-            page.goto(link_afiliado, wait_until="domcontentloaded", timeout=45000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=15000)
-            except Exception:
-                pass
+            page.wait_for_load_state("networkidle", timeout=3000)
+        except Exception:
+            pass
 
-            url_final = page.url
-            relatorio["url_final"] = url_final
+        url_final = page.url
+        relatorio["url_final"] = url_final
 
-            # Classificação do destino: fonte ÚNICA (link_validacao), a mesma usada
-            # pela aprovação na geração e pela conferência do envio.
-            relatorio["is_pagina_produto"] = eh_pagina_produto(url_final)
-            # Landing de afiliado que destaca o produto (storefront /social/)
-            relatorio["is_landing_afiliado"] = eh_vitrine_social(url_final)
+        # Interstitial do anti-bot (/gz/account-verification, captcha, challenge):
+        # a página pedida NUNCA foi vista. Sem isto o relatório saía sem destino
+        # válido e sem erro, e `verificar_e_aprovar` REPROVAVA um link que está
+        # perfeito — bastava uma janela de bloqueio para esvaziar a tela.
+        from apps.scrapers.scraper_mercadolivre.link_http import _CAMINHOS_INTERSTICIAIS
+        if any(p in url_final.lower() for p in _CAMINHOS_INTERSTICIAIS):
+            relatorio["erros"].append(
+                "Falha ao abrir link: o Mercado Livre exigiu verificação "
+                "antes de mostrar a página")
+            return relatorio
 
-            corpo = page.content().lower()
+        # Classificação do destino: fonte ÚNICA (link_validacao), a mesma usada
+        # pela aprovação na geração e pela conferência do envio.
+        relatorio["is_pagina_produto"] = eh_pagina_produto(url_final)
+        # Landing de afiliado que destaca o produto (storefront /social/)
+        relatorio["is_landing_afiliado"] = eh_vitrine_social(url_final)
 
-            termos_morto = ["anúncio pausado", "página não encontrada", "estoque indisponível"]
-            if any(t in corpo for t in termos_morto):
-                relatorio["erros"].append("Página indica anúncio inativo/inexistente.")
+        corpo = page.content().lower()
 
-            # Cupom REAL: badge de cupom na página ("X% OFF com cupom", "cupom de R$").
-            # NÃO usar só a palavra "cupom" — ela aparece no menu global "Cupons" (falso positivo).
-            relatorio["cupom_detectado"] = bool(
-                re.search(r"com\s+cupom|cupom\s+de\s+r?\$|%\s*off\s*com\s*cupom|aplicar\s+cupom", corpo)
-            )
-            # Preço antigo riscado SOMENTE no buybox do produto (não nos cards de vitrine
-            # da /social/, que dariam falso positivo de outro item).
+        termos_morto = ["anúncio pausado", "página não encontrada", "estoque indisponível"]
+        if any(t in corpo for t in termos_morto):
+            relatorio["erros"].append("Página indica anúncio inativo/inexistente.")
+
+        # Cupom REAL: badge de cupom na página ("X% OFF com cupom", "cupom de R$").
+        # NÃO usar só a palavra "cupom" — ela aparece no menu global "Cupons" (falso positivo).
+        relatorio["cupom_detectado"] = bool(
+            re.search(r"com\s+cupom|cupom\s+de\s+r?\$|%\s*off\s*com\s*cupom|aplicar\s+cupom", corpo)
+        )
+        if nome_esperado is not None:
+            relatorio["nome_confere"] = _nome_bate(nome_esperado, corpo)
+
+        # Preço e desconto só pesam na decisão quando `confiar_desconto` é False
+        # (ver aprovado_por_relatorio: oferta/busca já teve o de/por confirmado na
+        # raspagem). Para elas, estes dois `is_visible` eram 7s de espera por um
+        # dado que ninguém lê — o item mais caro do orçamento por link depois do
+        # próprio carregamento.
+        if not confiar_desconto:
+            # Preço antigo riscado SOMENTE no buybox do produto (não nos cards de
+            # vitrine da /social/, que dariam falso positivo de outro item).
             try:
                 relatorio["preco_riscado"] = page.locator(
                     ".ui-pdp-price s.andes-money-amount--previous, .ui-pdp-container s.andes-money-amount--previous"
                 ).first.is_visible(timeout=2000)
             except Exception:
                 relatorio["preco_riscado"] = False
-
-            if nome_esperado is not None:
-                relatorio["nome_confere"] = _nome_bate(nome_esperado, corpo)
 
             try:
                 preco_el = page.locator(".andes-money-amount__fraction").first
@@ -502,23 +702,23 @@ def verificar_link_afiliado(link_afiliado: str, screenshot_path: str = None,
             except Exception:
                 pass
 
-            if screenshot_path:
-                try:
-                    page.screenshot(path=screenshot_path, full_page=False)
-                    relatorio["screenshot"] = screenshot_path
-                except Exception as e:
-                    relatorio["erros"].append(f"screenshot falhou: {e}")
+        if screenshot_path:
+            try:
+                page.screenshot(path=screenshot_path, full_page=False)
+                relatorio["screenshot"] = screenshot_path
+            except Exception as e:
+                relatorio["erros"].append(f"screenshot falhou: {e}")
 
-            # Decisão ÚNICA de aprovação (link_validacao.aprovado_por_relatorio):
-            # a MESMA regra aplicada na aprovação (geração) e no envio.
-            relatorio["ok"] = aprovado_por_relatorio(relatorio, confiar_desconto)
-            if (not confiar_desconto and relatorio["is_landing_afiliado"]
-                    and not relatorio["is_pagina_produto"]):
-                relatorio["erros"].append(
-                    "Caiu na vitrine /social/ (afiliado ok, mas não dá pra confirmar o cupom do item)."
-                )
-        except Exception as e:
-            relatorio["erros"].append(f"Falha ao abrir link: {e}")
+        # Decisão ÚNICA de aprovação (link_validacao.aprovado_por_relatorio):
+        # a MESMA regra aplicada na aprovação (geração) e no envio.
+        relatorio["ok"] = aprovado_por_relatorio(relatorio, confiar_desconto)
+        if (not confiar_desconto and relatorio["is_landing_afiliado"]
+                and not relatorio["is_pagina_produto"]):
+            relatorio["erros"].append(
+                "Caiu na vitrine /social/ (afiliado ok, mas não dá pra confirmar o cupom do item)."
+            )
+    except Exception as e:
+        relatorio["erros"].append(f"Falha ao abrir link: {e}")
 
     return relatorio
 
@@ -552,7 +752,7 @@ def verificar_e_aprovar(usuario, produto, link_afiliado, url_isca="") -> str:
     return "reprovado"
 
 
-def verificar_links_pendentes(usuario, limite=20) -> dict:
+def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
     """Verifica o destino dos links gerados mas ainda sem veredito (verificado_ok
     IS NULL) e persiste o resultado. É o passo que torna um link enviável ANTES de
     a promoção aparecer na tela de envio — antes disto, o veredito só era calculado
@@ -562,30 +762,79 @@ def verificar_links_pendentes(usuario, limite=20) -> dict:
         return {"aprovados": 0, "reprovados": 0, "transitorios": 0}
     from apps.scrapers.models import LinkAfiliadoUsuario
 
-    linhas = list(
+    agora = timezone.now()
+    queryset = (
         LinkAfiliadoUsuario.objects
         .filter(usuario=usuario, verificado_ok__isnull=True)
+        .filter(Q(proxima_tentativa__isnull=True) | Q(proxima_tentativa__lte=agora))
         .exclude(link_afiliado="")
         .select_related("produto")
-        .order_by("-ultima_tentativa", "-id")[:limite]
     )
+    if produto_ids is not None:
+        queryset = queryset.filter(produto_id__in=list(produto_ids))
+    # Nunca-verificados primeiro; entre os já tentados, o que esperou mais. O
+    # `-ultima_tentativa` de antes olhava um campo que só a GERAÇÃO escreve, então a
+    # ordem não refletia a fila de verificação.
+    linhas = list(
+        queryset.order_by(F("proxima_tentativa").asc(nulls_first=True), "id")[:limite]
+    )
+    if not linhas:
+        return {"aprovados": 0, "reprovados": 0, "transitorios": 0}
     aprovados = reprovados = transitorios = 0
-    with _orm_permitido_no_playwright():
+
+    def _adiar(linha, motivo="Verificação temporariamente indisponível."):
+        LinkAfiliadoUsuario.objects.filter(pk=linha.pk).update(
+            proxima_tentativa=timezone.now() + timedelta(minutes=15),
+            verificacao_motivo=motivo,
+        )
+
+    # A organização é resolvida do PRÓPRIO usuário, não do contexto ambiente: esta
+    # função é chamada tanto do worker (contexto de sistema) quanto de comandos e
+    # testes, e `executar_no_tenant` recusa gravar sem escopo. Passar explicitamente
+    # torna o comportamento igual nos três.
+    from apps.accounts.models import organization_for_user
+    org = organization_for_user(usuario)
+    org_id = org.pk if org else None
+
+    def _no_tenant(fn, *args, **kwargs):
+        return executar_no_tenant(fn, *args, organization_id=org_id, **kwargs)
+
+    # UM browser para o lote inteiro. Abrir e fechar um Chromium por link custava
+    # ~2s de processo antes de qualquer trabalho útil — num lote de 40, mais de um
+    # minuto só subindo e derrubando navegador.
+    #
+    # Com o Playwright vivo nesta thread, o ORM levanta SynchronousOnlyOperation:
+    # por isso as gravações vão por executar_no_tenant, que as desvia para a thread
+    # dedicada (a mesma solução que gerar_links_em_lote já usa).
+    with iniciar_browser(headless=True) as (page, _ctx):
         for linha in linhas:
+            confiar = _confiar_desconto(linha.produto)
             try:
-                r = verificar_e_aprovar(
-                    usuario, linha.produto, linha.link_afiliado, linha.url_isca)
+                relatorio = _relatorio_na_pagina(
+                    page, linha.link_afiliado,
+                    nome_esperado=getattr(linha.produto, "nome", None),
+                    confiar_desconto=confiar)
             except Exception as e:
                 logger.warning("Verificação de destino falhou p/ produto %s: %s",
                                getattr(linha.produto, "id", None), e)
+                _no_tenant(_adiar, linha)
                 transitorios += 1
                 continue
-            if r == "aprovado":
+            if relatorio.get("ok"):
+                _no_tenant(registrar_aprovacao, usuario, linha.produto,
+                                   linha.link_afiliado,
+                                   url_canonica=linha.link_afiliado)
                 aprovados += 1
-            elif r == "reprovado":
-                reprovados += 1
-            else:
+            elif any("Falha ao abrir link" in str(e)
+                     for e in relatorio.get("erros", [])):
+                # Rede, timeout ou challenge do anti-bot: o destino nunca foi visto.
+                # Reprovar aqui derrubaria links bons em massa.
+                _no_tenant(_adiar, linha)
                 transitorios += 1
+            else:
+                _no_tenant(registrar_reprovacao, usuario, linha.produto,
+                                   motivo_reprovacao(relatorio, confiar))
+                reprovados += 1
     logger.info("Verificação de destino ML p/ %s: %s aprovado(s), %s reprovado(s), "
                 "%s transitório(s)", usuario, aprovados, reprovados, transitorios)
     return {"aprovados": aprovados, "reprovados": reprovados,
@@ -680,7 +929,10 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
             }
 
         if not has_storage_state(usuario):
-            raise LoginError(MSG_SESSAO_EXPIRADA)
+            # Não há sessão NENHUMA — nada foi aberto, então não é a mensagem do
+            # Link Builder. Antes as duas causas compartilhavam o mesmo texto e
+            # "pediu login de novo" aparecia para quem nunca havia conectado.
+            raise LoginError(MSG_SEM_SESSAO)
         url_isca = _montar_url_isca(url_produto, camp_id)
         if not url_isca:
             motivo = _motivo_url_recusada(url_produto)

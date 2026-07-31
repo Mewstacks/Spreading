@@ -23,20 +23,16 @@ class Cupom(models.Model):
     tipo_desconto = models.CharField(max_length=20) # 'fixo' ou 'porcentagem'
     valor_desconto = models.FloatField()
     valor_minimo = models.FloatField(default=0.0)  # compra mínima para o cupom ser válido
-    # Teto do desconto ("Limite de R$ 50"): sem ele um cupom de 40% num item de
-    # R$ 2.000 é anunciado com R$ 800 de desconto quando o ML só tira R$ 50.
+    # Limite efetivo informado pelo marketplace (ex.: "10% limitado a R$ 50").
     desconto_maximo = models.FloatField(null=True, blank=True)
+    # Condição de público/pagamento que precisa acompanhar a publicação.
+    restrito = models.BooleanField(default=False)
     link_original = models.URLField(max_length=1000)
     codigo = models.CharField(max_length=512, blank=True, default="")
     data_criacao = models.DateTimeField(auto_now_add=True)
     fonte = models.CharField(max_length=80, blank=True, default="")
     validade = models.DateTimeField(null=True, blank=True)
-    # Restrição de público/pagamento (primeira compra, app, cartão, pix). Não impede
-    # a publicação, mas obriga a linha "⚠️ Condição" na mensagem.
-    restrito = models.BooleanField(default=False)
     ultima_verificacao = models.DateTimeField(null=True, blank=True, db_index=True)
-    # 'ativo' | 'inativo' (o ML devolve status.id=INACTIVE) | 'expirado' (sumiu da
-    # listagem). Só 'ativo' pode ser publicado; os demais ficam para auditoria.
     estado = models.CharField(max_length=20, default="ativo", db_index=True)
 
 class Produto(models.Model):
@@ -62,13 +58,20 @@ class Produto(models.Model):
     campanha_id = models.CharField(max_length=100, db_index=True, blank=True, default="")
     origem = models.CharField(max_length=20, default="cupom", db_index=True)  # 'cupom' | 'oferta'
     nome = models.CharField(max_length=255)
-    # CONTRATO DE PREÇO (vale para todas as lanes de raspagem):
-    #   preco_sem_desconto = preço de TABELA (o riscado do card)
-    #   preco_com_cupom    = preço de VITRINE ATUAL, sem nenhum cupom aplicado
-    #                        (nome herdado; é o valor que vai ao carrinho)
-    # O preço DEPOIS do cupom não mora aqui: ele é por cupom e vive em
-    # ProdutoCupom.preco_final. Gravar o preço pós-cupom em `preco_com_cupom` fazia
-    # o desconto ser aplicado duas vezes e a compra mínima ser medida errado.
+    # SEMÂNTICA DOS TRÊS CAMPOS DE PREÇO — leia antes de gravar em qualquer um.
+    #   preco_sem_desconto: preço de lista, o "DE" riscado do card/PDP.
+    #   preco_com_cupom:    a VITRINE, ou seja, o "POR" que a página mostra ao abrir
+    #                       o link. O nome é legado e engana: NÃO é o preço depois
+    #                       de aplicar cupom nenhum.
+    #   preco_efetivo:      o que o cliente realmente paga. Só difere da vitrine em
+    #                       fonte de cupom-de-ativação (hoje a página oficial de
+    #                       cupons da Amazon), onde o abatimento já está garantido.
+    # Havia dois produtores gravando significados diferentes em preco_com_cupom: o
+    # caminho de cupom do ML salvava aqui o preço JÁ descontado, e coupon_products
+    # .calcular_precos descontava o cupom de novo em cima — a mensagem anunciava um
+    # valor que loja nenhuma cobrava. Quem for escrever o terceiro produtor: a
+    # vitrine vai em preco_com_cupom, e o desconto de cupom é calculado na hora de
+    # publicar, nunca persistido aqui.
     preco_sem_desconto = models.FloatField()
     preco_com_cupom = models.FloatField()
     link_produto = models.URLField(max_length=1000)
@@ -217,6 +220,94 @@ class ExecucaoIngestao(models.Model):
     total_ofertas = models.PositiveIntegerField(default=0)
     total_cupons = models.PositiveIntegerField(default=0)
     erro_publico = models.CharField(max_length=255, blank=True, default="")
+
+
+class ExecucaoRaspagem(models.Model):
+    """Pedido manual durável, executado pelo worker de raspagem.
+
+    Diferente de ``ExecucaoIngestao`` (uma execução técnica de uma fonte), este
+    registro representa a ação iniciada na interface e sobrevive a refresh,
+    queda do EventSource, deploy e reinício do processo web.
+    """
+
+    TIPOS = [("ofertas", "Promoções"), ("cupons", "Cupons")]
+    STATUS = [
+        ("queued", "Na fila"),
+        ("running", "Executando"),
+        ("succeeded", "Concluída"),
+        ("partial", "Concluída parcialmente"),
+        ("failed", "Falhou"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE,
+        related_name="execucoes_raspagem",
+    )
+    solicitada_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+        related_name="raspagens_solicitadas",
+    )
+    tipo = models.CharField(max_length=16, choices=TIPOS, db_index=True)
+    status = models.CharField(
+        max_length=16, choices=STATUS, default="queued", db_index=True,
+    )
+    etapa = models.CharField(max_length=80, blank=True, default="")
+    progresso = models.PositiveSmallIntegerField(default=0)
+    contagens = models.JSONField(default=dict, blank=True)
+    codigo_erro = models.CharField(max_length=40, blank=True, default="")
+    erro_publico = models.CharField(max_length=255, blank=True, default="")
+    acao_recomendada = models.CharField(max_length=255, blank=True, default="")
+    tentativas = models.PositiveSmallIntegerField(default=0)
+    criada_em = models.DateTimeField(auto_now_add=True, db_index=True)
+    iniciada_em = models.DateTimeField(null=True, blank=True)
+    heartbeat_em = models.DateTimeField(null=True, blank=True, db_index=True)
+    finalizada_em = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        ordering = ("-criada_em",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization"],
+                condition=models.Q(status__in=("queued", "running")),
+                name="uniq_raspagem_manual_ativa_por_org",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["status", "criada_em"],
+                         name="scrape_job_status_created"),
+        ]
+
+
+class EventoRaspagem(models.Model):
+    """Linha de progresso persistida e paginável por cursor numérico."""
+
+    NIVEIS = [
+        ("info", "Informação"),
+        ("warning", "Aviso"),
+        ("error", "Erro"),
+        ("success", "Sucesso"),
+    ]
+
+    execucao = models.ForeignKey(
+        ExecucaoRaspagem, on_delete=models.CASCADE, related_name="eventos",
+    )
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE,
+        related_name="eventos_raspagem",
+    )
+    nivel = models.CharField(max_length=12, choices=NIVEIS, default="info")
+    etapa = models.CharField(max_length=80, blank=True, default="")
+    mensagem = models.CharField(max_length=500)
+    progresso = models.PositiveSmallIntegerField(null=True, blank=True)
+    criado_em = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ("id",)
+        indexes = [
+            models.Index(fields=["execucao", "id"],
+                         name="scrape_event_job_cursor"),
+        ]
 
 
 class CupomNormalizado(models.Model):
@@ -657,16 +748,14 @@ class CupomCodigo(models.Model):
     """Cupom de CÓDIGO digitável no checkout (ex: SOUMELIMAIS). Curado manualmente."""
     codigo = models.CharField(max_length=60, unique=True)
     descricao = models.CharField(max_length=255, blank=True, default="")
-    # True = descoberto por regex na página do ML, sem vínculo provado com produto
-    # algum. Nunca entra automaticamente numa mensagem. Antes isso era inferido da
-    # `descricao`, que qualquer edição manual apagava — e o código voltava a ser
-    # colado em todo produto, já que `categorias` vazio vale para tudo.
-    automatico = models.BooleanField(default=False, db_index=True)
     tipo_desconto = models.CharField(max_length=20, default="porcentagem")  # 'porcentagem' | 'fixo'
     valor_desconto = models.FloatField(default=0.0)
     valor_minimo = models.FloatField(default=0.0)
     validade = models.DateField(null=True, blank=True)
     ativo = models.BooleanField(default=True)
+    # Códigos descobertos automaticamente não têm associação comprovada com um
+    # produto. A marca não depende da descrição, que pode ser editada no painel.
+    automatico = models.BooleanField(default=False, db_index=True)
     # macro_categorias em que o cupom é válido, separadas por vírgula. Vazio = vale p/ todas.
     # Usado para NÃO sugerir um código que não se aplica ao item (cupons não acumulam).
     categorias = models.CharField(max_length=255, blank=True, default="")

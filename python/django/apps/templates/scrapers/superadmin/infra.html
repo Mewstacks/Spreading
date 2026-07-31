@@ -1,30 +1,62 @@
 {% extends "base.html" %}
 {% block title %}Superadmin — Infra Fly{% endblock %}
 
+{% block head_extra %}
+<style>
+  /* bloco por app: título + estado */
+  .app-block + .app-block { margin-top: 1.2rem; padding-top: 1.1rem; border-top: 1px solid var(--border); }
+  .app-head { display: flex; align-items: center; gap: .55rem; margin-bottom: .6rem; flex-wrap: wrap; }
+  .app-head strong { font-size: 13.5px; }
+  .app-head .badge { font-weight: 600; }
+  .app-block .msg { margin: .4rem 0 .7rem; }
+  .no-machines { color: var(--muted); font-size: 12.5px; margin: 0; }
+
+  /* faixa de 2 indicadores: stat-strip forçado a 2 colunas (o padrão é 4) */
+  .strip-2 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; margin-bottom: 1.3rem; }
+</style>
+{% endblock %}
+
+{% block topbar_context %}<strong>Infra Fly</strong><span>Gestão</span>{% endblock %}
+
 {% block content %}
-<div style="margin-bottom:1rem;">
-  <a href="{% url 'superadmin-usuarios' %}" class="btn btn-sm btn-ghost"><i data-lucide="arrow-left"></i> Voltar</a>
-  <a href="?force=1" class="btn btn-sm btn-ghost"><i data-lucide="refresh-cw"></i> Atualizar</a>
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Administração</span>
+    <h1>Infra Fly</h1>
+    <p class="sub">Máquinas compartilhadas, custo estimado e o log operacional recente.</p>
+  </div>
+  <div class="head-actions">
+    <nav class="seg" aria-label="Seções da administração">
+      <a href="{% url 'superadmin-usuarios' %}"><i data-lucide="users"></i> Usuários</a>
+      <a href="{% url 'superadmin-saude' %}"><i data-lucide="stethoscope"></i> Saúde</a>
+      <a href="{% url 'superadmin-infra' %}" class="active" aria-current="page"><i data-lucide="server"></i> Infra</a>
+    </nav>
+    <a href="?force=1" class="btn btn-ghost btn-sm"><i data-lucide="refresh-cw"></i> Atualizar</a>
+  </div>
 </div>
 
-<div class="card">
-  <div class="card-head">
-    <h2><i data-lucide="server"></i> Máquinas Fly (compartilhadas)</h2>
-  </div>
+<section class="section">
+  <div class="section-head"><h2>Máquinas Fly (compartilhadas)</h2></div>
 
-  <div class="stat-grid" style="margin-bottom:1rem;">
-    <div class="stat"><div class="n">US$ {{ fly.custo_mensal }}</div><div class="l">Custo/mês (estimado)</div></div>
-    <div class="stat"><div class="n">{{ wa_ativas }}</div><div class="l">Sessões WhatsApp ativas (~cap 3-4)</div></div>
+  <div class="stat-strip strip-2">
+    <div class="stat-cell">
+      <div class="kpi-label">Custo/mês (estimado)</div>
+      <div class="kpi-value">US$ {{ fly.custo_mensal }}</div>
+    </div>
+    <div class="stat-cell">
+      <div class="kpi-label">Sessões WhatsApp ativas (~cap 3-4)</div>
+      <div class="kpi-value">{{ wa_ativas }}</div>
+    </div>
   </div>
 
   {% if not fly.disponivel %}
-    <div class="msg msg-info">{{ fly.motivo }}</div>
+    <div class="alert alert-info" style="margin:0;"><i data-lucide="info"></i><div>{{ fly.motivo }}</div></div>
   {% else %}
     {% for app in fly.apps %}
-    <div style="margin-bottom:1.1rem;">
-      <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem;">
+    <div class="app-block">
+      <div class="app-head">
         <strong>{{ app.app }}</strong>
-        {% if app.ok %}<span class="dot on"></span>{% else %}<span class="dot off"></span>{% endif %}
+        {% if app.ok %}<span class="badge badge-green"><span class="dot"></span>Saudável</span>{% else %}<span class="badge badge-red"><span class="dot"></span>Com problema</span>{% endif %}
       </div>
       {% if app.erro %}<div class="msg msg-error">{{ app.erro }}</div>{% endif %}
       {% if app.maquinas %}
@@ -35,45 +67,51 @@
             {% for m in app.maquinas %}
             <tr>
               <td>{{ m.nome|default:m.id }}</td>
-              <td><span class="dot {% if m.estado == 'started' %}on{% else %}off{% endif %}"></span> {{ m.estado }}</td>
+              <td>{% if m.estado == 'started' %}<span class="badge badge-green"><span class="dot"></span>{{ m.estado }}</span>{% else %}<span class="badge badge-red"><span class="dot"></span>{{ m.estado }}</span>{% endif %}</td>
               <td>{{ m.regiao }}</td>
-              <td>{{ m.cpus|default:"?" }}× {{ m.cpu_kind }}</td>
-              <td>{{ m.memoria_mb|default:"?" }} MB</td>
+              <td class="tnum">{{ m.cpus|default:"?" }}× {{ m.cpu_kind }}</td>
+              <td class="tnum">{{ m.memoria_mb|default:"?" }} MB</td>
             </tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
+      {% elif not app.erro %}
+      <p class="no-machines">Nenhuma máquina neste app.</p>
       {% endif %}
     </div>
     {% endfor %}
   {% endif %}
-  <p style="color:var(--muted);font-size:.78rem;">Infra é uma máquina por serviço (não por usuário). Uso por usuário fica na lista de <a href="{% url 'superadmin-usuarios' %}">usuários</a>.</p>
-</div>
+  <p class="help" style="margin:1rem 0 0;">Infra é uma máquina por serviço (não por usuário). Uso por usuário fica na lista de <a class="link" href="{% url 'superadmin-usuarios' %}">usuários</a>.</p>
+</section>
 
-<div class="card">
-  <div class="card-head">
-    <h2><i data-lucide="scroll-text"></i> Logs operacionais recentes</h2>
-  </div>
+<section class="section section-lined">
+  <div class="section-head"><h2>Logs operacionais recentes</h2></div>
+  {% if eventos %}
   <div class="tbl-wrap">
     <table class="grid">
       <thead><tr><th>Quando</th><th>Nível</th><th>Pipeline</th><th>Usuário</th><th>Evento</th><th>Mensagem</th></tr></thead>
       <tbody>
         {% for e in eventos %}
         <tr>
-          <td>{{ e.criado_em|date:"d/m H:i:s" }}</td>
+          <td class="tnum">{{ e.criado_em|date:"d/m H:i:s" }}</td>
           <td><span class="badge {% if e.level == 'error' %}badge-red{% elif e.level == 'warning' %}badge-yellow{% else %}badge-muted{% endif %}">{{ e.level }}</span></td>
           <td>{{ e.pipeline }}</td>
           <td>{{ e.usuario.get_username|default:"-" }}</td>
           <td>{{ e.evento }}</td>
           <td title="{{ e.erro }}">{{ e.mensagem|truncatechars:90 }}</td>
         </tr>
-        {% empty %}
-        <tr><td colspan="6" class="empty">Nenhum evento operacional registrado ainda.</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
-  <p style="color:var(--muted);font-size:.78rem;">Eventos detalhados também ficam no Django Admin em “Evento operacional”.</p>
-</div>
+  {% else %}
+  <div class="empty">
+    <i data-lucide="scroll-text"></i>
+    <div class="empty-title">Nenhum evento operacional</div>
+    <p>Os eventos aparecem aqui assim que os workers começarem a registrar atividade.</p>
+  </div>
+  {% endif %}
+  <p class="help" style="margin:.9rem 0 0;">Eventos detalhados também ficam no Django Admin em “Evento operacional”.</p>
+</section>
 {% endblock %}

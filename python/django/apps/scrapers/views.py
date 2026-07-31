@@ -1,6 +1,4 @@
-import asyncio
 import logging
-import os
 import queue
 import threading
 from contextlib import redirect_stdout
@@ -13,19 +11,21 @@ from django.core import signing
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.db.models import (
-    F, ExpressionWrapper, Exists, FloatField, OuterRef, Q, Count, Sum,
+    Case, F, ExpressionWrapper, Exists, FloatField, IntegerField, OuterRef, Q,
+    Count, Sum, When,
 )
 from django.http import StreamingHttpResponse, HttpResponse, JsonResponse
 from django.shortcuts import render, redirect
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.accounts.tenant import organization_callable
 from apps.scrapers.models import (
     CliquePublicacao, ConfiguracaoEnvio, Cupom, LinkAfiliadoUsuario, Produto,
     Publicacao, ReceitaAfiliado, RelatorioSync, FonteIngestao, CupomNormalizado,
-    IntegracaoAfiliado, ProgramaAfiliado,
+    IntegracaoAfiliado, ProgramaAfiliado, ExecucaoRaspagem,
 )
 from apps.scrapers.progresso import emitir_fase
 from apps.scrapers.scraper_mercadolivre.scraper import main as scrapper_main
@@ -62,6 +62,32 @@ def superadmin_required(view):
     return _wrapped
 
 
+_TAXONOMIA_TTL_S = 600
+
+
+def _taxonomia_cacheada(sufixo: str, request, produzir):
+    """Cacheia listas de categoria derivadas de um DISTINCT sobre `Produto`.
+
+    Esses DISTINCT varrem a tabela de produtos INTEIRA e rodavam a cada GET de
+    /scrapers/config/ e /scrapers/top/, só para preencher os <select> de filtro. A
+    taxonomia muda no ritmo da raspagem (horas), não no ritmo dos cliques.
+
+    A chave inclui a organização porque a RLS decide o que cada tenant enxerga: uma
+    chave global entregaria a um tenant a lista derivada das linhas de outro.
+    """
+    from django.core.cache import cache
+
+    # A organização já foi resolvida pelo OrganizationMiddleware; chamar
+    # `organization_for_user` de novo seria uma query só para montar a chave.
+    organization = getattr(request, "organization", None)
+    chave = f"taxonomia:{sufixo}:org:{getattr(organization, 'pk', '_sem_org')}"
+    valor = cache.get(chave)
+    if valor is None:
+        valor = produzir()
+        cache.set(chave, valor, _TAXONOMIA_TTL_S)
+    return valor
+
+
 def throttle_sse(max_por_min=10):
     """Limita quantas vezes/min um usuário dispara um endpoint SSE pesado.
 
@@ -90,6 +116,38 @@ def throttle_sse(max_por_min=10):
             return view(request, *args, **kwargs)
         return _wrapped
     return deco
+
+
+# O EventSource reconecta sozinho sempre que o stream cai. Sem um `retry:` explícito o
+# navegador tenta de novo em ~3s, e 6 tentativas cabem em menos de 20 segundos: o teto
+# de throttle_sse(6) estourava e a tela ficava SEM IMAGEM justamente quando o stream
+# estava instável — o pior momento possível. 10s por tentativa mantém as reconexões
+# dentro do orçamento do throttle.
+SSE_RETRY_MS = 10000
+
+
+def _stream_login_sse(eventos):
+    """Serializa os eventos do transporte de login no formato do EventSource."""
+    yield f"retry: {SSE_RETRY_MS}\n\n"
+    for event in eventos:
+        if event.get("id") is not None:
+            yield f"id: {event['id']}\n"
+        yield f"event: {event['event']}\ndata: {event['data']}\n\n"
+    yield "event: done\ndata: __DONE__\n\n"
+
+
+def _resposta_login_sse(eventos):
+    """Resposta SSE das telas de login (ML, portal de relatórios e Amazon).
+
+    `X-Accel-Buffering: no` impede que qualquer proxy segure os frames num buffer, o
+    que transformaria o live view numa sequência de saltos.
+    """
+    resposta = StreamingHttpResponse(
+        _stream_login_sse(eventos), content_type="text/event-stream",
+    )
+    resposta["Cache-Control"] = "no-cache"
+    resposta["X-Accel-Buffering"] = "no"
+    return resposta
 
 
 class _QueueWriter:
@@ -167,7 +225,9 @@ def operations_dashboard(request):
         .annotate(envios=Count("id", distinct=True), cliques=Count("cliques"))
         .order_by("-envios", "-cliques")[:5]
     )
-    from apps.scrapers.conexoes import estado_ml, estado_whatsapp
+    from apps.scrapers.conexoes import (
+        estado_ml, estado_ml_linkbuilder, estado_whatsapp,
+    )
 
     perfil = request.user.perfil
     configs = ConfiguracaoEnvio.objects.filter(owner=request.user)
@@ -175,12 +235,22 @@ def operations_dashboard(request):
     est_ml = estado_ml(request.user)
     est_wa = estado_whatsapp(request.user, session=perfil.sessao_whatsapp())
     ml_ok, wa_ok = est_ml.conectado, est_wa.conectado
+    # Só faz sentido perguntar pelo Link Builder quando o site já está OK: sem
+    # sessão nenhuma o aviso relevante é o de baixo, e dois avisos para a mesma
+    # causa era parte da confusão que esta tela produzia.
+    est_lb = estado_ml_linkbuilder(request.user) if ml_ok else None
+    lb_ok = est_lb.conectado if est_lb else True
+    if ml_ok and est_lb and not lb_ok:
+        # A falha que antes só aparecia como erro dentro do stream de geração de
+        # links, depois de o usuário clicar e esperar.
+        alertas.append(("Link Builder pedindo login", est_lb.motivo,
+                        "scraper-ml-conexao"))
     if not ml_ok and not perfil.amazon_conectado():
         # O motivo vem do estado: "sessão expirou" e "nunca conectou" pedem ações
         # diferentes, e o texto fixo dizia a mesma coisa para os dois.
         alertas.append(("Loja desconectada",
                         est_ml.motivo or "Conecte Mercado Livre ou Amazon para gerar links comissionados.",
-                        "scraper-conta"))
+                        "scraper-ml-conexao"))
     # "conectando" é o worker religando após deploy — piscar "Nenhum canal
     # conectado" nesses segundos assustava sem haver o que fazer.
     if not wa_ok and est_wa.detalhe != "conectando" and not perfil.telegram_conectado():
@@ -205,8 +275,12 @@ def operations_dashboard(request):
                 f"Relatório {sync.marketplace} precisa de atenção",
                 sync.erro_publico or "Sincronização automática não concluiu.",
                 # Reconectar a conta é o que resolve; "home" apontava pra esta mesma
-                # página, então clicar no alerta não levava a lugar nenhum.
-                "scraper-conta",
+                # página, então clicar no alerta não levava a lugar nenhum. E é a
+                # conexão de RELATÓRIOS que quebrou (report_sessions, sessão própria
+                # por usuário): mandar para a conexão do site era pedir um login que
+                # não conserta o sync.
+                "scraper-amazon" if sync.marketplace == "amazon"
+                else "scraper-ml-relatorio-conexao",
             ))
     publicacoes = list(
         pubs.select_related("produto", "configuracao", "cupom_normalizado")
@@ -219,8 +293,8 @@ def operations_dashboard(request):
         "melhores_destinos": melhores_destinos,
         "publicacoes": publicacoes,
         "alertas": alertas, "configs": configs, "syncs": list(syncs.values()),
-        "ml_ok": ml_ok, "wa_ok": wa_ok,
-        "est_ml": est_ml, "est_wa": est_wa,
+        "ml_ok": ml_ok, "wa_ok": wa_ok, "lb_ok": lb_ok,
+        "est_ml": est_ml, "est_wa": est_wa, "est_lb": est_lb,
         "tg_ok": perfil.telegram_conectado(),
     })
 
@@ -284,6 +358,7 @@ def sincronizar_receitas(request):
 
 
 @staff_required
+@ensure_csrf_cookie
 def dashboard(request):
     """Painel + checklist de primeiros passos (onboarding orientado a conexões)."""
     from apps.scrapers.monitor_conexao import ml_conectado, wa_conectado
@@ -292,7 +367,14 @@ def dashboard(request):
     perfil = getattr(user, "perfil", None)
 
     ml_ok = ml_conectado(user)
-    tag_ok = ml_ok
+    # O passo "afiliado conectado" media a MESMA coisa que o passo anterior (a sessão
+    # do site) e por isso ficava verde mesmo com o Link Builder recusando o login —
+    # o checklist declarava pronta exatamente a etapa que estava quebrada. Agora ele
+    # mede o portal de afiliados, que é o que a geração de link atravessa.
+    from apps.scrapers.conexoes import estado_ml_linkbuilder
+
+    est_lb = estado_ml_linkbuilder(user) if ml_ok else None
+    tag_ok = bool(est_lb and est_lb.conectado)
     wa_ok = wa_conectado(perfil.sessao_whatsapp() if perfil else str(user.id))
     tg_ok = bool(perfil and perfil.telegram_conectado())
     canal_ok = wa_ok or tg_ok
@@ -304,7 +386,8 @@ def dashboard(request):
          "desc": "Login seguro na própria página — gera seus links de afiliado.",
          "cta": "Conectar", "url": "/scrapers/ml/", "icon": "shopping-bag"},
         {"key": "tag", "titulo": "Mercado Livre afiliado conectado", "feito": tag_ok,
-         "desc": "O Link Builder usa a conta logada para gerar o link comissionado.",
+         "desc": (est_lb.motivo if est_lb and not tag_ok
+                  else "O Link Builder usa a conta logada para gerar o link comissionado."),
          "cta": "Conectar", "url": "/scrapers/ml/", "icon": "badge-dollar-sign"},
         {"key": "canal", "titulo": "Conectar um canal de envio", "feito": canal_ok,
          "desc": "WhatsApp (QR) ou Telegram (bot) — por onde as ofertas saem.",
@@ -375,18 +458,59 @@ def _tem_sessao_ml(user) -> bool:
     return estado_ml(user).conectado
 
 
-def configurar_conta(request):
-    """Conta do afiliado: tags de comissão (ML/Amazon), credenciais Amazon Creators
-    e sessão do Mercado Livre. Cada usuário configura a PRÓPRIA conta (multi-tenant).
+def _salvar_campos_amazon(perfil, post) -> None:
+    """Persiste tag de afiliado e credenciais Creators API da Amazon.
 
-    A tag é o que garante a comissão do usuário; a sessão ML é o "login salvo no robô"
-    (conectada pela web em Conexão Mercado Livre — browser remoto com live view)."""
+    Único caminho de escrita desses campos: a página da integração Amazon usa
+    este helper. A secret só é sobrescrita quando o campo vem preenchido
+    (em branco mantém a atual); o valor é criptografado pelo campo do model."""
+    perfil.afiliado_tag_amazon = (post.get("afiliado_tag_amazon") or "").strip()
+    perfil.amazon_credential_id = (post.get("amazon_credential_id") or "").strip()
+    perfil.amazon_creators_host = (post.get("amazon_creators_host") or "").strip()
+    campos = ["afiliado_tag_amazon", "amazon_credential_id", "amazon_creators_host"]
+    novo_secret = (post.get("amazon_credential_secret") or "").strip()
+    if novo_secret:
+        perfil.amazon_credential_secret = novo_secret
+        campos.append("amazon_credential_secret")
+    perfil.save(update_fields=campos)
+
+
+def amazon_painel(request):
+    """Página da integração Amazon: tag de afiliado, Creators API (opcional),
+    portal de relatórios e saúde das fontes. Antes essa configuração vivia
+    embutida em Conta — agora a Amazon tem página própria, como ML/WhatsApp/
+    Telegram, reutilizando o MESMO salvamento (sem duplicar regras)."""
     perfil = getattr(request.user, "perfil", None)
     if perfil and request.method == "POST":
-        perfil.afiliado_tag_ml = (request.POST.get("afiliado_tag_ml") or "").strip()
-        perfil.afiliado_tag_amazon = (request.POST.get("afiliado_tag_amazon") or "").strip()
-        perfil.amazon_credential_id = (request.POST.get("amazon_credential_id") or "").strip()
-        perfil.amazon_creators_host = (request.POST.get("amazon_creators_host") or "").strip()
+        _salvar_campos_amazon(perfil, request.POST)
+        messages.success(request, "Integração Amazon atualizada.")
+        return redirect("scraper-amazon")
+
+    from apps.scrapers.conexoes import estado_amazon_relatorios
+    sync = RelatorioSync.objects.filter(
+        usuario=request.user, marketplace="amazon").first()
+    fontes = FonteIngestao.objects.filter(
+        marketplace="amazon", habilitada=True).order_by("nome")
+    return render(request, "scrapers/amazon.html", {
+        "perfil": perfil,
+        "tem_secret": bool(perfil and perfil.amazon_credential_secret),
+        # Ortogonal ao "conectado": a Creators API é upgrade opcional, exibido só
+        # como informação. Não pode voltar a virar requisito de conexão.
+        "amazon_conectado": bool(perfil and perfil.amazon_conectado()),
+        "amazon_creators_ativa": bool(perfil and perfil.amazon_creators_ativa()),
+        "est_relatorios": estado_amazon_relatorios(request.user),
+        "sync": sync,
+        "fontes": fontes,
+    })
+
+
+def configurar_conta(request):
+    """Conta do afiliado: plano, identidade de publicação, templates e resumo
+    das integrações. A configuração da Amazon mora na página própria da
+    integração (scraper-amazon); a sessão ML é conectada em Conexão Mercado
+    Livre. Cada usuário configura a PRÓPRIA conta (multi-tenant)."""
+    perfil = getattr(request.user, "perfil", None)
+    if perfil and request.method == "POST":
         perfil.nome_marca = (request.POST.get("nome_marca") or perfil.nome_marca).strip()[:80]
         perfil.tom_marca = (request.POST.get("tom_marca") or perfil.tom_marca).strip()[:20]
         perfil.chamada_acao = (request.POST.get("chamada_acao") or perfil.chamada_acao).strip()[:120]
@@ -395,15 +519,8 @@ def configurar_conta(request):
         ).strip()[:180]
         perfil.template_a = (request.POST.get("template_a") or "").strip()
         perfil.template_b = (request.POST.get("template_b") or "").strip()
-        # Secret só sobrescreve se o campo veio preenchido (em branco mantém o atual).
-        novo_secret = (request.POST.get("amazon_credential_secret") or "").strip()
-        campos = ["afiliado_tag_ml", "afiliado_tag_amazon", "amazon_credential_id",
-                  "amazon_creators_host", "nome_marca", "tom_marca", "chamada_acao",
-                  "divulgacao_afiliado", "template_a", "template_b"]
-        if novo_secret:
-            perfil.amazon_credential_secret = novo_secret
-            campos.append("amazon_credential_secret")
-        perfil.save(update_fields=campos)
+        perfil.save(update_fields=["nome_marca", "tom_marca", "chamada_acao",
+                                   "divulgacao_afiliado", "template_a", "template_b"])
         messages.success(request, "Conta atualizada.")
         return redirect("scraper-conta")
 
@@ -761,6 +878,9 @@ def ml_conexao_painel(request):
     return render(request, "scrapers/ml_conexao.html", {
         "status": ml_conexao.status(request.user.id),
         "marketplace_nome": "Mercado Livre", "conexao_prefix": "/scrapers/ml",
+        # Só escolhe os textos da tela (ML x Amazon). O transporte é o mesmo nos três
+        # fluxos desde que a Amazon saiu do screencast legado.
+        "marketplace_ml": True,
     })
 
 
@@ -777,7 +897,7 @@ def amazon_conexao_painel(request):
     return render(request, "scrapers/ml_conexao.html", {
         "status": amazon_conexao.status(request.user.id),
         "marketplace_nome": "Amazon Associados", "conexao_prefix": "/scrapers/amazon",
-        "relatorio": True,
+        "relatorio": True, "marketplace_ml": False,
     })
 
 
@@ -790,7 +910,14 @@ def amazon_conexao_status_json(request):
 @require_POST
 def amazon_conexao_start(request):
     from apps.scrapers import amazon_conexao
-    return JsonResponse(amazon_conexao.criar_sessao(request.user))
+    import json
+    if len(request.body or b"") > 4096:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        client = json.loads((request.body or b"{}").decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(amazon_conexao.criar_sessao(request.user, client))
 
 
 @require_POST
@@ -807,25 +934,32 @@ def amazon_conexao_cancelar(request):
     return JsonResponse({"ok": True})
 
 
+# Um stream de frames prende UMA das 8 threads do gunicorn enquanto a aba
+# estiver aberta (--workers 1 --threads 8, ver python/Procfile). Sem teto,
+# recarregar a tela algumas vezes esgotava o pool e o painel inteiro parava
+# de responder — os streams de raspagem/envio já eram limitados, estes não.
+@throttle_sse(6)
 @require_GET
 def amazon_conexao_frames(request):
     from apps.scrapers import amazon_conexao
-    def _stream():
-        yield from (f"data: {frame}\n\n" for frame in amazon_conexao.frames(request.user.id))
-        yield "data: __DONE__\n\n"
-    return StreamingHttpResponse(_stream(), content_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return _resposta_login_sse(amazon_conexao.frames(
+        request.user.id, request.GET.get("session_id"),
+    ))
 
 
 @require_POST
 def amazon_conexao_input(request):
     import json
     from apps.scrapers import amazon_conexao
+    if len(request.body or b"") > 65536:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
     try:
-        events = json.loads((request.body or b"").decode() or "{}").get("events")
+        payload = json.loads((request.body or b"").decode() or "{}")
     except (ValueError, UnicodeDecodeError):
         return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
-    return JsonResponse(amazon_conexao.enfileirar_input(request.user.id, events))
+    return JsonResponse(amazon_conexao.enfileirar_input(
+        request.user.id, payload.get("session_id"), payload.get("events"),
+    ))
 
 
 # --- Conexão do portal de RELATÓRIOS do ML (afiliados), separada do site principal ---
@@ -837,7 +971,7 @@ def ml_relatorio_conexao_painel(request):
         "status": ml_relatorio_conexao.status(request.user.id),
         "marketplace_nome": "Relatórios Mercado Livre",
         "conexao_prefix": "/scrapers/ml-relatorio",
-        "relatorio": True,
+        "relatorio": True, "marketplace_ml": True,
     })
 
 
@@ -850,7 +984,14 @@ def ml_relatorio_conexao_status_json(request):
 @require_POST
 def ml_relatorio_conexao_start(request):
     from apps.scrapers import ml_relatorio_conexao
-    return JsonResponse(ml_relatorio_conexao.criar_sessao(request.user))
+    import json
+    if len(request.body or b"") > 4096:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        client = json.loads((request.body or b"{}").decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(ml_relatorio_conexao.criar_sessao(request.user, client))
 
 
 @require_POST
@@ -867,37 +1008,51 @@ def ml_relatorio_conexao_cancelar(request):
     return JsonResponse({"ok": True})
 
 
+# Um stream de frames prende UMA das 8 threads do gunicorn enquanto a aba
+# estiver aberta (--workers 1 --threads 8, ver python/Procfile). Sem teto,
+# recarregar a tela algumas vezes esgotava o pool e o painel inteiro parava
+# de responder — os streams de raspagem/envio já eram limitados, estes não.
+@throttle_sse(6)
 @require_GET
 def ml_relatorio_conexao_frames(request):
     from apps.scrapers import ml_relatorio_conexao
-    def _stream():
-        yield from (f"data: {frame}\n\n" for frame in ml_relatorio_conexao.frames(request.user.id))
-        yield "data: __DONE__\n\n"
-    return StreamingHttpResponse(_stream(), content_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return _resposta_login_sse(ml_relatorio_conexao.frames(
+        request.user.id, request.GET.get("session_id"),
+    ))
 
 
 @require_POST
 def ml_relatorio_conexao_input(request):
     import json
     from apps.scrapers import ml_relatorio_conexao
+    if len(request.body or b"") > 65536:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
     try:
-        events = json.loads((request.body or b"").decode() or "{}").get("events")
+        payload = json.loads((request.body or b"").decode() or "{}")
     except (ValueError, UnicodeDecodeError):
         return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
-    return JsonResponse(ml_relatorio_conexao.enfileirar_input(request.user.id, events))
+    return JsonResponse(ml_relatorio_conexao.enfileirar_input(
+        request.user.id, payload.get("session_id"), payload.get("events"),
+    ))
 
 
 @require_POST
 def ml_conexao_start(request):
     """Abre (ou reaproveita) a sessão remota de login do ML e devolve o estado."""
+    import json
     from apps.scrapers import ml_conexao
-    return JsonResponse(ml_conexao.criar_sessao(request.user))
+    if len(request.body or b"") > 4096:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        client = json.loads((request.body or b"{}").decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(ml_conexao.criar_sessao(request.user, client))
 
 
 @require_POST
 def ml_conexao_salvar(request):
-    """'Já entrei' — força a captura da sessão sem esperar o auto-detect."""
+    """Dispara a sonda autenticada; nunca força a gravação de cookies incompletos."""
     from apps.scrapers import ml_conexao
     ml_conexao.salvar_agora(request.user.id)
     return JsonResponse(ml_conexao.status(request.user.id))
@@ -911,39 +1066,67 @@ def ml_conexao_cancelar(request):
     return JsonResponse({"ok": True})
 
 
+@require_POST
+def ml_conexao_desconectar(request):
+    """Apaga a sessão salva do ML (espelha whatsapp_desconectar).
+
+    Faltava a contraparte do "Desconectar" do WhatsApp: quando a sessão ficava
+    presa em "conectado" — a sonda aceitando um cookie que os fluxos reais já não
+    conseguiam usar — não havia nenhuma saída manual. Apagar aqui é a única forma
+    de forçar um login novo de verdade, já que `criar_sessao` reaproveita o que
+    estiver no banco.
+    """
+    from apps.accounts.ml_sessions import delete_storage_state
+    from apps.scrapers import conexoes, ml_conexao
+
+    ml_conexao.cancelar(request.user.id)
+    apagou = delete_storage_state(request.user)
+    conexoes.invalidar_ml(request.user)
+    ml_conexao.esquecer(request.user.id)
+    return JsonResponse({
+        "ok": True,
+        "apagou": bool(apagou),
+        "mensagem": ("Sessão do Mercado Livre apagada. Clique em Conectar para "
+                     "entrar de novo." if apagou
+                     else "Não havia sessão salva do Mercado Livre."),
+    })
+
+
+# Um stream de frames prende UMA das 8 threads do gunicorn enquanto a aba
+# estiver aberta (--workers 1 --threads 8, ver python/Procfile). Sem teto,
+# recarregar a tela algumas vezes esgotava o pool e o painel inteiro parava
+# de responder — os streams de raspagem/envio já eram limitados, estes não.
+@throttle_sse(6)
 @require_GET
 def ml_conexao_frames(request):
     """SSE — transmite os frames (JPEG base64) do Chromium local pro <canvas> do front.
 
-    Live view self-hosted: o worker (ml_conexao) roda o browser e captura a tela via
-    CDP screencast; aqui só empurramos o último frame de CADA usuário (fila isolada por
-    request.user.id — um tenant nunca vê a tela do outro)."""
+    Live view self-hosted: o worker publica capturas JPEG determinísticas e numeradas;
+    aqui só empurramos o frame atual de CADA usuário (isolado por request.user.id e
+    pelo session_id opaco — um tenant nunca vê a tela do outro)."""
     from apps.scrapers import ml_conexao
-
-    def _stream():
-        for frame in ml_conexao.frames(request.user.id):
-            yield f"data: {frame}\n\n"
-        yield "data: __DONE__\n\n"
-
-    resp = StreamingHttpResponse(_stream(), content_type="text/event-stream")
-    resp["Cache-Control"] = "no-cache"
-    resp["X-Accel-Buffering"] = "no"
-    return resp
+    return _resposta_login_sse(ml_conexao.frames(
+        request.user.id, request.GET.get("session_id"),
+    ))
 
 
 @require_POST
 def ml_conexao_input(request):
     """Recebe eventos de mouse/teclado do front e encaminha pro browser de login.
 
-    Body JSON: {"events": [{"t":"down","x":..,"y":..}, {"t":"char","text":"a"}, ...]}.
-    A validação/limites ficam em ml_conexao.enfileirar_input (dados do cliente)."""
+    Body JSON: {"session_id":"...", "events":[{"seq":1,"t":"down",...}]}.
+    A validação, ordenação, deduplicação e os limites ficam no transporte compartilhado."""
     import json
     from apps.scrapers import ml_conexao
+    if len(request.body or b"") > 65536:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
     try:
         payload = json.loads((request.body or b"").decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError):
         return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
-    return JsonResponse(ml_conexao.enfileirar_input(request.user.id, payload.get("events")))
+    return JsonResponse(ml_conexao.enfileirar_input(
+        request.user.id, payload.get("session_id"), payload.get("events"),
+    ))
 
 
 @require_GET
@@ -1130,11 +1313,11 @@ def configuracoes(request):
                 cfg_obj.programas.set(program_ids)
         return redirect("scraper-configuracoes")
 
-    macros = list(
+    macros = _taxonomia_cacheada("macros", request, lambda: list(
         Produto.objects
         .exclude(macro_categoria__isnull=True).exclude(macro_categoria="")
         .values_list("macro_categoria", flat=True).distinct().order_by("macro_categoria")
-    )
+    ))
     # Grupos do WhatsApp NÃO são buscados aqui: a chamada ao Node pode travar o render
     # (até 15s) quando o serviço está offline. Carregados via AJAX (ver whatsapp_grupos_json).
 
@@ -1181,8 +1364,8 @@ def enviar_agora_stream(request):
         writer = _QueueWriter(q)
 
         def _run():
-            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-            asyncio.set_event_loop(asyncio.new_event_loop())
+            # Nada de bypass de ORM aqui: quem precisa de query com o Playwright
+            # aberto usa apps.accounts.tenant.executar_no_tenant (o porquê está lá).
             try:
                 with redirect_stdout(writer):
                     # Só a própria regra do usuário (isolamento multi-tenant).
@@ -1295,9 +1478,32 @@ def enviar_produto_stream(request):
             print("[ERRO] Produto não encontrado.")
             return
         print(f"Enviando '{prod.nome[:60]}' → {grupo_nome or grupo_id} ({canal})...")
-        r = enviar_oferta_de_produto(
-            prod, grupo_id, verificar=True, canal=canal, usuario=usuario,
-            destino_nome=grupo_nome, imagem_b64_custom=imagem_custom)
+        try:
+            r = enviar_oferta_de_produto(
+                prod, grupo_id, verificar=True, canal=canal, usuario=usuario,
+                destino_nome=grupo_nome, imagem_b64_custom=imagem_custom)
+        except Exception as exc:
+            # O núcleo re-levanta o inesperado para fechar a Publicacao; o SSE não pode
+            # devolver o erro genérico do runner e esconder a regressão do log.
+            logger.exception("Falha não tratada ao enviar produto %s", prod_id)
+            from apps.scrapers.eventos import log_event
+            try:
+                log_event(
+                    "publicacao", "offer_sse_failed",
+                    "Não foi possível concluir o envio da oferta.", level="error",
+                    usuario=usuario, contexto={"produto_id": prod_id, "canal": canal,
+                                               "destino": grupo_nome or grupo_id,
+                                               "causa": type(exc).__name__}, exc=exc,
+                )
+            except Exception:
+                logger.exception("Não foi possível auditar falha SSE da oferta %s", prod_id)
+            print("[ERRO] O envio encontrou uma falha temporária. Nada foi publicado; "
+                  "tente novamente em instantes.")
+            return
+        if not isinstance(r, dict):
+            logger.error("Envio do produto %s retornou resultado inválido: %r", prod_id, r)
+            print("[ERRO] Não foi possível concluir o envio. Atualize a tela e tente novamente.")
+            return
         if r.get("sucesso"):
             print(f"__SENT__ OK Enviado (via {r.get('via')}). Link: {r.get('link')}")
         else:
@@ -1343,9 +1549,31 @@ def enviar_cupom_stream(request):
             return
         rotulo = codigo_publicavel(cupom) or "Ativar no link"
         print(f"Enviando cupom '{rotulo}' → {grupo_nome or grupo_id} ({canal})...")
-        resultado = enviar_cupom(
-            cupom, grupo_id, canal=canal, usuario=usuario, destino_nome=grupo_nome,
-            imagem_b64_custom=imagem_custom)
+        try:
+            resultado = enviar_cupom(
+                cupom, grupo_id, canal=canal, usuario=usuario, destino_nome=grupo_nome,
+                imagem_b64_custom=imagem_custom)
+        except Exception as exc:
+            # O núcleo deve devolver um dict, mas o SSE não pode esconder uma
+            # regressão nova atrás do erro genérico do runner.
+            logger.exception("Falha não tratada ao enviar cupom %s", cupom_id)
+            from apps.scrapers.eventos import log_event
+            try:
+                log_event(
+                    "publicacao", "coupon_sse_failed",
+                    "Não foi possível concluir o envio do cupom.", level="error",
+                    usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                               "destino": grupo_nome or grupo_id,
+                                               "causa": type(exc).__name__}, exc=exc,
+                )
+            except Exception:
+                logger.exception("Não foi possível auditar falha SSE do cupom %s", cupom_id)
+            print("[ERRO] O envio encontrou uma falha temporária. Nenhum cupom foi confirmado; tente novamente em instantes.")
+            return
+        if not isinstance(resultado, dict):
+            logger.error("Envio de cupom %s retornou resultado inválido: %r", cupom_id, resultado)
+            print("[ERRO] Não foi possível concluir o envio do cupom. Atualize a tela e tente novamente.")
+            return
         if resultado.get("sucesso"):
             print(f"__SENT__ OK Cupom enviado (via {resultado.get('via', canal)}).")
         else:
@@ -1464,39 +1692,49 @@ def top_promocoes(request):
     # `tem_filtros_na_url` de propósito — paginar não pode reescrever os filtros.
     pagina = request.GET.get("pagina")
 
-    macro_categorias = (
+    macro_categorias = _taxonomia_cacheada("macros", request, lambda: list(
         Produto.objects
         .exclude(macro_categoria__isnull=True)
         .exclude(macro_categoria="")
         .values_list("macro_categoria", flat=True)
         .distinct()
         .order_by("macro_categoria")
-    )
+    ))
 
-    categorias_por_macro = {}
-    for row in (
-        Produto.objects
-        .exclude(macro_categoria__isnull=True).exclude(macro_categoria="")
-        .exclude(categoria__isnull=True).exclude(categoria="").exclude(categoria="DESCONHECIDO")
-        .values("macro_categoria", "categoria")
-        .distinct()
-        .order_by("macro_categoria", "categoria")
-    ):
-        categorias_por_macro.setdefault(row["macro_categoria"], []).append(row["categoria"])
+    def _montar_categorias_por_macro():
+        agrupado = {}
+        for row in (
+            Produto.objects
+            .exclude(macro_categoria__isnull=True).exclude(macro_categoria="")
+            .exclude(categoria__isnull=True).exclude(categoria="").exclude(categoria="DESCONHECIDO")
+            .values("macro_categoria", "categoria")
+            .distinct()
+            .order_by("macro_categoria", "categoria")
+        ):
+            agrupado.setdefault(row["macro_categoria"], []).append(row["categoria"])
+        return agrupado
+
+    categorias_por_macro = _taxonomia_cacheada(
+        "categorias", request, _montar_categorias_por_macro)
 
     # Ordenação: 'percent' (padrão — melhor p/ deal bot) ou 'valor' (R$ absoluto economizado).
     ordenar = "valor" if filtros.get("ordenar") == "valor" else "percent"
 
     from django.db.models import Q
+    from apps.scrapers.ofertas import anotacao_preco_publicado
     qs = Produto.objects.filter(preco_sem_desconto__gt=0).exclude(
         estado__in=["indisponivel", "invalido", "expirado", "stale"]
     ).filter(
         # Pool compartilhado (ML, owner=None) + itens privados do usuário (Amazon dele).
         Q(owner__isnull=True) | Q(owner=request.user)
     ).annotate(
-        economia=ExpressionWrapper(F("preco_sem_desconto") - F("preco_com_cupom"), output_field=FloatField()),
+        # A tela tem de mostrar o MESMO número que a mensagem anuncia — fonte única
+        # em ofertas.py, ao lado de preco_publicavel().
+        preco_publicado=anotacao_preco_publicado(),
+    ).annotate(
+        economia=ExpressionWrapper(F("preco_sem_desconto") - F("preco_publicado"), output_field=FloatField()),
         percent=ExpressionWrapper(
-            (F("preco_sem_desconto") - F("preco_com_cupom")) * 100.0 / F("preco_sem_desconto"),
+            (F("preco_sem_desconto") - F("preco_publicado")) * 100.0 / F("preco_sem_desconto"),
             output_field=FloatField(),
         ),
     )
@@ -1557,20 +1795,72 @@ def top_promocoes(request):
     for cupom_catalogo in cupons_lista:
         cupom_catalogo.codigo_publico = codigo_publicavel(cupom_catalogo)
         cupom_catalogo.modo_resgate = regras_do_cupom(cupom_catalogo)["modo_resgate"]
-    from apps.scrapers.coupon_products import ids_cupons_prontos
-    ids_prontos = ids_cupons_prontos(request.user, cupons_lista)
-    cupons_lista = [
-        c for c in cupons_lista if c.id in ids_prontos and cupom_publicavel(c)
-    ]
+    from apps.scrapers.coupon_products import mapa_relacoes_prontas
+    # Filtrar publicáveis ANTES de consultar. A ordem invertida cobrava 3 queries
+    # por cupom do catálogo inteiro (~7 mil com os 2379 de homologação) e jogava
+    # quase todo o resultado fora na linha seguinte.
+    cupons_publicaveis = [c for c in cupons_lista if cupom_publicavel(c)]
+    if como_usar_selecionado == "codigo":
+        cupons_publicaveis = [c for c in cupons_publicaveis if c.codigo_publico]
+    elif como_usar_selecionado == "ativacao":
+        cupons_publicaveis = [c for c in cupons_publicaveis if not c.codigo_publico]
+    # Uma passada em lote responde as duas perguntas (preparado? pronto?) num número
+    # de queries que não cresce com a quantidade de cupons.
+    relacoes_por_cupom, relacoes_prontas = mapa_relacoes_prontas(
+        request.user, cupons_publicaveis)
+    ids_preparados = set(relacoes_por_cupom)
+    ids_prontos = set(relacoes_prontas)
+    cupons_prontos = len(ids_prontos)
+    cupons_aguardando_preparo = len(cupons_publicaveis) - len(ids_preparados)
+    ids_produtos_preparados = {
+        relacao.produto_id
+        for relacoes in relacoes_por_cupom.values()
+        for relacao in relacoes
+    }
+    links_por_produto = {
+        link.produto_id: link
+        for link in LinkAfiliadoUsuario.objects.filter(
+            usuario=request.user, produto_id__in=ids_produtos_preparados,
+        )
+    }
+    cupons_aguardando_verificacao = 0
+    cupons_aguardando_conexao = 0
+    cupons_aguardando_link = 0
+    try:
+        from apps.scrapers.conexoes import estado_ml
+        ml_conectado = estado_ml(request.user).conectado
+    except Exception:
+        ml_conectado = False
+    for cupom in cupons_publicaveis:
+        if cupom.id not in ids_preparados or cupom.id in ids_prontos:
+            continue
+        relacoes = relacoes_por_cupom[cupom.id]
+        links = [links_por_produto.get(relacao.produto_id) for relacao in relacoes]
+        if any(link and link.link_afiliado and link.verificado_ok is None for link in links):
+            cupons_aguardando_verificacao += 1
+        elif cupom.marketplace == "mercadolivre" and not ml_conectado:
+            cupons_aguardando_conexao += 1
+        elif (
+            cupom.marketplace == "awin"
+            and cupom.integracao_id
+            and getattr(cupom.integracao, "status", "") in ("reconectar", "erro")
+        ):
+            cupons_aguardando_conexao += 1
+        else:
+            cupons_aguardando_link += 1
+    cupons_coletados = len(cupons_publicaveis)
+    cupons_fontes_sem_resultado = FonteIngestao.objects.filter(
+        habilitada=True, ultimo_total=0,
+        status__in=("degraded", "blocked"),
+    ).count()
+    # A lista continua estrita: o contador torna a fila visível sem oferecer um
+    # cupom cujo envio ainda não consegue montar produtos, imagem e link afiliado.
+    cupons_lista = [c for c in cupons_publicaveis if c.id in ids_prontos]
     # Os filtros tambem devem refletir somente o catalogo realmente publicavel.
     cupom_categorias = sorted({c.categoria for c in cupons_lista if c.categoria})
     cupom_anunciantes = sorted({c.anunciante_nome for c in cupons_lista
                                 if c.anunciante_nome})
     cupons_lista.sort(key=score_cupom, reverse=True)
-    if como_usar_selecionado == "codigo":
-        cupons_lista = [c for c in cupons_lista if c.codigo_publico]
-    elif como_usar_selecionado == "ativacao":
-        cupons_lista = [c for c in cupons_lista if not c.codigo_publico]
     cupons_page = Paginator(cupons_lista, POR_PAGINA).get_page(pagina)
     cupons_catalogo = list(cupons_page)
     perfil = getattr(request.user, "perfil", None)
@@ -1607,27 +1897,35 @@ def top_promocoes(request):
     # Atribuição é regra de cada loja (ver Marketplace.preparar_exibicao). Em lote e
     # agrupado por loja: por item seria uma query por produto da página.
     from apps.scrapers.marketplaces.registry import get_marketplace
-    por_loja = {}
-    for p in candidatos:
-        por_loja.setdefault(p.marketplace, []).append(p)
-    for slug, itens in por_loja.items():
-        get_marketplace(slug).preparar_exibicao(itens, request.user)
 
-    # O corte só acontece AQUI: item sem link de afiliado não vai para a tela de
-    # envio, porque enviá-lo não comissiona nada. O filtro é em Python, e não em SQL,
-    # de propósito — `afiliado_pronto` é contrato de cada loja (na Amazon sai de tag +
-    # ASIN, não de linha no banco), então só `preparar_exibicao` sabe respondê-lo.
+    def _preparar(itens):
+        por_loja = {}
+        for p in itens:
+            por_loja.setdefault(p.marketplace, []).append(p)
+        for slug, do_slug in por_loja.items():
+            get_marketplace(slug).preparar_exibicao(do_slug, request.user)
+
+    # O corte por afiliação é em Python, e não em SQL, de propósito —
+    # `afiliado_pronto` é contrato de cada loja (na Amazon sai de tag + ASIN, não de
+    # linha no banco), então só `preparar_exibicao` sabe respondê-lo. Isso obriga a
+    # preparar o conjunto INTEIRO quando o filtro está ligado: paginar antes contaria
+    # itens que a tela nunca mostra.
+    #
+    # Quando o filtro está DESLIGADO, porém, nada depende de `afiliado_pronto` fora
+    # da página exibida — e preparar o catálogo inteiro só para renderizar 20 linhas
+    # era trabalho jogado fora em cima da consulta mais pesada do sistema.
     pendentes_ocultos = 0
     if so_afiliados:
+        _preparar(candidatos)
         prontos = [p for p in candidatos if getattr(p, "afiliado_pronto", False)]
         pendentes_ocultos = len(candidatos) - len(prontos)
         candidatos = prontos
-    # Pagina a lista já materializada, e não o queryset: `afiliado_pronto` é
-    # decidido em Python (acima), então uma paginação em SQL contaria itens que a
-    # tela nunca mostra. As queries por item abaixo continuam recebendo só a
-    # página corrente.
-    page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
-    produtos = list(page_obj)
+        page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
+        produtos = list(page_obj)
+    else:
+        page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
+        produtos = list(page_obj)
+        _preparar(produtos)
 
     cupons_map = {
         c.campanha_id: c
@@ -1652,7 +1950,10 @@ def top_promocoes(request):
         p.ja_enviado = p.id in ja_enviados
         p.motivos_score = [f"{p.percent:.0f}% de desconto"]
         hist_preco = historico.get(chave_produto(p))
-        if hist_preco and hist_preco["n"] >= 3 and p.preco_com_cupom <= hist_preco["minimo"] * 1.02:
+        # Contra o preço publicado: o histórico é gravado com o valor que o cliente
+        # paga, então comparar a vitrine com ele daria selo em item que não está na
+        # mínima (e tiraria de item que está).
+        if hist_preco and hist_preco["n"] >= 3 and p.preco_publicado <= hist_preco["minimo"] * 1.02:
             p.motivos_score.append("mínima de 30 dias")
 
     # base da querystring (mantém filtros ao trocar a ordenação)
@@ -1726,6 +2027,13 @@ def top_promocoes(request):
         "anunciante_selecionado": anunciante_selecionado,
         "como_usar_selecionado": como_usar_selecionado,
         "cupons_catalogo": cupons_catalogo,
+        "cupons_coletados": cupons_coletados,
+        "cupons_prontos": cupons_prontos,
+        "cupons_aguardando_preparo": cupons_aguardando_preparo,
+        "cupons_aguardando_link": cupons_aguardando_link,
+        "cupons_aguardando_verificacao": cupons_aguardando_verificacao,
+        "cupons_aguardando_conexao": cupons_aguardando_conexao,
+        "cupons_fontes_sem_resultado": cupons_fontes_sem_resultado,
         "awin_programas": ProgramaAfiliado.objects.filter(
             integracao__owner=request.user, integracao__provedor="awin",
             integracao__status="conectada", habilitado=True,
@@ -1751,26 +2059,16 @@ def top_promocoes(request):
 def run_scraper_stream(request):
     """SSE endpoint — streams every print() from the scraper to the browser."""
 
-    # Resolve fora da thread: lá dentro não há request, e avaliar o SimpleLazyObject
-    # de `request.user` depois não é seguro.
-    usuario = request.user
-
     def _event_stream():
         q: queue.Queue = queue.Queue()
         writer = _QueueWriter(q)
 
         def _run():
-            # Playwright's sync API leaves asyncio's event loop in a running state
-            # on the calling thread, which trips Django's ORM async-safety check.
-            # DJANGO_ALLOW_ASYNC_UNSAFE is the documented bypass for this scenario.
-            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-            asyncio.set_event_loop(asyncio.new_event_loop())
+            # Nada de bypass de ORM aqui: quem precisa de query com o Playwright
+            # aberto usa apps.accounts.tenant.executar_no_tenant (o porquê está lá).
             try:
                 with redirect_stdout(writer):
-                    # A raspagem de cupons de campanha exige sessão ML. No clique
-                    # manual usa a conta de quem clicou; no ciclo automático, a
-                    # conta de catálogo declarada.
-                    scrapper_main(usuario=usuario)
+                    scrapper_main()
             except Exception:
                 logger.exception("Falha inesperada no scraper principal")
                 q.put("[ERRO] Falha inesperada ao processar a solicitação.")
@@ -1797,80 +2095,58 @@ def run_scraper_stream(request):
     return response
 
 
-@staff_required
-@require_GET
-@throttle_sse(10)
-def scrape_ofertas_stream(request):
-    """SSE endpoint — raspa as ofertas (de/por) do ML e já pré-gera os links de afiliado."""
-    from apps.scrapers.scraper_mercadolivre.ofertas_scraper import mapear_ofertas
-    from apps.scrapers.scraper_mercadolivre.link import gerar_links_em_lote
-    try:
-        paginas = int(request.GET.get("paginas", 10))
-    except (TypeError, ValueError):
-        paginas = 10
-    try:
-        links_limite = int(request.GET.get("links", 60))
-    except (TypeError, ValueError):
-        links_limite = 60
+def _criar_raspagem_manual(request, tipo):
+    from apps.scrapers import automacao_state as state
+    from apps.scrapers.manual_scraping import criar_execucao, serializar_execucao
 
-    # Fora da thread de propósito: _run roda noutra thread e não pode tocar request.
-    usuario = request.user
-
-    def _event_stream():
-        q: queue.Queue = queue.Queue()
-        writer = _QueueWriter(q)
-
-        def _run():
-            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            try:
-                with redirect_stdout(writer):
-                    mapear_ofertas(max_paginas=paginas)
-                    if links_limite > 0:
-                        # Pool ML compartilhado (owner=None). Amazon não entra aqui.
-                        pend_qs = Produto.objects.filter(link_afiliado="", owner__isnull=True)
-                        pendentes = list(pend_qs[:links_limite])
-                        if pendentes:
-                            print(f"\nGerando links de afiliado para {len(pendentes)} oferta(s)...")
-                            # O pool é compartilhado, mas a sessão do ML é do usuário:
-                            # sem isto, lia-se um auth.json que a tela nunca grava.
-                            gerar_links_em_lote(pendentes, usuario=usuario)
-                        from apps.scrapers.afiliado import frase_resumo_afiliacao
-                        print(frase_resumo_afiliacao(usuario))
-            except Exception:
-                logger.exception("Falha inesperada na raspagem de ofertas")
-                q.put("[ERRO] Falha inesperada ao processar a solicitação.")
-            finally:
-                writer.flush()
-                q.put(None)
-
-        thread = threading.Thread(
-            target=organization_callable(request.organization.pk, _run),
-            daemon=True,
+    execucao, criada = criar_execucao(
+        organization=request.organization,
+        usuario=request.user,
+        tipo=tipo,
+    )
+    # Em produção o processo já vive no Procfile. Em desenvolvimento, garante o
+    # worker sem ligar o toggle da raspagem automática.
+    state.spawn_worker("scrape")
+    payload = serializar_execucao(execucao)
+    payload["reutilizada"] = not criada
+    if not criada and execucao.tipo != tipo:
+        payload["mensagem"] = (
+            "Já existe outra raspagem em andamento para esta organização."
         )
-        thread.start()
-        while True:
-            line = q.get()
-            if line is None:
-                yield "data: __DONE__\n\n"
-                break
-            yield f"data: {line}\n\n"
-
-    response = StreamingHttpResponse(_event_stream(), content_type="text/event-stream")
-    response["Cache-Control"] = "no-cache"
-    response["X-Accel-Buffering"] = "no"
-    return response
+        return JsonResponse(payload, status=409)
+    return JsonResponse(payload, status=202 if criada else 200)
 
 
-def _sse_runner(fn, organization):
-    """Roda fn() capturando prints e streamando via SSE (reusa o padrão _QueueWriter)."""
+@staff_required
+@require_POST
+def scrape_ofertas_stream(request):
+    """Enfileira Promoções; o worker persiste progresso e resultado."""
+    return _criar_raspagem_manual(request, "ofertas")
+
+
+def _sse_runner(fn, organization, *, segurar_transacao=True):
+    """Roda fn() capturando prints e streamando via SSE (reusa o padrão _QueueWriter).
+
+    `segurar_transacao=False` para jobs que passam minutos fora do banco (geração de
+    links): sem isso o tenant é instalado com um `transaction.atomic()` aberto do
+    início ao fim, a conexão fica `idle in transaction` enquanto o Link Builder
+    trabalha, e o proxy da Fly a derruba. Dentro de transação o Django nem consegue
+    renovar a conexão — só marca `closed_in_transaction`. Quem usa este modo tem de
+    passar suas leituras/gravações por `executar_no_tenant`, senão a RLS as bloqueia.
+    """
     def _event_stream():
         q: queue.Queue = queue.Queue()
         writer = _QueueWriter(q)
 
         def _run():
-            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-            asyncio.set_event_loop(asyncio.new_event_loop())
+            # Sem bypass de ORM aqui: o Playwright agora é sempre fechado antes de
+            # qualquer query (ver auxiliar.iniciar_browser) ou a query vai por
+            # apps.accounts.tenant.executar_no_tenant. DJANGO_ALLOW_ASYNC_UNSAFE era
+            # setada no os.environ do PROCESSO e nunca restaurada — com 8 threads no
+            # gunicorn, o `finally` de outro fluxo a removia no meio deste.
+            # O set_event_loop também saiu: o Playwright cria o próprio loop e
+            # get_running_loop() ignora o loop "setado" — isso só vazava um epoll por
+            # request SSE.
             try:
                 with redirect_stdout(writer):
                     fn()
@@ -1882,7 +2158,8 @@ def _sse_runner(fn, organization):
                 q.put(None)
 
         threading.Thread(
-            target=organization_callable(organization, _run),
+            target=organization_callable(organization, _run,
+                                         segurar_transacao=segurar_transacao),
             daemon=True,
         ).start()
         while True:
@@ -1972,96 +2249,51 @@ def automacao_control(request):
 
 
 @staff_required
-@require_GET
-@throttle_sse(10)
+@require_POST
 def scrape_cupons_codigo_stream(request):
-    """SSE — pipeline completo de cupons: campanhas, códigos e projeção p/ a aba."""
-    from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import mapear_cupons_codigo
-    from apps.scrapers.scraper_mercadolivre.scraper import (
-        mapear_cupons, projetar_catalogo_cupons)
+    """Enfileira Cupons; etapas independentes podem concluir parcialmente."""
+    return _criar_raspagem_manual(request, "cupons")
 
-    from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
-    from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
 
-    uid = request.user.id  # capturado fora da thread
+@staff_required
+@require_GET
+def raspagem_atual(request):
+    from apps.scrapers.manual_scraping import serializar_execucao
 
-    def _job():
-        from django.contrib.auth import get_user_model
-        from apps.scrapers.afiliado import frase_resumo_afiliacao
-        from apps.scrapers.eventos import log_event
-        from apps.scrapers.marketplaces.registry import get_marketplace
-        usuario = get_user_model().objects.filter(id=uid).first()
-
-        # O trabalho é dividido em faixas da barra porque nenhuma etapa sozinha
-        # conhece o total: sem isso a barra ou zerava a cada etapa, ou (o que
-        # acontecia) nunca aparecia e o botão ficava cinza sem explicação.
-        try:
-            n_campanha = mapear_cupons(faixa=(0, 45))
-        except (LoginError, AuthError, SessaoExpirada) as exc:
-            print(f"[ERRO] Sessão do Mercado Livre expirada: {exc}")
-            print("__ML_LOGIN__")
-            return
-        except BrowserError as exc:
-            print(f"[ERRO] Não foi possível abrir a página de cupons: {exc}")
-            return
-        print(f"{n_campanha} cupom(ns) de campanha raspados.")
-
-        try:
-            n_codigo = mapear_cupons_codigo(faixa=(45, 75))
-            print(f"{n_codigo} produto(s) de cupom de checkout raspados.")
-        except Exception as exc:
-            print(f"Aviso: raspagem de códigos de checkout falhou ({exc}).")
-
-        n_proj = projetar_catalogo_cupons(faixa=(75, 82))
-        print(
-            f"{n_proj} campanha(s) personalizada(s) catalogada(s) como dados "
-            "internos; elas não são códigos públicos."
+    execucao = (
+        ExecucaoRaspagem.objects
+        .filter(organization=request.organization)
+        .order_by(
+            # jobs ativos primeiro; depois, o resultado mais recente
+            Case(
+                When(status__in=("queued", "running"), then=0),
+                default=1,
+                output_field=IntegerField(),
+            ),
+            "-criada_em",
         )
-        from apps.scrapers.sources import run_source
-        from apps.scrapers.sources.persistence import persist_items
-        fonte_oficial = run_source("ml-cupons-afiliados")
-        persistidos = persist_items(fonte_oficial.get("coupons", []))
-        n_oficiais = persistidos["coupons"]
-        print(f"{n_oficiais} cupom(ns) público(s) oficial(is) encontrado(s).")
-        from apps.scrapers.coupon_products import preparar_lote
-        preparo = preparar_lote(limite=max(12, n_oficiais))
-        print(
-            f"{preparo['prontos']} cupom(ns) novo(s) preparado(s) com produtos; "
-            f"{preparo['processados']} verificado(s) neste ciclo."
-        )
-        if not n_oficiais:
-            print("Aviso: a fonte oficial não trouxe códigos públicos ativos; "
-                  "campanhas de ativação pessoais não serão divulgadas.")
-            log_event("scraper", "cupons_vazios",
-                      "A fonte oficial não trouxe códigos públicos ativos.",
-                      level="warning", usuario=usuario,
-                      contexto={"marketplace": "mercadolivre",
-                                "campanhas": n_campanha, "etapa": "fonte_oficial"})
+        .first()
+    )
+    return JsonResponse(
+        {"execucao": serializar_execucao(execucao) if execucao else None},
+    )
 
-        # Produto de cupom sem link de afiliado não aparece na tela de envio (ver
-        # top_promocoes): raspar sem afiliar deixava a raspagem "sem efeito visível".
-        emitir_fase("Gerando links de afiliado", 0.0, (85, 100))
-        pendentes = _produtos_sem_link(usuario, origens=("cupom", "cupom_codigo"))
-        if not pendentes:
-            print("Todos os produtos de cupom já têm link de afiliado.")
-        else:
-            print(f"\nGerando links de afiliado para {len(pendentes)} produto(s) de cupom...")
-            por_loja = {}
-            for p in pendentes:
-                por_loja.setdefault(p.marketplace or "mercadolivre", []).append(p)
-            for slug, grupo in por_loja.items():
-                try:
-                    get_marketplace(slug).prefetch_links(grupo, usuario=usuario,
-                                                         faixa=(85, 100))
-                except (LoginError, AuthError, SessaoExpirada) as exc:
-                    print(f"[ERRO] Sessão do Mercado Livre expirada: {exc}")
-                    print("__ML_LOGIN__")
-                    break
-                except Exception as exc:
-                    print(f"Aviso: geração de links em {slug} falhou ({exc}).")
-        print(frase_resumo_afiliacao(usuario))
 
-    return _sse_runner(_job, request.organization)
+@staff_required
+@require_GET
+def raspagem_status(request, execucao_id):
+    from apps.scrapers.manual_scraping import serializar_execucao
+
+    execucao = ExecucaoRaspagem.objects.filter(
+        pk=execucao_id, organization=request.organization,
+    ).first()
+    if execucao is None:
+        return JsonResponse({"erro": "Raspagem não encontrada."}, status=404)
+    try:
+        after = max(0, int(request.GET.get("after", 0)))
+    except (TypeError, ValueError):
+        after = 0
+    return JsonResponse(serializar_execucao(execucao, after=after))
 
 
 def _produtos_sem_link(usuario, origens=None, limite=80, macros=None):
@@ -2119,9 +2351,13 @@ def gerar_links_stream(request):
     Promoções só lista item afiliado, então quem não é staff precisava esperar o
     worker para ter QUALQUER produto enviável.
     """
+    from apps.scrapers.carga import operacao_pesada_com_espera
     from apps.scrapers.marketplaces.registry import get_marketplace
     from apps.scrapers.auxiliar import SessaoExpirada
-    from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
+    from apps.scrapers.progresso import usar_reporter
+    from apps.scrapers.scraper_mercadolivre.link import (
+        AntiBotError, AuthError, LoginError,
+    )
 
     try:
         limite = int(request.GET.get("limite", 50))
@@ -2135,32 +2371,122 @@ def gerar_links_stream(request):
     def _job():
         from django.contrib.auth import get_user_model
         from apps.scrapers.afiliado import frase_resumo_afiliacao
-        usuario = get_user_model().objects.filter(id=uid).first()
+        from apps.accounts.tenant import executar_no_tenant
 
-        pendentes = _produtos_sem_link(usuario, limite=limite, macros=macros or None)
+        # Este job roda com o tenant apenas ANOTADO (segurar_transacao=False, ver
+        # _sse_runner): não há transação nem GUC abertos enquanto o Link Builder
+        # trabalha. Em troca, TODA ida ao banco passa por executar_no_tenant, que
+        # reinstala o escopo numa transação de milissegundos — sem isso a RLS
+        # devolveria zero linha.
+        usuario = executar_no_tenant(
+            lambda: get_user_model().objects.filter(id=uid).first())
+
+        pendentes = executar_no_tenant(
+            _produtos_sem_link, usuario, limite=limite, macros=macros or None)
         if not pendentes:
             if macros:
                 print(f"Nenhum produto sem link na categoria selecionada ({', '.join(macros)}).")
             else:
                 print("Nenhum produto na fila — todos já têm link de afiliado.")
-            print(frase_resumo_afiliacao(usuario))
+            print(executar_no_tenant(frase_resumo_afiliacao, usuario))
             return
         alvo = f" ({', '.join(macros)})" if macros else ""
         print(f"Gerando link de afiliado para {len(pendentes)} produto(s){alvo}...")
+
+        _esperou = False
+
+        def _quando_o_robo_volta():
+            """" — ele os pega no próximo ciclo, às HH:MM" quando dá para saber."""
+            try:
+                from apps.scrapers import automacao_state as st
+                from django.utils.dateparse import parse_datetime
+                proximo = parse_datetime((st.read_state("links") or {})
+                                         .get("proximo_ciclo") or "")
+                if proximo:
+                    return f" — o robô os pega no próximo ciclo, às {timezone.localtime(proximo):%H:%M}"
+            except Exception:
+                pass
+            return " — o robô os pega no próximo ciclo"
+
+        def _avisar_espera(segundos):
+            nonlocal _esperou
+            if not _esperou:
+                _esperou = True
+                print("O robô está usando o navegador agora. Sua vez assim que ele "
+                      "soltar — costuma levar menos de 2 minutos.")
+                return
+            print(f"Aguardando o navegador ficar livre… ({segundos // 60:02d}:{segundos % 60:02d})")
         # Agrupa por loja: cada marketplace gera seus links (ML=Playwright,
         # Amazon=puro Python). Evita rodar o Link Builder do ML num ASIN.
         por_loja = {}
         for p in pendentes:
             por_loja.setdefault(p.marketplace or "mercadolivre", []).append(p)
-        for slug, grupo in por_loja.items():
+        def _gerar(slug, grupo):
+            """Uma loja. Traduz cada falha na AÇÃO que o usuário precisa tomar."""
             try:
-                get_marketplace(slug).prefetch_links(grupo, usuario=usuario)
-            except (LoginError, AuthError, SessaoExpirada) as exc:
-                print(f"[ERRO] Sessão do Mercado Livre expirada: {exc}")
+                # usar_reporter faz o `emitir_fase("Link i/N")` que já existe em
+                # gerar_links_em_lote chegar à caixa de log. Sem ele o progresso ia
+                # só para o logger do servidor: o usuário via a primeira linha e
+                # mais nada por ~4 minutos, o que fazia qualquer falha parecer
+                # instantânea e total. As linhas periódicas também mantêm o stream
+                # vivo — um SSE ocioso por minutos é candidato a ser cortado pelo
+                # proxy da Fly, o que vira "A conexão foi perdida" na tela.
+                with usar_reporter(lambda msg, progresso=None: print(msg)):
+                    get_marketplace(slug).prefetch_links(grupo, usuario=usuario)
+            except (LoginError, SessaoExpirada) as exc:
+                # Sessão morta DE VERDADE: aqui o "Reconectar" resolve. A mensagem
+                # da exceção já nomeia o assunto (link.MSG_SESSAO_EXPIRADA /
+                # MSG_SEM_SESSAO); o prefixo antigo "Sessão do Mercado Livre
+                # expirada:" repetia isso e o usuário lia duas afirmações
+                # sobrepostas sobre a mesma coisa.
+                print(f"[ERRO] {exc}")
                 print("__ML_LOGIN__")
-                break
+            except AntiBotError:
+                # A conta está boa; foi o gateway anti-bot do ML reagindo ao IP do
+                # servidor. Oferecer "Reconectar" aqui mandava o usuário refazer um
+                # login que estava perfeito.
+                print("[AVISO] O Mercado Livre pediu verificação de segurança ao abrir "
+                      "o Link Builder (proteção contra robôs, dispara pelo IP do "
+                      "servidor). Sua conta está conectada e não há nada a corrigir — "
+                      "o robô tenta de novo sozinho.")
+            except AuthError:
+                print("[AVISO] Não foi possível abrir o Link Builder agora (o Mercado "
+                      "Livre não respondeu). Tente de novo em alguns minutos.")
             except Exception as exc:
                 print(f"Aviso: geração de links em {slug} falhou ({exc}).")
-        print(frase_resumo_afiliacao(usuario))
 
-    return _sse_runner(_job, request.organization)
+        # Primeiro as lojas LEVES, fora do lock: a Amazon é Python puro (concatena a
+        # tag na URL) e não abre navegador. Fazer um usuário só-Amazon esperar o
+        # worker seria dano gratuito.
+        for slug, grupo in por_loja.items():
+            if slug != "mercadolivre":
+                _gerar(slug, grupo)
+
+        grupo_ml = por_loja.get("mercadolivre")
+        if grupo_ml:
+            # O ML disputa o MESMO advisory lock do worker. Sem isto, clicar o botão
+            # enquanto o worker está no Link Builder abria um segundo Chromium no
+            # mesmo portal SSO com a mesma sessão — e o ML derrubava um dos dois para
+            # login. Era a causa do falso "sessão expirada".
+            with operacao_pesada_com_espera(aviso=_avisar_espera) as conseguiu:
+                if conseguiu:
+                    if _esperou:
+                        print("Navegador liberado.")
+                    _gerar("mercadolivre", grupo_ml)
+                else:
+                    print(f"O robô ainda está ocupado. Seus {len(grupo_ml)} produto(s) "
+                          f"continuam na fila{_quando_o_robo_volta()}.")
+                    print("__LINKS_OCUPADO__")
+        # O resumo é informativo: se ELE falhar, o lote já feito continua válido e
+        # não pode ser reportado como erro da operação inteira.
+        try:
+            print(executar_no_tenant(frase_resumo_afiliacao, usuario))
+        except Exception:
+            logger.exception("Resumo de afiliação falhou após gerar links")
+            print("Links processados. (Não foi possível montar o resumo final.)")
+
+    # segurar_transacao=False: o lote passa minutos no Link Builder, e uma
+    # transação aberta esse tempo todo vira `idle in transaction` até o proxy
+    # da Fly matar o socket — e dentro de transação o Django nem consegue
+    # renovar a conexão. As idas ao banco deste job vão por executar_no_tenant.
+    return _sse_runner(_job, request.organization, segurar_transacao=False)

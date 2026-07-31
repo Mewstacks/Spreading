@@ -49,11 +49,12 @@ manual por usuário.
 
 O login do Mercado Livre acontece dentro do próprio app: rodamos um Chromium **local**
 (o mesmo Chromium/Playwright que o scraper já usa) e transmitimos a tela pro navegador
-do usuário via **CDP screencast** desenhado num `<canvas>`; o mouse e o teclado dele
-voltam por POST e viram comandos `Input.dispatch*`. Ele loga no ML ali — no celular ou
-desktop, inclusive a verificação em duas etapas — e a sessão é salva sozinha. Não
-precisa rodar script nenhum, colar `auth.json`, nem contratar serviço externo. A senha
-é digitada direto na página real do ML (não passa pelo backend do Spreading).
+do usuário como capturas numeradas desenhadas num `<canvas>`; mouse e teclado voltam
+por POST com confirmação e deduplicação. Ele loga no ML ali — no celular ou desktop,
+inclusive a verificação em duas etapas — e a sessão é salva sozinha. Não precisa rodar
+script nenhum, colar `auth.json`, nem contratar serviço externo. Cliques e teclas são
+retransmitidos ao Chromium apenas durante a conexão; o conteúdo não é persistido nem
+incluído nos logs do Spreading.
 
 Não há chaves a configurar: o login usa o Chromium da própria imagem. Basta ter o
 Playwright + Chromium instalados (o `Dockerfile`/`setup.ps1` já fazem isso).

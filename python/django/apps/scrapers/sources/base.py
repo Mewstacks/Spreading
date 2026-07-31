@@ -1,6 +1,33 @@
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable
+
+_DECIMAL_COM_PONTO = re.compile(r"^\d+\.\d{1,2}$")
+
+
+def normalizar_dinheiro(texto) -> float:
+    """Converte um preço renderizado em float, sem confundir milhar com decimal.
+
+    A Amazon alterna entre "R$ 1.299,90" (ponto de milhar) e "R$ 64.99" (ponto
+    decimal, quando a página cai no formato en-US). Tratar todo ponto como milhar
+    multiplicava o segundo caso por 100 e o valor errado passava por todos os
+    gates de desconto.
+    """
+    bruto = str(texto or "").replace("\xa0", " ").replace("R$", "")
+    bruto = re.sub(r"[^\d.,]", "", bruto)
+    if not bruto:
+        return 0.0
+    if "," in bruto:
+        # Vírgula presente => ela é o decimal e o ponto é separador de milhar.
+        bruto = bruto.replace(".", "").replace(",", ".")
+    elif not _DECIMAL_COM_PONTO.match(bruto):
+        # Sem vírgula: só é decimal quando há 1-2 dígitos após um único ponto.
+        bruto = bruto.replace(".", "")
+    try:
+        return round(float(bruto), 2)
+    except ValueError:
+        return 0.0
 
 
 @dataclass(frozen=True)
@@ -12,6 +39,9 @@ class IngestedItem:
     canonical_url: str
     title: str
     current_price: float = 0
+    # Preço realmente pago quando a fonte conhece um desconto que só aparece no
+    # checkout (cupom de ativação da Amazon). Vazio significa "igual ao current".
+    effective_price: float = 0
     reference_price: float = 0
     image_url: str = ""
     coupon_code: str = ""

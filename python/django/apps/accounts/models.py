@@ -11,7 +11,12 @@ from django.utils import timezone
 from django.utils.text import slugify
 import uuid
 
+from contextlib import nullcontext
+
 from apps.accounts.fields import EncryptedCharField
+from apps.accounts.tenant import (
+    actor_context, current_actor_id, in_system_context, organization_context,
+)
 
 
 class Organization(models.Model):
@@ -32,13 +37,6 @@ class Organization(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
         related_name="personal_organization",
     )
-    # Organização cuja sessão do ML alimenta o catálogo COMPARTILHADO de cupons
-    # (tabela Cupom, sem dono). A página /cupons/filter exige login, e o dado é o
-    # mesmo para todos — então uma conta declarada raspa uma vez para todo mundo.
-    # É escolha explícita, não "a sessão mais recente": nada aqui resolve tenant
-    # por acaso. Sem nenhuma marcada, a raspagem falha com instrução, não em
-    # silêncio.
-    fonte_catalogo_ml = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -86,9 +84,19 @@ class MercadoLivreSession(models.Model):
 
     STATUS = [
         ("active", "Ativa"),
+        ("suspect", "Suspeita"),
         ("expired", "Expirada"),
         ("decrypt_error", "Erro de criptografia"),
         ("rotation_required", "Rotação necessária"),
+    ]
+
+    # Vereditos da sonda de sessão (conexoes.sondar_sessao_ml). "suspeito" NÃO é
+    # logout: é o que o ML responde a um IP de datacenter quando o anti-bot entra
+    # no caminho. Só a repetição (PROBE_FALHAS_PARA_DESCONECTAR) vira "reconecte".
+    PROBE_RESULTS = [
+        ("conectado", "Conectado"),
+        ("suspeito", "Suspeito"),
+        ("inconclusivo", "Inconclusivo"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -108,6 +116,32 @@ class MercadoLivreSession(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     rotated_at = models.DateTimeField(null=True, blank=True)
     last_used_at = models.DateTimeField(null=True, blank=True)
+
+    # ── Veredito da sonda: fonte COMPARTILHADA entre os 9 processos ──
+    # O cache do Django é LocMem, por processo (ver core/settings.py). Enquanto o
+    # veredito morava só lá, web e workers sondavam o ML em paralelo e discordavam:
+    # a tela ficava verde com o cache do gunicorn e um worker, cinco minutos depois,
+    # concluía "expirado" e apagava a credencial da organização inteira. Guardar o
+    # veredito aqui, ao lado da própria sessão, dá UMA leitura para todo mundo.
+    last_probe_at = models.DateTimeField(null=True, blank=True)
+    last_probe_result = models.CharField(max_length=16, choices=PROBE_RESULTS, blank=True)
+    probe_failures = models.PositiveSmallIntegerField(default=0)
+    probe_reason = models.CharField(max_length=200, blank=True)
+
+    # ── Veredito da sonda do LINK BUILDER (portal de afiliados) ──
+    # O portal /afiliados/linkbuilder tem SSO próprio (jms/msl): um cookie que
+    # ainda vale em mercadolivre.com.br pode ser recusado lá. Era a assimetria que
+    # produzia "todas as telas dizem conectado e a geração de links falha" — os
+    # campos acima medem só o site principal.
+    #
+    # Deliberadamente NÃO alimentam `status`: ele é o gate de `has_storage_state`,
+    # e o portal recusar o cookie não torna a credencial inútil (a raspagem do site
+    # segue funcionando com ela). Quem traduz `lb_probe_failures` em "reconecte" é
+    # a tela.
+    lb_last_probe_at = models.DateTimeField(null=True, blank=True)
+    lb_last_probe_result = models.CharField(max_length=16, choices=PROBE_RESULTS, blank=True)
+    lb_probe_failures = models.PositiveSmallIntegerField(default=0)
+    lb_probe_reason = models.CharField(max_length=200, blank=True)
 
     def __str__(self):
         return f"MLSession<{self.organization_id}>"
@@ -129,22 +163,28 @@ class WhatsAppConnection(models.Model):
 
 
 def ensure_personal_organization(user) -> Organization:
-    """Retorna/cria o tenant pessoal de um usuário de forma idempotente."""
+    """Retorna/cria o tenant pessoal de um usuário de forma idempotente.
+
+    Membership e WhatsAppConnection são STRICT_TENANT_TABLES: exigem app.organization_id
+    (não basta o actor_context usado para achar `existing`). Fora de system_context —
+    ex.: chamado a partir do login — abre organization_context explicitamente.
+    """
     existing = Organization.objects.filter(personal_owner=user).first()
     if existing:
-        Membership.objects.get_or_create(
-            organization=existing, user=user,
-            defaults={"role": "owner", "is_active": True},
-        )
-        WhatsAppConnection.objects.get_or_create(
-            organization=existing,
-            defaults={
-                "instance_id": (
-                    getattr(getattr(user, "perfil", None), "wa_session", "")
-                    or str(user.pk)
-                ),
-            },
-        )
+        with nullcontext() if in_system_context() else organization_context(existing):
+            Membership.objects.get_or_create(
+                organization=existing, user=user,
+                defaults={"role": "owner", "is_active": True},
+            )
+            WhatsAppConnection.objects.get_or_create(
+                organization=existing,
+                defaults={
+                    "instance_id": (
+                        getattr(getattr(user, "perfil", None), "wa_session", "")
+                        or str(user.pk)
+                    ),
+                },
+            )
         return existing
 
     base = slugify(user.get_username())[:80] or "conta"
@@ -332,10 +372,7 @@ class Perfil(models.Model):
         return f"Perfil<{self.user.get_username()}>"
 
 
-@receiver(post_save, sender=settings.AUTH_USER_MODEL)
-def criar_perfil(sender, instance, created, **kwargs):
-    """Todo User ganha um Perfil. Superusuário (createsuperuser) já nasce verificado."""
-    organization = ensure_personal_organization(instance)
+def _criar_ou_atualizar_perfil(instance, organization, created):
     if created:
         Perfil.objects.create(
             user=instance,
@@ -352,3 +389,27 @@ def criar_perfil(sender, instance, created, **kwargs):
         if profile.organization_id != organization.pk:
             profile.organization = organization
             profile.save(update_fields=["organization"])
+
+
+@receiver(post_save, sender=settings.AUTH_USER_MODEL)
+def criar_perfil(sender, instance, created, **kwargs):
+    """Todo User ganha um Perfil. Superusuário (createsuperuser) já nasce verificado.
+
+    Este signal dispara em QUALQUER save do User — inclusive o `update_last_login` do
+    login, que roda antes de qualquer middleware abrir o escopo do tenant. Sem
+    contexto nenhum a RLS esconde a organização (e o perfil) já existentes e a leitura
+    cai no caminho de criação, que a RLS barra. `actor_context`/`organization_context`
+    resolvem isso com o mesmo privilégio de um usuário comum (só autoriza achar a
+    PRÓPRIA organização); pulados quando já há um escopo aberto (ex.: bootstrap sob
+    system_context, ou este signal disparando de dentro de um request já escopado).
+    """
+    if in_system_context():
+        organization = ensure_personal_organization(instance)
+        _criar_ou_atualizar_perfil(instance, organization, created)
+        return
+
+    already_scoped = current_actor_id() == str(instance.pk)
+    with actor_context(instance.pk) if not already_scoped else nullcontext():
+        organization = ensure_personal_organization(instance)
+        with organization_context(organization):
+            _criar_ou_atualizar_perfil(instance, organization, created)

@@ -20,6 +20,8 @@ const RESET_TIMER_FIELDS = [
     'qrIdleTimer',
     'reconnectTimer',
     'qrBootstrapTimer',
+    'logoutRecoveryTimer',
+    'keepaliveTimer',
     'preparationTimer',
     'gruposRetryTimer',
 ];
@@ -39,7 +41,10 @@ const beginQrReset = (session, clearTimer = clearTimeout) => {
 };
 
 const markResetFailure = (session, message, motivo = MOTIVO_FALHA_RESET.DESCONHECIDO) => {
-    for (const field of ['initTimer', 'qrIdleTimer', 'reconnectTimer', 'qrBootstrapTimer']) {
+    for (const field of [
+        'initTimer', 'qrIdleTimer', 'reconnectTimer', 'qrBootstrapTimer',
+        'logoutRecoveryTimer', 'keepaliveTimer',
+    ]) {
         if (session[field]) clearTimeout(session[field]);
         session[field] = null;
     }

@@ -116,3 +116,14 @@ test('grupos list is only exposed once actually loaded', () => {
     assert.deepEqual(buildGruposPayload(s).grupos, []);
     assert.equal(buildSessionPayload(s).grupos, 0);
 });
+
+test('QR residual nunca vaza fora da fase qr', () => {
+    const carregando = fakeSession({
+        fase: 'carregando',
+        ultimoQR: 'qr-antigo-que-o-celular-ja-consumiu',
+    });
+    assert.equal(buildSessionPayload(carregando).qr, null);
+
+    const qr = fakeSession({ fase: 'qr', ultimoQR: 'qr-atual' });
+    assert.equal(buildSessionPayload(qr).qr, 'qr-atual');
+});

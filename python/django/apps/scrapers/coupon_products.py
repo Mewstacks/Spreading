@@ -11,7 +11,8 @@ import html
 import json
 import logging
 import re
-from datetime import timedelta
+from collections import defaultdict, deque
+from datetime import timedelta, timezone as datetime_timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html.parser import HTMLParser
 from urllib.parse import urlsplit, urlunsplit
@@ -20,12 +21,18 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from apps.scrapers.models import CupomPreparacao, Produto, ProdutoCupom
+from apps.scrapers.models import (
+    CupomPreparacao, LinkAfiliadoUsuario, Produto, ProdutoCupom,
+)
 
 logger = logging.getLogger(__name__)
 
 CACHE_HORAS = 3
+# Espera antes de reprocessar um cupom que não rendeu nenhum produto. Sem isto o
+# preparo vazio é reagendado imediatamente e consome o lote inteiro em repetição.
+BACKOFF_VAZIO = timedelta(hours=6)
 MAX_CANDIDATOS = 36
+PREPARO_LOTE_POR_CICLO = 12
 _CENT = Decimal("0.01")
 
 
@@ -239,16 +246,14 @@ _MIN_CODIGO_PROVA = 4
 
 
 def _promocao_confirma_codigo(cupom, produto):
-    """O texto promocional do produto cita o código do cupom por inteiro?
-
-    Precisa ser palavra inteira: com `in` cru, um código curto como "PET" casava
-    dentro de "PETSHOP"/"COMPETE" e o cupom era dado como comprovado para um
-    produto que não o aceita. Códigos com menos de 4 caracteres não provam nada.
-    """
+    """Confirma somente o código completo, nunca uma substring promocional."""
     codigo = str(getattr(cupom, "codigo", "") or "").strip()
     if len(codigo) < _MIN_CODIGO_PROVA:
         return False
-    padrao = re.compile(rf"(?<![0-9A-Za-z]){re.escape(codigo)}(?![0-9A-Za-z])", re.I)
+    padrao = re.compile(
+        rf"(?<![0-9A-Za-z]){re.escape(codigo)}(?![0-9A-Za-z])",
+        re.IGNORECASE,
+    )
     ev = getattr(produto, "evidencia", {}) or {}
     promo = ev.get("promotion") or {}
     textos = [
@@ -278,8 +283,24 @@ def _base_produtos(cupom, usuario):
     campanha = external.split(":", 1)[1] if external.startswith("campanha:") else ""
     programa_id = str(getattr(getattr(cupom, "programa", None), "external_id", "") or "")
 
+    # Cupom de ATIVAÇÃO do ML: a mensagem divulga o link do PRODUTO, e esse link só
+    # carrega `coupon_campaign_id` quando `produto.campanha_id` está preenchido (ver
+    # _montar_url_isca). Produtos casados apenas pelo container vêm do feed de
+    # ofertas com campanha_id VAZIO — divulgar um deles diria "ative o cupom" e a
+    # pessoa cairia numa página sem cupom nenhum. Exigimos a campanha no próprio
+    # produto, o que na prática restringe aos produtos coletados da página oficial
+    # do cupom (_coletar_ml_remoto), que já nascem com ela.
+    #
+    # Não vale para cupom de CÓDIGO: ali o desconto é digitado no checkout e não
+    # depende de o link carregar a campanha.
+    from apps.scrapers.coupon_rules import codigo_publicavel
+    exige_campanha_no_produto = bool(
+        campanha and mkt == "mercadolivre" and not codigo_publicavel(cupom))
+
     candidatos = []
     for produto in qs.order_by("-ultima_observacao")[:500]:
+        if exige_campanha_no_produto and produto.campanha_id != campanha:
+            continue
         provado = produto.id in ids_confirmados
         if not provado and campanha:
             provado = bool(produto.campanha_id == campanha)
@@ -301,11 +322,10 @@ def _base_produtos(cupom, usuario):
 
 
 def calcular_precos(cupom, produto):
-    """(original, atual, final) ou None; todos Decimal e especificos do cupom.
+    """(original, atual, final) ou None; todos Decimal e específicos do cupom.
 
-    `atual` é o preço de vitrine (o que o cliente paga sem o cupom) e é a base de
-    tudo: compra mínima, desconto e teto. `original` é só o preço de tabela, usado
-    para contexto — nunca para calcular o desconto do cupom.
+    ``atual`` é o preço de vitrine, usado para compra mínima e desconto. O preço
+    de tabela serve apenas de contexto e nunca aumenta o benefício do cupom.
     """
     from apps.scrapers.coupon_rules import regras_do_cupom
 
@@ -315,12 +335,6 @@ def calcular_precos(cupom, produto):
     if atual is None or atual <= 0:
         return None
     if original is None or original < atual or original > atual * 10:
-        if original is not None and original != atual:
-            # Não pode ficar em silêncio: é assim que um "de" corrompido some da
-            # mensagem sem deixar rastro de qual produto/fonte o produziu.
-            logger.warning(
-                "Preço de tabela descartado no cupom %s, produto %s: de=%s por=%s",
-                getattr(cupom, "pk", "?"), getattr(produto, "id", "?"), original, atual)
         original = atual
     minimo = _decimal(regras.get("valor_minimo")) or Decimal("0")
     if minimo and atual < minimo:
@@ -353,20 +367,22 @@ def calcular_precos(cupom, produto):
 
 
 def _ordem_por_valor_do_cupom(relacao):
-    """Ranking dos itens da colagem: o que o CUPOM abate, não o que a vitrine já fez.
-
-    Ordenar por (original - final) colocava na frente o item que já estava barato na
-    vitrine, ainda que o cupom mal encostasse nele.
-    """
+    """Ordena pelo abatimento causado pelo cupom, não pela promoção da vitrine."""
     atual = relacao.preco_atual or relacao.preco_original or Decimal("0")
+    final = relacao.preco_final or Decimal("0")
     if atual <= 0:
-        return (Decimal("0"), Decimal("0"))
-    economia = atual - relacao.preco_final
-    return (economia / atual, economia)
+        return Decimal("0"), Decimal("0")
+    economia = atual - final
+    return economia / atual, economia
 
 
-def _coletar_ml_remoto(cupom):
-    """Materializa a listagem oficial do ML quando ela ainda nao esta no banco."""
+def _coletar_ml_remoto(cupom, usuario=None):
+    """Materializa a listagem oficial do ML quando ela ainda nao esta no banco.
+
+    `usuario` é o contexto do preparo (None em cupom global, que cai na
+    organização de sistema — ver scrapers/ml_auth.py). O container do ML é SSR e
+    só rende a listagem completa com sessão.
+    """
     link = str((cupom.regras or {}).get("container_url") or cupom.link or "").strip()
     try:
         host = (urlsplit(link).hostname or "").casefold().rstrip(".")
@@ -378,10 +394,14 @@ def _coletar_ml_remoto(cupom):
                         or host.endswith(".mercadolivre.com.br")):
         return 0
     from apps.scrapers.auxiliar import iniciar_browser
-    from apps.scrapers.session_paths import ml_auth_path
+    from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
     from apps.scrapers.scraper_mercadolivre.scraper import (
         _ml_http_session, listar_itens_por_cupom,
     )
+
+    state = storage_state(usuario)
+    if state is None:
+        avisar_sem_sessao(f"Coleta do container do cupom {cupom.pk}", usuario)
 
     payload = {
         "campaignId": (str(cupom.external_id).split(":", 1)[1]
@@ -397,16 +417,21 @@ def _coletar_ml_remoto(cupom):
     # Chromium aberto por vários minutos. Browser fica como fallback para challenge.
     resultado = None
     try:
-        response = _ml_http_session(ml_auth_path()).get(link, timeout=25)
+        response = _ml_http_session(state).get(link, timeout=12)
         response.raise_for_status()
         rows = _produtos_ml_do_html(response.text, limite=9)
         if rows:
             resultado = {**payload, "produtos_aplicaveis": rows}
     except Exception as exc:
         logger.info("Container ML via HTTP falhou para %s: %s", cupom.pk, exc)
+    # Sem uma sessão válida o Chromium repete a mesma resposta pública/challenge e
+    # pode consumir dezenas de segundos por cupom. O worker registra o preparo vazio
+    # e volta no próximo ciclo; uma sessão conectada habilita novamente o fallback.
+    if resultado is None and state is None:
+        return 0
     if resultado is None:
         with iniciar_browser(
-            auth_path=ml_auth_path(), headless=True, validar_sessao=False,
+            storage_state=state, headless=True,
         ) as (page, _context):
             resultado = listar_itens_por_cupom(payload, page, max_paginas=2)
     total = 0
@@ -429,10 +454,9 @@ def _coletar_ml_remoto(cupom):
             "estado": "ativo", "ultima_verificacao": timezone.now(),
         }
         if produto:
-            # O item pode já existir por outra lane (oferta/busca). Atualiza preço e
-            # disponibilidade, mas não rouba a identidade dele: gravar
-            # origem="cupom" e o campanha_id deste cupom fazia o produto passar a
-            # anunciar "ative o cupom no link" de uma campanha que não é a dele.
+            # Um item já coletado por outra lane mantém sua proveniência. O cupom
+            # atualiza preço/disponibilidade, mas não pode reivindicar a identidade
+            # e fazer o produto divulgar uma campanha à qual não pertence.
             campos = dict(defaults)
             if produto.origem and produto.origem != "cupom":
                 for campo in ("campanha_id", "origem", "fonte"):
@@ -470,7 +494,7 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
     if not cupom_publicavel(cupom):
         CupomPreparacao.objects.filter(pk=preparo.pk).update(
             status="vazio", produtos_chave=chave, verificado_em=timezone.now(),
-            proxima_tentativa=None,
+            proxima_tentativa=timezone.now() + BACKOFF_VAZIO,
             erro="Cupom sem código público ou ativação comprovada.")
         return []
 
@@ -478,7 +502,7 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
         candidatos = _base_produtos(cupom, contexto)
         if (not candidatos and permitir_rede
                 and str(cupom.marketplace).lower() == "mercadolivre"):
-            _coletar_ml_remoto(cupom)
+            _coletar_ml_remoto(cupom, usuario=contexto)
             candidatos = _base_produtos(cupom, contexto)
 
         validos = []
@@ -508,7 +532,13 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
                 id__in=ids).update(status="expirado")
             CupomPreparacao.objects.filter(pk=preparo.pk).update(
                 status="pronto" if validos else "vazio", produtos_chave=chave,
-                verificado_em=agora, proxima_tentativa=None,
+                verificado_em=agora,
+                # Preparo vazio agendava proxima_tentativa=None, o que a prioridade
+                # de preparar_lote lê como "retomável" — o cupom voltava TODO ciclo e
+                # ocupava os 12 slots para dar vazio de novo. Com 22 cupons isso era
+                # irrelevante; com os milhares que a ativação do ML libera, os vazios
+                # girariam para sempre e nenhum cupom novo seria preparado.
+                proxima_tentativa=None if validos else agora + BACKOFF_VAZIO,
                 erro="" if validos else "Nenhum produto comprovadamente aplicavel.")
         validos.sort(key=_ordem_por_valor_do_cupom, reverse=True)
         return validos[:9]
@@ -521,78 +551,243 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
         return []
 
 
-def cupom_pronto_para_usuario(cupom, usuario) -> bool:
+def relacoes_preparadas_para_envio(cupom, usuario, limite=9):
+    """Devolve relações preparadas sem alterar o catálogo compartilhado.
+
+    O envio manual roda no contexto RLS do usuário e, por isso, não pode tentar
+    "atualizar" cupom/produto/preparo compartilhados. Este é deliberadamente um
+    predicado de leitura: o worker é o único responsável por materializar e
+    renovar o preparo.
+    """
     contexto = _usuario_do_preparo(cupom, usuario)
-    # Recalcula em vez de confiar no campo denormalizado: uma alteração feita por
-    # admin/script também deve invalidar imediatamente um preparo antigo.
     chave = chave_produtos_cupom(cupom)
-    return CupomPreparacao.objects.filter(
+    fresco_desde = timezone.now() - timedelta(hours=CACHE_HORAS)
+    preparo = CupomPreparacao.objects.filter(
         cupom=cupom, usuario=contexto, status="pronto", produtos_chave=chave,
-    ).exists()
+        verificado_em__gte=fresco_desde,
+    ).first()
+    if not preparo:
+        return []
+    relacoes = list(ProdutoCupom.objects.filter(
+        cupom=cupom, status="confirmado", preco_original__isnull=False,
+        preco_final__isnull=False, produto__imagem_url__gt="",
+    ).exclude(produto__estado__in=["indisponivel", "invalido", "expirado", "stale"])
+      .select_related("produto"))
+    relacoes.sort(key=_ordem_por_valor_do_cupom, reverse=True)
+    return relacoes[:limite]
+
+
+def relacoes_prontas_para_envio(cupom, usuario, limite=9):
+    """Relações preparadas que também possuem link afiliado utilizável.
+
+    O veredito por usuário é obrigatório. Um link legado no produto não registra
+    qual conta receberá a comissão nem se o destino foi verificado, portanto não
+    pode liberar um cupom na listagem estrita.
+    """
+    relacoes = relacoes_preparadas_para_envio(cupom, usuario, limite=limite)
+    if not relacoes or usuario is None:
+        return []
+    from apps.scrapers.models import LinkAfiliadoUsuario
+    ids_com_link = set(LinkAfiliadoUsuario.objects.filter(
+        usuario=usuario, produto_id__in=[relacao.produto_id for relacao in relacoes],
+        verificado_ok=True,
+    ).exclude(link_afiliado="").values_list("produto_id", flat=True))
+    return [
+        relacao for relacao in relacoes
+        if relacao.produto_id in ids_com_link
+    ]
+
+
+def cupom_pronto_para_usuario(cupom, usuario) -> bool:
+    return bool(relacoes_prontas_para_envio(cupom, usuario))
+
+
+def mapa_relacoes_prontas(usuario, cupons, limite=9):
+    """(preparados, prontos) para uma LISTA de cupons, em 3 queries fixas.
+
+    A versão por cupom (`relacoes_prontas_para_envio`) custa 3 queries CADA, e a
+    tela a chamava para todo cupom ativo: com os 2379 de homologação eram ~7 mil
+    queries por carregamento, quase todas descartadas logo depois pelo filtro de
+    publicáveis. Aqui o número de queries não depende da quantidade de cupons.
+
+    Devolve:
+      preparadas: dict id -> [ProdutoCupom] com preparo pronto, fresco e produtos
+                  válidos (o que a tela usa para diagnosticar a fila)
+      prontas:    dict id -> [ProdutoCupom] que também têm link afiliado verificado
+
+    `relacoes_prontas_para_envio` continua sendo a fonte do ENVIO: ela é o caminho
+    crítico e não vale o risco de as duas divergirem. Um teste de paridade amarra
+    as duas.
+    """
+    cupons = list(cupons)
+    if not cupons:
+        return {}, {}
+    ids = [c.id for c in cupons]
+    agora = timezone.now()
+    fresco_desde = agora - timedelta(hours=CACHE_HORAS)
+
+    # `chave_produtos_cupom` e `_usuario_do_preparo` são puras (só hash de campos do
+    # próprio objeto), então o casamento acontece em Python, sem ida ao banco.
+    chaves = {c.id: chave_produtos_cupom(c) for c in cupons}
+    contextos = {c.id: _usuario_do_preparo(c, usuario) for c in cupons}
+    contexto_id = {cid: (u.id if u is not None else None)
+                   for cid, u in contextos.items()}
+
+    preparados = set()
+    for prep in CupomPreparacao.objects.filter(
+            cupom_id__in=ids, status="pronto", verificado_em__gte=fresco_desde):
+        if (prep.produtos_chave == chaves.get(prep.cupom_id)
+                and prep.usuario_id == contexto_id.get(prep.cupom_id)):
+            preparados.add(prep.cupom_id)
+    if not preparados:
+        return {}, {}
+
+    por_cupom = defaultdict(list)
+    for relacao in (ProdutoCupom.objects.filter(
+            cupom_id__in=preparados, status="confirmado",
+            preco_original__isnull=False, preco_final__isnull=False,
+            produto__imagem_url__gt="")
+            .exclude(produto__estado__in=["indisponivel", "invalido", "expirado", "stale"])
+            .select_related("produto")):
+        por_cupom[relacao.cupom_id].append(relacao)
+
+    # Mesma ordenação de relacoes_preparadas_para_envio: maior desconto primeiro.
+    preparadas = {}
+    for cupom_id, relacoes in por_cupom.items():
+        relacoes.sort(key=lambda r: (
+            (r.preco_original - r.preco_final) / r.preco_original
+            if r.preco_original else Decimal("0"),
+            r.preco_original - r.preco_final,
+        ), reverse=True)
+        preparadas[cupom_id] = relacoes[:limite]
+
+    if usuario is None:
+        return preparadas, {}
+
+    todos_produtos = {r.produto_id for rs in preparadas.values() for r in rs}
+    com_link = set(LinkAfiliadoUsuario.objects.filter(
+        usuario=usuario, produto_id__in=todos_produtos, verificado_ok=True,
+    ).exclude(link_afiliado="").values_list("produto_id", flat=True))
+
+    prontas = {}
+    for cupom_id, relacoes in preparadas.items():
+        utilizaveis = [r for r in relacoes if r.produto_id in com_link]
+        if utilizaveis:
+            prontas[cupom_id] = utilizaveis
+    return preparadas, prontas
 
 
 def ids_cupons_prontos(usuario, cupons):
-    cupons = list(cupons)
-    if not cupons:
-        return set()
-    ids = [c.id for c in cupons]
-    # Só conta preparação FRESCA (dentro da mesma janela que o envio usa para
-    # reaproveitar o cache). Sem isto, a tela mostrava cupons cujo preparo "pronto"
-    # era antigo: o envio então repreparava, não achava mais produtos e devolvia
-    # "cupom sem produtos" para algo que a tela prometia enviável. Ao exigir
-    # frescor, a tela deixa de anunciar cupons que o envio não conseguiria montar.
-    fresco_desde = timezone.now() - timedelta(hours=CACHE_HORAS)
-    rows = CupomPreparacao.objects.filter(
-        cupom_id__in=ids, status="pronto", verificado_em__gte=fresco_desde,
-    ).filter(Q(usuario__isnull=True) | Q(usuario=usuario)).values_list(
-        "cupom_id", "usuario_id", "produtos_chave")
-    por_contexto = {(cid, uid): chave for cid, uid, chave in rows}
-    prontos = set()
-    for cupom in cupons:
-        uid = getattr(usuario, "id", None)
-        if (str(cupom.marketplace).lower() == "mercadolivre"
-                and cupom.owner_id is None):
-            uid = None
-        chave = chave_produtos_cupom(cupom)
-        if por_contexto.get((cupom.id, uid)) == chave:
-            prontos.add(cupom.id)
-    return prontos
+    return set(mapa_relacoes_prontas(usuario, cupons)[1])
 
 
-def preparar_lote(limite=8):
-    """Prepara cupons ativos em pequenos lotes; chamado pelo worker de catalogo."""
+def preparar_lote(
+    limite=PREPARO_LOTE_POR_CICLO, *, usuarios=None, detalhado=False,
+    permitir_rede=True,
+):
+    """Prepara cupons ativos com round-robin por fonte, usuário e organização.
+
+    O catálogo de uma fonte grande (notadamente campanhas/feeds) não pode consumir
+    todo o ciclo. Cada bucket avança um item por rodada, mantendo a janela de três
+    horas renovada também para cupons privados e integrações menores.
+    """
     from django.contrib.auth import get_user_model
-    from apps.scrapers.coupon_rules import cupom_publicavel
+    from apps.scrapers.coupon_rules import _FONTES_ML_ATIVACAO, cupom_publicavel
     from apps.scrapers.models import CupomNormalizado
 
     agora = timezone.now()
-    # Filtra as duas origens publicáveis antes do recorte. As milhares de campanhas
-    # personalizadas do ML não podem ocupar o lote; os cupons oficiais Amazon são
-    # de ativação e, portanto, não possuem código digitável.
+    # Pré-filtro barato das origens que PODEM ser publicáveis; `cupom_publicavel`
+    # reconfere item a item no laço. Cupons de ativação (Amazon e, quando a flag
+    # está ligada, campanhas ML com container público) não têm código digitável,
+    # então não podem ser filtrados por `codigo__gt=""`.
     cupons = list(CupomNormalizado.objects.filter(estado="ativo").filter(
-        Q(codigo__gt="") | Q(fonte__slug="amazon-public-coupons")
+        Q(codigo__gt="")
+        | Q(fonte__slug__in=("amazon-public-coupons",) + _FONTES_ML_ATIVACAO)
     ).filter(
         Q(validade__isnull=True) | Q(validade__gte=agora)
-    ).order_by("-ultima_observacao")[:200])
-    feitos = prontos = 0
-    usuarios = list(get_user_model().objects.filter(is_active=True))
+    ).order_by("-ultima_observacao"))
+    fresco_desde = agora - timedelta(hours=CACHE_HORAS)
+    preparos = {
+        (prep.cupom_id, prep.usuario_id): prep
+        for prep in CupomPreparacao.objects.filter(
+            cupom_id__in=[cupom.id for cupom in cupons],
+        )
+    }
+
+    def prioridade(cupom, usuario):
+        """Evita que cupons já frescos ocupem sempre o começo do lote."""
+        contexto = _usuario_do_preparo(cupom, usuario)
+        prep = preparos.get((cupom.id, getattr(contexto, "id", None)))
+        if prep is None:
+            estado = 0  # nunca preparado
+        elif prep.proxima_tentativa and prep.proxima_tentativa > agora:
+            estado = 3  # respeita backoff; fica por último e será pulado abaixo
+        elif prep.status == "pronto" and prep.verificado_em and prep.verificado_em >= fresco_desde:
+            estado = 4  # já está visível na tela
+        else:
+            estado = 1  # preparação vencida, vazia ou com erro retomável
+        validade = cupom.validade or timezone.datetime.max.replace(tzinfo=datetime_timezone.utc)
+        return (estado, 0 if cupom.relampago else 1, validade, cupom.id)
+
+    usuarios = list(
+        usuarios if usuarios is not None
+        else get_user_model().objects.filter(is_active=True)
+    )
+    buckets = defaultdict(list)
     for cupom in cupons:
-        if feitos >= limite or not cupom_publicavel(cupom):
+        if not cupom_publicavel(cupom):
             continue
         contextos = [None] if _usuario_do_preparo(cupom, None) is None else (
             [cupom.owner] if cupom.owner_id else usuarios)
         for usuario in contextos:
-            if feitos >= limite:
-                break
-            contexto = _usuario_do_preparo(cupom, usuario)
-            chave = atualizar_chave_cupom(cupom)
-            prep = CupomPreparacao.objects.filter(cupom=cupom, usuario=contexto).first()
-            if prep and prep.produtos_chave == chave and prep.verificado_em:
-                if prep.status == "pronto" and prep.verificado_em >= agora - timedelta(hours=CACHE_HORAS):
-                    continue
-                if prep.proxima_tentativa and prep.proxima_tentativa > agora:
-                    continue
-            feitos += 1
-            if preparar_cupom(cupom, usuario=usuario, force=True):
-                prontos += 1
-    return {"processados": feitos, "prontos": prontos}
+            if usuario is None and cupom.owner_id:
+                continue
+            organization_id = (
+                getattr(cupom, "organization_id", None)
+                or getattr(usuario, "organization_id", None)
+                or getattr(getattr(usuario, "perfil", None), "organization_id", None)
+            )
+            fonte = getattr(getattr(cupom, "fonte", None), "slug", "") or "sem-fonte"
+            buckets[(fonte, getattr(usuario, "id", None), organization_id)].append(
+                (cupom, usuario)
+            )
+    for items in buckets.values():
+        items.sort(key=lambda item: prioridade(*item))
+
+    filas = deque(
+        deque(items)
+        for _key, items in sorted(
+            buckets.items(), key=lambda pair: tuple(str(value or "") for value in pair[0])
+        )
+        if items
+    )
+    feitos = prontos = 0
+    por_fonte = defaultdict(lambda: {"processados": 0, "prontos": 0})
+    while filas and feitos < limite:
+        fila = filas.popleft()
+        cupom, usuario = fila.popleft()
+        if fila:
+            filas.append(fila)
+        contexto = _usuario_do_preparo(cupom, usuario)
+        chave = atualizar_chave_cupom(cupom)
+        prep = preparos.get((cupom.id, getattr(contexto, "id", None)))
+        if prep and prep.produtos_chave == chave and prep.verificado_em:
+            if prep.status == "pronto" and prep.verificado_em >= fresco_desde:
+                continue
+            if prep.proxima_tentativa and prep.proxima_tentativa > agora:
+                continue
+        fonte = getattr(getattr(cupom, "fonte", None), "slug", "") or "sem-fonte"
+        feitos += 1
+        por_fonte[fonte]["processados"] += 1
+        if preparar_cupom(
+            cupom, usuario=usuario, force=True, permitir_rede=permitir_rede,
+        ):
+            prontos += 1
+            por_fonte[fonte]["prontos"] += 1
+    resultado = {
+        "processados": feitos,
+        "prontos": prontos,
+    }
+    if detalhado:
+        resultado["por_fonte"] = dict(por_fonte)
+    return resultado

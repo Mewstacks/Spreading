@@ -1,74 +1,238 @@
 {% extends "base.html" %}
 {% block title %}Top Promoções{% endblock %}
 
+{% block topbar_context %}<strong>Promoções</strong><span>Ofertas &amp; cupons</span>{% endblock %}
+{% block topbar_actions %}
+<div class="seg">
+  <a href="?tipo=oferta" class="{% if tipo != 'cupom' %}active{% endif %}"><i data-lucide="tag"></i> Ofertas</a>
+  <a href="?tipo=cupom" class="{% if tipo == 'cupom' %}active{% endif %}"><i data-lucide="ticket-percent"></i> Cupons</a>
+</div>
+{% endblock %}
+
 {% block head_extra %}
 <style>
+  /* ── Card "Geração de links de afiliado" ──────────────────────────────────
+     Os quatro controles (contador, filtro de pendentes, categoria, botão) eram
+     elementos soltos na barra de ações, cada um com a cor do seu tipo. Nada dizia
+     que o select de categoria pertencia ao botão nem que "Mostrar também os
+     pendentes" não era um filtro da tabela — o usuário não sabia sobre o que o
+     "Gerar" ia agir. O card resolve isso por conter: uma moldura laranja, um
+     rótulo, e todos os controles herdando o acento em vez de disputar com ele. */
+  .links-card { display: flex; flex-direction: column; gap: .5rem;
+    padding: .6rem .75rem; border-radius: var(--r-md);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .links-card-head { display: flex; align-items: center; gap: .4rem;
+    color: color-mix(in srgb, var(--accent) 80%, var(--text));
+    font-family: var(--mono); font-size: 9.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .14em; }
+  .links-card-head i { width: 12px; height: 12px; }
+  .links-card-body { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+  /* Dentro do card o acento é o contexto, então o contador e o filtro param de
+     brigar por atenção com o botão. */
+  .links-card .tech-tag { border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+  .links-card .btn-ghost { border-color: color-mix(in srgb, var(--accent) 32%, transparent); }
+  .links-card .modal-log:empty { display: none; }
+  .links-card .modal-log { margin: 0; }
+
+  /* ── Ação "Gerar links de afiliado" (sempre visível, sem dropdown) ── */
+  .links-acao { display: inline-flex; align-items: center; gap: .4rem; }
+  .links-acao .links-macro { max-width: 190px; }
+  /* Fila estampada no botão: o número dizia "há trabalho a fazer" só na faixa de
+     Fontes, longe do controle que resolve. */
+  .links-fila { display: inline-flex; align-items: center; justify-content: center;
+    min-width: 1.35rem; height: 1.35rem; padding: 0 .35rem; margin-left: .1rem;
+    border-radius: 999px; background: color-mix(in srgb, currentColor 18%, transparent);
+    font-family: var(--mono); font-size: 10.5px; font-weight: 600; line-height: 1; }
+  .js-links-btn[disabled] { opacity: .6; cursor: progress; }
+  .empty-acoes { display: flex; gap: .5rem; justify-content: center;
+    flex-wrap: wrap; margin-top: 1rem; }
+
+  /* ── Dropdowns de categoria (macro/sub) ── */
   .dd { position: relative; display: inline-block; }
   .dd-panel { display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 100;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 10px; min-width: 240px;
-    max-height: 320px; overflow-y: auto; box-shadow: var(--shadow-lg); }
+    background: var(--surface-3); border: 1px solid var(--border); border-radius: var(--r-md);
+    min-width: 240px; max-height: 320px; overflow-y: auto; box-shadow: var(--shadow-pop); }
   .dd-panel.open { display: block; }
-  .dd-header { padding: .35rem .75rem; color: var(--muted); font-size: .72rem; text-transform: uppercase;
-    letter-spacing: .06em; border-bottom: 1px solid var(--border-soft); }
+  .dd-header { padding: .4rem .75rem .25rem; color: var(--muted); font-family: var(--mono);
+    font-size: 9.5px; font-weight: 500; text-transform: uppercase; letter-spacing: .14em;
+    border-bottom: 1px solid var(--border); }
   .dd-item { display: flex; align-items: center; gap: .45rem; padding: .5rem .75rem; cursor: pointer;
-    font-size: .85rem; color: var(--text); user-select: none; min-height: 40px; }
+    font-size: 13px; color: var(--text); user-select: none; min-height: 40px; }
   .dd-item:hover { background: var(--surface-2); }
   .dd-item input { accent-color: var(--accent); cursor: pointer; flex-shrink: 0; width: auto; }
-  .thumb { width: 52px; height: 52px; object-fit: contain; background: #fff; border-radius: 8px; flex-shrink: 0; }
-  .thumb-ph { width: 52px; height: 52px; border-radius: 8px; background: var(--surface-2); display: flex;
-    align-items: center; justify-content: center; color: var(--muted); flex-shrink: 0; }
-  .thumb-ph .lucide { width: 1.3rem; height: 1.3rem; }
-  .prod-cell { display: flex; gap: .7rem; align-items: center; }
-  .prod-name { color: var(--text); text-decoration: none; font-weight: 500; }
-  .prod-name:hover { color: var(--accent); }
-  .preco-original { color: var(--muted); text-decoration: line-through; font-size: .82rem; }
-  .preco-final { color: var(--green); font-weight: 700; font-size: 1.02rem; }
-  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
-  .seg a { padding: .5rem .85rem; font-size: .82rem; color: var(--muted); text-decoration: none; min-height: 40px; display: flex; align-items: center; }
-  .seg a.on { background: var(--surface-2); color: var(--accent); font-weight: 600; }
-  .filter-card { margin-bottom: 1.25rem; padding: 1rem; background: var(--surface);
-    border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
-  .filter-row { display: flex; align-items: center; gap: .65rem; flex-wrap: wrap; }
-  .filter-search { position: relative; flex: 1 1 300px; }
+
+  /* ── Estado das fontes: linha compacta, sem caixa ── */
+  .fontes-strip { padding: .8rem 0 .95rem; border-bottom: 1px solid var(--border); }
+  .fontes-bar { display: flex; align-items: center; gap: .5rem .9rem; flex-wrap: wrap; }
+  .fontes-label { font-family: var(--mono); font-size: 10px; font-weight: 500; text-transform: uppercase;
+    letter-spacing: .16em; color: var(--muted); }
+  .fonte-grupo { display: inline-flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+  .fonte-grupo + .fonte-grupo { padding-left: .9rem; border-left: 1px solid var(--border); }
+  .fonte-grupo-label { font-family: var(--mono); font-size: 9.5px; text-transform: uppercase;
+    letter-spacing: .12em; color: var(--muted); }
+  .fontes-afiliacao { margin-left: auto; display: inline-flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+  .fontes-sub { display: flex; align-items: center; gap: .6rem 1rem; flex-wrap: wrap;
+    margin-top: .7rem; padding-top: .7rem; border-top: 1px solid var(--border);
+    font-size: 12.5px; color: var(--muted); }
+  .fontes-sub .lucide { width: 1em; height: 1em; }
+
+  /* ── Filtros: toolbar integrada à listagem, sem caixa ── */
+  .filtros { padding-bottom: 1rem; margin-bottom: 1.1rem; border-bottom: 1px solid var(--border); }
+  .filter-main { row-gap: .6rem; }
+  .filter-search { position: relative; flex: 1 1 280px; }
   .filter-search .lucide { position: absolute; left: .75rem; top: 50%; transform: translateY(-50%);
     color: var(--muted); pointer-events: none; }
-  .filter-search input { padding-left: 2.25rem; }
-  .min-discount { width: 175px; }
-  .filter-meta { display: flex; align-items: center; justify-content: space-between; gap: .75rem;
-    margin-top: .75rem; padding-top: .75rem; border-top: 1px solid var(--border-soft); }
-  .result-count { color: var(--muted); font-size: .82rem; }
+  .filter-search input { padding-left: 2.3rem; }
+  .filter-main select { width: auto; min-width: 150px; }
+  .min-discount { min-width: 170px; }
+  .filter-adv { margin-top: .7rem; }
+  .filter-adv > summary { list-style: none; display: inline-flex; align-items: center; gap: .4rem;
+    cursor: pointer; user-select: none; font-size: 12.5px; font-weight: 500; color: var(--muted);
+    padding: .35rem .1rem; border-radius: var(--r-sm); transition: color .14s var(--ease); }
+  .filter-adv > summary::-webkit-details-marker { display: none; }
+  .filter-adv > summary::marker { content: ""; }
+  .filter-adv > summary:hover { color: var(--text); }
+  .filter-adv > summary .chev { transition: transform .18s var(--ease); }
+  .filter-adv[open] > summary .chev { transform: rotate(180deg); }
+  .filter-adv-grid { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+    margin-top: .55rem; padding: .8rem .9rem; background: var(--surface-2);
+    border-radius: var(--r-md); }
+  .filter-adv-grid select { width: auto; min-width: 150px; }
+  .filter-meta { display: flex; align-items: center; gap: .5rem .9rem; flex-wrap: wrap;
+    margin-top: .8rem; padding-top: .8rem; border-top: 1px solid var(--border); }
+  .result-count { color: var(--muted); font-size: 12.5px; }
+  .result-count strong { color: var(--text-2); }
+  .filter-tags { display: inline-flex; gap: .35rem; flex-wrap: wrap; }
+  .filter-meta .seg { margin-left: auto; }
+
+  /* ── Tabela de ofertas ── */
+  .thumb { width: 52px; height: 52px; object-fit: contain; background: var(--surface-2);
+    border: 1px solid var(--border); border-radius: var(--r-md); flex-shrink: 0; }
+  .thumb-ph { width: 52px; height: 52px; border-radius: var(--r-md); background: var(--surface-2);
+    border: 1px solid var(--border); display: flex; align-items: center; justify-content: center;
+    color: var(--muted); flex-shrink: 0; }
+  .thumb-ph .lucide { width: 1.3rem; height: 1.3rem; }
+  .prod-cell { display: flex; gap: .75rem; align-items: center; }
+  .prod-name { color: var(--text); text-decoration: none; font-weight: 500; }
+  .prod-name:hover { color: var(--accent); }
+  .store-line { display: flex; align-items: center; gap: .45rem; margin-top: .35rem; flex-wrap: wrap; }
+  .preco-original { color: var(--muted); text-decoration: line-through; font-size: 12px; }
+  .preco-final { color: var(--text); font-weight: 600; font-size: 15px; }
   .deal-cell { min-width: 150px; }
   .deal-prices { display: flex; align-items: baseline; gap: .5rem; }
-  .deal-saving { color: var(--muted); font-size: .76rem; margin-top: .18rem; }
-  .store-line { display: flex; align-items: center; gap: .45rem; margin-top: .35rem; }
-  .table-wrap table { min-width: 880px; }
+  .deal-saving { color: var(--muted); font-size: 11.5px; margin-top: .18rem; }
+  .table-flat table { min-width: 880px; border-top: 0; /* a hairline já vem da .filtros */ }
   .td-prod { width: 100%; white-space: normal; }
+  .td-prod .prod-name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   /* Código de cupom pode ser bem longo (até 120 chars): quebra e limita a largura
      p/ não empurrar a coluna Cupom pra fora da tela (bug da tabela cortada). */
   .cell-code { white-space: normal; width: 200px; min-width: 160px; }
   .cell-code .td-val { white-space: normal; overflow-wrap: anywhere; }
-  #modal-envio .btn, #modal-envio select, #modal-envio input, #modal-envio .x-btn { min-height: 44px; }
-  .td-prod .prod-name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .col-actions { position: sticky; right: 0; background: var(--surface); box-shadow: -10px 0 18px rgba(0,0,0,.12); }
-  thead .col-actions { background: var(--surface-2); z-index: 2; }
+  .col-actions { position: sticky; right: 0; background: var(--bg); box-shadow: -1px 0 0 var(--border); }
+  thead .col-actions { z-index: 2; }
   tbody tr:hover .col-actions { background: var(--surface-2); }
-  @media (max-width: 859px) {
-    #filtro-form { width: 100%; }
-    #filtro-form .seg { margin-left: 0 !important; width: 100%; }
-    #filtro-form .seg a { flex: 1; justify-content: center; }
-    .filter-search, .min-discount, .filter-row > .btn { width: 100%; flex-basis: 100%; }
-    .filter-meta { align-items: flex-start; flex-direction: column; }
-    .col-actions { position: static; box-shadow: none; }
-    .table-wrap table { min-width: 0; }
 
-    /* Tabela vira cards empilhados — sem scroll horizontal no celular. */
-    .table-wrap { border: none; background: transparent; box-shadow: none; overflow: visible; }
+  /* ── Paginação ── */
+  .pager { display: flex; justify-content: center; margin: 1.2rem 0 .4rem; }
+  .pager .seg button:disabled { opacity: .4; cursor: not-allowed; }
+  .pager .pager-pos { display: inline-flex; align-items: center; padding: .38rem .85rem;
+    font-family: var(--mono); font-size: 11px; color: var(--muted); }
+
+  /* ── Busca externa por novos itens nas duas lojas ── */
+  .busca-ext { margin-bottom: 1.1rem; }
+  .busca-ext > summary { list-style: none; display: inline-flex; align-items: center; gap: .4rem;
+    cursor: pointer; user-select: none; font-size: 12.5px; color: var(--muted);
+    padding: .3rem .1rem; border-radius: var(--r-sm); transition: color .14s var(--ease); }
+  .busca-ext > summary::-webkit-details-marker { display: none; }
+  .busca-ext > summary::marker { content: ""; }
+  .busca-ext > summary:hover { color: var(--text); }
+  .busca-bar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-top: .7rem; }
+  .busca-bar input[type="text"] { flex: 1; min-width: 180px; }
+
+  /* ── Cupom privado (form inline recolhível): painel tonal, sem borda ── */
+  details.collapse-card { background: var(--surface); border-radius: var(--r-lg);
+    padding: 1rem 1.2rem; margin-bottom: 1.1rem; }
+  details.collapse-card > summary { list-style: none; display: flex; align-items: center; gap: .5rem;
+    cursor: pointer; user-select: none; font-size: 14.5px; font-weight: 600; letter-spacing: -.01em; }
+  details.collapse-card > summary::-webkit-details-marker { display: none; }
+  details.collapse-card > summary::marker { content: ""; }
+  details.collapse-card > summary .lucide { color: var(--accent); }
+  details.collapse-card > summary .chev { margin-left: auto; color: var(--muted);
+    transition: transform .18s var(--ease); }
+  details.collapse-card[open] > summary { margin-bottom: 1rem; padding-bottom: .85rem;
+    border-bottom: 1px solid var(--border); }
+  details.collapse-card[open] > summary .chev { transform: rotate(180deg); }
+
+  /* ── Modal de envio ── */
+  /* scrim derivado dos tokens: escuro usa o inset quase-preto; claro usa o ink */
+  .modal-ov { position: fixed; inset: 0; z-index: 200;
+    background: color-mix(in srgb, var(--bg-inset) 55%, transparent);
+    display: none; align-items: center; justify-content: center; padding: 1rem; }
+  [data-theme="light"] .modal-ov { background: color-mix(in srgb, var(--text) 30%, transparent); }
+  .modal-ov.open { display: flex; }
+  .modal { background: var(--surface-3); border: 1px solid var(--border); border-radius: var(--r-lg);
+    box-shadow: var(--shadow-pop); width: 100%; max-width: 460px; max-height: 90vh; overflow-y: auto; }
+  .modal-head { display: flex; align-items: center; gap: .55rem; padding: 1rem 1.2rem;
+    border-bottom: 1px solid var(--border); }
+  .modal-head h3 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -.01em;
+    display: flex; align-items: center; gap: .5rem; }
+  .modal-head h3 .lucide { color: var(--accent); }
+  .modal-head .x-btn { margin-left: auto; background: none; border: 1px solid transparent;
+    color: var(--muted); cursor: pointer; width: 36px; height: 36px; display: flex;
+    align-items: center; justify-content: center; border-radius: var(--r-md); transition: .14s var(--ease); }
+  .modal-head .x-btn:hover { background: var(--surface-2); color: var(--text); border-color: var(--border); }
+  .modal-body { padding: 1.2rem; display: flex; flex-direction: column; gap: 1rem; }
+  .modal-prod { font-size: 13px; color: var(--text-2); overflow-wrap: anywhere;
+    padding: .6rem .75rem; background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: var(--r-md); }
+  .modal-foot { padding: 1rem 1.2rem; border-top: 1px solid var(--border);
+    display: flex; gap: .6rem; justify-content: flex-end; }
+  .modal-log { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; line-height: 1.6;
+    background: var(--bg-inset); border: 1px solid var(--border); border-radius: var(--r-md);
+    padding: .6rem .75rem; max-height: 160px; overflow-y: auto; }
+  .modal-log:empty { display: none; }
+  .modal-log .err { color: var(--red); }
+  /* Situação passageira que o robô resolve sozinho — âmbar, não vermelho. */
+  .modal-log .warn { color: var(--yellow, #d9a441); }
+  .modal-log .ok { color: var(--green); font-weight: 700; }
+  #modal-envio .btn, #modal-envio select, #modal-envio input, #modal-envio .x-btn { min-height: 44px; }
+
+  /* ── Mobile: tabela vira cards empilhados (sem scroll horizontal) ──
+     Mesmo breakpoint do sistema (900px): abaixo dele a página inteira
+     já está em modo toque, então a tabela acompanha. */
+  @media (max-width: 899px) {
+    #filtro-form { width: 100%; }
+    .filter-main > select, .min-discount { width: 100%; flex-basis: 100%; }
+    .filter-search { flex-basis: 100%; }
+    .filter-main > .btn { flex: 1; }
+    .filter-adv-grid { flex-direction: column; align-items: stretch; }
+    .filter-adv-grid select, .filter-adv-grid .dd, .filter-adv-grid .dd > .btn { width: 100%; }
+    .filter-adv-grid .dd-panel { width: 100%; }
+    .filter-meta .seg { margin-left: 0; width: 100%; }
+    .filter-meta .seg a { flex: 1; justify-content: center; }
+    .fontes-afiliacao { margin-left: 0; flex-basis: 100%; }
+    /* A ação de links é a principal da tela: no mobile o card ocupa a linha inteira
+       e cada controle vira um alvo de toque cheio, em vez de espremer contador,
+       filtro, select e botão na mesma linha. */
+    .links-card { flex-basis: 100%; }
+    .links-card-body { flex-direction: column; align-items: stretch; }
+    .links-card-body > .tech-tag { align-self: flex-start; }
+    .links-card-body > .btn-ghost { justify-content: center; min-height: 44px; }
+    .links-acao { flex-basis: 100%; flex-wrap: wrap; }
+    .links-acao .links-macro { max-width: none; flex: 1 1 100%; min-height: 44px; }
+    .links-acao .js-links-btn { flex: 1 1 100%; justify-content: center; min-height: 44px; }
+    .empty-acoes .btn { flex-basis: 100%; justify-content: center; min-height: 44px; }
+    .col-actions { position: static; box-shadow: none; }
+    .table-flat table { min-width: 0; }
+
+    .table-flat { overflow: visible; }
     table, thead, tbody, tr, td { display: block; width: 100%; }
     thead { display: none; }
     tbody tr {
       position: relative;
       background: var(--surface); border: 1px solid var(--border);
-      border-radius: var(--radius); box-shadow: var(--shadow);
+      border-radius: var(--r-lg);
       padding: .9rem; margin-bottom: .9rem;
     }
     tbody tr:hover { background: var(--surface); }
@@ -78,14 +242,14 @@
     /* # da posição: chip no canto superior direito */
     td.td-rank {
       position: absolute; top: .7rem; right: .8rem; width: auto; padding: 0;
-      font-size: .78rem; font-weight: 700; color: var(--muted);
+      font-family: var(--mono); font-size: 11px; font-weight: 500; color: var(--muted);
     }
     td.td-rank::before { content: "#"; }
 
     /* Produto: cabeçalho do card, largura total */
     td.td-prod {
       padding: 0 2.2rem .7rem 0; margin-bottom: .55rem;
-      border-bottom: 1px solid var(--border-soft) !important;
+      border-bottom: 1px solid var(--border) !important;
     }
     td.td-prod .thumb, td.td-prod .thumb-ph { width: 60px; height: 60px; }
     td.td-prod .prod-cell > div { min-width: 0; }
@@ -97,136 +261,117 @@
     }
     td[data-label]::before {
       content: attr(data-label);
-      flex-shrink: 0; color: var(--muted); font-weight: 600;
-      font-size: .72rem; text-transform: uppercase; letter-spacing: .05em;
+      flex-shrink: 0; color: var(--muted); font-family: var(--mono); font-weight: 500;
+      font-size: 9.5px; text-transform: uppercase; letter-spacing: .12em;
     }
     td[data-label] .td-val { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+
+    .pager { width: 100%; }
+    .pager .seg { width: 100%; flex-wrap: wrap; }
+    .pager .seg a, .pager .seg button { flex: 1; justify-content: center; }
+    .pager .pager-pos { flex-basis: 100%; justify-content: center; order: -1; padding-top: .3rem; }
   }
-
-  /* Filtro de geração de links: recolhido até o clique no gatilho */
-  .links-collapse { display: inline-block; }
-  .links-summary { list-style: none; cursor: pointer; user-select: none; }
-  .links-summary::-webkit-details-marker { display: none; }
-  .links-summary::marker { content: ""; }
-  .links-panel { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center;
-    margin-top: .55rem; }
-
-  /* Paginação (ofertas e cupons) */
-  .pager { display: flex; align-items: center; justify-content: center; gap: .6rem;
-    flex-wrap: wrap; margin: 1.1rem 0 .4rem; }
-  .pager .btn { min-height: 44px; }
-  .pager .pager-pos { color: var(--muted); font-size: .82rem; }
-  @media (max-width: 859px) {
-    .pager .btn { flex: 1; justify-content: center; }
-    .pager .pager-pos { order: -1; flex-basis: 100%; text-align: center; }
-  }
-
-  /* Busca externa por novos itens nas duas lojas */
-  .busca-bar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
-  .busca-bar input[type="text"] { flex: 1; min-width: 180px; }
-
-  /* Modal de envio */
-  .modal-ov { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,.55);
-    display: none; align-items: center; justify-content: center; padding: 1rem; }
-  .modal-ov.open { display: flex; }
-  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-    box-shadow: var(--shadow-lg); width: 100%; max-width: 440px; max-height: 90vh; overflow-y: auto; }
-  .modal-head { display: flex; align-items: center; gap: .55rem; padding: 1rem 1.2rem;
-    border-bottom: 1px solid var(--border-soft); }
-  .modal-head h3 { margin: 0; font-size: 1rem; font-weight: 600; display: flex; align-items: center; gap: .5rem; }
-  .modal-head .x-btn { margin-left: auto; background: none; border: 0; color: var(--muted); cursor: pointer;
-    width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; border-radius: 8px; }
-  .modal-head .x-btn:hover { background: var(--surface-2); color: var(--text); }
-  .modal-body { padding: 1.2rem; display: flex; flex-direction: column; gap: 1rem; }
-  .modal-prod { font-size: .85rem; color: var(--muted); overflow-wrap: anywhere; }
-  .modal-foot { padding: 1rem 1.2rem; border-top: 1px solid var(--border-soft);
-    display: flex; gap: .6rem; justify-content: flex-end; }
-  .modal-log { font-family: var(--mono); font-size: .78rem; white-space: pre-wrap;
-    background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: .6rem .7rem;
-    max-height: 160px; overflow-y: auto; }
-  .modal-log:empty { display: none; }
-  .modal-log .err { color: var(--red); } .modal-log .ok { color: var(--green); font-weight: 700; }
 </style>
 {% endblock %}
 
 {% block content %}
 <div class="page-head">
-  <h1><i data-lucide="flame"></i> Top Promoções</h1>
-  <p class="sub">As melhores ofertas do Mercado Livre e da Amazon. Filtre, compare e envie para seus grupos.</p>
-</div>
-
-<div class="seg" style="margin-bottom:1rem;">
-  <a href="?tipo=oferta" class="{% if tipo != 'cupom' %}on{% endif %}">Ofertas</a>
-  <a href="?tipo=cupom" class="{% if tipo == 'cupom' %}on{% endif %}">Cupons</a>
-</div>
-<div class="filter-card" style="padding:.8rem 1rem;">
-  <div style="font-size:.84rem;margin-bottom:.55rem;"><strong>Saúde das fontes</strong> · {{ amazon_diagnostico }}</div>
-  <div class="muted" style="font-size:.8rem;margin-bottom:.55rem;"
-       {% if afiliacao_ultimo_erro %}title="{{ afiliacao_ultimo_erro }}"{% endif %}>
-    Afiliação: {{ afiliacao.prontos }} prontos · {{ afiliacao.pendente }} na fila{% if afiliacao.erro %} · {{ afiliacao.erro }} com erro{% endif %}{% if afiliacao.nao_afiliavel %} · {{ afiliacao.nao_afiliavel }} não afiliáveis{% endif %}
+  <div class="head-main">
+    <span class="eyebrow">Promoções</span>
+    <h1><i data-lucide="flame"></i> Top Promoções</h1>
+    <p class="sub">As melhores ofertas do Mercado Livre e da Amazon. Filtre, compare e envie para seus grupos.</p>
   </div>
-  {% if tipo != 'cupom' %}
-  <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.55rem;">
-    {# Filtro de geração de links recolhido: só aparece o gatilho até o clique. #}
-    <details class="links-collapse">
-      <summary class="btn btn-blue btn-sm acao-sm links-summary">
-        <i data-lucide="link"></i> Gerar links de afiliado</summary>
-      <div class="links-panel">
-        <select id="links-macro" class="btn-sm acao-sm" aria-label="Categoria para gerar links" style="width:auto;min-width:150px;">
-          <option value="">Todas as categorias</option>
-          {% for mc in macro_categorias %}<option value="{{ mc }}">{{ mc }}</option>{% endfor %}
-        </select>
-        <button type="button" id="links-btn" class="btn btn-green btn-sm acao-sm" onclick="gerarLinks()">
-          <i data-lucide="zap"></i> Gerar</button>
+  <div class="head-actions">
+    {% if tipo == 'cupom' %}
+    <span class="tech-tag"><i data-lucide="list"></i> {{ cupons_page.paginator.count }} resultado(s)</span>
+    {% endif %}
+    {% if tipo == 'cupom' %}
+      <span class="tech-tag"><i data-lucide="database"></i> {{ cupons_coletados }} coletado(s)</span>
+      <span class="tech-tag"><i data-lucide="circle-check"></i> {{ cupons_prontos }} pronto(s)</span>
+      {% if cupons_aguardando_preparo %}<span class="tech-tag"><i data-lucide="loader-circle"></i> {{ cupons_aguardando_preparo }} aguardando preparo</span>{% endif %}
+      {% if cupons_aguardando_link %}<span class="tech-tag"><i data-lucide="link"></i> {{ cupons_aguardando_link }} aguardando link</span>{% endif %}
+      {% if cupons_aguardando_verificacao %}<span class="tech-tag"><i data-lucide="scan-search"></i> {{ cupons_aguardando_verificacao }} aguardando verificação</span>{% endif %}
+      {% if cupons_aguardando_conexao %}<span class="tech-tag"><i data-lucide="unplug"></i> {{ cupons_aguardando_conexao }} aguardando conexão</span>{% endif %}
+    {% endif %}
+    {% if tipo != 'cupom' %}
+      {% comment %}
+      Ação principal da tela: sem link de afiliado o item não aparece na lista nem
+      pode ser enviado. Ela morava recolhida num <details> ghost dentro da faixa de
+      diagnóstico "Fontes" — o texto do estado vazio mandava "use Gerar links acima"
+      apontando para um botão que ninguém achava. Depois virou botão solto na barra,
+      e aí o problema passou a ser o oposto: visível, mas sem dizer sobre O QUE ele
+      age. Agora contador, escopo e ação moram no mesmo card laranja, e o log de
+      progresso abre dentro dele.
+      {% endcomment %}
+      <div class="links-card">
+        <span class="links-card-head"><i data-lucide="link"></i> Geração de links de afiliado</span>
+        <div class="links-card-body">
+          <span class="tech-tag"><i data-lucide="list"></i> {{ page_obj.paginator.count }} resultado(s)</span>
+          {% if so_afiliados %}
+          <a class="btn btn-ghost btn-sm" href="?{{ qs_base_sem_afiliado }}afiliado=todos"><i data-lucide="eye"></i> Mostrar também os pendentes</a>
+          {% else %}
+          <a class="btn btn-ghost btn-sm" href="?{{ qs_base_sem_afiliado }}afiliado=prontos"><i data-lucide="check"></i> Mostrar só os afiliados</a>
+          {% endif %}
+          {% include "scrapers/_gerar_links.html" %}
+        </div>
+        <div id="links-log" class="modal-log"></div>
       </div>
-    </details>
-    {% if so_afiliados %}
-      <a class="btn btn-ghost btn-sm acao-sm" href="?{{ qs_base_sem_afiliado }}afiliado=todos">Mostrar também os pendentes</a>
-    {% else %}
-      <a class="btn btn-ghost btn-sm acao-sm" href="?{{ qs_base_sem_afiliado }}afiliado=prontos">Mostrar só os afiliados</a>
     {% endif %}
   </div>
-  <div id="links-log" class="modal-log"></div>
-  {% endif %}
-  <div style="display:flex;gap:.45rem;flex-wrap:wrap;">
-    {% for f in fontes %}<span class="badge {% if f.status == 'ok' %}badge-green{% elif f.status == 'blocked' %}badge-red{% else %}badge-yellow{% endif %}" title="{{ f.erro_publico|default:'Sem erro recente' }}">{{ f.nome }} · {{ f.status }}</span>
-    {% empty %}<span class="muted">As fontes serão registradas no próximo ciclo.</span>{% endfor %}
-  </div>
 </div>
+
+<section class="fontes-strip" aria-label="Saúde das fontes">
+  <div class="fontes-bar">
+    <span class="fontes-label">Fontes</span>
+    {% if fontes %}
+      {% with fontes_ord=fontes|dictsort:"status" %}
+      {% regroup fontes_ord by status as fontes_grupos %}
+      {% for g in fontes_grupos %}
+      <span class="fonte-grupo">
+        <span class="fonte-grupo-label">{% if g.grouper == 'ok' %}Operacional{% elif g.grouper == 'degraded' %}Atenção{% elif g.grouper == 'blocked' %}Degradado{% else %}Desconectado{% endif %}</span>
+        {% for f in g.list %}
+        <span class="badge {% if f.status == 'ok' %}badge-green{% elif f.status == 'blocked' %}badge-red{% elif f.status == 'degraded' %}badge-yellow{% else %}badge-muted{% endif %}"
+              title="{{ f.erro_publico|default:'Sem erro recente' }}"><span class="dot"></span>{{ f.nome }}</span>
+        {% endfor %}
+      </span>
+      {% endfor %}
+      {% endwith %}
+    {% else %}
+      <span class="muted" style="font-size:12.5px;">As fontes serão registradas no próximo ciclo.</span>
+    {% endif %}
+    <span class="fontes-afiliacao"
+          {% if afiliacao_ultimo_erro %}title="{{ afiliacao_ultimo_erro }}"{% endif %}>
+      <span class="fonte-grupo-label">Afiliação: {{ afiliacao.prontos }} prontos</span>
+      <span class="tech-tag">{{ afiliacao.pendente }} na fila</span>
+      {% if afiliacao.erro %}<span class="tech-tag" style="color:var(--red);border-color:color-mix(in srgb, var(--red) 35%, transparent);">{{ afiliacao.erro }} com erro</span>{% endif %}
+      {% if afiliacao.nao_afiliavel %}<span class="tech-tag">{{ afiliacao.nao_afiliavel }} não afiliáveis</span>{% endif %}
+    </span>
+  </div>
+  <div class="fontes-sub">
+    <span><i data-lucide="info"></i> {{ amazon_diagnostico }}</span>
+  </div>
+</section>
 
 {{ categorias_por_macro|json_script:"cats-data" }}
 {{ categorias_selecionadas|json_script:"sel-cats-data" }}
 
-<form method="get" id="filtro-form" class="filter-card">
-  <div class="filter-row">
-    <div class="filter-search">
+<form method="get" id="filtro-form" class="filtros">
+  <div class="toolbar filter-main">
+    <div class="filter-search grow">
       <i data-lucide="search"></i>
       <input type="search" name="q" value="{{ busca }}" placeholder="Buscar produto ou categoria"
              aria-label="Buscar promoções">
     </div>
 
-    <select name="loja" aria-label="Loja" style="width:auto;min-width:145px;">
+    <select name="loja" aria-label="Loja">
       <option value="">Todas as lojas</option>
       {% for lj in lojas %}<option value="{{ lj }}" {% if loja_selecionada == lj %}selected{% endif %}>{% if lj == "mercadolivre" %}Mercado Livre{% else %}{{ lj|title }}{% endif %}</option>{% endfor %}
     </select>
 
-    {% if tipo == 'cupom' %}
-    {% if cupom_categorias %}
-    <select name="categoria_cupom" aria-label="Categoria do cupom" style="width:auto;min-width:160px;">
+    {% if tipo == 'cupom' and cupom_categorias %}
+    <select name="categoria_cupom" aria-label="Categoria do cupom">
       <option value="">Todas as categorias</option>
       {% for cat in cupom_categorias %}<option value="{{ cat }}" {% if categoria_cupom_selecionada == cat %}selected{% endif %}>{{ cat }}</option>{% endfor %}
-    </select>
-    {% endif %}
-    {% if cupom_anunciantes %}
-    <select name="anunciante" aria-label="Anunciante / sobre o cupom" style="width:auto;min-width:170px;">
-      <option value="">Todos os anunciantes</option>
-      {% for an in cupom_anunciantes %}<option value="{{ an }}" {% if anunciante_selecionado == an %}selected{% endif %}>{{ an }}</option>{% endfor %}
-    </select>
-    {% endif %}
-    <select name="como_usar" aria-label="Como usar" style="width:auto;min-width:150px;">
-      <option value="">Como usar: qualquer</option>
-      <option value="codigo" {% if como_usar_selecionado == 'codigo' %}selected{% endif %}>Com código</option>
-      <option value="ativacao" {% if como_usar_selecionado == 'ativacao' %}selected{% endif %}>Ativar no link</option>
     </select>
     {% endif %}
 
@@ -240,79 +385,116 @@
       <option value="50" {% if min_desconto == 50 %}selected{% endif %}>50% ou mais</option>
       <option value="60" {% if min_desconto == 60 %}selected{% endif %}>60% ou mais</option>
     </select>
+    {% endif %}
 
-  <div class="dd" id="dd-macro">
-    <button type="button" class="btn btn-ghost btn-sm{% if macros_selecionados %} on{% endif %}" onclick="toggleDD('dd-macro')">
-      Categoria{% if macros_selecionados %} ({{ macros_selecionados|length }}){% endif %} ▾
-    </button>
-    <div class="dd-panel" id="panel-macro">
-      {% for mc in macro_categorias %}
-      <label class="dd-item">
-        <input type="checkbox" name="macro" value="{{ mc }}" {% if mc in macros_selecionados %}checked{% endif %} onchange="onMacroChange(this)">
-        {{ mc }}
-      </label>
-      {% endfor %}
+    <button type="submit" class="btn btn-accent btn-sm"><i data-lucide="filter"></i> Filtrar</button>
+    {% if filtros_ativos %}
+    <a href="{% url 'scraper-top' %}?reset=1" class="btn btn-ghost btn-sm"><i data-lucide="x"></i> Limpar</a>
+    {% endif %}
+  </div>
+
+  <details class="filter-adv" {% if fonte_selecionada or confianca_selecionada or atualizado_desde or macros_selecionados or categorias_selecionadas or anunciante_selecionado or como_usar_selecionado %}open{% endif %}>
+    <summary><i data-lucide="sliders-horizontal"></i> Mais filtros <i data-lucide="chevron-down" class="chev"></i></summary>
+    <div class="filter-adv-grid">
+      {% if tipo == 'cupom' %}
+      {% if cupom_anunciantes %}
+      <select name="anunciante" aria-label="Anunciante / sobre o cupom">
+        <option value="">Todos os anunciantes</option>
+        {% for an in cupom_anunciantes %}<option value="{{ an }}" {% if anunciante_selecionado == an %}selected{% endif %}>{{ an }}</option>{% endfor %}
+      </select>
+      {% endif %}
+      <select name="como_usar" aria-label="Como usar">
+        <option value="">Como usar: qualquer</option>
+        <option value="codigo" {% if como_usar_selecionado == 'codigo' %}selected{% endif %}>Com código</option>
+        <option value="ativacao" {% if como_usar_selecionado == 'ativacao' %}selected{% endif %}>Ativar no link</option>
+      </select>
+      {% endif %}
+
+      {% if tipo != 'cupom' %}
+      <div class="dd" id="dd-macro">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="toggleDD('dd-macro')">
+          Categoria{% if macros_selecionados %} ({{ macros_selecionados|length }}){% endif %} ▾
+        </button>
+        <div class="dd-panel" id="panel-macro">
+          {% for mc in macro_categorias %}
+          <label class="dd-item">
+            <input type="checkbox" name="macro" value="{{ mc }}" {% if mc in macros_selecionados %}checked{% endif %} onchange="onMacroChange(this)">
+            {{ mc }}
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="dd" id="dd-cat" style="{% if not macros_selecionados %}display:none{% endif %}">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="toggleDD('dd-cat')">
+          Subcategoria{% if categorias_selecionadas %} ({{ categorias_selecionadas|length }}){% endif %} ▾
+        </button>
+        <div class="dd-panel" id="panel-cat"></div>
+      </div>
+
+      <select name="confianca" aria-label="Confiança">
+        <option value="">Toda confiança</option>
+        <option value="alta" {% if confianca_selecionada == 'alta' %}selected{% endif %}>Alta</option>
+        <option value="media" {% if confianca_selecionada == 'media' %}selected{% endif %}>Média</option>
+        <option value="baixa" {% if confianca_selecionada == 'baixa' %}selected{% endif %}>Baixa</option>
+      </select>
+      {% endif %}
+
+      <select name="fonte" aria-label="Fonte">
+        <option value="">Todas as fontes</option>
+        {% for f in fontes %}<option value="{{ f.slug }}" {% if fonte_selecionada == f.slug %}selected{% endif %}>{{ f.nome }}</option>{% endfor %}
+      </select>
+      <select name="atualizado_desde" aria-label="Atualização">
+        <option value="">Qualquer idade</option>
+        <option value="6" {% if atualizado_desde == 6 %}selected{% endif %}>Últimas 6h</option>
+        <option value="24" {% if atualizado_desde == 24 %}selected{% endif %}>Últimas 24h</option>
+        <option value="48" {% if atualizado_desde == 48 %}selected{% endif %}>Últimas 48h</option>
+      </select>
     </div>
-  </div>
+  </details>
 
-  <div class="dd" id="dd-cat" style="{% if not macros_selecionados %}display:none{% endif %}">
-    <button type="button" class="btn btn-ghost btn-sm" onclick="toggleDD('dd-cat')">
-      Subcategoria{% if categorias_selecionadas %} ({{ categorias_selecionadas|length }}){% endif %} ▾
-    </button>
-    <div class="dd-panel" id="panel-cat"></div>
-  </div>
-  {% endif %}
-
-  <select name="fonte" aria-label="Fonte" style="width:auto;min-width:160px;">
-    <option value="">Todas as fontes</option>
-    {% for f in fontes %}<option value="{{ f.slug }}" {% if fonte_selecionada == f.slug %}selected{% endif %}>{{ f.nome }}</option>{% endfor %}
-  </select>
-  {% if tipo != 'cupom' %}
-  <select name="confianca" aria-label="Confiança" style="width:auto;min-width:130px;">
-    <option value="">Toda confiança</option>
-    <option value="alta" {% if confianca_selecionada == 'alta' %}selected{% endif %}>Alta</option>
-    <option value="media" {% if confianca_selecionada == 'media' %}selected{% endif %}>Média</option>
-    <option value="baixa" {% if confianca_selecionada == 'baixa' %}selected{% endif %}>Baixa</option>
-  </select>
-  {% endif %}
-  <select name="atualizado_desde" aria-label="Atualização" style="width:auto;min-width:140px;">
-    <option value="">Qualquer idade</option>
-    <option value="6" {% if atualizado_desde == 6 %}selected{% endif %}>Últimas 6h</option>
-    <option value="24" {% if atualizado_desde == 24 %}selected{% endif %}>Últimas 24h</option>
-    <option value="48" {% if atualizado_desde == 48 %}selected{% endif %}>Últimas 48h</option>
-  </select>
   <input type="hidden" name="tipo" value="{{ tipo }}">
   <input type="hidden" name="ordenar" id="ordenar-input" value="{{ ordenar }}">
-  <button type="submit" class="btn btn-green btn-sm"><i data-lucide="filter"></i> Filtrar</button>
-  {% if filtros_ativos %}
-  <a href="{% url 'scraper-top' %}?reset=1" class="btn btn-ghost btn-sm"><i data-lucide="x"></i> Limpar</a>
-  {% endif %}
-  </div>
 
   <div class="filter-meta">
     {# Total, não o tamanho da página: "20 resultado(s)" em toda página escondia a lista real. #}
-    <span class="result-count"><strong>{% if tipo == 'cupom' %}{{ cupons_page.paginator.count }}{% else %}{{ page_obj.paginator.count }}{% endif %}</strong> resultado(s){% if tipo == 'cupom' %}{% if cupons_page.paginator.num_pages > 1 %} · página {{ cupons_page.number }} de {{ cupons_page.paginator.num_pages }}{% endif %}{% elif page_obj.paginator.num_pages > 1 %} · página {{ page_obj.number }} de {{ page_obj.paginator.num_pages }}{% endif %} · seus filtros ficam salvos{% if tipo != 'cupom' and so_afiliados and pendentes_ocultos %} · {{ pendentes_ocultos }} sem link de afiliado ocultado(s){% endif %}</span>
+    <span class="result-count"><strong>{% if tipo == 'cupom' %}{{ cupons_page.paginator.count }}{% else %}{{ page_obj.paginator.count }}{% endif %}</strong> resultado(s){% if tipo == 'cupom' %}{% if cupons_page.paginator.num_pages > 1 %} · página {{ cupons_page.number }} de {{ cupons_page.paginator.num_pages }}{% endif %}{% elif page_obj.paginator.num_pages > 1 %} · página {{ page_obj.number }} de {{ page_obj.paginator.num_pages }}{% endif %} · filtros salvos{% if tipo != 'cupom' and so_afiliados and pendentes_ocultos %} · {{ pendentes_ocultos }} sem link de afiliado ocultado(s){% endif %}</span>
+    {% if filtros_ativos %}
+    <span class="filter-tags">
+      {% if busca %}<span class="tech-tag">busca: {{ busca }}</span>{% endif %}
+      {% if loja_selecionada %}<span class="tech-tag">loja: {% if loja_selecionada == "mercadolivre" %}Mercado Livre{% else %}{{ loja_selecionada|title }}{% endif %}</span>{% endif %}
+      {% if min_desconto %}<span class="tech-tag">desconto ≥ {{ min_desconto }}%</span>{% endif %}
+      {% if macros_selecionados %}<span class="tech-tag">{{ macros_selecionados|length }} categoria(s)</span>{% endif %}
+      {% if categorias_selecionadas %}<span class="tech-tag">{{ categorias_selecionadas|length }} subcategoria(s)</span>{% endif %}
+      {% if fonte_selecionada %}{% for f in fontes %}{% if f.slug == fonte_selecionada %}<span class="tech-tag">fonte: {{ f.nome }}</span>{% endif %}{% endfor %}{% endif %}
+      {% if confianca_selecionada %}<span class="tech-tag">confiança: {{ confianca_selecionada }}</span>{% endif %}
+      {% if atualizado_desde %}<span class="tech-tag">últimas {{ atualizado_desde }}h</span>{% endif %}
+      {% if categoria_cupom_selecionada %}<span class="tech-tag">categoria: {{ categoria_cupom_selecionada }}</span>{% endif %}
+      {% if anunciante_selecionado %}<span class="tech-tag">anunciante: {{ anunciante_selecionado }}</span>{% endif %}
+      {% if como_usar_selecionado %}<span class="tech-tag">{% if como_usar_selecionado == 'codigo' %}com código{% else %}ativar no link{% endif %}</span>{% endif %}
+    </span>
+    {% endif %}
     {% if tipo != 'cupom' %}<span class="seg">
-    <a href="?{{ qs_base }}ordenar=percent" class="{% if ordenar != 'valor' %}on{% endif %}">% desconto</a>
-    <a href="?{{ qs_base }}ordenar=valor" class="{% if ordenar == 'valor' %}on{% endif %}">R$ economizado</a>
+    <a href="?{{ qs_base }}ordenar=percent" class="{% if ordenar != 'valor' %}active{% endif %}">% desconto</a>
+    <a href="?{{ qs_base }}ordenar=valor" class="{% if ordenar == 'valor' %}active{% endif %}">R$ economizado</a>
     </span>{% endif %}
   </div>
 </form>
 
-{% if tipo != 'cupom' %}<details style="margin-bottom:1rem;">
-  <summary class="muted" style="font-size:.84rem;cursor:pointer;">Não encontrou? Buscar novos produtos nas lojas</summary>
-  <div class="busca-bar" style="margin-top:.7rem;">
+{% if tipo != 'cupom' %}<details class="busca-ext">
+  <summary><i data-lucide="radar"></i> Não encontrou? Buscar novos produtos nas lojas</summary>
+  <div class="busca-bar">
     <input type="text" id="busca-termo" placeholder="Ex.: air fryer, fone bluetooth"
            onkeydown="if(event.key==='Enter'){event.preventDefault();buscarItens();}">
-    <button type="button" class="btn btn-blue btn-sm" onclick="buscarItens()"><i data-lucide="radar"></i> Buscar nas lojas</button>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="buscarItens()"><i data-lucide="radar"></i> Buscar nas lojas</button>
   </div>
-  <div id="busca-log" class="modal-log"></div>
+  <div id="busca-log" class="modal-log" style="margin-top:.6rem;"></div>
 </details>{% endif %}
 
 {% if tipo == 'cupom' %}
-  <details class="card" style="margin-bottom:1rem;" id="cupom-manual">
-    <summary style="cursor:pointer;font-weight:700;"><i data-lucide="plus-circle"></i> Adicionar cupom privado</summary>
-    <p class="muted" style="font-size:.8rem;">Visível somente na sua conta. O link afiliado é preparado antes da publicação.</p>
+  <details class="collapse-card" id="cupom-manual">
+    <summary><i data-lucide="plus-circle"></i> Adicionar cupom privado <i data-lucide="chevron-down" class="chev"></i></summary>
+    <p class="muted" style="font-size:12.5px;margin-top:0;">Visível somente na sua conta. O link afiliado é preparado antes da publicação.</p>
     <form method="post" action="{% url 'scraper-cupom-manual' %}">{% csrf_token %}
       <div class="form-grid">
         <div><label>Loja</label><select name="marketplace" id="manual-marketplace" onchange="document.getElementById('manual-awin').style.display=this.value==='awin'?'block':'none'" required>
@@ -335,44 +517,61 @@
         <label class="field-check"><input type="checkbox" name="restrito"> Público restrito</label>
         <label class="field-check"><input type="checkbox" name="relampago"> Oferta-relâmpago</label>
       </div>
-      <button class="btn btn-blue" type="submit"><i data-lucide="save"></i> Salvar cupom privado</button>
+      <button class="btn btn-accent" type="submit"><i data-lucide="save"></i> Salvar cupom privado</button>
     </form>
   </details>
   {% if cupons_catalogo %}
-  <div class="table-wrap"><table><thead><tr><th>Como usar</th><th class="cell-grow">Cupom</th><th>Loja</th><th>Validade</th><th>Ação</th></tr></thead><tbody>
+  <div class="table-flat"><table><thead><tr><th>Como usar</th><th class="cell-grow">Cupom</th><th>Loja</th><th>Validade</th><th class="col-actions">Ação</th></tr></thead><tbody>
   {% for c in cupons_catalogo %}<tr>
-    <td data-label="Como usar" class="cell-code"><div class="td-val" style="white-space:normal;overflow-wrap:anywhere;"><strong>{% if c.codigo_publico %}{{ c.codigo_publico }}{% else %}Ativar no link{% endif %}</strong></div></td>
-    <td data-label="Cupom"><div class="td-val"><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.3rem;">{% if c.relampago %}<span class="badge badge-warn">Relâmpago</span>{% endif %}{% if c.restrito %}<span class="badge badge-muted">Restrito</span>{% endif %}{% if c.marketplace == 'awin' %}<span class="badge badge-accent">Awin</span>{% endif %}{% if c.fonte.slug == 'manual-private' %}<span class="badge badge-green">Privado</span>{% endif %}{% if not c.codigo_publico %}<span class="badge badge-muted">Ativação no link</span>{% endif %}</div><div class="muted" style="font-size:.76rem;">{% if c.restrito %}Confira as condições antes de publicar.{% else %}Confirme a aplicação no checkout.{% endif %}</div></div></td>
-    <td data-label="Loja"><div class="td-val">{% if c.anunciante_nome %}{{ c.anunciante_nome }}<div class="muted" style="font-size:.72rem;">{% if c.marketplace == 'mercadolivre' %}Mercado Livre{% else %}{{ c.marketplace|title }}{% endif %}</div>{% elif c.marketplace == 'mercadolivre' %}Mercado Livre{% else %}{{ c.marketplace|title }}{% endif %}</div></td>
-    <td data-label="Validade"><div class="td-val">{% if c.validade %}{{ c.validade|date:"d/m/Y H:i" }}{% else %}Não informada{% endif %}</div></td>
-    <td data-label="Ação" class="col-actions"><div class="td-val" style="display:flex;justify-content:flex-end;">
-      <button class="btn btn-green btn-sm" onclick="abrirEnvioCupom({{ c.id }}, '{{ c.codigo_publico|escapejs }}')"><i data-lucide="send"></i> Enviar</button>
+    <td data-label="Como usar" class="cell-code"><div class="td-val">{% if c.codigo_publico %}<span class="tech-tag" style="font-size:12px;color:var(--text);">{{ c.codigo_publico }}</span>{% else %}<span class="tech-tag">Ativar no link</span>{% endif %}</div></td>
+    <td data-label="Cupom"><div class="td-val"><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.3rem;">{% if c.relampago %}<span class="badge badge-yellow">Relâmpago</span>{% endif %}{% if c.restrito %}<span class="badge badge-muted">Restrito</span>{% endif %}{% if c.marketplace == 'awin' %}<span class="badge badge-accent">Awin</span>{% endif %}{% if c.fonte.slug == 'manual-private' %}<span class="badge badge-green">Privado</span>{% endif %}{% if not c.codigo_publico %}<span class="badge badge-muted">Ativação no link</span>{% endif %}</div><div class="muted" style="font-size:11.5px;margin-top:.25rem;">{% if c.restrito %}Confira as condições antes de publicar.{% else %}Confirme a aplicação no checkout.{% endif %}</div></div></td>
+    <td data-label="Loja"><div class="td-val">{% if c.anunciante_nome %}{{ c.anunciante_nome }}<div class="muted" style="font-size:11.5px;">{% if c.marketplace == 'mercadolivre' %}Mercado Livre{% else %}{{ c.marketplace|title }}{% endif %}</div>{% elif c.marketplace == 'mercadolivre' %}Mercado Livre{% else %}{{ c.marketplace|title }}{% endif %}</div></td>
+    <td data-label="Validade"><div class="td-val tnum">{% if c.validade %}{{ c.validade|date:"d/m/Y H:i" }}{% else %}<span class="muted">Não informada</span>{% endif %}</div></td>
+    <td data-label="Ação" class="col-actions"><div class="td-val row-actions" style="justify-content:flex-end;">
+      <button class="btn btn-accent btn-sm" onclick="abrirEnvioCupom({{ c.id }}, '{{ c.codigo_publico|escapejs }}')"><i data-lucide="send"></i> Enviar</button>
       {% if c.fonte.slug == 'manual-private' %}<form method="post" action="{% url 'scraper-cupom-manual-desativar' c.id %}" style="display:inline">{% csrf_token %}<button class="icon-btn danger" title="Desativar cupom"><i data-lucide="x"></i></button></form>{% endif %}
     </div></td>
   </tr>{% endfor %}</tbody></table></div>
   {% include "scrapers/_paginacao.html" with page=cupons_page %}
-  {% else %}<p class="empty">Nenhum cupom ativo encontrado pelas fontes.</p>{% endif %}
+  {% else %}
+  <div class="empty">
+    <i data-lucide="ticket-percent"></i>
+    <div class="empty-title">Nenhum cupom pronto para envio</div>
+    {% if cupons_coletados %}
+      <p>{{ cupons_coletados }} cupom(ns) foram coletado(s), mas
+      {% if cupons_aguardando_preparo %}{{ cupons_aguardando_preparo }} aguardam preparo{% endif %}{% if cupons_aguardando_preparo and cupons_aguardando_link %}, {% endif %}
+      {% if cupons_aguardando_link %}{{ cupons_aguardando_link }} aguardam geração de link{% endif %}{% if cupons_aguardando_verificacao %}{% if cupons_aguardando_preparo or cupons_aguardando_link %}, {% endif %}{{ cupons_aguardando_verificacao }} aguardam verificação{% endif %}{% if cupons_aguardando_conexao %}{% if cupons_aguardando_preparo or cupons_aguardando_link or cupons_aguardando_verificacao %}, {% endif %}{{ cupons_aguardando_conexao }} aguardam conexão da conta{% endif %}.
+      O worker de cupons tenta novamente a cada 15 minutos.</p>
+    {% elif filtros_ativos %}
+      <p>Nenhum cupom pronto corresponde aos filtros atuais.</p>
+    {% elif cupons_fontes_sem_resultado %}
+      <p>As fontes habilitadas não retornaram resultados na última coleta; o catálogo anterior foi preservado.</p>
+    {% else %}
+      <p>As fontes habilitadas ainda não encontraram cupons publicáveis.</p>
+    {% endif %}
+  </div>
+  {% endif %}
 {% elif produtos %}
-<div class="table-wrap">
+<div class="table-flat">
   <table>
     <thead>
-      <tr><th>#</th><th>Produto</th><th>Cupom</th><th>Oferta</th><th>Desconto</th><th class="col-actions" style="text-align:right;">Ação</th></tr>
+      <tr><th>#</th><th>Produto</th><th>Cupom</th><th>Preço</th><th>Desconto</th><th class="col-actions">Ação</th></tr>
     </thead>
     <tbody>
       {% for p in produtos %}
       <tr>
         {# Posição no ranking, não na página: sem o offset a página 2 recomeçava em 1. #}
-        <td class="muted td-rank" style="font-weight:700;">{{ page_obj.start_index|add:forloop.counter0 }}</td>
+        <td class="muted td-rank tnum">{{ page_obj.start_index|add:forloop.counter0 }}</td>
         <td class="td-prod">
           <div class="prod-cell">
             {% if p.imagem_url %}<img class="thumb" src="{{ p.imagem_url }}" alt="" loading="lazy">{% else %}<div class="thumb-ph"><i data-lucide="package"></i></div>{% endif %}
             <div>
               <a class="prod-name" href="{{ p.link_produto }}" target="_blank" rel="noopener">{{ p.nome }}</a>
               {% if p.categoria and p.categoria != "DESCONHECIDO" %}
-                <div class="muted" style="font-size:.78rem;margin-top:.15rem;">{% if p.macro_categoria %}{{ p.macro_categoria }} · {% endif %}{{ p.categoria }}</div>
+                <div class="muted" style="font-size:12px;margin-top:.15rem;">{% if p.macro_categoria %}{{ p.macro_categoria }} · {% endif %}{{ p.categoria }}</div>
               {% endif %}
               <div class="store-line">
-                <span class="badge badge-muted">{% if p.marketplace == "mercadolivre" %}Mercado Livre{% elif p.marketplace == "amazon" %}Amazon{% else %}{{ p.marketplace|title }}{% endif %}</span>
+                <span class="tech-tag">{% if p.marketplace == "mercadolivre" %}Mercado Livre{% elif p.marketplace == "amazon" %}Amazon{% else %}{{ p.marketplace|title }}{% endif %}</span>
                 {% comment %}
                 Quatro estados, não dois: "pendente" para tudo fazia o usuário esperar
                 por um link que, para item de catálogo/perfil, nunca ia existir.
@@ -385,26 +584,28 @@
                 {% elif p.afiliado_estado == "erro" %}<span class="badge badge-red" title="{{ p.afiliado_motivo|default:'A geração do link falhou.' }}"><i data-lucide="alert-circle"></i> erro</span>
                 {% else %}<span class="badge badge-yellow" title="{% if p.afiliado_motivo %}{{ p.afiliado_motivo }} — nova tentativa em instantes.{% else %}Na fila para gerar o link de afiliado.{% endif %}"><i data-lucide="clock"></i> pendente</span>{% endif %}
               </div>
-              <div class="muted" style="font-size:.74rem;margin-top:.3rem;"><i data-lucide="sparkles"></i> {{ p.motivos_score|join:" · " }}</div>
+              {% if p.motivos_score %}
+              <div class="muted" style="font-size:11.5px;margin-top:.3rem;"><i data-lucide="sparkles"></i> {{ p.motivos_score|join:" · " }}</div>
+              {% endif %}
             </div>
           </div>
         </td>
         <td data-label="Cupom">
           <div class="td-val">
           {% if p.cupom %}
-            <a class="link" href="{{ p.cupom.link_original }}" target="_blank" rel="noopener" style="font-size:.82rem;">{{ p.cupom.titulo }}</a>
-            <div class="muted" style="font-size:.76rem;">{% if p.cupom.tipo_desconto == 'fixo' %}- R$ {{ p.cupom.valor_desconto|floatformat:2 }}{% else %}- {{ p.cupom.valor_desconto|floatformat:0 }}%{% endif %}</div>
-          {% else %}<span class="muted">Oferta de preço · sem cupom</span>{% endif %}
+            <a class="link" href="{{ p.cupom.link_original }}" target="_blank" rel="noopener" style="font-size:12.5px;">{{ p.cupom.titulo }}</a>
+            <div class="muted" style="font-size:11.5px;">{% if p.cupom.tipo_desconto == 'fixo' %}- R$ {{ p.cupom.valor_desconto|floatformat:2 }}{% else %}- {{ p.cupom.valor_desconto|floatformat:0 }}%{% endif %}</div>
+          {% else %}<span class="muted" style="font-size:12px;">Oferta de preço · sem cupom</span>{% endif %}
           </div>
         </td>
-        <td data-label="Oferta" class="deal-cell"><div class="td-val">
-          <div class="deal-prices"><span class="preco-final">R$ {{ p.preco_com_cupom|floatformat:2 }}</span></div>
-          <div class="deal-saving">de <span class="preco-original">R$ {{ p.preco_sem_desconto|floatformat:2 }}</span></div>
+        <td data-label="Preço" class="deal-cell"><div class="td-val">
+          <div class="deal-prices"><span class="preco-final tnum">R$ {{ p.preco_publicado|floatformat:2 }}</span></div>
+          <div class="deal-saving">de <span class="preco-original tnum">R$ {{ p.preco_sem_desconto|floatformat:2 }}</span></div>
         </div></td>
         <td data-label="Desconto">
           <div class="td-val">
-          <span class="badge badge-green">-{{ p.percent|floatformat:0 }}%</span>
-          <div class="muted" style="font-size:.76rem;margin-top:.15rem;">- R$ {{ p.economia|floatformat:2 }}</div>
+          <span class="badge badge-green tnum">-{{ p.percent|floatformat:0 }}%</span>
+          <div class="muted tnum" style="font-size:11.5px;margin-top:.15rem;">- R$ {{ p.economia|floatformat:2 }}</div>
           </div>
         </td>
         <td data-label="Ação" class="col-actions">
@@ -416,14 +617,14 @@
             sem veredito mostram o status/motivo no lugar do botão.
             {% endcomment %}
             {% if p.afiliado_pronto %}
-            <button class="btn btn-green btn-sm"
+            <button class="btn btn-accent btn-sm"
                     onclick="abrirEnvio({{ p.id }}, '{{ p.nome|escapejs }}')"><i data-lucide="send"></i> Enviar</button>
             {% elif p.afiliado_estado == "link_invalido" %}
-            <span class="muted" style="font-size:.76rem;" title="{{ p.afiliado_motivo|default:'O link não abre o anúncio certo.' }}"><i data-lucide="link-2-off"></i> link inválido</span>
+            <span class="muted" style="font-size:12px;" title="{{ p.afiliado_motivo|default:'O link não abre o anúncio certo.' }}"><i data-lucide="link-2-off"></i> link inválido</span>
             {% elif p.afiliado_estado == "verificando" %}
-            <span class="muted" style="font-size:.76rem;" title="Conferindo o link antes de liberar o envio."><i data-lucide="loader"></i> verificando…</span>
+            <span class="muted" style="font-size:12px;" title="Conferindo o link antes de liberar o envio."><i data-lucide="loader"></i> verificando…</span>
             {% else %}
-            <span class="muted" style="font-size:.76rem;" title="{{ p.afiliado_motivo|default:'Sem link de afiliado pronto para envio.' }}">indisponível</span>
+            <span class="muted" style="font-size:12px;" title="{{ p.afiliado_motivo|default:'Sem link de afiliado pronto para envio.' }}">indisponível</span>
             {% endif %}
           </div>
         </td>
@@ -439,21 +640,37 @@ Lista vazia com fila cheia não é "não achou nada": é o link de afiliado que 
 não saiu. Dizer só "nenhum produto encontrado" mandava o usuário raspar de novo,
 que era exatamente o que não resolvia.
 {% endcomment %}
-<p class="empty">
-  Nenhum item afiliado ainda — {{ pendentes_ocultos }} produto(s) aguardando link.<br>
-  <span class="muted" style="font-size:.85rem;">
-    {{ afiliacao.pendente }} na fila{% if afiliacao.erro %} · {{ afiliacao.erro }} com erro{% endif %}{% if afiliacao.nao_afiliavel %} · {{ afiliacao.nao_afiliavel }} não afiliáveis{% endif %}.
-    Use <strong>Gerar links de afiliado</strong> acima, ou
-    <a class="link" href="/scrapers/ml/">reconecte o Mercado Livre</a> se a sessão caiu.
-  </span>
-</p>
+<div class="empty">
+  <i data-lucide="hourglass"></i>
+  <div class="empty-title">Nenhum item afiliado ainda</div>
+  <p>A raspagem trouxe {{ pendentes_ocultos }} produto(s), mas eles só aparecem aqui
+    depois que o link de afiliado sai — enviar sem link não comissiona.<br>
+    {{ afiliacao.pendente }} na fila{% if afiliacao.erro %} · {{ afiliacao.erro }} com erro{% endif %}{% if afiliacao.nao_afiliavel %} · {{ afiliacao.nao_afiliavel }} não afiliáveis{% endif %}.</p>
+  {% comment %}
+  Antes: "Use Gerar links de afiliado acima" — apontando para um controle que o CSS
+  mantinha invisível. O botão da ação vem junto do texto que pede a ação.
+  {% endcomment %}
+  <div class="empty-acoes">
+    <button type="button" class="btn btn-accent btn-sm js-links-btn" onclick="gerarLinks()">
+      <i data-lucide="link"></i> Gerar links agora</button>
+    <a class="btn btn-ghost btn-sm" href="?{{ qs_base_sem_afiliado }}afiliado=todos">
+      <i data-lucide="eye"></i> Ver os pendentes assim mesmo</a>
+  </div>
+  <p class="muted" style="margin-top:.6rem;font-size:12.5px;">
+    Se o log acusar sessão expirada,
+    <a class="link" href="/scrapers/ml/">reconecte o Mercado Livre</a>.</p>
+</div>
 {% else %}
-<p class="empty">Nenhum produto encontrado. Rode o <a class="link" href="/scrapers/">scraper</a> primeiro, ou pesquise um item acima.</p>
+<div class="empty">
+  <i data-lucide="package-search"></i>
+  <div class="empty-title">Nenhum produto encontrado</div>
+  <p>Rode o <a class="link" href="/scrapers/">scraper</a> primeiro, ou pesquise um item acima.</p>
+</div>
 {% endif %}
 
 <!-- Popup de envio: escolhe canal + destino e envia o item na hora -->
 <div class="modal-ov" id="modal-envio" onclick="if(event.target===this)fecharEnvio()">
-  <div class="modal" role="dialog" aria-modal="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="env-titulo">
     <div class="modal-head">
       <h3 id="env-titulo"><i data-lucide="send"></i> Enviar oferta</h3>
       <button class="x-btn" type="button" onclick="fecharEnvio()" aria-label="Fechar"><i data-lucide="x"></i></button>
@@ -461,31 +678,31 @@ que era exatamente o que não resolvia.
     <div class="modal-body">
       <div class="modal-prod" id="env-prod">—</div>
       <div>
-        <label>Canal</label>
+        <label for="env-canal">Canal</label>
         <select id="env-canal" onchange="envToggleCanal()">
           {% for ch in canais %}<option value="{{ ch }}">{% if ch == "whatsapp" %}WhatsApp{% elif ch == "telegram" %}Telegram{% else %}{{ ch|title }}{% endif %}</option>{% endfor %}
         </select>
       </div>
       <div id="env-wa">
-        <label>Grupo do WhatsApp <span id="env-grupos-msg" class="muted" style="font-size:.72rem;font-weight:400;"></span></label>
+        <label>Grupo do WhatsApp <span id="env-grupos-msg" class="muted" style="font-size:11.5px;font-weight:400;"></span></label>
         <div id="env-grupo-field"><input id="env-grupo-input" placeholder="12345@g.us"></div>
-        <span class="muted" style="font-size:.74rem;">Escolha um grupo sincronizado ou digite o código do grupo (termina em @g.us).</span>
+        <span class="help">Escolha um grupo sincronizado ou digite o código do grupo (termina em @g.us).</span>
       </div>
       <div id="env-tg" style="display:none;">
-        <label>Canal do Telegram</label>
+        <label for="env-tg-input">Canal do Telegram</label>
         <input id="env-tg-input" placeholder="@meucanal">
-        <span class="muted" style="font-size:.74rem;">Use @nomedocanal ou o ID numérico (começa com -100).</span>
+        <span class="help">Use @nomedocanal ou o ID numérico (começa com -100).</span>
       </div>
       <div id="env-foto-bloco">
-        <label>Foto (opcional)</label>
+        <label for="env-foto">Foto (opcional)</label>
         <input type="file" id="env-foto" accept="image/*">
-        <span class="muted" style="font-size:.74rem;">Anexe uma foto para ir acima da mensagem. Sem foto, vai a imagem do produto (no WhatsApp).</span>
+        <span class="help">Anexe uma foto para ir acima da mensagem. Sem foto, vai a imagem do produto (no WhatsApp).</span>
       </div>
       <div class="modal-log" id="env-log"></div>
     </div>
     <div class="modal-foot">
       <button class="btn btn-ghost btn-sm" type="button" onclick="fecharEnvio()">Cancelar</button>
-      <button class="btn btn-green btn-sm" id="env-go" type="button" onclick="dispararEnvio()"><i data-lucide="send"></i> Enviar agora</button>
+      <button class="btn btn-accent btn-sm" id="env-go" type="button" onclick="dispararEnvio()"><i data-lucide="send"></i> Enviar agora</button>
     </div>
   </div>
 </div>
@@ -570,22 +787,61 @@ function buscarItens() {
 // ─── Gerar links de afiliado da fila deste usuário ───
 // A lista só mostra item afiliado, então sem isto quem não é staff dependia só do
 // worker para ter QUALQUER produto enviável na tela.
+// O botão existe em dois lugares (cabeçalho e estado vazio da lista), então o
+// estado é aplicado por CLASSE: com id só o primeiro travava, e o outro seguia
+// clicável durante a geração, disparando um segundo stream em paralelo.
+function _linksBotoes() { return document.querySelectorAll('.js-links-btn'); }
+
+function _linksOcupado(ocupado) {
+  _linksBotoes().forEach(function (b) {
+    b.disabled = ocupado;
+    if (ocupado) {
+      if (!b.dataset.rotulo) b.dataset.rotulo = b.innerHTML;
+      b.textContent = 'Gerando links…';
+    } else if (b.dataset.rotulo) {
+      b.innerHTML = b.dataset.rotulo;
+      if (window.lucide) lucide.createIcons();
+    }
+  });
+}
+
 function gerarLinks() {
-  var btn = document.getElementById('links-btn');
   var log = document.getElementById('links-log');
-  btn.disabled = true; log.textContent = '';
+  _linksOcupado(true);
+  log.textContent = '';
+  // O log fica no topo; sem isto o clique no estado vazio (fim da página) não
+  // mostrava nenhuma resposta e parecia que o botão não fez nada.
+  log.scrollIntoView({ behavior: 'smooth', block: 'center' });
   var macroSel = document.getElementById('links-macro');
   var macro = macroSel ? macroSel.value.trim() : '';
   var url = '/scrapers/gerar-links/' + (macro ? '?macro=' + encodeURIComponent(macro) : '');
   var es = new EventSource(url);
+  var ocupado = false;
   es.onmessage = function (e) {
-    if (e.data === '__DONE__') { es.close(); location.reload(); return; }
+    if (e.data === '__DONE__') {
+      es.close();
+      // Recarregar quando o robô estava ocupado apagaria a mensagem que acabou de
+      // aparecer — e a tela não teria nada de novo para mostrar mesmo.
+      if (ocupado) { _linksOcupado(false); return; }
+      location.reload();
+      return;
+    }
     var ln = document.createElement('div');
-    if (e.data.indexOf('__ML_LOGIN__') !== -1) {
+    if (e.data.indexOf('__LINKS_OCUPADO__') !== -1) {
+      // Antes do teste de __ML_LOGIN__: não é problema de conta, é fila.
+      ocupado = true;
+      ln.className = 'warn';
+      ln.innerHTML = '&rarr; <a href="#" onclick="gerarLinks();return false;" ' +
+        'style="color:inherit;font-weight:600;text-decoration:underline">Tentar de novo</a>';
+    } else if (e.data.indexOf('__ML_LOGIN__') !== -1) {
       ln.className = 'err';
       ln.innerHTML = '&rarr; <a href="/scrapers/ml/" style="color:inherit;font-weight:600;text-decoration:underline">Reconectar Mercado Livre</a>';
     } else {
+      // [AVISO] é situação que se resolve sozinha (o ML pediu verificação, o robô
+      // retenta). Pintar de vermelho como erro fazia o usuário procurar culpa numa
+      // conta que está perfeita — e clicar em "Reconectar" à toa.
       if (e.data.startsWith('[ERRO]')) ln.className = 'err';
+      else if (e.data.startsWith('[AVISO]')) ln.className = 'warn';
       ln.textContent = e.data;
     }
     log.appendChild(ln); log.scrollTop = log.scrollHeight;
@@ -593,7 +849,7 @@ function gerarLinks() {
   es.onerror = function () {
     var l = document.createElement('div'); l.className = 'err';
     l.textContent = 'A conexão foi perdida. Tente novamente.';
-    log.appendChild(l); es.close(); btn.disabled = false;
+    log.appendChild(l); es.close(); _linksOcupado(false);
   };
 }
 
@@ -618,6 +874,7 @@ function abrirEnvio(id, nome) {
   envGruposParar();
   envToggleCanal();
   renderIcons();
+  document.getElementById('env-canal').focus();
 }
 // Mesmo popup dos produtos, mas envia um cupom: só troca a origem do conteúdo.
 // A colagem usa automaticamente os produtos vinculados ao cupom — a cliente não
@@ -635,6 +892,7 @@ function abrirEnvioCupom(id, codigo) {
   envGruposParar();
   envToggleCanal();
   renderIcons();
+  document.getElementById('env-canal').focus();
 }
 function fecharEnvio() {
   document.getElementById('modal-envio').classList.remove('open');

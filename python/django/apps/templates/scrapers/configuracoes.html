@@ -1,232 +1,345 @@
 {% extends "base.html" %}
 {% block title %}Configurações de Envio{% endblock %}
+{% block page_class %}page-narrow{% endblock %}
+{% block topbar_context %}<strong>Envios</strong><span>Operação</span>{% endblock %}
 
 {% block head_extra %}
 <style>
-  /* Multiselect estilizado (sub-nichos) */
+  /* ── Estado do envio automático: painel tonal, sem caixa ── */
+  .auto-bar { display: flex; align-items: center; gap: 1.1rem; flex-wrap: wrap; }
+  .auto-info { flex: 1; min-width: 230px; }
+  .auto-line { display: flex; align-items: center; gap: .7rem; flex-wrap: wrap; }
+  .auto-label { font-weight: 600; font-size: 1rem; letter-spacing: -.01em; }
+  .auto-desc { margin: .3rem 0 0; color: var(--muted); font-size: 12.5px; max-width: 62ch; }
+
+  /* ── Lista de regras ── */
+  .rule-title { font-size: 13.5px; }
+  .rule-tags { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .5rem; }
+  .rule-tags .tech-tag .lucide { width: .95em; height: .95em; }
+  .rank-preview { font-size: 12px; margin-top: .45rem; max-width: 34rem; overflow-wrap: anywhere; }
+  .dest-grupo { display: block; margin-top: .3rem; font-family: var(--mono); font-size: 11px;
+    color: var(--muted); overflow-wrap: anywhere; }
+
+  /* ── Multiselect estilizado (sub-nichos) ── */
   .ms { position: relative; }
-  .ms-box { padding: .55rem .65rem; background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: 8px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; font-size: .9rem; }
+  .ms-box { padding: .55rem .7rem; background: var(--field); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer;
+    display: flex; justify-content: space-between; align-items: center; font-size: 13.5px;
+    transition: border-color .14s var(--ease), box-shadow .14s var(--ease); }
+  .ms-box:hover { border-color: var(--border-strong); }
+  .ms.open .ms-box { border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
   .ms-box .cap { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ms-box .arrow { color: var(--muted); margin-left: .5rem; }
-  .ms-panel { display: none; position: absolute; z-index: 20; left: 0; right: 0; margin-top: 2px;
-    max-height: 260px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border);
-    border-radius: 8px; box-shadow: var(--shadow-lg); }
+  .ms-panel { display: none; position: absolute; z-index: 20; left: 0; right: 0; margin-top: 4px;
+    max-height: 260px; overflow-y: auto; background: var(--surface-3); border: 1px solid var(--border);
+    border-radius: var(--r-md); box-shadow: var(--shadow-pop); }
   .ms.open .ms-panel { display: block; }
-  .ms-group { padding: .4rem .6rem; font-size: .72rem; color: var(--accent); text-transform: uppercase;
-    letter-spacing: .03em; background: var(--surface-2); position: sticky; top: 0; }
-  .ms-opt { display: flex; align-items: center; gap: .5rem; padding: .35rem .7rem; margin: 0;
-    font-size: .85rem; color: var(--text); cursor: pointer; }
+  .ms-group { padding: .45rem .7rem; font-family: var(--mono); font-size: 10px; font-weight: 500;
+    color: var(--accent); text-transform: uppercase; letter-spacing: .14em;
+    background: var(--surface-2); position: sticky; top: 0; }
+  .ms-opt { display: flex; align-items: center; gap: .5rem; padding: .4rem .7rem; margin: 0;
+    font-size: 13px; color: var(--text); cursor: pointer; }
   .ms-opt:hover { background: var(--surface-2); }
   .ms-opt input { width: auto; margin: 0; }
-  .auto-card { display: flex; align-items: center; gap: 1rem; padding: .95rem 1.4rem; }
-  .auto-main { flex: 1; min-width: 0; }
-  .auto-title { font-weight: 600; font-size: 1rem; display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
-  .adv-title { font-weight: 600; font-size: .88rem; margin: 1.1rem 0 .6rem; }
-  @media (max-width: 859px) {
-    .card-head { flex-wrap: wrap; }
+  .ms-empty { padding: .6rem .7rem; color: var(--muted); font-size: 12.5px; }
 
-    /* Tabela de regras -> cards empilhados (sem scroll horizontal) */
+  /* ── Drawer: formulário de nova regra ── */
+  .rule-form .form-section:first-of-type { margin-top: 0; }
+  .drawer-head .drawer-close { margin-left: auto; }
+  .label-note { font-weight: 400; color: var(--muted); }
+  .grupo-sync { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-top: .55rem; }
+  .grupo-sync .help { margin-top: 0; }
+  .hora-row { display: flex; align-items: center; gap: .5rem; }
+  .hora-row input { flex: 1; }
+  .switch-text { font-size: 13px; color: var(--text-2); }
+  .adv-checks { grid-column: 1 / -1; display: flex; flex-direction: column; gap: .65rem; }
+
+  /* opções avançadas (details) */
+  .adv { margin-top: 1.6rem; border: 1px solid var(--border); border-radius: var(--r-md);
+    background: var(--surface-2); }
+  .adv summary { cursor: pointer; padding: .7rem .95rem; font-weight: 600; font-size: 13px;
+    display: flex; align-items: center; gap: .5rem; list-style: none; min-height: 42px; }
+  .adv summary::-webkit-details-marker { display: none; }
+  .adv summary .lucide { color: var(--muted); transition: transform .18s var(--ease); margin-left: auto; }
+  .adv[open] summary .lucide { transform: rotate(180deg); }
+  .adv-body { padding: 0 .95rem 1rem; }
+  .adv-title { font-family: var(--mono); font-size: 10px; font-weight: 500; text-transform: uppercase;
+    letter-spacing: .14em; color: var(--muted); margin: 1.1rem 0 .55rem; }
+
+  @media (max-width: 899px) {
+    /* Tabela de regras -> cartões empilhados (sem scroll horizontal) */
     .cfg-table thead { display: none; }
     .cfg-table, .cfg-table tbody, .cfg-table tr, .cfg-table td { display: block; width: 100%; }
-    .cfg-table tr { border: 1px solid var(--border); border-radius: 12px;
-      padding: .2rem .9rem; margin: .9rem 0; background: var(--surface); }
-    .cfg-table td { display: flex; align-items: center;
-      gap: 1rem; text-align: right; overflow-wrap: anywhere; white-space: normal;
-      padding: .6rem 0; border: 0; border-bottom: 1px solid var(--border-soft); }
+    .cfg-table tr { border: 1px solid var(--border); border-radius: var(--r-lg);
+      padding: .2rem .95rem; margin: .9rem 0; background: var(--surface); }
+    .cfg-table td { display: flex; align-items: center; gap: 1rem; text-align: right;
+      overflow-wrap: anywhere; white-space: normal; padding: .6rem 0; border: 0;
+      border-bottom: 1px solid var(--border); }
     .cfg-table td:last-child { border-bottom: 0; }
     .cfg-table td::before { content: attr(data-label); color: var(--muted);
-      font-size: .72rem; text-transform: uppercase; letter-spacing: .04em;
-      font-weight: 600; text-align: left; flex: none; margin-right: auto; }
+      font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .13em;
+      font-weight: 500; text-align: left; flex: none; margin-right: auto; }
     .cfg-table td.col-actions, .cfg-table .row-actions { justify-content: flex-end; }
-    .cfg-table td[data-label="Nicho"] { flex-wrap: wrap; }
-    .cfg-table .rule-niche { margin-left: auto; min-width: 0; }
-    .cfg-table .rank-preview { flex: 1 0 100%; max-width: none !important;
-      padding-top: .2rem; text-align: left; overflow-wrap: anywhere; }
-    .cfg-table td.empty { justify-content: center; text-align: center; }
-    .cfg-table td.empty::before { content: ''; }
+    .cfg-table td[data-label="Regra"] { flex-wrap: wrap; }
+    .cfg-table .rule-main { margin-left: auto; min-width: 0; }
+    .cfg-table .rule-tags { justify-content: flex-end; }
+    .cfg-table .rank-preview { flex: 1 0 100%; max-width: none; padding-top: .2rem; text-align: left; }
   }
 </style>
 {% endblock %}
 
 {% block content %}
 <div class="page-head">
-  <h1><i data-lucide="settings-2"></i> Configurações de Envio</h1>
-  <p class="sub">Cada regra define o que enviar, para qual grupo e com que frequência.</p>
+  <div class="head-main">
+    <span class="eyebrow">Automação de envios</span>
+    <h1><i data-lucide="settings-2"></i> Envios</h1>
+    <p class="sub">Cada regra define o que enviar, para qual grupo e com que frequência. O envio automático processa as regras ativas dentro da janela de cada uma.</p>
+  </div>
 </div>
 
 <!-- Envio automático (independente da raspagem; usa as regras abaixo) -->
-<div class="card auto-card">
-  <div class="auto-main">
-    <div class="auto-title">Envio automático <span id="auto-status"><span class="badge badge-muted"><span class="dot"></span>verificando…</span></span></div>
-    <div class="muted" style="font-size:.82rem;">Processa as regras ativas no horário e limite de cada grupo.</div>
+<section class="panel auto-bar" aria-label="Estado do envio automático">
+  <div class="auto-info">
+    <div class="auto-line">
+      <span class="auto-label">Envio automático</span>
+      <span id="auto-status"><span class="badge badge-muted"><span class="dot"></span>verificando…</span></span>
+    </div>
+    <p class="auto-desc">Quando ligado, processa as regras ativas no horário e limite de cada grupo — funciona de forma independente da raspagem.</p>
   </div>
   {% if request.user.is_staff %}<label class="switch" title="Controle operacional global">
     <input type="checkbox" id="auto-toggle" onchange="toggleAuto(this)">
     <span class="track"></span>
   </label>{% endif %}
-</div>
+</section>
 
 {# Texto preenchido por loadGrupos(): o motivo varia e antes tudo virava "WhatsApp desconectado". #}
-<div id="wa-offline" class="alert alert-warn" style="display:none;">
+<div id="wa-offline" class="alert-row warn" style="display:none;">
   <i data-lucide="alert-triangle"></i>
   <div id="wa-offline-msg"></div>
 </div>
 
-<div class="card" style="padding:0;overflow:hidden;">
-  <div class="card-head" style="padding:1.1rem 1.4rem;margin:0;">
-    <h2><i data-lucide="list-checks"></i> Regras de envio</h2>
-    <span class="count">{{ configs|length }} regra{{ configs|length|pluralize }}</span>
-  </div>
-  {% if configs %}
-  <div class="table-wrap" style="border:0;border-radius:0;box-shadow:none;">
-    <table class="cfg-table">
-      <thead>
-        <tr><th class="cell-grow">Nicho</th><th>Destino</th><th>Loja</th><th>Horário</th>
-          <th>Mín %</th><th>Status</th><th>Último envio</th><th style="text-align:right;">Ações</th></tr>
-      </thead>
-      <tbody>
-      {% for c in configs %}
-        <tr>
-          <td data-label="Nicho" class="cell-grow"><div class="rule-niche"><b>{{ c.macro_categoria|default:"Todas" }}</b>{% if c.termo_busca %} <span class="muted">{{ c.termo_busca }}</span>{% endif %}</div>{% if c.previa_conteudo %}<div class="muted rank-preview" style="font-size:.72rem;margin-top:.3rem;max-width:28rem;">Prévia: {{ c.previa_conteudo.titulo }}{% if c.previa_conteudo.score %} · score {{ c.previa_conteudo.score }}{% endif %} · {{ c.previa_conteudo.motivos|join:", " }}</div>{% endif %}</td>
-          <td data-label="Destino">
-            {% if c.canal == "telegram" %}<span class="badge badge-accent"><i data-lucide="send"></i> Telegram</span>{% else %}<span class="badge badge-green"><i data-lucide="message-circle"></i> WhatsApp</span>{% endif %}
-            <span class="mono" style="font-size:.8rem;display:inline-block;margin-left:.35rem;">{{ c.grupo_nome|default:c.grupo_id }}</span>
-          </td>
-          <td data-label="Loja">{% if c.marketplace == "mercadolivre" %}Mercado Livre{% elif c.marketplace == "amazon" %}Amazon{% elif c.marketplace %}{{ c.marketplace|title }}{% else %}Todas{% endif %}</td>
-          <td data-label="Horário" class="mono" style="font-size:.8rem;">{{ c.janela_inicio }}h–{{ c.janela_fim }}h · {{ c.intervalo_minutos }}min</td>
-          <td data-label="Mín %">{{ c.min_desconto_percent }}%</td>
-          <td data-label="Status">{% if c.ativo %}<span class="badge badge-green"><span class="dot"></span>ativo</span>{% else %}<span class="badge badge-muted">pausado</span>{% endif %}</td>
-          <td data-label="Último envio" class="muted" style="font-size:.8rem;">{{ c.ultimo_envio|default:"—" }}</td>
-          <td data-label="Ações" class="col-actions">
-            <div class="row-actions">
-              <button class="icon-btn go" title="Enviar agora" onclick="enviarAgora({{ c.id }})"><i data-lucide="play"></i></button>
-              {% if c.termo_busca %}<button class="icon-btn warn" title="Atualizar itens do sub-nicho" onclick="atualizarItens({{ c.id }})"><i data-lucide="search"></i></button>{% endif %}
-              <form method="post" style="display:inline">{% csrf_token %}
-                <input type="hidden" name="acao" value="delete"><input type="hidden" name="id" value="{{ c.id }}">
-                <button class="icon-btn danger" title="Excluir regra" onclick="return confirm('Excluir esta regra de envio? Esta ação não pode ser desfeita.')"><i data-lucide="trash-2"></i></button>
-              </form>
-            </div>
-          </td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% else %}
-  <div class="empty">Nenhuma regra de envio ainda.<br>Crie a primeira no formulário abaixo.</div>
-  {% endif %}
+<div class="section-head">
+  <h2>Regras de envio</h2>
+  <span class="head-actions">
+    <span class="badge badge-muted">{{ configs|length }} regra{{ configs|length|pluralize }}</span>
+    <button class="btn btn-accent btn-sm" type="button" onclick="openRuleDrawer()"><i data-lucide="plus"></i> Nova regra</button>
+  </span>
 </div>
 
-<div class="card" style="margin-top:1.1rem;">
-  <div class="card-head"><h2><i data-lucide="plus-circle"></i> Nova regra</h2></div>
-  <form method="post">{% csrf_token %}
-    <div class="form-grid">
-      <div>
-        <label>Categoria</label>
-        <select name="macro_categoria" id="sel-macro" onchange="msFilter()">
-          <option value="">Todas as categorias</option>
-          {% for m in macros %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
-        </select>
-      </div>
-      <div>
-        <label>Nichos (opcional)</label>
-        <div class="ms" id="ms-sub">
-          <div class="ms-box" onclick="document.getElementById('ms-sub').classList.toggle('open')">
-            <span class="cap" id="ms-cap">Todos da categoria</span><span class="arrow">▾</span>
-          </div>
-          <div class="ms-panel">
-            {% for grp in subnichos %}
-            <div class="ms-grp-block" data-macro="{{ grp.macro }}">
-              <div class="ms-group">{{ grp.macro }}</div>
-              {% for it in grp.itens %}
-              <label class="ms-opt"><input type="checkbox" name="termo_busca" value="{{ it.termos }}" onchange="msUpdate()"> {{ it.label }}</label>
-              {% endfor %}
+{% if configs %}
+<div class="table-flat">
+  <table class="cfg-table">
+    <thead>
+      <tr><th class="cell-grow">Regra</th><th>Destino</th><th>Status</th><th>Último envio</th><th class="col-actions">Ações</th></tr>
+    </thead>
+    <tbody>
+    {% for c in configs %}
+      <tr>
+        <td data-label="Regra" class="cell-grow">
+          <div class="rule-main">
+            <div class="rule-title"><b>{{ c.macro_categoria|default:"Todas" }}</b>{% if c.termo_busca %} <span class="muted">{{ c.termo_busca }}</span>{% endif %}</div>
+            <div class="rule-tags">
+              <span class="tech-tag"><i data-lucide="store"></i>{% if c.marketplace == "mercadolivre" %}Mercado Livre{% elif c.marketplace == "amazon" %}Amazon{% elif c.marketplace %}{{ c.marketplace|title }}{% else %}Todas as lojas{% endif %}</span>
+              <span class="tech-tag"><i data-lucide="percent"></i>mín {{ c.min_desconto_percent }}%</span>
+              <span class="tech-tag"><i data-lucide="clock"></i>{{ c.janela_inicio }}h–{{ c.janela_fim }}h · {{ c.intervalo_minutos }}min</span>
             </div>
-            {% endfor %}
-            <div class="ms-empty" id="ms-empty" style="display:none;padding:.6rem .7rem;color:var(--muted);font-size:.8rem;">Nenhum nicho nesta categoria.</div>
+            {% if c.previa_conteudo %}<div class="muted rank-preview">Prévia: {{ c.previa_conteudo.titulo }}{% if c.previa_conteudo.score %} · score {{ c.previa_conteudo.score }}{% endif %} · {{ c.previa_conteudo.motivos|join:", " }}</div>{% endif %}
           </div>
-        </div>
-      </div>
-      <div>
-        <label>Canal de envio</label>
-        <select name="canal" id="sel-canal" onchange="toggleCanal()">
-          {% for ch in canais %}<option value="{{ ch }}">{% if ch == "whatsapp" %}WhatsApp{% elif ch == "telegram" %}Telegram{% else %}{{ ch|title }}{% endif %}</option>{% endfor %}
-        </select>
-      </div>
-      <div>
-        <label>Loja</label>
-        <select name="marketplace">
-          <option value="">Todas as lojas</option>
-          {% for mk in marketplaces %}<option value="{{ mk }}">{% if mk == "mercadolivre" %}Mercado Livre{% elif mk == "amazon" %}Amazon{% else %}{{ mk|title }}{% endif %}</option>{% endfor %}
-        </select>
-      </div>
-      <div id="dest-whatsapp">
-        <label>Grupo do WhatsApp <span id="grupos-msg" class="muted" style="font-size:.72rem;font-weight:400;"></span></label>
-        <div id="grupo-field">
-          <input name="grupo_id" placeholder="12345@g.us">
-        </div>
-        <input type="hidden" name="grupo_nome">
-        <button type="button" id="refresh-grupos" class="btn btn-ghost btn-sm" style="margin-top:.55rem;" onclick="atualizarGrupos()"><i data-lucide="refresh-cw"></i> Sincronizar grupos</button>
-        <span id="refresh-msg" class="muted" style="font-size:.72rem;"></span>
-      </div>
-      <div id="dest-telegram" style="display:none">
-        <label>Canal do Telegram</label>
-        <input name="telegram_chat_id" placeholder="@meucanal">
-        <span class="muted" style="font-size:.72rem;">Use @nomedocanal ou o ID numérico (começa com -100).</span>
-      </div>
-      <div>
-        <label>Horário de envio (0–23h)</label>
-        <div style="display:flex;align-items:center;gap:.5rem;">
-          <input name="janela_inicio" type="number" value="8" min="0" max="23" style="flex:1;" aria-label="Hora inicial">
-          <span class="muted">até</span>
-          <input name="janela_fim" type="number" value="20" min="0" max="23" style="flex:1;" aria-label="Hora final">
-        </div>
-      </div>
-      <div>
-        <label>Intervalo entre envios (minutos)</label>
-        <input name="intervalo_minutos" type="number" value="60" min="1">
-        <span class="muted" style="font-size:.72rem;">Com variação aleatória de até 10 min.</span>
-      </div>
-      <div><label>Desconto mínimo (%)</label><input name="min_desconto_percent" type="number" value="15" min="0" step="0.5"></div>
-    </div>
-    <details style="margin-top:1rem;">
-      <summary style="cursor:pointer;font-weight:600;">Opções avançadas</summary>
-      <p class="muted" style="font-size:.8rem;">Os padrões funcionam bem para a maioria dos grupos. Campos em branco usam a identidade definida em Conta.</p>
-      <div class="adv-title">Limites de segurança</div>
-      <div class="form-grid">
-        <div><label>Limite diário de envios</label><input name="max_envios_dia" type="number" value="20" min="1" max="300"></div>
-        <div><label>Pausar após falhas consecutivas</label><input name="pausar_apos_falhas" type="number" value="5" min="1" max="20"></div>
-      </div>
-      <div class="adv-title">Fontes e campanhas</div>
-      <div class="form-grid">
-        {% if awin_programas %}<div style="grid-column:1/-1;"><label>Anunciantes Awin (opcional)</label><select name="programas" multiple size="5">{% for p in awin_programas %}<option value="{{ p.id }}">{{ p.nome }}</option>{% endfor %}</select><span class="muted" style="font-size:.72rem;">Sem seleção, todos os anunciantes conectados participam do ranking.</span></div>{% endif %}
-        <label class="field-check"><input name="incluir_restritos" type="checkbox" checked> Incluir cupons restritos</label>
-        <label class="field-check"><input name="incluir_sem_desconto" type="checkbox" checked> Incluir campanhas sem desconto calculável</label>
-      </div>
-      <div class="adv-title">Personalização deste grupo</div>
-      <div class="form-grid">
-        <div><label>Nome da marca</label><input name="nome_marca" placeholder="{{ perfil.nome_marca }}"></div>
-        <div><label>Tom</label><select name="tom_marca"><option value="">Padrão da conta</option><option value="direto">Direto</option><option value="amigavel">Amigável</option><option value="premium">Premium</option><option value="urgente">Urgente, sem falsa escassez</option></select></div>
-        <div><label>Chamada para ação</label><input name="chamada_acao" placeholder="{{ perfil.chamada_acao }}"></div>
-        <div><label>Variação de mensagem</label><select name="variante_template"><option value="alternar">Alternar entre A e B</option><option value="A">Somente A</option><option value="B">Somente B</option></select></div>
-        <div style="grid-column:1/-1;"><label>Divulgação de afiliado</label><input name="divulgacao_afiliado" placeholder="{{ perfil.divulgacao_afiliado }}"></div>
-        <div style="grid-column:1/-1;"><label>Template A (opcional)</label><textarea name="template_a" rows="3" placeholder="{marca}&#10;{nome} — {preco} ({desconto})&#10;{link}"></textarea></div>
-        <div style="grid-column:1/-1;"><label>Template B (opcional)</label><textarea name="template_b" rows="3" placeholder="Variáveis: {marca}, {nome}, {preco}, {desconto}, {link}"></textarea></div>
-      </div>
-    </details>
-    <div class="form-actions" style="display:flex;align-items:center;gap:1.1rem;flex-wrap:wrap;">
-      <button class="btn btn-green" type="submit"><i data-lucide="save"></i> Salvar regra</button>
-      <label class="field-check" style="margin:0;font-size:.85rem;color:var(--muted);"><input name="ativo" type="checkbox" checked> Começar ativa</label>
-    </div>
-  </form>
+        </td>
+        <td data-label="Destino">
+          {% if c.canal == "telegram" %}<span class="badge badge-accent"><i data-lucide="send"></i> Telegram</span>{% else %}<span class="badge badge-green"><i data-lucide="message-circle"></i> WhatsApp</span>{% endif %}
+          <span class="dest-grupo">{{ c.grupo_nome|default:c.grupo_id }}</span>
+        </td>
+        <td data-label="Status">{% if c.ativo %}<span class="badge badge-green"><span class="dot"></span>ativo</span>{% else %}<span class="badge badge-muted">pausado</span>{% endif %}</td>
+        <td data-label="Último envio" class="muted" style="font-size:12.5px;">{{ c.ultimo_envio|default:"—" }}</td>
+        <td data-label="Ações" class="col-actions">
+          <div class="row-actions">
+            <button class="icon-btn go" title="Enviar agora" onclick="enviarAgora({{ c.id }})"><i data-lucide="play"></i></button>
+            {% if c.termo_busca %}<button class="icon-btn warn" title="Atualizar itens do sub-nicho" onclick="atualizarItens({{ c.id }})"><i data-lucide="search"></i></button>{% endif %}
+            <form method="post" style="display:inline">{% csrf_token %}
+              <input type="hidden" name="acao" value="delete"><input type="hidden" name="id" value="{{ c.id }}">
+              <button class="icon-btn danger" title="Excluir regra" onclick="return confirm('Excluir esta regra de envio? Esta ação não pode ser desfeita.')"><i data-lucide="trash-2"></i></button>
+            </form>
+          </div>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
 </div>
+{% else %}
+<div class="empty">
+  <i data-lucide="inbox"></i>
+  <div class="empty-title">Nenhuma regra de envio ainda</div>
+  <p>Use o botão <b>Nova regra</b> acima para definir o que enviar, para onde e com que frequência.</p>
+</div>
+{% endif %}
 
 <div id="log" class="log"></div>
+
+<!-- Drawer lateral: criação de regra (mesmo form, campos e endpoint de sempre) -->
+<div class="drawer-scrim" id="rule-scrim" onclick="closeRuleDrawer()" aria-hidden="true"></div>
+<aside class="drawer" id="rule-drawer" aria-label="Nova regra de envio">
+  <div class="drawer-head">
+    <h2><i data-lucide="plus-circle"></i> Nova regra</h2>
+    <button type="button" class="icon-btn drawer-close" onclick="closeRuleDrawer()" title="Fechar" aria-label="Fechar"><i data-lucide="x"></i></button>
+  </div>
+  <div class="drawer-body">
+    <form method="post" class="rule-form">{% csrf_token %}
+
+      <div class="form-section">
+        <div class="fs-title"><i data-lucide="package"></i> Conteúdo</div>
+        <div class="form-grid">
+          <div>
+            <label>Categoria</label>
+            <select name="macro_categoria" id="sel-macro" onchange="msFilter()">
+              <option value="">Todas as categorias</option>
+              {% for m in macros %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+            </select>
+          </div>
+          <div>
+            <label>Nichos (opcional)</label>
+            <div class="ms" id="ms-sub">
+              <div class="ms-box" onclick="document.getElementById('ms-sub').classList.toggle('open')">
+                <span class="cap" id="ms-cap">Todos da categoria</span><span class="arrow">▾</span>
+              </div>
+              <div class="ms-panel">
+                {% for grp in subnichos %}
+                <div class="ms-grp-block" data-macro="{{ grp.macro }}">
+                  <div class="ms-group">{{ grp.macro }}</div>
+                  {% for it in grp.itens %}
+                  <label class="ms-opt"><input type="checkbox" name="termo_busca" value="{{ it.termos }}" onchange="msUpdate()"> {{ it.label }}</label>
+                  {% endfor %}
+                </div>
+                {% endfor %}
+                <div class="ms-empty" id="ms-empty" style="display:none;">Nenhum nicho nesta categoria.</div>
+              </div>
+            </div>
+          </div>
+          <div>
+            <label>Loja</label>
+            <select name="marketplace">
+              <option value="">Todas as lojas</option>
+              {% for mk in marketplaces %}<option value="{{ mk }}">{% if mk == "mercadolivre" %}Mercado Livre{% elif mk == "amazon" %}Amazon{% else %}{{ mk|title }}{% endif %}</option>{% endfor %}
+            </select>
+          </div>
+          <div>
+            <label>Desconto mínimo (%)</label>
+            <input name="min_desconto_percent" type="number" value="15" min="0" step="0.5">
+          </div>
+        </div>
+      </div>
+
+      <div class="form-section">
+        <div class="fs-title"><i data-lucide="send"></i> Destino</div>
+        <div class="form-grid">
+          <div>
+            <label>Canal de envio</label>
+            <select name="canal" id="sel-canal" onchange="toggleCanal()">
+              {% for ch in canais %}<option value="{{ ch }}">{% if ch == "whatsapp" %}WhatsApp{% elif ch == "telegram" %}Telegram{% else %}{{ ch|title }}{% endif %}</option>{% endfor %}
+            </select>
+          </div>
+          <div id="dest-whatsapp">
+            <label>Grupo do WhatsApp <span id="grupos-msg" class="label-note"></span></label>
+            <div id="grupo-field">
+              <input name="grupo_id" placeholder="12345@g.us">
+            </div>
+            <input type="hidden" name="grupo_nome">
+            <div class="grupo-sync">
+              <button type="button" id="refresh-grupos" class="btn btn-ghost btn-sm" onclick="atualizarGrupos()"><i data-lucide="refresh-cw"></i> Sincronizar grupos</button>
+              <span id="refresh-msg" class="help"></span>
+            </div>
+          </div>
+          <div id="dest-telegram" style="display:none">
+            <label>Canal do Telegram</label>
+            <input name="telegram_chat_id" placeholder="@meucanal">
+            <span class="help">Use @nomedocanal ou o ID numérico (começa com -100).</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-section">
+        <div class="fs-title"><i data-lucide="clock"></i> Agendamento</div>
+        <div class="form-grid">
+          <div>
+            <label>Horário de envio (0–23h)</label>
+            <div class="hora-row">
+              <input name="janela_inicio" type="number" value="8" min="0" max="23" aria-label="Hora inicial">
+              <span class="muted">até</span>
+              <input name="janela_fim" type="number" value="20" min="0" max="23" aria-label="Hora final">
+            </div>
+          </div>
+          <div>
+            <label>Intervalo entre envios (minutos)</label>
+            <input name="intervalo_minutos" type="number" value="60" min="1">
+            <span class="help">Com variação aleatória de até 10 min.</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-section">
+        <div class="fs-title"><i data-lucide="shield-check"></i> Limites</div>
+        <div class="form-grid">
+          <div><label>Limite diário de envios</label><input name="max_envios_dia" type="number" value="20" min="1" max="300"></div>
+          <div><label>Pausar após falhas consecutivas</label><input name="pausar_apos_falhas" type="number" value="5" min="1" max="20"></div>
+        </div>
+        <span class="help">Protegem o grupo contra volume excessivo e pausam a regra se os envios começarem a falhar.</span>
+      </div>
+
+      <details class="adv">
+        <summary>Opções avançadas <i data-lucide="chevron-down"></i></summary>
+        <div class="adv-body">
+          <p class="help" style="margin-top:.2rem;">Os padrões funcionam bem para a maioria dos grupos. Campos em branco usam a identidade definida em Conta.</p>
+          <div class="adv-title">Fontes e campanhas</div>
+          <div class="form-grid">
+            {% if awin_programas %}<div style="grid-column:1/-1;"><label>Anunciantes Awin (opcional)</label><select name="programas" multiple size="5">{% for p in awin_programas %}<option value="{{ p.id }}">{{ p.nome }}</option>{% endfor %}</select><span class="help">Sem seleção, todos os anunciantes conectados participam do ranking.</span></div>{% endif %}
+            <div class="adv-checks">
+              <label class="switch"><input name="incluir_restritos" type="checkbox" checked><span class="track"></span><span class="switch-text">Incluir cupons restritos</span></label>
+              <label class="switch"><input name="incluir_sem_desconto" type="checkbox" checked><span class="track"></span><span class="switch-text">Incluir campanhas sem desconto calculável</span></label>
+            </div>
+          </div>
+          <div class="adv-title">Personalização deste grupo</div>
+          <div class="form-grid">
+            <div><label>Nome da marca</label><input name="nome_marca" placeholder="{{ perfil.nome_marca }}"></div>
+            <div><label>Tom</label><select name="tom_marca"><option value="">Padrão da conta</option><option value="direto">Direto</option><option value="amigavel">Amigável</option><option value="premium">Premium</option><option value="urgente">Urgente, sem falsa escassez</option></select></div>
+            <div><label>Chamada para ação</label><input name="chamada_acao" placeholder="{{ perfil.chamada_acao }}"></div>
+            <div><label>Variação de mensagem</label><select name="variante_template"><option value="alternar">Alternar entre A e B</option><option value="A">Somente A</option><option value="B">Somente B</option></select></div>
+            <div style="grid-column:1/-1;"><label>Divulgação de afiliado</label><input name="divulgacao_afiliado" placeholder="{{ perfil.divulgacao_afiliado }}"></div>
+            <div style="grid-column:1/-1;"><label>Template A (opcional)</label><textarea name="template_a" rows="3" placeholder="{marca}&#10;{nome} — {preco} ({desconto})&#10;{link}"></textarea></div>
+            <div style="grid-column:1/-1;"><label>Template B (opcional)</label><textarea name="template_b" rows="3" placeholder="Variáveis: {marca}, {nome}, {preco}, {desconto}, {link}"></textarea></div>
+          </div>
+        </div>
+      </details>
+
+      <label class="switch" style="margin-top:1.4rem;">
+        <input name="ativo" type="checkbox" checked>
+        <span class="track"></span>
+        <span class="switch-text">Começar ativa — a regra entra no próximo ciclo do envio automático</span>
+      </label>
+
+      <div class="form-actions">
+        <button class="btn btn-accent" type="submit"><i data-lucide="save"></i> Salvar regra</button>
+        <button class="btn btn-ghost" type="button" onclick="closeRuleDrawer()">Cancelar</button>
+      </div>
+    </form>
+  </div>
+</aside>
 {% endblock %}
 
 {% block scripts %}
 <script>
+  // --- Drawer de nova regra (abre/fecha por classe; form inalterado) ---
+  function openRuleDrawer() {
+    document.getElementById('rule-drawer').classList.add('open');
+    document.getElementById('rule-scrim').classList.add('open');
+  }
+  function closeRuleDrawer() {
+    document.getElementById('rule-drawer').classList.remove('open');
+    document.getElementById('rule-scrim').classList.remove('open');
+  }
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeRuleDrawer(); });
+
   // --- Envio automático (tipo=envio, independente da raspagem) ---
   function getCookie(nome) {
     const m = document.cookie.match('(^|;)\\s*' + nome + '\\s*=\\s*([^;]+)');
@@ -240,15 +353,18 @@
       ? '<span class="badge badge-green"><span class="dot"></span>Ligado</span>'
       : '<span class="badge badge-muted">Desligado</span>';
   }
+  let ultimoAuto = null;
   async function autoStatus() {
-    if (autoBusy) return;
+    if (autoBusy || document.hidden) return;
     try {
       const r = await fetch('/scrapers/automacao/?tipo=envio');
       const d = await r.json();
-      paintAuto(d.rodando);
+      // `renderIcons()` varre o DOM inteiro. Rodava a cada 10s mesmo quando nada
+      // mudava — e este badge só troca quando alguém mexe no interruptor.
+      if (d.rodando !== ultimoAuto) { ultimoAuto = d.rodando; paintAuto(d.rodando); renderIcons(); }
     } catch (e) {}
-    renderIcons();
   }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) autoStatus(); });
   async function toggleAuto(el) {
     autoBusy = true;
     const acao = el.checked ? 'start' : 'stop';

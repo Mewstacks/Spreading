@@ -4,6 +4,9 @@ import hmac
 import json
 import os
 import tempfile
+import threading
+from datetime import timedelta
+from unittest.mock import patch
 
 import jwt
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -13,18 +16,26 @@ from django.core.exceptions import (
     PermissionDenied,
     ValidationError,
 )
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.test import (
+    SimpleTestCase, TestCase, TransactionTestCase, override_settings,
+)
 from django.urls import reverse
+from django.utils import timezone
 
 from apps.accounts.ml_session_crypto import MLSessionCryptoError
-from apps.accounts.ml_sessions import load_storage_state, save_storage_state
+from apps.accounts.ml_sessions import (
+    has_storage_state, load_storage_state, save_storage_state,
+)
 from apps.accounts.models import (
     Membership,
     MercadoLivreSession,
     WhatsAppConnection,
 )
 from apps.accounts.rls import STRICT_TENANT_TABLES, policy_statements
-from apps.accounts.tenant import _context_signature, organization_context
+from apps.accounts.tenant import (
+    _context_signature, current_organization_id, executar_no_tenant,
+    organization_context,
+)
 from apps.accounts.wa_capabilities import issue_capability, public_key_base64url
 from apps.scrapers.models import Produto
 
@@ -165,6 +176,192 @@ class MercadoLivreEncryptionTests(TestCase):
 
 
 @override_settings(
+    ML_SESSION_KEKS_JSON=ML_KEYS,
+    ML_SESSION_CURRENT_KEY_VERSION="v1",
+    ML_LEGACY_SESSION_READ_ENABLED=False,
+)
+class VereditoDaSondaTests(TestCase):
+    """A sonda nunca apaga a credencial — e uma suspeita isolada não desconecta.
+
+    Antes, `conexoes.estado_ml` chamava `delete_storage_state` no primeiro veredito
+    "expirado". Só que quem produzia esse veredito era um GET a partir do IP de
+    datacenter da Fly, onde o gateway anti-bot do ML responde 302→login/403 a
+    requisições autenticadas. O usuário conectava, via a tela verde, e um worker o
+    desconectava minutos depois — apagando a sessão da organização inteira.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("ml-probe", password="test")
+        self.org = self.user.personal_organization
+        self.state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
+        save_storage_state(self.user, self.state)
+
+    def _suspeitar(self, vezes, *, espacadas=True):
+        from apps.accounts.ml_sessions import PROBE_JANELA_S, registrar_veredito
+
+        for _ in range(vezes):
+            registrar_veredito(self.org, "suspeito", "o ML redirecionou para o login")
+            if espacadas:
+                MercadoLivreSession.objects.filter(organization=self.org).update(
+                    last_probe_at=timezone.now() - timedelta(seconds=PROBE_JANELA_S + 1),
+                )
+        return MercadoLivreSession.objects.get(organization=self.org)
+
+    def test_uma_suspeita_nao_apaga_nem_desconecta(self):
+        record = self._suspeitar(1)
+        self.assertEqual(record.status, "suspect")
+        self.assertEqual(record.probe_failures, 1)
+        self.assertEqual(load_storage_state(self.user), self.state)
+
+    def test_suspeitas_repetidas_pedem_reconexao_sem_apagar(self):
+        from apps.accounts.ml_sessions import PROBE_FALHAS_PARA_DESCONECTAR
+
+        record = self._suspeitar(PROBE_FALHAS_PARA_DESCONECTAR)
+        self.assertEqual(record.status, "expired")
+        self.assertFalse(has_storage_state(self.user))
+        # Os bytes continuam lá: a sonda segue rodando e um "conectado" reabilita.
+        self.assertEqual(load_storage_state(self.user), self.state)
+
+    def test_rajada_simultanea_conta_como_uma_suspeita(self):
+        """Nove processos sondam em paralelo (ver python/Procfile). Sem a janela,
+        uma única rajada valeria pelos três ciclos independentes que a política
+        exige e desconectaria o usuário em segundos."""
+        record = self._suspeitar(5, espacadas=False)
+        self.assertEqual(record.probe_failures, 1)
+        self.assertEqual(record.status, "suspect")
+
+    def test_conectado_reabilita_a_sessao_sozinho(self):
+        from apps.accounts.ml_sessions import (
+            PROBE_FALHAS_PARA_DESCONECTAR, registrar_veredito,
+        )
+
+        self._suspeitar(PROBE_FALHAS_PARA_DESCONECTAR)
+        registrar_veredito(self.org, "conectado")
+        record = MercadoLivreSession.objects.get(organization=self.org)
+        self.assertEqual(record.status, "active")
+        self.assertEqual(record.probe_failures, 0)
+        self.assertTrue(has_storage_state(self.user))
+
+    def test_inconclusivo_nao_conta_falha(self):
+        from apps.accounts.ml_sessions import registrar_veredito
+
+        registrar_veredito(self.org, "inconclusivo", "timeout")
+        record = MercadoLivreSession.objects.get(organization=self.org)
+        self.assertEqual(record.probe_failures, 0)
+        self.assertEqual(record.status, "active")
+
+    def test_reconectar_zera_o_historico_da_sonda(self):
+        self._suspeitar(2)
+        save_storage_state(self.user, self.state)
+        record = MercadoLivreSession.objects.get(organization=self.org)
+        self.assertEqual(record.probe_failures, 0)
+        self.assertEqual(record.last_probe_result, "")
+        self.assertEqual(record.status, "active")
+
+    def test_leitura_de_sonda_nao_marca_uso(self):
+        MercadoLivreSession.objects.filter(organization=self.org).update(
+            last_used_at=None,
+        )
+        load_storage_state(self.user, touch=False)
+        self.assertIsNone(
+            MercadoLivreSession.objects.get(organization=self.org).last_used_at,
+        )
+
+
+class VereditoDoLinkBuilderTests(TestCase):
+    """O veredito do PORTAL DE AFILIADOS, isolado do veredito do site.
+
+    A separação é o ponto: o portal recusar o cookie não pode bloquear a raspagem
+    do site, que usa a MESMA credencial e continua funcionando. Se este veredito
+    alimentasse `status`, três suspeitas do Link Builder derrubariam o catálogo
+    inteiro da organização.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("lb-probe", password="test")
+        self.org = self.user.personal_organization
+        self.state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
+        save_storage_state(self.user, self.state)
+
+    def _suspeitar(self, vezes, *, espacadas=True):
+        from apps.accounts.ml_sessions import (
+            PROBE_JANELA_S, registrar_veredito_linkbuilder,
+        )
+
+        for _ in range(vezes):
+            registrar_veredito_linkbuilder(self.org, "suspeito", "portal pediu login")
+            if espacadas:
+                MercadoLivreSession.objects.filter(organization=self.org).update(
+                    lb_last_probe_at=timezone.now() - timedelta(seconds=PROBE_JANELA_S + 1),
+                )
+        return MercadoLivreSession.objects.get(organization=self.org)
+
+    def test_suspeitas_do_portal_nunca_bloqueiam_a_sessao_do_site(self):
+        from apps.accounts.ml_sessions import PROBE_FALHAS_PARA_DESCONECTAR
+
+        record = self._suspeitar(PROBE_FALHAS_PARA_DESCONECTAR + 2)
+        self.assertGreaterEqual(record.lb_probe_failures, PROBE_FALHAS_PARA_DESCONECTAR)
+        # `status` intocado: a raspagem segue autorizada.
+        self.assertEqual(record.status, "active")
+        self.assertTrue(has_storage_state(self.user))
+        self.assertEqual(load_storage_state(self.user), self.state)
+
+    def test_os_dois_vereditos_nao_se_misturam(self):
+        from apps.accounts.ml_sessions import registrar_veredito
+
+        registrar_veredito(self.org, "suspeito", "site")
+        self._suspeitar(1)
+        record = MercadoLivreSession.objects.get(organization=self.org)
+        self.assertEqual(record.probe_failures, 1)
+        self.assertEqual(record.lb_probe_failures, 1)
+        registrar_veredito(self.org, "conectado")
+        record.refresh_from_db()
+        # Site voltou; o portal segue suspeito, que é exatamente o caso real.
+        self.assertEqual(record.probe_failures, 0)
+        self.assertEqual(record.lb_probe_failures, 1)
+
+    def test_rajada_simultanea_conta_como_uma_suspeita(self):
+        record = self._suspeitar(5, espacadas=False)
+        self.assertEqual(record.lb_probe_failures, 1)
+
+    def test_conectado_zera_o_contador(self):
+        from apps.accounts.ml_sessions import registrar_veredito_linkbuilder
+
+        self._suspeitar(2)
+        registrar_veredito_linkbuilder(self.org, "conectado")
+        record = MercadoLivreSession.objects.get(organization=self.org)
+        self.assertEqual(record.lb_probe_failures, 0)
+
+    def test_inconclusivo_nao_conta_falha(self):
+        from apps.accounts.ml_sessions import registrar_veredito_linkbuilder
+
+        registrar_veredito_linkbuilder(self.org, "inconclusivo", "anti-bot")
+        self.assertEqual(
+            MercadoLivreSession.objects.get(organization=self.org).lb_probe_failures, 0)
+
+    def test_reconectar_zera_o_historico_do_portal(self):
+        """O login novo atravessa o SSO do portal: as suspeitas eram sobre os
+        cookies antigos."""
+        self._suspeitar(2)
+        save_storage_state(self.user, self.state)
+        record = MercadoLivreSession.objects.get(organization=self.org)
+        self.assertEqual(record.lb_probe_failures, 0)
+        self.assertEqual(record.lb_last_probe_result, "")
+        self.assertIsNone(record.lb_last_probe_at)
+
+    def test_snapshot_devolve_chaves_sem_prefixo(self):
+        """conexoes._estado_do_registro traduz os dois escopos com o mesmo código."""
+        from apps.accounts.ml_sessions import linkbuilder_snapshot
+
+        self._suspeitar(1)
+        snap = linkbuilder_snapshot(self.org)
+        self.assertEqual(snap["probe_failures"], 1)
+        self.assertEqual(snap["last_probe_result"], "suspeito")
+        # "" e não "active": este escopo não tem status próprio, de propósito.
+        self.assertEqual(snap["status"], "")
+
+
+@override_settings(
     WA_CAPABILITY_PRIVATE_KEY=WA_PRIVATE,
     WA_CAPABILITY_KEY_ID="test-ed25519",
     WA_CAPABILITY_ISSUER="spreading-web",
@@ -293,3 +490,66 @@ class TenantContextSigningTests(SimpleTestCase):
     def test_production_context_without_key_fails_closed(self):
         with self.assertRaises(ImproperlyConfigured):
             _context_signature("system")
+
+
+class PonteORMForaDoLoopTests(TransactionTestCase):
+    """`executar_no_tenant`: a ponte que substituiu DJANGO_ALLOW_ASYNC_UNSAFE.
+
+    A API sync do Playwright deixa um event loop rodando num greenlet desta mesma
+    thread, e o @async_unsafe do Django derruba qualquer query enquanto isso durar.
+    O bypass antigo era uma variável de ambiente GLOBAL AO PROCESSO: com 8 threads no
+    gunicorn, o `finally` de um fluxo removia a permissão no meio de outro. Aqui a
+    query é desviada para uma thread sem loop — e o tenant precisa ser reinstalado
+    lá, porque contextvars não cruzam threads de executor.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("ponte-orm", password="test")
+        self.organization = self.user.personal_organization
+
+    def test_fora_do_playwright_roda_na_mesma_thread(self):
+        # É isto que mantém `TestCase` (transação revertida no fim) enxergando as
+        # escritas do resto da suíte: sem loop rodando, não há desvio nenhum.
+        with organization_context(self.organization):
+            thread = executar_no_tenant(threading.get_ident)
+        self.assertEqual(thread, threading.get_ident())
+
+    def test_dentro_do_playwright_desvia_para_outra_thread_e_persiste(self):
+        with organization_context(self.organization), \
+             patch("apps.accounts.tenant._dentro_de_loop", return_value=True):
+            thread = executar_no_tenant(threading.get_ident)
+            executar_no_tenant(
+                Produto.objects.create, owner=self.user, nome="Gravado pela ponte",
+                preco_sem_desconto=100, preco_com_cupom=80,
+                marketplace="mercadolivre", origem="oferta",
+            )
+
+        self.assertNotEqual(thread, threading.get_ident())
+        self.assertTrue(
+            Produto.objects.filter(nome="Gravado pela ponte").exists(),
+            "a escrita feita na thread da ponte tem de estar commitada",
+        )
+
+    def test_o_escopo_de_organizacao_e_reinstalado_na_thread(self):
+        # Sem reinstalar, a organização da chamada anterior sobreviveria na conexão
+        # persistente do executor e vazaria para o tenant seguinte.
+        vistos = []
+        with organization_context(self.organization), \
+             patch("apps.accounts.tenant._dentro_de_loop", return_value=True):
+            executar_no_tenant(lambda: vistos.append(current_organization_id()))
+        self.assertEqual(vistos, [str(self.organization.pk)])
+
+    def test_excecao_propaga_em_vez_de_ficar_presa_no_future(self):
+        def explode():
+            raise ZeroDivisionError("falha real")
+
+        with organization_context(self.organization), \
+             patch("apps.accounts.tenant._dentro_de_loop", return_value=True):
+            with self.assertRaises(ZeroDivisionError):
+                executar_no_tenant(explode)
+
+    def test_sem_tenant_falha_fechado(self):
+        # Falhar aqui é melhor que falhar na RLS minutos depois, com o browser já
+        # fechado e o dado capturado perdido.
+        with self.assertRaises(ValueError):
+            executar_no_tenant(lambda: None)

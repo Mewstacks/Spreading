@@ -3,16 +3,22 @@
 
 {% block head_extra %}
 <style>
-  .auth-wrap { max-width: 30rem; margin: 2rem auto; }
-  .auth-head { text-align: center; margin-bottom: 1.4rem; }
-  .auth-head .ic { width: 3.4rem; height: 3.4rem; margin: 0 auto 1rem; border-radius: 14px;
-    background: var(--brand-grad); color: #fff; display: flex; align-items: center; justify-content: center; }
-  .auth-head .ic .lucide { width: 1.7rem; height: 1.7rem; }
-  .auth-head h1 { font-size: 1.4rem; margin: 0 0 .4rem; font-weight: 700; }
-  .auth-head p { color: var(--muted); font-size: .92rem; margin: 0; line-height: 1.5; }
-  .auth-foot { margin-top: 1.2rem; text-align: center; font-size: .85rem; color: var(--muted); }
+  .auth-wrap { max-width: 26.5rem; margin: 2.5rem auto; }
+  .auth-head { text-align: center; margin-bottom: 1.5rem; }
+  .auth-head h1 { margin: .55rem 0 0; font-size: 1.55rem; font-weight: 600; letter-spacing: -.025em; line-height: 1.15; text-wrap: balance; }
+  .auth-head h1 em { font-family: var(--serif); font-style: italic; font-weight: 400; }
+  .auth-head .sub { color: var(--muted); font-size: 13.5px; margin: .45rem 0 0; line-height: 1.5; text-wrap: pretty; }
+  .auth-head .sub b { color: var(--text-2); font-weight: 600; }
+  .auth-card { padding: 1.5rem 1.6rem; text-align: center; }
+  .auth-card .sub { color: var(--muted); font-size: 13.5px; margin: 0 0 1.2rem; line-height: 1.5; }
+  .auth-foot { margin-top: 1.3rem; text-align: center; font-size: 13px; color: var(--muted); }
   .auth-foot a, .auth-foot button.linklike { color: var(--accent); background: none; border: 0;
-    cursor: pointer; font-weight: 600; font-size: .85rem; font-family: var(--sans); padding: 0; }
+    cursor: pointer; font-weight: 500; font-size: 13px; font-family: var(--sans); padding: 0; text-decoration: none; }
+  .auth-foot a:hover, .auth-foot button.linklike:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .ic { width: 3rem; height: 3rem; margin: 0 auto 1rem; border-radius: var(--r-lg);
+    display: flex; align-items: center; justify-content: center;
+    background: var(--accent-bg); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
+  .ic .lucide { width: 1.4rem; height: 1.4rem; }
 </style>
 {% endblock %}
 
@@ -20,16 +26,19 @@
 <div class="auth-wrap">
   <div class="auth-head">
     <div class="ic"><i data-lucide="mail-check"></i></div>
-    <h1>Confirme seu e-mail</h1>
-    <p>Enviamos um link de confirmação{% if email %} para <b>{{ email }}</b>{% endif %}.
+    <span class="eyebrow">Verificação</span>
+    <h1>Confirme seu <em>e-mail</em></h1>
+    <p class="sub">Enviamos um link de confirmação{% if email %} para <b>{{ email }}</b>{% endif %}.
        Abra seu e-mail e clique no link para liberar o painel.</p>
   </div>
-  <div class="card" style="text-align:center;">
-    <p class="muted" style="font-size:.88rem;margin:0 0 1rem;">Não recebeu? Verifique o spam ou reenvie.</p>
+
+  <div class="card auth-card">
+    <p class="sub">Não recebeu? Verifique a caixa de spam ou reenvie o e-mail.</p>
     <form method="post" action="{% url 'reenviar-verificacao' %}">{% csrf_token %}
-      <button type="submit" class="btn btn-green"><i data-lucide="send"></i> Reenviar e-mail</button>
+      <button type="submit" class="btn" style="width:100%;"><i data-lucide="send"></i> Reenviar e-mail</button>
     </form>
   </div>
+
   <div class="auth-foot">
     <form method="post" action="{% url 'logout' %}" style="display:inline;">{% csrf_token %}
       <button type="submit" class="linklike">Sair</button>

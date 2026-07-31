@@ -5,7 +5,9 @@ Servidor Node.js que envia mensagens e mídias pelo WhatsApp via HTTP.
 
 SEGURANÇA
 ---------
-- Toda requisição precisa do header: x-api-key = [valor do API_KEY no .env]
+- Toda rota de sessão exige Bearer JWT Ed25519 com tenant, sessão, ação e expiração
+- O serviço guarda somente chaves públicas em WA_CAPABILITY_PUBLIC_KEYS_JSON
+- Não existe API key simétrica global nem fallback de autenticação
 - Helmet esconde informações do servidor nas respostas
 - Rate limit: máximo 30 requisições por minuto por IP
 - Número só aceita dígitos, sem injeção possível
@@ -14,27 +16,19 @@ SEGURANÇA
 
 ROTAS
 -----
-GET  /api/status           → Verifica se o WhatsApp está conectado (sem autenticação)
-POST /api/enviar/texto     → Envia texto. Body: { numero, mensagem }
-POST /api/enviar/midia     → Envia imagem/vídeo/etc. Body: { numero, base64, mimetype, nomeArquivo, legenda }
-
-FALLBACK
---------
-Se o WhatsApp Web cair, o sistema tenta enviar automaticamente pela Evolution API.
-A resposta virá com "via: evolution" e um aviso para reconectar o WhatsApp Web.
-Para reconectar: reiniciar o servidor e escanear o QR Code novamente.
+GET  /api/status           → Verifica uma sessão (ação `status`)
+POST /api/enviar           → Envia texto/mídia (ação `send` + Idempotency-Key)
+POST /api/sessoes/reset    → Gera novo QR (ação `reset`, uso único)
+POST /api/sessoes/logout   → Despareia (ação `logout`, uso único)
 
 VARIÁVEIS DO .env
 -----------------
-API_KEY             → Senha para usar a API (você define)
-PORT                → Porta do servidor (padrão: 3000)
-EVOLUTION_API_URL   → Endereço da Evolution API
-EVOLUTION_API_KEY   → Senha da Evolution API (você define)
-EVOLUTION_INSTANCE  → Nome da instância criada na Evolution
+WA_CAPABILITY_PUBLIC_KEYS_JSON → mapa kid -> chave pública Ed25519 base64url
+WA_CAPABILITY_ISSUER           → emissor esperado (`spreading-web`)
+WA_CAPABILITY_AUDIENCE         → audience esperada (`spreading-wa`)
+PORT                           → porta privada (padrão: 3000)
 
 DOCKER
 ------
-Comando para subir tudo: docker-compose up -d
-- whatsapp-api   → seu servidor Node na porta 3000
-- evolution-api  → servidor Evolution na porta 8080
-As sessões são salvas em volumes, não precisa escanear QR a cada reinício.
+No Fly, o app não declara `services` nem `http_service`: só responde na rede
+privada 6PN/.internal. As sessões LocalAuth persistem no volume.

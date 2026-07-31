@@ -210,7 +210,7 @@ def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> li
     # Tanto ML quanto Amazon leem o relatório da SESSÃO DE RELATÓRIO cifrada
     # (report_sessions), não da sessão do site principal. Para o ML isso separa a
     # sessão do portal de afiliados (comissão) da sessão do Link Builder.
-    from apps.scrapers.report_sessions import load_report_state
+    from apps.scrapers.report_sessions import load_report_state, registrar_veredito
     storage_state = load_report_state(usuario, marketplace)
 
     try:
@@ -225,8 +225,15 @@ def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> li
             rows = (_parse_delimited_report(exported, marketplace, desde, ate)
                     if exported is not None else _extract_table_rows(page, marketplace, desde, ate))
             browser.close()
+            # O sync é o ÚNICO fluxo que usa a sessão de relatórios de verdade, então
+            # é o único que sabe se ela vale. A tela lê este veredito — antes ela só
+            # checava se o arquivo existia, e por isso mostrava verde para sempre.
+            registrar_veredito(usuario, marketplace, "conectado")
             return rows
-    except ReportSyncActionRequired:
+    except ReportSyncActionRequired as exc:
+        # Suspeita, não sentença: registra e deixa a acumulação decidir. Uma falha
+        # isolada (portal instável, layout mudado) não pode desconectar a conta.
+        registrar_veredito(usuario, marketplace, "suspeito", str(exc))
         raise
     except Exception as exc:
         raise ReportSyncError(f"{marketplace}: falha ao ler relatório automático: {exc}")
