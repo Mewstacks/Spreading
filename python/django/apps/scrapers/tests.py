@@ -1614,6 +1614,22 @@ class TopPromocoesFilterTests(TestCase):
         self.assertEqual([c.id for c in response.context["cupons_catalogo"]], [pronto.id])
         self.assertNotIn(aguardando.id, [c.id for c in response.context["cupons_catalogo"]])
 
+    def test_coupon_without_validity_older_than_ttl_is_not_collected(self):
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-stale-source", marketplace="amazon", nome="Cupons antigos")
+        antigo = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="old-no-expiry", marketplace="amazon",
+            titulo="Cupom sem validade que sumiu da fonte", codigo="VELHO20",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20}, estado="ativo",
+        )
+        CupomNormalizado.objects.filter(pk=antigo.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=49))
+
+        response = self.client.get(self.url, {"tipo": "cupom"})
+
+        self.assertEqual(response.context["cupons_coletados"], 0)
+
     def test_search_and_minimum_discount_are_applied(self):
         response = self.client.get(self.url, {"q": "fone", "min_desconto": "40"})
 
@@ -2376,6 +2392,63 @@ class MonitorCatalogMaintenanceTests(SimpleTestCase):
         expire.assert_called_once_with()
         self.assertEqual(result["produtos_expirados"], 7)
         self.assertEqual(result["cupons_expirados"], 2)
+
+
+class CouponCatalogFreshnessTests(TestCase):
+    def setUp(self):
+        self.public_source = FonteIngestao.objects.create(
+            slug="coupon-freshness-source", marketplace="amazon", nome="Cupons")
+        self.manual_source, _ = FonteIngestao.objects.get_or_create(
+            slug="manual-private",
+            defaults={"marketplace": "amazon", "nome": "Privados"},
+        )
+
+    def _coupon(self, source, external_id, **extra):
+        values = {
+            "fonte": source, "external_id": external_id,
+            "marketplace": "amazon", "titulo": external_id,
+            "codigo": "TESTE20", "estado": "ativo",
+        }
+        values.update(extra)
+        return CupomNormalizado.objects.create(**values)
+
+    def _age(self, coupon, hours=49):
+        CupomNormalizado.objects.filter(pk=coupon.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=hours))
+
+    def test_cleanup_expires_old_undated_coupon_but_preserves_manual_private(self):
+        from apps.scrapers.maintenance import expire_stale
+
+        public_old = self._coupon(self.public_source, "public-old")
+        manual_old = self._coupon(self.manual_source, "manual-old")
+        self._age(public_old)
+        self._age(manual_old)
+
+        result = expire_stale()
+
+        public_old.refresh_from_db()
+        manual_old.refresh_from_db()
+        self.assertEqual(result["coupons"], 1)
+        self.assertEqual(public_old.estado, "expirado")
+        self.assertEqual(manual_old.estado, "ativo")
+
+    def test_explicit_future_validity_wins_over_observation_age(self):
+        from apps.scrapers.maintenance import cupons_frescos_q, expire_stale
+
+        future = self._coupon(
+            self.public_source, "future",
+            validade=timezone.now() + timedelta(days=3),
+        )
+        self._age(future, hours=240)
+
+        result = expire_stale()
+
+        future.refresh_from_db()
+        self.assertEqual(result["coupons"], 0)
+        self.assertEqual(future.estado, "ativo")
+        self.assertTrue(
+            CupomNormalizado.objects.filter(pk=future.pk).filter(
+                cupons_frescos_q()).exists())
 
 
 class AmazonPipelineTests(TestCase):

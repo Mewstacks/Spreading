@@ -1491,12 +1491,13 @@ def _melhor_cupom_normalizado_obj(produto):
     """
     from apps.scrapers.models import CupomNormalizado, ProdutoCupom
     from apps.scrapers.coupon_rules import regras_do_cupom, codigo_publicavel
+    from apps.scrapers.maintenance import cupons_frescos_q
     if getattr(produto, "marketplace", "mercadolivre") not in ("mercadolivre", ""):
         return None
     agora = timezone.now()
     base = CupomNormalizado.objects.filter(
         marketplace="mercadolivre", estado="ativo",
-    ).filter(Q(validade__isnull=True) | Q(validade__gte=agora))
+    ).filter(cupons_frescos_q(agora=agora))
 
     ids_confirmados = set()
     if getattr(produto, "pk", None):

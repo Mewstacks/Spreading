@@ -1542,8 +1542,10 @@ def enviar_cupom_stream(request):
         if not grupo_id:
             print("[ERRO] Nenhum destino informado (grupo/chat).")
             return
+        from apps.scrapers.maintenance import cupons_frescos_q
         cupom = CupomNormalizado.objects.filter(
-            Q(owner__isnull=True) | Q(owner=usuario), id=cupom_id, estado="ativo").first()
+            Q(owner__isnull=True) | Q(owner=usuario), id=cupom_id, estado="ativo",
+        ).filter(cupons_frescos_q()).first()
         if not cupom:
             print("[ERRO] Cupom não encontrado ou inativo.")
             return
@@ -1791,10 +1793,11 @@ def top_promocoes(request):
         reverse=True,
     )
     cupons_visiveis = Q(owner__isnull=True) | Q(owner=request.user)
+    from apps.scrapers.maintenance import cupons_frescos_q
     cupons_qs = CupomNormalizado.objects.select_related(
         "fonte", "integracao", "programa").filter(
         cupons_visiveis, estado="ativo"
-    ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
+    ).filter(cupons_frescos_q())
     if loja_selecionada:
         cupons_qs = cupons_qs.filter(marketplace=loja_selecionada)
     if fonte_selecionada:

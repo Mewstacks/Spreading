@@ -4,6 +4,7 @@ from django.utils import timezone
 
 
 PRODUCT_MAX_AGE_HOURS = 48
+COUPON_MAX_AGE_HOURS = 48
 
 
 def produtos_frescos_q(*, agora=None, max_age_hours=PRODUCT_MAX_AGE_HOURS,
@@ -24,6 +25,27 @@ def produtos_frescos_q(*, agora=None, max_age_hours=PRODUCT_MAX_AGE_HOURS,
     )
 
 
+def cupons_frescos_q(*, agora=None, max_age_hours=COUPON_MAX_AGE_HOURS,
+                     prefix=""):
+    """Cupom com validade explícita vale até ela; sem validade exige recência.
+
+    Cupons privados são exceção: foram cadastrados pelo usuário e permanecem
+    ativos até ele desativá-los ou informar uma validade.
+    """
+    agora = agora or timezone.now()
+    cutoff = agora - timedelta(hours=max_age_hours)
+    return (
+        Q(**{f"{prefix}validade__gte": agora})
+        | (
+            Q(**{f"{prefix}validade__isnull": True})
+            & (
+                Q(**{f"{prefix}fonte__slug": "manual-private"})
+                | Q(**{f"{prefix}ultima_observacao__gte": cutoff})
+            )
+        )
+    )
+
+
 def expire_stale(max_age_hours=PRODUCT_MAX_AGE_HOURS):
     """Expiração gradual; não remove linhas nem histórico."""
     from apps.scrapers.models import Produto, CupomNormalizado, ProdutoCupom
@@ -32,8 +54,12 @@ def expire_stale(max_age_hours=PRODUCT_MAX_AGE_HOURS):
     stale_products = Produto.objects.filter(
         ultima_observacao__lt=cutoff, estado="ativo"
     ).update(estado="stale", falha_verificacao="Fonte sem confirmar a oferta há 48h")
-    expired_coupons = CupomNormalizado.objects.filter(
-        validade__lt=now, estado="ativo"
+    expired_coupons = CupomNormalizado.objects.filter(estado="ativo").filter(
+        Q(validade__lt=now)
+        | (
+            Q(validade__isnull=True, ultima_observacao__lt=cutoff)
+            & ~Q(fonte__slug="manual-private")
+        )
     ).update(estado="expirado")
     ProdutoCupom.objects.filter(cupom__estado="expirado").exclude(
         status="expirado").update(status="expirado")
