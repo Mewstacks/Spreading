@@ -309,7 +309,8 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
 
     qs = Produto.objects.exclude(origem="cupom").exclude(
         estado__in=["indisponivel", "invalido", "expirado", "stale"])
-    qs = qs.filter(Q(valido_ate__isnull=True) | Q(valido_ate__gte=timezone.now()))
+    from apps.scrapers.maintenance import produtos_frescos_q
+    qs = qs.filter(produtos_frescos_q())
     qs = qs.filter(Q(owner__isnull=True) | Q(owner=usuario)) if usuario else qs.filter(
         owner__isnull=True)
     if marketplace:
@@ -325,7 +326,7 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
         if cond:
             qs = qs.filter(cond)
 
-    elegiveis = qs.annotate(
+    elegiveis_qs = qs.annotate(
         economia_rs=ExpressionWrapper(
             F("preco_sem_desconto") - F("preco_com_cupom"),
             output_field=FloatField()),
@@ -336,9 +337,13 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
         desconto_percent__gte=min_desconto_percent,
         desconto_percent__lt=90, preco_com_cupom__gt=0,
     )
+    from apps.scrapers.product_identity import deduplicar_por_produto
+    elegiveis = deduplicar_por_produto(
+        elegiveis_qs.order_by("-ultima_observacao", "-id")
+    )
     cupons = {
         c.campanha_id: c for c in Cupom.objects.filter(
-            campanha_id__in=elegiveis.values_list("campanha_id", flat=True),
+            campanha_id__in=[produto.campanha_id for produto in elegiveis],
             estado="ativo",
         ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
     }

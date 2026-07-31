@@ -269,6 +269,8 @@ def _base_produtos(cupom, usuario):
     qs = Produto.objects.filter(marketplace=mkt).exclude(
         estado__in=["indisponivel", "invalido", "expirado", "stale"]
     ).exclude(imagem_url="").filter(preco_com_cupom__gt=0)
+    from apps.scrapers.maintenance import produtos_frescos_q
+    qs = qs.filter(produtos_frescos_q())
     if mkt in ("amazon", "awin"):
         qs = qs.filter(owner=usuario)
     else:
@@ -298,6 +300,8 @@ def _base_produtos(cupom, usuario):
         campanha and mkt == "mercadolivre" and not codigo_publicavel(cupom))
 
     candidatos = []
+    identidades = set()
+    from apps.scrapers.product_identity import identidade_produto
     for produto in qs.order_by("-ultima_observacao")[:500]:
         if exige_campanha_no_produto and produto.campanha_id != campanha:
             continue
@@ -315,6 +319,10 @@ def _base_produtos(cupom, usuario):
             else:
                 provado = True
         if provado:
+            identidade = identidade_produto(produto)
+            if identidade in identidades:
+                continue
+            identidades.add(identidade)
             candidatos.append(produto)
             if len(candidatos) >= MAX_CANDIDATOS:
                 break
@@ -568,11 +576,16 @@ def relacoes_preparadas_para_envio(cupom, usuario, limite=9):
     ).first()
     if not preparo:
         return []
+    from apps.scrapers.maintenance import produtos_frescos_q
     relacoes = list(ProdutoCupom.objects.filter(
+        produtos_frescos_q(prefix="produto__"),
         cupom=cupom, status="confirmado", preco_original__isnull=False,
         preco_final__isnull=False, produto__imagem_url__gt="",
     ).exclude(produto__estado__in=["indisponivel", "invalido", "expirado", "stale"])
       .select_related("produto"))
+    from apps.scrapers.product_identity import deduplicar_por_produto
+    relacoes.sort(key=lambda r: (r.produto.ultima_observacao, r.produto_id), reverse=True)
+    relacoes = deduplicar_por_produto(relacoes, produto_de=lambda r: r.produto)
     relacoes.sort(key=_ordem_por_valor_do_cupom, reverse=True)
     return relacoes[:limite]
 
@@ -643,12 +656,22 @@ def mapa_relacoes_prontas(usuario, cupons, limite=9):
         return {}, {}
 
     por_cupom = defaultdict(list)
-    for relacao in (ProdutoCupom.objects.filter(
+    identidades_por_cupom = defaultdict(set)
+    from apps.scrapers.maintenance import produtos_frescos_q
+    from apps.scrapers.product_identity import identidade_produto
+    relacoes = list(ProdutoCupom.objects.filter(
+            produtos_frescos_q(prefix="produto__"),
             cupom_id__in=preparados, status="confirmado",
             preco_original__isnull=False, preco_final__isnull=False,
             produto__imagem_url__gt="")
             .exclude(produto__estado__in=["indisponivel", "invalido", "expirado", "stale"])
-            .select_related("produto")):
+            .select_related("produto")
+            .order_by("-produto__ultima_observacao", "-produto_id"))
+    for relacao in relacoes:
+        identidade = identidade_produto(relacao.produto)
+        if identidade in identidades_por_cupom[relacao.cupom_id]:
+            continue
+        identidades_por_cupom[relacao.cupom_id].add(identidade)
         por_cupom[relacao.cupom_id].append(relacao)
 
     # Mesma ordenação de relacoes_preparadas_para_envio: maior desconto primeiro.

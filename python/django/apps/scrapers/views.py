@@ -1722,7 +1722,10 @@ def top_promocoes(request):
 
     from django.db.models import Q
     from apps.scrapers.ofertas import anotacao_preco_publicado
-    qs = Produto.objects.filter(preco_sem_desconto__gt=0).exclude(
+    from apps.scrapers.maintenance import produtos_frescos_q
+    qs = Produto.objects.filter(
+        produtos_frescos_q(), preco_sem_desconto__gt=0,
+    ).exclude(
         estado__in=["indisponivel", "invalido", "expirado", "stale"]
     ).filter(
         # Pool compartilhado (ML, owner=None) + itens privados do usuário (Amazon dele).
@@ -1765,7 +1768,23 @@ def top_promocoes(request):
     # paginava somente os afiliados que por acaso estivessem entre os 200 maiores
     # descontos. O conjunto cabe em memória e cada marketplace resolve os links em
     # lote, portanto todos os produtos afiliados podem entrar na paginação.
-    candidatos = list(qs.order_by(ordem))
+    # A mesma oferta chega por feed completo, lane rápida e busca, com querystrings
+    # diferentes. Seleciona primeiro a observação mais recente de cada identidade;
+    # só então ranqueia, evitando duplicatas e preço antigo vencer pelo desconto.
+    from apps.scrapers.product_identity import deduplicar_por_produto
+    candidatos = deduplicar_por_produto(
+        qs.order_by("-ultima_observacao", "-id")
+    )
+    campo_ordem = "economia" if ordenar == "valor" else "percent"
+    candidatos.sort(
+        key=lambda produto: (
+            float(getattr(produto, campo_ordem, 0) or 0),
+            produto.ultima_observacao or timezone.datetime.min.replace(
+                tzinfo=timezone.get_current_timezone()),
+            produto.id,
+        ),
+        reverse=True,
+    )
     cupons_visiveis = Q(owner__isnull=True) | Q(owner=request.user)
     cupons_qs = CupomNormalizado.objects.select_related(
         "fonte", "integracao", "programa").filter(
@@ -2311,13 +2330,18 @@ def _produtos_sem_link(usuario, origens=None, limite=80, macros=None):
         .exclude(estado__in=["indisponivel", "invalido", "expirado", "stale"])
         .exclude(Exists(ja_tem))
     )
+    from apps.scrapers.maintenance import produtos_frescos_q
+    qs = qs.filter(produtos_frescos_q())
     if origens:
         qs = qs.filter(origem__in=origens)
     # Mesmo filtro de categoria da tela de Promoções (macro_categoria): gera link só
     # do nicho escolhido no seletor ao lado do botão.
     if macros:
         qs = qs.filter(macro_categoria__in=macros)
-    return list(qs.order_by("-ultima_observacao")[:limite])
+    from apps.scrapers.product_identity import deduplicar_por_produto
+    return deduplicar_por_produto(
+        qs.order_by("-ultima_observacao", "-id")
+    )[:limite]
 
 
 @require_GET

@@ -101,8 +101,15 @@ def _registrar_veredito_lb(usuario, veredito: str, motivo: str = "") -> None:
         from apps.accounts.ml_sessions import registrar_veredito_linkbuilder_para_usuario
         from apps.scrapers.conexoes import invalidar_ml
 
-        registrar_veredito_linkbuilder_para_usuario(usuario, veredito, motivo)
-        invalidar_ml(usuario)
+        def _persistir():
+            registrar_veredito_linkbuilder_para_usuario(usuario, veredito, motivo)
+            invalidar_ml(usuario)
+
+        # Esta função é chamada com o Playwright sync ativo. Ele mantém um event
+        # loop no greenlet da thread atual, então qualquer acesso direto ao ORM
+        # dispara SynchronousOnlyOperation. A mesma ponte já usada pelas demais
+        # gravações do lote reinstala o tenant numa thread sem esse loop.
+        executar_no_tenant(_persistir)
     except Exception:
         logger.warning("Não foi possível registrar o veredito do Link Builder.",
                        exc_info=True)

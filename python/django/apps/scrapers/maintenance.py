@@ -1,8 +1,30 @@
 from datetime import timedelta
+from django.db.models import Q
 from django.utils import timezone
 
 
-def expire_stale(max_age_hours=48):
+PRODUCT_MAX_AGE_HOURS = 48
+
+
+def produtos_frescos_q(*, agora=None, max_age_hours=PRODUCT_MAX_AGE_HOURS,
+                       prefix=""):
+    """Predicado de leitura que não depende da faxina ter rodado.
+
+    `expire_stale` materializa o estado para diagnóstico, mas telas e envios não
+    podem voltar a oferecer preço velho se o worker de coleta estiver desligado.
+    """
+    agora = agora or timezone.now()
+    cutoff = agora - timedelta(hours=max_age_hours)
+    return (
+        Q(**{f"{prefix}ultima_observacao__gte": cutoff})
+        & (
+            Q(**{f"{prefix}valido_ate__isnull": True})
+            | Q(**{f"{prefix}valido_ate__gte": agora})
+        )
+    )
+
+
+def expire_stale(max_age_hours=PRODUCT_MAX_AGE_HOURS):
     """Expiração gradual; não remove linhas nem histórico."""
     from apps.scrapers.models import Produto, CupomNormalizado, ProdutoCupom
     now = timezone.now()

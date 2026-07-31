@@ -648,6 +648,25 @@ class MensagemDeSessaoDeLinkTests(SimpleTestCase):
         self.assertNotEqual(link.MSG_SEM_SESSAO, link.MSG_SESSAO_EXPIRADA)
         self.assertIn("nenhuma conta", link.MSG_SEM_SESSAO.lower())
 
+    def test_veredito_do_link_builder_usa_ponte_de_orm_do_playwright(self):
+        """O veredito é persistido fora do event loop do Playwright sync."""
+        from apps.scrapers.scraper_mercadolivre import link
+
+        usuario = Mock(id=7)
+        executar = lambda fn, *args, **kwargs: fn(*args, **kwargs)
+        with (
+            patch.object(link, "executar_no_tenant", side_effect=executar) as ponte,
+            patch(
+                "apps.accounts.ml_sessions.registrar_veredito_linkbuilder_para_usuario"
+            ) as registrar,
+            patch("apps.scrapers.conexoes.invalidar_ml") as invalidar,
+        ):
+            link._registrar_veredito_lb(usuario, "conectado", "ok")
+
+        ponte.assert_called_once()
+        registrar.assert_called_once_with(usuario, "conectado", "ok")
+        invalidar.assert_called_once_with(usuario)
+
 
 class EstadoMLTests(SimpleTestCase):
     """Tradução do veredito persistido no Estado que a tela renderiza.
@@ -1617,6 +1636,44 @@ class TopPromocoesFilterTests(TestCase):
 
         self.assertNotIn(stale.id, [p.id for p in response.context["produtos"]])
 
+    def test_active_product_older_than_catalog_ttl_is_hidden(self):
+        old = self._criar_produto(
+            marketplace="mercadolivre", nome="Oferta ativa mas vencida",
+            categoria="Cozinha", macro_categoria="Casa",
+            preco_sem_desconto=100, preco_com_cupom=50,
+            link_produto="https://produto.mercadolivre.com.br/MLB-9000001",
+            estado="ativo",
+        )
+        Produto.objects.filter(pk=old.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=49))
+
+        response = self.client.get(self.url, {"q": "Oferta ativa mas vencida"})
+
+        self.assertNotIn(old.id, [p.id for p in response.context["produtos"]])
+
+    def test_same_ml_item_and_title_uses_only_latest_observation(self):
+        first = self._criar_produto(
+            marketplace="mercadolivre", nome="Top Puma repetido",
+            categoria="Moda", macro_categoria="Moda",
+            preco_sem_desconto=160, preco_com_cupom=38,
+            link_produto=("https://produto.mercadolivre.com.br/MLB-3102506128-item"
+                          "?searchVariation=111"),
+        )
+        second = self._criar_produto(
+            marketplace="mercadolivre", nome="Top Puma repetido",
+            categoria="Moda", macro_categoria="Moda",
+            preco_sem_desconto=160, preco_com_cupom=40,
+            link_produto=("https://produto.mercadolivre.com.br/MLB-3102506128-item"
+                          "?searchVariation=222"),
+        )
+        Produto.objects.filter(pk=first.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=1))
+
+        response = self.client.get(self.url, {"q": "Top Puma repetido"})
+
+        self.assertEqual(
+            [p.id for p in response.context["produtos"]], [second.id])
+
     def test_products_without_affiliate_link_are_hidden_from_sending_list(self):
         """Item sem link de afiliado não pode chegar ao botão Enviar: enviá-lo não
         comissiona nada. Antes ele aparecia com o badge 'pendente' e era enviável."""
@@ -2209,6 +2266,65 @@ class RankingAndCooldownTests(TestCase):
             usuario=self.user, grupo_id=self.group_a, min_desconto_percent=10)
 
         self.assertNotIn(product, selected)
+
+    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
+    def test_ranking_ignores_active_product_older_than_catalog_ttl(self, get_marketplace):
+        get_marketplace.return_value = Mock(is_alive=Mock(return_value=True))
+        product = self._product("Oferta velha no ranking", 50)
+        Produto.objects.filter(pk=product.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=49))
+
+        from apps.scrapers.ofertas import selecionar_item_para_grupo
+        selected = selecionar_item_para_grupo(
+            usuario=self.user, grupo_id=self.group_a, min_desconto_percent=10)
+
+        self.assertEqual(selected, [])
+
+    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
+    def test_ranking_collapses_duplicate_ml_variations_by_latest_observation(
+        self, get_marketplace
+    ):
+        get_marketplace.return_value = Mock(is_alive=Mock(return_value=True))
+        first = self._product("Top repetido", 30)
+        second = self._product("Top repetido", 35)
+        Produto.objects.filter(pk=first.pk).update(
+            link_produto=("https://produto.mercadolivre.com.br/MLB-3102506128-item"
+                          "?searchVariation=111"),
+            ultima_observacao=timezone.now() - timedelta(hours=1),
+        )
+        Produto.objects.filter(pk=second.pk).update(
+            link_produto=("https://produto.mercadolivre.com.br/MLB-3102506128-item"
+                          "?searchVariation=222"),
+        )
+        first.refresh_from_db()
+        second.refresh_from_db()
+
+        from apps.scrapers.ofertas import selecionar_item_para_grupo
+        selected = selecionar_item_para_grupo(
+            usuario=self.user, grupo_id=self.group_a,
+            min_desconto_percent=10, limite_envio=5)
+
+        self.assertEqual(selected, [second])
+
+
+class MonitorCatalogMaintenanceTests(SimpleTestCase):
+    @patch("apps.scrapers.incidentes_saude.fechar_conexoes_restabelecidas",
+           return_value=0)
+    @patch("apps.scrapers.incidentes_saude.reconciliar_pendentes", return_value=0)
+    @patch("apps.scrapers.maintenance.expire_stale",
+           return_value={"products": 7, "coupons": 2})
+    @patch("apps.scrapers.management.commands.monitorar.verificar_e_notificar",
+           return_value={"checados": 1, "alertas_enviados": 0})
+    def test_monitor_expires_catalog_even_without_scrape(
+        self, _connections, expire, _reconcile, _close
+    ):
+        from apps.scrapers.management.commands.monitorar import Command
+
+        result = Command()._ciclo()
+
+        expire.assert_called_once_with()
+        self.assertEqual(result["produtos_expirados"], 7)
+        self.assertEqual(result["cupons_expirados"], 2)
 
 
 class AmazonPipelineTests(TestCase):

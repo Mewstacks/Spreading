@@ -901,6 +901,29 @@ class MapaDeRelacoesEmLoteTests(TestCase):
         self.assertIn(sem_link.id, preparadas)
         self.assertNotIn(sem_link.id, prontas)
 
+    def test_mesma_identidade_pode_pertencer_a_cupons_diferentes(self):
+        """Deduplicação é por campanha, nunca entre cupons independentes."""
+        from apps.scrapers.coupon_products import (
+            chave_produtos_cupom, mapa_relacoes_prontas,
+        )
+        primeiro = self._cupom_pronto("51")
+        segundo = self._cupom_pronto("52")
+        relacao = ProdutoCupom.objects.get(cupom=segundo)
+        produto = relacao.produto
+        produto.nome = ProdutoCupom.objects.get(cupom=primeiro).produto.nome
+        produto.link_produto = "https://www.mercadolivre.com.br/p/MLB51"
+        produto.save(update_fields=["nome", "link_produto"])
+        CupomPreparacao.objects.filter(cupom=segundo).update(
+            produtos_chave=chave_produtos_cupom(segundo))
+
+        preparadas, prontas = mapa_relacoes_prontas(
+            self.user, [primeiro, segundo])
+
+        self.assertIn(primeiro.id, preparadas)
+        self.assertIn(segundo.id, preparadas)
+        self.assertIn(primeiro.id, prontas)
+        self.assertIn(segundo.id, prontas)
+
 
 class SemanticaDePrecoDoCatalogoMLTests(TestCase):
     """`preco_com_cupom` é a VITRINE, nos dois produtores do catálogo de cupom.
