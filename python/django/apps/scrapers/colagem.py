@@ -23,6 +23,8 @@ _TELA = 1080          # lado da imagem final (quadrada, padrão de card)
 _MARGEM = 12          # respiro branco entre as células
 _FUNDO = (255, 255, 255)
 _MAX_BYTES = 8 * 1024 * 1024
+_LIMIAR_FUNDO_BRANCO = 12
+_RESPIRO_PRODUTO = 0.06
 
 
 def _url_publica(url):
@@ -120,10 +122,59 @@ def montar_colagem_itens(itens, max_itens=9):
         produto = item.get("produto")
         img = _baixar_imagem(getattr(produto, "imagem_url", ""))
         if img is not None:
+            if str(getattr(produto, "marketplace", "")).casefold() == "amazon":
+                img = _enquadrar_produto_amazon(img)
             imagens.append(img)
             validos.append(item)
     b64, mime = _montar_imagens(imagens)
     return b64, mime, validos
+
+
+def _enquadrar_produto_amazon(img):
+    """Remove o excesso de fundo branco sem cortar o produto da Amazon.
+
+    As imagens do catálogo costumam vir quadradas, mas com o produto ocupando só o
+    centro. Se a colagem reduz esse quadrado inteiro, a margem branca também é
+    reduzida e o produto fica minúsculo. O limiar tolera a compressão JPEG do fundo;
+    o respiro devolvido ao redor do conteúdo evita um enquadramento apertado demais.
+    """
+    from PIL import Image, ImageChops
+
+    rgb = img.convert("RGB")
+    branco = Image.new("RGB", rgb.size, _FUNDO)
+    diferenca = ImageChops.difference(rgb, branco).convert("L")
+    mascara = diferenca.point(
+        lambda pixel: 255 if pixel > _LIMIAR_FUNDO_BRANCO else 0,
+        mode="1",
+    )
+    bbox = mascara.getbbox()
+    if not bbox:
+        return rgb
+
+    esquerda, topo, direita, base = bbox
+    largura = direita - esquerda
+    altura = base - topo
+    respiro_x = max(4, round(largura * _RESPIRO_PRODUTO))
+    respiro_y = max(4, round(altura * _RESPIRO_PRODUTO))
+    caixa = (
+        max(0, esquerda - respiro_x),
+        max(0, topo - respiro_y),
+        min(rgb.width, direita + respiro_x),
+        min(rgb.height, base + respiro_y),
+    )
+    recorte = rgb.crop(caixa)
+    escala = min(rgb.width / recorte.width, rgb.height / recorte.height)
+    tamanho = (
+        max(1, round(recorte.width * escala)),
+        max(1, round(recorte.height * escala)),
+    )
+    ampliado = recorte.resize(tamanho, Image.Resampling.LANCZOS)
+    enquadrada = Image.new("RGB", rgb.size, _FUNDO)
+    enquadrada.paste(
+        ampliado,
+        ((rgb.width - ampliado.width) // 2, (rgb.height - ampliado.height) // 2),
+    )
+    return enquadrada
 
 
 def _montar_imagens(imagens):

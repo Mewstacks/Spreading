@@ -431,9 +431,14 @@ class MercadoLivreCouponHTMLTests(SimpleTestCase):
 
 
 class CouponCollageTests(SimpleTestCase):
-    def _items(self, n):
-        return [{"produto": SimpleNamespace(imagem_url=f"https://img.example/{i}.jpg")}
-                for i in range(n)]
+    def _items(self, n, marketplace="mercadolivre"):
+        return [
+            {"produto": SimpleNamespace(
+                imagem_url=f"https://img.example/{i}.jpg",
+                marketplace=marketplace,
+            )}
+            for i in range(n)
+        ]
 
     def test_colagens_de_1_5_e_9_fotos_sao_jpeg_quadrado_1080(self):
         from PIL import Image
@@ -460,6 +465,41 @@ class CouponCollageTests(SimpleTestCase):
         ]):
             _b64, _mime, validos = montar_colagem_itens(itens)
         self.assertEqual(validos, [itens[0], itens[2]])
+
+    def test_produto_amazon_ocupa_o_card_sem_perder_o_fundo_branco(self):
+        from PIL import Image, ImageDraw
+        from apps.scrapers.colagem import montar_colagem_itens
+
+        origem = Image.new("RGB", (1000, 1000), "white")
+        ImageDraw.Draw(origem).rectangle((400, 400, 600, 600), fill="black")
+
+        with patch("apps.scrapers.colagem._baixar_imagem", return_value=origem):
+            b64, _mime, _validos = montar_colagem_itens(
+                self._items(1, marketplace="amazon"))
+
+        imagem = Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
+        pixels_escuros = imagem.convert("L").point(lambda pixel: 255 if pixel < 64 else 0)
+        esquerda, topo, direita, base = pixels_escuros.getbbox()
+
+        self.assertGreater(direita - esquerda, 800)
+        self.assertGreater(base - topo, 800)
+        self.assertGreaterEqual(imagem.getpixel((0, 0))[0], 250)
+
+    def test_margem_branca_de_outros_marketplaces_nao_e_recortada(self):
+        from PIL import Image, ImageDraw
+        from apps.scrapers.colagem import montar_colagem_itens
+
+        origem = Image.new("RGB", (1000, 1000), "white")
+        ImageDraw.Draw(origem).rectangle((400, 400, 600, 600), fill="black")
+
+        with patch("apps.scrapers.colagem._baixar_imagem", return_value=origem):
+            b64, _mime, _validos = montar_colagem_itens(self._items(1))
+
+        imagem = Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
+        pixels_escuros = imagem.convert("L").point(lambda pixel: 255 if pixel < 64 else 0)
+        esquerda, _topo, direita, _base = pixels_escuros.getbbox()
+
+        self.assertLess(direita - esquerda, 300)
 
     def test_urls_locais_e_nao_https_sao_rejeitadas(self):
         from apps.scrapers.colagem import _url_publica
