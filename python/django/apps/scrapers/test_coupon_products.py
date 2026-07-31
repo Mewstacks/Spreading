@@ -485,6 +485,26 @@ class CouponCollageTests(SimpleTestCase):
         self.assertGreater(base - topo, 800)
         self.assertGreaterEqual(imagem.getpixel((0, 0))[0], 250)
 
+    def test_miniaturas_pequenas_da_amazon_sao_ampliadas_na_grade(self):
+        from PIL import Image
+        from apps.scrapers.colagem import montar_colagem_itens
+
+        miniaturas = [
+            Image.new("RGB", (199, 226), "black"),
+            Image.new("RGB", (226, 141), "black"),
+        ]
+        with patch("apps.scrapers.colagem._baixar_imagem", side_effect=miniaturas):
+            b64, _mime, _validos = montar_colagem_itens(
+                self._items(2, marketplace="amazon"))
+
+        imagem = Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
+        for esquerda_celula in (0, 540):
+            celula = imagem.crop((esquerda_celula, 0, esquerda_celula + 540, 1080))
+            pixels_escuros = celula.convert("L").point(
+                lambda pixel: 255 if pixel < 64 else 0)
+            esquerda, _topo, direita, _base = pixels_escuros.getbbox()
+            self.assertGreater(direita - esquerda, 400)
+
     def test_margem_branca_de_outros_marketplaces_nao_e_recortada(self):
         from PIL import Image, ImageDraw
         from apps.scrapers.colagem import montar_colagem_itens

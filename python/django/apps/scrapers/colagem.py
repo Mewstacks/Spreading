@@ -131,12 +131,12 @@ def montar_colagem_itens(itens, max_itens=9):
 
 
 def _enquadrar_produto_amazon(img):
-    """Remove o excesso de fundo branco sem cortar o produto da Amazon.
+    """Amplia a miniatura e remove o excesso de branco sem cortar o produto.
 
-    As imagens do catálogo costumam vir quadradas, mas com o produto ocupando só o
-    centro. Se a colagem reduz esse quadrado inteiro, a margem branca também é
-    reduzida e o produto fica minúsculo. O limiar tolera a compressão JPEG do fundo;
-    o respiro devolvido ao redor do conteúdo evita um enquadramento apertado demais.
+    A Amazon pode devolver arquivos de apenas 226 px. ``thumbnail`` (usado na
+    colagem) só reduz e, por isso, essas imagens ficavam no tamanho original dentro
+    de células com mais de 500 px. O canvas quadrado em alta resolução permite a
+    ampliação proporcional e mantém o fundo branco uniforme em qualquer grade.
     """
     from PIL import Image, ImageChops
 
@@ -148,31 +148,32 @@ def _enquadrar_produto_amazon(img):
         mode="1",
     )
     bbox = mascara.getbbox()
-    if not bbox:
-        return rgb
+    recorte = rgb
+    if bbox:
+        esquerda, topo, direita, base = bbox
+        largura = direita - esquerda
+        altura = base - topo
+        respiro_x = max(4, round(largura * _RESPIRO_PRODUTO))
+        respiro_y = max(4, round(altura * _RESPIRO_PRODUTO))
+        caixa = (
+            max(0, esquerda - respiro_x),
+            max(0, topo - respiro_y),
+            min(rgb.width, direita + respiro_x),
+            min(rgb.height, base + respiro_y),
+        )
+        recorte = rgb.crop(caixa)
 
-    esquerda, topo, direita, base = bbox
-    largura = direita - esquerda
-    altura = base - topo
-    respiro_x = max(4, round(largura * _RESPIRO_PRODUTO))
-    respiro_y = max(4, round(altura * _RESPIRO_PRODUTO))
-    caixa = (
-        max(0, esquerda - respiro_x),
-        max(0, topo - respiro_y),
-        min(rgb.width, direita + respiro_x),
-        min(rgb.height, base + respiro_y),
-    )
-    recorte = rgb.crop(caixa)
-    escala = min(rgb.width / recorte.width, rgb.height / recorte.height)
+    alvo = _TELA - 2 * _MARGEM
+    escala = min(alvo / recorte.width, alvo / recorte.height)
     tamanho = (
         max(1, round(recorte.width * escala)),
         max(1, round(recorte.height * escala)),
     )
     ampliado = recorte.resize(tamanho, Image.Resampling.LANCZOS)
-    enquadrada = Image.new("RGB", rgb.size, _FUNDO)
+    enquadrada = Image.new("RGB", (_TELA, _TELA), _FUNDO)
     enquadrada.paste(
         ampliado,
-        ((rgb.width - ampliado.width) // 2, (rgb.height - ampliado.height) // 2),
+        ((_TELA - ampliado.width) // 2, (_TELA - ampliado.height) // 2),
     )
     return enquadrada
 
