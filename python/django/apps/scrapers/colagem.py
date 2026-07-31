@@ -138,15 +138,14 @@ def _enquadrar_produto_amazon(img):
     de células com mais de 500 px. O canvas quadrado em alta resolução permite a
     ampliação proporcional e mantém o fundo branco uniforme em qualquer grade.
     """
-    from PIL import Image, ImageChops
+    from PIL import Image, ImageChops, ImageFilter
 
     rgb = img.convert("RGB")
     branco = Image.new("RGB", rgb.size, _FUNDO)
     diferenca = ImageChops.difference(rgb, branco).convert("L")
     mascara = diferenca.point(
         lambda pixel: 255 if pixel > _LIMIAR_FUNDO_BRANCO else 0,
-        mode="1",
-    )
+    ).filter(ImageFilter.MedianFilter(size=5))
     bbox = mascara.getbbox()
     recorte = rgb
     if bbox:
