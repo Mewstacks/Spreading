@@ -1718,6 +1718,21 @@ class TopPromocoesFilterTests(TestCase):
         self.assertNotIn(
             incoerente.id, [p.id for p in response.context["produtos"]])
 
+    def test_product_without_real_discount_is_hidden(self):
+        sem_desconto = self._criar_produto(
+            marketplace="amazon", owner=self.user,
+            nome="Produto com cupom sem abatimento confirmado",
+            categoria="Outros", macro_categoria="Outros",
+            preco_sem_desconto=2111.10, preco_com_cupom=2111.10,
+            link_produto="https://example.com/sem-desconto",
+        )
+
+        response = self.client.get(
+            self.url, {"q": "Produto com cupom sem abatimento confirmado"})
+
+        self.assertNotIn(
+            sem_desconto.id, [p.id for p in response.context["produtos"]])
+
     def test_same_ml_item_and_title_uses_only_latest_observation(self):
         first = self._criar_produto(
             marketplace="mercadolivre", nome="Top Puma repetido",

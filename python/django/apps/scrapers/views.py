@@ -1743,6 +1743,10 @@ def top_promocoes(request):
             output_field=FloatField(),
         ),
     ).filter(
+        # Produto com preço "de" igual ao "por" não é promoção. Além de
+        # poluir o ranking, ele chegava ao modo padrão da Amazon com badge 0% e
+        # botão de envio, embora nenhum abatimento estivesse confirmado.
+        percent__gt=0,
         # A seleção automática já rejeita 90%+: além de raros, esses valores
         # quase sempre são `savingBasis` em escala errada (ex.: 63990 vs 63,99).
         # A vitrine precisa aplicar a mesma barreira, inclusive para fontes novas.
