@@ -110,9 +110,136 @@ class RevalidacaoTests(TestCase):
         self.assertTrue(
             PrecoHistorico.objects.filter(marketplace="amazon", preco=80.0).exists())
 
-    def test_mercado_livre_nao_e_revalidado_aqui(self):
-        self.produto.marketplace = "mercadolivre"
+    def test_marketplace_sem_fonte_ao_vivo_segue_com_o_banco(self):
+        self.produto.marketplace = "awin"
         self.produto.save(update_fields=["marketplace"])
         resultado = preco_ao_vivo.revalidar(self.produto, usuario=self.user)
         self.assertTrue(resultado["ok"])
         self.assertEqual(resultado["fonte"], "nao_suportado")
+
+    def test_cupom_de_ativacao_da_amazon_nao_e_revalidado(self):
+        """O pior desfecho possível: achatar o pós-cupom contra a vitrine.
+
+        A Creators API devolve a VITRINE. Se revalidássemos um item cujo preço
+        anunciado é o `preco_efetivo` (cupom já garantido na página oficial), a
+        mensagem passaria a prometer o valor maior logo abaixo de "ative o cupom".
+        """
+        self.produto.preco_efetivo = 70.0  # < preco_com_cupom (100)
+        self.produto.save(update_fields=["preco_efetivo"])
+
+        resultado = self._revalidar(_item_api(100.0, 200.0))
+
+        self.assertTrue(resultado["ok"])
+        self.assertEqual(resultado["fonte"], "cupom_ativacao_nao_revalidavel")
+        self.produto.refresh_from_db()
+        self.assertEqual(self.produto.preco_efetivo, 70.0)
+        self.assertLess(self.produto.preco_efetivo, self.produto.preco_com_cupom)
+
+
+def _relatorio(preco=0.0, preco_de=0.0, bloqueio="", morto=False):
+    return {"preco": preco, "preco_de": preco_de, "url_final": "",
+            "bloqueio": bloqueio, "morto": morto}
+
+
+class RevalidacaoMercadoLivreTests(TestCase):
+    """O ML é o pool principal e não era revalidado — a causa do preço errado.
+
+    Só o GET autenticado passa pelo anti-bot (ver link_http), então tudo aqui
+    mocka `sessao_ml` + `relatorio_de_preco`.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("preco-ml")
+        self.produto = Produto.objects.create(
+            owner=None, marketplace="mercadolivre", nome="Smart TV 50",
+            origem="oferta", estado="ativo",
+            link_produto="https://www.mercadolivre.com.br/tv/p/MLB123",
+            preco_sem_desconto=2499.0, preco_com_cupom=1799.0, preco_efetivo=1799.0,
+            frase_llm="TÍTULO ANTIGO", nome_llm="Smart TV",
+        )
+
+    def _revalidar(self, relatorio, *, configuracao=None, url="", sessao=object()):
+        with patch.object(preco_ao_vivo, "sessao_ml", return_value=sessao), \
+             patch("apps.scrapers.scraper_mercadolivre.link_http.relatorio_de_preco",
+                   return_value=relatorio) as chamada:
+            resultado = preco_ao_vivo.revalidar(
+                self.produto, usuario=self.user, configuracao=configuracao, url=url)
+        return resultado, chamada
+
+    def test_preco_igual_nao_grava_nada(self):
+        resultado, _ = self._revalidar(_relatorio(1799.0, 2499.0))
+        self.assertTrue(resultado["ok"])
+        self.assertFalse(resultado["mudou"])
+        self.assertEqual(resultado["fonte"], "ml-http-sessao")
+
+    def test_preco_que_caiu_atualiza_e_segue(self):
+        resultado, _ = self._revalidar(_relatorio(1499.0, 2499.0))
+        self.assertTrue(resultado["ok"])
+        self.assertTrue(resultado["mudou"])
+        self.produto.refresh_from_db()
+        self.assertEqual(self.produto.preco_com_cupom, 1499.0)
+        self.assertEqual(self.produto.preco_efetivo, 1499.0)
+
+    def test_preco_que_subiu_derrubando_o_desconto_aborta(self):
+        config = ConfiguracaoEnvio.objects.create(
+            owner=self.user, grupo_id="123@g.us", min_desconto_percent=15.0)
+        # 2450 de 2499 = 2%, abaixo do mínimo.
+        resultado, _ = self._revalidar(
+            _relatorio(2450.0, 2499.0), configuracao=config)
+        self.assertFalse(resultado["ok"])
+        self.assertIn("desconto caiu", resultado["motivo"])
+
+    def test_confere_a_url_publicada_e_nao_o_link_do_produto(self):
+        """É o GET que segue meli.la -> PDP: a página que o assinante abre."""
+        _resultado, chamada = self._revalidar(
+            _relatorio(1799.0, 2499.0), url="https://meli.la/abc")
+        self.assertEqual(chamada.call_args.args[0], "https://meli.la/abc")
+
+    def test_sem_url_cai_no_link_do_produto(self):
+        _resultado, chamada = self._revalidar(_relatorio(1799.0, 2499.0))
+        self.assertEqual(chamada.call_args.args[0], self.produto.link_produto)
+
+    def test_challenge_do_anti_bot_e_inconclusivo_e_nao_bloqueia(self):
+        """A regra central: uma janela de bloqueio não pode parar os envios."""
+        resultado, _ = self._revalidar(
+            _relatorio(bloqueio="o Mercado Livre exigiu verificação"))
+        self.assertTrue(resultado["ok"])
+        self.assertEqual(resultado["fonte"], "inconclusivo")
+        self.produto.refresh_from_db()
+        self.assertEqual(self.produto.preco_com_cupom, 1799.0)
+
+    def test_sem_sessao_do_ml_e_inconclusivo(self):
+        resultado, _ = self._revalidar(_relatorio(1499.0), sessao=None)
+        self.assertTrue(resultado["ok"])
+        self.assertEqual(resultado["fonte"], "inconclusivo")
+        self.produto.refresh_from_db()
+        self.assertEqual(self.produto.preco_com_cupom, 1799.0)
+
+    def test_historico_vai_com_o_marketplace_certo(self):
+        """Gravar como "amazon" quebraria o selo de mínima de 30 dias do ML."""
+        self._revalidar(_relatorio(1499.0, 2499.0))
+        self.assertTrue(PrecoHistorico.objects.filter(
+            marketplace="mercadolivre", preco=1499.0).exists())
+        self.assertFalse(
+            PrecoHistorico.objects.filter(marketplace="amazon").exists())
+
+    def test_rls_negando_a_escrita_ainda_corrige_a_mensagem(self):
+        """Sob o RLS do usuário o pool compartilhado não é gravável.
+
+        O que a mensagem lê é o objeto em memória — o save é best-effort.
+        """
+        with patch.object(Produto, "save", side_effect=Exception("RLS: denied")):
+            resultado, _ = self._revalidar(_relatorio(1499.0, 2499.0))
+
+        self.assertTrue(resultado["ok"])
+        self.assertEqual(self.produto.preco_com_cupom, 1499.0)  # em memória
+        self.produto.refresh_from_db()
+        self.assertEqual(self.produto.preco_com_cupom, 1799.0)  # banco intacto
+
+    def test_flag_desligada_nao_toca_a_rede(self):
+        with self.settings(PRECO_REVALIDA_ML=False), \
+             patch.object(preco_ao_vivo, "sessao_ml") as sessao:
+            resultado = preco_ao_vivo.revalidar(self.produto, usuario=self.user)
+        self.assertTrue(resultado["ok"])
+        self.assertEqual(resultado["fonte"], "desligado")
+        sessao.assert_not_called()

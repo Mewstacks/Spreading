@@ -268,6 +268,99 @@ class VereditoDaSondaTests(TestCase):
         )
 
 
+class VereditoDoLinkBuilderTests(TestCase):
+    """O veredito do PORTAL DE AFILIADOS, isolado do veredito do site.
+
+    A separação é o ponto: o portal recusar o cookie não pode bloquear a raspagem
+    do site, que usa a MESMA credencial e continua funcionando. Se este veredito
+    alimentasse `status`, três suspeitas do Link Builder derrubariam o catálogo
+    inteiro da organização.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("lb-probe", password="test")
+        self.org = self.user.personal_organization
+        self.state = {"cookies": [{"name": "ssid", "value": "x"}], "origins": []}
+        save_storage_state(self.user, self.state)
+
+    def _suspeitar(self, vezes, *, espacadas=True):
+        from apps.accounts.ml_sessions import (
+            PROBE_JANELA_S, registrar_veredito_linkbuilder,
+        )
+
+        for _ in range(vezes):
+            registrar_veredito_linkbuilder(self.org, "suspeito", "portal pediu login")
+            if espacadas:
+                MercadoLivreSession.objects.filter(organization=self.org).update(
+                    lb_last_probe_at=timezone.now() - timedelta(seconds=PROBE_JANELA_S + 1),
+                )
+        return MercadoLivreSession.objects.get(organization=self.org)
+
+    def test_suspeitas_do_portal_nunca_bloqueiam_a_sessao_do_site(self):
+        from apps.accounts.ml_sessions import PROBE_FALHAS_PARA_DESCONECTAR
+
+        record = self._suspeitar(PROBE_FALHAS_PARA_DESCONECTAR + 2)
+        self.assertGreaterEqual(record.lb_probe_failures, PROBE_FALHAS_PARA_DESCONECTAR)
+        # `status` intocado: a raspagem segue autorizada.
+        self.assertEqual(record.status, "active")
+        self.assertTrue(has_storage_state(self.user))
+        self.assertEqual(load_storage_state(self.user), self.state)
+
+    def test_os_dois_vereditos_nao_se_misturam(self):
+        from apps.accounts.ml_sessions import registrar_veredito
+
+        registrar_veredito(self.org, "suspeito", "site")
+        self._suspeitar(1)
+        record = MercadoLivreSession.objects.get(organization=self.org)
+        self.assertEqual(record.probe_failures, 1)
+        self.assertEqual(record.lb_probe_failures, 1)
+        registrar_veredito(self.org, "conectado")
+        record.refresh_from_db()
+        # Site voltou; o portal segue suspeito, que é exatamente o caso real.
+        self.assertEqual(record.probe_failures, 0)
+        self.assertEqual(record.lb_probe_failures, 1)
+
+    def test_rajada_simultanea_conta_como_uma_suspeita(self):
+        record = self._suspeitar(5, espacadas=False)
+        self.assertEqual(record.lb_probe_failures, 1)
+
+    def test_conectado_zera_o_contador(self):
+        from apps.accounts.ml_sessions import registrar_veredito_linkbuilder
+
+        self._suspeitar(2)
+        registrar_veredito_linkbuilder(self.org, "conectado")
+        record = MercadoLivreSession.objects.get(organization=self.org)
+        self.assertEqual(record.lb_probe_failures, 0)
+
+    def test_inconclusivo_nao_conta_falha(self):
+        from apps.accounts.ml_sessions import registrar_veredito_linkbuilder
+
+        registrar_veredito_linkbuilder(self.org, "inconclusivo", "anti-bot")
+        self.assertEqual(
+            MercadoLivreSession.objects.get(organization=self.org).lb_probe_failures, 0)
+
+    def test_reconectar_zera_o_historico_do_portal(self):
+        """O login novo atravessa o SSO do portal: as suspeitas eram sobre os
+        cookies antigos."""
+        self._suspeitar(2)
+        save_storage_state(self.user, self.state)
+        record = MercadoLivreSession.objects.get(organization=self.org)
+        self.assertEqual(record.lb_probe_failures, 0)
+        self.assertEqual(record.lb_last_probe_result, "")
+        self.assertIsNone(record.lb_last_probe_at)
+
+    def test_snapshot_devolve_chaves_sem_prefixo(self):
+        """conexoes._estado_do_registro traduz os dois escopos com o mesmo código."""
+        from apps.accounts.ml_sessions import linkbuilder_snapshot
+
+        self._suspeitar(1)
+        snap = linkbuilder_snapshot(self.org)
+        self.assertEqual(snap["probe_failures"], 1)
+        self.assertEqual(snap["last_probe_result"], "suspeito")
+        # "" e não "active": este escopo não tem status próprio, de propósito.
+        self.assertEqual(snap["status"], "")
+
+
 @override_settings(
     WA_CAPABILITY_PRIVATE_KEY=WA_PRIVATE,
     WA_CAPABILITY_KEY_ID="test-ed25519",

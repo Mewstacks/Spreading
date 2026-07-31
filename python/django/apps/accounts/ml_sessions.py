@@ -140,9 +140,17 @@ def save_storage_state(user, storage_state: dict) -> MercadoLivreSession:
     existing.last_probe_result = ""
     existing.probe_failures = 0
     existing.probe_reason = ""
+    # O mesmo vale para o histórico do Link Builder: o login novo passa pelo SSO do
+    # portal, então as suspeitas sobre os cookies antigos não valem mais.
+    existing.lb_last_probe_at = None
+    existing.lb_last_probe_result = ""
+    existing.lb_probe_failures = 0
+    existing.lb_probe_reason = ""
     existing.save(update_fields=[
         *encrypted.keys(), "status", "rotated_at", "updated_at",
         "last_probe_at", "last_probe_result", "probe_failures", "probe_reason",
+        "lb_last_probe_at", "lb_last_probe_result", "lb_probe_failures",
+        "lb_probe_reason",
     ])
     return existing
 
@@ -219,6 +227,82 @@ def registrar_veredito(organization, resultado: str, motivo: str = "") -> dict |
     }
     snapshot.update(campos)
     return snapshot
+
+
+def linkbuilder_snapshot(organization) -> dict | None:
+    """Veredito compartilhado da sonda do Link Builder (portal de afiliados).
+
+    Irmão de `probe_snapshot`, sobre as colunas `lb_*`. Devolve as chaves com os
+    nomes SEM prefixo para que `conexoes._estado_do_registro` traduza os dois
+    escopos com o mesmo código — a política de acúmulo é idêntica, só a coluna
+    muda. `status` vem sempre "" de propósito: ver o comentário do modelo.
+    """
+    if organization is None:
+        return None
+    linha = MercadoLivreSession.objects.filter(organization=organization).values(
+        "lb_last_probe_at", "lb_last_probe_result", "lb_probe_failures",
+        "lb_probe_reason",
+    ).first()
+    if linha is None:
+        return None
+    return {
+        "status": "",
+        "last_probe_at": linha["lb_last_probe_at"],
+        "last_probe_result": linha["lb_last_probe_result"],
+        "probe_failures": linha["lb_probe_failures"],
+        "probe_reason": linha["lb_probe_reason"],
+    }
+
+
+def registrar_veredito_linkbuilder(organization, resultado: str,
+                                   motivo: str = "") -> dict | None:
+    """Persiste o veredito do Link Builder, sem tocar em `status`.
+
+    Mesma política acumulativa e reversível de `registrar_veredito` — inclusive
+    PROBE_JANELA_S, pelo mesmo motivo (9 processos sondando em paralelo) — mas
+    isolada nas colunas `lb_*`. Não mexer em `status` é o ponto: o portal de
+    afiliados recusar o cookie não pode bloquear a raspagem do site, que usa a
+    mesma credencial e continua funcionando.
+    """
+    if organization is None:
+        return None
+    record = MercadoLivreSession.objects.filter(organization=organization).first()
+    if record is None:
+        return None
+
+    agora = timezone.now()
+    campos = {
+        "lb_last_probe_at": agora,
+        "lb_last_probe_result": resultado,
+        "lb_probe_reason": (motivo or "")[:200],
+    }
+    if resultado == "conectado":
+        campos["lb_probe_failures"] = 0
+    elif resultado == "suspeito":
+        falhas = record.lb_probe_failures
+        anterior = record.lb_last_probe_at
+        if (record.lb_last_probe_result != "suspeito" or anterior is None
+                or (agora - anterior).total_seconds() >= PROBE_JANELA_S):
+            falhas += 1
+        campos["lb_probe_failures"] = falhas
+    # "inconclusivo" (anti-bot, intersticial, 5xx) não mexe no contador.
+
+    MercadoLivreSession.objects.filter(pk=record.pk).update(**campos)
+    return {
+        "status": "",
+        "last_probe_at": campos["lb_last_probe_at"],
+        "last_probe_result": campos["lb_last_probe_result"],
+        "probe_failures": campos.get("lb_probe_failures", record.lb_probe_failures),
+        "probe_reason": campos["lb_probe_reason"],
+    }
+
+
+def registrar_veredito_linkbuilder_para_usuario(user, resultado: str,
+                                               motivo: str = "") -> dict | None:
+    """Atalho para quem tem usuário na mão (o próprio Link Builder, em link.py)."""
+    return registrar_veredito_linkbuilder(
+        organization_for_user(user) if user is not None else None, resultado, motivo,
+    )
 
 
 def delete_storage_state(user) -> bool:

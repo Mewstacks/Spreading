@@ -195,14 +195,33 @@
       <div class="panel-head">
         <span class="panel-ico ok"><i data-lucide="badge-check"></i></span>
         <div>
-          <strong>Conexão confirmada</strong>
-          <p class="hint">{% if relatorio %}O Spreading já pode acessar os relatórios autorizados desta conta.{% else %}Sua sessão foi validada e já pode ser usada para gerar links.{% endif %}</p>
+          {% comment %}
+          Título e dica são reescritos pelo JS quando o Link Builder recusa: "Conexão
+          confirmada · já pode ser usada para gerar links" ao lado de uma linha
+          vermelha era a mesma contradição de antes, só movida para dentro do painel.
+          {% endcomment %}
+          <strong id="ok-titulo">Conexão confirmada</strong>
+          <p class="hint" id="ok-hint">{% if relatorio %}O Spreading já pode acessar os relatórios autorizados desta conta.{% else %}Sua sessão foi validada e já pode ser usada para gerar links.{% endif %}</p>
         </div>
       </div>
       <div class="ok-rows">
         <div class="ok-row"><span class="k">Conta</span><span class="v">{{ marketplace_nome|default:"Mercado Livre" }}</span></div>
-        <div class="ok-row"><span class="k">Sessão</span><span class="badge badge-green"><span class="dot"></span>Ativa</span></div>
-        <div class="ok-row"><span class="k">{% if relatorio %}Relatórios{% else %}Link de afiliado{% endif %}</span><span class="v">{% if relatorio %}Acesso autorizado{% else %}Pronto para gerar{% endif %}</span></div>
+        <div class="ok-row"><span class="k">{% if relatorio %}Sessão{% else %}Site{% endif %}</span><span class="badge badge-green"><span class="dot"></span>Ativa</span></div>
+        {% comment %}
+        Segunda linha só no ML principal: o portal /afiliados/linkbuilder tem SSO
+        próprio (jms/msl) e pode recusar um cookie que o site ainda aceita. Enquanto
+        esta linha não existia, a tela dizia "Ativa" e o clique em "Gerar links de
+        afiliado" respondia "sessão expirada" — o usuário não tinha como saber antes
+        de tentar. O badge é preenchido pelo poll (#lb-badge), a partir do bloco
+        `linkbuilder` de ml_conexao.status().
+        {% endcomment %}
+        {% if not relatorio %}
+        <div class="ok-row" id="lb-row" style="display:none;">
+          <span class="k">Link Builder</span>
+          <span class="badge" id="lb-badge"><span class="dot"></span><span id="lb-badge-txt">—</span></span>
+        </div>
+        {% endif %}
+        <div class="ok-row"><span class="k">{% if relatorio %}Relatórios{% else %}Link de afiliado{% endif %}</span><span class="v" id="lb-resumo">{% if relatorio %}Acesso autorizado{% else %}Pronto para gerar{% endif %}</span></div>
       </div>
       <div class="actions">
         <button id="reconectar-btn" class="btn btn-ghost btn-sm"><i data-lucide="refresh-cw"></i> Reconectar</button>
@@ -667,8 +686,13 @@
     // - `alerta_conexao`: conexão VIVA cuja última sonda não passou (o anti-bot do
     //   ML barra requisições legítimas vindas do datacenter). Vai no box de aviso,
     //   e não no de erro, porque não há nada para o usuário fazer ainda.
+    // Terceiro aviso possível: o site aceita a sessão mas o Link Builder não. É a
+    // única falha que a tela antes não sabia contar, e a que mandava o usuário
+    // procurar uma "segunda conexão" que não existe.
+    const lb = state.linkbuilder || {};
+    const avisoLb = lb.medido ? (lb.ok ? (lb.alerta || '') : (lb.motivo || '')) : '';
     const aviso = state.aviso
-      || (!state.auth_valido ? state.motivo_desconexao : state.alerta_conexao)
+      || (!state.auth_valido ? state.motivo_desconexao : (state.alerta_conexao || avisoLb))
       || '';
     if (aviso) {
       warnText.textContent = aviso;
@@ -680,6 +704,43 @@
     if (connecting) startLive(); else stopLive();
     show(startArea, phase === 'idle' || phase === 'erro', 'grid');
     show(okArea, phase === 'conectado', 'grid');
+    pintarLinkBuilder(lb);
+  }
+
+  // Três estados, não dois: verde (portal abriu), amarelo (recusou a última
+  // verificação, mas ainda não é logout — o anti-bot do ML produz isso do IP do
+  // datacenter) e vermelho (pediu login de fato). O mesmo botão "Reconectar" acima
+  // resolve os três, porque é a MESMA conexão — só o SSO é separado.
+  function pintarLinkBuilder(lb) {
+    const row = document.getElementById('lb-row');
+    if (!row) return;
+    show(row, Boolean(lb && lb.medido), 'flex');
+    if (!lb || !lb.medido) return;
+    const badge = document.getElementById('lb-badge');
+    const texto = document.getElementById('lb-badge-txt');
+    const resumo = document.getElementById('lb-resumo');
+    const instavel = Boolean(lb.ok && lb.alerta);
+    badge.className = 'badge ' + (!lb.ok ? 'badge-red' : (instavel ? 'badge-yellow' : 'badge-green'));
+    texto.textContent = !lb.ok ? 'Pede login' : (instavel ? 'Instável' : 'Pronto');
+    if (resumo) {
+      resumo.textContent = lb.ok
+        ? (instavel ? 'Pode falhar — reconecte se der erro' : 'Pronto para gerar')
+        : 'Reconecte para voltar a gerar';
+    }
+    const titulo = document.getElementById('ok-titulo');
+    const hint = document.getElementById('ok-hint');
+    if (!titulo || !hint) return;
+    if (lb.ok) {
+      titulo.textContent = 'Conexão confirmada';
+      hint.textContent = instavel
+        ? 'A conta está conectada, mas o Link Builder recusou a última verificação. '
+          + 'Se a geração de links falhar, use Reconectar.'
+        : 'Sua sessão foi validada e já pode ser usada para gerar links.';
+    } else {
+      titulo.textContent = 'Conta conectada, Link Builder recusando';
+      hint.textContent = 'O login do site está válido, mas o portal de afiliados pediu '
+        + 'login de novo. É a mesma conexão: use Reconectar aqui e a geração de links volta.';
+    }
   }
   async function poll() {
     try {

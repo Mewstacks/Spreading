@@ -54,6 +54,20 @@ class Produto(models.Model):
     campanha_id = models.CharField(max_length=100, db_index=True, blank=True, default="")
     origem = models.CharField(max_length=20, default="cupom", db_index=True)  # 'cupom' | 'oferta'
     nome = models.CharField(max_length=255)
+    # SEMÂNTICA DOS TRÊS CAMPOS DE PREÇO — leia antes de gravar em qualquer um.
+    #   preco_sem_desconto: preço de lista, o "DE" riscado do card/PDP.
+    #   preco_com_cupom:    a VITRINE, ou seja, o "POR" que a página mostra ao abrir
+    #                       o link. O nome é legado e engana: NÃO é o preço depois
+    #                       de aplicar cupom nenhum.
+    #   preco_efetivo:      o que o cliente realmente paga. Só difere da vitrine em
+    #                       fonte de cupom-de-ativação (hoje a página oficial de
+    #                       cupons da Amazon), onde o abatimento já está garantido.
+    # Havia dois produtores gravando significados diferentes em preco_com_cupom: o
+    # caminho de cupom do ML salvava aqui o preço JÁ descontado, e coupon_products
+    # .calcular_precos descontava o cupom de novo em cima — a mensagem anunciava um
+    # valor que loja nenhuma cobrava. Quem for escrever o terceiro produtor: a
+    # vitrine vai em preco_com_cupom, e o desconto de cupom é calculado na hora de
+    # publicar, nunca persistido aqui.
     preco_sem_desconto = models.FloatField()
     preco_com_cupom = models.FloatField()
     link_produto = models.URLField(max_length=1000)

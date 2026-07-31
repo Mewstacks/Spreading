@@ -41,6 +41,13 @@ _URL_SONDA_ML = "https://myaccount.mercadolivre.com.br/my_purchases/list"
 # e link.py:57-66 — mantidos em sincronia de propósito.
 _MARCAS_LOGIN = ("/login", "/lgz/", "/registration", "loginhub")
 
+# Sonda do PORTAL DE AFILIADOS. Mesma URL que link._LB_URL abre no Chromium, sem
+# o fragmento (#hub não viaja em HTTP). O portal tem SSO próprio (jms/msl): um
+# cookie que ainda vale em mercadolivre.com.br pode ser recusado aqui, e era
+# justamente isso que nenhuma tela media — o usuário via tudo verde e a geração
+# de links falhava com "sessão expirada".
+_URL_SONDA_LINKBUILDER = "https://www.mercadolivre.com.br/afiliados/linkbuilder"
+
 
 @dataclass
 class Estado:
@@ -205,23 +212,30 @@ def _sondar_e_registrar(user, organization, agora) -> Estado:
     return _estado_do_registro(registro, "sonda", agora)
 
 
-def _estado_do_registro(registro: dict, fonte: str, agora) -> Estado:
-    """Traduz o veredito persistido no Estado que a tela renderiza."""
+def _estado_do_registro(registro: dict, fonte: str, agora, *,
+                        servico: str = "Mercado Livre",
+                        motivo_expirado: str = "Sessão do Mercado Livre expirou — "
+                                               "reconecte sua conta.",
+                        alerta_instavel: str = "Conexão instável com o Mercado Livre — "
+                                               "reconecte se o problema persistir.") -> Estado:
+    """Traduz o veredito persistido no Estado que a tela renderiza.
+
+    Serve os dois escopos (site principal e Link Builder): a política de acúmulo é
+    a mesma, só mudam o nome do serviço e os textos. Para o Link Builder,
+    `registro["status"]` vem sempre "" — ver o comentário em
+    `ml_sessions.registrar_veredito_linkbuilder`.
+    """
     from apps.accounts.ml_sessions import PROBE_FALHAS_PARA_DESCONECTAR
 
     falhas = registro.get("probe_failures") or 0
     if registro.get("status") == "expired" or falhas >= PROBE_FALHAS_PARA_DESCONECTAR:
-        return Estado(False, "Mercado Livre", fonte,
-                      "Sessão do Mercado Livre expirou — reconecte sua conta.",
-                      "expirado", agora)
+        return Estado(False, servico, fonte, motivo_expirado, "expirado", agora)
     if falhas:
         # Suspeita isolada: a conexão SEGUE valendo. O ML responde 302→login/403 a
         # requisições autenticadas quando o anti-bot entra no caminho, e derrubar a
         # conexão aqui desconectava o usuário por ruído de infraestrutura.
-        return Estado(True, "Mercado Livre", fonte, "", "", agora,
-                      alerta="Conexão instável com o Mercado Livre — "
-                             "reconecte se o problema persistir.")
-    return Estado(True, "Mercado Livre", fonte, "", "", agora)
+        return Estado(True, servico, fonte, "", "", agora, alerta=alerta_instavel)
+    return Estado(True, servico, fonte, "", "", agora)
 
 
 def _cachear(chave: str, estado: Estado) -> Estado:
@@ -274,15 +288,149 @@ def sondar_sessao_ml(storage_state) -> tuple:
     return "inconclusivo", f"o ML respondeu {r.status_code}"
 
 
-def _chave_ml_org(organization) -> str:
+def sondar_portal_afiliados_ml(storage_state) -> tuple:
+    """O portal de afiliados aceita esta sessão? → (veredito, motivo)
+
+    Irmã de `sondar_sessao_ml`, com o mesmo vocabulário de veredito e as mesmas
+    regras — inclusive 403 → "inconclusivo", que no IP de datacenter da Fly é
+    assinatura do gateway anti-bot e não logout. A diferença é só o alvo: aqui o
+    SSO do portal (jms/msl), que é o que a geração de link realmente atravessa.
+
+    Sem Chromium, pelo mesmo motivo declarado em `sondar_sessao_ml`: isto roda em
+    request de tela e no polling da Saúde.
+    """
+    from apps.scrapers.ml_auth import http_session
+    from apps.scrapers.scraper_mercadolivre.link_http import _CAMINHOS_INTERSTICIAIS
+
+    try:
+        sessao = http_session(storage_state)
+    except Exception as e:
+        return "inconclusivo", f"não foi possível ler a sessão: {e}"
+    if not len(sessao.cookies):
+        return "suspeito", "sessão salva não tem cookies"
+
+    try:
+        r = sessao.get(_URL_SONDA_LINKBUILDER, timeout=8, allow_redirects=False)
+    except Exception as e:
+        return "inconclusivo", str(e)
+
+    destino = (r.headers.get("Location") or "").lower()
+    if r.status_code in (301, 302, 303, 307, 308):
+        if any(p in destino for p in _CAMINHOS_INTERSTICIAIS):
+            # Verificação interposta: a conta segue conectada, o gateway só pediu
+            # confirmação. Mesma leitura de link._pagina_intersticial.
+            return "inconclusivo", "o ML pediu verificação de segurança"
+        if any(m in destino for m in _MARCAS_LOGIN):
+            return "suspeito", "o portal de afiliados redirecionou para o login"
+        return "inconclusivo", f"redirect inesperado para {destino[:80]}"
+    if r.status_code == 200:
+        return "conectado", ""
+    if r.status_code == 401:
+        return "suspeito", "o portal de afiliados respondeu 401"
+    if r.status_code == 403:
+        return "inconclusivo", "o ML respondeu 403 (bloqueio de bot, não logout)"
+    return "inconclusivo", f"o portal de afiliados respondeu {r.status_code}"
+
+
+_MOTIVO_LB_EXPIRADO = ("O Link Builder do Mercado Livre está pedindo login de novo. "
+                       "Reconecte sua conta para voltar a gerar links de afiliado.")
+_ALERTA_LB_INSTAVEL = ("O Link Builder recusou a última verificação — se a geração "
+                       "de links falhar, reconecte o Mercado Livre.")
+
+
+def estado_ml_linkbuilder(user=None, usar_cache: bool = True) -> Estado:
+    """A sessão salva serve para GERAR LINKS (portal de afiliados)?
+
+    Mesma arquitetura de três camadas de `estado_ml` (cache de processo → veredito
+    no banco → sonda HTTP) sobre as colunas `lb_*`. Existe porque `estado_ml` mede
+    `myaccount.mercadolivre.com.br` e o Link Builder mora atrás de outro SSO: sem
+    esta função, toda tela dizia "conectado" e só o clique em "Gerar links de
+    afiliado" descobria o contrário.
+
+    Nunca reporta desconectado quando não existe sessão nenhuma — nesse caso o
+    problema é o anterior (`estado_ml`), e duplicar o aviso confunde mais do que
+    ajuda.
+    """
+    from apps.accounts.models import organization_for_user
+    from apps.accounts import ml_sessions
+
+    agora = timezone.now()
+    organization = organization_for_user(user) if user is not None else None
+    if organization is None:
+        return Estado(False, "Link Builder", "banco",
+                      "Nenhuma sessão do Mercado Livre — conecte sua conta.",
+                      "sem_sessao", agora)
+
+    chave = _chave_ml_org(organization, escopo="linkbuilder")
+    if usar_cache:
+        cacheado = cache.get(chave)
+        if cacheado is not None:
+            return Estado(**{**cacheado, "fonte": "cache"})
+
+    registro = ml_sessions.linkbuilder_snapshot(organization)
+    if registro is None:
+        return Estado(False, "Link Builder", "banco",
+                      "Nenhuma sessão do Mercado Livre — conecte sua conta.",
+                      "sem_sessao", agora)
+
+    sondado_em = registro.get("last_probe_at")
+    fresco = (
+        sondado_em is not None
+        and (agora - sondado_em).total_seconds() < _TTL_ML_S
+    )
+    if usar_cache and fresco:
+        return _cachear(chave, _estado_lb_do_registro(registro, "banco", agora))
+
+    return _cachear(chave, _sondar_e_registrar_lb(user, organization, agora))
+
+
+def _estado_lb_do_registro(registro: dict, fonte: str, agora) -> Estado:
+    return _estado_do_registro(
+        registro, fonte, agora, servico="Link Builder",
+        motivo_expirado=_MOTIVO_LB_EXPIRADO, alerta_instavel=_ALERTA_LB_INSTAVEL,
+    )
+
+
+def _sondar_e_registrar_lb(user, organization, agora) -> Estado:
+    """Sonda o portal e persiste o veredito. Nunca apaga a credencial."""
+    from apps.accounts.ml_session_crypto import MLSessionCryptoError
+    from apps.accounts import ml_sessions
+
+    try:
+        storage_state = ml_sessions.load_storage_state(user, touch=False)
+    except MLSessionCryptoError:
+        return Estado(False, "Link Builder", "sonda",
+                      "Sessão do Mercado Livre inválida — reconecte sua conta.",
+                      "decrypt_error", agora)
+    if storage_state is None:
+        return Estado(False, "Link Builder", "sonda",
+                      "Nenhuma sessão do Mercado Livre — conecte sua conta.",
+                      "sem_sessao", agora)
+
+    veredito, motivo = sondar_portal_afiliados_ml(storage_state)
+    registro = ml_sessions.registrar_veredito_linkbuilder(organization, veredito, motivo)
+    if registro is None:
+        return Estado(False, "Link Builder", "sonda",
+                      "Nenhuma sessão do Mercado Livre — conecte sua conta.",
+                      "sem_sessao", agora)
+    if veredito == "inconclusivo":
+        logger.warning("Sonda do Link Builder inconclusiva (%s); sessão preservada.", motivo)
+    return _estado_lb_do_registro(registro, "sonda", agora)
+
+
+def _chave_ml_org(organization, escopo: str = "site") -> str:
     """Chave por ORGANIZAÇÃO, não por usuário.
 
     A sessão ML é OneToOne com Organization, então o veredito vale para a
     organização inteira — mas a chave antiga (`user.id`) só invalidava o cache de
     UM membro. Numa org com mais de uma pessoa, os outros continuavam vendo o
     estado velho por até 5 min.
+
+    `escopo` separa a sonda do site da sonda do Link Builder: são dois vereditos
+    independentes sobre a mesma credencial (o portal de afiliados tem SSO próprio),
+    e compartilhar a chave faria um sobrescrever o outro.
     """
-    return f"ml_sessao:org:{organization.pk}"
+    return f"ml_sessao:org:{organization.pk}:{escopo}"
 
 
 def invalidar_ml(user=None) -> None:
@@ -298,6 +446,7 @@ def invalidar_ml(user=None) -> None:
     organization = organization_for_user(user) if user is not None else None
     if organization is not None:
         cache.delete(_chave_ml_org(organization))
+        cache.delete(_chave_ml_org(organization, escopo="linkbuilder"))
 
 
 def estado_amazon_relatorios(user=None) -> Estado:
@@ -331,7 +480,8 @@ def estado_ml_relatorios(user=None) -> Estado:
 # ─────────────────────────── Conveniências ───────────────────────────
 
 def estados_do_usuario(user) -> dict:
-    """Os dois estados de uma conta. É o que as telas renderizam."""
+    """Todos os estados de uma conta. É o que as telas renderizam."""
     return {"whatsapp": estado_whatsapp(user), "mercadolivre": estado_ml(user),
+            "ml_linkbuilder": estado_ml_linkbuilder(user),
             "amazon_relatorios": estado_amazon_relatorios(user),
             "ml_relatorios": estado_ml_relatorios(user)}

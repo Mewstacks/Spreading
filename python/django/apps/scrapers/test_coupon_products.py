@@ -769,3 +769,244 @@ class MapaDeRelacoesEmLoteTests(TestCase):
         preparadas, prontas = mapa_relacoes_prontas(self.user, [sem_link])
         self.assertIn(sem_link.id, preparadas)
         self.assertNotIn(sem_link.id, prontas)
+
+
+class SemanticaDePrecoDoCatalogoMLTests(TestCase):
+    """`preco_com_cupom` é a VITRINE, nos dois produtores do catálogo de cupom.
+
+    O caminho legado gravava aqui o preço JÁ descontado e a vitrine no campo do
+    preço de lista; `calcular_precos` então descontava o cupom outra vez e a
+    mensagem anunciava um valor que loja nenhuma cobrava.
+    """
+
+    ROW = {
+        "nome_produto": "Cafeteira Expresso",
+        "categoria": "CASA",
+        "link_produto": "https://www.mercadolivre.com.br/cafeteira/p/MLB1",
+        "imagem_url": "https://http2.mlstatic.com/foto.jpg",
+        "preco_original_sem_desconto": "250.00",   # preço de lista riscado
+        "preco_vitrine_atual": "100.00",           # o que a página mostra
+        "preco_final_com_cupom": "80.00",          # 20% do cupom, só p/ filtrar
+    }
+
+    def _sincronizar(self):
+        from apps.scrapers.scraper_mercadolivre.scraper import (
+            _sincronizar_produtos_no_banco,
+        )
+        _sincronizar_produtos_no_banco([
+            {"campaignId": "13975432", "produtos_aplicaveis": [dict(self.ROW)]},
+        ])
+        return Produto.objects.get(link_produto=self.ROW["link_produto"])
+
+    def test_grava_a_vitrine_e_o_preco_de_lista_nos_campos_certos(self):
+        produto = self._sincronizar()
+        self.assertEqual(produto.preco_com_cupom, 100.0)   # vitrine
+        self.assertEqual(produto.preco_efetivo, 100.0)
+        self.assertEqual(produto.preco_sem_desconto, 250.0)  # lista, não a vitrine
+        # O preço pós-cupom NÃO é persistido: ele é recalculado na publicação.
+        self.assertNotEqual(produto.preco_com_cupom, 80.0)
+
+    def test_cupom_desconta_uma_vez_so(self):
+        """O bug: 20% sobre 100 tem de dar 80, não 64."""
+        from apps.scrapers.coupon_products import calcular_precos
+
+        produto = self._sincronizar()
+        cupom = SimpleNamespace(
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 20},
+            marketplace="mercadolivre", codigo="", evidencia={})
+        original, atual, final = calcular_precos(cupom, produto)
+
+        self.assertEqual(atual, Decimal("100.00"))
+        self.assertEqual(final, Decimal("80.00"))
+        self.assertEqual(original, Decimal("250.00"))
+
+    def test_paridade_com_o_produtor_novo(self):
+        """Os dois caminhos gravam os MESMOS campos — foi a divergência entre eles
+        que deixou o desconto ser aplicado duas vezes."""
+        from apps.scrapers.coupon_products import _produtos_ml_do_html
+
+        produto_legado = self._sincronizar()
+        # O produtor novo lê os cards SSR; monta um card com os mesmos números.
+        html = (
+            '<div class="poly-card">'
+            '<a class="poly-component__title" href="https://ml.com.br/x/p/MLB2">Cafeteira</a>'
+            '<img class="poly-component__picture" src="https://http2.mlstatic.com/f.jpg">'
+            '<s class="andes-money-amount--previous">'
+            '<span class="andes-money-amount__fraction">250</span></s>'
+            '<div class="poly-price__current">'
+            '<span class="andes-money-amount__fraction">100</span></div>'
+            '</div>')
+        rows = _produtos_ml_do_html(html, limite=1)
+        self.assertTrue(rows, "o card de referência precisa ser parseável")
+        row = rows[0]
+        self.assertEqual(float(row["preco_vitrine_atual"]), produto_legado.preco_com_cupom)
+        self.assertEqual(float(row["preco_original_sem_desconto"]),
+                         produto_legado.preco_sem_desconto)
+
+
+class RevalidacaoDaColagemTests(TestCase):
+    """A colagem anuncia "De X por Y" por item, com Y calculado sobre a vitrine
+    que estava no banco (até 3h atrás). Aqui ela é medida ao vivo."""
+
+    def setUp(self):
+        from apps.scrapers import preco_ao_vivo
+        self.preco_ao_vivo = preco_ao_vivo
+        self.user = get_user_model().objects.create_user("colagem-user")
+        self.fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML público"})
+        self.cupom = CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id="campanha:99", marketplace="mercadolivre",
+            titulo="20% OFF", codigo="", estado="ativo",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 20,
+                    "valor_minimo": 50, "modo_resgate": "ativacao"})
+        self.produto = Produto.objects.create(
+            owner=None, marketplace="mercadolivre", nome="Cafeteira",
+            origem="cupom", campanha_id="99", fonte="mercadolivre-cupom",
+            estado="ativo", link_produto="https://ml.com.br/cafeteira/p/MLB1",
+            imagem_url="https://http2.mlstatic.com/f.jpg",
+            preco_sem_desconto=250.0, preco_com_cupom=100.0, preco_efetivo=100.0)
+        self.relacao = ProdutoCupom.objects.create(
+            produto=self.produto, cupom=self.cupom, status="confirmado",
+            verificado_em=timezone.now(), preco_original=Decimal("250.00"),
+            preco_atual=Decimal("100.00"), preco_final=Decimal("80.00"))
+        self.itens = [{"produto": self.produto, "relacao": self.relacao,
+                       "link": "https://meli.la/abc"}]
+
+    def _revalidar(self, relatorio):
+        with patch.object(self.preco_ao_vivo, "sessao_ml", return_value=object()), \
+             patch("apps.scrapers.scraper_mercadolivre.link_http.relatorio_de_preco",
+                   return_value=relatorio):
+            return self.preco_ao_vivo.revalidar_colagem(
+                self.cupom, self.itens, usuario=self.user)
+
+    def test_preco_que_caiu_recalcula_a_linha_e_mantem_o_item(self):
+        mantidos, removidos = self._revalidar(
+            {"preco": 90.0, "preco_de": 250.0, "bloqueio": "", "morto": False})
+
+        self.assertEqual(len(mantidos), 1)
+        self.assertEqual(removidos, [])
+        # 20% sobre a vitrine viva de 90 -> 72, não os 80 do preparo.
+        self.assertEqual(mantidos[0]["relacao"].preco_final, Decimal("72.00"))
+        self.assertEqual(mantidos[0]["relacao"].preco_atual, Decimal("90.00"))
+
+    def test_nao_escreve_no_catalogo_compartilhado(self):
+        """RLS: sob o contexto do usuário estas linhas não são graváveis. A
+        correção tem de vir da mutação em memória."""
+        self._revalidar({"preco": 90.0, "preco_de": 250.0, "bloqueio": "", "morto": False})
+
+        self.relacao.refresh_from_db()
+        self.produto.refresh_from_db()
+        self.assertEqual(self.relacao.preco_final, Decimal("80.00"))
+        self.assertEqual(self.produto.preco_com_cupom, 100.0)
+
+    def test_item_que_sai_das_regras_do_cupom_e_removido(self):
+        """Abaixo do valor mínimo não existe linha "De X por Y" verdadeira."""
+        mantidos, removidos = self._revalidar(
+            {"preco": 40.0, "preco_de": 250.0, "bloqueio": "", "morto": False})
+
+        self.assertEqual(mantidos, [])
+        self.assertEqual(len(removidos), 1)
+
+    def test_anuncio_morto_e_removido(self):
+        mantidos, removidos = self._revalidar(
+            {"preco": 0.0, "preco_de": 0.0, "bloqueio": "", "morto": True})
+        self.assertEqual(mantidos, [])
+        self.assertEqual(len(removidos), 1)
+
+    def test_bloqueio_mantem_a_linha_preparada(self):
+        """Inconclusivo nunca reprova — challenge do ML não pode esvaziar a colagem."""
+        mantidos, removidos = self._revalidar(
+            {"preco": 0.0, "preco_de": 0.0, "bloqueio": "challenge", "morto": False})
+
+        self.assertEqual(len(mantidos), 1)
+        self.assertEqual(removidos, [])
+        self.assertEqual(mantidos[0]["relacao"].preco_final, Decimal("80.00"))
+
+    def test_sem_sessao_do_ml_mantem_tudo(self):
+        with patch.object(self.preco_ao_vivo, "sessao_ml", return_value=None):
+            mantidos, removidos = self.preco_ao_vivo.revalidar_colagem(
+                self.cupom, self.itens, usuario=self.user)
+        self.assertEqual(len(mantidos), 1)
+        self.assertEqual(removidos, [])
+
+    def test_orcamento_estourado_mantem_o_item(self):
+        import time as _time
+
+        def lento(*args, **kwargs):
+            _time.sleep(1.5)
+            return {"preco": 90.0, "preco_de": 250.0, "bloqueio": "", "morto": False}
+
+        with patch.object(self.preco_ao_vivo, "sessao_ml", return_value=object()), \
+             patch("apps.scrapers.scraper_mercadolivre.link_http.relatorio_de_preco",
+                   side_effect=lento):
+            inicio = _time.monotonic()
+            mantidos, removidos = self.preco_ao_vivo.revalidar_colagem(
+                self.cupom, self.itens, usuario=self.user, orcamento_s=0.2)
+            decorrido = _time.monotonic() - inicio
+
+        self.assertEqual(len(mantidos), 1)
+        self.assertEqual(removidos, [])
+        self.assertLess(decorrido, 1.4, "o orçamento não segurou o envio")
+
+
+class BackfillDoDescontoDuplicadoTests(TestCase):
+    """A migration 0054 conserta o que já está gravado errado.
+
+    A re-raspagem não resolve: `scraper.main` pula toda campanha que já tenha
+    produto, então as linhas ficam congeladas com o desconto aplicado duas vezes.
+    """
+
+    def _corrigir(self):
+        import importlib
+
+        from django.apps import apps as django_apps
+
+        migracao = importlib.import_module(
+            "apps.scrapers.migrations.0054_backfill_preco_cupom_duplicado")
+        migracao.desfazer_desconto_duplicado(django_apps, None)
+
+    def _produto(self, sufixo, **kw):
+        campos = {
+            "owner": None, "marketplace": "mercadolivre", "origem": "cupom",
+            "fonte": "mercadolivre-cupom", "nome": f"Item {sufixo}",
+            "estado": "ativo", "campanha_id": "99",
+            "link_produto": f"https://ml.com.br/i{sufixo}/p/MLB{sufixo}",
+        }
+        campos.update(kw)
+        return Produto.objects.create(**campos)
+
+    def test_linha_legada_volta_para_a_vitrine(self):
+        # Vitrine 100 no campo do preço de lista, pós-cupom 80 na vitrine.
+        legado = self._produto(
+            "1", preco_sem_desconto=100.0, preco_com_cupom=80.0,
+            preco_fonte=100.0, preco_efetivo=80.0)
+
+        self._corrigir()
+
+        legado.refresh_from_db()
+        self.assertEqual(legado.preco_com_cupom, 100.0)
+        self.assertEqual(legado.preco_efetivo, 100.0)
+
+    def test_linha_do_produtor_novo_fica_intacta(self):
+        novo = self._produto(
+            "2", preco_sem_desconto=250.0, preco_com_cupom=100.0,
+            preco_fonte=100.0, preco_efetivo=100.0)
+
+        self._corrigir()
+
+        novo.refresh_from_db()
+        self.assertEqual(novo.preco_com_cupom, 100.0)
+        self.assertEqual(novo.preco_sem_desconto, 250.0)
+
+    def test_oferta_comum_nao_e_tocada(self):
+        """origem='oferta' tem de/por legítimos: `por` menor que `de` é normal."""
+        oferta = self._produto(
+            "3", origem="oferta", fonte="mercadolivre-web",
+            preco_sem_desconto=100.0, preco_com_cupom=80.0,
+            preco_fonte=100.0, preco_efetivo=80.0)
+
+        self._corrigir()
+
+        oferta.refresh_from_db()
+        self.assertEqual(oferta.preco_com_cupom, 80.0)

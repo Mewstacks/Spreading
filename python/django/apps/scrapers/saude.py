@@ -387,7 +387,13 @@ def _conexoes_ao_vivo(usuario=None) -> list[dict]:
     except Exception as e:
         logger.warning("Não foi possível ler as conexões de %s: %s", usuario, e)
         return []
-    return [estados["whatsapp"].as_dict(), estados["mercadolivre"].as_dict()]
+    # Os quatro escopos, não dois: `ml_linkbuilder` (portal de afiliados, SSO
+    # próprio) e as sessões de relatório eram calculadas por estados_do_usuario e
+    # descartadas aqui. O painel que existe para acabar com divergência de tela era
+    # justamente o que não mostrava a conexão cuja queda ninguém enxergava.
+    return [estados["whatsapp"].as_dict(), estados["mercadolivre"].as_dict(),
+            estados["ml_linkbuilder"].as_dict(), estados["ml_relatorios"].as_dict(),
+            estados["amazon_relatorios"].as_dict()]
 
 
 def _configuracao_silenciosa() -> list[dict]:

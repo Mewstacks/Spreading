@@ -9,7 +9,9 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 
 from apps.scrapers.models import Produto
-from apps.scrapers.ofertas import _preco_br, montar_mensagem, preco_publicavel
+from apps.scrapers.ofertas import (
+    _preco_br, anotacao_preco_publicado, montar_mensagem, preco_publicavel,
+)
 from apps.scrapers.sources.amazon_coupons import _money
 
 
@@ -58,6 +60,79 @@ class PrecoPublicavelTests(TestCase):
         texto = montar_mensagem(produto, "https://link", None)
         self.assertIn("POR 100", texto)
         self.assertNotIn("CUPOM", texto)
+
+
+class ParidadeTelaMensagemTests(TestCase):
+    """A tela e a mensagem têm de dizer o MESMO número.
+
+    A lista mostrava `preco_com_cupom` e a mensagem publicava `preco_publicavel()`:
+    o item aparecia com um preço na tela e saía com outro no WhatsApp.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("paridade-user")
+
+    def test_anotacao_sql_bate_com_a_funcao_python(self):
+        casos = [
+            ("sem efetivo", 0.0),
+            ("efetivo menor (cupom de ativação)", 90.0),
+            ("efetivo igual", 100.0),
+            ("efetivo maior — dado corrompido", 150.0),
+        ]
+        for rotulo, efetivo in casos:
+            with self.subTest(rotulo):
+                produto = Produto.objects.create(
+                    owner=self.user, marketplace="amazon", asin="B0PARIDADE",
+                    nome=f"Item {efetivo}", origem="oferta", estado="ativo",
+                    link_produto=f"https://www.amazon.com.br/dp/{efetivo}",
+                    preco_sem_desconto=120.0, preco_com_cupom=100.0,
+                    preco_efetivo=efetivo,
+                )
+                anotado = (Produto.objects.filter(pk=produto.pk)
+                           .annotate(preco_publicado=anotacao_preco_publicado())
+                           .first())
+                self.assertEqual(anotado.preco_publicado, preco_publicavel(produto))
+
+    def test_preco_efetivo_nulo_cai_na_vitrine(self):
+        produto = Produto.objects.create(
+            owner=self.user, marketplace="mercadolivre", nome="Sem efetivo",
+            origem="oferta", estado="ativo",
+            link_produto="https://ml.com.br/x/p/MLB9",
+            preco_sem_desconto=120.0, preco_com_cupom=100.0, preco_efetivo=None,
+        )
+        anotado = (Produto.objects.filter(pk=produto.pk)
+                   .annotate(preco_publicado=anotacao_preco_publicado()).first())
+        self.assertEqual(anotado.preco_publicado, 100.0)
+        self.assertEqual(preco_publicavel(produto), 100.0)
+
+
+class MensagemDeProdutoDeCupomMLTests(TestCase):
+    """Produto de campanha do ML anuncia a VITRINE — o número que a página mostra.
+
+    O cupom do ML só entra depois de ativar o link, então publicar o pós-cupom
+    fazia a mensagem prometer um valor que a página não cobrava.
+    """
+
+    def test_anuncia_a_vitrine_e_manda_ativar_o_cupom_no_link(self):
+        from apps.scrapers.models import Cupom
+
+        produto = Produto.objects.create(
+            owner=None, marketplace="mercadolivre", nome="Cafeteira Expresso",
+            origem="cupom", campanha_id="99", fonte="mercadolivre-cupom",
+            estado="ativo", link_produto="https://ml.com.br/cafeteira/p/MLB1",
+            preco_sem_desconto=250.0, preco_com_cupom=100.0, preco_efetivo=100.0,
+        )
+        cupom = Cupom(campanha_id="99", titulo="20% OFF",
+                      tipo_desconto="porcentagem", valor_desconto=20)
+
+        texto = montar_mensagem(produto, "https://meli.la/abc", cupom)
+
+        self.assertIn("POR 100", texto)
+        self.assertIn("DE ", texto)          # 250, o preço de lista
+        self.assertIn("250", texto)
+        self.assertIn("CUPOM: ative no link", texto)
+        # O antigo pós-cupom duplamente descontado (20% de 80) não pode aparecer.
+        self.assertNotIn("64", texto)
 
 
 class NormalizacaoDinheiroTests(TestCase):

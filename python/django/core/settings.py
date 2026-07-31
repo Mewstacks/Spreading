@@ -376,6 +376,13 @@ PRECO_REVALIDA_ANTES_ENVIO = os.getenv("PRECO_REVALIDA_ANTES_ENVIO", "1") == "1"
 # Fallback por raspagem da PDP quando a Creators API não responde. É Playwright:
 # custa segundos e uma das threads do gunicorn, por isso nasce desligado.
 PRECO_REVALIDA_PLAYWRIGHT = os.getenv("PRECO_REVALIDA_PLAYWRIGHT", "0") == "1"
+# Flag PRÓPRIA do Mercado Livre, separada da Amazon de propósito: o ML depende do
+# anti-bot deixar passar o GET autenticado. Se ele apertar, desliga só o ML sem
+# levar junto a revalidação da Amazon, que não depende disso.
+PRECO_REVALIDA_ML = os.getenv("PRECO_REVALIDA_ML", "1") == "1"
+# Teto de tempo para revalidar a colagem inteira de um cupom (até 9 itens em
+# paralelo). Estourar o orçamento nunca reprova: o que não voltou fica inconclusivo.
+PRECO_REVALIDA_ORCAMENTO_S = float(os.getenv("PRECO_REVALIDA_ORCAMENTO_S", "6"))
 
 
 # ─────────────────────────────────────────────────────────────

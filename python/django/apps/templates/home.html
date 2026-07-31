@@ -155,7 +155,9 @@
           </div>
           <div class="row-side">
             {% if sync.status == 'acao' and sync.marketplace == 'mercadolivre' %}
-            <a class="btn btn-ghost btn-sm" href="{% url 'scraper-ml-conexao' %}"><i data-lucide="plug-zap"></i> Reconectar</a>
+            {% comment %}Portal de RELATÓRIOS, não o site: é a sessão de
+               report_sessions que expirou, e reconectar o site não a conserta.{% endcomment %}
+            <a class="btn btn-ghost btn-sm" href="{% url 'scraper-ml-relatorio-conexao' %}"><i data-lucide="plug-zap"></i> Reconectar</a>
             {% elif sync.status == 'nao_configurado' %}
             {% comment %}Sem botão: não há leitura automática desta loja, então "Sincronizar"
                só repetiria a mesma resposta. Oferecer o botão seria mentir sobre o que ele
@@ -210,11 +212,17 @@
     <section class="section section-lined" aria-label="Conexões">
       <div class="section-head"><h2>Conexões</h2></div>
       <div class="rows">
+        {% comment %}
+        O ponto fica AMARELO quando o site aceita a sessão mas o Link Builder não:
+        "conectado" com a geração de links quebrada era exatamente a divergência que
+        fazia o usuário duvidar da tela. Verde só quando os dois passam.
+        {% endcomment %}
         <div class="row-item">
-          <span class="dot {% if ml_ok %}on{% else %}off{% endif %}"></span>
+          <span class="dot {% if ml_ok and lb_ok %}on{% elif ml_ok %}warn{% else %}off{% endif %}"></span>
           <div class="row-main">
             <div style="font-weight:600;font-size:13.5px;">Mercado Livre</div>
-            {% if not ml_ok and est_ml.motivo %}<div class="row-sub">{{ est_ml.motivo }}</div>{% endif %}
+            {% if not ml_ok and est_ml.motivo %}<div class="row-sub">{{ est_ml.motivo }}</div>
+            {% elif not lb_ok and est_lb %}<div class="row-sub">{{ est_lb.motivo }}</div>{% endif %}
           </div>
           <div class="row-side"><a class="btn-link" href="{% url 'scraper-ml-conexao' %}">{% if ml_ok %}Gerenciar{% else %}Conectar{% endif %}</a></div>
         </div>

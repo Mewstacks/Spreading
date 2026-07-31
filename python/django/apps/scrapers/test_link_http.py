@@ -123,7 +123,9 @@ class VerificacaoPorHttpTests(SimpleTestCase):
                 URL_PDP, nome_esperado="Smart TV 50 polegadas 4K",
                 confiar_desconto=False)
         self.assertTrue(r["ok"])
-        self.assertEqual(r["preco_visivel"], "R$ 1.799")
+        # Agora sai do parser do buybox (com centavos), não do regex do documento.
+        self.assertEqual(r["preco_visivel"], "R$ 1.799,00")
+        self.assertEqual(r["preco_numerico"], 1799.0)
         self.assertTrue(r["preco_riscado"])
 
     def test_cupom_sem_desconto_visivel_reprova(self):
@@ -150,6 +152,117 @@ class VerificacaoPorHttpTests(SimpleTestCase):
         r = link_http.relatorio_por_http("", confiar_desconto=True)
         self.assertFalse(r["ok"])
         self.assertTrue(r["erros"])
+
+
+def _buybox(riscado="2.499", riscado_cents="00", preco="1.799", cents="90",
+            parcelamento=True, extra=""):
+    """Bloco de preço na ORDEM REAL da PDP: riscado antes do corrente."""
+    bloco_riscado = (
+        '<div class="ui-pdp-price__original-value">'
+        '<s class="andes-money-amount andes-money-amount--previous">'
+        f'<span class="andes-money-amount__fraction">{riscado}</span>'
+        f'<span class="andes-money-amount__cents">{riscado_cents}</span>'
+        '</s></div>' if riscado else "")
+    bloco_cents = (f'<span class="andes-money-amount__cents">{cents}</span>'
+                   if cents else "")
+    bloco_parcelas = (
+        '<div class="ui-pdp-price__subtitles">em 10x '
+        '<span class="andes-money-amount__fraction">179</span>'
+        '<span class="andes-money-amount__cents">99</span></div>'
+        if parcelamento else "")
+    return (
+        '<html><body><div class="ui-pdp-container">'
+        '<div class="ui-pdp-price ui-pdp-price--size-large">'
+        f'{bloco_riscado}'
+        '<div class="ui-pdp-price__second-line"><span class="andes-money-amount">'
+        f'<span class="andes-money-amount__fraction">{preco}</span>{bloco_cents}'
+        '</span></div>'
+        f'{bloco_parcelas}'
+        '</div>'
+        f'{extra}'
+        '</div></body></html>'
+    ).lower()
+
+
+class PrecoDaPdpTests(SimpleTestCase):
+    """O preço que a mensagem anuncia sai daqui — errar é anunciar valor falso."""
+
+    def test_riscado_vem_antes_do_corrente_e_nao_e_confundido_com_ele(self):
+        """A armadilha do `_RE_PRECO`: a primeira fração do documento é o "DE"."""
+        self.assertEqual(link_http.preco_da_pdp(_buybox()), (1799.90, 2499.00))
+
+    def test_parcelamento_nao_vira_preco(self):
+        """"em 10x R$ 179,99" também é andes-money-amount."""
+        preco, _de = link_http.preco_da_pdp(_buybox(riscado=""))
+        self.assertEqual(preco, 1799.90)
+
+    def test_milhar_sem_centavos_nao_multiplica_por_cem(self):
+        self.assertEqual(link_http.preco_da_pdp(_buybox(cents=""))[0], 1799.0)
+
+    def test_preco_pequeno_com_centavos(self):
+        self.assertEqual(
+            link_http.preco_da_pdp(_buybox(riscado="", preco="64", cents="99"))[0],
+            64.99)
+
+    def test_cards_de_recomendacao_nao_sobrescrevem_o_buybox(self):
+        recomendados = (
+            '<div class="poly-card"><div class="poly-price__current">'
+            '<span class="andes-money-amount__fraction">99</span>'
+            '<span class="andes-money-amount__cents">00</span></div></div>')
+        preco, _de = link_http.preco_da_pdp(_buybox(extra=recomendados))
+        self.assertEqual(preco, 1799.90)
+
+    def test_riscado_menor_que_o_corrente_e_descartado(self):
+        """Dado corrompido não pode virar um "DE" que inventa desconto."""
+        self.assertEqual(link_http.preco_da_pdp(_buybox(riscado="10"))[1], 0.0)
+
+    def test_pagina_sem_bloco_de_preco(self):
+        self.assertEqual(link_http.preco_da_pdp("<html><body>nada</body></html>"),
+                         (0.0, 0.0))
+
+
+class RelatorioDePrecoTests(SimpleTestCase):
+    URL = "https://meli.la/abc"
+
+    def test_preco_ao_vivo_da_pagina(self):
+        with _get(RespostaFalsa(URL_PDP, _buybox() + "x" * 25000)):
+            r = link_http.relatorio_de_preco(self.URL)
+        self.assertEqual(r["preco"], 1799.90)
+        self.assertEqual(r["preco_de"], 2499.00)
+        self.assertFalse(r["bloqueio"])
+
+    def test_challenge_e_bloqueio_nunca_preco_zero_valido(self):
+        with _get(RespostaFalsa(
+                "https://www.mercadolivre.com.br/gz/account-verification?go=x", "")):
+            r = link_http.relatorio_de_preco(self.URL)
+        self.assertTrue(r["bloqueio"])
+        self.assertEqual(r["preco"], 0.0)
+
+    def test_anuncio_morto(self):
+        corpo = _buybox() + "anúncio pausado" + "x" * 25000
+        with _get(RespostaFalsa(URL_PDP, corpo)):
+            r = link_http.relatorio_de_preco(self.URL)
+        self.assertTrue(r["morto"])
+
+    def test_pagina_abre_mas_sem_preco_e_inconclusiva(self):
+        corpo = '<div class="ui-pdp-container">sem preço</div>' + "x" * 25000
+        with _get(RespostaFalsa(URL_PDP, corpo)):
+            r = link_http.relatorio_de_preco(self.URL)
+        self.assertTrue(r["bloqueio"])
+        self.assertEqual(r["preco"], 0.0)
+
+    def test_usa_a_sessao_injetada(self):
+        """O GET anônimo não passa no ML; quem chama injeta a sessão autenticada."""
+        chamadas = []
+
+        class SessaoFalsa:
+            def get(self, url, **kwargs):
+                chamadas.append(url)
+                return RespostaFalsa(URL_PDP, _buybox() + "x" * 25000)
+
+        r = link_http.relatorio_de_preco(self.URL, sessao=SessaoFalsa())
+        self.assertEqual(chamadas, [self.URL])
+        self.assertEqual(r["preco"], 1799.90)
 
 
 class DespachoDeTransporteTests(SimpleTestCase):
@@ -319,3 +432,72 @@ class AbrirLinkBuilderTests(SimpleTestCase):
             self.link._abrir_link_builder(pagina)
         # A mensagem antiga mandava "Reconecte sua conta", que era o conselho errado.
         self.assertNotIn("Reconecte", str(ctx.exception))
+
+
+class VereditoPublicadoPeloLinkBuilderTests(SimpleTestCase):
+    """O que acontece de fato no Chromium alimenta o estado que as telas leem.
+
+    Sem isto a tela só descobriria a queda do portal no próximo ciclo de sonda — e
+    o usuário já teria visto o erro no stream de geração de links. Cada uma das
+    três causas escreve um veredito diferente, porque cada uma pede uma ação
+    diferente do usuário: reconectar, esperar, tentar mais tarde.
+    """
+
+    PageFalsa = AbrirLinkBuilderTests.PageFalsa
+
+    def setUp(self):
+        from apps.scrapers.scraper_mercadolivre import link
+        self.link = link
+        for alvo in (patch.object(link.time, "sleep"),):
+            alvo.start()
+            self.addCleanup(alvo.stop)
+        self.registrado = patch.object(link, "_registrar_veredito_lb")
+        self.registrar = self.registrado.start()
+        self.addCleanup(self.registrado.stop)
+        self.usuario = object()
+
+    def _veredito(self):
+        self.assertTrue(self.registrar.called, "nenhum veredito publicado")
+        return self.registrar.call_args[0][1]
+
+    def test_login_publica_suspeito(self):
+        pagina = self.PageFalsa([
+            "https://www.mercadolivre.com/jms/mlb/lgz/msl/login/",
+            "https://www.mercadolivre.com/jms/mlb/lgz/msl/login/",
+        ])
+        with self.assertRaises(self.link.LoginError):
+            self.link._abrir_link_builder(pagina, usuario=self.usuario)
+        self.assertEqual(self._veredito(), "suspeito")
+
+    def test_antibot_publica_inconclusivo_nao_suspeito(self):
+        """Challenge do anti-bot não pode acumular para "reconecte": a conta está
+        boa e o IP da Fly produz isso sozinho."""
+        pagina = self.PageFalsa([
+            "https://www.mercadolivre.com.br/gz/account-verification?go=x",
+            "https://www.mercadolivre.com.br/gz/account-verification?go=x",
+        ])
+        with self.assertRaises(self.link.AntiBotError):
+            self.link._abrir_link_builder(pagina, usuario=self.usuario)
+        self.assertEqual(self._veredito(), "inconclusivo")
+
+    def test_ml_fora_do_ar_publica_inconclusivo(self):
+        pagina = self.PageFalsa([], erros=[TimeoutError("x"), TimeoutError("y")])
+        with self.assertRaises(self.link.AuthError):
+            self.link._abrir_link_builder(pagina, usuario=self.usuario)
+        self.assertEqual(self._veredito(), "inconclusivo")
+
+    def test_sucesso_publica_conectado(self):
+        pagina = self.PageFalsa(["https://www.mercadolivre.com.br/afiliados/linkbuilder#hub"])
+        self.link._abrir_link_builder(pagina, usuario=self.usuario)
+        self.assertEqual(self._veredito(), "conectado")
+
+    def test_sem_usuario_nao_escreve_nada(self):
+        """A automação global chama sem usuário; não há organização a atualizar."""
+        from apps.scrapers.scraper_mercadolivre import link
+
+        self.registrado.stop()
+        self.addCleanup(self.registrado.start)
+        with patch("apps.accounts.ml_sessions."
+                   "registrar_veredito_linkbuilder_para_usuario") as escreveu:
+            link._registrar_veredito_lb(None, "conectado")
+        escreveu.assert_not_called()

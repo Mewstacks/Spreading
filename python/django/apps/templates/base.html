@@ -685,7 +685,8 @@
         </div>
         <div class="side-group">
           <div class="side-group-label">Integrações</div>
-          <a class="side-link {% if u == 'scraper-ml-conexao' or u == 'scraper-ml-relatorio-conexao' %}active{% endif %}" href="/scrapers/ml/" {% if u == 'scraper-ml-conexao' or u == 'scraper-ml-relatorio-conexao' %}aria-current="page"{% endif %} title="Mercado Livre"><i data-lucide="shopping-bag"></i><span class="lbl">Mercado Livre</span></a>
+          {# O href acompanha a rota ativa: marcar 'active' para o portal de relatorios e mandar sempre para /scrapers/ml/ deixava o portal sem navegacao propria no menu. #}
+          <a class="side-link {% if u == 'scraper-ml-conexao' or u == 'scraper-ml-relatorio-conexao' %}active{% endif %}" href="{% if u == 'scraper-ml-relatorio-conexao' %}{% url 'scraper-ml-relatorio-conexao' %}{% else %}/scrapers/ml/{% endif %}" {% if u == 'scraper-ml-conexao' or u == 'scraper-ml-relatorio-conexao' %}aria-current="page"{% endif %} title="Mercado Livre"><i data-lucide="shopping-bag"></i><span class="lbl">Mercado Livre</span></a>
           <a class="side-link {% if u == 'scraper-amazon' or u == 'scraper-amazon-conexao' %}active{% endif %}" href="{% url 'scraper-amazon' %}" {% if u == 'scraper-amazon' or u == 'scraper-amazon-conexao' %}aria-current="page"{% endif %} title="Amazon"><i data-lucide="package"></i><span class="lbl">Amazon</span></a>
           <a class="side-link {% if u == 'scraper-whatsapp' %}active{% endif %}" href="/scrapers/whatsapp/" {% if u == 'scraper-whatsapp' %}aria-current="page"{% endif %} title="WhatsApp"><i data-lucide="message-circle"></i><span class="lbl">WhatsApp</span></a>
           <a class="side-link {% if u == 'scraper-telegram' %}active{% endif %}" href="/scrapers/telegram/" {% if u == 'scraper-telegram' %}aria-current="page"{% endif %} title="Telegram"><i data-lucide="send"></i><span class="lbl">Telegram</span></a>

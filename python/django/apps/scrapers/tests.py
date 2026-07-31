@@ -1,3 +1,4 @@
+import itertools
 import json
 import os
 import re
@@ -336,6 +337,316 @@ class SondaSessaoMLTests(SimpleTestCase):
         valores = {c.domain: c.value for c in sessao.cookies}
         self.assertEqual(valores[".mercadolivre.com.br"], "correto")
         self.assertEqual(valores[".mercadopago.com.br"], "outro")
+
+
+class EsperaDeReconexaoDoWhatsAppTests(SimpleTestCase):
+    """O gate de canal ESPERA a reconexão em vez de recusar o envio na hora.
+
+    Era a queixa: "estou enviando promoções e do nada aparece que o canal de envio
+    não é mais válido". A reconexão automática já existia no worker; o que faltava
+    era o envio dar a ela alguns segundos. Uma queda de rede de 5s virava erro na
+    tela, embora a sessão voltasse sozinha em seguida.
+    """
+
+    def setUp(self):
+        cache.clear()
+
+    @staticmethod
+    def _estado(conectado, detalhe="", motivo=""):
+        from apps.scrapers.conexoes import Estado
+
+        return Estado(conectado, "WhatsApp", "worker", motivo, detalhe, None)
+
+    @staticmethod
+    def _relogio():
+        """Relógio falso: cada leitura avança um intervalo de espera.
+
+        Sem isto o teste dependeria do relógio real — com `time.sleep` mockado, a
+        espera de 20s viraria milhares de iterações instantâneas (ou 20s de teste).
+        """
+        from apps.scrapers import ofertas
+
+        contador = itertools.count(0, ofertas._WA_ESPERA_INTERVALO_S)
+        return lambda: next(contador)
+
+    def _canal(self, estados, *, insistir=False):
+        """Roda o gate com uma sequência de estados; devolve (erro, chamadas)."""
+        from apps.scrapers import ofertas
+
+        sequencia = (itertools.chain(estados, itertools.repeat(estados[-1]))
+                     if insistir else list(estados))
+        with patch("apps.scrapers.ofertas.wa_session_de", return_value="s1"), \
+             patch("apps.scrapers.conexoes.estado_whatsapp",
+                   side_effect=sequencia) as le, \
+             patch("apps.scrapers.whatsapp_client.invalidar_status"), \
+             patch("apps.scrapers.whatsapp_client.status",
+                   return_value={"conectado": False, "fase": "reconectando"}), \
+             patch("time.sleep"), \
+             patch("time.monotonic", side_effect=self._relogio()):
+            return ofertas._canal_pronto_ou_erro("whatsapp", object()), le.call_count
+
+    def test_conectado_de_primeira_nao_espera(self):
+        erro, chamadas = self._canal([self._estado(True)])
+        self.assertIsNone(erro)
+        self.assertEqual(chamadas, 1)
+
+    def test_reconectando_que_volta_libera_o_envio(self):
+        """O caso central: a sessão volta durante a espera e a promoção sai."""
+        erro, _ = self._canal([
+            self._estado(False, "conectando", "WhatsApp reativando a conexão."),
+            self._estado(False, "conectando"),
+            self._estado(True),
+        ])
+        self.assertIsNone(erro)
+
+    def test_reconectando_que_nao_volta_ainda_e_transitorio(self):
+        """Não conta falha da configuração: `pausar_apos_falhas` não pode desligar
+        a automação por uma queda de infraestrutura."""
+        parado = self._estado(False, "conectando", "WhatsApp reativando a conexão.")
+        erro, _ = self._canal([parado], insistir=True)
+        self.assertIsNotNone(erro)
+        self.assertEqual(erro["classe"], "transitorio")
+        # E não pede login: não há QR a ler, é só esperar.
+        self.assertNotIn("precisa_login_wa", erro)
+
+    def test_sem_pareamento_nao_espera_nada(self):
+        """Estado terminal: esperar só atrasaria a mensagem que pede ação."""
+        sem_par = self._estado(False, "sem_pareamento",
+                               "WhatsApp desconectado. Reconecte sua conta.")
+        erro, chamadas = self._canal([sem_par, sem_par])
+        self.assertIsNotNone(erro)
+        self.assertTrue(erro["precisa_login_wa"])
+        # Uma leitura no gate; nenhuma volta de espera.
+        self.assertEqual(chamadas, 1)
+
+    def test_sessao_inativa_religa_e_o_mesmo_clique_ja_envia(self):
+        """Antes, o clique que religava a sessão nunca era o que enviava: devolvia
+        erro e só a tentativa seguinte encontrava a sessão de pé."""
+        from apps.scrapers import ofertas
+
+        with patch("apps.scrapers.ofertas.wa_session_de", return_value="s1"), \
+             patch("apps.scrapers.conexoes.estado_whatsapp", side_effect=[
+                 self._estado(False, "sem_pareamento", "desconectado"),
+                 self._estado(False, "conectando"),
+                 self._estado(True),
+             ]), \
+             patch("apps.scrapers.whatsapp_client.invalidar_status"), \
+             patch("apps.scrapers.whatsapp_client.status",
+                   return_value={"conectado": False, "fase": "inativo"}), \
+             patch("apps.scrapers.whatsapp_client.iniciar_sessao") as religar, \
+             patch("time.sleep"):
+            erro = ofertas._canal_pronto_ou_erro("whatsapp", object())
+
+        religar.assert_called_once()
+        self.assertIsNone(erro)
+
+    def test_canal_que_nao_e_whatsapp_passa_direto(self):
+        from apps.scrapers import ofertas
+
+        self.assertIsNone(ofertas._canal_pronto_ou_erro("telegram", object()))
+
+
+class MensagemDeCanalReconectandoTests(SimpleTestCase):
+    """A tradução da falha de transporte não pode pedir o que não existe.
+
+    "As credenciais do canal precisam ser reconectadas" mandava o usuário procurar
+    uma reconexão manual que o worker já estava fazendo sozinho.
+    """
+
+    def test_reconexao_em_curso_diz_que_e_automatica(self):
+        from apps.scrapers.ofertas import _motivo_publico_transporte
+
+        texto = _motivo_publico_transporte({
+            "classe": "transitorio",
+            "erro": "WhatsApp reconectando — o envio será retomado.",
+        })
+        self.assertIn("volta", texto.lower())
+        self.assertNotIn("credenciais", texto.lower())
+
+    def test_outras_falhas_transitorias_mantem_o_texto_antigo(self):
+        from apps.scrapers.ofertas import _motivo_publico_transporte
+
+        texto = _motivo_publico_transporte({"classe": "transitorio", "erro": "429"})
+        self.assertIn("temporariamente indisponível", texto)
+
+    def test_credencial_realmente_permanente_continua_pedindo_reconexao(self):
+        from apps.scrapers.ofertas import _motivo_publico_transporte
+
+        texto = _motivo_publico_transporte({
+            "classe": "permanente", "erro": "token invalido"})
+        self.assertIn("reconectadas", texto)
+
+
+class SondaLinkBuilderTests(SimpleTestCase):
+    """A sonda do PORTAL DE AFILIADOS, que não existia.
+
+    O portal /afiliados/linkbuilder tem SSO próprio (jms/msl): um cookie que
+    mercadolivre.com.br ainda aceita pode ser recusado lá. Enquanto só
+    `sondar_sessao_ml` existia, todas as telas diziam "conectado" e a geração de
+    links respondia "sessão expirada" — o relato que originou este trabalho.
+
+    Vocabulário e política são os mesmos da sonda do site, de propósito: só a
+    repetição de "suspeito" pede reconexão, e 403 nunca é logout.
+    """
+
+    STATE = {"cookies": [{"name": "ssid", "value": "x", "domain": ".mercadolivre.com.br",
+                          "path": "/"}], "origins": []}
+
+    @staticmethod
+    def _resposta(status, location=None):
+        return Mock(status_code=status,
+                    headers={"Location": location} if location else {})
+
+    def _sondar(self, **kwargs):
+        from apps.scrapers.conexoes import sondar_portal_afiliados_ml
+
+        with patch("requests.Session.get", **kwargs):
+            return sondar_portal_afiliados_ml(self.STATE)
+
+    def test_sonda_bate_no_portal_e_nao_no_site(self):
+        """Sondar myaccount não responde a pergunta: é o portal que recusa."""
+        from apps.scrapers.conexoes import sondar_portal_afiliados_ml
+
+        with patch("requests.Session.get", return_value=self._resposta(200)) as get:
+            sondar_portal_afiliados_ml(self.STATE)
+        (url,), _ = get.call_args
+        self.assertIn("/afiliados/linkbuilder", url)
+
+    def test_200_e_portal_aceitando(self):
+        self.assertEqual(self._sondar(return_value=self._resposta(200)),
+                         ("conectado", ""))
+
+    def test_redirect_para_login_e_suspeito(self):
+        veredito, motivo = self._sondar(return_value=self._resposta(
+            302, "https://www.mercadolivre.com.br/jms/mlb/lgz/login"))
+        self.assertEqual(veredito, "suspeito")
+        self.assertIn("portal de afiliados", motivo)
+
+    def test_intersticial_e_inconclusivo(self):
+        """Verificação de segurança interposta: a conta segue conectada. Contar
+        isto como suspeita desconectaria por ruído do anti-bot."""
+        veredito, _ = self._sondar(return_value=self._resposta(
+            302, "https://www.mercadolivre.com.br/gz/account-verification"))
+        self.assertEqual(veredito, "inconclusivo")
+
+    def test_403_e_inconclusivo(self):
+        veredito, _ = self._sondar(return_value=self._resposta(403))
+        self.assertEqual(veredito, "inconclusivo")
+
+    def test_timeout_e_5xx_sao_inconclusivos(self):
+        self.assertEqual(self._sondar(side_effect=requests.Timeout("x"))[0],
+                         "inconclusivo")
+        self.assertEqual(self._sondar(return_value=self._resposta(502))[0],
+                         "inconclusivo")
+
+    def test_sem_cookies_e_suspeito(self):
+        from apps.scrapers.conexoes import sondar_portal_afiliados_ml
+
+        self.assertEqual(
+            sondar_portal_afiliados_ml({"cookies": [], "origins": []})[0], "suspeito")
+
+
+class StatusDeConexaoComLinkBuilderTests(SimpleTestCase):
+    """O bloco `linkbuilder` do JSON que a tela de conexão pinta.
+
+    É o contrato entre ml_conexao.status() e pintarLinkBuilder() no template. O
+    campo `medido` existe para a tela render "—" em vez de afirmar algo: sem sessão
+    nenhuma, o diagnóstico relevante é `motivo_desconexao`, e dar dois diagnósticos
+    para a mesma causa era parte da confusão original.
+    """
+
+    def setUp(self):
+        cache.clear()
+
+    @staticmethod
+    def _estado(conectado, motivo="", alerta="", servico="Link Builder"):
+        from apps.scrapers.conexoes import Estado
+
+        return Estado(conectado, servico, "sonda", motivo, "", None, alerta=alerta)
+
+    def _status(self, site, lb):
+        from apps.scrapers import ml_conexao
+
+        with patch.object(ml_conexao, "_transport", Mock(status=Mock(return_value={}))), \
+             patch("apps.scrapers.conexoes.estado_ml", return_value=site), \
+             patch("apps.scrapers.conexoes.estado_ml_linkbuilder",
+                   return_value=lb) as sondou, \
+             patch("django.contrib.auth.get_user_model") as modelo:
+            modelo.return_value.objects.filter.return_value.first.return_value = Mock()
+            return ml_conexao.status(1), sondou
+
+    def test_portal_pedindo_login_com_site_ok(self):
+        """O caso do relato: site verde, Link Builder recusando."""
+        dados, _ = self._status(
+            self._estado(True, servico="Mercado Livre"),
+            self._estado(False, "O Link Builder do Mercado Livre está pedindo login de novo."),
+        )
+        self.assertTrue(dados["auth_valido"])
+        self.assertEqual(dados["linkbuilder"]["medido"], True)
+        self.assertFalse(dados["linkbuilder"]["ok"])
+        self.assertIn("Link Builder", dados["linkbuilder"]["motivo"])
+
+    def test_portal_instavel_vira_alerta_e_nao_motivo(self):
+        """Suspeita isolada não desconecta: a tela avisa sem alarmar."""
+        dados, _ = self._status(
+            self._estado(True, servico="Mercado Livre"),
+            self._estado(True, alerta="O Link Builder recusou a última verificação."),
+        )
+        self.assertTrue(dados["linkbuilder"]["ok"])
+        self.assertIn("recusou", dados["linkbuilder"]["alerta"])
+        self.assertEqual(dados["linkbuilder"]["motivo"], "")
+
+    def test_sem_sessao_nao_sonda_o_portal(self):
+        """Sondar o portal sem credencial gastaria um GET para dizer o que a linha
+        de cima já diz — e a tela mostraria dois avisos para uma causa."""
+        dados, sondou = self._status(
+            self._estado(False, "Nenhuma sessão do Mercado Livre.", servico="Mercado Livre"),
+            self._estado(True),
+        )
+        self.assertFalse(dados["auth_valido"])
+        self.assertFalse(dados["linkbuilder"]["medido"])
+        sondou.assert_not_called()
+
+    def test_login_em_curso_nao_sonda_o_portal(self):
+        """Durante o login a fase já manda na tela, e a sonda custa até 8s de rede
+        num endpoint que o front chama a cada 3s."""
+        from apps.scrapers import ml_conexao
+
+        cache.set(ml_conexao._cache_key(1), {"fase": "validando"})
+        with patch.object(ml_conexao, "_transport", Mock(status=Mock(return_value={}))), \
+             patch("apps.scrapers.conexoes.estado_ml_linkbuilder") as sondou:
+            dados = ml_conexao.status(1)
+
+        self.assertFalse(dados["linkbuilder"]["medido"])
+        sondou.assert_not_called()
+
+
+class MensagemDeSessaoDeLinkTests(SimpleTestCase):
+    """Os textos que o usuário lê quando a geração de link falha.
+
+    O texto antigo afirmava que o portal "tem sessão própria, separada da sua
+    conta no site" e mandava reconectar em Conexão Mercado Livre. As duas metades
+    eram verdadeiras isoladamente e contraditórias juntas: o usuário concluía que
+    faltava uma segunda conexão, que não existe — o Link Builder usa a sessão do
+    site (iniciar_browser(session_user=...)).
+    """
+
+    def test_nao_sugere_uma_segunda_conexao(self):
+        from apps.scrapers.scraper_mercadolivre import link
+
+        texto = link.MSG_SESSAO_EXPIRADA.lower()
+        self.assertNotIn("sessão própria", texto)
+        self.assertNotIn("separada", texto)
+        # E diz o que resolve: um login, na tela que já existe.
+        self.assertIn("mesma conexão", texto)
+        self.assertIn("conexão mercado livre", texto)
+
+    def test_sem_sessao_tem_texto_proprio(self):
+        """"Pediu login de novo" para quem nunca conectou era desorientador."""
+        from apps.scrapers.scraper_mercadolivre import link
+
+        self.assertNotEqual(link.MSG_SEM_SESSAO, link.MSG_SESSAO_EXPIRADA)
+        self.assertIn("nenhuma conta", link.MSG_SEM_SESSAO.lower())
 
 
 class EstadoMLTests(SimpleTestCase):
@@ -4351,6 +4662,20 @@ class WhatsAppPainelSemEfeitoColateralTests(TestCase):
         self.assertIn("fase === 'falha_reset'", html)
         self.assertIn("QR novo pronto para leitura.", html)
         self.assertIn("Não foi possível gerar o QR. Clique para tentar novamente.", html)
+
+    def test_front_remove_qr_antigo_e_serializa_polling(self):
+        with patch("apps.scrapers.whatsapp_client.status",
+                   return_value={"conectado": False, "fase": "qr", "qr": None}):
+            response = self.client.get(reverse("scraper-whatsapp"))
+
+        html = response.content.decode()
+        self.assertIn("qrImg.removeAttribute('src')", html)
+        self.assertIn("refreshQr(null)", html)
+        self.assertIn("qrArea.style.display = 'none';\n    refreshQr(null)", html)
+        self.assertIn("if (pollEmVoo) return pollEmVoo", html)
+        self.assertIn("pollTimer = setTimeout(cicloPoll, 5000)", html)
+        self.assertNotIn("setInterval(poll, 5000)", html)
+        self.assertIn("cache: 'no-store'", html)
 
 
 class ChecarAfiliacaoCommandTests(TestCase):

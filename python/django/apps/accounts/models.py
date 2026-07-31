@@ -128,6 +128,21 @@ class MercadoLivreSession(models.Model):
     probe_failures = models.PositiveSmallIntegerField(default=0)
     probe_reason = models.CharField(max_length=200, blank=True)
 
+    # ── Veredito da sonda do LINK BUILDER (portal de afiliados) ──
+    # O portal /afiliados/linkbuilder tem SSO próprio (jms/msl): um cookie que
+    # ainda vale em mercadolivre.com.br pode ser recusado lá. Era a assimetria que
+    # produzia "todas as telas dizem conectado e a geração de links falha" — os
+    # campos acima medem só o site principal.
+    #
+    # Deliberadamente NÃO alimentam `status`: ele é o gate de `has_storage_state`,
+    # e o portal recusar o cookie não torna a credencial inútil (a raspagem do site
+    # segue funcionando com ela). Quem traduz `lb_probe_failures` em "reconecte" é
+    # a tela.
+    lb_last_probe_at = models.DateTimeField(null=True, blank=True)
+    lb_last_probe_result = models.CharField(max_length=16, choices=PROBE_RESULTS, blank=True)
+    lb_probe_failures = models.PositiveSmallIntegerField(default=0)
+    lb_probe_reason = models.CharField(max_length=200, blank=True)
+
     def __str__(self):
         return f"MLSession<{self.organization_id}>"
 

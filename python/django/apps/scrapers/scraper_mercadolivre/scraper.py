@@ -838,10 +838,18 @@ def _sincronizar_produtos_no_banco(cupons_com_produtos):
                     campanha_id=camp_id,
                     fonte="mercadolivre-cupom",
                     nome=p["nome_produto"][:255],
-                    preco_sem_desconto=float(p["preco_vitrine_atual"]),
-                    preco_com_cupom=float(p["preco_final_com_cupom"]),
+                    # Vitrine em preco_com_cupom/preco_efetivo e preço de lista em
+                    # preco_sem_desconto — a mesma semântica de _coletar_ml_remoto
+                    # (coupon_products.py) e a documentada em Produto. Este bloco
+                    # gravava a vitrine no campo "DE" e o preço JÁ com o cupom nos
+                    # outros dois; calcular_precos então descontava o cupom de novo
+                    # e a mensagem saía com um valor que a loja não cobrava.
+                    # preco_final_com_cupom continua sendo calculado acima, mas só
+                    # como FILTRO (desconto fixo >= preço, >= 90%, valor mínimo).
+                    preco_sem_desconto=float(p["preco_original_sem_desconto"]),
+                    preco_com_cupom=float(p["preco_vitrine_atual"]),
                     preco_fonte=float(p["preco_vitrine_atual"]),
-                    preco_efetivo=float(p["preco_final_com_cupom"]),
+                    preco_efetivo=float(p["preco_vitrine_atual"]),
                     link_produto=p.get("link_produto") or "",
                     imagem_url=p.get("imagem_url") or "",
                     categoria=p.get("categoria", "DESCONHECIDO"),

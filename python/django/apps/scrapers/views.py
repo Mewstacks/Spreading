@@ -225,7 +225,9 @@ def operations_dashboard(request):
         .annotate(envios=Count("id", distinct=True), cliques=Count("cliques"))
         .order_by("-envios", "-cliques")[:5]
     )
-    from apps.scrapers.conexoes import estado_ml, estado_whatsapp
+    from apps.scrapers.conexoes import (
+        estado_ml, estado_ml_linkbuilder, estado_whatsapp,
+    )
 
     perfil = request.user.perfil
     configs = ConfiguracaoEnvio.objects.filter(owner=request.user)
@@ -233,6 +235,16 @@ def operations_dashboard(request):
     est_ml = estado_ml(request.user)
     est_wa = estado_whatsapp(request.user, session=perfil.sessao_whatsapp())
     ml_ok, wa_ok = est_ml.conectado, est_wa.conectado
+    # Só faz sentido perguntar pelo Link Builder quando o site já está OK: sem
+    # sessão nenhuma o aviso relevante é o de baixo, e dois avisos para a mesma
+    # causa era parte da confusão que esta tela produzia.
+    est_lb = estado_ml_linkbuilder(request.user) if ml_ok else None
+    lb_ok = est_lb.conectado if est_lb else True
+    if ml_ok and est_lb and not lb_ok:
+        # A falha que antes só aparecia como erro dentro do stream de geração de
+        # links, depois de o usuário clicar e esperar.
+        alertas.append(("Link Builder pedindo login", est_lb.motivo,
+                        "scraper-ml-conexao"))
     if not ml_ok and not perfil.amazon_conectado():
         # O motivo vem do estado: "sessão expirou" e "nunca conectou" pedem ações
         # diferentes, e o texto fixo dizia a mesma coisa para os dois.
@@ -263,8 +275,12 @@ def operations_dashboard(request):
                 f"Relatório {sync.marketplace} precisa de atenção",
                 sync.erro_publico or "Sincronização automática não concluiu.",
                 # Reconectar a conta é o que resolve; "home" apontava pra esta mesma
-                # página, então clicar no alerta não levava a lugar nenhum.
-                "scraper-amazon" if sync.marketplace == "amazon" else "scraper-ml-conexao",
+                # página, então clicar no alerta não levava a lugar nenhum. E é a
+                # conexão de RELATÓRIOS que quebrou (report_sessions, sessão própria
+                # por usuário): mandar para a conexão do site era pedir um login que
+                # não conserta o sync.
+                "scraper-amazon" if sync.marketplace == "amazon"
+                else "scraper-ml-relatorio-conexao",
             ))
     publicacoes = list(
         pubs.select_related("produto", "configuracao", "cupom_normalizado")
@@ -277,8 +293,8 @@ def operations_dashboard(request):
         "melhores_destinos": melhores_destinos,
         "publicacoes": publicacoes,
         "alertas": alertas, "configs": configs, "syncs": list(syncs.values()),
-        "ml_ok": ml_ok, "wa_ok": wa_ok,
-        "est_ml": est_ml, "est_wa": est_wa,
+        "ml_ok": ml_ok, "wa_ok": wa_ok, "lb_ok": lb_ok,
+        "est_ml": est_ml, "est_wa": est_wa, "est_lb": est_lb,
         "tg_ok": perfil.telegram_conectado(),
     })
 
@@ -351,7 +367,14 @@ def dashboard(request):
     perfil = getattr(user, "perfil", None)
 
     ml_ok = ml_conectado(user)
-    tag_ok = ml_ok
+    # O passo "afiliado conectado" media a MESMA coisa que o passo anterior (a sessão
+    # do site) e por isso ficava verde mesmo com o Link Builder recusando o login —
+    # o checklist declarava pronta exatamente a etapa que estava quebrada. Agora ele
+    # mede o portal de afiliados, que é o que a geração de link atravessa.
+    from apps.scrapers.conexoes import estado_ml_linkbuilder
+
+    est_lb = estado_ml_linkbuilder(user) if ml_ok else None
+    tag_ok = bool(est_lb and est_lb.conectado)
     wa_ok = wa_conectado(perfil.sessao_whatsapp() if perfil else str(user.id))
     tg_ok = bool(perfil and perfil.telegram_conectado())
     canal_ok = wa_ok or tg_ok
@@ -363,7 +386,8 @@ def dashboard(request):
          "desc": "Login seguro na própria página — gera seus links de afiliado.",
          "cta": "Conectar", "url": "/scrapers/ml/", "icon": "shopping-bag"},
         {"key": "tag", "titulo": "Mercado Livre afiliado conectado", "feito": tag_ok,
-         "desc": "O Link Builder usa a conta logada para gerar o link comissionado.",
+         "desc": (est_lb.motivo if est_lb and not tag_ok
+                  else "O Link Builder usa a conta logada para gerar o link comissionado."),
          "cta": "Conectar", "url": "/scrapers/ml/", "icon": "badge-dollar-sign"},
         {"key": "canal", "titulo": "Conectar um canal de envio", "feito": canal_ok,
          "desc": "WhatsApp (QR) ou Telegram (bot) — por onde as ofertas saem.",
@@ -1697,15 +1721,20 @@ def top_promocoes(request):
     ordenar = "valor" if filtros.get("ordenar") == "valor" else "percent"
 
     from django.db.models import Q
+    from apps.scrapers.ofertas import anotacao_preco_publicado
     qs = Produto.objects.filter(preco_sem_desconto__gt=0).exclude(
         estado__in=["indisponivel", "invalido", "expirado", "stale"]
     ).filter(
         # Pool compartilhado (ML, owner=None) + itens privados do usuário (Amazon dele).
         Q(owner__isnull=True) | Q(owner=request.user)
     ).annotate(
-        economia=ExpressionWrapper(F("preco_sem_desconto") - F("preco_com_cupom"), output_field=FloatField()),
+        # A tela tem de mostrar o MESMO número que a mensagem anuncia — fonte única
+        # em ofertas.py, ao lado de preco_publicavel().
+        preco_publicado=anotacao_preco_publicado(),
+    ).annotate(
+        economia=ExpressionWrapper(F("preco_sem_desconto") - F("preco_publicado"), output_field=FloatField()),
         percent=ExpressionWrapper(
-            (F("preco_sem_desconto") - F("preco_com_cupom")) * 100.0 / F("preco_sem_desconto"),
+            (F("preco_sem_desconto") - F("preco_publicado")) * 100.0 / F("preco_sem_desconto"),
             output_field=FloatField(),
         ),
     )
@@ -1921,7 +1950,10 @@ def top_promocoes(request):
         p.ja_enviado = p.id in ja_enviados
         p.motivos_score = [f"{p.percent:.0f}% de desconto"]
         hist_preco = historico.get(chave_produto(p))
-        if hist_preco and hist_preco["n"] >= 3 and p.preco_com_cupom <= hist_preco["minimo"] * 1.02:
+        # Contra o preço publicado: o histórico é gravado com o valor que o cliente
+        # paga, então comparar a vitrine com ele daria selo em item que não está na
+        # mínima (e tiraria de item que está).
+        if hist_preco and hist_preco["n"] >= 3 and p.preco_publicado <= hist_preco["minimo"] * 1.02:
             p.motivos_score.append("mínima de 30 dias")
 
     # base da querystring (mantém filtros ao trocar a ordenação)
@@ -2402,8 +2434,12 @@ def gerar_links_stream(request):
                 with usar_reporter(lambda msg, progresso=None: print(msg)):
                     get_marketplace(slug).prefetch_links(grupo, usuario=usuario)
             except (LoginError, SessaoExpirada) as exc:
-                # Sessão morta DE VERDADE: aqui o "Reconectar" resolve.
-                print(f"[ERRO] Sessão do Mercado Livre expirada: {exc}")
+                # Sessão morta DE VERDADE: aqui o "Reconectar" resolve. A mensagem
+                # da exceção já nomeia o assunto (link.MSG_SESSAO_EXPIRADA /
+                # MSG_SEM_SESSAO); o prefixo antigo "Sessão do Mercado Livre
+                # expirada:" repetia isso e o usuário lia duas afirmações
+                # sobrepostas sobre a mesma coisa.
+                print(f"[ERRO] {exc}")
                 print("__ML_LOGIN__")
             except AntiBotError:
                 # A conta está boa; foi o gateway anti-bot do ML reagindo ao IP do

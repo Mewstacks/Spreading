@@ -100,13 +100,14 @@ def status(user_id: int) -> dict:
         estado["auth_valido"] = False
         estado["motivo_desconexao"] = ""
         estado["alerta_conexao"] = ""
+        estado["linkbuilder"] = _LINKBUILDER_VAZIO
         estado.update(_transport.status(user_id))
         return estado
     # 'conectado' de verdade vem da fonte única (conexoes.py) — a mesma que o
     # dashboard e a Saúde leem. A `fase` acima é só o progresso do login em curso.
     try:
         from django.contrib.auth import get_user_model
-        from apps.scrapers.conexoes import estado_ml
+        from apps.scrapers.conexoes import estado_ml, estado_ml_linkbuilder
 
         user = get_user_model().objects.filter(id=user_id).first()
         est = estado_ml(user) if user else None
@@ -116,14 +117,37 @@ def status(user_id: int) -> dict:
         # alarmar: o anti-bot do ML bloqueia requisições legítimas vindas do IP da
         # Fly, e a conexão volta ao normal sozinha na maioria das vezes.
         estado["alerta_conexao"] = est.alerta if est and est.conectado else ""
+        # Segunda linha da tela: o portal de afiliados tem SSO próprio e pode
+        # recusar o cookie que o site aceita. Só medimos quando o site está OK —
+        # sem sessão nenhuma, o aviso relevante é o de cima, e duplicá-lo faria a
+        # tela dar dois diagnósticos para o mesmo problema.
+        estado["linkbuilder"] = (
+            _bloco_linkbuilder(estado_ml_linkbuilder(user))
+            if user and estado["auth_valido"] else _LINKBUILDER_VAZIO
+        )
     except Exception:
         from apps.accounts.ml_sessions import has_storage_state
         user = get_user_model().objects.filter(id=user_id).first()
         estado["auth_valido"] = bool(user and has_storage_state(user))
         estado["motivo_desconexao"] = ""
         estado["alerta_conexao"] = ""
+        estado["linkbuilder"] = _LINKBUILDER_VAZIO
     estado.update(_transport.status(user_id))
     return estado
+
+
+# Ausência de veredito, não veredito negativo: a tela renderiza "—" em vez de
+# afirmar que o Link Builder está de pé ou caído.
+_LINKBUILDER_VAZIO = {"medido": False, "ok": False, "motivo": "", "alerta": ""}
+
+
+def _bloco_linkbuilder(est) -> dict:
+    return {
+        "medido": True,
+        "ok": bool(est.conectado),
+        "motivo": "" if est.conectado else est.motivo,
+        "alerta": est.alerta if est.conectado else "",
+    }
 
 
 def _storage_fingerprint(storage_state: dict) -> str:

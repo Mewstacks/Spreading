@@ -23,6 +23,12 @@ def _motivo_publico_transporte(resultado) -> str:
     classe = resultado.get("classe")
     erro = str(resultado.get("erro") or "").lower()
     if classe == "transitorio":
+        # Reconexão é automática (o worker vigia o WAState e religa sozinho, e o
+        # próprio envio espera por ela). Dizer só "indisponível" fazia o usuário
+        # procurar o que reconectar — não há nada para ele fazer aqui.
+        if any(p in erro for p in ("reconect", "não está conectado", "nao esta conectado")):
+            return ("O WhatsApp estava reconectando neste instante. A conexão volta "
+                    "sozinha — tente novamente em alguns segundos.")
         return "O canal está temporariamente indisponível. Tente novamente mais tarde."
     if classe == "permanente":
         if any(p in erro for p in ("destino", "grupo", "chat", "@g.us", "@canal")):
@@ -56,24 +62,74 @@ def _canal_pronto_ou_erro(canal, usuario) -> dict | None:
     estado = estado_whatsapp(usuario, session=sessao)
     if estado.conectado:
         return None
-    # 'inativo': o worker tem a credencial mas ela saiu do Map (restore pulado no
-    # boot, runtime destruído). Religar é seguro e não precisa de QR — este clique
-    # não envia, mas o próximo já encontra a sessão de pé.
+    # Reconexão em curso: ESPERA em vez de recusar o envio. A queda de segundos é o
+    # caso comum (oscilação de rede, CONFLICT, reciclagem do Chromium) e o worker
+    # religa sozinho — recusar na hora era o que fazia "estou enviando e do nada o
+    # canal não é mais válido" aparecer no meio de uma fila.
     if estado.detalhe in ("conectando", "capacidade"):
+        estado = _esperar_wa_reconectar(usuario, sessao)
+        if estado.conectado:
+            return None
         return {"sucesso": False,
                 "motivo": estado.motivo
                 or "WhatsApp reativando a conexão — tente novamente em instantes.",
                 "classe": TRANSITORIO}
+    # 'inativo': o worker tem a credencial mas ela saiu do Map (restore pulado no
+    # boot, runtime destruído). Religar é seguro e não precisa de QR.
+    religou = False
     try:
         bruto = whatsapp_client.status(sessao)
         if not bruto.get("conectado") and bruto.get("fase") == "inativo":
             whatsapp_client.iniciar_sessao(sessao)
+            religou = True
     except Exception:
         pass
+    if religou:
+        # Antes o clique que religava a sessão nunca era o que enviava: devolvia erro
+        # e só a tentativa SEGUINTE encontrava a sessão de pé.
+        estado = _esperar_wa_reconectar(usuario, sessao)
+        if estado.conectado:
+            return None
     return {"sucesso": False,
             "motivo": estado.motivo
             or "WhatsApp desconectado. Reconecte sua conta para enviar.",
             "classe": TRANSITORIO, "precisa_login_wa": True}
+
+
+# Orçamento da espera por reconexão dentro de um request. 20s é o teto: a thread do
+# gunicorn fica presa aqui, e o worker religa com backoff a partir de 5s — então
+# isto cobre a primeira e a segunda tentativa dele sem transformar o envio numa
+# requisição pendurada.
+_WA_ESPERA_RECONEXAO_S = 20
+_WA_ESPERA_INTERVALO_S = 2.5
+
+
+def _esperar_wa_reconectar(usuario, sessao):
+    """Reconsulta o estado do WhatsApp até ele voltar ou o orçamento acabar.
+
+    Devolve o último Estado lido (nunca None), para o chamador reaproveitar o
+    `motivo` já calculado pela fonte única. Invalida o cache de 5s do
+    whatsapp_client entre as leituras — sem isso as reconsultas devolveriam o mesmo
+    payload velho e a espera não observaria nada.
+    """
+    import time
+
+    from apps.scrapers import whatsapp_client
+    from apps.scrapers.conexoes import estado_whatsapp
+
+    limite = time.monotonic() + _WA_ESPERA_RECONEXAO_S
+    estado = estado_whatsapp(usuario, session=sessao)
+    while not estado.conectado and time.monotonic() < limite:
+        # Estados terminais não voltam sozinhos: esperar por eles só queima o
+        # orçamento do request e atrasa a mensagem que pede ação do usuário.
+        if estado.detalhe in ("sem_pareamento", "recuperacao_pausada", "servico_fora"):
+            break
+        time.sleep(_WA_ESPERA_INTERVALO_S)
+        whatsapp_client.invalidar_status(sessao)
+        estado = estado_whatsapp(usuario, session=sessao)
+    if estado.conectado:
+        logger.info("WhatsApp voltou durante a espera do envio (sessão %s).", sessao)
+    return estado
 
 
 def esta_vivo(produto):
@@ -1054,6 +1110,15 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         itens_cupom, bloqueio_afiliacao = _preparar_itens_cupom(
             cupom, usuario, relacoes_prontas)
         img_kwargs = {}
+        if itens_cupom and getattr(settings, "PRECO_REVALIDA_ANTES_ENVIO", True):
+            # Antes da IA (para a chamada nascer do preço fresco), antes do corte
+            # do Telegram e antes da colagem — que é quem garante foto↔texto.
+            from apps.scrapers import preco_ao_vivo
+            itens_cupom, _removidos = preco_ao_vivo.revalidar_colagem(
+                cupom, itens_cupom, usuario=usuario)
+            if not itens_cupom:
+                return falhar("Os preços deste cupom mudaram; nenhum produto "
+                              "continua dentro das regras dele.", classe="transitorio")
         if itens_cupom:
             _preparar_conteudo_ia_cupom(itens_cupom)
             # Telegram limita legendas de foto a 1024 caracteres. Como a regra e
@@ -1188,6 +1253,23 @@ def preco_publicavel(produto) -> float:
     atual = getattr(produto, "preco_com_cupom", 0) or 0
     efetivo = getattr(produto, "preco_efetivo", 0) or 0
     return efetivo if 0 < efetivo < atual else atual
+
+
+def anotacao_preco_publicado():
+    """`preco_publicavel` em SQL, para a tela anotar o mesmo número da mensagem.
+
+    Existe para que haja UMA definição de "preço publicado". A tela mostrava
+    `preco_com_cupom` enquanto a mensagem publicava `preco_publicavel()`, e o item
+    aparecia com um valor na lista e saía com outro no WhatsApp.
+    """
+    from django.db.models import F, FloatField, Value
+    from django.db.models.functions import Coalesce, Least, NullIf
+
+    return Least(
+        F("preco_com_cupom"),
+        Coalesce(NullIf(F("preco_efetivo"), Value(0.0)), F("preco_com_cupom")),
+        output_field=FloatField(),
+    )
 
 
 def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
@@ -1654,10 +1736,15 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         # Preço ao vivo: depois da verificação (não faz sentido revalidar link
         # reprovado) e ANTES de montar a mensagem, para o texto gravado na
         # Publicacao ser exatamente o que foi enviado.
+        #
+        # Roda mesmo no caminho de cache acima (verificado_ok is True), e é isso que
+        # tira o envio do "zero contato com a página": o veredito do LINK continua
+        # vindo da fonte única, mas o PREÇO é medido agora, no `link` publicado —
+        # um GET segue meli.la -> PDP e mede a página que o assinante vai abrir.
         if getattr(settings, "PRECO_REVALIDA_ANTES_ENVIO", True):
             from apps.scrapers import preco_ao_vivo
             checagem = preco_ao_vivo.revalidar(
-                produto, usuario=usuario, configuracao=configuracao)
+                produto, usuario=usuario, configuracao=configuracao, url=link)
             if not checagem["ok"]:
                 return falhar(f"preço mudou antes do envio: {checagem['motivo']}",
                               link=link)

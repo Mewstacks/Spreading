@@ -362,13 +362,25 @@
   // ela não muda, a imagem fica parada.
   var ultimoQrMostrado = null;
   function refreshQr(valorQr) {
-    // Sem valor de QR no status: o /qr.png também devolveria 204. Não recarrega —
-    // o placeholder "Gerando QR code…" já aparece pelo CSS quando o img está sem src.
-    if (!valorQr) return;
+    // QR é credencial efêmera. Se o worker o consumiu ou invalidou, a imagem
+    // anterior precisa sumir imediatamente; mantê-la permite escanear um código
+    // morto enquanto o backend já está em outra tentativa.
+    if (!valorQr) {
+      qrImg.removeAttribute('src');
+      qrImg.alt = 'Gerando QR code…';
+      ultimoQrMostrado = null;
+      return;
+    }
     if (valorQr === ultimoQrMostrado) return;              // mesmo QR: não pisca
     ultimoQrMostrado = valorQr;
     qrImg.src = '/scrapers/whatsapp/qr.png?t=' + Date.now();
   }
+
+  // Uma única request de status em voo. setInterval disparava uma nova chamada
+  // mesmo quando a anterior ainda esperava o worker, acumulando polls e podendo
+  // pintar respostas antigas depois das novas.
+  let pollEmVoo = null;
+  let pollTimer = null;
 
   // Layout por estado: conectado recolhe a coluna de instruções e o pareamento;
   // erro terminal ganha acento próprio. Só apresentação — a lógica de fases
@@ -386,6 +398,7 @@
     instrDetalhes.open = true;
     stepsEl.style.display = 'none';
     qrArea.style.display = 'none';
+    refreshQr(null);
     waAviso.style.display = 'none';
     progArea.style.display = 'none';
     grpChip.style.display = 'none';
@@ -409,8 +422,11 @@
   }
 
   async function poll() {
-    try {
-      const r = await fetch('/scrapers/whatsapp/status/');
+    if (pollEmVoo) return pollEmVoo;
+    pollEmVoo = (async function () {
+     try {
+      const r = await fetch('/scrapers/whatsapp/status/', { cache: 'no-store' });
+      if (!r.ok) throw new Error('status ' + r.status);
       const s = await r.json();
       if (s.erro) { showOffline(); return; }
       offline.style.display = 'none';
@@ -459,8 +475,16 @@
       // fase que não previa mostrá-lo (ex.: reconectando após purgar a
       // credencial) — sem isto o usuário ficava preso na barra de progresso
       // com um QR válido escondido do outro lado.
-      if (f.qr || s.qr) { qrArea.style.display = 'block'; refreshQr(s.qr); }
-      else { qrArea.style.display = 'none'; ultimoQrMostrado = null; }
+      if (s.qr) {
+        qrArea.style.display = 'block';
+        refreshQr(s.qr);
+      } else if (f.qr) {
+        qrArea.style.display = 'block';
+        refreshQr(null);
+      } else {
+        qrArea.style.display = 'none';
+        refreshQr(null);
+      }
 
       // Barra
       if (f.bar) {
@@ -483,7 +507,19 @@
         (fase === 'conectado' || fase === 'indisponivel') ? 'none' : 'block';
       renderIcons();
 
-    } catch (e) { showOffline(); }
+     } catch (e) { showOffline(); }
+    })();
+    try {
+      return await pollEmVoo;
+    } finally {
+      pollEmVoo = null;
+    }
+  }
+
+  async function cicloPoll() {
+    await poll();
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(cicloPoll, 5000);
   }
 
   function getCookie(nome) {
@@ -610,10 +646,9 @@
     poll();
   };
 
-  poll();
+  cicloPoll();
   // 5s, não 2,5s: o status é servido de um cache de 5s no backend, então polling mais
   // rápido que isso só gasta thread de gunicorn sem trazer informação nova.
-  setInterval(poll, 5000);
   // Voltar para a aba é a hora certa de reagir: o revive é suprimido enquanto ela
   // está oculta, então sem isto o usuário esperaria mais um ciclo de poll olhando
   // para um "Desconectado" que já poderia estar sendo resolvido.

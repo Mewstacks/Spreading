@@ -3,11 +3,19 @@
 
 {% block topbar_context %}<strong>Scraper</strong><span>Coleta</span>{% endblock %}
 {% block topbar_actions %}
-{% with ml=passos.0 %}
-{% if ml.feito %}
-<span class="badge badge-green"><span class="dot"></span> Mercado Livre conectado</span>
-{% else %}
+{% comment %}
+Três estados, não dois. "Mercado Livre conectado" com o Link Builder recusando login
+era o badge que fazia o usuário duvidar do sistema: a tela afirmava conectado e a
+geração de links respondia "sessão expirada". passos.0 = sessão do site,
+passos.1 = portal de afiliados.
+{% endcomment %}
+{% with ml=passos.0 lb=passos.1 %}
+{% if not ml.feito %}
 <a href="{% url 'scraper-ml-conexao' %}" class="badge badge-yellow badge-link"><span class="dot"></span> Mercado Livre não conectado</a>
+{% elif not lb.feito %}
+<a href="{% url 'scraper-ml-conexao' %}" class="badge badge-yellow badge-link" title="{{ lb.desc }}"><span class="dot"></span> Link Builder pede login</a>
+{% else %}
+<span class="badge badge-green"><span class="dot"></span> Mercado Livre conectado</span>
 {% endif %}
 {% endwith %}
 {% endblock %}

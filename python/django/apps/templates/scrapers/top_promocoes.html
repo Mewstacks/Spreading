@@ -11,6 +11,30 @@
 
 {% block head_extra %}
 <style>
+  /* ── Card "Geração de links de afiliado" ──────────────────────────────────
+     Os quatro controles (contador, filtro de pendentes, categoria, botão) eram
+     elementos soltos na barra de ações, cada um com a cor do seu tipo. Nada dizia
+     que o select de categoria pertencia ao botão nem que "Mostrar também os
+     pendentes" não era um filtro da tabela — o usuário não sabia sobre o que o
+     "Gerar" ia agir. O card resolve isso por conter: uma moldura laranja, um
+     rótulo, e todos os controles herdando o acento em vez de disputar com ele. */
+  .links-card { display: flex; flex-direction: column; gap: .5rem;
+    padding: .6rem .75rem; border-radius: var(--r-md);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .links-card-head { display: flex; align-items: center; gap: .4rem;
+    color: color-mix(in srgb, var(--accent) 80%, var(--text));
+    font-family: var(--mono); font-size: 9.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .14em; }
+  .links-card-head i { width: 12px; height: 12px; }
+  .links-card-body { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+  /* Dentro do card o acento é o contexto, então o contador e o filtro param de
+     brigar por atenção com o botão. */
+  .links-card .tech-tag { border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+  .links-card .btn-ghost { border-color: color-mix(in srgb, var(--accent) 32%, transparent); }
+  .links-card .modal-log:empty { display: none; }
+  .links-card .modal-log { margin: 0; }
+
   /* ── Ação "Gerar links de afiliado" (sempre visível, sem dropdown) ── */
   .links-acao { display: inline-flex; align-items: center; gap: .4rem; }
   .links-acao .links-macro { max-width: 190px; }
@@ -188,8 +212,13 @@
     .filter-meta .seg { margin-left: 0; width: 100%; }
     .filter-meta .seg a { flex: 1; justify-content: center; }
     .fontes-afiliacao { margin-left: 0; flex-basis: 100%; }
-    /* A ação de links é a principal da tela: no mobile ocupa a linha inteira, com
-       alvo de toque cheio, em vez de espremer select + botão lado a lado. */
+    /* A ação de links é a principal da tela: no mobile o card ocupa a linha inteira
+       e cada controle vira um alvo de toque cheio, em vez de espremer contador,
+       filtro, select e botão na mesma linha. */
+    .links-card { flex-basis: 100%; }
+    .links-card-body { flex-direction: column; align-items: stretch; }
+    .links-card-body > .tech-tag { align-self: flex-start; }
+    .links-card-body > .btn-ghost { justify-content: center; min-height: 44px; }
     .links-acao { flex-basis: 100%; flex-wrap: wrap; }
     .links-acao .links-macro { max-width: none; flex: 1 1 100%; min-height: 44px; }
     .links-acao .js-links-btn { flex: 1 1 100%; justify-content: center; min-height: 44px; }
@@ -253,7 +282,9 @@
     <p class="sub">As melhores ofertas do Mercado Livre e da Amazon. Filtre, compare e envie para seus grupos.</p>
   </div>
   <div class="head-actions">
-    <span class="tech-tag"><i data-lucide="list"></i> {% if tipo == 'cupom' %}{{ cupons_page.paginator.count }}{% else %}{{ page_obj.paginator.count }}{% endif %} resultado(s)</span>
+    {% if tipo == 'cupom' %}
+    <span class="tech-tag"><i data-lucide="list"></i> {{ cupons_page.paginator.count }} resultado(s)</span>
+    {% endif %}
     {% if tipo == 'cupom' %}
       <span class="tech-tag"><i data-lucide="database"></i> {{ cupons_coletados }} coletado(s)</span>
       <span class="tech-tag"><i data-lucide="circle-check"></i> {{ cupons_prontos }} pronto(s)</span>
@@ -263,23 +294,31 @@
       {% if cupons_aguardando_conexao %}<span class="tech-tag"><i data-lucide="unplug"></i> {{ cupons_aguardando_conexao }} aguardando conexão</span>{% endif %}
     {% endif %}
     {% if tipo != 'cupom' %}
-      {% if so_afiliados %}
-      <a class="btn btn-ghost btn-sm" href="?{{ qs_base_sem_afiliado }}afiliado=todos"><i data-lucide="eye"></i> Mostrar também os pendentes</a>
-      {% else %}
-      <a class="btn btn-ghost btn-sm" href="?{{ qs_base_sem_afiliado }}afiliado=prontos"><i data-lucide="check"></i> Mostrar só os afiliados</a>
-      {% endif %}
       {% comment %}
       Ação principal da tela: sem link de afiliado o item não aparece na lista nem
       pode ser enviado. Ela morava recolhida num <details> ghost dentro da faixa de
       diagnóstico "Fontes" — o texto do estado vazio mandava "use Gerar links acima"
-      apontando para um botão que ninguém achava. Agora é botão de ação, no lugar
-      onde o usuário já está olhando, com a fila estampada.
+      apontando para um botão que ninguém achava. Depois virou botão solto na barra,
+      e aí o problema passou a ser o oposto: visível, mas sem dizer sobre O QUE ele
+      age. Agora contador, escopo e ação moram no mesmo card laranja, e o log de
+      progresso abre dentro dele.
       {% endcomment %}
-      {% include "scrapers/_gerar_links.html" %}
+      <div class="links-card">
+        <span class="links-card-head"><i data-lucide="link"></i> Geração de links de afiliado</span>
+        <div class="links-card-body">
+          <span class="tech-tag"><i data-lucide="list"></i> {{ page_obj.paginator.count }} resultado(s)</span>
+          {% if so_afiliados %}
+          <a class="btn btn-ghost btn-sm" href="?{{ qs_base_sem_afiliado }}afiliado=todos"><i data-lucide="eye"></i> Mostrar também os pendentes</a>
+          {% else %}
+          <a class="btn btn-ghost btn-sm" href="?{{ qs_base_sem_afiliado }}afiliado=prontos"><i data-lucide="check"></i> Mostrar só os afiliados</a>
+          {% endif %}
+          {% include "scrapers/_gerar_links.html" %}
+        </div>
+        <div id="links-log" class="modal-log"></div>
+      </div>
     {% endif %}
   </div>
 </div>
-{% if tipo != 'cupom' %}<div id="links-log" class="modal-log" style="margin-top:.7rem;"></div>{% endif %}
 
 <section class="fontes-strip" aria-label="Saúde das fontes">
   <div class="fontes-bar">
@@ -560,7 +599,7 @@
           </div>
         </td>
         <td data-label="Preço" class="deal-cell"><div class="td-val">
-          <div class="deal-prices"><span class="preco-final tnum">R$ {{ p.preco_com_cupom|floatformat:2 }}</span></div>
+          <div class="deal-prices"><span class="preco-final tnum">R$ {{ p.preco_publicado|floatformat:2 }}</span></div>
           <div class="deal-saving">de <span class="preco-original tnum">R$ {{ p.preco_sem_desconto|floatformat:2 }}</span></div>
         </div></td>
         <td data-label="Desconto">

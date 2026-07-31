@@ -69,12 +69,43 @@ class UrlNaoPermitidaError(Exception):
 
 # O portal de afiliados tem SSO PRÓPRIO (jms/msl), separado do site principal — o
 # mesmo desenho já reconhecido em ml_relatorio_conexao.py. Cookie bom em
-# mercadolivre.com.br não implica Link Builder logado, e é essa assimetria que
-# produz o relato "a tela diz conectado mas a geração de link falha": a sonda de
-# conexoes.py mede o site principal, e nenhuma tela media este portal.
-MSG_SESSAO_EXPIRADA = ("O portal de afiliados do Mercado Livre pediu login de novo. "
-                       "Ele tem sessão própria, separada da sua conta no site. "
-                       "Reconecte em Conexão Mercado Livre para gerar os links de afiliado.")
+# mercadolivre.com.br não implica Link Builder logado.
+#
+# A mensagem NÃO diz mais "ele tem sessão própria": era verdade sobre o SSO e
+# mentira sobre o que o usuário precisa fazer. A geração de link usa a sessão do
+# SITE (iniciar_browser(session_user=...), abaixo), não a de report_sessions —
+# então um único login em Conexão Mercado Livre resolve, e sugerir uma segunda
+# conexão só produzia a dúvida "onde é a outra?". A assimetria do SSO agora é
+# medida por conexoes.sondar_portal_afiliados_ml e aparece na tela ANTES do clique;
+# _registrar_veredito_lb, abaixo, alimenta essa medição com o sinal real daqui.
+MSG_SESSAO_EXPIRADA = ("O Mercado Livre pediu login de novo ao abrir o Link Builder. "
+                       "É a mesma conexão da sua conta: reconecte em Conexão Mercado "
+                       "Livre e a geração de links volta a funcionar.")
+
+MSG_SEM_SESSAO = ("Nenhuma conta do Mercado Livre conectada. Conecte em Conexão "
+                  "Mercado Livre para gerar links de afiliado.")
+
+
+def _registrar_veredito_lb(usuario, veredito: str, motivo: str = "") -> None:
+    """Publica no estado compartilhado o que ACABOU de acontecer com o portal.
+
+    Vale mais que a sonda HTTP de conexoes.py: aqui o Chromium realmente abriu (ou
+    não) o Link Builder com a sessão do usuário. Sem isto, a tela só descobriria a
+    falha no próximo ciclo de sonda — e o usuário já teria visto o erro no stream.
+
+    Falha de escrita nunca derruba a geração de link: isto é telemetria de estado.
+    """
+    if usuario is None:
+        return
+    try:
+        from apps.accounts.ml_sessions import registrar_veredito_linkbuilder_para_usuario
+        from apps.scrapers.conexoes import invalidar_ml
+
+        registrar_veredito_linkbuilder_para_usuario(usuario, veredito, motivo)
+        invalidar_ml(usuario)
+    except Exception:
+        logger.warning("Não foi possível registrar o veredito do Link Builder.",
+                       exc_info=True)
 
 
 def e_catalogo_universal(url: str) -> bool:
@@ -123,7 +154,7 @@ _LB_TIMEOUT_MS = 60000
 _MAX_FALHAS_CONSECUTIVAS = 3
 
 
-def _abrir_link_builder(page):
+def _abrir_link_builder(page, usuario=None):
     """Abre o Link Builder, distinguindo anti-bot de sessão realmente caída.
 
     O portal de afiliados usa SSO próprio (jms/msl): mesmo com cookies válidos no
@@ -134,7 +165,8 @@ def _abrir_link_builder(page):
 
     Levanta AntiBotError (verificação interposta), LoginError (sessão morta de
     verdade) ou AuthError (o ML não respondeu). São três causas com três ações
-    diferentes: esperar, reconectar, tentar mais tarde.
+    diferentes: esperar, reconectar, tentar mais tarde. `usuario` só serve para
+    publicar o veredito no estado que as telas leem — ver _registrar_veredito_lb.
     """
     ultimo_erro = None
     navegou = False
@@ -162,18 +194,25 @@ def _abrir_link_builder(page):
             time.sleep(3)
 
     # Três causas, três ações do usuário: tentar mais tarde, esperar, reconectar.
+    # O veredito acompanha essa mesma divisão — só o login é "suspeito"; anti-bot e
+    # ML fora do ar são "inconclusivo", porque a conexão segue valendo e contá-los
+    # como falha desconectaria o usuário por ruído de infraestrutura.
     if not navegou:
+        _registrar_veredito_lb(usuario, "inconclusivo", "o ML não respondeu")
         raise AuthError(
             "O Mercado Livre não respondeu ao abrir o Link Builder. "
             "Tente de novo em alguns minutos."
         ) from ultimo_erro
     if _pagina_intersticial(page):
+        _registrar_veredito_lb(usuario, "inconclusivo", "verificação de segurança interposta")
         raise AntiBotError(
             "O Mercado Livre pediu verificação de segurança antes de abrir o Link "
             "Builder. A conta segue conectada."
         )
     if _pagina_de_login(page):
+        _registrar_veredito_lb(usuario, "suspeito", "o portal de afiliados pediu login")
         raise LoginError(MSG_SESSAO_EXPIRADA)
+    _registrar_veredito_lb(usuario, "conectado")
 
 
 # Campo de resultado do Link Builder — é a fonte do botão "Copiar" (ele copia
@@ -282,7 +321,7 @@ def afiliate_link_builder(link_base, auth_path=None, usuario=None):
         session_user=usuario,
         headless=True
     ) as (page, context):
-        _abrir_link_builder(page)
+        _abrir_link_builder(page, usuario=usuario)
 
         try:
             link_final = _afiliar_url_na_pagina(page, link_base)
@@ -297,6 +336,8 @@ def afiliate_link_builder(link_base, auth_path=None, usuario=None):
             # O ML pode derrubar a sessão NO MEIO da interação: o fill/click estoura
             # timeout enquanto a página redireciona pro login. Não engolir isso.
             if _pagina_de_login(page):
+                _registrar_veredito_lb(usuario, "suspeito",
+                                       "sessão caiu durante a geração do link")
                 raise LoginError(MSG_SESSAO_EXPIRADA)
             logger.warning("Erro ao gerar link de afiliado ML: %s", e)
             return None
@@ -431,7 +472,7 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
         session_user=usuario,
         headless=True
     ) as (page, context):
-        _abrir_link_builder(page)
+        _abrir_link_builder(page, usuario=usuario)
 
         total_lote = len(pendentes)
         logger.info("Gerando links afiliados ML em lote para %s produtos", total_lote)
@@ -474,7 +515,7 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
                 # segue de onde parou — os itens já gerados ficam salvos.
                 if _pagina_de_login(page) or _pagina_intersticial(page):
                     try:
-                        _abrir_link_builder(page)
+                        _abrir_link_builder(page, usuario=usuario)
                     except AntiBotError:
                         interrompido = e
                         break
@@ -888,7 +929,10 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
             }
 
         if not has_storage_state(usuario):
-            raise LoginError(MSG_SESSAO_EXPIRADA)
+            # Não há sessão NENHUMA — nada foi aberto, então não é a mensagem do
+            # Link Builder. Antes as duas causas compartilhavam o mesmo texto e
+            # "pediu login de novo" aparecia para quem nunca havia conectado.
+            raise LoginError(MSG_SEM_SESSAO)
         url_isca = _montar_url_isca(url_produto, camp_id)
         if not url_isca:
             motivo = _motivo_url_recusada(url_produto)
