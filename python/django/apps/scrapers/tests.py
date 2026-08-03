@@ -1518,6 +1518,52 @@ class ConfiguracaoValidationTests(TestCase):
             for message in get_messages(response.wsgi_request)
         ))
 
+    def test_rejects_too_many_subniches_without_server_error(self):
+        """Marcar o macro-nicho inteiro estourava o CharField e devolvia 500.
+
+        O caminho real: os sub-nichos de Eletrodomésticos somam 395 caracteres, e o
+        insert morria com "value too long for type character varying(255)" antes de
+        qualquer validação — o afiliado ficava sem regra e sem explicação.
+        """
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import SUBNICHOS
+
+        termos = [termos for _, termos in SUBNICHOS["Eletrodomésticos"]]
+        self.assertGreater(len(", ".join(termos)), 255)  # o caso que quebrava
+
+        response = self.client.post(self.url, {
+            "canal": "whatsapp",
+            "grupo_id": "123@g.us",
+            "macro_categoria": "Eletrodomésticos",
+            "termo_busca": termos,
+            "intervalo_minutos": "60",
+            "min_desconto_percent": "15",
+        })
+
+        self.assertRedirects(response, self.url)
+        self.assertFalse(self.user.configuracoes.exists())
+        self.assertTrue(any(
+            "Sub-nichos demais" in str(message)
+            for message in get_messages(response.wsgi_request)
+        ))
+
+    def test_accepts_subniches_that_fit(self):
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import SUBNICHOS
+
+        termos = [termos for _, termos in SUBNICHOS["Eletrodomésticos"][:3]]
+
+        response = self.client.post(self.url, {
+            "canal": "whatsapp",
+            "grupo_id": "123@g.us",
+            "macro_categoria": "Eletrodomésticos",
+            "termo_busca": termos,
+            "intervalo_minutos": "60",
+            "min_desconto_percent": "15",
+        })
+
+        self.assertRedirects(response, self.url)
+        cfg = self.user.configuracoes.get()
+        self.assertEqual(cfg.termo_busca, ", ".join(termos))
+
     def test_rejects_invalid_schedule_range(self):
         response = self.client.post(self.url, {
             "canal": "whatsapp",
