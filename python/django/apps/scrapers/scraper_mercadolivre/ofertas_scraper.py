@@ -44,6 +44,30 @@ def _upsert_resiliente(**kwargs):
         _reconectar_db()
         return Produto.objects.update_or_create(**kwargs)
 
+
+def _normalizar_link_produto(link: str) -> str:
+    """Reduz URLs de tracking do ML a um destino persistível e estável.
+
+    Alguns cards de busca entregam URLs ``click1/mclics`` com mais de 1.000
+    caracteres. Além de criarem duplicatas, elas estouram o ``URLField`` de
+    ``Produto`` só no fim de uma busca longa. O Link Builder já conhece todas as
+    formas de extrair o item MLB; reutilizamos a mesma regra e mantemos um fallback
+    sem query/fragmento para páginas de catálogo não afiliáveis.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+    from apps.scrapers.scraper_mercadolivre.link import _montar_url_isca
+
+    bruto = str(link or "").strip()
+    canonico = _montar_url_isca(bruto, "")
+    if canonico:
+        return canonico[:1000]
+    try:
+        parsed = urlsplit(bruto)
+        limpo = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    except (TypeError, ValueError):
+        limpo = bruto.split("#", 1)[0].split("?", 1)[0]
+    return limpo[:1000]
+
 # Classificação de OFERTAS por palavra-chave no nome (PT), mapeando para os mesmos
 # nomes de macro de cateorize.py. Ordem importa: mais específico primeiro.
 _PT_MACRO = [
@@ -309,7 +333,7 @@ def _coletar_cards(page):
 
             out.append({
                 "nome": nome[:255],
-                "link_produto": link.split("#")[0],
+                "link_produto": _normalizar_link_produto(link),
                 "preco_sem_desconto": de,
                 "preco_com_cupom": por,
                 "imagem_url": imagem[:1000],
@@ -344,13 +368,14 @@ def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):
     vistos = set()
     salvos = []
     for o in coletados:
-        if o["link_produto"] in vistos:
+        link_produto = _normalizar_link_produto(o["link_produto"])
+        if not link_produto or link_produto in vistos:
             continue
-        vistos.add(o["link_produto"])
+        vistos.add(link_produto)
         from apps.scrapers.scraper_mercadolivre.link import e_catalogo_universal
-        catalogo = e_catalogo_universal(o["link_produto"])
+        catalogo = e_catalogo_universal(link_produto)
         produto, _ = _upsert_resiliente(
-            marketplace="mercadolivre", owner=None, link_produto=o["link_produto"],
+            marketplace="mercadolivre", owner=None, link_produto=link_produto,
             defaults={"campanha_id": "", "origem": origem,
                       "fonte": "mercadolivre-web", "codigo_checkout": codigo_checkout,
                       "nome": o["nome"], "preco_sem_desconto": o["preco_sem_desconto"],
@@ -385,13 +410,14 @@ def _upsert_ofertas(coletados):
     _reconectar_db()  # conexão fresca: a fase de browser pode ter matado o socket
     vistos, n = set(), 0
     for o in coletados:
-        if o["link_produto"] in vistos:
+        link_produto = _normalizar_link_produto(o["link_produto"])
+        if not link_produto or link_produto in vistos:
             continue
-        vistos.add(o["link_produto"])
+        vistos.add(link_produto)
         from apps.scrapers.scraper_mercadolivre.link import e_catalogo_universal
-        catalogo = e_catalogo_universal(o["link_produto"])
+        catalogo = e_catalogo_universal(link_produto)
         produto, _ = _upsert_resiliente(
-            origem="oferta", link_produto=o["link_produto"], owner=None,
+            origem="oferta", link_produto=link_produto, owner=None,
             defaults={
                 "nome": o["nome"],
                 "preco_sem_desconto": o["preco_sem_desconto"],
@@ -413,7 +439,7 @@ def _upsert_ofertas(coletados):
         if catalogo:
             produto.links_usuario.all().delete()
         else:
-            registrar("mercadolivre", "", o["link_produto"], o["preco_com_cupom"])
+            registrar("mercadolivre", "", link_produto, o["preco_com_cupom"])
             n += 1
     return n
 

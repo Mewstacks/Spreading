@@ -56,6 +56,33 @@ class LinkBuilderHardeningTests(SimpleTestCase):
 
 
 class ScraperPersistenceHardeningTests(TestCase):
+    def test_url_de_tracking_longa_e_reduzida_antes_do_banco(self):
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import (
+            _normalizar_link_produto,
+        )
+
+        longa = (
+            "https://click1.mercadolivre.com.br/mclics/click?"
+            + "tracking=" + ("x" * 1200)
+            + "&pdp_filters=item_id%3AMLB123456789"
+        )
+
+        self.assertEqual(
+            _normalizar_link_produto(longa),
+            "https://produto.mercadolivre.com.br/MLB-123456789",
+        )
+
+    def test_url_sem_item_perde_query_e_respeita_limite_do_model(self):
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import (
+            _normalizar_link_produto,
+        )
+
+        longa = "https://www.mercadolivre.com.br/ofertas?tracking=" + ("x" * 1200)
+        normalizada = _normalizar_link_produto(longa)
+
+        self.assertEqual(normalizada, "https://www.mercadolivre.com.br/ofertas")
+        self.assertLessEqual(len(normalizada), 1000)
+
     def test_busca_vazia_preserva_catalogo(self):
         existente = Produto.objects.create(
             marketplace="mercadolivre", origem="busca", nome="Fone Bluetooth",
