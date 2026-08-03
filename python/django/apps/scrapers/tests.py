@@ -1,3 +1,4 @@
+import asyncio
 import itertools
 import json
 import os
@@ -544,6 +545,227 @@ class SondaLinkBuilderTests(SimpleTestCase):
 
         self.assertEqual(
             sondar_portal_afiliados_ml({"cookies": [], "origins": []})[0], "suspeito")
+
+
+class ProntidaoRealDoLinkBuilderTests(TestCase):
+    def setUp(self):
+        from apps.accounts.ml_sessions import save_storage_state
+
+        cache.clear()
+        self.user = get_user_model().objects.create_user("lb-real", password="test")
+        self.org = self.user.personal_organization
+        save_storage_state(
+            self.user,
+            {"cookies": [{"name": "ssid", "value": "x"}], "origins": []},
+        )
+
+    def _estado(self):
+        from apps.scrapers.conexoes import estado_ml_linkbuilder
+
+        cache.clear()
+        return estado_ml_linkbuilder(self.user, usar_cache=False)
+
+    def test_http_200_nunca_promove_unknown_para_ready(self):
+        with patch(
+            "apps.scrapers.conexoes.sondar_portal_afiliados_ml",
+            return_value=("conectado", ""),
+        ) as sonda:
+            estado = self._estado()
+
+        self.assertFalse(estado.conectado)
+        self.assertEqual(estado.detalhe, "unknown")
+        sonda.assert_not_called()
+
+    def test_transicoes_reais_e_validade_de_quinze_minutos(self):
+        from apps.accounts.ml_sessions import registrar_prontidao_linkbuilder
+        from apps.accounts.models import MercadoLivreSession
+
+        registrar_prontidao_linkbuilder(self.org, "ready", "controles confirmados")
+        self.assertTrue(self._estado().conectado)
+        self.assertEqual(self._estado().detalhe, "ready")
+
+        MercadoLivreSession.objects.filter(organization=self.org).update(
+            lb_readiness_checked_at=timezone.now() - timedelta(minutes=16),
+        )
+        self.assertEqual(self._estado().detalhe, "stale")
+
+        registrar_prontidao_linkbuilder(
+            self.org, "login_required", "portal pediu login",
+        )
+        self.assertEqual(self._estado().detalhe, "login_required")
+
+        registrar_prontidao_linkbuilder(
+            self.org, "temporarily_unavailable", "anti-bot",
+        )
+        self.assertEqual(self._estado().detalhe, "temporarily_unavailable")
+
+
+class ControlesReaisDoLinkBuilderTests(SimpleTestCase):
+    """Protege as duas versões de DOM vistas no portal do Mercado Livre."""
+
+    class Locator:
+        def __init__(self, *, visivel=False, habilitado=True, ao_preencher=None):
+            self.visivel = visivel
+            self.habilitado = habilitado
+            self.ao_preencher = ao_preencher
+            self.first = self
+            self.preenchido = None
+            self.clicado = False
+
+        def is_visible(self, timeout=None):
+            return self.visivel
+
+        def is_enabled(self, timeout=None):
+            return self.habilitado
+
+        def fill(self, valor):
+            self.preenchido = valor
+            if self.ao_preencher:
+                self.ao_preencher(valor)
+
+        def input_value(self, timeout=None):
+            return self.preenchido or ""
+
+        def click(self):
+            self.clicado = True
+
+        def filter(self, **kwargs):
+            return self
+
+    class Page:
+        def __init__(self, *, textarea=False, legado=False):
+            self.botao = ControlesReaisDoLinkBuilderTests.Locator(visivel=True)
+
+            def habilitar_com_url(valor):
+                self.botao.habilitado = bool(valor)
+
+            self.campo_atual = ControlesReaisDoLinkBuilderTests.Locator(
+                visivel=textarea, ao_preencher=habilitar_com_url,
+            )
+            self.campo_legado = ControlesReaisDoLinkBuilderTests.Locator(
+                visivel=legado, ao_preencher=habilitar_com_url,
+            )
+
+        def locator(self, seletor):
+            if seletor.startswith("textarea"):
+                return self.campo_atual
+            if seletor == "button":
+                return self.botao
+            return ControlesReaisDoLinkBuilderTests.Locator()
+
+        def get_by_role(self, role, name=None, exact=None):
+            if role == "textbox":
+                return self.campo_legado
+            if role == "button" and name == "Gerar":
+                return self.botao
+            return ControlesReaisDoLinkBuilderTests.Locator()
+
+    def test_dom_atual_com_textarea_sem_nome_acessivel_fica_ready(self):
+        from apps.scrapers.scraper_mercadolivre.link import _linkbuilder_pronto
+
+        self.assertTrue(_linkbuilder_pronto(self.Page(textarea=True)))
+
+    def test_dom_legado_com_nome_acessivel_continua_ready(self):
+        from apps.scrapers.scraper_mercadolivre.link import _linkbuilder_pronto
+
+        self.assertTrue(_linkbuilder_pronto(self.Page(legado=True)))
+
+    def test_botao_desabilitado_em_campo_vazio_e_exercitado_sem_submeter(self):
+        from apps.scrapers.scraper_mercadolivre.link import _linkbuilder_pronto
+
+        page = self.Page(textarea=True)
+        page.botao.habilitado = False
+
+        self.assertTrue(_linkbuilder_pronto(page))
+        self.assertEqual(page.campo_atual.preenchido, "")
+        self.assertFalse(page.botao.clicado)
+
+    def test_geracao_preenche_o_textarea_atual_e_clica_em_gerar(self):
+        from apps.scrapers.scraper_mercadolivre import link as ml
+
+        page = self.Page(textarea=True)
+        with patch.object(ml, "_limpar_resultado"), \
+             patch.object(ml, "_esperar_resultado", return_value="https://meli.la/x"), \
+             patch.object(ml, "_validar_resultado_link", return_value="https://meli.la/x"):
+            resultado = ml._afiliar_url_na_pagina(
+                page, "https://produto.mercadolivre.com.br/MLB-123",
+            )
+
+        self.assertEqual(resultado, "https://meli.la/x")
+        self.assertEqual(
+            page.campo_atual.preenchido,
+            "https://produto.mercadolivre.com.br/MLB-123",
+        )
+        self.assertTrue(page.botao.clicado)
+
+
+class VereditoLinkBuilderForaDoLoopORMTests(TransactionTestCase):
+    """Regressão do SynchronousOnlyOperation visto em produção."""
+
+    def test_veredito_real_e_gravado_com_event_loop_ativo(self):
+        from apps.accounts.models import MercadoLivreSession
+        from apps.accounts.ml_sessions import save_storage_state
+        from apps.accounts.tenant import tenant_suspenso
+        from apps.scrapers.scraper_mercadolivre.link import _registrar_veredito_lb
+
+        user = get_user_model().objects.create_user("lb-async-bridge", password="test")
+        organization = user.personal_organization
+        save_storage_state(
+            user,
+            {"cookies": [{"name": "ssid", "value": "x"}], "origins": []},
+        )
+        user._spreading_organization_id = organization.pk
+
+        async def observar():
+            with tenant_suspenso(organization.pk, actor_id=user.pk):
+                _registrar_veredito_lb(
+                    user, "conectado", "campo e botão confirmados",
+                )
+
+        asyncio.run(observar())
+
+        record = MercadoLivreSession.objects.get(organization=organization)
+        self.assertEqual(record.lb_readiness, "ready")
+        self.assertEqual(record.lb_last_probe_result, "conectado")
+
+    def test_lote_sob_tenant_suspenso_le_e_grava_no_tenant_correto(self):
+        from apps.accounts.ml_sessions import save_storage_state
+        from apps.accounts.tenant import tenant_suspenso
+        from apps.scrapers.scraper_mercadolivre import link as ml
+
+        user = get_user_model().objects.create_user("ml-suspenso", password="test")
+        organization = user.personal_organization
+        save_storage_state(
+            user,
+            {"cookies": [{"name": "ssid", "value": "x"}], "origins": []},
+        )
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Item tenant", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=70,
+            link_produto="https://produto.mercadolivre.com.br/MLB-998877",
+        )
+
+        @contextmanager
+        def browser_falso(**_kwargs):
+            yield Mock(), Mock()
+
+        async def gerar():
+            with tenant_suspenso(organization.pk, actor_id=user.pk):
+                return ml.gerar_links_em_lote([produto], usuario=user)
+
+        with patch.object(ml, "iniciar_browser", browser_falso), \
+             patch.object(ml, "_abrir_link_builder"), \
+             patch.object(
+                 ml, "_afiliar_url_na_pagina",
+                 return_value="https://meli.la/tenant-certo",
+             ):
+            resultado = asyncio.run(gerar())
+
+        self.assertEqual(resultado, (1, 0))
+        self.assertTrue(LinkAfiliadoUsuario.objects.filter(
+            usuario=user, produto=produto,
+            link_afiliado="https://meli.la/tenant-certo",
+        ).exists())
 
 
 class StatusDeConexaoComLinkBuilderTests(SimpleTestCase):
@@ -3669,6 +3891,11 @@ class GeracaoDeLinksEmLoteTests(TestCase):
         executar_no_tenant, e o ambiente não é tocado em momento nenhum.
         """
         produto = self._produto()
+        from apps.accounts.ml_sessions import save_storage_state
+        save_storage_state(
+            self.user,
+            {"cookies": [{"name": "ssid", "value": "x"}], "origins": []},
+        )
         anterior = os.environ.pop("DJANGO_ALLOW_ASYNC_UNSAFE", None)
 
         @contextmanager
@@ -5470,9 +5697,11 @@ class SessaoMLGravadaForaDoPlaywrightTests(TestCase):
         from apps.scrapers import ml_conexao
 
         ordem = []
+        persistido = {}
 
-        def gravar(user_id, estado):
+        def gravar(user_id, estado, **kwargs):
             ordem.append("sessao_gravada")
+            persistido.update(kwargs)
 
         with patch("playwright.sync_api.sync_playwright", self._playwright_falso(ordem)), \
              patch.object(ml_conexao, "_ir_para_login"), \
@@ -5482,6 +5711,7 @@ class SessaoMLGravadaForaDoPlaywrightTests(TestCase):
             ml_conexao._worker(self.user.id)
 
         self.assertEqual(ordem, ["playwright_fechado", "sessao_gravada"])
+        self.assertEqual(persistido["prontidao"], "ready")
         self.assertEqual(ml_conexao.status(self.user.id)["fase"], "conectado")
 
     def test_falha_ao_gravar_nao_deixa_a_tela_presa_em_salvando(self):
@@ -5596,7 +5826,7 @@ class RenovacaoDeSessaoPersistidaTests(TestCase):
         with patch("apps.scrapers.auxiliar.sync_playwright", playwright_falso), \
              patch("apps.scrapers.auxiliar._iniciar_chromium", return_value=navegador), \
              patch("apps.accounts.ml_sessions.load_storage_state", return_value=storage_state), \
-             patch("apps.accounts.ml_sessions.save_storage_state",
+             patch("apps.accounts.ml_sessions.renew_storage_state",
                    side_effect=lambda *a, **k: ordem.append("sessao_gravada")):
             yield
 
@@ -5668,16 +5898,28 @@ class LoteDeLinksResilienteTests(TestCase):
 
         # executar_no_tenant exige contexto de tenant instalado (RLS); no teste ele
         # não existe, então a gravação viraria exceção e mascararia o que se mede.
-        direto = lambda fn, *a, **kw: fn(*a, **kw)
+        direto = lambda fn, *a, **kw: fn(
+            *a, **{k: v for k, v in kw.items() if k != "organization_id"}
+        )
 
         with patch.object(ml, "iniciar_browser", _browser), \
              patch.object(ml, "_abrir_link_builder") as abrir, \
              patch.object(ml, "_afiliar_url_na_pagina", side_effect=afiliar), \
+             patch.object(ml, "has_storage_state", return_value=True), \
              patch.object(ml, "executar_no_tenant", direto), \
              patch.object(ml, "salvar_cache"), \
              patch.object(ml, "registrar_falha") as falha:
             resultado = ml.gerar_links_em_lote(produtos, usuario=self.user)
         return resultado, falha, abrir, page
+
+    def test_sem_sessao_falha_antes_de_abrir_chromium(self):
+        from apps.scrapers.scraper_mercadolivre import link as ml
+
+        produtos = self._produtos(1)
+        with patch.object(ml, "iniciar_browser") as navegador:
+            with self.assertRaisesMessage(ml.LoginError, "Nenhuma conta"):
+                ml.gerar_links_em_lote(produtos, usuario=self.user)
+        navegador.assert_not_called()
 
     def test_falha_no_meio_reabre_e_continua_o_lote(self):
         from apps.scrapers.scraper_mercadolivre import link as ml
@@ -5699,7 +5941,7 @@ class LoteDeLinksResilienteTests(TestCase):
         self.assertEqual(abrir.call_count, 2)  # abertura inicial + 1 reabertura
         falha.assert_not_called()              # erro de infra não queima a fila
 
-    def test_erro_do_proprio_produto_continua_registrando_falha(self):
+    def test_erro_generico_do_portal_nao_queima_tentativa_do_produto(self):
         produtos = self._produtos(2)
 
         def afiliar(page, url):
@@ -5708,8 +5950,8 @@ class LoteDeLinksResilienteTests(TestCase):
         (gerados, falhas), falha, _, _ = self._rodar(produtos, afiliar)
 
         self.assertEqual(gerados, 0)
-        self.assertEqual(falhas, 2)
-        self.assertEqual(falha.call_count, 2)  # aqui a culpa É do produto
+        self.assertEqual(falhas, 0)
+        falha.assert_not_called()
 
     def test_tres_reaberturas_seguidas_encerram_o_lote(self):
         produtos = self._produtos(10)
@@ -5742,11 +5984,14 @@ class LoteDeLinksResilienteTests(TestCase):
         def _browser(*a, **kw):
             yield page, MagicMock()
 
-        direto = lambda fn, *a, **kw: fn(*a, **kw)
+        direto = lambda fn, *a, **kw: fn(
+            *a, **{k: v for k, v in kw.items() if k != "organization_id"}
+        )
         with patch.object(ml, "iniciar_browser", _browser), \
              patch.object(ml, "_abrir_link_builder",
                           side_effect=[None, ml.LoginError("morreu")]), \
              patch.object(ml, "_afiliar_url_na_pagina", side_effect=afiliar), \
+             patch.object(ml, "has_storage_state", return_value=True), \
              patch.object(ml, "executar_no_tenant", direto), \
              patch.object(ml, "salvar_cache"), \
              patch.object(ml, "registrar_falha") as falha:

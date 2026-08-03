@@ -64,12 +64,41 @@ def _set(user_id, **values):
 
 
 def status(user_id):
-    state = cache.get(_key(user_id)) or {"fase": "idle"}
+    state = dict(cache.get(_key(user_id)) or {"fase": "idle"})
     from django.contrib.auth import get_user_model
     user = get_user_model().objects.filter(pk=user_id).first()
     state["auth_valido"] = bool(user and has_report_session(user, "mercadolivre"))
     state.update(_transport.status(user_id))
+    for comando in ("retentar_qr", "cancelar", "salvar_agora", "validar_agora"):
+        state.pop(comando, None)
     return state
+
+
+def _marcar_configuracao_qr(user_id: int) -> dict:
+    atual = dict(cache.get(_key(user_id)) or {})
+    desafio_anterior = atual.get("desafio")
+    desafio_anterior = desafio_anterior if isinstance(desafio_anterior, dict) else {}
+    if atual.get("fase") == "configurar_qr":
+        return atual
+    try:
+        tentativas_anteriores = max(0, int(desafio_anterior.get("tentativas") or 0))
+    except (TypeError, ValueError):
+        tentativas_anteriores = 0
+    tentativas = tentativas_anteriores + 1
+    logger.info(
+        "ml_login_metric transport=mercado_livre_relatorios user=%s "
+        "challenge=camera_not_found context=relatorios attempt=%s",
+        user_id, tentativas,
+    )
+    return _set(
+        user_id, fase="configurar_qr", retentar_qr=False,
+        desafio={
+            "tipo": "camera_indisponivel",
+            "contexto": "relatorios",
+            "tentativas": tentativas,
+        },
+        aviso="", erro="",
+    )
 
 
 def _logado(page) -> bool:
@@ -105,12 +134,17 @@ def _worker(user):
     from apps.scrapers.contexto_login import (
         LAUNCH_ARGS, habilitar_foco, opcoes_de_contexto,
     )
+    from apps.scrapers.ml_login_challenge import pagina_exige_configuracao_qr
 
     uid = user.id
     runtime = _transport.get(uid) or _transport.create(uid)
     estado_capturado = None
+    qr_deadline_estendido = False
     try:
-        _set(uid, fase="iniciando", erro="")
+        _set(
+            uid, fase="iniciando", desafio={}, retentar_qr=False,
+            aviso="", erro="",
+        )
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=LAUNCH_ARGS)
             try:
@@ -148,11 +182,47 @@ def _worker(user):
                         state = cache.get(_key(uid)) or {}
                         proxima_leitura = agora + 0.5
                     if state.get("cancelar"):
-                        _set(uid, fase="idle", erro="")
+                        _set(
+                            uid, fase="idle", desafio={}, retentar_qr=False,
+                            aviso="", erro="",
+                        )
                         break
                     current_page = active_page.current()
                     if current_page is None:
                         raise RuntimeError("A janela do portal de afiliados foi fechada.")
+
+                    if state.get("fase") == "configurar_qr":
+                        if state.get("retentar_qr"):
+                            logger.info(
+                                "ml_login_metric transport=mercado_livre_relatorios "
+                                "user=%s challenge=camera_not_found action=retry "
+                                "context=relatorios", uid,
+                            )
+                            state = _set(
+                                uid, fase="aguardando_login", retentar_qr=False,
+                                aviso="Reabrindo o portal de relatórios…", erro="",
+                            )
+                            try:
+                                current_page.goto(
+                                    _report_url(), wait_until="domcontentloaded",
+                                    timeout=GOTO_TIMEOUT_MS,
+                                )
+                            except Exception as exc:
+                                logger.info(
+                                    "ml_login_metric transport=mercado_livre_relatorios "
+                                    "user=%s challenge=camera_not_found "
+                                    "action=retry_failed context=relatorios",
+                                    uid,
+                                )
+                                raise RuntimeError(
+                                    "O Mercado Livre não respondeu ao reabrir o portal. "
+                                    "Inicie uma nova conexão e tente novamente."
+                                ) from exc
+                            _transport.capture(runtime, current_page, active=True)
+                            proxima_checagem = 0.0
+                        current_page.wait_for_timeout(LOOP_MS)
+                        continue
+
                     had_input = False
                     for _ in range(MAX_EVENTOS_POR_POST * 4):
                         try:
@@ -187,6 +257,13 @@ def _worker(user):
                         current_page.wait_for_timeout(LOOP_MS)
                         continue
                     proxima_checagem = agora + 1.0
+                    if pagina_exige_configuracao_qr(current_page):
+                        if not qr_deadline_estendido:
+                            deadline = agora + LOGIN_DEADLINE_S
+                            qr_deadline_estendido = True
+                        state = _marcar_configuracao_qr(uid)
+                        current_page.wait_for_timeout(LOOP_MS)
+                        continue
                     authenticated = _logado(current_page)
                     if validate_now or authenticated:
                         logger.info(
@@ -212,8 +289,19 @@ def _worker(user):
                     # formato dos outros workers e garante que a fase só vire
                     # 'conectado' quando a sessão estiver de fato no disco.
                     estado_capturado = context.storage_state()
-                elif (cache.get(_key(uid)) or {}).get("fase") != "idle":
-                    _set(uid, fase="erro", erro="Tempo esgotado esperando o login do portal de afiliados.")
+                else:
+                    estado_final = cache.get(_key(uid)) or {}
+                    if estado_final.get("fase") != "idle":
+                        esperando_qr = estado_final.get("fase") == "configurar_qr"
+                        _set(
+                            uid, fase="erro", retentar_qr=False,
+                            erro=(
+                                "O tempo para configurar o QR terminou. "
+                                "Inicie uma nova conexão e tente novamente."
+                                if esperando_qr else
+                                "Tempo esgotado esperando o login do portal de afiliados."
+                            ),
+                        )
             finally:
                 # Em finally: solto no fim do bloco, o close não era alcançado
                 # em nenhuma exceção e o Chromium ficava órfão.
@@ -225,9 +313,17 @@ def _worker(user):
 
         if estado_capturado is not None:
             save_report_state(user, "mercadolivre", estado_capturado)
+            desafio_concluido = (cache.get(_key(uid)) or {}).get("desafio")
+            if isinstance(desafio_concluido, dict) and desafio_concluido.get("tipo"):
+                logger.info(
+                    "ml_login_metric transport=mercado_livre_relatorios user=%s "
+                    "challenge=camera_not_found action=success context=relatorios "
+                    "attempts=%s",
+                    uid, desafio_concluido.get("tentativas", 1),
+                )
             _set(
-                uid, fase="conectado", erro="", aviso="",
-                salvar_agora=False, validar_agora=False,
+                uid, fase="conectado", desafio={}, retentar_qr=False,
+                erro="", aviso="", salvar_agora=False, validar_agora=False,
             )
     except Exception as exc:
         codigo = novo_codigo()
@@ -262,8 +358,8 @@ def criar_sessao(user, client: dict | None = None):
         runtime = _transport.create(user.id, client)
         _set(
             user.id, fase="iniciando", erro="", aviso="", cancelar=False,
-            salvar_agora=False, validar_agora=False, session_id=runtime.session_id,
-            viewport=runtime.viewport,
+            salvar_agora=False, validar_agora=False, retentar_qr=False,
+            desafio={}, session_id=runtime.session_id, viewport=runtime.viewport,
         )
         thread = threading.Thread(target=_worker, args=(user,), daemon=True)
         _threads[user.id] = thread
@@ -279,9 +375,43 @@ def enfileirar_input(user_id, session_id, eventos):
     return _transport.enqueue(user_id, session_id, eventos)
 
 
+def retentar_apos_configurar_qr(user_id: int) -> tuple[bool, dict]:
+    with _lock:
+        thread = _threads.get(user_id)
+        ativa = bool(
+            thread and thread.is_alive()
+            and _transport.get(user_id) is not None
+        )
+    if not ativa:
+        return False, {
+            "ok": False,
+            "erro": "A sessão de login terminou. Inicie uma nova conexão.",
+        }
+    atual = cache.get(_key(user_id)) or {}
+    if atual.get("fase") != "configurar_qr":
+        return False, {
+            "ok": False,
+            "erro": "O login não está aguardando a configuração do QR.",
+        }
+    _set(user_id, retentar_qr=True, aviso="", erro="")
+    resposta = status(user_id)
+    resposta["ok"] = True
+    return True, resposta
+
+
 def salvar_agora(user_id):
     _set(user_id, validar_agora=True, salvar_agora=False, aviso="")
 
 
 def cancelar(user_id):
-    _set(user_id, cancelar=True, fase="idle", aviso="", erro="")
+    atual = cache.get(_key(user_id)) or {}
+    if atual.get("fase") == "configurar_qr":
+        logger.info(
+            "ml_login_metric transport=mercado_livre_relatorios user=%s "
+            "challenge=camera_not_found action=cancel context=relatorios",
+            user_id,
+        )
+    _set(
+        user_id, cancelar=True, fase="idle", desafio={}, retentar_qr=False,
+        aviso="", erro="",
+    )

@@ -98,6 +98,12 @@ class MercadoLivreSession(models.Model):
         ("suspeito", "Suspeito"),
         ("inconclusivo", "Inconclusivo"),
     ]
+    LINKBUILDER_READINESS = [
+        ("unknown", "Não verificado"),
+        ("ready", "Pronto"),
+        ("login_required", "Login necessário"),
+        ("temporarily_unavailable", "Temporariamente indisponível"),
+    ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.OneToOneField(
@@ -142,6 +148,15 @@ class MercadoLivreSession(models.Model):
     lb_last_probe_result = models.CharField(max_length=16, choices=PROBE_RESULTS, blank=True)
     lb_probe_failures = models.PositiveSmallIntegerField(default=0)
     lb_probe_reason = models.CharField(max_length=200, blank=True)
+    # Fonte autoritativa para a UI: somente o Chromium que abre o Link Builder real
+    # pode escrever estes campos. A sonda HTTP acima é apenas telemetria, pois o
+    # portal responde 200 antes de o JavaScript/SSO redirecionar para o login.
+    lb_readiness = models.CharField(
+        max_length=32, choices=LINKBUILDER_READINESS, default="unknown",
+        db_index=True,
+    )
+    lb_readiness_checked_at = models.DateTimeField(null=True, blank=True)
+    lb_readiness_reason = models.CharField(max_length=200, blank=True)
 
     def __str__(self):
         return f"MLSession<{self.organization_id}>"

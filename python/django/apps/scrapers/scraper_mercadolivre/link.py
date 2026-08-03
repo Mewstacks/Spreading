@@ -98,11 +98,32 @@ def _registrar_veredito_lb(usuario, veredito: str, motivo: str = "") -> None:
     if usuario is None:
         return
     try:
-        from apps.accounts.ml_sessions import registrar_veredito_linkbuilder_para_usuario
-        from apps.scrapers.conexoes import invalidar_ml
+        from apps.accounts.ml_sessions import (
+            registrar_prontidao_linkbuilder,
+            registrar_veredito_linkbuilder,
+        )
+        from apps.accounts.models import organization_for_user
+        from apps.scrapers.conexoes import invalidar_ml_organization
 
-        registrar_veredito_linkbuilder_para_usuario(usuario, veredito, motivo)
-        invalidar_ml(usuario)
+        estado = {
+            "conectado": "ready",
+            "suspeito": "login_required",
+            "inconclusivo": "temporarily_unavailable",
+        }.get(veredito, "temporarily_unavailable")
+
+        def _gravar():
+            # Mantém a telemetria histórica, mas a prontidão abaixo é a única
+            # fonte que pode acender o verde.
+            organization = organization_for_user(usuario)
+            registrar_veredito_linkbuilder(organization, veredito, motivo)
+            registrar_prontidao_linkbuilder(organization, estado, motivo)
+            return getattr(organization, "pk", None)
+
+        organization_id = executar_no_tenant(
+            _gravar,
+            organization_id=getattr(usuario, "_spreading_organization_id", None),
+        )
+        invalidar_ml_organization(organization_id)
     except Exception:
         logger.warning("Não foi possível registrar o veredito do Link Builder.",
                        exc_info=True)
@@ -140,6 +161,76 @@ def _pagina_intersticial(page) -> bool:
     from apps.scrapers.scraper_mercadolivre.link_http import _CAMINHOS_INTERSTICIAIS
     url = (getattr(page, "url", "") or "").lower()
     return any(p in url for p in _CAMINHOS_INTERSTICIAIS)
+
+
+def _campo_url_linkbuilder(page):
+    """Localiza o campo de URLs nas versões atual e legada do Link Builder.
+
+    Em 31/07/2026 o ML removeu o nome acessível ``Insira 1 ou mais URLs`` do
+    textarea e deixou apenas um placeholder iniciado por ``Ex: https://...``.
+    Selecionar primeiro o textarea evita confundi-lo com a busca global do
+    cabeçalho, que também é um textbox visível.
+    """
+    candidatos = (
+        page.locator("textarea[placeholder*='http']").first,
+        page.locator("textarea").first,
+        page.get_by_role("textbox", name="Insira 1 ou mais URLs"),
+    )
+    for campo in candidatos:
+        try:
+            if campo.is_visible(timeout=1000):
+                return campo
+        except Exception:
+            continue
+    return None
+
+
+def _botao_gerar_linkbuilder(page):
+    """Localiza somente o botão Gerar do formulário, sem casar botões globais."""
+    candidatos = (
+        page.get_by_role("button", name="Gerar", exact=True),
+        page.locator("button").filter(has_text="Gerar").first,
+    )
+    for botao in candidatos:
+        try:
+            if botao.is_visible(timeout=1000):
+                return botao
+        except Exception:
+            continue
+    return None
+
+
+def _linkbuilder_pronto(page) -> bool:
+    """Confirma os dois controles necessários no DOM real do portal."""
+    try:
+        campo = _campo_url_linkbuilder(page)
+        botao = _botao_gerar_linkbuilder(page)
+        if campo is None or botao is None:
+            return False
+        if botao.is_enabled(timeout=1000):
+            return True
+
+        # No DOM atual o botão nasce desabilitado enquanto o textarea está vazio.
+        # Exercitamos o formulário sem submeter: isto prova que os controles estão
+        # funcionais, não apenas presentes, e não cria link nem atribuição.
+        try:
+            valor_anterior = campo.input_value(timeout=1000)
+        except Exception:
+            valor_anterior = ""
+        try:
+            campo.fill("https://www.mercadolivre.com.br/")
+            try:
+                page.wait_for_timeout(150)
+            except Exception:
+                pass
+            return bool(botao.is_enabled(timeout=3000))
+        finally:
+            try:
+                campo.fill(valor_anterior)
+            except Exception:
+                pass
+    except Exception:
+        return False
 
 
 _LB_URL = "https://www.mercadolivre.com.br/afiliados/linkbuilder#hub"
@@ -212,7 +303,16 @@ def _abrir_link_builder(page, usuario=None):
     if _pagina_de_login(page):
         _registrar_veredito_lb(usuario, "suspeito", "o portal de afiliados pediu login")
         raise LoginError(MSG_SESSAO_EXPIRADA)
-    _registrar_veredito_lb(usuario, "conectado")
+    if not _linkbuilder_pronto(page):
+        _registrar_veredito_lb(
+            usuario, "inconclusivo",
+            "os controles do Link Builder não ficaram disponíveis",
+        )
+        raise AuthError(
+            "O Link Builder não ficou disponível agora. "
+            "Tente novamente em alguns minutos."
+        )
+    _registrar_veredito_lb(usuario, "conectado", "campo de URL e botão Gerar confirmados")
 
 
 # Campo de resultado do Link Builder — é a fonte do botão "Copiar" (ele copia
@@ -316,6 +416,20 @@ def afiliate_link_builder(link_base, auth_path=None, usuario=None):
         raise BrowserError(
             "Link Builder por navegador está desativado para esta organização."
         )
+    if usuario is not None:
+        try:
+            from apps.accounts.models import organization_for_user
+            organization = executar_no_tenant(organization_for_user, usuario)
+        except ValueError:
+            organization = organization_for_user(usuario)
+        organization_id = getattr(organization, "pk", None)
+        usuario._spreading_organization_id = organization_id
+        if not executar_no_tenant(
+            has_storage_state, usuario, organization_id=organization_id,
+        ):
+            # A guarda acontece antes de iniciar_browser: nunca cria contexto
+            # Chromium anônimo para um usuário sem credencial.
+            raise LoginError(MSG_SEM_SESSAO)
     with iniciar_browser(
         auth_path=auth_path,
         session_user=usuario,
@@ -339,8 +453,23 @@ def afiliate_link_builder(link_base, auth_path=None, usuario=None):
                 _registrar_veredito_lb(usuario, "suspeito",
                                        "sessão caiu durante a geração do link")
                 raise LoginError(MSG_SESSAO_EXPIRADA)
+            if _pagina_intersticial(page):
+                _registrar_veredito_lb(
+                    usuario, "inconclusivo",
+                    "verificação de segurança durante a geração",
+                )
+                raise AntiBotError(
+                    "O Mercado Livre pediu verificação de segurança durante a geração."
+                ) from e
             logger.warning("Erro ao gerar link de afiliado ML: %s", e)
-            return None
+            _registrar_veredito_lb(
+                usuario, "inconclusivo",
+                "o Link Builder falhou durante a geração",
+            )
+            raise AuthError(
+                "O Link Builder ficou temporariamente indisponível. "
+                "Tente novamente em alguns minutos."
+            ) from e
 
 
 def _extrair_item_id(url: str):
@@ -425,8 +554,15 @@ def _afiliar_url_na_pagina(page, link_base: str):
     apontando pro produto errado, sem erro nenhum no log.
     """
     _limpar_resultado(page)
-    page.get_by_role("textbox", name="Insira 1 ou mais URLs").fill(link_base)
-    page.get_by_role("button", name="Gerar").click()
+    campo = _campo_url_linkbuilder(page)
+    botao = _botao_gerar_linkbuilder(page)
+    if campo is None or botao is None:
+        raise AuthError(
+            "Os controles do Link Builder não ficaram disponíveis. "
+            "Tente novamente em alguns minutos."
+        )
+    campo.fill(link_base)
+    botao.click()
     return _validar_resultado_link(_esperar_resultado(page))
 
 
@@ -450,8 +586,25 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
 
     Retorna: (qtd_gerados, qtd_falhas).
     """
+    organization_id = None
     if usuario is not None:
-        prontos = ids_com_link(usuario, produtos)
+        # Resolve o tenant antes de abrir o Playwright. No SSE/worker ele já está
+        # apenas anotado; em chamadas diretas (comandos/testes) descobrimos a
+        # organização numa consulta curta e passamos o id explicitamente.
+        try:
+            from apps.accounts.models import organization_for_user
+            organization = executar_no_tenant(organization_for_user, usuario)
+        except ValueError:
+            organization = organization_for_user(usuario)
+        organization_id = getattr(organization, "pk", None)
+        usuario._spreading_organization_id = organization_id
+        if not executar_no_tenant(
+            has_storage_state, usuario, organization_id=organization_id,
+        ):
+            raise LoginError(MSG_SEM_SESSAO)
+        prontos = executar_no_tenant(
+            ids_com_link, usuario, produtos, organization_id=organization_id,
+        )
         pendentes = [p for p in produtos if p.id not in prontos]
     else:
         pendentes = [p for p in produtos if not p.link_afiliado]
@@ -529,15 +682,15 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
                         interrompido = e
                         break
                     continue
-                consecutivas = 0
-                logger.warning("Falha ao gerar link afiliado ML em lote para produto %s: %s", getattr(prod, "id", None), e)
-                # Só erro DO PRODUTO conta tentativa. Erro de infraestrutura passar
-                # por aqui aposentava o item: registrar_falha incrementa `tentativas`
-                # e, aos MAX_TENTATIVAS_ERRO, marca estado="erro" com
-                # proxima_tentativa=None — fora da fila para sempre. Uma janela de
-                # anti-bot poderia aposentar dezenas de produtos afiliáveis.
-                executar_no_tenant(registrar_falha, usuario, prod, str(e))
-                falhas += 1
+                # Fora de uma recusa explícita da URL não sabemos atribuir a falha
+                # ao produto. Timeout, DOM alterado e resposta vazia são falhas do
+                # portal/automação: interrompem o lote e preservam as tentativas.
+                logger.warning(
+                    "Infraestrutura do Link Builder falhou no produto %s: %s",
+                    getattr(prod, "id", None), e,
+                )
+                interrompido = e
+                break
 
     if interrompido is not None:
         logger.warning("Lote de links ML interrompido após %s gerado(s): %s",
@@ -545,17 +698,17 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
     logger.info("Links afiliados ML em lote: %s gerados, %s falhas", gerados, falhas)
     if (falhas or interrompido) and usuario is not None:
         from apps.scrapers.eventos import log_event
-        log_event(
+        executar_no_tenant(
+            log_event,
             "scraper", "links_erro",
             f"Lote de links ML: {gerados} gerado(s), {falhas} falha(s)."
             + (" Interrompido por instabilidade do Mercado Livre."
                if interrompido else ""),
             level="warning", usuario=usuario,
-            # `interrompido` separa "o produto não afilia" de "o ML não deixou
-            # trabalhar" — é o que vai permitir medir se a serialização resolveu.
             contexto={"gerados": gerados, "falhas": falhas, "total": len(pendentes),
                       "interrompido": bool(interrompido)},
             exc=interrompido or ultimo_erro,
+            organization_id=organization_id,
         )
     return (gerados, falhas)
 
@@ -762,22 +915,33 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
         return {"aprovados": 0, "reprovados": 0, "transitorios": 0}
     from apps.scrapers.models import LinkAfiliadoUsuario
 
-    agora = timezone.now()
-    queryset = (
-        LinkAfiliadoUsuario.objects
-        .filter(usuario=usuario, verificado_ok__isnull=True)
-        .filter(Q(proxima_tentativa__isnull=True) | Q(proxima_tentativa__lte=agora))
-        .exclude(link_afiliado="")
-        .select_related("produto")
-    )
-    if produto_ids is not None:
-        queryset = queryset.filter(produto_id__in=list(produto_ids))
-    # Nunca-verificados primeiro; entre os já tentados, o que esperou mais. O
-    # `-ultima_tentativa` de antes olhava um campo que só a GERAÇÃO escreve, então a
-    # ordem não refletia a fila de verificação.
-    linhas = list(
-        queryset.order_by(F("proxima_tentativa").asc(nulls_first=True), "id")[:limite]
-    )
+    def _carregar():
+        from apps.accounts.models import organization_for_user
+
+        agora = timezone.now()
+        queryset = (
+            LinkAfiliadoUsuario.objects
+            .filter(usuario=usuario, verificado_ok__isnull=True)
+            .filter(Q(proxima_tentativa__isnull=True) | Q(proxima_tentativa__lte=agora))
+            .exclude(link_afiliado="")
+            .select_related("produto")
+        )
+        if produto_ids is not None:
+            queryset = queryset.filter(produto_id__in=list(produto_ids))
+        linhas_locais = list(
+            queryset.order_by(
+                F("proxima_tentativa").asc(nulls_first=True), "id",
+            )[:max(1, min(int(limite), 80))]
+        )
+        organization = organization_for_user(usuario)
+        return linhas_locais, getattr(organization, "pk", None)
+
+    try:
+        linhas, org_id = executar_no_tenant(_carregar)
+    except ValueError:
+        # Chamadas diretas de comandos/testes não carregam o tenant suspenso;
+        # ainda assim toda navegação acontece só depois desta consulta curta.
+        linhas, org_id = _carregar()
     if not linhas:
         return {"aprovados": 0, "reprovados": 0, "transitorios": 0}
     aprovados = reprovados = transitorios = 0
@@ -787,14 +951,6 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
             proxima_tentativa=timezone.now() + timedelta(minutes=15),
             verificacao_motivo=motivo,
         )
-
-    # A organização é resolvida do PRÓPRIO usuário, não do contexto ambiente: esta
-    # função é chamada tanto do worker (contexto de sistema) quanto de comandos e
-    # testes, e `executar_no_tenant` recusa gravar sem escopo. Passar explicitamente
-    # torna o comportamento igual nos três.
-    from apps.accounts.models import organization_for_user
-    org = organization_for_user(usuario)
-    org_id = org.pk if org else None
 
     def _no_tenant(fn, *args, **kwargs):
         return executar_no_tenant(fn, *args, organization_id=org_id, **kwargs)
@@ -943,8 +1099,11 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
         if not link_afiliado:
             # afiliate_link_builder já logou a causa; aqui garantimos que ela também
             # fique gravada no item, senão a tela só sabe dizer "pendente".
-            registrar_falha(usuario, produto,
-                            "O Link Builder do Mercado Livre não devolveu um link.")
+            registrar_falha(
+                usuario, produto,
+                "O Programa de Afiliados não aceitou a URL deste produto.",
+                terminal=True,
+            )
             return None
         afiliado_ok = True
         salvar_cache(usuario, produto, link_afiliado, url_isca, afiliado_ok)
