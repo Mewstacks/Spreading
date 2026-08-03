@@ -27,6 +27,10 @@ from .scraper import _ml_http_session
 
 logger = logging.getLogger(__name__)
 
+
+class SessaoMLObrigatoriaError(RuntimeError):
+    """A parte autenticada do casamento não pode produzir um falso sucesso."""
+
 # Teto de cupons por passada. Sem ele a varredura pegava TODOS os cupons ativos com
 # container — em homologação, 2357 — a 2 páginas de navegação cada, e levava horas.
 LIMITE_CUPONS = 60
@@ -254,6 +258,17 @@ def casar_cupons_container(coletor=None, max_paginas=2, usuario=None,
             pares.append((cupom, ids))
 
     if pendentes:
+        if state is None:
+            # O HTTP público foi tentado, mas os containers restantes exigem uma
+            # sessão. Abrir Chromium anônimo só repetiria o vazio e faria o pipeline
+            # relatar "0 falhas". Persiste os pares públicos já confirmados e degrada
+            # explicitamente a etapa autenticada.
+            if pares:
+                _confirmar_todos(pares, idx, agora)
+            raise SessaoMLObrigatoriaError(
+                "A sessão sistêmica do Mercado Livre é necessária para consultar "
+                f"{len(pendentes)} container(s) de cupom."
+            )
         restante = max(fim - time.monotonic(), 0)
         logger.info("Casamento de container: %s por HTTP, %s vão pro navegador",
                     len(pares), len(pendentes))

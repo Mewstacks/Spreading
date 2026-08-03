@@ -92,3 +92,18 @@ def reconciliar_publicacoes_orfas(max_age_minutes=30):
     cutoff = timezone.now() - timedelta(minutes=max_age_minutes)
     return Publicacao.objects.filter(status="pendente", criada_em__lt=cutoff).update(
         status="falhou", erro="Envio interrompido antes de concluir (worker reiniciado).")
+
+
+def reconciliar_execucoes_ingestao_orfas(max_age_hours=2):
+    """Fecha execuções técnicas abandonadas por crash/deploy do worker."""
+    from apps.scrapers.models import ExecucaoIngestao
+
+    agora = timezone.now()
+    cutoff = agora - timedelta(hours=max_age_hours)
+    return ExecucaoIngestao.objects.filter(
+        status="running", iniciada_em__lt=cutoff,
+    ).update(
+        status="error",
+        finalizada_em=agora,
+        erro_publico="Coleta interrompida antes de concluir; dados anteriores preservados.",
+    )

@@ -687,12 +687,17 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
 
     pagina_atual = 1
 
+    falha_extracao = False
     while pagina_atual <= max_paginas:
         try:
             page.wait_for_selector(".ui-search-layout", timeout=15000)
             page.wait_for_timeout(2000)
         except Exception:
-            logger.debug("Pagina %s sem produtos encontrados ou demorou demais", pagina_atual)
+            logger.warning(
+                "Página %s do cupom não confirmou o layout; catálogo anterior preservado",
+                pagina_atual,
+            )
+            falha_extracao = True
             break
 
         categorias_por_id = {}
@@ -889,6 +894,9 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
         if not navegou:
             break
 
+    if falha_extracao:
+        return None
+
     cupom_atualizado = cupom.copy()
     cupom_atualizado["produtos_aplicaveis"] = produtos_raspados
     logger.debug("%s produtos coletados para o cupom %s", len(produtos_raspados), cupom.get("campaignId", ""))
@@ -959,7 +967,9 @@ def main(usuario=None):
 
     # Cupons que já têm produtos scraped — podem ser pulados
     ja_feitos = set(
-        Produto.objects.values_list("campanha_id", flat=True).distinct()
+        Produto.objects.filter(
+            marketplace="mercadolivre", origem="cupom", estado="ativo",
+        ).exclude(campanha_id="").values_list("campanha_id", flat=True).distinct()
     )
 
     cupons_pendentes = []

@@ -11,6 +11,9 @@ import traceback
 SENSITIVE_KEYS = {
     "password", "senha", "token", "secret", "api_key", "authorization",
     "credential_secret", "amazon_credential_secret", "telegram_bot_token",
+    # O login remoto envia uma lista ``events`` cujos caracteres ficam em ``text``.
+    # Esses nomes parecem inofensivos, mas podem conter senha e código 2FA.
+    "events", "text", "body", "request_body",
 }
 
 # Mapeia o level do log_event para a severidade do Sentry.
@@ -33,10 +36,7 @@ def _report_sentry(exc, *, pipeline, evento, level, usuario, contexto):
             scope.set_tag("evento", (evento or "")[:80])
             scope.set_context("evento_operacional", _clean(contexto or {}))
             if usuario is not None:
-                scope.set_user({
-                    "id": getattr(usuario, "pk", None),
-                    "username": getattr(usuario, "username", str(usuario)),
-                })
+                scope.set_user({"id": getattr(usuario, "pk", None)})
             sentry_sdk.capture_exception(exc)
     except Exception:
         pass  # observabilidade nunca pode virar outra fonte de falha

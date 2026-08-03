@@ -127,8 +127,8 @@ def _rodar_scrape_rapido(paginas=8):
     total = mapear_ofertas(max_paginas=paginas, substituir=False)
     now = timezone.now()
     fonte, _ = FonteIngestao.objects.get_or_create(
-        slug="mercadolivre-web",
-        defaults={"marketplace": "mercadolivre", "nome": "Mercado Livre — páginas públicas"},
+        slug="mercadolivre-ofertas-flash",
+        defaults={"marketplace": "mercadolivre", "nome": "Mercado Livre — ofertas flash"},
     )
     fonte.ultima_tentativa = now
     fonte.ultimo_total = total
@@ -626,10 +626,19 @@ class Command(BaseCommand):
                 # o worker morreu no meio de um envio (deploy/crash). Nunca derruba o
                 # tick — envio é o que importa aqui.
                 try:
-                    from apps.scrapers.maintenance import reconciliar_publicacoes_orfas
+                    from apps.scrapers.maintenance import (
+                        reconciliar_execucoes_ingestao_orfas,
+                        reconciliar_publicacoes_orfas,
+                    )
                     orfas = reconciliar_publicacoes_orfas()
                     if orfas:
                         logger.warning("%s publicacao(oes) orfa(s) fechada(s) como falha", orfas)
+                    ingestoes_orfas = reconciliar_execucoes_ingestao_orfas()
+                    if ingestoes_orfas:
+                        logger.warning(
+                            "%s execução(ões) de ingestão órfã(s) fechada(s)",
+                            ingestoes_orfas,
+                        )
                 except Exception as e:
                     logger.warning("Reconciliacao de publicacoes falhou: %s", e)
                 # Purga do log 1x/dia. Mora neste loop porque é o único ligado o dia

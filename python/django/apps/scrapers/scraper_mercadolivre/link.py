@@ -219,6 +219,23 @@ def _abrir_link_builder(page, usuario=None):
     if _pagina_de_login(page):
         _registrar_veredito_lb(usuario, "suspeito", "o portal de afiliados pediu login")
         raise LoginError(MSG_SESSAO_EXPIRADA)
+
+    # A URL pode carregar sem login/challenge e ainda assim trazer um fallback,
+    # experimento ou layout novo. Validar o contrato do formulário aqui impede que
+    # o loop marque 40 produtos como falhos por um único seletor ausente.
+    try:
+        campo = page.get_by_role("textbox", name="Insira 1 ou mais URLs")
+        botao = page.get_by_role("button", name="Gerar")
+        campo.wait_for(state="visible", timeout=15000)
+        botao.wait_for(state="visible", timeout=5000)
+    except Exception as exc:
+        _registrar_veredito_lb(
+            usuario, "inconclusivo", "formulário do Link Builder indisponível"
+        )
+        raise AuthError(
+            "O Link Builder abriu sem o formulário esperado. O lote foi preservado "
+            "e será tentado novamente mais tarde."
+        ) from exc
     _registrar_veredito_lb(usuario, "conectado")
 
 
@@ -273,8 +290,15 @@ def _validar_resultado_link(bruto):
     s = (bruto or "").strip()
     if not s:
         raise ValueError("Link Builder não retornou nada (resultado vazio).")
-    baixo = s.lower()
-    if "não é permitido" in baixo or "nao e permitido" in baixo or "não permitido" in baixo:
+    import unicodedata
+    baixo = unicodedata.normalize("NFKD", s.lower()).encode(
+        "ascii", "ignore"
+    ).decode()
+    rejeicoes = (
+        "nao e permitido", "nao permitido", "nao e do mercado livre brasil",
+        "url nao e do mercado livre", "url invalido", "url invalida",
+    )
+    if any(texto in baixo for texto in rejeicoes):
         raise UrlNaoPermitidaError(s)
     if not s.startswith("http"):
         raise ValueError(f"Resultado não é uma URL: {s[:120]}")
@@ -293,6 +317,7 @@ def link_tem_tag_afiliado(link_curto: str, usuario=None) -> bool:
     """
     import requests as _requests
     from apps.scrapers.afiliado import tag_ml
+    from apps.scrapers.scraper_mercadolivre.link_http import _get_ml
 
     if not link_curto:
         return False
@@ -303,9 +328,11 @@ def link_tem_tag_afiliado(link_curto: str, usuario=None) -> bool:
     if not tag:
         return True
     try:
-        r = _requests.get(link_curto, allow_redirects=True, timeout=8, headers={
+        sessao = _requests.Session()
+        sessao.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
+        r = _get_ml(sessao, link_curto, timeout=8)
         cadeia = " ".join([h.headers.get("location", "") for h in r.history] + [r.url])
     except Exception:
         return False
@@ -376,6 +403,21 @@ def _montar_url_isca(url_produto: str, camp_id: str):
     if not url_produto:
         return None
 
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url_produto)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except (TypeError, ValueError):
+        return None
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if not (host == "mercadolivre.com.br" or host.endswith(".mercadolivre.com.br")):
+        return None
+    if parsed.username or parsed.password or port not in (None, 80, 443):
+        return None
+
     _URLS_PROIBIDAS = ("/social/", "/perfil/", "/usuario/", "/noindex/")
     eh_tracking = "click1.mercadolivre" in url_produto or "/mclics/" in url_produto
     eh_catalogo_up = "/up/" in url_produto  # /up/MLBU... = catálogo, Programa rejeita
@@ -396,6 +438,11 @@ def _montar_url_isca(url_produto: str, camp_id: str):
     else:
         # Já é página de produto válida (produto./MLB- ou /p/MLB catálogo): mantém
         base = url_limpa.split('?')[0]
+
+    # O destino afiliado sempre deve sair por HTTPS, mesmo se uma fonte antiga
+    # ainda tiver persistido uma URL http.
+    if base.startswith("http://"):
+        base = "https://" + base[len("http://"):]
 
     # Ofertas (sem camp_id) não injetam coupon_campaign_id
     if not camp_id:

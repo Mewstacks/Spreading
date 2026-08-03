@@ -118,11 +118,13 @@ class AutomationStatusSecurityTests(TestCase):
             with self.assertRaisesRegex(RuntimeError, "fim do loop de teste"):
                 Command()._loop_envio({"tick": 5})
 
-        aguardando = [
+        # O heartbeat atualiza somente o timestamp: repetir ``fase`` apagaria o
+        # erro/proximo_ciclo persistido pelo tick anterior.
+        pulsos = [
             chamada for chamada in write_state.call_args_list
-            if chamada.kwargs.get("fase") == "aguardando"
+            if chamada.args == ("envio",) and not chamada.kwargs
         ]
-        self.assertGreaterEqual(len(aguardando), 4)
+        self.assertGreaterEqual(len(pulsos), 3)
 
 
 class AffiliateIdentityTests(TestCase):
@@ -1884,7 +1886,7 @@ class TopPromocoesFilterTests(TestCase):
            return_value=12)
     @patch("apps.scrapers.coupon_products.preparar_lote",
            return_value={"processados": 0, "prontos": 0})
-    def test_flash_scrape_marks_mercado_livre_source_healthy(self, _preparo, _mapear):
+    def test_flash_scrape_does_not_mask_full_mercado_livre_source(self, _preparo, _mapear):
         source = FonteIngestao.objects.get(slug="mercadolivre-web")
         source.status = "degraded"
         source.falhas_consecutivas = 2
@@ -1894,9 +1896,11 @@ class TopPromocoesFilterTests(TestCase):
 
         self.assertEqual(_rodar_scrape_rapido(paginas=2), 12)
         source.refresh_from_db()
-        self.assertEqual(source.status, "ok")
-        self.assertEqual(source.falhas_consecutivas, 0)
-        self.assertEqual(source.erro_publico, "")
+        self.assertEqual(source.status, "degraded")
+        self.assertEqual(source.falhas_consecutivas, 2)
+        flash = FonteIngestao.objects.get(slug="mercadolivre-ofertas-flash")
+        self.assertEqual(flash.status, "ok")
+        self.assertEqual(flash.ultimo_total, 12)
 
 
 class AttributionWorkflowTests(TestCase):
@@ -3904,7 +3908,7 @@ class GeracaoDeLinksEmLoteTests(TestCase):
         return Produto.objects.create(
             marketplace="mercadolivre", nome=nome, origem="oferta",
             preco_sem_desconto=100, preco_com_cupom=50,
-            link_produto="https://example.com/fone", **extra)
+            link_produto="https://produto.mercadolivre.com.br/MLB-123456789", **extra)
 
     @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
     @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links")

@@ -49,6 +49,14 @@ URL_PDP = "https://www.mercadolivre.com.br/smart-tv/p/MLB123456"
 
 class VerificacaoPorHttpTests(SimpleTestCase):
 
+    def test_host_externo_e_bloqueado_antes_da_rede(self):
+        sessao = type("S", (), {"get": lambda *_a, **_k: self.fail("não deve abrir")})()
+        with patch.object(link_http, "_sessao", return_value=sessao):
+            r = link_http.relatorio_por_http(
+                "https://127.0.0.1/admin", confiar_desconto=True
+            )
+        self.assertTrue(any("domínios permitidos" in e for e in r["erros"]))
+
     def test_pdp_valida_com_nome_batendo_e_aprovada(self):
         with _get(RespostaFalsa(URL_PDP, _pdp())):
             r = link_http.relatorio_por_http(
@@ -380,6 +388,12 @@ class AbrirLinkBuilderTests(SimpleTestCase):
             class _El:
                 def is_visible(self_inner, *a, **kw):
                     return False
+            return _El()
+
+        def get_by_role(self, *a, **kw):
+            class _El:
+                def wait_for(self_inner, *a, **kw):
+                    return None
             return _El()
 
     def setUp(self):

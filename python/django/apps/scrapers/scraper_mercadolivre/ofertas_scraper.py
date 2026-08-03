@@ -466,7 +466,8 @@ def mapear_ofertas(max_paginas=40, substituir=True, usuario=None):
     if not coletados:
         logger.warning("Raspagem de ofertas ML vazia; feed existente preservado")
         return 0
-    n = _salvar(coletados, origem="oferta")
+    n = (_salvar(coletados, origem="oferta") if substituir
+         else _upsert_ofertas(coletados))
     logger.info("Ofertas ML salvas/atualizadas: %s", n)
     return n
 
@@ -491,6 +492,7 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None,
     if not termos:
         return 0
     coletados = []
+    termos_confirmados = []
 
     with iniciar_browser(storage_state=storage_state(usuario), headless=True) as (page, context):
         for termo in termos:
@@ -498,6 +500,7 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None,
             if not slug:
                 continue
             vazias_seguidas = 0  # a tolerância é POR TERMO
+            coletados_termo = []
             for p in range(max_paginas):
                 desde = p * 50 + 1
                 url = f"https://lista.mercadolivre.com.br/{slug}_Discount_{int(min_desconto)}-100"
@@ -526,15 +529,25 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None,
                     pausa_humana()
                     continue
                 vazias_seguidas = 0
-                coletados.extend(cards)
+                coletados_termo.extend(cards)
                 pausa_humana()  # ritmo humano entre páginas (anti-bloqueio)
+            if coletados_termo:
+                termos_confirmados.append(termo)
+                coletados.extend(coletados_termo)
+
+    # Uma resposta inteiramente vazia é indistinguível de bloqueio, timeout ou
+    # mudança de layout. Nunca apaga o catálogo anterior nesse cenário.
+    if not coletados:
+        logger.warning("Busca ML '%s' vazia; resultados existentes preservados",
+                       termo_busca)
+        return 0
 
     # Refresh escopado: remove itens 'busca' que casam com algum termo, recria.
     # Reconecta antes: o delete é a 1ª query após a longa fase de browser.
     _reconectar_db()
     from django.db.models import Q
     cond = Q()
-    for t in termos:
+    for t in termos_confirmados:
         cond |= Q(nome__icontains=t)
     Produto.objects.filter(
         marketplace="mercadolivre", owner__isnull=True, origem="busca"

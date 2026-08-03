@@ -7,6 +7,7 @@ e-mail não pode derrubar signup nem o watchdog.
 import logging
 
 from django.conf import settings
+from django.core.cache import cache
 from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
 from django.urls import reverse
@@ -19,6 +20,23 @@ logger = logging.getLogger(__name__)
 def _enviar(assunto: str, destino: str, template_base: str, ctx: dict) -> bool:
     """Renderia {template_base}.txt (+ .html opcional) e envia. Retorna sucesso."""
     if not destino:
+        return False
+    backend = getattr(settings, "EMAIL_BACKEND", "")
+    if backend.endswith("smtp.EmailBackend") and not (
+        getattr(settings, "EMAIL_HOST_USER", "")
+        and getattr(settings, "EMAIL_HOST_PASSWORD", "")
+    ):
+        # Sem credencial, insistir no SMTP só produz um 553 por alerta/signup.
+        # Registra a degradação no máximo uma vez por hora e preserva o fluxo.
+        if cache.add("email:configuracao-ausente", "1", timeout=3600):
+            from apps.scrapers.eventos import log_event
+
+            logger.warning("SMTP não configurado; e-mail não enviado.")
+            log_event(
+                "sistema", "email_falhou",
+                "SMTP não configurado; e-mails estão temporariamente indisponíveis.",
+                level="error", contexto={"backend": backend},
+            )
         return False
     try:
         corpo_txt = render_to_string(f"{template_base}.txt", ctx)
@@ -44,15 +62,15 @@ def _enviar(assunto: str, destino: str, template_base: str, ctx: dict) -> bool:
         # tratam False como "segue o fluxo", então sem isto um SMTP mal configurado
         # derruba verificação de conta e alerta de conexão sem deixar rastro.
         from apps.scrapers.eventos import log_event
-        logger.warning("Falha ao enviar e-mail '%s' para %s: %s", assunto, destino, e)
-        log_event(
-            "sistema", "email_falhou",
-            f"E-mail '{assunto}' não pôde ser enviado.",
-            level="error",
-            contexto={"assunto": assunto, "destino": destino,
-                      "backend": getattr(settings, "EMAIL_BACKEND", "")},
-            exc=e,
-        )
+        if cache.add("email:falha-envio", "1", timeout=3600):
+            logger.warning("Falha ao enviar e-mail '%s': %s", assunto, e)
+            log_event(
+                "sistema", "email_falhou",
+                f"E-mail '{assunto}' não pôde ser enviado.",
+                level="error",
+                contexto={"assunto": assunto, "backend": backend},
+                exc=e,
+            )
         return False
 
 
