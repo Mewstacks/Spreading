@@ -1236,6 +1236,19 @@ def configuracoes(request):
             cfg_id = request.POST.get("id")
             # Sub-nichos: multi-select -> junta as strings de termos (OR no filtro)
             termos = [t.strip() for t in request.POST.getlist("termo_busca") if t.strip()]
+            termo_busca = ", ".join(termos)
+            # Um macro-nicho grande (Eletrodomésticos soma 395 caracteres de termos)
+            # estourava o CharField e o insert derrubava a tela com 500. Recusar é
+            # melhor do que truncar: cortar no meio deixaria um termo pela metade
+            # ("cafete"), que não casa com produto nenhum e some sem avisar.
+            limite_termos = ConfiguracaoEnvio._meta.get_field("termo_busca").max_length
+            if len(termo_busca) > limite_termos:
+                messages.error(
+                    request,
+                    f"Sub-nichos demais para uma regra só ({len(termo_busca)} de "
+                    f"{limite_termos} caracteres). Marque menos ou divida em duas "
+                    "regras para o mesmo grupo.")
+                return redirect("scraper-configuracoes")
             canal = (request.POST.get("canal") or "whatsapp").strip()
             if canal not in {"whatsapp", "telegram"}:
                 messages.error(request, "Canal de envio inválido.")
@@ -1243,8 +1256,14 @@ def configuracoes(request):
             # Telegram usa o campo de chat_id digitado; WhatsApp usa o grupo escolhido.
             grupo_id = (request.POST.get("telegram_chat_id") if canal == "telegram"
                         else request.POST.get("grupo_id")) or ""
-            if not grupo_id.strip():
+            grupo_id = grupo_id.strip()
+            if not grupo_id:
                 messages.error(request, "Escolha ou informe um grupo de destino.")
+                return redirect("scraper-configuracoes")
+            # O destino não pode ser truncado — mandaria a promoção para um chat que
+            # não é o pedido. Fora do tamanho, é erro de digitação: recusa e avisa.
+            if len(grupo_id) > ConfiguracaoEnvio._meta.get_field("grupo_id").max_length:
+                messages.error(request, "O identificador do grupo de destino é longo demais.")
                 return redirect("scraper-configuracoes")
             try:
                 intervalo = int(request.POST.get("intervalo_minutos") or 60)
@@ -1266,12 +1285,12 @@ def configuracoes(request):
                 messages.error(request, "Limites diários e de falhas devem ser positivos.")
                 return redirect("scraper-configuracoes")
             campos = dict(
-                macro_categoria=request.POST.get("macro_categoria", "").strip(),
-                termo_busca=", ".join(termos),
+                macro_categoria=request.POST.get("macro_categoria", "").strip()[:100],
+                termo_busca=termo_busca,
                 canal=canal,
-                marketplace=(request.POST.get("marketplace") or "").strip(),
-                grupo_id=grupo_id.strip(),
-                grupo_nome=request.POST.get("grupo_nome", "").strip(),
+                marketplace=(request.POST.get("marketplace") or "").strip()[:20],
+                grupo_id=grupo_id,
+                grupo_nome=request.POST.get("grupo_nome", "").strip()[:255],
                 intervalo_minutos=intervalo,
                 janela_inicio=janela_inicio,
                 janela_fim=janela_fim,
