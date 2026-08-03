@@ -610,6 +610,10 @@ class Command(BaseCommand):
                 time.sleep(POLL)
                 continue
             if timezone.now() < proximo:
+                # Heartbeat também entre os ticks. Sem isto o estado ficava parado
+                # pelos ~5min de espera, worker_alive() (90s) dava falso e a tela
+                # pintava "Desligado" mesmo com a flag ligada — igual ao scrape.
+                st.write_state("envio")
                 time.sleep(POLL)
                 continue
             agora = timezone.now()
