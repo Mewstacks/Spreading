@@ -632,13 +632,20 @@
     /* ── Alvos de toque maiores no mobile (44px mín) ── */
     @media (max-width: 899px) {
       .card, .panel, .panel-2 { padding: 1.05rem 1.1rem; }
-      .btn { padding: .65rem 1rem; min-height: 42px; }
-      .btn-sm { padding: .5rem .85rem; min-height: 38px; }
-      .acao-sm.btn-sm { min-height: 44px; }
-      .icon-btn { width: 42px; height: 42px; }
+      .btn, .btn-sm, .acao-sm.btn-sm { padding: .6rem .9rem; min-height: 44px; }
+      .btn-link { display: inline-flex; align-items: center; min-height: 44px; }
+      .icon-btn { width: 44px; height: 44px; }
+      .nav-toggle, .theme-btn { width: 44px; height: 44px; }
+      .brand { display: inline-flex; align-items: center; min-height: 44px; }
+      .seg a, .seg button { display: inline-flex; align-items: center; justify-content: center;
+        min-height: 44px; }
+      details > summary { min-height: 44px; display: flex; align-items: center; }
       input, select, textarea { padding: .65rem .75rem; font-size: 16px; /* evita zoom iOS */ }
       .page-head h1 { flex-wrap: wrap; }
       .side-link, .side-tool { min-height: 44px; }
+    }
+    @media (max-width: 520px) {
+      .topbar-context > span { display: none; }
     }
   </style>
   {% block head_extra %}{% endblock %}
