@@ -9,6 +9,8 @@ save/update/create/delete — para poder ser rodado em produção durante incide
 
 `--secao` limita a saída (catalogo, amazon, cupons, envios, eventos).
 """
+from urllib.parse import urlsplit
+
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.db.models import Count, ExpressionWrapper, F, FloatField, Max, Q
@@ -204,6 +206,23 @@ class Command(BaseCommand):
                 self._linha("  POR QUE cada um foi reprovado:")
                 self._linha("  " + str(Counter(
                     self._motivo_reprovacao(c) for c in reprovados).most_common(12)))
+                # `_ativacao_ml_publicavel` exige `regras.container_url`, mas o
+                # preparo (`_coletar_ml_remoto`) aceita `cupom.link` como listagem.
+                # Saber a CARA desses links decide se a diferença é um portão a mais
+                # de segurança ou catálogo publicável sendo descartado.
+                sem_container = [c for c in reprovados
+                                 if "container_url" in self._motivo_reprovacao(c)]
+                if sem_container:
+                    hosts = Counter()
+                    for c in sem_container:
+                        try:
+                            hosts[urlsplit(c.link or "").netloc.casefold()] += 1
+                        except ValueError:
+                            hosts["<url inválida>"] += 1
+                    self._linha("  host do `link` desses cupons: "
+                                + str(hosts.most_common(6)))
+                    for c in sem_container[:4]:
+                        self._linha(f"    exemplo: {(c.link or '')[:110]}")
 
             self._sec("CUPONS — prontidao por usuario")
             self._linha("  CupomPreparacao por status: " + str(list(
