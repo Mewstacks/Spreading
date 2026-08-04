@@ -487,7 +487,7 @@
   <div class="busca-bar">
     <input type="text" id="busca-termo" placeholder="Ex.: air fryer, fone bluetooth"
            onkeydown="if(event.key==='Enter'){event.preventDefault();buscarItens();}">
-    <button type="button" class="btn btn-ghost btn-sm" onclick="buscarItens()"><i data-lucide="radar"></i> Buscar nas lojas</button>
+    <button type="button" id="busca-btn" class="btn btn-ghost btn-sm" onclick="buscarItens()"><i data-lucide="radar"></i> Buscar nas lojas</button>
   </div>
   <div id="busca-log" class="modal-log" style="margin-top:.6rem;"></div>
 </details>{% endif %}
@@ -772,17 +772,33 @@ que era exatamente o que não resolvia.
 function buscarItens() {
   var termo = document.getElementById('busca-termo').value.trim();
   var log = document.getElementById('busca-log');
+  var btn = document.getElementById('busca-btn');
   if (!termo) { log.innerHTML = '<span class="err">Digite o que você quer buscar.</span>'; return; }
   log.textContent = '';
+  if (btn) { btn.disabled = true; btn.dataset.rotulo = btn.innerHTML; btn.textContent = 'Buscando…'; }
+  function liberar() {
+    if (btn && btn.dataset.rotulo) {
+      btn.disabled = false; btn.innerHTML = btn.dataset.rotulo;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
   var es = new EventSource('/scrapers/buscar-promocoes/?termo=' + encodeURIComponent(termo));
   es.onmessage = function (e) {
-    if (e.data === '__DONE__') { es.close(); location.reload(); return; }
+    if (e.data === '__DONE__') {
+      es.close();
+      // Recarregar a MESMA url mantinha os filtros da sessão e ordenava tudo por
+      // desconto: os itens recém-buscados ficavam dezenas de páginas abaixo do
+      // catálogo antigo, e a busca parecia não ter trazido nada. Abrir a lista já
+      // filtrada pelo termo é o único desfecho em que o usuário vê o que pediu.
+      window.location = '/scrapers/top/?tipo=oferta&q=' + encodeURIComponent(termo);
+      return;
+    }
     var ln = document.createElement('div');
     if (e.data.startsWith('[ERRO]')) ln.className = 'err';
     ln.textContent = e.data;
     log.appendChild(ln); log.scrollTop = log.scrollHeight;
   };
-  es.onerror = function () { var l=document.createElement('div'); l.className='err'; l.textContent='A conexão foi perdida. Tente novamente.'; log.appendChild(l); es.close(); };
+  es.onerror = function () { var l=document.createElement('div'); l.className='err'; l.textContent='A conexão foi perdida. Tente novamente.'; log.appendChild(l); es.close(); liberar(); };
 }
 
 // ─── Gerar links de afiliado da fila deste usuário ───

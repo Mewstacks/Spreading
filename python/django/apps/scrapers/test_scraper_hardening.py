@@ -236,3 +236,177 @@ class AmazonCredentialHardeningTests(SimpleTestCase):
         creds = creators_api.Credenciais("id", "secret", "host", "tag")
         with self.assertRaises(creators_api.AmazonNotEligible):
             creators_api._post("searchItems", {}, creds)
+
+
+class AmazonTaxonomyTests(SimpleTestCase):
+    """A Creators API já classifica o item; descartar isso escondia a loja inteira."""
+
+    def _item(self, nos):
+        return {
+            "asin": "B0TAXON001",
+            "itemInfo": {"title": {"displayValue": "DREAME F10 Robô Aspirador com câmera"}},
+            "browseNodeInfo": {"browseNodes": nos},
+            "offersV2": {"listings": [{"price": {
+                "money": {"amount": 80}, "savingBasis": {"money": {"amount": 100}}}}]},
+        }
+
+    def test_categoria_vem_do_browse_node(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        m = az._mapear_item(self._item([
+            {"displayName": "Aspiradores de Pó-Água", "isRoot": False},
+        ]))
+
+        self.assertEqual(m["categoria"], "Aspiradores de Pó-Água")
+
+    def test_no_raiz_nao_vira_categoria(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        m = az._mapear_item(self._item([
+            {"displayName": "Todos os departamentos", "isRoot": True},
+            {"displayName": "Eletroportáteis do Lar", "isRoot": False},
+        ]))
+
+        self.assertEqual(m["categoria"], "Eletroportáteis do Lar")
+
+    def test_browse_node_corrige_macro_que_o_titulo_erra(self):
+        """'... com câmera' batia em 'Áudio, Vídeo e Fotografia' antes de
+        'Eletrodomésticos': a lista de palavras-chave é ordenada."""
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import (
+            classificar_oferta_por_nome,
+        )
+
+        item = self._item([{"displayName": "Aspiradores de Pó e Cuidados com o Chão",
+                            "isRoot": False}])
+        self.assertEqual(
+            classificar_oferta_por_nome(item["itemInfo"]["title"]["displayValue"]),
+            "Áudio, Vídeo e Fotografia",
+        )
+        self.assertEqual(az._mapear_item(item)["macro_sugerida"], "Eletrodomésticos")
+
+    def test_item_sem_browse_node_nao_quebra(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        m = az._mapear_item(self._item([]))
+
+        self.assertEqual(m["categoria"], "")
+        self.assertEqual(m["macro_sugerida"], "")
+
+
+class AmazonCollectionHardeningTests(SimpleTestCase):
+    """Falha total da API não pode virar 'zero ofertas' silencioso."""
+
+    def _creds(self):
+        return creators_api.Credenciais("id", "secret", "host", "tag")
+
+    def test_uma_keyword_quebrada_nao_derruba_as_outras(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        def coletar(termo, *args, **kwargs):
+            if termo == "ruim":
+                raise creators_api.AmazonAPIError("500")
+            return [{"asin": "B0OK", "preco_sem_desconto": 100, "preco_com_cupom": 80}]
+
+        with patch.object(az, "_coletar", side_effect=coletar):
+            itens = az._coletar_termos(["ruim", "bom"], 15, creds=self._creds())
+
+        self.assertEqual(len(itens), 1)
+
+    def test_todas_as_keywords_quebradas_levantam_erro(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        with patch.object(az, "_coletar",
+                          side_effect=creators_api.AmazonAPIError("429")):
+            with self.assertRaisesRegex(creators_api.AmazonAPIError, "429"):
+                az._coletar_termos(["a", "b"], 15, creds=self._creds())
+
+    def test_credencial_recusada_interrompe_na_primeira_keyword(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        with patch.object(az, "_coletar",
+                          side_effect=creators_api.AmazonNotEligible("403")) as coletar:
+            with self.assertRaises(creators_api.AmazonNotEligible):
+                az._coletar_termos(["a", "b", "c"], 15, creds=self._creds())
+
+        self.assertEqual(coletar.call_count, 1)
+
+
+def _item_mapeado(asin, nome, de, por, **extra):
+    base = {
+        "asin": asin, "nome": nome, "preco_sem_desconto": de, "preco_com_cupom": por,
+        "link_produto": f"https://www.amazon.com.br/dp/{asin}", "imagem_url": "",
+        "frete_full": False, "tem_promocao": False, "rotulo_promo": "",
+        "cupom_confirmado": False, "categoria": "", "macro_sugerida": "",
+    }
+    base.update(extra)
+    return base
+
+
+class AmazonTermSearchTests(TestCase):
+    def test_busca_descarta_item_abaixo_do_minimo_pedido(self):
+        """`minSavingPercent` é pedido, não filtro: a API devolve 0% junto."""
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        coletados = [
+            _item_mapeado("B0COMDESC", "Com desconto", 100.0, 50.0),
+            _item_mapeado("B0SEMDESC", "Sem desconto", 90.0, 90.0),
+        ]
+        with patch.object(az, "_coletar_termos", return_value=coletados):
+            total = az.buscar_por_termo("aspirador", min_desconto=15)
+
+        self.assertEqual(total, 1)
+        self.assertTrue(Produto.objects.filter(asin="B0COMDESC").exists())
+        self.assertFalse(Produto.objects.filter(asin="B0SEMDESC").exists())
+
+    def test_categoria_real_chega_ao_produto(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        coletados = [_item_mapeado(
+            "B0CATEG01", "Robô aspirador", 100.0, 50.0,
+            categoria="Aspiradores de Pó-Água", macro_sugerida="Eletrodomésticos")]
+        with patch.object(az, "_coletar_termos", return_value=coletados):
+            az.buscar_por_termo("aspirador", min_desconto=15)
+
+        produto = Produto.objects.get(asin="B0CATEG01")
+        self.assertEqual(produto.categoria, "Aspiradores de Pó-Água")
+        self.assertEqual(produto.macro_categoria, "Eletrodomésticos")
+
+
+class AmazonMarketplaceReportingTests(TestCase):
+    def test_conta_desconectada_explica_em_vez_de_devolver_zero(self):
+        from apps.scrapers.marketplaces.amazon import Amazon
+        from apps.scrapers.marketplaces.base import MarketplaceIndisponivel
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        with patch.object(az, "buscar_por_termo",
+                          side_effect=creators_api.AmazonConfigError("sem tag")):
+            with self.assertRaisesRegex(MarketplaceIndisponivel, "não conectada"):
+                Amazon().buscar_por_termo("aspirador")
+
+    def test_feed_e_promocoes_compartilham_uma_unica_coleta(self):
+        """Duas varreduras idênticas dobravam o consumo da cota da conta."""
+        from django.contrib.auth import get_user_model
+        from apps.scrapers.marketplaces.amazon import Amazon
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        user = get_user_model().objects.create_user("amazonfeed", password="x")
+        with patch.object(az, "coletar_feed", return_value=[]) as coletar, \
+                patch.object(az, "buscar_por_termo", return_value=0):
+            self.assertTrue(Amazon()._scrape_usuario(user))
+
+        coletar.assert_called_once_with(user)
+
+    def test_api_totalmente_fora_marca_conta_e_libera_fallback(self):
+        from django.contrib.auth import get_user_model
+        from apps.scrapers.marketplaces.amazon import Amazon
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        user = get_user_model().objects.create_user("amazondown", password="x")
+        with patch.object(az, "coletar_feed",
+                          side_effect=creators_api.AmazonAPIError("429 sustentado")):
+            self.assertFalse(Amazon()._scrape_usuario(user))
+
+        user.perfil.refresh_from_db()
+        self.assertIsNone(user.perfil.amazon_elegivel)
+        self.assertIn("indisponível", user.perfil.amazon_ultimo_erro)

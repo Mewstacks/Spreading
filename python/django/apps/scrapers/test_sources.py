@@ -674,6 +674,41 @@ class GerarLinksNaoSeguraTransacaoTests(TestCase):
         organization_callable(org.pk, _corpo, segurar_transacao=True)()
         self.assertEqual(visto["instalado"], str(org.pk))
 
+    def test_alvo_de_thread_devolve_a_conexao_ao_terminar(self):
+        """Thread que morre não fecha a conexão dela, e `close_old_connections`
+        também não: com CONN_MAX_AGE=600 ela não está velha, só órfã. Sem isto,
+        cada requisição SSE deixava uma conexão pendurada no Postgres.
+
+        (O fechamento em si não é observável aqui: o sqlite em memória dos testes
+        ignora `close()` de propósito, para não destruir o banco. O que se verifica
+        é que o alvo de thread pede o fechamento e o `organization_callable` cru,
+        usado em linha dentro da transação do chamador, não pede.)
+        """
+        import threading
+        from django.db import connections
+        from apps.accounts.models import organization_for_user
+        from apps.accounts.tenant import (
+            organization_callable, organization_thread_target,
+        )
+
+        user = get_user_model().objects.create_user("threadconn", password="test")
+        org = organization_for_user(user)
+
+        def _corpo():
+            connections["default"].ensure_connection()
+
+        with patch.object(connections, "close_all") as fechar:
+            thread = threading.Thread(
+                target=organization_thread_target(org.pk, _corpo), daemon=True)
+            thread.start()
+            thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        fechar.assert_called_once_with()
+
+        with patch.object(connections, "close_all") as fechar_em_linha:
+            organization_callable(org.pk, _corpo)()
+        fechar_em_linha.assert_not_called()
+
 
 class MensagensDoGerarLinksTests(TransactionTestCase):
     """Anti-bot e sessão morta pedem AÇÕES DIFERENTES do usuário: esperar vs

@@ -21,7 +21,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
-from apps.accounts.tenant import organization_callable
+from apps.accounts.tenant import organization_thread_target
 from apps.scrapers.models import (
     CliquePublicacao, ConfiguracaoEnvio, Cupom, LinkAfiliadoUsuario, Produto,
     Publicacao, ReceitaAfiliado, RelatorioSync, FonteIngestao, CupomNormalizado,
@@ -1424,7 +1424,7 @@ def enviar_agora_stream(request):
                 q.put(None)
 
         thread = threading.Thread(
-            target=organization_callable(request.organization.pk, _run),
+            target=organization_thread_target(request.organization.pk, _run),
             daemon=True,
         )
         thread.start()
@@ -1622,6 +1622,7 @@ def buscar_promocoes_stream(request):
 
     def _job():
         from django.contrib.auth import get_user_model
+        from apps.scrapers.marketplaces.base import Marketplace, MarketplaceIndisponivel
         usuario = get_user_model().objects.filter(id=uid).first()
         if not termo:
             print("[ERRO] Digite um termo de busca.")
@@ -1629,13 +1630,22 @@ def buscar_promocoes_stream(request):
         total = 0
         for slug in MARKETPLACES:
             mp = get_marketplace(slug)
+            # Loja sem busca por termo (Awin vive de feed) devolvia "0 item(ns)" e
+            # parecia uma loja vazia. Não consultar não é o mesmo que não achar.
+            if type(mp).buscar_por_termo is Marketplace.buscar_por_termo:
+                continue
             try:
                 print(f"Buscando '{termo}' em {slug}...")
                 # Amazon usa a conta do usuário (itens privados); ML é compartilhado.
                 n = mp.buscar_por_termo(termo, min_desconto=min_desc, usuario=usuario) or 0
                 total += n
                 print(f"  {slug}: {n} item(ns).")
+            except MarketplaceIndisponivel as e:
+                # Motivo escrito para o usuário: "0 itens" escondia conta
+                # desconectada atrás do mesmo texto de "não há oferta".
+                print(f"  {slug} não foi consultada: {e}")
             except Exception as e:
+                logger.exception("Busca por termo falhou em %s", slug)
                 print(f"  {slug} falhou: {e}")
         print(f"Concluído. {total} item(ns) novos no total.")
 
@@ -2057,9 +2067,13 @@ def top_promocoes(request):
         "macros_selecionados": macros_selecionados,
         "categorias_selecionadas": categorias_selecionadas,
         "loja_selecionada": loja_selecionada,
-        "lojas": list(MARKETPLACES.keys()) + (["awin"] if IntegracaoAfiliado.objects.filter(
-            owner=request.user, provedor="awin", status="conectada", habilitada=True).exists()
-            else []),
+        # Awin já está em MARKETPLACES, então somá-la de novo duplicava a opção no
+        # seletor de loja. Ela é condicional: sem integração conectada, filtrar por
+        # Awin só devolve lista vazia.
+        "lojas": [slug for slug in MARKETPLACES if slug != "awin"] + (
+            ["awin"] if IntegracaoAfiliado.objects.filter(
+                owner=request.user, provedor="awin", status="conectada",
+                habilitada=True).exists() else []),
         "canais": list(SENDERS.keys()),
         "ordenar": ordenar,
         "busca": busca,
@@ -2127,7 +2141,7 @@ def run_scraper_stream(request):
                 q.put(None)  # sentinel
 
         thread = threading.Thread(
-            target=organization_callable(request.organization.pk, _run),
+            target=organization_thread_target(request.organization.pk, _run),
             daemon=True,
         )
         thread.start()
@@ -2208,8 +2222,8 @@ def _sse_runner(fn, organization, *, segurar_transacao=True):
                 q.put(None)
 
         threading.Thread(
-            target=organization_callable(organization, _run,
-                                         segurar_transacao=segurar_transacao),
+            target=organization_thread_target(organization, _run,
+                                              segurar_transacao=segurar_transacao),
             daemon=True,
         ).start()
         while True:
