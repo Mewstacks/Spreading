@@ -1757,14 +1757,15 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             texto = str(e)
             logger.warning("Falha do navegador ao afiliar produto %s: %s", produto.pk, e)
             precisa_login = "LOGIN_REQUIRED" in texto
+            # Só o caso de sessão é transitório. O resto do BrowserError inclui
+            # ML_LINK_BUILDER_ENABLED desligada, que não se resolve sozinha nunca:
+            # classificá-la como transitória faria a regra bater no mesmo erro a
+            # cada tick, para sempre, sem nada no painel escalar.
+            classe = {"classe": TRANSITORIO} if precisa_login else {}
             return falhar(
                 "Sessão do Mercado Livre expirada. Reconecte sua conta."
                 if precisa_login else _motivo_navegador(texto),
-                # Navegador/Link Builder fora do ar também é infraestrutura, não
-                # defeito da regra: pausar a automação por isso só transfere para o
-                # usuário um problema que ele não pode resolver na tela dele.
-                classe=TRANSITORIO,
-                precisa_login_ml=precisa_login, _erro_tecnico=texto)
+                precisa_login_ml=precisa_login, _erro_tecnico=texto, **classe)
         if not info:
             return falhar("falha ao gerar link de afiliado "
                           "(URL não afiliável ou o Link Builder recusou)")
