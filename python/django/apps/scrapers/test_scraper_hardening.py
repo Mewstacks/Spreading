@@ -83,6 +83,66 @@ class ScraperPersistenceHardeningTests(TestCase):
         self.assertEqual(normalizada, "https://www.mercadolivre.com.br/ofertas")
         self.assertLessEqual(len(normalizada), 1000)
 
+    def test_lane_rapida_reutiliza_produto_ja_coletado_por_cupom(self):
+        from unittest.mock import patch
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _upsert_ofertas
+
+        url = "https://produto.mercadolivre.com.br/MLB-123456789"
+        existente = Produto.objects.create(
+            marketplace="mercadolivre",
+            owner=None,
+            origem="cupom_codigo",
+            nome="Produto com cupom",
+            preco_sem_desconto=120,
+            preco_com_cupom=90,
+            link_produto=url,
+        )
+        coletado = [{
+            "nome": "Produto no feed",
+            "preco_sem_desconto": 120,
+            "preco_com_cupom": 80,
+            "link_produto": url,
+            "imagem_url": "https://img.example/item.jpg",
+            "frete_full": True,
+            "relampago": False,
+        }]
+
+        with patch("apps.scrapers.precos.registrar"):
+            total = _upsert_ofertas(coletado)
+
+        self.assertEqual(total, 1)
+        self.assertEqual(Produto.objects.count(), 1)
+        existente.refresh_from_db()
+        self.assertEqual(existente.origem, "oferta")
+        self.assertEqual(existente.preco_com_cupom, 80)
+
+    def test_upsert_atualiza_a_observacao_mais_recente_se_ja_houver_duplicatas(self):
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _upsert_resiliente
+
+        url = "https://produto.mercadolivre.com.br/MLB-987654321"
+        antigo = Produto.objects.create(
+            marketplace="mercadolivre", owner=None, origem="cupom_codigo",
+            nome="Observação antiga", preco_sem_desconto=100,
+            preco_com_cupom=90, link_produto=url,
+        )
+        recente = Produto.objects.create(
+            marketplace="mercadolivre", owner=None, origem="oferta",
+            nome="Observação recente", preco_sem_desconto=100,
+            preco_com_cupom=85, link_produto=url,
+        )
+
+        produto, criado = _upsert_resiliente(
+            marketplace="mercadolivre", owner=None, link_produto=url,
+            defaults={"origem": "oferta", "nome": "Atualizado",
+                      "preco_sem_desconto": 100, "preco_com_cupom": 80},
+        )
+
+        self.assertFalse(criado)
+        self.assertEqual(produto.pk, recente.pk)
+        self.assertEqual(produto.nome, "Atualizado")
+        antigo.refresh_from_db()
+        self.assertEqual(antigo.nome, "Observação antiga")
+
     def test_busca_vazia_preserva_catalogo(self):
         existente = Produto.objects.create(
             marketplace="mercadolivre", origem="busca", nome="Fone Bluetooth",

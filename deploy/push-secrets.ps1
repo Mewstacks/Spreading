@@ -1,6 +1,6 @@
 # Lê ../.env.fly e envia os segredos p/ os apps Fly.
-#   spreading-wa  <- API_KEY
-#   spreading-web <- todo o resto + WHATSAPP_API_KEY (= API_KEY)
+#   spreading-wa  <- somente WA_CAPABILITY_PUBLIC_KEYS_JSON
+#   spreading-web <- signer privado, keyring ML, URLs PostgreSQL e integrações
 # Placeholders (<...>) e vazios são ignorados. Rode da raiz do repo:
 #   powershell -ExecutionPolicy Bypass -File deploy\push-secrets.ps1
 $ErrorActionPreference = 'Stop'
@@ -20,18 +20,23 @@ foreach ($line in Get-Content $envFile) {
     $vals[$k] = $v
 }
 
-if ($vals.ContainsKey('API_KEY')) {
-    Write-Host "-> API_KEY em spreading-wa"
-    & fly secrets set ("API_KEY=" + $vals['API_KEY']) --app spreading-wa
-    if ($LASTEXITCODE -ne 0) { throw "falha ao setar API_KEY (spreading-wa)" }
+$waKeys = @('WA_CAPABILITY_PUBLIC_KEYS_JSON', 'WA_CAPABILITY_PUBLIC_KEYS_JSON_B64')
+$waArgs = @()
+foreach ($k in $waKeys) {
+    if ($vals.ContainsKey($k)) { $waArgs += ($k + '=' + $vals[$k]) }
+}
+if ($waArgs.Count -gt 0) {
+    Write-Host ("-> " + $waArgs.Count + " chave(s) publica(s) em spreading-wa")
+    & fly secrets set @waArgs --app spreading-wa
+    if ($LASTEXITCODE -ne 0) { throw "falha ao setar chaves publicas (spreading-wa)" }
 }
 
 $webArgs = @()
 foreach ($k in $vals.Keys) {
-    if ($k -eq 'API_KEY') { continue }
+    if ($k -eq 'API_KEY' -or $k -eq 'WHATSAPP_API_KEY') { continue }
+    if ($waKeys -contains $k) { continue }
     $webArgs += ($k + '=' + $vals[$k])
 }
-if ($vals.ContainsKey('API_KEY')) { $webArgs += ('WHATSAPP_API_KEY=' + $vals['API_KEY']) }
 
 if ($webArgs.Count -gt 0) {
     Write-Host ("-> " + $webArgs.Count + " segredos em spreading-web")

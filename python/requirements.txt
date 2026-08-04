@@ -1,6 +1,6 @@
 # Dependencias Python (pip). NAO instala Ollama nem o navegador do Playwright:
 # rode  ../setup.ps1  para deps nativas (Ollama model, chromium, npm do node.js).
-Django==6.0.6
+Django==6.0.7
 requests==2.33.0
 urllib3==2.7.0
 idna==3.15
@@ -18,7 +18,7 @@ psycopg[binary]==3.2.9
 dj-database-url==2.3.0
 gunicorn==23.0.0
 whitenoise==6.9.0
-cryptography==49.0.0
+cryptography==50.0.0
 PyJWT==2.13.0
 honcho==2.0.0
 # Monitor de canais curados (userbot MTProto) — Track B4

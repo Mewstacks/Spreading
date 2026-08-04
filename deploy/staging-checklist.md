@@ -5,8 +5,9 @@
 
 1. Crie `spreading-web-staging`, `spreading-wa-staging`, um Postgres e os volumes
    `ml_data_staging` / `wa_data_staging`, todos na região `gru`.
-2. Aplique segredos novos: `DJANGO_SECRET_KEY`, `SECRETS_FERNET_KEY`, banco e uma
-   `API_KEY` exclusiva. Não reutilize cookies, sessão WhatsApp ou chaves produtivas.
+2. Execute `deploy\phase0-bootstrap.ps1 staging`: ele cria URLs de banco por role,
+   KEK ML, HMAC de tenant e um par Ed25519 exclusivo. Nunca copie cookies, sessões
+   WhatsApp ou chaves de produção.
 3. Faça deploy com `fly deploy -c fly.staging.toml` em cada diretório e crie uma conta
    de teste verificada.
 4. Conecte as contas de teste de ML e Amazon pelo live view; pareie somente um grupo

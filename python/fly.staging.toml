@@ -11,6 +11,8 @@ primary_region = "gru"
 [env]
   APP_ENV = "staging"
   SENTRY_ENV = "staging"
+  SECURITY_FREEZE_NEW_TENANTS = "1"
+  ML_LEGACY_SESSION_READ_ENABLED = "0"
   DJANGO_DEBUG = "0"
   DJANGO_ALLOWED_HOSTS = "spreading-web-staging.fly.dev"
   DJANGO_CSRF_TRUSTED_ORIGINS = "https://spreading-web-staging.fly.dev"
@@ -29,13 +31,18 @@ primary_region = "gru"
   AMAZON_BROWSER_LOGIN_ENABLED = "1"
   ML_LINK_BUILDER_ENABLED = "1"
   WHATSAPP_WEB_ENABLED = "1"
+  TELETHON_RELINK_ENABLED = "0"
   # Cupons de ativação do ML (clique no container público, sem código digitável).
   # Ligado SÓ aqui: em produção ele entra por organização, depois de validar o texto
   # da mensagem. É seguro em homologação porque não há destino de envio configurado.
   ML_CUPONS_ATIVACAO_ENABLED = "1"
+  TENANT_RUNTIME_DB_ROLE = "spreading_runtime"
+  TENANT_SYSTEM_DB_ROLE = "spreading_system"
+  TENANT_MIGRATION_DB_ROLE = "spreading_migration"
 
 [deploy]
-  release_command = "sh -c 'python django/manage.py migrate --noinput && env TENANT_SYSTEM_PROCESS=1 python django/manage.py bootstrap_superuser'"
+  strategy = "rolling"
+  release_command = "python django/manage.py phase0_release"
 
 [[mounts]]
   source = "ml_data_staging"

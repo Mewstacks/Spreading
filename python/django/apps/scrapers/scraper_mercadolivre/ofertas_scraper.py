@@ -35,14 +35,43 @@ def _reconectar_db():
 
 
 def _upsert_resiliente(**kwargs):
-    """`Produto.update_or_create` tolerante a socket morto: numa OperationalError,
-    reconecta e tenta de novo uma vez (cobre a queda no meio do save)."""
+    """Upsert tolerante a socket morto e observações históricas duplicadas.
+
+    O ranking aceita múltiplas observações do mesmo anúncio (inclusive variações
+    de URL). Uma normalização pode fazer duas delas convergirem para a mesma chave;
+    nesse caso, atualizar a mais recente não pode derrubar a coleta inteira.
+    """
+    def salvar():
+        try:
+            return Produto.objects.update_or_create(**kwargs)
+        except Produto.MultipleObjectsReturned:
+            lookup = {
+                chave: valor for chave, valor in kwargs.items()
+                if chave not in {"defaults", "create_defaults"}
+            }
+            candidatos = Produto.objects.filter(**lookup).order_by(
+                "-ultima_observacao", "-pk"
+            )
+            total = candidatos.count()
+            produto = candidatos.first()
+            if produto is None:  # corrida: as duplicatas sumiram entre GET e SELECT
+                return Produto.objects.update_or_create(**kwargs)
+            for campo, valor in (kwargs.get("defaults") or {}).items():
+                setattr(produto, campo, valor() if callable(valor) else valor)
+            produto.save()
+            logger.warning(
+                "Produto duplicado no upsert; observação mais recente atualizada "
+                "(id=%s, candidatos=%s).",
+                produto.pk, total,
+            )
+            return produto, False
+
     try:
-        return Produto.objects.update_or_create(**kwargs)
+        return salvar()
     except OperationalError:
         logger.warning("Conexão do banco caiu no save; reconectando e tentando de novo.")
         _reconectar_db()
-        return Produto.objects.update_or_create(**kwargs)
+        return salvar()
 
 
 def _normalizar_link_produto(link: str) -> str:
@@ -417,8 +446,9 @@ def _upsert_ofertas(coletados):
         from apps.scrapers.scraper_mercadolivre.link import e_catalogo_universal
         catalogo = e_catalogo_universal(link_produto)
         produto, _ = _upsert_resiliente(
-            origem="oferta", link_produto=link_produto, owner=None,
+            marketplace="mercadolivre", link_produto=link_produto, owner=None,
             defaults={
+                "origem": "oferta",
                 "nome": o["nome"],
                 "preco_sem_desconto": o["preco_sem_desconto"],
                 "preco_com_cupom": o["preco_com_cupom"],

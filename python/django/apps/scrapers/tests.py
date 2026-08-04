@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import itertools
 import json
 import os
@@ -22,7 +24,7 @@ from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase, o
 from django.utils import timezone
 
 from apps.accounts.tenant import organization_context
-from apps.scrapers import ofertas, whatsapp_client
+from apps.scrapers import hooks, ofertas, whatsapp_client
 from apps.scrapers.afiliado import tag_ml
 from apps.scrapers.maintenance import reconciliar_publicacoes_orfas
 from apps.scrapers.management.commands.automacao import _rodar_links
@@ -6140,3 +6142,162 @@ class LoteDeLinksResilienteTests(TestCase):
             with self.assertRaises(ml.LoginError):
                 ml.gerar_links_em_lote(produtos, usuario=self.user)
         falha.assert_not_called()
+
+
+class SentryHookTests(TestCase):
+    """Relay Sentry → repository_dispatch (apps.scrapers.hooks)."""
+
+    SEGREDO = "segredo-de-teste"
+
+    def setUp(self):
+        self.url = reverse("sentry-hook")
+        self.client = Client()
+
+    @contextmanager
+    def _configurado(self, **extra):
+        env = {
+            "SENTRY_HOOK_SECRET": self.SEGREDO,
+            "GITHUB_DISPATCH_TOKEN": "ghp_fake",
+            "GITHUB_REPO": "g2rmano/Spreading",
+        }
+        env.update(extra)
+        with patch.dict(os.environ, env, clear=False):
+            yield
+
+    def _post(self, payload, assinatura=None):
+        corpo = json.dumps(payload).encode()
+        if assinatura is None:
+            assinatura = hmac.new(
+                self.SEGREDO.encode(), corpo, hashlib.sha256
+            ).hexdigest()
+        return self.client.post(
+            self.url,
+            data=corpo,
+            content_type="application/json",
+            headers={"sentry-hook-signature": assinatura},
+        )
+
+    @staticmethod
+    def _payload(**over):
+        evento = {
+            "issue_id": "4507",
+            "title": "KeyError: 'preco'",
+            "culprit": "apps.scrapers.ofertas in montar",
+            "environment": "production",
+            "web_url": "https://sentry.io/organizations/x/issues/4507/",
+            "entries": [
+                {
+                    "type": "exception",
+                    "data": {
+                        "values": [
+                            {
+                                "type": "KeyError",
+                                "value": "'preco'",
+                                "stacktrace": {
+                                    "frames": [
+                                        {
+                                            "filename": "apps/scrapers/ofertas.py",
+                                            "lineNo": 120,
+                                            "function": "montar",
+                                            "vars": {"senha": "hunter2"},
+                                        }
+                                    ]
+                                },
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+        evento.update(over)
+        return {"action": "triggered", "data": {"event": evento}}
+
+    def test_assinatura_invalida_e_recusada(self):
+        with self._configurado():
+            with patch.object(hooks, "_dispara_github") as dispatch:
+                resposta = self._post(self._payload(), assinatura="deadbeef")
+        self.assertEqual(resposta.status_code, 403)
+        dispatch.assert_not_called()
+
+    def test_assinatura_ausente_e_recusada(self):
+        with self._configurado():
+            with patch.object(hooks, "_dispara_github") as dispatch:
+                resposta = self.client.post(
+                    self.url,
+                    data=json.dumps(self._payload()),
+                    content_type="application/json",
+                )
+        self.assertEqual(resposta.status_code, 403)
+        dispatch.assert_not_called()
+
+    def test_sem_credenciais_responde_503(self):
+        with patch.dict(
+            os.environ,
+            {"SENTRY_HOOK_SECRET": "", "GITHUB_DISPATCH_TOKEN": "", "GITHUB_REPO": ""},
+            clear=False,
+        ):
+            with patch.object(hooks, "_dispara_github") as dispatch:
+                resposta = self._post(self._payload())
+        self.assertEqual(resposta.status_code, 503)
+        dispatch.assert_not_called()
+
+    def test_ambiente_fora_de_producao_e_ignorado(self):
+        with self._configurado():
+            with patch.object(hooks, "_dispara_github") as dispatch:
+                resposta = self._post(self._payload(environment="staging"))
+        self.assertEqual(resposta.status_code, 204)
+        dispatch.assert_not_called()
+
+    def test_evento_sem_issue_id_e_ignorado(self):
+        with self._configurado():
+            with patch.object(hooks, "_dispara_github") as dispatch:
+                resposta = self._post(self._payload(issue_id=None))
+        self.assertEqual(resposta.status_code, 204)
+        dispatch.assert_not_called()
+
+    def test_acao_diferente_de_triggered_e_ignorada(self):
+        payload = self._payload()
+        payload["action"] = "created"
+        with self._configurado():
+            with patch.object(hooks, "_dispara_github") as dispatch:
+                resposta = self._post(payload)
+        self.assertEqual(resposta.status_code, 204)
+        dispatch.assert_not_called()
+
+    def test_dispara_dispatch_com_payload_enxuto(self):
+        with self._configurado():
+            with patch.object(hooks, "_dispara_github") as dispatch:
+                resposta = self._post(self._payload())
+        self.assertEqual(resposta.status_code, 202)
+        dispatch.assert_called_once()
+        despacho = dispatch.call_args.args[0]
+        self.assertEqual(despacho["issue_id"], "4507")
+        self.assertEqual(despacho["title"], "KeyError: 'preco'")
+        self.assertIn("apps/scrapers/ofertas.py:120 in montar", despacho["stack"])
+        # O resumo do stacktrace nunca pode carregar variáveis locais.
+        self.assertNotIn("hunter2", despacho["stack"])
+        self.assertNotIn("senha", despacho["stack"])
+
+    def test_falha_do_github_nao_derruba_o_endpoint(self):
+        with self._configurado():
+            with patch.object(
+                hooks, "_dispara_github", side_effect=OSError("github fora do ar")
+            ):
+                resposta = self._post(self._payload())
+        self.assertEqual(resposta.status_code, 502)
+
+    def test_corpo_invalido_responde_400(self):
+        corpo = b"{nao e json"
+        assinatura = hmac.new(self.SEGREDO.encode(), corpo, hashlib.sha256).hexdigest()
+        with self._configurado():
+            resposta = self.client.post(
+                self.url,
+                data=corpo,
+                content_type="application/json",
+                headers={"sentry-hook-signature": assinatura},
+            )
+        self.assertEqual(resposta.status_code, 400)
+
+    def test_get_nao_e_aceito(self):
+        with self._configurado():
+            self.assertEqual(self.client.get(self.url).status_code, 405)

@@ -1,6 +1,6 @@
 # Fly.io — app Django (web + workers). Região São Paulo (gru).
-# Secrets (NÃO versionar): fly secrets set DJANGO_SECRET_KEY=... DATABASE_URL=... \
-#   WHATSAPP_API_KEY=... SECRETS_FERNET_KEY=... AMAZON_* EMAIL_* TELEGRAM_API_ID=...
+# Secrets (NÃO versionar): DJANGO_SECRET_KEY, três URLs PostgreSQL,
+# ML_SESSION_KEKS_JSON, WA_CAPABILITY_PRIVATE_KEY e credenciais de integrações.
 # (login web do ML NÃO precisa de secret: roda no Chromium local — ver ml_conexao.py)
 app = "spreading-web"
 primary_region = "gru"
@@ -12,6 +12,7 @@ primary_region = "gru"
   policy = "always"
 
 [env]
+  APP_ENV = "production"
   DJANGO_DEBUG = "0"
   DJANGO_ALLOWED_HOSTS = "spreading-web.fly.dev"
   DJANGO_CSRF_TRUSTED_ORIGINS = "https://spreading-web.fly.dev"
@@ -20,12 +21,23 @@ primary_region = "gru"
   ML_AUTH_DIR = "/data/ml_sessions"
   # Serviço do WhatsApp na rede privada do Fly (.internal).
   WHATSAPP_API_URL = "http://spreading-wa.internal:3000"
+  SECURITY_FREEZE_NEW_TENANTS = "1"
+  ML_LEGACY_SESSION_READ_ENABLED = "0"
+  ML_BROWSER_LOGIN_ENABLED = "0"
+  ML_LINK_BUILDER_ENABLED = "0"
+  ML_BROWSER_REPORTS_ENABLED = "0"
+  TELETHON_RELINK_ENABLED = "0"
+  WHATSAPP_WEB_ENABLED = "0"
+  TENANT_RUNTIME_DB_ROLE = "spreading_runtime"
+  TENANT_SYSTEM_DB_ROLE = "spreading_system"
+  TENANT_MIGRATION_DB_ROLE = "spreading_migration"
 
 # migra o banco a cada deploy, antes de trocar as máquinas.
 # (createcachetable saiu: o cache é LocMem por processo -- ver settings.py --, então
 # a tabela nunca foi lida por ninguém.)
 [deploy]
-  release_command = "sh -c 'python django/manage.py migrate --noinput && env TENANT_SYSTEM_PROCESS=1 python django/manage.py bootstrap_superuser'"
+  strategy = "rolling"
+  release_command = "python django/manage.py phase0_release"
 
 # Volume persistente das sessões do ML (auth_{id}.json). Preso a UMA máquina:
 # por isso web + workers rodam juntos (honcho) e não escalamos horizontalmente.

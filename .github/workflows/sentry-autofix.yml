@@ -1,0 +1,145 @@
+name: sentry-autofix
+
+# Disparado pelo relay em apps/scrapers/hooks.py quando o Sentry registra uma
+# issue nova em produção. Claude Code investiga, escreve um teste de regressão,
+# corrige e abre um PR. O merge é sempre manual.
+#
+# ATENÇÃO: repository_dispatch só dispara workflows presentes na branch default.
+# Este arquivo precisa estar na `main` para funcionar.
+on:
+  repository_dispatch:
+    types: [sentry-error]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Uma execução por issue do Sentry. Ocorrências repetidas do mesmo erro
+# atualizam o mesmo PR em vez de abrir dezenas.
+concurrency:
+  group: sentry-autofix-${{ github.event.client_payload.issue_id }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event.client_payload.issue_id != ''
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Freio de mão: se já há PRs de autofix parados esperando revisão, não
+      # gasta mais cota do plano criando outro.
+      - name: Limite de PRs de autofix abertos
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          abertos=$(gh pr list --state open --label autofix --json number --jq 'length')
+          echo "PRs de autofix abertos: $abertos"
+          if [ "$abertos" -ge 3 ]; then
+            echo "::warning::limite de 3 PRs de autofix atingido — ignorando este alerta"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: python/requirements.txt
+
+      - run: pip install -r python/requirements.txt
+
+      - name: Claude Code — investiga e corrige
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: >-
+            --allowedTools Read,Edit,Write,Glob,Grep,Bash
+            --max-turns 40
+          prompt: |
+            A production error was reported by Sentry. Fix it.
+
+            Title:   ${{ github.event.client_payload.title }}
+            Culprit: ${{ github.event.client_payload.culprit }}
+            Sentry:  ${{ github.event.client_payload.permalink }}
+
+            Stack:
+            ${{ github.event.client_payload.stack }}
+
+            This is a Django project. Application code lives under `python/django/apps/`
+            (`scrapers`, `accounts`). Settings are in `python/django/core/settings.py`.
+            The WhatsApp bridge is a separate Node service under `node.js/`.
+
+            Do the following, in order:
+
+            1. Locate the code responsible for this error. Read enough surrounding
+               code to understand the intended behaviour before changing anything.
+            2. Add a regression test that fails because of this bug. Put Django
+               tests in the relevant app's `tests.py`.
+            3. Apply the smallest correct fix. Do not refactor unrelated code, do
+               not rename things, do not add abstractions.
+            4. Run the suite from the `python` directory:
+                 python django/manage.py check
+                 python django/manage.py test apps.scrapers apps.accounts
+               Both must pass before you finish.
+            5. If you cannot reproduce the error, or you are not confident in the
+               fix, make NO code changes. Instead write your analysis (what you
+               found, what is still unknown, what you would need) to
+               `AUTOFIX_NOTES.md` at the repo root and stop.
+
+            Hard constraints:
+            - Never touch secrets, `.env*` files, `fly.toml`, `fly.staging.toml`,
+              or anything under `deploy/`.
+            - Never create or edit database migrations unless the stacktrace shows
+              the error is caused by a migration.
+            - Never disable, skip, or weaken an existing test to make the suite pass.
+            - Never widen an `except` clause just to swallow this error.
+
+      # Defensivo: se a action tiver commitado por conta própria, devolve as
+      # mudanças para o working tree — é de lá que o create-pull-request lê.
+      # No-op quando o Claude só editou arquivos sem commitar.
+      - name: Normaliza alterações
+        run: |
+          git reset --soft "origin/${{ github.event.repository.default_branch }}" || true
+          git status --porcelain
+
+      - name: Abre PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: autofix/sentry-${{ github.event.client_payload.issue_id }}
+          base: main
+          commit-message: |
+            fix: ${{ github.event.client_payload.title }}
+
+            Autofix para a issue Sentry ${{ github.event.client_payload.issue_id }}.
+          title: "fix(autofix): ${{ github.event.client_payload.title }}"
+          body: |
+            Correção automática gerada a partir de um alerta do Sentry.
+
+            - **Issue Sentry:** ${{ github.event.client_payload.issue_id }}
+            - **Link:** ${{ github.event.client_payload.permalink }}
+            - **Culprit:** `${{ github.event.client_payload.culprit }}`
+
+            <details>
+            <summary>Stacktrace</summary>
+
+            ```
+            ${{ github.event.client_payload.stack }}
+            ```
+
+            </details>
+
+            ---
+
+            Gerado por Claude Code. **Revise antes de fazer merge** — nenhum
+            merge automático está configurado, e essa é a intenção.
+
+            Se o corpo do PR contém apenas `AUTOFIX_NOTES.md`, o Claude não
+            conseguiu corrigir e deixou a análise no arquivo.
+          labels: |
+            autofix
+            sentry
+          delete-branch: true
