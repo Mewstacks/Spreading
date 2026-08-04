@@ -1741,9 +1741,18 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         except (LoginError, AuthError, SessaoExpirada) as e:
             # Sessão do ML caída: sem link de afiliado NENHUM produto sai. Motivo claro
             # + flag p/ a UI oferecer a reconexão e o chamador parar de retentar.
+            #
+            # TRANSITÓRIO, como no caminho de cupom: a sessão volta quando o usuário
+            # reconecta, e nada na regra de envio está errado. Sem a classe, cada
+            # tick contava uma falha "permanente" e em cinco a automação se
+            # desligava sozinha (`ativo=False`) — em produção foi exatamente isso
+            # que parou TODOS os envios, e religá-la exige ação manual mesmo depois
+            # da reconexão. O gate do WhatsApp já pula sem punir a regra pela mesma
+            # razão.
             logger.warning("Sessão ML expirada ao afiliar produto %s: %s", produto.pk, e)
             return falhar("Sessão do Mercado Livre expirada. Reconecte sua conta.",
-                          precisa_login_ml=True, _erro_tecnico=str(e))
+                          classe=TRANSITORIO, precisa_login_ml=True,
+                          _erro_tecnico=str(e))
         except BrowserError as e:
             texto = str(e)
             logger.warning("Falha do navegador ao afiliar produto %s: %s", produto.pk, e)
@@ -1751,6 +1760,10 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             return falhar(
                 "Sessão do Mercado Livre expirada. Reconecte sua conta."
                 if precisa_login else _motivo_navegador(texto),
+                # Navegador/Link Builder fora do ar também é infraestrutura, não
+                # defeito da regra: pausar a automação por isso só transfere para o
+                # usuário um problema que ele não pode resolver na tela dele.
+                classe=TRANSITORIO,
                 precisa_login_ml=precisa_login, _erro_tecnico=texto)
         if not info:
             return falhar("falha ao gerar link de afiliado "

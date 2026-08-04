@@ -410,3 +410,95 @@ class AmazonMarketplaceReportingTests(TestCase):
         user.perfil.refresh_from_db()
         self.assertIsNone(user.perfil.amazon_elegivel)
         self.assertIn("indisponível", user.perfil.amazon_ultimo_erro)
+
+    def test_ciclo_publica_resultado_na_tela_de_fontes(self):
+        """A linha da Creators API ficava `degraded`/0 para sempre, mesmo coletando."""
+        from django.utils import timezone
+        from apps.scrapers.marketplaces.amazon import Amazon
+
+        inicio = timezone.now() - timedelta(seconds=5)
+        Produto.objects.create(
+            marketplace="amazon", asin="B0FONTE001", origem="oferta",
+            fonte="amazon-creators-api", nome="Item", preco_sem_desconto=100,
+            preco_com_cupom=70, link_produto="https://a/dp/B0FONTE001")
+
+        Amazon()._reportar_fonte(inicio, contas=1, falhas=0)
+
+        fonte = FonteIngestao.objects.get(slug="amazon-creators-api")
+        self.assertEqual(fonte.status, "ok")
+        self.assertEqual(fonte.ultimo_total, 1)
+        self.assertIsNotNone(fonte.ultimo_sucesso)
+        self.assertEqual(fonte.erro_publico, "")
+
+    def test_todas_as_contas_falhando_degrada_a_fonte(self):
+        from django.utils import timezone
+        from apps.scrapers.marketplaces.amazon import Amazon
+
+        Amazon()._reportar_fonte(timezone.now(), contas=2, falhas=2)
+
+        fonte = FonteIngestao.objects.get(slug="amazon-creators-api")
+        self.assertEqual(fonte.status, "degraded")
+        self.assertEqual(fonte.falhas_consecutivas, 1)
+        self.assertIn("Nenhuma conta", fonte.erro_publico)
+
+
+class CamposDeCampanhaDuplicadosTests(TestCase):
+    """A paginação de /cupons/filter repete campanhas entre páginas."""
+
+    def _row(self, campaign_id, titulo):
+        return {
+            "campaignId": campaign_id, "title": titulo,
+            "desconto": {"tipo": "porcentagem", "valor": 10.0},
+            "valor_minimo": 0.0, "desconto_maximo": None,
+            "link_produtos": "https://lista.mercadolivre.com.br/_Container_x",
+            "codigo": "", "validade": None, "restrito": False, "estado": "ativo",
+        }
+
+    def test_campanha_repetida_na_varredura_nao_derruba_a_persistencia(self):
+        """Duas linhas com a mesma chave no mesmo ON CONFLICT fazem o PostgreSQL
+        abortar a instrução inteira — e a varredura completa se perdia."""
+        from apps.scrapers.models import Cupom
+        from apps.scrapers.scraper_mercadolivre.scraper import (
+            _persistir_campanhas_cupons,
+        )
+
+        rows = [self._row("C1", "Primeira leitura"),
+                self._row("C2", "Outra campanha"),
+                self._row("C1", "Leitura mais recente")]
+
+        _persistir_campanhas_cupons(rows, varredura_completa=False)
+
+        self.assertEqual(Cupom.objects.count(), 2)
+        self.assertEqual(Cupom.objects.get(campanha_id="C1").titulo,
+                         "Leitura mais recente")
+
+
+class SessaoMLExpiradaNaoPausaAutomacaoTests(TestCase):
+    """Sessão caída é infraestrutura recuperável, não defeito da regra de envio."""
+
+    def test_falha_de_sessao_no_envio_de_produto_e_transitoria(self):
+        from django.contrib.auth import get_user_model
+        from apps.scrapers import ofertas
+        from apps.scrapers.auxiliar import SessaoExpirada
+        from apps.scrapers.whatsapp_client import TRANSITORIO
+
+        user = get_user_model().objects.create_user("sessaoml", password="x")
+        user.perfil.marcar_verificado()
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", origem="oferta", nome="Oferta",
+            preco_sem_desconto=100, preco_com_cupom=60,
+            link_produto="https://produto.mercadolivre.com.br/MLB-1")
+
+        loja = Mock()
+        loja.build_affiliate_link.side_effect = SessaoExpirada("sessão caiu")
+        with patch("apps.scrapers.marketplaces.registry.get_marketplace",
+                   return_value=loja), \
+                patch.object(ofertas, "_canal_pronto_ou_erro", return_value=None):
+            resultado = ofertas.enviar_oferta_de_produto(
+                produto, "123@g.us", usuario=user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertTrue(resultado["precisa_login_ml"])
+        # Sem esta classe, cinco ticks seguidos desligavam a regra (`ativo=False`)
+        # e religá-la exigia ação manual mesmo depois de reconectar o ML.
+        self.assertEqual(resultado["classe"], TRANSITORIO)

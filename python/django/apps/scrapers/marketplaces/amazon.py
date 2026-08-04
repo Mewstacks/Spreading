@@ -20,6 +20,7 @@ class Amazon(Marketplace):
         """Amazon é POR USUÁRIO: cada um conecta a própria conta Creators e raspa as
         PRÓPRIAS ofertas (Produto.owner=user). Itera todos os usuários conectados.
         `termos` global é ignorado — usa os sub-nichos das configs de CADA usuário."""
+        from django.utils import timezone
         from apps.accounts.models import Perfil
         from apps.scrapers.afiliado import tag_amazon
         from apps.scrapers.scraper_amazon.creators_api import creds_de_usuario
@@ -27,9 +28,14 @@ class Amazon(Marketplace):
         candidatos = [p for p in perfis if not p.bloqueado and tag_amazon(p.user)]
         conectados = [p for p in candidatos if creds_de_usuario(p.user).completo()]
         fallback = [p for p in candidatos if not creds_de_usuario(p.user).completo()]
+        inicio = timezone.now()
+        falhas = 0
         for perfil in conectados:
             if not self._scrape_usuario(perfil.user):
                 fallback.append(perfil)
+                falhas += 1
+        if conectados:
+            self._reportar_fonte(inicio, len(conectados), falhas)
         if fallback:
             self._scrape_publico([p.user for p in fallback], termos=termos)
         elif not conectados:
@@ -75,6 +81,54 @@ class Amazon(Marketplace):
             return False
         self._marcar_elegibilidade(usuario, True, "")
         return True
+
+    @staticmethod
+    def _reportar_fonte(inicio, contas, falhas):
+        """Publica o resultado do ciclo na tela de Fontes.
+
+        Nada escrevia nesta linha: a Creators API aparecia como `degraded`, com
+        `ultimo_total=0` e `ultimo_sucesso` vazio, para sempre — mesmo tendo
+        coletado centenas de produtos. O painel dizia que a fonte estava quebrada
+        justamente enquanto ela funcionava, e uma quebra real ficava
+        indistinguível do estado normal.
+        """
+        from django.utils import timezone
+        from apps.scrapers.models import FonteIngestao, Produto
+
+        agora = timezone.now()
+        total = Produto.objects.filter(
+            marketplace="amazon", fonte="amazon-creators-api",
+            ultima_observacao__gte=inicio,
+        ).count()
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="amazon-creators-api",
+            defaults={"marketplace": "amazon", "nome": "Amazon — Creators API"},
+        )
+        fonte.ultima_tentativa = agora
+        fonte.ultimo_total = total
+        if falhas >= contas:
+            fonte.status = "degraded"
+            fonte.falhas_consecutivas += 1
+            fonte.erro_publico = (
+                "Nenhuma conta Amazon concluiu a coleta; catálogo anterior preservado."
+            )
+        elif falhas:
+            fonte.status = "degraded"
+            fonte.ultimo_sucesso = agora
+            fonte.falhas_consecutivas = 0
+            fonte.erro_publico = (
+                f"{falhas} de {contas} conta(s) Amazon não concluíram a coleta."
+            )
+        else:
+            fonte.status = "ok" if total else "degraded"
+            fonte.ultimo_sucesso = agora if total else fonte.ultimo_sucesso
+            fonte.falhas_consecutivas = 0
+            fonte.erro_publico = "" if total else (
+                "Coleta vazia; catálogo anterior preservado.")
+        fonte.save(update_fields=[
+            "ultima_tentativa", "ultimo_total", "status", "ultimo_sucesso",
+            "falhas_consecutivas", "erro_publico",
+        ])
 
     @staticmethod
     def _scrape_publico(usuarios, termos=None):

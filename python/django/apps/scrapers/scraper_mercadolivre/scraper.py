@@ -178,6 +178,21 @@ def _persistir_campanhas_cupons(
     rows, *, varredura_completa, motivo_parada="", pagina_final=0, tentativas=3,
 ):
     """Persiste uma varredura já concluída, reabrindo DB/RLS sem repetir a rede."""
+    # A paginação de /cupons/filter repete campanhas entre páginas (o catálogo se
+    # move enquanto a varredura anda). Duas linhas com o mesmo `campanha_id` no
+    # MESMO `bulk_create(update_conflicts=True)` fazem o PostgreSQL abortar com
+    # "ON CONFLICT DO UPDATE command cannot affect row a second time" — e era a
+    # varredura INTEIRA que se perdia, todo ciclo, deixando a tabela Cupom velha.
+    # Sem ela, produto com campanha não gera link de afiliado e fica pendente.
+    # A última ocorrência vence: é a leitura mais recente da mesma campanha.
+    if rows:
+        unicas = {}
+        for row in rows:
+            unicas[row["campaignId"]] = row
+        if len(unicas) != len(rows):
+            logger.info("Cupons de campanha: %s duplicata(s) na varredura descartada(s)",
+                        len(rows) - len(unicas))
+        rows = list(unicas.values())
     ids_vistos = {row["campaignId"] for row in rows}
     ids_ativos = {
         row["campaignId"] for row in rows if row.get("estado", "ativo") == "ativo"
