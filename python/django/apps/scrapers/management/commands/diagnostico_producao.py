@@ -41,6 +41,44 @@ class Command(BaseCommand):
     def _linha(self, texto=""):
         self.stdout.write(str(texto))
 
+    @staticmethod
+    def _motivo_reprovacao(cupom) -> str:
+        """Primeiro portão que este cupom não passou, na ordem em que são aplicados.
+
+        Sem isto o funil só diz "1665 reprovados" e não dá para saber se falta
+        ligar uma flag, se a fonte parou de trazer um campo, ou se os cupons
+        simplesmente não são publicáveis.
+        """
+        from django.conf import settings
+        from apps.scrapers.coupon_rules import _FONTES_ML_ATIVACAO, regras_do_cupom
+
+        regras = regras_do_cupom(cupom)
+        if regras["modo_resgate"] == "codigo":
+            return "modo=codigo mas o código não é humano/digitável"
+        marketplace = str(getattr(cupom, "marketplace", "") or "").casefold()
+        if marketplace == "amazon":
+            evidencia = getattr(cupom, "evidencia", {}) or {}
+            if not evidencia.get("promotion_id"):
+                return "amazon: evidência sem promotion_id"
+            if not evidencia.get("asins"):
+                return "amazon: evidência sem ASINs"
+            return "amazon: associação não é da página oficial"
+        if marketplace != "mercadolivre":
+            return f"marketplace {marketplace!r} não tem regra de ativação"
+        if getattr(getattr(cupom, "fonte", None), "slug", "") not in _FONTES_ML_ATIVACAO:
+            return "fonte ML fora da lista de ativação"
+        if not str(getattr(cupom, "external_id", "") or "").startswith("campanha:"):
+            return "external_id não é campanha:"
+        if regras.get("is_mar_aberto"):
+            return "campanha site-wide (mar aberto)"
+        if not regras.get("container_url"):
+            return "campanha sem container_url público"
+        if regras.get("valor_desconto") in (None, "", 0):
+            return "campanha sem valor de desconto"
+        if not settings.ML_CUPONS_ATIVACAO_ENABLED:
+            return "APTO — só falta ML_CUPONS_ATIVACAO_ENABLED"
+        return "flag ligada globalmente, mas não para esta organização"
+
     # ── diagnóstico ───────────────────────────────────────────────────────
     def _executar(self, secoes, dias):
         from apps.scrapers.maintenance import cupons_frescos_q, produtos_frescos_q
@@ -163,6 +201,9 @@ class Command(BaseCommand):
                 from collections import Counter
                 self._linha("  reprovados por fonte: " + str(
                     Counter(getattr(c.fonte, "slug", "?") for c in reprovados).most_common(10)))
+                self._linha("  POR QUE cada um foi reprovado:")
+                self._linha("  " + str(Counter(
+                    self._motivo_reprovacao(c) for c in reprovados).most_common(12)))
 
             self._sec("CUPONS — prontidao por usuario")
             self._linha("  CupomPreparacao por status: " + str(list(

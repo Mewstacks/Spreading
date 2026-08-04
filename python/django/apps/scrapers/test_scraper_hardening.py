@@ -473,6 +473,48 @@ class CamposDeCampanhaDuplicadosTests(TestCase):
                          "Leitura mais recente")
 
 
+class MotivoDeReprovacaoDeCupomTests(TestCase):
+    """O funil só dizia "N reprovados"; sem o motivo não dá para agir."""
+
+    def _cupom(self, **kwargs):
+        from apps.scrapers.models import CupomNormalizado
+
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug=kwargs.pop("slug", "mercadolivre-web"),
+            defaults={"marketplace": "mercadolivre", "nome": "ML"})
+        campos = {
+            "fonte": fonte, "marketplace": "mercadolivre", "titulo": "Cupom",
+            "external_id": "campanha:123", "codigo": "", "estado": "ativo",
+            "regras": {"modo_resgate": "ativacao", "valor_desconto": 10,
+                       "container_url": "https://lista.mercadolivre.com.br/_Container_x"},
+        }
+        campos.update(kwargs)
+        return CupomNormalizado.objects.create(**campos)
+
+    def _motivo(self, cupom):
+        from apps.scrapers.management.commands.diagnostico_producao import Command
+
+        return Command._motivo_reprovacao(cupom)
+
+    def test_aponta_a_flag_quando_o_cupom_esta_apto(self):
+        with self.settings(ML_CUPONS_ATIVACAO_ENABLED=False):
+            self.assertIn("ML_CUPONS_ATIVACAO_ENABLED", self._motivo(self._cupom()))
+
+    def test_aponta_container_ausente(self):
+        cupom = self._cupom(regras={"modo_resgate": "ativacao", "valor_desconto": 10})
+        self.assertIn("container_url", self._motivo(cupom))
+
+    def test_aponta_campanha_ausente_no_external_id(self):
+        cupom = self._cupom(external_id="checkout:XPTO")
+        self.assertIn("external_id", self._motivo(cupom))
+
+    def test_aponta_site_wide(self):
+        cupom = self._cupom(regras={
+            "modo_resgate": "ativacao", "valor_desconto": 10, "is_mar_aberto": True,
+            "container_url": "https://lista.mercadolivre.com.br/_Container_x"})
+        self.assertIn("mar aberto", self._motivo(cupom))
+
+
 class SessaoMLExpiradaNaoPausaAutomacaoTests(TestCase):
     """Sessão caída é infraestrutura recuperável, não defeito da regra de envio."""
 
