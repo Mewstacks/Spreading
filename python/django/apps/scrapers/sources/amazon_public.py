@@ -13,6 +13,16 @@ def _money(text):
     return normalizar_dinheiro(text)
 
 
+def _precos_publicaveis(current, previous):
+    """Aceita desconto realista e barra preço anterior em escala errada.
+
+    O HTML público já devolveu valores como 63990 para um produto de 63,99.
+    A seleção automática considera 90% suspeito; a coleta deve aplicar a mesma
+    regra antes de persistir o item.
+    """
+    return current > 0 and previous > current and previous < current * 10
+
+
 def verify_product_url(url, nome_esperado=None):
     """Validação JIT pública usada antes de qualquer publicação Amazon."""
     with iniciar_browser(headless=True) as (page, _):
@@ -65,7 +75,7 @@ class AmazonPublicSource(SourceAdapter):
                         old = card.locator(".a-price.a-text-price .a-offscreen")
                         if old.count():
                             previous = _money(old.first.inner_text(timeout=1000))
-                        if current <= 0 or previous <= current:
+                        if not _precos_publicaveis(current, previous):
                             continue
                         seen.add(asin)
                         yield IngestedItem(

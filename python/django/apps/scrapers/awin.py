@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import requests
 from django.utils import timezone
 
-from apps.scrapers.coupon_rules import normalizar_regras_cupom
+from apps.scrapers.coupon_rules import normalizar_regras_cupom, numero_br
 from apps.scrapers.sources.base import IngestedItem
 
 
@@ -195,12 +195,18 @@ def _dt(value, end_of_day=False):
     return parsed
 
 
+# Número em formato brasileiro por extenso: "1.199", "1.234,56", "99,90", "50".
+# O padrão antigo (`\d+(?:[.,]\d+)?`) parava no primeiro grupo e lia "R$ 1.234,56"
+# como 1.234 — depois `_numero` ainda o interpretava como R$ 1,23.
+_NUM_BR = r"\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:[.,]\d+)?"
+
+
 def _discount(text):
     text = str(text or "")
-    percent = re.search(r"(\d{1,3}(?:[.,]\d+)?)\s*%", text)
-    fixed = re.search(r"R\$\s*(\d+(?:[.,]\d+)?)", text, re.I)
-    minimum = re.search(r"(?:acima de|a partir de|mínim[oa])\s*R\$?\s*(\d+(?:[.,]\d+)?)",
-                        text, re.I)
+    percent = re.search(rf"({_NUM_BR})\s*%", text)
+    fixed = re.search(rf"R\$\s*({_NUM_BR})", text, re.I)
+    minimum = re.search(
+        rf"(?:acima de|a partir de|mínim[oa])\s*R\$?\s*({_NUM_BR})", text, re.I)
     if percent:
         kind, value = "porcentagem", percent.group(1)
     elif fixed:
@@ -299,9 +305,18 @@ def coletar_ofertas(integracao):
 
 
 def _preco_feed(value):
-    """Aceita numero ou strings Google Feed como '129.90 BRL'."""
-    match = re.search(r"\d+(?:[.,]\d+)?", str(value or ""))
-    return float(match.group(0).replace(",", ".")) if match else 0.0
+    """Aceita numero ou strings Google Feed como '129.90 BRL' e '1.234,56 BRL'.
+
+    O regex antigo casava só o primeiro grupo de "1.234,56" e devolvia 1.234 — um
+    produto de R$ 1.234,56 entrava no catálogo valendo R$ 1,23. `_numero` trata os
+    dois formatos (ponto de milhar brasileiro vs. ponto decimal do feed).
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    match = re.search(_NUM_BR, str(value or ""))
+    if not match:
+        return 0.0
+    return numero_br(match.group(0)) or 0.0
 
 
 def sincronizar_feeds_produtos(integracao, max_programas=3, max_produtos=5000):

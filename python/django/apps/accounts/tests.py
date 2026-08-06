@@ -360,6 +360,38 @@ class VereditoDoLinkBuilderTests(TestCase):
         # "" e não "active": este escopo não tem status próprio, de propósito.
         self.assertEqual(snap["status"], "")
 
+    def test_renovacao_de_cookies_preserva_prontidao_e_status(self):
+        from apps.accounts.ml_sessions import (
+            registrar_prontidao_linkbuilder,
+            renew_storage_state,
+        )
+
+        registrar_prontidao_linkbuilder(
+            self.org, "login_required", "portal pediu login",
+        )
+        MercadoLivreSession.objects.filter(organization=self.org).update(
+            status="suspect",
+        )
+        renew_storage_state(
+            self.user,
+            {"cookies": [{"name": "ssid", "value": "renovado"}], "origins": []},
+        )
+
+        record = MercadoLivreSession.objects.get(organization=self.org)
+        self.assertEqual(record.lb_readiness, "login_required")
+        self.assertEqual(record.lb_readiness_reason, "portal pediu login")
+        self.assertEqual(record.status, "suspect")
+
+    def test_nova_autenticacao_retorna_prontidao_para_unknown(self):
+        from apps.accounts.ml_sessions import registrar_prontidao_linkbuilder
+
+        registrar_prontidao_linkbuilder(self.org, "ready", "controles visíveis")
+        save_storage_state(self.user, self.state)
+
+        record = MercadoLivreSession.objects.get(organization=self.org)
+        self.assertEqual(record.lb_readiness, "unknown")
+        self.assertIsNone(record.lb_readiness_checked_at)
+
 
 @override_settings(
     WA_CAPABILITY_PRIVATE_KEY=WA_PRIVATE,

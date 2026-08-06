@@ -20,6 +20,7 @@ from django.conf import settings
 from django.db import connection
 from django.http import HttpResponse
 from django.urls import path, include
+from apps.scrapers import hooks as scraper_hooks
 from apps.scrapers import views as scraper_views
 
 
@@ -150,6 +151,9 @@ urlpatterns = [
     # cada caractere a menos conta dentro da mensagem do WhatsApp/Telegram.
     path('r/<str:slug>/', scraper_views.redirect_curto, name='redirect-curto'),
     path('healthz', healthz, name='healthz'),
+    # Webhook do Sentry → repository_dispatch no GitHub (workflow de autofix).
+    # Público por necessidade; autenticado por HMAC em apps.scrapers.hooks.
+    path('hooks/sentry/', scraper_hooks.sentry_hook, name='sentry-hook'),
     path('admin/', admin.site.urls),
     path('accounts/', include('apps.accounts.urls')),
     path('scrapers/', include('apps.scrapers.urls')),

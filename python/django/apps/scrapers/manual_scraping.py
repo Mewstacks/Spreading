@@ -324,57 +324,137 @@ def _produtos_sem_link(usuario, *, origens, limite):
     )
 
 
-def _gerar_links(usuario, *, origens, limite, faixa, reporter):
-    from apps.scrapers.marketplaces.registry import get_marketplace
+# Teto de tempo da etapa de links. MAX_JOB_SECONDS é 45min e a coleta já consumiu
+# parte dele; sem um teto próprio, uma fila de milhares de itens levaria o job
+# inteiro a estourar e a coleta que já deu certo seria reportada como falha.
+SEGUNDOS_MAX_LINKS = 15 * 60
+LOTE_LINKS = 40
 
-    pendentes = _db_retry(
-        lambda: _produtos_sem_link(usuario, origens=origens, limite=limite),
-    )
-    if not pendentes:
-        reporter.emit("Todos os itens coletados já possuem link de afiliado.")
-        return 0, 0
-    reporter.emit(f"Gerando links para {len(pendentes)} item(ns).")
+
+def _gerar_links_ate_esvaziar(usuario, *, faixa, reporter):
+    """Gera links em lotes até a fila acabar ou o teto de tempo chegar.
+
+    Devolve (gerados, falhas, restantes). O limite fixo de 60 por execução era o
+    motivo de a tela mostrar milhares de pendentes com um botão manual ao lado: a
+    raspagem nunca alcançava a própria fila.
+
+    Idempotente por construção — `_produtos_sem_link` exclui quem já tem link, então
+    repetir a execução não regera nada nem duplica.
+    """
+    limite = monotonic() + SEGUNDOS_MAX_LINKS
+    ini, fim = faixa
     gerados = falhas = 0
-    grupos = {}
-    for produto in pendentes:
-        grupos.setdefault(produto.marketplace or "mercadolivre", []).append(produto)
-    for slug, produtos in grupos.items():
-        ok, erros = get_marketplace(slug).prefetch_links(
-            produtos, usuario=usuario, faixa=faixa,
-        )
-        gerados += ok
-        falhas += erros
-    return gerados, falhas
+    vistos = 0
+    while monotonic() < limite:
+        pendentes = _db_retry(lambda: _produtos_sem_link(
+            usuario, origens=("oferta", "busca"), limite=LOTE_LINKS))
+        if not pendentes:
+            break
+        vistos += len(pendentes)
+        reporter.emit(f"Gerando links para {len(pendentes)} item(ns).")
+        grupos = {}
+        for produto in pendentes:
+            grupos.setdefault(produto.marketplace or "mercadolivre", []).append(produto)
+        antes = gerados
+        for slug, produtos in grupos.items():
+            from apps.scrapers.marketplaces.registry import get_marketplace
+            ok, erros = get_marketplace(slug).prefetch_links(
+                produtos, usuario=usuario, faixa=(ini, fim))
+            gerados += ok
+            falhas += erros
+        if gerados == antes:
+            # Nenhum link saiu neste lote: o próximo traria os MESMOS produtos
+            # (continuam sem link) e o laço giraria até o teto de tempo sem
+            # progredir. Sessão caída e Link Builder desligado caem aqui.
+            reporter.warning(
+                "A geração de links não avançou neste lote; o restante fica para "
+                "a próxima execução.")
+            break
+    restantes = _db_retry(lambda: Produto.objects.filter(
+        Q(owner__isnull=True) | Q(owner=usuario), origem__in=("oferta", "busca"),
+    ).exclude(estado__in=["indisponivel", "invalido", "expirado", "stale"]).exclude(
+        Exists(LinkAfiliadoUsuario.objects.filter(
+            usuario=usuario, produto=OuterRef("pk")).exclude(link_afiliado=""))
+    ).count())
+    if not vistos:
+        reporter.emit("Todos os itens coletados já possuem link de afiliado.")
+    return gerados, falhas, restantes
 
 
 def _executar_ofertas(job, reporter):
-    from apps.scrapers.scraper_mercadolivre.ofertas_scraper import mapear_ofertas
+    """Coleta de TODAS as lojas + geração dos links, numa operação só.
+
+    Antes este job era só o feed do Mercado Livre e gerava 60 links; a Amazon
+    entrava apenas pelo worker de fundo, e o resto da fila de links dependia de a
+    pessoa achar e clicar um segundo botão noutra tela — com milhares pendentes.
+    As etapas continuam separadas por dentro (cada uma reporta e falha sozinha),
+    mas para quem clicou é um fluxo só.
+    """
+    from apps.scrapers.marketplaces.base import Marketplace, MarketplaceIndisponivel
+    from apps.scrapers.marketplaces.registry import MARKETPLACES
 
     warnings = []
-    reporter.step("Coletando promoções", 3)
-    with usar_reporter(reporter.callback((3, 70))):
-        total = mapear_ofertas(
-            max_paginas=40, usuario=job.solicitada_por,
-        )
-    reporter.count(ofertas=total)
-    if not total:
-        warnings.append("A fonte não trouxe promoções; o catálogo anterior foi preservado.")
+    coletado = 0
+    consultadas = quebradas = 0
+    ultimo_erro = None
+    # Uma loja por vez, dividindo a faixa de progresso. Falha de uma NÃO derruba as
+    # outras: catálogo parcial vale mais que nenhum, e a pessoa precisa saber qual
+    # loja ficou de fora e por quê.
+    # Loja sem coleta por usuário (Awin vive de feed) fica fora: contá-la como
+    # consultada faria uma loja que não fez nada mascarar a quebra total das que
+    # fizeram, e o job voltaria "parcial" com o catálogo inteiro no chão.
+    lojas = [(slug, mp) for slug, mp in MARKETPLACES.items()
+             if type(mp).scrape_para_usuario is not Marketplace.scrape_para_usuario]
+    passo = 60 / max(1, len(lojas))
+    for i, (slug, mp) in enumerate(lojas):
+        inicio = 3 + int(i * passo)
+        reporter.step(f"Coletando promoções ({slug})", inicio)
+        try:
+            with usar_reporter(reporter.callback((inicio, inicio + int(passo)))):
+                total = mp.scrape_para_usuario(job.solicitada_por) or 0
+            coletado += total
+            consultadas += 1
+            reporter.count(**{f"ofertas_{slug}": total})
+        except MarketplaceIndisponivel as exc:
+            # Loja que a pessoa não conectou não é defeito da raspagem: vira nota,
+            # não aviso. Marcá-la como aviso deixaria "parcial" toda execução de
+            # quem só usa o Mercado Livre. O motivo aparece assim mesmo — "0 itens"
+            # escondia conta desconectada atrás do texto de "não há oferta".
+            reporter.emit(f"{slug} não foi consultada — {exc}")
+        except Exception as exc:
+            logger.exception("Coleta de ofertas falhou em %s", slug)
+            consultadas += 1
+            quebradas += 1
+            ultimo_erro = exc
+            warnings.append(f"{slug}: {_erro_publico(classificar_erro(exc))[0]}")
+            reporter.warning(warnings[-1])
+    reporter.count(ofertas=coletado)
+    # Toda loja consultada quebrou: isso é falha do job, não resultado parcial.
+    # Reportar "parcial" aqui esconderia uma coleta totalmente quebrada atrás da
+    # mesma cor de um ciclo que só não achou novidade — e nada chegaria à Saúde
+    # da conta. Mesma regra do worker de fundo (automacao._rodar_scrape).
+    if consultadas and quebradas == consultadas:
+        raise ultimo_erro
+    if not coletado:
+        warnings.append("Nenhuma loja trouxe promoções; o catálogo anterior foi preservado.")
         reporter.warning(warnings[-1])
 
-    reporter.step("Gerando links de afiliado", 72)
+    reporter.step("Gerando links de afiliado", 66)
     try:
         with usar_reporter(reporter.emit):
-            gerados, falhas = _gerar_links(
-                job.solicitada_por,
-                origens=("oferta",),
-                limite=60,
-                faixa=(72, 98),
-                reporter=reporter,
+            gerados, falhas, restantes = _gerar_links_ate_esvaziar(
+                job.solicitada_por, faixa=(66, 98), reporter=reporter,
             )
-        reporter.count(links_gerados=gerados, links_falhos=falhas)
+        reporter.count(links_gerados=gerados, links_falhos=falhas,
+                       links_restantes=restantes)
         if falhas:
             warnings.append(f"{falhas} link(s) não puderam ser gerados.")
             reporter.warning(warnings[-1])
+        if restantes:
+            # Não é falha: o teto de tempo existe para o job não estourar
+            # MAX_JOB_SECONDS. Dizer quantos sobraram evita a impressão de que a
+            # fila ficou parada — a próxima execução continua de onde parou.
+            reporter.emit(f"{restantes} item(ns) ficaram para a próxima execução.")
     except Exception as exc:
         codigo = classificar_erro(exc)
         warnings.append(f"Links de afiliado: {_erro_publico(codigo)[0]}")

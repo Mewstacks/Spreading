@@ -34,6 +34,8 @@
   .links-card .btn-ghost { border-color: color-mix(in srgb, var(--accent) 32%, transparent); }
   .links-card .modal-log:empty { display: none; }
   .links-card .modal-log { margin: 0; }
+  .links-card-nota { margin: 0; font-size: 11.5px; line-height: 1.45;
+    color: color-mix(in srgb, var(--text) 62%, transparent); }
 
   /* ── Ação "Gerar links de afiliado" (sempre visível, sem dropdown) ── */
   .links-acao { display: inline-flex; align-items: center; gap: .4rem; }
@@ -253,7 +255,8 @@
     }
     td.td-prod .thumb, td.td-prod .thumb-ph { width: 60px; height: 60px; }
     td.td-prod .prod-cell > div { min-width: 0; }
-    td.td-prod .prod-name { display: block; overflow-wrap: anywhere; }
+    td.td-prod .prod-name { display: flex; align-items: center; min-height: 44px;
+      overflow-wrap: anywhere; }
 
     /* Demais células: rótulo à esquerda, valor à direita */
     td[data-label] {
@@ -314,6 +317,16 @@
           {% endif %}
           {% include "scrapers/_gerar_links.html" %}
         </div>
+        {% comment %}
+        A raspagem já gera os links no mesmo fluxo (manual_scraping._executar_ofertas).
+        Dizer isso aqui é o que impede a leitura de que ainda faltam duas ações
+        separadas — foi essa dúvida que a cliente trouxe. O botão continua existindo
+        para adiantar a fila ou refazer só esta etapa quando ela falha sozinha.
+        {% endcomment %}
+        <p class="links-card-nota">
+          A raspagem de promoções já gera estes links sozinha. Use o botão só para
+          adiantar a fila ou refazer esta etapa.
+        </p>
         <div id="links-log" class="modal-log"></div>
       </div>
     {% endif %}
@@ -486,7 +499,7 @@
   <div class="busca-bar">
     <input type="text" id="busca-termo" placeholder="Ex.: air fryer, fone bluetooth"
            onkeydown="if(event.key==='Enter'){event.preventDefault();buscarItens();}">
-    <button type="button" class="btn btn-ghost btn-sm" onclick="buscarItens()"><i data-lucide="radar"></i> Buscar nas lojas</button>
+    <button type="button" id="busca-btn" class="btn btn-ghost btn-sm" onclick="buscarItens()"><i data-lucide="radar"></i> Buscar nas lojas</button>
   </div>
   <div id="busca-log" class="modal-log" style="margin-top:.6rem;"></div>
 </details>{% endif %}
@@ -771,17 +784,33 @@ que era exatamente o que não resolvia.
 function buscarItens() {
   var termo = document.getElementById('busca-termo').value.trim();
   var log = document.getElementById('busca-log');
+  var btn = document.getElementById('busca-btn');
   if (!termo) { log.innerHTML = '<span class="err">Digite o que você quer buscar.</span>'; return; }
   log.textContent = '';
+  if (btn) { btn.disabled = true; btn.dataset.rotulo = btn.innerHTML; btn.textContent = 'Buscando…'; }
+  function liberar() {
+    if (btn && btn.dataset.rotulo) {
+      btn.disabled = false; btn.innerHTML = btn.dataset.rotulo;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
   var es = new EventSource('/scrapers/buscar-promocoes/?termo=' + encodeURIComponent(termo));
   es.onmessage = function (e) {
-    if (e.data === '__DONE__') { es.close(); location.reload(); return; }
+    if (e.data === '__DONE__') {
+      es.close();
+      // Recarregar a MESMA url mantinha os filtros da sessão e ordenava tudo por
+      // desconto: os itens recém-buscados ficavam dezenas de páginas abaixo do
+      // catálogo antigo, e a busca parecia não ter trazido nada. Abrir a lista já
+      // filtrada pelo termo é o único desfecho em que o usuário vê o que pediu.
+      window.location = '/scrapers/top/?tipo=oferta&q=' + encodeURIComponent(termo);
+      return;
+    }
     var ln = document.createElement('div');
     if (e.data.startsWith('[ERRO]')) ln.className = 'err';
     ln.textContent = e.data;
     log.appendChild(ln); log.scrollTop = log.scrollHeight;
   };
-  es.onerror = function () { var l=document.createElement('div'); l.className='err'; l.textContent='A conexão foi perdida. Tente novamente.'; log.appendChild(l); es.close(); };
+  es.onerror = function () { var l=document.createElement('div'); l.className='err'; l.textContent='A conexão foi perdida. Tente novamente.'; log.appendChild(l); es.close(); liberar(); };
 }
 
 // ─── Gerar links de afiliado da fila deste usuário ───

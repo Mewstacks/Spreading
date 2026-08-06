@@ -116,7 +116,16 @@ class SourcePipelineTests(TestCase):
             marketplace="mercadolivre", nome="Produto", preco_sem_desconto=100,
             preco_com_cupom=80, link_produto="https://produto.example/item")
         CupomCodigo.objects.create(codigo="TESTE10", descricao="cupom ML (checkout)",
-                                   valor_desconto=10, ativo=True)
+                                   valor_desconto=10, ativo=True, automatico=True)
+        self.assertIsNone(_melhor_codigo(product))
+
+    def test_regex_discovered_coupon_stays_blocked_after_manual_edit(self):
+        """Renomear a descrição não pode reabilitar um código sem vínculo provado."""
+        product = Produto.objects.create(
+            marketplace="mercadolivre", nome="Produto", preco_sem_desconto=100,
+            preco_com_cupom=80, link_produto="https://produto.example/outro")
+        CupomCodigo.objects.create(codigo="TESTE20", descricao="Meu cupom favorito",
+                                   valor_desconto=20, ativo=True, automatico=True)
         self.assertIsNone(_melhor_codigo(product))
 
     @patch("apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper._salvar", return_value=1)
@@ -390,6 +399,23 @@ class CouponPagePayloadTests(TestCase):
         self.assertIsNone(_normalizar_cupom({**self.CUPOM, "action": {
             "type": "link", "value": "https://www.mercadolivre.com.br/social/loja"}}))
 
+    def test_condicao_de_publico_e_persistida(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import (
+            _normalizar_cupom, _salvar_cupons_smart,
+        )
+
+        bruto = {
+            **self.CUPOM,
+            "campaign_id": "restrito-app",
+            "title": {"text": "20% OFF somente no app para novos clientes"},
+        }
+        normalizado = _normalizar_cupom(bruto)
+        self.assertTrue(normalizado["restrito"])
+        _salvar_cupons_smart([normalizado])
+        self.assertTrue(
+            CupomNormalizado.objects.get(external_id="campanha:restrito-app").restrito,
+        )
+
     def test_malformed_page_never_raises(self):
         from apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper import _payload_nordic
         self.assertIsNone(_payload_nordic("<html>sem script</html>"))
@@ -486,6 +512,46 @@ class AmazonDiscountRecoveryTests(TestCase):
                                         "savingBasis": {"money": {"amount": 100}},
                                         "savings": {"percentage": 20}}))
         self.assertEqual(m["preco_sem_desconto"], 100)
+
+    def test_rejects_saving_basis_at_ten_times_price_without_percentage(self):
+        """Razão 10x é 90% falso no topo; a guarda antiga usava `>` e deixava
+        passar exatamente os exemplos corrompidos encontrados em produção."""
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        m = az._mapear_item(self._item({
+            "money": {"amount": 63.99},
+            "savingBasis": {"money": {"amount": 639.90}},
+        }))
+
+        self.assertIsNone(m)
+
+    def test_rejects_saving_basis_that_disagrees_with_api_percentage(self):
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        m = az._mapear_item(self._item({
+            "money": {"amount": 63.99},
+            "savingBasis": {"money": {"amount": 63990}},
+            "savings": {"percentage": 20},
+        }))
+
+        self.assertIsNone(m)
+
+
+class AmazonPublicPriceSanityTests(TestCase):
+    def test_accepts_plausible_discount(self):
+        from apps.scrapers.sources.amazon_public import _precos_publicaveis
+
+        self.assertTrue(_precos_publicaveis(80, 100))
+
+    def test_rejects_exactly_ninety_percent(self):
+        from apps.scrapers.sources.amazon_public import _precos_publicaveis
+
+        self.assertFalse(_precos_publicaveis(63.99, 639.90))
+
+    def test_rejects_reference_price_in_wrong_scale(self):
+        from apps.scrapers.sources.amazon_public import _precos_publicaveis
+
+        self.assertFalse(_precos_publicaveis(63.99, 63990))
 
 
 class VerificacaoDeLinksEhLanePropriaTests(TestCase):
@@ -607,6 +673,41 @@ class GerarLinksNaoSeguraTransacaoTests(TestCase):
 
         organization_callable(org.pk, _corpo, segurar_transacao=True)()
         self.assertEqual(visto["instalado"], str(org.pk))
+
+    def test_alvo_de_thread_devolve_a_conexao_ao_terminar(self):
+        """Thread que morre não fecha a conexão dela, e `close_old_connections`
+        também não: com CONN_MAX_AGE=600 ela não está velha, só órfã. Sem isto,
+        cada requisição SSE deixava uma conexão pendurada no Postgres.
+
+        (O fechamento em si não é observável aqui: o sqlite em memória dos testes
+        ignora `close()` de propósito, para não destruir o banco. O que se verifica
+        é que o alvo de thread pede o fechamento e o `organization_callable` cru,
+        usado em linha dentro da transação do chamador, não pede.)
+        """
+        import threading
+        from django.db import connections
+        from apps.accounts.models import organization_for_user
+        from apps.accounts.tenant import (
+            organization_callable, organization_thread_target,
+        )
+
+        user = get_user_model().objects.create_user("threadconn", password="test")
+        org = organization_for_user(user)
+
+        def _corpo():
+            connections["default"].ensure_connection()
+
+        with patch.object(connections, "close_all") as fechar:
+            thread = threading.Thread(
+                target=organization_thread_target(org.pk, _corpo), daemon=True)
+            thread.start()
+            thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        fechar.assert_called_once_with()
+
+        with patch.object(connections, "close_all") as fechar_em_linha:
+            organization_callable(org.pk, _corpo)()
+        fechar_em_linha.assert_not_called()
 
 
 class MensagensDoGerarLinksTests(TransactionTestCase):

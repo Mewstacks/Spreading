@@ -4,6 +4,7 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 import secrets
+import unicodedata
 import uuid
 
 from apps.accounts.fields import EncryptedCharField
@@ -17,12 +18,31 @@ _ALFABETO_SLUG = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
 def gerar_slug_curto():
     return "".join(secrets.choice(_ALFABETO_SLUG) for _ in range(7))
 
+
+def normalizar_busca(texto) -> str:
+    """Minúsculas e sem acento, para 'robo' encontrar 'Robô Aspirador'.
+
+    `icontains` vira ILIKE no Postgres, que é sensível a acento: quem digitava
+    "robo" não achava nenhum dos itens cujo título traz "robô", e a tela parecia
+    não ter o produto. A alternativa seria a extensão `unaccent`, mas dev e CI
+    rodam SQLite — o caminho de produção ficaria sem cobertura de teste. Uma
+    coluna normalizada casa igual nos dois bancos.
+    """
+    if not texto:
+        return ""
+    decomposto = unicodedata.normalize("NFKD", str(texto))
+    return "".join(c for c in decomposto if not unicodedata.combining(c)).casefold()
+
 class Cupom(models.Model):
     campanha_id = models.CharField(max_length=100, unique=True)
     titulo = models.CharField(max_length=255)
     tipo_desconto = models.CharField(max_length=20) # 'fixo' ou 'porcentagem'
     valor_desconto = models.FloatField()
     valor_minimo = models.FloatField(default=0.0)  # compra mínima para o cupom ser válido
+    # Limite efetivo informado pelo marketplace (ex.: "10% limitado a R$ 50").
+    desconto_maximo = models.FloatField(null=True, blank=True)
+    # Condição de público/pagamento que precisa acompanhar a publicação.
+    restrito = models.BooleanField(default=False)
     link_original = models.URLField(max_length=1000)
     codigo = models.CharField(max_length=512, blank=True, default="")
     data_criacao = models.DateTimeField(auto_now_add=True)
@@ -54,6 +74,14 @@ class Produto(models.Model):
     campanha_id = models.CharField(max_length=100, db_index=True, blank=True, default="")
     origem = models.CharField(max_length=20, default="cupom", db_index=True)  # 'cupom' | 'oferta'
     nome = models.CharField(max_length=255)
+    # Espelho de `nome` sem acento e em minúsculas, mantido por save() e pelo único
+    # bulk_create de Produto (scraper_mercadolivre/scraper.py). É contra ele que a
+    # busca da tela de Promoções casa — ver normalizar_busca() acima.
+    #
+    # Sem db_index de propósito: a busca é `icontains`, ou seja LIKE '%termo%', e
+    # curinga à esquerda não usa índice btree. Um índice aqui só custaria escrita.
+    # Folga no tamanho porque casefold() pode alongar (ß -> ss).
+    nome_norm = models.CharField(max_length=300, blank=True, default="")
     # SEMÂNTICA DOS TRÊS CAMPOS DE PREÇO — leia antes de gravar em qualquer um.
     #   preco_sem_desconto: preço de lista, o "DE" riscado do card/PDP.
     #   preco_com_cupom:    a VITRINE, ou seja, o "POR" que a página mostra ao abrir
@@ -104,6 +132,16 @@ class Produto(models.Model):
     evidencia = models.JSONField(default=dict, blank=True)
     valido_ate = models.DateTimeField(null=True, blank=True, db_index=True)
     falhas_consecutivas = models.PositiveIntegerField(default=0)
+
+    def save(self, *args, **kwargs):
+        self.nome_norm = normalizar_busca(self.nome)[:300]
+        # `update_fields` restrito não gravaria a coluna: quem atualiza só o nome
+        # (a raspagem faz isso quando o título do anúncio muda) deixaria a busca
+        # casando com o nome antigo para sempre.
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "nome" in set(update_fields):
+            kwargs["update_fields"] = list(update_fields) + ["nome_norm"]
+        return super().save(*args, **kwargs)
 
 
 class FonteIngestao(models.Model):
@@ -742,13 +780,16 @@ class LinkAfiliadoUsuario(models.Model):
 
 class CupomCodigo(models.Model):
     """Cupom de CÓDIGO digitável no checkout (ex: SOUMELIMAIS). Curado manualmente."""
-    codigo = models.CharField(max_length=60)
+    codigo = models.CharField(max_length=60, unique=True)
     descricao = models.CharField(max_length=255, blank=True, default="")
     tipo_desconto = models.CharField(max_length=20, default="porcentagem")  # 'porcentagem' | 'fixo'
     valor_desconto = models.FloatField(default=0.0)
     valor_minimo = models.FloatField(default=0.0)
     validade = models.DateField(null=True, blank=True)
     ativo = models.BooleanField(default=True)
+    # Códigos descobertos automaticamente não têm associação comprovada com um
+    # produto. A marca não depende da descrição, que pode ser editada no painel.
+    automatico = models.BooleanField(default=False, db_index=True)
     # macro_categorias em que o cupom é válido, separadas por vírgula. Vazio = vale p/ todas.
     # Usado para NÃO sugerir um código que não se aplica ao item (cupons não acumulam).
     categorias = models.CharField(max_length=255, blank=True, default="")
@@ -828,7 +869,15 @@ class ConfiguracaoEnvio(models.Model):
     macro_categoria = models.CharField(max_length=100, blank=True, default="")
     # Sub-nicho opcional: só envia itens cujo nome casa com algum destes termos
     # (separados por vírgula). Ex: "aspirador robo, robot vacuum, robô aspirador".
-    termo_busca = models.CharField(max_length=255, blank=True, default="")
+    #
+    # TextField e não CharField(255): a semântica sempre foi "vários sub-nichos em
+    # OU" — todo consumidor faz split(",") (content_ranking.py, o scraper da Amazon
+    # e a busca por termo) — mas o teto de 255 obrigava a criar uma regra por
+    # sub-nicho para o MESMO
+    # grupo. Um macro-nicho grande sozinho já passava do limite: Eletrodomésticos
+    # soma 395 caracteres de termos. Não há índice nem unicidade sobre esta coluna,
+    # então soltar o tamanho não custa nada no banco.
+    termo_busca = models.TextField(blank=True, default="")
     # Canal de envio: 'whatsapp' (grupo @g.us) | 'telegram' (chat/channel id).
     canal = models.CharField(max_length=20, default="whatsapp")
     # Filtro opcional de marketplace ('' = qualquer). Ex: só 'mercadolivre'.

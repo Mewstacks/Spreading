@@ -235,12 +235,12 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
 
 
 def _cupons_visiveis(usuario):
+    from apps.scrapers.maintenance import cupons_frescos_q
+
     return CupomNormalizado.objects.select_related("fonte").filter(
         Q(owner__isnull=True) | Q(owner=usuario),
         estado="ativo",
-    ).filter(
-        Q(validade__isnull=True) | Q(validade__gte=timezone.now())
-    )
+    ).filter(cupons_frescos_q())
 
 
 def afiliar_cupons(usuario, *, limite=80, faixa=None):

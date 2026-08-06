@@ -120,6 +120,64 @@ class ManualScrapingQueueTests(TransactionTestCase):
         self.assertEqual(calls, [False, False])
         self.assertGreaterEqual(close.call_count, 3)
 
+    def test_geracao_de_links_esvazia_a_fila_em_vez_de_parar_em_60(self):
+        """O limite fixo por execução era por que a tela mostrava milhares pendentes.
+
+        A raspagem gerava 60 links e parava; o resto só saía se a pessoa achasse e
+        clicasse o botão manual noutra tela. Agora o job continua em lotes até a
+        fila acabar.
+        """
+        from apps.scrapers.manual_scraping import _gerar_links_ate_esvaziar
+        from apps.scrapers.models import LinkAfiliadoUsuario, Produto
+
+        for i in range(95):
+            Produto.objects.create(
+                marketplace="mercadolivre", nome=f"Item {i}", origem="oferta",
+                preco_sem_desconto=100, preco_com_cupom=50,
+                link_produto=f"https://example.com/{i}",
+            )
+
+        def afiliar(produtos, usuario=None, faixa=None):
+            LinkAfiliadoUsuario.objects.bulk_create([
+                LinkAfiliadoUsuario(
+                    usuario=usuario, produto=p, link_afiliado=f"https://meli.la/{p.id}",
+                    afiliado_ok=True, estado="pronto",
+                ) for p in produtos
+            ])
+            return len(produtos), 0
+
+        reporter = JobReporter(self._job(status="running", tentativas=1).pk)
+        with patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre"
+                   ".prefetch_links", side_effect=afiliar):
+            with system_context():
+                gerados, falhas, restantes = _gerar_links_ate_esvaziar(
+                    self.user, faixa=(66, 98), reporter=reporter)
+
+        self.assertEqual((gerados, falhas, restantes), (95, 0, 0))
+
+    def test_geracao_de_links_para_quando_o_lote_nao_avanca(self):
+        """Sessão caída devolve 0 gerado; sem esta saída o laço giraria até o teto."""
+        from apps.scrapers.manual_scraping import _gerar_links_ate_esvaziar
+        from apps.scrapers.models import Produto
+
+        for i in range(50):
+            Produto.objects.create(
+                marketplace="mercadolivre", nome=f"Parado {i}", origem="oferta",
+                preco_sem_desconto=100, preco_com_cupom=50,
+                link_produto=f"https://example.com/parado/{i}",
+            )
+
+        reporter = JobReporter(self._job(status="running", tentativas=1).pk)
+        with patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre"
+                   ".prefetch_links", return_value=(0, 40)):
+            with system_context():
+                gerados, falhas, restantes = _gerar_links_ate_esvaziar(
+                    self.user, faixa=(66, 98), reporter=reporter)
+
+        self.assertEqual(gerados, 0)
+        self.assertEqual(falhas, 40)     # um lote só, não um giro infinito
+        self.assertEqual(restantes, 50)
+
     def test_reporter_persiste_quando_chamado_dentro_de_event_loop(self):
         job = self._job(status="running", tentativas=1)
         reporter = JobReporter(job.pk)
@@ -164,7 +222,8 @@ class ManualScrapingQueueTests(TransactionTestCase):
         self.assertEqual(job.etapa, "Retomada após interrupção")
         self.assertTrue(job.erro_publico)
 
-    @patch("apps.scrapers.manual_scraping._gerar_links", return_value=(3, 0))
+    @patch("apps.scrapers.manual_scraping._gerar_links_ate_esvaziar",
+           return_value=(3, 0, 0))
     @patch(
         "apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
         return_value=7,
@@ -180,7 +239,8 @@ class ManualScrapingQueueTests(TransactionTestCase):
         self.assertEqual(job.contagens["ofertas"], 7)
         self.assertEqual(job.contagens["links_gerados"], 3)
 
-    @patch("apps.scrapers.manual_scraping._gerar_links", return_value=(2, 1))
+    @patch("apps.scrapers.manual_scraping._gerar_links_ate_esvaziar",
+           return_value=(2, 1, 0))
     @patch(
         "apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
         return_value=5,
@@ -196,7 +256,7 @@ class ManualScrapingQueueTests(TransactionTestCase):
         self.assertEqual(job.contagens["links_falhos"], 1)
 
     @patch(
-        "apps.scrapers.manual_scraping._gerar_links",
+        "apps.scrapers.manual_scraping._gerar_links_ate_esvaziar",
         side_effect=RuntimeError("browser de afiliação indisponível"),
     )
     @patch(
@@ -215,11 +275,59 @@ class ManualScrapingQueueTests(TransactionTestCase):
         self.assertEqual(job.contagens["ofertas"], 5)
         self.assertTrue(job.eventos.filter(nivel="warning").exists())
 
+    @patch("apps.scrapers.manual_scraping._gerar_links_ate_esvaziar",
+           return_value=(0, 0, 0))
+    @patch("apps.scrapers.marketplaces.amazon.Amazon.scrape_para_usuario",
+           return_value=4)
+    @patch(
+        "apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
+        return_value=6,
+    )
+    def test_uma_raspagem_cobre_mercado_livre_e_amazon(self, _ml, _az, _links):
+        """Pedido do cliente: um clique só, sem ir a outra tela terminar o serviço.
+
+        A Amazon só entrava pelo worker de fundo, então o resultado do botão
+        dependia de quando o loop passasse — para o usuário parecia que a loja
+        simplesmente não tinha oferta.
+        """
+        job = self._job(status="running", tentativas=1)
+
+        executar_job(job)
+        job.refresh_from_db()
+
+        self.assertEqual(job.status, "succeeded")
+        self.assertEqual(job.contagens["ofertas_mercadolivre"], 6)
+        self.assertEqual(job.contagens["ofertas_amazon"], 4)
+        self.assertEqual(job.contagens["ofertas"], 10)
+
+    @patch("apps.scrapers.manual_scraping._gerar_links_ate_esvaziar",
+           return_value=(0, 0, 0))
+    @patch("apps.scrapers.marketplaces.amazon.Amazon.scrape_para_usuario")
+    @patch(
+        "apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
+        return_value=6,
+    )
+    def test_loja_nao_conectada_nao_degrada_a_raspagem(self, _ml, amazon, _links):
+        """Quem só usa o Mercado Livre não pode ver "parcial" em toda execução."""
+        from apps.scrapers.marketplaces.base import MarketplaceIndisponivel
+
+        amazon.side_effect = MarketplaceIndisponivel("conta Amazon não conectada")
+        job = self._job(status="running", tentativas=1)
+
+        executar_job(job)
+        job.refresh_from_db()
+
+        self.assertEqual(job.status, "succeeded")
+        self.assertTrue(job.eventos.filter(
+            mensagem__contains="conta Amazon não conectada").exists())
+
+    @patch("apps.scrapers.marketplaces.amazon.Amazon.scrape_para_usuario",
+           side_effect=RuntimeError("Amazon fora do ar"))
     @patch(
         "apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
         side_effect=RuntimeError("falha técnica controlada"),
     )
-    def test_falha_total_aparece_na_saude_da_conta(self, _mapear):
+    def test_falha_total_aparece_na_saude_da_conta(self, _mapear, _az):
         job = self._job(status="running", tentativas=1)
 
         executar_job(job)

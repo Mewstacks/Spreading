@@ -8,7 +8,7 @@ NÃO derrubar o ML — só loga e pula o tick da Amazon.
 """
 import logging
 
-from apps.scrapers.marketplaces.base import Marketplace
+from apps.scrapers.marketplaces.base import Marketplace, MarketplaceIndisponivel
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,7 @@ class Amazon(Marketplace):
         """Amazon é POR USUÁRIO: cada um conecta a própria conta Creators e raspa as
         PRÓPRIAS ofertas (Produto.owner=user). Itera todos os usuários conectados.
         `termos` global é ignorado — usa os sub-nichos das configs de CADA usuário."""
+        from django.utils import timezone
         from apps.accounts.models import Perfil
         from apps.scrapers.afiliado import tag_amazon
         from apps.scrapers.scraper_amazon.creators_api import creds_de_usuario
@@ -27,9 +28,14 @@ class Amazon(Marketplace):
         candidatos = [p for p in perfis if not p.bloqueado and tag_amazon(p.user)]
         conectados = [p for p in candidatos if creds_de_usuario(p.user).completo()]
         fallback = [p for p in candidatos if not creds_de_usuario(p.user).completo()]
+        inicio = timezone.now()
+        falhas = 0
         for perfil in conectados:
             if not self._scrape_usuario(perfil.user):
                 fallback.append(perfil)
+                falhas += 1
+        if conectados:
+            self._reportar_fonte(inicio, len(conectados), falhas)
         if fallback:
             self._scrape_publico([p.user for p in fallback], termos=termos)
         elif not conectados:
@@ -37,23 +43,55 @@ class Amazon(Marketplace):
         # Cupons públicos, preparo e links são mantidos pelo pipeline central de
         # cupons, independente do toggle desta raspagem geral.
 
+    def scrape_para_usuario(self, usuario, termos=None) -> int:
+        """Coleta a Amazon com a conta Creators de UM usuário.
+
+        A Amazon é privada por usuário (Produto.owner = user), então este é o único
+        caminho correto para uma raspagem pedida na tela: `scrape_all` percorreria
+        as contas de todos os tenants.
+        """
+        from django.utils import timezone
+        from apps.scrapers.afiliado import tag_amazon
+        from apps.scrapers.models import Produto
+        from apps.scrapers.scraper_amazon.creators_api import creds_de_usuario
+
+        if not tag_amazon(usuario):
+            raise MarketplaceIndisponivel(
+                "sua tag de afiliado da Amazon não está cadastrada (tela Conta)")
+        if not creds_de_usuario(usuario).completo():
+            raise MarketplaceIndisponivel(
+                "sua conta Amazon não está conectada (cadastre as credenciais na "
+                "tela Conta)")
+
+        inicio = timezone.now()
+        if not self._scrape_usuario(usuario):
+            from apps.accounts.models import Perfil
+            perfil = Perfil.objects.filter(user=usuario).first()
+            raise MarketplaceIndisponivel(
+                (getattr(perfil, "amazon_ultimo_erro", "") or "").strip()
+                or "a Amazon recusou a coleta agora")
+        return Produto.objects.filter(
+            marketplace="amazon", owner=usuario, ultima_observacao__gte=inicio,
+        ).count()
+
     def _scrape_usuario(self, usuario) -> bool:
         from apps.scrapers.models import ConfiguracaoEnvio
         from apps.scrapers.scraper_amazon import ofertas_scraper as az
         from apps.scrapers.scraper_amazon.creators_api import (
-            AmazonNotEligible, AmazonConfigError,
+            AmazonAPIError, AmazonConfigError, AmazonNotEligible,
         )
         termos = list(
             ConfiguracaoEnvio.objects.filter(owner=usuario, ativo=True)
             .exclude(termo_busca="").values_list("termo_busca", flat=True)
         )
         try:
-            az.mapear_ofertas(usuario=usuario)
-            az.mapear_cupons_codigo(usuario=usuario)
+            # Uma coleta, dois destinos: ofertas e promoções liam as MESMAS páginas
+            # da API separadamente e dobravam o consumo da cota do usuário.
+            itens = az.coletar_feed(usuario)
+            az.mapear_ofertas(usuario=usuario, itens=itens)
+            az.mapear_cupons_codigo(usuario=usuario, itens=itens)
             for t in termos:
                 az.buscar_por_termo(t, usuario=usuario)
-            self._marcar_elegibilidade(usuario, True, "")
-            return True
         except AmazonNotEligible as e:
             logger.info("Usuario %s nao elegivel para Amazon Creators API: %s", usuario.id, e)
             self._marcar_elegibilidade(usuario, False,
@@ -62,8 +100,66 @@ class Amazon(Marketplace):
         except AmazonConfigError as e:
             logger.info("Configuracao Amazon ausente para usuario %s: %s", usuario.id, e)
             self._marcar_elegibilidade(usuario, None, f"Configuração Amazon incompleta: {e}")
-
             return False
+        except AmazonAPIError as e:
+            # A API recusou TODAS as buscas (cota estourada, host errado, fora do ar).
+            # Isto era engolido keyword a keyword: o ciclo terminava "com sucesso" e
+            # zero itens, a conta era marcada elegível, o fallback público nunca
+            # rodava e o painel dizia apenas "nenhuma oferta confirmada".
+            logger.warning("Coleta Amazon do usuario %s falhou por completo: %s",
+                           usuario.id, e)
+            self._marcar_elegibilidade(usuario, None, f"Amazon indisponível: {e}")
+            return False
+        self._marcar_elegibilidade(usuario, True, "")
+        return True
+
+    @staticmethod
+    def _reportar_fonte(inicio, contas, falhas):
+        """Publica o resultado do ciclo na tela de Fontes.
+
+        Nada escrevia nesta linha: a Creators API aparecia como `degraded`, com
+        `ultimo_total=0` e `ultimo_sucesso` vazio, para sempre — mesmo tendo
+        coletado centenas de produtos. O painel dizia que a fonte estava quebrada
+        justamente enquanto ela funcionava, e uma quebra real ficava
+        indistinguível do estado normal.
+        """
+        from django.utils import timezone
+        from apps.scrapers.models import FonteIngestao, Produto
+
+        agora = timezone.now()
+        total = Produto.objects.filter(
+            marketplace="amazon", fonte="amazon-creators-api",
+            ultima_observacao__gte=inicio,
+        ).count()
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="amazon-creators-api",
+            defaults={"marketplace": "amazon", "nome": "Amazon — Creators API"},
+        )
+        fonte.ultima_tentativa = agora
+        fonte.ultimo_total = total
+        if falhas >= contas:
+            fonte.status = "degraded"
+            fonte.falhas_consecutivas += 1
+            fonte.erro_publico = (
+                "Nenhuma conta Amazon concluiu a coleta; catálogo anterior preservado."
+            )
+        elif falhas:
+            fonte.status = "degraded"
+            fonte.ultimo_sucesso = agora
+            fonte.falhas_consecutivas = 0
+            fonte.erro_publico = (
+                f"{falhas} de {contas} conta(s) Amazon não concluíram a coleta."
+            )
+        else:
+            fonte.status = "ok" if total else "degraded"
+            fonte.ultimo_sucesso = agora if total else fonte.ultimo_sucesso
+            fonte.falhas_consecutivas = 0
+            fonte.erro_publico = "" if total else (
+                "Coleta vazia; catálogo anterior preservado.")
+        fonte.save(update_fields=[
+            "ultima_tentativa", "ultimo_total", "status", "ultimo_sucesso",
+            "falhas_consecutivas", "erro_publico",
+        ])
 
     @staticmethod
     def _scrape_publico(usuarios, termos=None):
@@ -189,16 +285,30 @@ class Amazon(Marketplace):
         return True
 
     def buscar_por_termo(self, termo_busca, min_desconto=15, macro=None, usuario=None):
+        """Busca da tela de Promoções. Falha explica-se; nunca vira um zero mudo.
+
+        O `except` daqui era código morto: `ofertas_scraper.buscar_por_termo` engolia
+        toda exceção termo a termo e devolvia 0. Quem clicava "Buscar nas lojas" lia
+        "amazon: 0 item(ns)" tanto para "não há oferta" quanto para "sua conta Amazon
+        não está conectada" — e não havia como distinguir os dois.
+        """
         from apps.scrapers.scraper_amazon.ofertas_scraper import buscar_por_termo
         from apps.scrapers.scraper_amazon.creators_api import (
-            AmazonNotEligible, AmazonConfigError,
+            AmazonConfigError, AmazonNotEligible,
         )
         try:
             return buscar_por_termo(termo_busca, min_desconto=min_desconto,
                                     macro=macro, usuario=usuario)
-        except (AmazonNotEligible, AmazonConfigError) as e:
+        except AmazonConfigError as e:
             logger.info("Busca por termo Amazon pulada: %s", e)
-            return 0
+            raise MarketplaceIndisponivel(
+                "conta Amazon não conectada (cadastre credenciais e tag na tela Conta)"
+            ) from e
+        except AmazonNotEligible as e:
+            logger.info("Busca por termo Amazon pulada: %s", e)
+            raise MarketplaceIndisponivel(
+                "conta Amazon sem elegibilidade na Creators API (10 vendas em 30 dias)"
+            ) from e
 
     def can_affiliate(self, produto, usuario=None) -> bool:
         from apps.scrapers.scraper_amazon.link import pode_gerar_link

@@ -39,6 +39,11 @@ MOTIVOS_TRANSITORIOS = (
     "timeout",
     "sessão whatsapp do usuário ausente",
     "nenhum candidato passou",
+    # Sessão do ML: o usuário reconecta e a regra volta a funcionar sem tocar em
+    # nada. O orquestrador já a trata como transitória; sem o par aqui, a config
+    # que ele desligou ANTES dessa correção ficava parada para sempre.
+    "sessão do mercado livre expirada",
+    "sessao do mercado livre expirada",
 )
 
 

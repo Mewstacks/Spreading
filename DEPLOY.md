@@ -1,5 +1,11 @@
 # Deploy — Fly.io
 
+> O procedimento atual de segurança é
+> [`deploy/PHASE0_RUNBOOK.md`](deploy/PHASE0_RUNBOOK.md). As instruções antigas
+> abaixo são apenas histórico de bootstrap e não devem ser usadas para produção:
+> elas ainda mencionam a chave mestre removida e não contemplam roles separadas,
+> RLS, criptografia das sessões ML ou rollout expand/contract.
+
 Two Fly apps in region **gru** (São Paulo):
 - **spreading-web** — Django (gunicorn + workers + Playwright). Volume `ml_data` at `/data`.
 - **spreading-wa** — Node WhatsApp service. Volume `wa_data` at `/app/.wwebjs_auth`. Private-only.

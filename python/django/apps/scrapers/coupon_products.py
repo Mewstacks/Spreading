@@ -242,10 +242,18 @@ def _produto_direto(cupom, produto):
     return bool(pid and pid in ids)
 
 
+_MIN_CODIGO_PROVA = 4
+
+
 def _promocao_confirma_codigo(cupom, produto):
-    codigo = str(getattr(cupom, "codigo", "") or "").strip().casefold()
-    if not codigo:
+    """Confirma somente o código completo, nunca uma substring promocional."""
+    codigo = str(getattr(cupom, "codigo", "") or "").strip()
+    if len(codigo) < _MIN_CODIGO_PROVA:
         return False
+    padrao = re.compile(
+        rf"(?<![0-9A-Za-z]){re.escape(codigo)}(?![0-9A-Za-z])",
+        re.IGNORECASE,
+    )
     ev = getattr(produto, "evidencia", {}) or {}
     promo = ev.get("promotion") or {}
     textos = [
@@ -253,7 +261,7 @@ def _promocao_confirma_codigo(cupom, produto):
         promo.get("label") if isinstance(promo, dict) else "",
         promo.get("code") if isinstance(promo, dict) else "",
     ]
-    return any(codigo in str(texto or "").casefold() for texto in textos)
+    return any(padrao.search(str(texto or "")) for texto in textos)
 
 
 def _base_produtos(cupom, usuario):
@@ -261,6 +269,8 @@ def _base_produtos(cupom, usuario):
     qs = Produto.objects.filter(marketplace=mkt).exclude(
         estado__in=["indisponivel", "invalido", "expirado", "stale"]
     ).exclude(imagem_url="").filter(preco_com_cupom__gt=0)
+    from apps.scrapers.maintenance import produtos_frescos_q
+    qs = qs.filter(produtos_frescos_q())
     if mkt in ("amazon", "awin"):
         qs = qs.filter(owner=usuario)
     else:
@@ -290,6 +300,8 @@ def _base_produtos(cupom, usuario):
         campanha and mkt == "mercadolivre" and not codigo_publicavel(cupom))
 
     candidatos = []
+    identidades = set()
+    from apps.scrapers.product_identity import identidade_produto
     for produto in qs.order_by("-ultima_observacao")[:500]:
         if exige_campanha_no_produto and produto.campanha_id != campanha:
             continue
@@ -307,6 +319,10 @@ def _base_produtos(cupom, usuario):
             else:
                 provado = True
         if provado:
+            identidade = identidade_produto(produto)
+            if identidade in identidades:
+                continue
+            identidades.add(identidade)
             candidatos.append(produto)
             if len(candidatos) >= MAX_CANDIDATOS:
                 break
@@ -314,7 +330,11 @@ def _base_produtos(cupom, usuario):
 
 
 def calcular_precos(cupom, produto):
-    """(original, atual, final) ou None; todos Decimal e especificos do cupom."""
+    """(original, atual, final) ou None; todos Decimal e específicos do cupom.
+
+    ``atual`` é o preço de vitrine, usado para compra mínima e desconto. O preço
+    de tabela serve apenas de contexto e nunca aumenta o benefício do cupom.
+    """
     from apps.scrapers.coupon_rules import regras_do_cupom
 
     regras = regras_do_cupom(cupom)
@@ -352,6 +372,16 @@ def calcular_precos(cupom, produto):
     if (original - final) / original >= Decimal("0.90"):
         return None
     return original, atual, final
+
+
+def _ordem_por_valor_do_cupom(relacao):
+    """Ordena pelo abatimento causado pelo cupom, não pela promoção da vitrine."""
+    atual = relacao.preco_atual or relacao.preco_original or Decimal("0")
+    final = relacao.preco_final or Decimal("0")
+    if atual <= 0:
+        return Decimal("0"), Decimal("0")
+    economia = atual - final
+    return economia / atual, economia
 
 
 def _coletar_ml_remoto(cupom, usuario=None):
@@ -432,9 +462,16 @@ def _coletar_ml_remoto(cupom, usuario=None):
             "estado": "ativo", "ultima_verificacao": timezone.now(),
         }
         if produto:
-            for key, value in defaults.items():
+            # Um item já coletado por outra lane mantém sua proveniência. O cupom
+            # atualiza preço/disponibilidade, mas não pode reivindicar a identidade
+            # e fazer o produto divulgar uma campanha à qual não pertence.
+            campos = dict(defaults)
+            if produto.origem and produto.origem != "cupom":
+                for campo in ("campanha_id", "origem", "fonte"):
+                    campos.pop(campo, None)
+            for key, value in campos.items():
                 setattr(produto, key, value)
-            produto.save(update_fields=list(defaults))
+            produto.save(update_fields=list(campos))
         else:
             produto = Produto.objects.create(marketplace="mercadolivre", **defaults)
         ProdutoCupom.objects.update_or_create(
@@ -459,10 +496,7 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
         cached = list(ProdutoCupom.objects.filter(
             cupom=cupom, status="confirmado", preco_final__isnull=False,
         ).select_related("produto"))
-        cached.sort(key=lambda r: (
-            (r.preco_original - r.preco_final) / r.preco_original,
-            r.preco_original - r.preco_final,
-        ), reverse=True)
+        cached.sort(key=_ordem_por_valor_do_cupom, reverse=True)
         return cached[:9]
 
     if not cupom_publicavel(cupom):
@@ -514,10 +548,7 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
                 # girariam para sempre e nenhum cupom novo seria preparado.
                 proxima_tentativa=None if validos else agora + BACKOFF_VAZIO,
                 erro="" if validos else "Nenhum produto comprovadamente aplicavel.")
-        validos.sort(key=lambda r: (
-            (r.preco_original - r.preco_final) / r.preco_original,
-            r.preco_original - r.preco_final,
-        ), reverse=True)
+        validos.sort(key=_ordem_por_valor_do_cupom, reverse=True)
         return validos[:9]
     except Exception as exc:
         logger.exception("Preparacao do cupom %s falhou", cupom.pk)
@@ -545,16 +576,17 @@ def relacoes_preparadas_para_envio(cupom, usuario, limite=9):
     ).first()
     if not preparo:
         return []
+    from apps.scrapers.maintenance import produtos_frescos_q
     relacoes = list(ProdutoCupom.objects.filter(
+        produtos_frescos_q(prefix="produto__"),
         cupom=cupom, status="confirmado", preco_original__isnull=False,
         preco_final__isnull=False, produto__imagem_url__gt="",
     ).exclude(produto__estado__in=["indisponivel", "invalido", "expirado", "stale"])
       .select_related("produto"))
-    relacoes.sort(key=lambda r: (
-        (r.preco_original - r.preco_final) / r.preco_original
-        if r.preco_original else Decimal("0"),
-        r.preco_original - r.preco_final,
-    ), reverse=True)
+    from apps.scrapers.product_identity import deduplicar_por_produto
+    relacoes.sort(key=lambda r: (r.produto.ultima_observacao, r.produto_id), reverse=True)
+    relacoes = deduplicar_por_produto(relacoes, produto_de=lambda r: r.produto)
+    relacoes.sort(key=_ordem_por_valor_do_cupom, reverse=True)
     return relacoes[:limite]
 
 
@@ -624,12 +656,22 @@ def mapa_relacoes_prontas(usuario, cupons, limite=9):
         return {}, {}
 
     por_cupom = defaultdict(list)
-    for relacao in (ProdutoCupom.objects.filter(
+    identidades_por_cupom = defaultdict(set)
+    from apps.scrapers.maintenance import produtos_frescos_q
+    from apps.scrapers.product_identity import identidade_produto
+    relacoes = list(ProdutoCupom.objects.filter(
+            produtos_frescos_q(prefix="produto__"),
             cupom_id__in=preparados, status="confirmado",
             preco_original__isnull=False, preco_final__isnull=False,
             produto__imagem_url__gt="")
             .exclude(produto__estado__in=["indisponivel", "invalido", "expirado", "stale"])
-            .select_related("produto")):
+            .select_related("produto")
+            .order_by("-produto__ultima_observacao", "-produto_id"))
+    for relacao in relacoes:
+        identidade = identidade_produto(relacao.produto)
+        if identidade in identidades_por_cupom[relacao.cupom_id]:
+            continue
+        identidades_por_cupom[relacao.cupom_id].add(identidade)
         por_cupom[relacao.cupom_id].append(relacao)
 
     # Mesma ordenação de relacoes_preparadas_para_envio: maior desconto primeiro.
