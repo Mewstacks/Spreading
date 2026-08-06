@@ -1,4 +1,4 @@
-"""Coluna de busca sem acento para Produto, mais o backfill do catálogo atual.
+"""Coluna de busca sem acento para Produto.
 
 A busca da tela de Promoções usava `nome__icontains`, que no Postgres vira ILIKE
 e é sensível a acento: quem digitava "robo" não encontrava nenhum item cujo título
@@ -6,52 +6,22 @@ traz "robô", e a tela parecia simplesmente não ter o produto.
 
 `nome_norm` guarda o título em minúsculas e sem acento (ver
 `apps.scrapers.models.normalizar_busca`). Daqui para a frente ela é mantida por
-`Produto.save()` e pelo único `bulk_create` de Produto; esta migração preenche o
-que já está no banco, em lotes, para não montar um UPDATE único sobre o catálogo
-inteiro durante o release.
+`Produto.save()` e pelo único `bulk_create` de Produto.
+
+SÓ a coluna entra aqui — o preenchimento do catálogo que já existe é o comando
+`backfill_nome_norm`, rodado DEPOIS do deploy.
+
+Por quê: a primeira versão desta migração trazia o backfill junto, num laço que ia
+até a fila esvaziar. Mas durante o release_command quem está servindo é o release
+ANTERIOR, que não conhece esta coluna — então cada produto que a raspagem insere
+naquele momento entra com `nome_norm` vazio. O laço drenava e o scraper repunha, e
+o release ficou 8 minutos sem terminar até ser abortado (v164 failed, 2026-08-06).
+
+Separar resolve nas duas pontas: o release passa a ser instantâneo, e o backfill
+roda com o código novo já no ar, quando toda escrita nova já preenche a coluna
+sozinha e a fila só diminui.
 """
-import logging
-import unicodedata
-
 from django.db import migrations, models
-
-logger = logging.getLogger(__name__)
-
-TAMANHO_LOTE = 2000
-
-
-def _normalizar(texto) -> str:
-    # Cópia deliberada de models.normalizar_busca: migração não importa código de
-    # aplicação, que muda com o tempo e mudaria o resultado desta migração
-    # retroativamente.
-    if not texto:
-        return ""
-    decomposto = unicodedata.normalize("NFKD", str(texto))
-    return "".join(c for c in decomposto if not unicodedata.combining(c)).casefold()
-
-
-def preencher(apps, schema_editor):
-    Produto = apps.get_model("scrapers", "Produto")
-    total = 0
-    while True:
-        lote = list(
-            Produto.objects.filter(nome_norm="").exclude(nome="")
-            .only("id", "nome")[:TAMANHO_LOTE]
-        )
-        if not lote:
-            break
-        for produto in lote:
-            produto.nome_norm = _normalizar(produto.nome)[:300]
-        Produto.objects.bulk_update(lote, ["nome_norm"])
-        total += len(lote)
-        # Um item cujo nome normaliza para "" (título só de pontuação) voltaria no
-        # próximo lote para sempre. Não existe hoje, mas o loop não pode depender
-        # disso — sem esta saída o release travaria.
-        if all(not p.nome_norm for p in lote):
-            logger.warning("Backfill parou: %s item(ns) sem nome normalizável.",
-                           len(lote))
-            break
-    logger.info("Backfill de nome_norm: %s produto(s).", total)
 
 
 class Migration(migrations.Migration):
@@ -66,5 +36,4 @@ class Migration(migrations.Migration):
             name='nome_norm',
             field=models.CharField(blank=True, default='', max_length=300),
         ),
-        migrations.RunPython(preencher, migrations.RunPython.noop, elidable=False),
     ]
