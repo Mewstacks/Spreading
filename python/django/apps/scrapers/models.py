@@ -4,6 +4,7 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 import secrets
+import unicodedata
 import uuid
 
 from apps.accounts.fields import EncryptedCharField
@@ -16,6 +17,21 @@ _ALFABETO_SLUG = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
 
 def gerar_slug_curto():
     return "".join(secrets.choice(_ALFABETO_SLUG) for _ in range(7))
+
+
+def normalizar_busca(texto) -> str:
+    """Minúsculas e sem acento, para 'robo' encontrar 'Robô Aspirador'.
+
+    `icontains` vira ILIKE no Postgres, que é sensível a acento: quem digitava
+    "robo" não achava nenhum dos itens cujo título traz "robô", e a tela parecia
+    não ter o produto. A alternativa seria a extensão `unaccent`, mas dev e CI
+    rodam SQLite — o caminho de produção ficaria sem cobertura de teste. Uma
+    coluna normalizada casa igual nos dois bancos.
+    """
+    if not texto:
+        return ""
+    decomposto = unicodedata.normalize("NFKD", str(texto))
+    return "".join(c for c in decomposto if not unicodedata.combining(c)).casefold()
 
 class Cupom(models.Model):
     campanha_id = models.CharField(max_length=100, unique=True)
@@ -58,6 +74,14 @@ class Produto(models.Model):
     campanha_id = models.CharField(max_length=100, db_index=True, blank=True, default="")
     origem = models.CharField(max_length=20, default="cupom", db_index=True)  # 'cupom' | 'oferta'
     nome = models.CharField(max_length=255)
+    # Espelho de `nome` sem acento e em minúsculas, mantido por save() e pelo único
+    # bulk_create de Produto (scraper_mercadolivre/scraper.py). É contra ele que a
+    # busca da tela de Promoções casa — ver normalizar_busca() acima.
+    #
+    # Sem db_index de propósito: a busca é `icontains`, ou seja LIKE '%termo%', e
+    # curinga à esquerda não usa índice btree. Um índice aqui só custaria escrita.
+    # Folga no tamanho porque casefold() pode alongar (ß -> ss).
+    nome_norm = models.CharField(max_length=300, blank=True, default="")
     # SEMÂNTICA DOS TRÊS CAMPOS DE PREÇO — leia antes de gravar em qualquer um.
     #   preco_sem_desconto: preço de lista, o "DE" riscado do card/PDP.
     #   preco_com_cupom:    a VITRINE, ou seja, o "POR" que a página mostra ao abrir
@@ -108,6 +132,16 @@ class Produto(models.Model):
     evidencia = models.JSONField(default=dict, blank=True)
     valido_ate = models.DateTimeField(null=True, blank=True, db_index=True)
     falhas_consecutivas = models.PositiveIntegerField(default=0)
+
+    def save(self, *args, **kwargs):
+        self.nome_norm = normalizar_busca(self.nome)[:300]
+        # `update_fields` restrito não gravaria a coluna: quem atualiza só o nome
+        # (a raspagem faz isso quando o título do anúncio muda) deixaria a busca
+        # casando com o nome antigo para sempre.
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "nome" in set(update_fields):
+            kwargs["update_fields"] = list(update_fields) + ["nome_norm"]
+        return super().save(*args, **kwargs)
 
 
 class FonteIngestao(models.Model):

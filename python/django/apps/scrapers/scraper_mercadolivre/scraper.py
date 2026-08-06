@@ -12,7 +12,9 @@ from apps.scrapers.coupon_rules import (
     derivar_categoria_cupom, extrair_escopo_produtos, rotulo_anunciante,
     tem_restricao_publico)
 from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
-from apps.scrapers.models import Cupom, Produto, CupomNormalizado, FonteIngestao
+from apps.scrapers.models import (
+    Cupom, CupomNormalizado, FonteIngestao, Produto, normalizar_busca,
+)
 from apps.scrapers.progresso import emitir_progresso, emitir_fase
 from django.db import DatabaseError, OperationalError, connections, transaction
 from django.utils import timezone
@@ -939,6 +941,10 @@ def _sincronizar_produtos_no_banco(cupons_com_produtos):
                     campanha_id=camp_id,
                     fonte="mercadolivre-cupom",
                     nome=p["nome_produto"][:255],
+                    # bulk_create não passa por Produto.save(), então a coluna da
+                    # busca precisa ser preenchida aqui — senão estes itens ficam
+                    # invisíveis para quem pesquisa sem acento.
+                    nome_norm=normalizar_busca(p["nome_produto"])[:300],
                     # Vitrine em preco_com_cupom/preco_efetivo e preço de lista em
                     # preco_sem_desconto — a mesma semântica de _coletar_ml_remoto
                     # (coupon_products.py) e a documentada em Produto. Este bloco

@@ -25,7 +25,7 @@ from apps.accounts.tenant import organization_thread_target
 from apps.scrapers.models import (
     CliquePublicacao, ConfiguracaoEnvio, Cupom, LinkAfiliadoUsuario, Produto,
     Publicacao, ReceitaAfiliado, RelatorioSync, FonteIngestao, CupomNormalizado,
-    IntegracaoAfiliado, ProgramaAfiliado, ExecucaoRaspagem,
+    IntegracaoAfiliado, ProgramaAfiliado, ExecucaoRaspagem, normalizar_busca,
 )
 from apps.scrapers.progresso import emitir_fase
 from apps.scrapers.scraper_mercadolivre.scraper import main as scrapper_main
@@ -1819,8 +1819,13 @@ def top_promocoes(request):
     if loja_selecionada:
         qs = qs.filter(marketplace=loja_selecionada)
     if busca:
+        # Casa contra a coluna normalizada: "robo", "Robô" e "ROBÔ" têm de trazer
+        # o mesmo conjunto. Categoria e macro-categoria continuam em icontains —
+        # são valores da nossa taxonomia, não texto livre da loja, e normalizá-las
+        # exigiria mais duas colunas para nada.
+        busca_norm = normalizar_busca(busca)
         qs = qs.filter(
-            Q(nome__icontains=busca)
+            Q(nome_norm__icontains=busca_norm)
             | Q(categoria__icontains=busca)
             | Q(macro_categoria__icontains=busca)
         )

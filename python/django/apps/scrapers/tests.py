@@ -1966,6 +1966,44 @@ class TopPromocoesFilterTests(TestCase):
 
         self.assertEqual([p.nome for p in response.context["produtos"]], ["Fone Bluetooth"])
 
+    def test_busca_ignora_acento_e_caixa(self):
+        """Buscar "robô" só achava produto do ML e o cliente achava que faltava item.
+
+        `icontains` vira ILIKE no Postgres, que é sensível a acento: "robo" não
+        casava com nenhum título que traz "robô". Toda grafia tem de devolver o
+        mesmo conjunto — inclusive o item da Amazon, que é privado do usuário.
+        """
+        self._criar_produto(
+            marketplace="amazon", owner=self.user,
+            nome="Robô Aspirador Inteligente", categoria="Casa",
+            macro_categoria="Eletrodomésticos", preco_sem_desconto=200,
+            preco_com_cupom=100, link_produto="https://example.com/robo",
+        )
+
+        for termo in ("robô", "robo", "ROBÔ", "Robo", "aspirador"):
+            with self.subTest(termo=termo):
+                response = self.client.get(self.url, {"q": termo})
+                self.assertEqual(
+                    [p.nome for p in response.context["produtos"]],
+                    ["Robô Aspirador Inteligente"],
+                )
+
+    def test_nome_normalizado_acompanha_alteracao_do_titulo(self):
+        """Raspagem que só atualiza `nome` não pode deixar a busca no título antigo."""
+        produto = self._criar_produto(
+            marketplace="mercadolivre", nome="Ventilador",
+            categoria="Casa", macro_categoria="Eletrodomésticos",
+            preco_sem_desconto=100, preco_com_cupom=50,
+            link_produto="https://example.com/ventilador",
+        )
+
+        produto.nome = "Climatizador Portátil"
+        produto.save(update_fields=["nome"])
+
+        response = self.client.get(self.url, {"q": "portatil"})
+        self.assertEqual(
+            [p.nome for p in response.context["produtos"]], ["Climatizador Portátil"])
+
     def test_filters_are_restored_on_next_visit_and_can_be_cleared(self):
         self.client.get(self.url, {"loja": "amazon", "ordenar": "valor"})
 
