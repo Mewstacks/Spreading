@@ -31,7 +31,5 @@ def main():
         browser.close()
     print(f"\nSessão salva em: {DESTINO}")
     print('Cole o conteúdo desse arquivo no painel: Scraper -> "Enviar sessão ML".')
-
-
 if __name__ == "__main__":
     main()
