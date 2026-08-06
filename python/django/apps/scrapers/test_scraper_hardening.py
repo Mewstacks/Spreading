@@ -35,23 +35,29 @@ class LinkBuilderHardeningTests(SimpleTestCase):
             "https://produto.mercadolivre.com.br/MLB-123456789?coupon_campaign_id=camp",
         )
 
+    @patch.object(ml_link, "_linkbuilder_pronto", return_value=False)
     @patch.object(ml_link, "_registrar_veredito_lb")
     @patch.object(ml_link, "_pagina_de_login", return_value=False)
     @patch.object(ml_link, "_pagina_intersticial", return_value=False)
     def test_formulario_ausente_interrompe_antes_do_lote(
-        self, _intersticial, _login, registrar
+        self, _intersticial, _login, registrar, _pronto
     ):
+        """Página abre sem login nem challenge, mas sem o formulário esperado.
+
+        É o caso de fallback/experimento/layout novo do ML: sem esta parada, o
+        loop marcaria os 40 produtos do lote como falhos por um seletor ausente.
+        O veredito tem de ser inconclusivo — a conexão do usuário continua boa.
+        """
         page = Mock()
         usuario = Mock()
-        page.get_by_role.return_value.wait_for.side_effect = TimeoutError("layout")
 
-        with self.assertRaisesRegex(ml_link.AuthError, "lote foi preservado"):
+        with self.assertRaisesRegex(ml_link.AuthError, "não ficou disponível"):
             ml_link._abrir_link_builder(page, usuario=usuario)
 
         registrar.assert_called_with(
             usuario,
             "inconclusivo",
-            "formulário do Link Builder indisponível",
+            "os controles do Link Builder não ficaram disponíveis",
         )
 
 

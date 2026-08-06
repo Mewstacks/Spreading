@@ -86,23 +86,35 @@ def _auth_path(user_id: int) -> str:
     return os.path.join(settings.ML_AUTH_DIR, f"auth_{user_id}.json")
 
 
+def _estado_publico(estado: dict) -> dict:
+    """Remove comandos internos antes de devolver o estado ao navegador."""
+    publico = dict(estado)
+    for comando in ("retentar_qr", "cancelar", "salvar_agora", "validar_agora"):
+        publico.pop(comando, None)
+    return publico
+
+
 def status(user_id: int) -> dict:
     """Estado atual da conexão pro polling do front.
 
-    fase: 'idle' | 'iniciando' | 'aguardando_login' | 'salvando' | 'conectado' | 'erro'
+    fase: 'idle' | 'iniciando' | 'aguardando_login' | 'configurar_qr' |
+          'salvando' | 'conectado' | 'erro'
     """
-    estado = cache.get(_cache_key(user_id)) or {"fase": "idle"}
+    estado = dict(cache.get(_cache_key(user_id)) or {"fase": "idle"})
     # Durante o login em curso o veredito da sessão salva não muda nada na tela
     # (a fase já manda), e em cache-miss a sonda custa até 8s de rede. Com o
     # front pedindo status a cada 3s, isso empilhava requisições nas 8 threads do
     # gunicorn e atrasava a pintura da imagem.
-    if estado.get("fase") in {"iniciando", "aguardando_login", "validando", "salvando"}:
+    if estado.get("fase") in {
+        "iniciando", "aguardando_login", "configurar_qr", "validando",
+        "validando_linkbuilder", "aguardando_linkbuilder", "salvando",
+    }:
         estado["auth_valido"] = False
         estado["motivo_desconexao"] = ""
         estado["alerta_conexao"] = ""
         estado["linkbuilder"] = _LINKBUILDER_VAZIO
         estado.update(_transport.status(user_id))
-        return estado
+        return _estado_publico(estado)
     # 'conectado' de verdade vem da fonte única (conexoes.py) — a mesma que o
     # dashboard e a Saúde leem. A `fase` acima é só o progresso do login em curso.
     try:
@@ -133,21 +145,71 @@ def status(user_id: int) -> dict:
         estado["alerta_conexao"] = ""
         estado["linkbuilder"] = _LINKBUILDER_VAZIO
     estado.update(_transport.status(user_id))
-    return estado
+    return _estado_publico(estado)
 
 
 # Ausência de veredito, não veredito negativo: a tela renderiza "—" em vez de
 # afirmar que o Link Builder está de pé ou caído.
-_LINKBUILDER_VAZIO = {"medido": False, "ok": False, "motivo": "", "alerta": ""}
+_LINKBUILDER_VAZIO = {
+    "medido": False,
+    "estado": "unknown",
+    "ok": False,
+    "motivo": "",
+    "alerta": "",
+    "verificado_em": None,
+}
 
 
 def _bloco_linkbuilder(est) -> dict:
     return {
         "medido": True,
+        "estado": est.detalhe or ("ready" if est.conectado else "unknown"),
         "ok": bool(est.conectado),
         "motivo": "" if est.conectado else est.motivo,
-        "alerta": est.alerta if est.conectado else "",
+        "alerta": est.alerta or "",
+        "verificado_em": (
+            est.verificado_em.isoformat()
+            if hasattr(est.verificado_em, "isoformat") else est.verificado_em
+        ),
     }
+
+
+def _marcar_configuracao_qr(user_id: int, contexto: str) -> dict:
+    """Pausa o login e publica o onboarding sem incrementar a cada leitura do DOM."""
+    atual = dict(cache.get(_cache_key(user_id)) or {})
+    desafio_anterior = atual.get("desafio")
+    desafio_anterior = desafio_anterior if isinstance(desafio_anterior, dict) else {}
+    if (
+        atual.get("fase") == "configurar_qr"
+        and desafio_anterior.get("contexto") == contexto
+    ):
+        return atual
+
+    try:
+        tentativas_anteriores = max(0, int(desafio_anterior.get("tentativas") or 0))
+    except (TypeError, ValueError):
+        tentativas_anteriores = 0
+    tentativas = (
+        tentativas_anteriores + 1
+        if desafio_anterior.get("contexto") == contexto else 1
+    )
+    logger.info(
+        "ml_login_metric transport=mercado_livre user=%s "
+        "challenge=camera_not_found context=%s attempt=%s",
+        user_id, contexto, tentativas,
+    )
+    return _set_estado(
+        user_id,
+        fase="configurar_qr",
+        desafio={
+            "tipo": "camera_indisponivel",
+            "contexto": contexto,
+            "tentativas": tentativas,
+        },
+        retentar_qr=False,
+        aviso="",
+        erro="",
+    )
 
 
 def _storage_fingerprint(storage_state: dict) -> str:
@@ -235,14 +297,21 @@ def _ir_para_login(page):
 from apps.accounts.tenant import executar_no_tenant, organization_job_sem_transacao
 
 
-def _gravar_sessao(user_id: int, storage_state: dict) -> None:
+def _gravar_sessao(user_id: int, storage_state: dict, prontidao: str = "unknown",
+                   motivo_prontidao: str = "") -> None:
     """Grava a sessão capturada e derruba o cache da sonda. Roda no tenant, fora do loop."""
     from django.contrib.auth import get_user_model
-    from apps.accounts.ml_sessions import save_storage_state
+    from apps.accounts.ml_sessions import (
+        registrar_prontidao_linkbuilder_para_usuario,
+        save_storage_state,
+    )
     from apps.scrapers.conexoes import invalidar_ml
 
     user = get_user_model().objects.get(pk=user_id)
     save_storage_state(user, storage_state)
+    registrar_prontidao_linkbuilder_para_usuario(
+        user, prontidao, motivo_prontidao,
+    )
     # A sonda de sessão é cacheada por 5 min; sem invalidar, quem acabou de conectar
     # continuaria vendo "desconectado" até o cache vencer — logo depois de fazer
     # exatamente o que pedimos. `invalidar_ml` é só cache.delete (não toca o banco),
@@ -256,13 +325,18 @@ def _gravar_sessao(user_id: int, storage_state: dict) -> None:
             "levar até 5 min para mostrar 'conectado' (user %s).", user_id, exc_info=True)
 
 
-def _persistir_sessao(user_id: int, storage_state: dict, tentativas: int = 3) -> None:
+def _persistir_sessao(user_id: int, storage_state: dict, tentativas: int = 3,
+                      prontidao: str = "unknown",
+                      motivo_prontidao: str = "") -> None:
     """Grava a sessão, tolerante a socket morto depois de minutos de browser ocioso."""
     from django.db import InterfaceError, OperationalError, close_old_connections
 
     for tentativa in range(1, tentativas + 1):
         try:
-            executar_no_tenant(_gravar_sessao, user_id, storage_state)
+            executar_no_tenant(
+                _gravar_sessao, user_id, storage_state,
+                prontidao, motivo_prontidao,
+            )
             return
         except (OperationalError, InterfaceError) as exc:
             if tentativa == tentativas:
@@ -273,6 +347,155 @@ def _persistir_sessao(user_id: int, storage_state: dict, tentativas: int = 3) ->
             time.sleep(0.5 * tentativa)
 
 
+def _validar_linkbuilder_ao_vivo(user_id: int, active_page, runtime, context,
+                                 deadline: float) -> tuple[str | None, str]:
+    """Abre o portal no mesmo navegador e mantém a live view até o veredito.
+
+    ``None`` significa cancelamento explícito. Os demais estados são persistidos
+    somente depois que o Playwright fecha.
+    """
+    from apps.scrapers.scraper_mercadolivre.link import (
+        _LB_TIMEOUT_MS,
+        _LB_URL,
+        _linkbuilder_pronto,
+        _pagina_de_login,
+        _pagina_intersticial,
+    )
+    from apps.scrapers.ml_login_challenge import pagina_exige_configuracao_qr
+
+    current_page = active_page.current()
+    if current_page is None:
+        return "temporarily_unavailable", "a janela do Link Builder foi fechada"
+    _set_estado(
+        user_id, fase="validando_linkbuilder", aviso=(
+            "Login confirmado. Conferindo agora o Link Builder real…"
+        ),
+    )
+    try:
+        current_page.goto(
+            _LB_URL, wait_until="domcontentloaded", timeout=_LB_TIMEOUT_MS,
+        )
+        try:
+            current_page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
+    except Exception:
+        logger.warning(
+            "Link Builder não concluiu a navegação durante o login (user %s).",
+            user_id, exc_info=True,
+        )
+
+    ultimo_estado = "temporarily_unavailable"
+    ultimo_motivo = "o Link Builder não ficou disponível"
+    last_beat = 0.0
+    proxima_checagem_qr = 0.0
+    qr_deadline_estendido = False
+    while time.time() < deadline:
+        estado = cache.get(_cache_key(user_id)) or {}
+        if estado.get("cancelar"):
+            if estado.get("fase") == "configurar_qr":
+                logger.info(
+                    "ml_login_metric transport=mercado_livre user=%s "
+                    "challenge=camera_not_found action=cancel context=linkbuilder",
+                    user_id,
+                )
+            _set_estado(user_id, fase="idle", desafio={}, aviso="", erro="")
+            return None, "cancelado pelo usuário"
+
+        current_page = active_page.current()
+        if current_page is None:
+            return "temporarily_unavailable", "a janela do Link Builder foi fechada"
+
+        if estado.get("fase") == "configurar_qr":
+            if estado.get("retentar_qr"):
+                logger.info(
+                    "ml_login_metric transport=mercado_livre user=%s "
+                    "challenge=camera_not_found action=retry context=linkbuilder",
+                    user_id,
+                )
+                estado = _set_estado(
+                    user_id, fase="validando_linkbuilder", retentar_qr=False,
+                    aviso="Reabrindo o Link Builder…", erro="",
+                )
+                try:
+                    current_page.goto(
+                        _LB_URL, wait_until="domcontentloaded", timeout=_LB_TIMEOUT_MS,
+                    )
+                    _transport.capture(runtime, current_page, active=True)
+                except Exception:
+                    logger.info(
+                        "ml_login_metric transport=mercado_livre user=%s "
+                        "challenge=camera_not_found action=retry_failed "
+                        "context=linkbuilder",
+                        user_id,
+                    )
+                    logger.warning(
+                        "Link Builder não reabriu depois da configuração do QR "
+                        "(user %s).", user_id, exc_info=True,
+                    )
+                    _set_estado(
+                        user_id, fase="aguardando_linkbuilder", aviso=(
+                            "O Link Builder não respondeu agora. A janela continua "
+                            "aberta; tente verificar novamente."
+                        ),
+                    )
+            current_page.wait_for_timeout(LOOP_MS)
+            continue
+
+        houve_input = False
+        for _ in range(MAX_EVENTOS_POR_POST * 4):
+            try:
+                evento = runtime.input_queue.get_nowait()
+            except queue.Empty:
+                break
+            despachar_input_v2(current_page, evento)
+            houve_input = True
+        _transport.capture(runtime, current_page, active=houve_input)
+
+        agora = time.time()
+        if agora >= proxima_checagem_qr:
+            proxima_checagem_qr = agora + 1.0
+            if pagina_exige_configuracao_qr(current_page):
+                if not qr_deadline_estendido:
+                    deadline = agora + LOGIN_DEADLINE_S
+                    qr_deadline_estendido = True
+                _marcar_configuracao_qr(user_id, "linkbuilder")
+                current_page.wait_for_timeout(LOOP_MS)
+                continue
+
+        if _linkbuilder_pronto(current_page):
+            return "ready", "campo de URL e botão Gerar confirmados"
+        if _pagina_de_login(current_page):
+            ultimo_estado = "login_required"
+            ultimo_motivo = "o portal de afiliados pediu login"
+            _set_estado(
+                user_id, fase="aguardando_linkbuilder", aviso=(
+                    "O Link Builder pediu uma etapa adicional. Conclua o login "
+                    "ou a verificação nesta janela."
+                ),
+            )
+        elif _pagina_intersticial(current_page):
+            ultimo_estado = "temporarily_unavailable"
+            ultimo_motivo = "verificação de segurança interposta"
+            _set_estado(
+                user_id, fase="aguardando_linkbuilder", aviso=(
+                    "O Mercado Livre pediu uma verificação de segurança. "
+                    "Conclua a etapa nesta janela para validar o Link Builder."
+                ),
+            )
+        else:
+            ultimo_estado = "temporarily_unavailable"
+            ultimo_motivo = "os controles do Link Builder não apareceram"
+            _set_estado(user_id, fase="validando_linkbuilder")
+
+        if time.time() - last_beat > 8:
+            _set_estado(user_id)
+            last_beat = time.time()
+        current_page.wait_for_timeout(LOOP_MS)
+
+    return ultimo_estado, ultimo_motivo
+
+
 @organization_job_sem_transacao
 def _worker(user_id: int):
     """Sobe o Chromium, publica capturas nítidas e valida a sessão de verdade."""
@@ -281,6 +504,7 @@ def _worker(user_id: int):
         LAUNCH_ARGS, habilitar_foco, opcoes_de_contexto,
     )
     from apps.scrapers.conexoes import sondar_sessao_ml
+    from apps.scrapers.ml_login_challenge import pagina_exige_configuracao_qr
 
     runtime = _transport.get(user_id) or _transport.create(user_id)
 
@@ -295,8 +519,14 @@ def _worker(user_id: int):
     recargas = 0
     erro_ml_avisado = False
     last_error_check = 0.0
+    prontidao_linkbuilder = "unknown"
+    motivo_linkbuilder = ""
+    qr_deadline_estendido = False
     try:
-        _set_estado(user_id, fase="iniciando", erro="")
+        _set_estado(
+            user_id, fase="iniciando", desafio={}, retentar_qr=False,
+            aviso="", erro="",
+        )
         with sync_playwright() as p:
             # Flags do scraper (auxiliar.iniciar_browser) + dev-shm p/ não crashar o
             # Chromium em container com /dev/shm pequeno (Fly) + locale, ver
@@ -333,12 +563,61 @@ def _worker(user_id: int):
                         estado = cache.get(_cache_key(user_id)) or {}
                         last_check = agora
                     if estado.get("cancelar"):
-                        _set_estado(user_id, fase="idle", erro="")
+                        if estado.get("fase") == "configurar_qr":
+                            logger.info(
+                                "ml_login_metric transport=mercado_livre user=%s "
+                                "challenge=camera_not_found action=cancel context=%s",
+                                user_id,
+                                (estado.get("desafio") or {}).get("contexto", "login"),
+                            )
+                        _set_estado(
+                            user_id, fase="idle", desafio={}, retentar_qr=False,
+                            aviso="", erro="",
+                        )
                         break
 
                     current_page = active_page.current()
                     if current_page is None:
                         raise RuntimeError("A janela de login do Mercado Livre foi fechada.")
+
+                    # Enquanto o cliente ativa o QR no celular, o Chromium continua
+                    # vivo, mas não desperdiça screenshot/entrada nem mantém o SSE.
+                    # O botão do onboarding só levanta esta flag; a navegação ocorre
+                    # aqui, na mesma thread que é dona do Playwright.
+                    if estado.get("fase") == "configurar_qr":
+                        if estado.get("retentar_qr"):
+                            logger.info(
+                                "ml_login_metric transport=mercado_livre user=%s "
+                                "challenge=camera_not_found action=retry context=login",
+                                user_id,
+                            )
+                            estado = _set_estado(
+                                user_id, fase="aguardando_login", retentar_qr=False,
+                                aviso="Reabrindo o login do Mercado Livre…", erro="",
+                            )
+                            if pending_validation is not None:
+                                pending_validation.cancel()
+                                pending_validation = None
+                            pending_state = None
+                            manual_validation = False
+                            last_fingerprint = ""
+                            ultima_leitura_storage = 0.0
+                            recargas = 0
+                            erro_ml_avisado = False
+                            try:
+                                _ir_para_login(current_page)
+                            except Exception:
+                                logger.info(
+                                    "ml_login_metric transport=mercado_livre user=%s "
+                                    "challenge=camera_not_found action=retry_failed "
+                                    "context=login",
+                                    user_id,
+                                )
+                                raise
+                            _transport.capture(runtime, current_page, active=True)
+                            last_error_check = 0.0
+                        current_page.wait_for_timeout(LOOP_MS)
+                        continue
 
                     # Drena e aplica os eventos confirmados pelo protocolo sequencial.
                     houve_input = False
@@ -357,6 +636,18 @@ def _worker(user_id: int):
                     # minutos, e o log não registrava nada.
                     if agora - last_error_check > SNAPSHOT_INTERVAL_S:
                         last_error_check = agora
+                        if pagina_exige_configuracao_qr(current_page):
+                            if not qr_deadline_estendido:
+                                deadline = agora + LOGIN_DEADLINE_S
+                                qr_deadline_estendido = True
+                            if pending_validation is not None:
+                                pending_validation.cancel()
+                                pending_validation = None
+                            pending_state = None
+                            manual_validation = False
+                            estado = _marcar_configuracao_qr(user_id, "login")
+                            current_page.wait_for_timeout(LOOP_MS)
+                            continue
                         if _pagina_de_erro_do_ml(current_page):
                             logger.info(
                                 "ml_login_metric transport=mercado_livre user=%s "
@@ -459,11 +750,32 @@ def _worker(user_id: int):
                     current_page.wait_for_timeout(LOOP_MS)
 
                 if logado:
-                    _set_estado(user_id, fase="salvando")
-                    estado_capturado = estado_capturado or context.storage_state()
-                elif (cache.get(_cache_key(user_id)) or {}).get("fase") != "idle":
-                    _set_estado(user_id, fase="erro",
-                                erro="Tempo esgotado esperando o login. Tente de novo.")
+                    prontidao_linkbuilder, motivo_linkbuilder = (
+                        _validar_linkbuilder_ao_vivo(
+                            user_id, active_page, runtime, context, deadline,
+                        )
+                    )
+                    if prontidao_linkbuilder is None:
+                        logado = False
+                        estado_capturado = None
+                    else:
+                        _set_estado(user_id, fase="salvando")
+                        # Captura de novo: o SSO do portal pode ter renovado ou
+                        # acrescentado cookies depois da validação do site.
+                        estado_capturado = context.storage_state()
+                else:
+                    estado_final = cache.get(_cache_key(user_id)) or {}
+                    if estado_final.get("fase") != "idle":
+                        esperando_qr = estado_final.get("fase") == "configurar_qr"
+                        _set_estado(
+                            user_id, fase="erro", retentar_qr=False,
+                            erro=(
+                                "O tempo para configurar o QR terminou. "
+                                "Inicie uma nova conexão e tente novamente."
+                                if esperando_qr else
+                                "Tempo esgotado esperando o login. Tente de novo."
+                            ),
+                        )
             finally:
                 # Sem isto o Chromium ficava órfão em qualquer exceção: o close
                 # estava solto no fim do bloco e simplesmente não era alcançado.
@@ -477,10 +789,35 @@ def _worker(user_id: int):
         # vira 'conectado' DEPOIS de a gravação confirmar — senão uma falha aqui
         # deixaria a tela presa em 'salvando' para sempre.
         if estado_capturado is not None:
-            _persistir_sessao(user_id, estado_capturado)
+            _persistir_sessao(
+                user_id, estado_capturado,
+                prontidao=prontidao_linkbuilder,
+                motivo_prontidao=motivo_linkbuilder,
+            )
+            desafio_concluido = (cache.get(_cache_key(user_id)) or {}).get("desafio")
+            if isinstance(desafio_concluido, dict) and desafio_concluido.get("tipo"):
+                logger.info(
+                    "ml_login_metric transport=mercado_livre user=%s "
+                    "challenge=camera_not_found action=success context=%s attempts=%s",
+                    user_id,
+                    desafio_concluido.get("contexto", "login"),
+                    desafio_concluido.get("tentativas", 1),
+                )
+            aviso_final = ""
+            if prontidao_linkbuilder == "login_required":
+                aviso_final = (
+                    "A conta principal foi salva, mas o Link Builder ainda pediu "
+                    "login. Reconecte para concluir essa etapa."
+                )
+            elif prontidao_linkbuilder == "temporarily_unavailable":
+                aviso_final = (
+                    "A conta foi salva; o Link Builder ficou temporariamente "
+                    "indisponível e será testado novamente no próximo uso."
+                )
             _set_estado(
                 user_id, fase="conectado", salvar_agora=False,
-                validar_agora=False, aviso="", erro="",
+                validar_agora=False, retentar_qr=False, desafio={},
+                aviso=aviso_final, erro="",
             )
     except Exception as exc:  # noqa: BLE001 — qualquer falha vira mensagem pro usuário
         codigo = novo_codigo()
@@ -516,8 +853,8 @@ def criar_sessao(user, client: dict | None = None) -> dict:
         runtime = _transport.create(user_id, client)
         _set_estado(
             user_id, fase="iniciando", erro="", aviso="", cancelar=False,
-            salvar_agora=False, validar_agora=False, session_id=runtime.session_id,
-            viewport=runtime.viewport,
+            salvar_agora=False, validar_agora=False, retentar_qr=False,
+            desafio={}, session_id=runtime.session_id, viewport=runtime.viewport,
         )
         t = threading.Thread(target=_worker, args=(user_id,), daemon=True)
         _threads[user_id] = t
@@ -533,6 +870,33 @@ def frames(user_id: int, session_id: str | None = None):
 def enfileirar_input(user_id: int, session_id: str, eventos) -> dict:
     """Valida, deduplica e confirma eventos do transporte v2."""
     return _transport.enqueue(user_id, session_id, eventos)
+
+
+def retentar_apos_configurar_qr(user_id: int) -> tuple[bool, dict]:
+    """Sinaliza a retomada; somente a thread dona do Playwright navega a página."""
+    with _lock:
+        thread = _threads.get(user_id)
+        ativa = bool(
+            thread and thread.is_alive()
+            and _transport.get(user_id) is not None
+        )
+    if not ativa:
+        return False, {
+            "ok": False,
+            "erro": "A sessão de login terminou. Inicie uma nova conexão.",
+        }
+
+    atual = cache.get(_cache_key(user_id)) or {}
+    if atual.get("fase") != "configurar_qr":
+        return False, {
+            "ok": False,
+            "erro": "O login não está aguardando a configuração do QR.",
+        }
+
+    _set_estado(user_id, retentar_qr=True, aviso="", erro="")
+    resposta = status(user_id)
+    resposta["ok"] = True
+    return True, resposta
 
 
 def salvar_sessao_manual(user_id: int, raw_json: str) -> dict:
@@ -578,7 +942,10 @@ def salvar_sessao_manual(user_id: int, raw_json: str) -> dict:
     except Exception as exc:
         return _set_estado(user_id, fase="erro", erro=f"Não foi possível salvar a sessão: {exc}")
 
-    return _set_estado(user_id, fase="conectado", erro="", salvar_agora=False, cancelar=False)
+    return _set_estado(
+        user_id, fase="conectado", desafio={}, retentar_qr=False,
+        erro="", salvar_agora=False, cancelar=False,
+    )
 
 
 def salvar_agora(user_id: int):
@@ -587,7 +954,17 @@ def salvar_agora(user_id: int):
 
 
 def cancelar(user_id: int):
-    _set_estado(user_id, cancelar=True, fase="idle", aviso="", erro="")
+    atual = cache.get(_cache_key(user_id)) or {}
+    if atual.get("fase") == "configurar_qr":
+        logger.info(
+            "ml_login_metric transport=mercado_livre user=%s "
+            "challenge=camera_not_found action=cancel context=%s",
+            user_id, (atual.get("desafio") or {}).get("contexto", "login"),
+        )
+    _set_estado(
+        user_id, cancelar=True, fase="idle", desafio={}, retentar_qr=False,
+        aviso="", erro="",
+    )
 
 
 def esquecer(user_id: int) -> None:

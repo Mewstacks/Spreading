@@ -107,6 +107,11 @@ def load_storage_state(user, *, allow_legacy=None, touch=True) -> dict | None:
 
 @transaction.atomic
 def save_storage_state(user, storage_state: dict) -> MercadoLivreSession:
+    """Persiste uma autenticação NOVA.
+
+    Diferente de ``renew_storage_state``, este caminho invalida todos os vereditos:
+    cookies recém-capturados ainda precisam provar que abrem o site e o Link Builder.
+    """
     organization = organization_for_user(user)
     if organization is None:
         raise MLSessionCryptoError("Usuário sem organização ativa.")
@@ -146,11 +151,49 @@ def save_storage_state(user, storage_state: dict) -> MercadoLivreSession:
     existing.lb_last_probe_result = ""
     existing.lb_probe_failures = 0
     existing.lb_probe_reason = ""
+    existing.lb_readiness = "unknown"
+    existing.lb_readiness_checked_at = None
+    existing.lb_readiness_reason = ""
     existing.save(update_fields=[
         *encrypted.keys(), "status", "rotated_at", "updated_at",
         "last_probe_at", "last_probe_result", "probe_failures", "probe_reason",
         "lb_last_probe_at", "lb_last_probe_result", "lb_probe_failures",
-        "lb_probe_reason",
+        "lb_probe_reason", "lb_readiness", "lb_readiness_checked_at",
+        "lb_readiness_reason",
+    ])
+    return existing
+
+
+@transaction.atomic
+def renew_storage_state(user, storage_state: dict) -> MercadoLivreSession:
+    """Atualiza cookies usados sem promover ou apagar nenhum veredito.
+
+    O Chromium renova cookies até quando o Link Builder terminou numa tela de login.
+    Reusar ``save_storage_state`` aqui marcava ``status=active`` e zerava o diagnóstico
+    exatamente depois da falha real. Renovação só troca o ciphertext e o carimbo.
+    """
+    organization = organization_for_user(user)
+    if organization is None:
+        raise MLSessionCryptoError("Usuário sem organização ativa.")
+    existing = (
+        MercadoLivreSession.objects.select_for_update()
+        .filter(organization=organization)
+        .first()
+    )
+    if existing is None:
+        raise MLSessionCryptoError(
+            "Sessão do Mercado Livre ausente durante a renovação."
+        )
+    encrypted = encrypt_storage_state(
+        storage_state,
+        organization_id=organization.pk,
+        connection_id=existing.connection_id,
+    )
+    for field, value in encrypted.items():
+        setattr(existing, field, value)
+    existing.rotated_at = timezone.now()
+    existing.save(update_fields=[
+        *encrypted.keys(), "rotated_at", "updated_at",
     ])
     return existing
 
@@ -252,6 +295,54 @@ def linkbuilder_snapshot(organization) -> dict | None:
         "probe_failures": linha["lb_probe_failures"],
         "probe_reason": linha["lb_probe_reason"],
     }
+
+
+def linkbuilder_readiness_snapshot(organization) -> dict | None:
+    """Último resultado do Chromium real, sem rede e sem decifrar a sessão."""
+    if organization is None:
+        return None
+    return MercadoLivreSession.objects.filter(organization=organization).values(
+        "lb_readiness", "lb_readiness_checked_at", "lb_readiness_reason",
+    ).first()
+
+
+def registrar_prontidao_linkbuilder(organization, estado: str,
+                                    motivo: str = "") -> dict | None:
+    """Registra somente observação do Chromium real.
+
+    Um HTTP 200 do HTML inicial do portal não é prova: o JavaScript/SSO pode
+    redirecionar para login segundos depois. Por isso este contrato é separado dos
+    campos ``lb_*probe*`` e aceita apenas estados de prontidão explícitos.
+    """
+    estados = {value for value, _label in MercadoLivreSession.LINKBUILDER_READINESS}
+    if estado not in estados:
+        raise ValueError(f"Estado inválido do Link Builder: {estado}")
+    if organization is None:
+        return None
+    agora = timezone.now()
+    atualizados = MercadoLivreSession.objects.filter(
+        organization=organization,
+    ).update(
+        lb_readiness=estado,
+        lb_readiness_checked_at=agora,
+        lb_readiness_reason=(motivo or "")[:200],
+    )
+    if not atualizados:
+        return None
+    return {
+        "estado": estado,
+        "verificado_em": agora,
+        "motivo": (motivo or "")[:200],
+    }
+
+
+def registrar_prontidao_linkbuilder_para_usuario(user, estado: str,
+                                                 motivo: str = "") -> dict | None:
+    return registrar_prontidao_linkbuilder(
+        organization_for_user(user) if user is not None else None,
+        estado,
+        motivo,
+    )
 
 
 def registrar_veredito_linkbuilder(organization, resultado: str,

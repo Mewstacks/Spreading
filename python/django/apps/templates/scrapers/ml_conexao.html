@@ -30,8 +30,9 @@
     font-family:var(--mono); font-size:.72rem; font-weight:500; color:var(--muted);
     transition:all .25s var(--ease); }
   .step .step-txt { min-width:0; padding-top:.15rem; }
-  .step .lbl { font-size:.82rem; font-weight:500; color:var(--muted); line-height:1.25; }
-  .step .step-desc { font-size:11.5px; color:var(--muted); line-height:1.35; margin-top:.1rem; opacity:.85; }
+  .step .lbl { display:block; font-size:.82rem; font-weight:500; color:var(--muted); line-height:1.25; }
+  .step .step-desc { display:block; font-size:11.5px; color:var(--muted); line-height:1.35;
+    margin-top:.1rem; opacity:.85; }
   .step.is-done .ball { background:var(--green); border-color:var(--green); color:var(--accent-ink); }
   .step.is-done .lbl { color:var(--text-2); }
   .step.is-current .ball { border-color:var(--accent); color:var(--accent);
@@ -59,6 +60,54 @@
   .panel-head .hint { margin:.25rem 0 0; color:var(--muted); font-size:12.5px; line-height:1.5; max-width:56ch; }
   .actions { display:flex; gap:.6rem; flex-wrap:wrap; align-items:center; }
   .acao-msg { font-size:12px; color:var(--muted); min-height:1em; margin:0; }
+
+  /* ── Handoff de segurança ML: computador → QR → celular. ── */
+  #qr-setup-area { margin-bottom:1.6rem; scroll-margin-top:1rem; }
+  #qr-setup-area:focus { outline:none; }
+  #qr-setup-area:focus-visible { box-shadow:0 0 0 3px var(--accent-bg), var(--shadow-pop); }
+  .qr-setup-grid { display:grid; gap:1.25rem; }
+  .qr-handoff { display:grid; grid-template-columns:52px 1fr 52px 1fr 52px;
+    align-items:center; width:min(100%, 430px); padding:.9rem; border:1px solid var(--border);
+    border-radius:var(--r-lg); background:var(--bg-inset); }
+  .qr-node { position:relative; z-index:1; display:grid; place-items:center; width:52px;
+    height:52px; border:1px solid var(--border-strong); border-radius:var(--r-lg);
+    color:var(--text-2); background:var(--surface); }
+  .qr-node.is-key { color:var(--accent-ink); background:var(--accent); border-color:var(--accent); }
+  .qr-node.is-phone { color:var(--green); background:var(--green-bg);
+    border-color:color-mix(in srgb,var(--green) 35%,transparent); }
+  .qr-node .lucide { width:1.35rem; height:1.35rem; }
+  .qr-route { position:relative; height:2px; margin:0 .35rem; background:var(--border-strong); }
+  .qr-route::after { content:''; position:absolute; right:-1px; top:50%; width:7px; height:7px;
+    border-top:2px solid var(--border-strong); border-right:2px solid var(--border-strong);
+    transform:translateY(-50%) rotate(45deg); }
+  .qr-copy .eyebrow { margin-bottom:.45rem; }
+  .qr-copy h2 { margin:0; font-size:clamp(1.15rem, 3vw, 1.45rem); line-height:1.2;
+    letter-spacing:-.025em; }
+  .qr-lead { margin:.55rem 0 0; max-width:68ch; color:var(--text-2); font-size:13.5px;
+    line-height:1.55; }
+  .qr-once { display:inline-flex; align-items:center; gap:.4rem; margin:.75rem 0 0;
+    padding:.35rem .6rem; border-radius:var(--r-sm); background:var(--green-bg);
+    color:var(--green); font-size:11.5px; font-weight:600; }
+  .qr-once .lucide { width:.9rem; height:.9rem; }
+  .qr-instructions { display:grid; gap:.65rem; margin:1rem 0 0; padding:0; list-style:none; }
+  .qr-instructions li { display:grid; grid-template-columns:28px minmax(0,1fr); gap:.65rem;
+    align-items:start; color:var(--text-2); font-size:13px; line-height:1.45; }
+  .qr-step-num { display:grid; place-items:center; width:28px; height:28px; border-radius:50%;
+    background:var(--surface-2); border:1px solid var(--border); color:var(--accent);
+    font-family:var(--mono); font-size:11px; font-weight:600; }
+  .qr-instructions strong { color:var(--text); font-weight:600; }
+  .qr-repeat-note { display:none; margin:.9rem 0 0; }
+  .qr-repeat-note.is-visible { display:flex; }
+  .qr-actions { margin-top:1rem; }
+  .qr-actions .btn, .qr-actions .btn-link { min-height:44px; }
+  #qr-action-msg { margin:.65rem 0 0; min-height:1.2em; color:var(--muted);
+    font-size:12px; line-height:1.45; }
+
+  @media (min-width:900px) {
+    .qr-setup-grid { grid-template-columns:minmax(290px, .8fr) minmax(0, 1.4fr);
+      align-items:center; gap:1.75rem; }
+    .qr-handoff { justify-self:center; }
+  }
 
   /* linhas de detalhe da conta conectada (hairlines) */
   .ok-rows { display:flex; flex-direction:column; border-top:1px solid var(--border); }
@@ -124,6 +173,8 @@
   @media (max-width:899px) {
     .live-controls { width:100%; bottom:.25rem; }
     .live-controls .btn { flex:1 1 145px; }
+    .qr-actions { display:grid; grid-template-columns:1fr; }
+    .qr-actions .btn, .qr-actions .btn-link { width:100%; justify-content:center; }
   }
 </style>
 {% endblock %}
@@ -142,6 +193,59 @@
     </div>
   </div>
 </div>
+
+{% if marketplace_ml %}
+<!-- Aparece somente quando o próprio ML informa que o Chromium remoto não tem câmera. -->
+<section id="qr-setup-area" class="panel" style="display:none;" tabindex="-1"
+  aria-labelledby="qr-setup-title">
+  <div class="qr-setup-grid">
+    <div class="qr-handoff" aria-hidden="true">
+      <span class="qr-node"><i data-lucide="monitor"></i></span>
+      <span class="qr-route"></span>
+      <span class="qr-node is-key"><i data-lucide="qr-code"></i></span>
+      <span class="qr-route"></span>
+      <span class="qr-node is-phone"><i data-lucide="smartphone"></i></span>
+    </div>
+    <div class="qr-copy">
+      <span class="eyebrow">Verificação do Mercado Livre</span>
+      <h2 id="qr-setup-title">Ative o acesso por QR no Mercado Pago</h2>
+      <p class="qr-lead">O Mercado Livre pediu reconhecimento facial, mas esta janela
+        segura roda no servidor e não possui câmera. Ative o QR no celular e retome
+        daqui sem começar tudo de novo.</p>
+      <span class="qr-once"><i data-lucide="check"></i> Configuração necessária apenas uma vez</span>
+
+      <ol class="qr-instructions">
+        <li><span class="qr-step-num">1</span><span>Abra o <strong>Mercado Pago</strong>
+          no celular usando a mesma conta do Mercado Livre.</span></li>
+        <li><span class="qr-step-num">2</span><span>Acesse <strong>Mais → Seu perfil →
+          Segurança → Métodos de verificação → Código QR</strong> e ative a opção.</span></li>
+        <li><span class="qr-step-num">3</span><span>Volte para esta tela e selecione
+          <strong>Já ativei — tentar novamente</strong>.</span></li>
+      </ol>
+
+      <div id="qr-repeat-note" class="alert alert-warn qr-repeat-note" role="status">
+        <i data-lucide="info"></i>
+        <span>O Mercado Livre ainda não encontrou o QR ativo. Confirme se ele foi
+          habilitado na mesma conta e tente novamente.</span>
+      </div>
+      <p id="qr-context-text" class="help" style="margin:.75rem 0 0;"></p>
+      <div class="actions qr-actions">
+        <button id="qr-retry-btn" class="btn btn-accent">
+          <i data-lucide="refresh-cw"></i> Já ativei — tentar novamente
+        </button>
+        <a class="btn btn-ghost" href="https://www.mercadolivre.com.br/ajuda/31030"
+          target="_blank" rel="noopener noreferrer">
+          <i data-lucide="external-link"></i> Abrir instruções oficiais
+        </a>
+        <button id="qr-cancelar-btn" class="btn btn-ghost">
+          <i data-lucide="x"></i> Cancelar
+        </button>
+      </div>
+      <p id="qr-action-msg" role="status" aria-live="polite"></p>
+    </div>
+  </div>
+</section>
+{% endif %}
 
 <!-- Live view remota: peça central enquanto a conexão está em andamento -->
 <div id="live-area" class="panel" style="display:none;">
@@ -221,7 +325,7 @@
           <span class="badge" id="lb-badge"><span class="dot"></span><span id="lb-badge-txt">—</span></span>
         </div>
         {% endif %}
-        <div class="ok-row"><span class="k">{% if relatorio %}Relatórios{% else %}Link de afiliado{% endif %}</span><span class="v" id="lb-resumo">{% if relatorio %}Acesso autorizado{% else %}Pronto para gerar{% endif %}</span></div>
+        <div class="ok-row"><span class="k">{% if relatorio %}Relatórios{% else %}Link de afiliado{% endif %}</span><span class="v" id="lb-resumo">{% if relatorio %}Acesso autorizado{% else %}Aguardando validação{% endif %}</span></div>
       </div>
       <div class="actions">
         <button id="reconectar-btn" class="btn btn-ghost btn-sm"><i data-lucide="refresh-cw"></i> Reconectar</button>
@@ -300,6 +404,12 @@
   const startArea = document.getElementById('start-area');
   const liveArea = document.getElementById('live-area');
   const okArea = document.getElementById('ok-area');
+  const qrSetupArea = document.getElementById('qr-setup-area');
+  const qrRetryBtn = document.getElementById('qr-retry-btn');
+  const qrCancelarBtn = document.getElementById('qr-cancelar-btn');
+  const qrActionMsg = document.getElementById('qr-action-msg');
+  const qrRepeatNote = document.getElementById('qr-repeat-note');
+  const qrContextText = document.getElementById('qr-context-text');
   const canvas = document.getElementById('live-canvas');
   const ctx = canvas.getContext('2d');
   const frameWrap = document.getElementById('live-frame-wrap');
@@ -320,7 +430,10 @@
     idle:             {txt:'Não conectado', cls:'is-off', step:0},
     iniciando:        {txt:'Abrindo janela…', cls:'is-mid', step:1},
     aguardando_login: {txt:'Aguardando seu login', cls:'is-mid', step:2},
+    configurar_qr:    {txt:'Ative o QR no Mercado Pago', cls:'is-mid', step:2},
     validando:        {txt:'Verificando a sessão…', cls:'is-mid', step:3},
+    validando_linkbuilder: {txt:'Validando o Link Builder…', cls:'is-mid', step:3},
+    aguardando_linkbuilder: {txt:'Conclua a etapa do Link Builder', cls:'is-mid', step:3},
     salvando:         {txt:'Salvando a sessão…', cls:'is-mid', step:3},
     conectado:        {txt:'Conectado', cls:'is-on', step:4},
     erro:             {txt:'A conexão precisa de atenção', cls:'is-off', step:0},
@@ -344,6 +457,7 @@
   let decoding = false;
   let pendingFrame = null;
   let composing = false;
+  let qrEstavaVisivel = false;
 
   function getCookie(name) {
     const match = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
@@ -633,7 +747,10 @@
 
   // Fases de login EM CURSO: aqui a `fase` manda, porque o servidor zera
   // auth_valido de propósito enquanto o login não terminou (ml_conexao.status).
-  const FASES_EM_CURSO = new Set(['iniciando','aguardando_login','validando','salvando']);
+  const FASES_EM_CURSO = new Set([
+    'iniciando','aguardando_login','configurar_qr','validando',
+    'validando_linkbuilder','aguardando_linkbuilder','salvando'
+  ]);
 
   function paint(state) {
     let phase = state.fase || 'idle';
@@ -653,8 +770,13 @@
     // Login em andamento é o único momento em que a fase muda sozinha; conectado,
     // 'idle' e 'erro' são estados de repouso e não justificam um poll de 3s.
     const emAndamento = FASES_EM_CURSO.has(phase);
+    const configurandoQr = phase === 'configurar_qr' && Boolean(qrSetupArea);
+    const connecting = [
+      'iniciando','aguardando_login','validando',
+      'validando_linkbuilder','aguardando_linkbuilder','salvando'
+    ].includes(phase);
     agendarPoll(emAndamento ? POLL_ATIVO_MS : POLL_OCIOSO_MS);
-    watchFrames(emAndamento);
+    watchFrames(connecting);
     const visual = FASES[phase] || FASES.idle;
     pill.className = `conn-pill ${visual.cls}`;
     pillTxt.textContent = visual.txt;
@@ -699,7 +821,26 @@
       show(warnBox, true, 'flex');
     } else show(warnBox, false);
 
-    const connecting = ['iniciando','aguardando_login','validando','salvando'].includes(phase);
+    show(qrSetupArea, configurandoQr, 'block');
+    if (configurandoQr) {
+      const desafio = state.desafio || {};
+      const tentativas = Number(desafio.tentativas || 1);
+      qrRepeatNote?.classList.toggle('is-visible', tentativas > 1);
+      const contextos = {
+        login:'Depois da ativação, o login principal será aberto novamente nesta mesma sessão.',
+        linkbuilder:'Depois da ativação, voltaremos direto ao Link Builder para concluir a validação.',
+        relatorios:'Depois da ativação, o portal de relatórios será aberto novamente nesta mesma sessão.',
+      };
+      if (qrContextText) qrContextText.textContent = contextos[desafio.contexto] || contextos.login;
+      if (!qrEstavaVisivel) {
+        qrEstavaVisivel = true;
+        requestAnimationFrame(() => qrSetupArea.focus({preventScroll:true}));
+      }
+    } else {
+      qrEstavaVisivel = false;
+      qrRepeatNote?.classList.remove('is-visible');
+      if (qrActionMsg) qrActionMsg.textContent = '';
+    }
     show(liveArea, connecting, 'grid');
     if (connecting) startLive(); else stopLive();
     show(startArea, phase === 'idle' || phase === 'erro', 'grid');
@@ -707,10 +848,8 @@
     pintarLinkBuilder(lb);
   }
 
-  // Três estados, não dois: verde (portal abriu), amarelo (recusou a última
-  // verificação, mas ainda não é logout — o anti-bot do ML produz isso do IP do
-  // datacenter) e vermelho (pediu login de fato). O mesmo botão "Reconectar" acima
-  // resolve os três, porque é a MESMA conexão — só o SSO é separado.
+  // Quatro estados honestos: só o Chromium recente produz verde. Pendente/vencido
+  // e indisponibilidade externa são amarelos; login real é vermelho.
   function pintarLinkBuilder(lb) {
     const row = document.getElementById('lb-row');
     if (!row) return;
@@ -719,27 +858,38 @@
     const badge = document.getElementById('lb-badge');
     const texto = document.getElementById('lb-badge-txt');
     const resumo = document.getElementById('lb-resumo');
-    const instavel = Boolean(lb.ok && lb.alerta);
-    badge.className = 'badge ' + (!lb.ok ? 'badge-red' : (instavel ? 'badge-yellow' : 'badge-green'));
-    texto.textContent = !lb.ok ? 'Pede login' : (instavel ? 'Instável' : 'Pronto');
-    if (resumo) {
-      resumo.textContent = lb.ok
-        ? (instavel ? 'Pode falhar — reconecte se der erro' : 'Pronto para gerar')
-        : 'Reconecte para voltar a gerar';
-    }
+    const estado = lb.estado || (lb.ok ? 'ready' : 'unknown');
+    const login = estado === 'login_required';
+    const temporario = estado === 'temporarily_unavailable';
+    const pronto = estado === 'ready' && lb.ok;
+    badge.className = 'badge ' + (pronto ? 'badge-green' : (login ? 'badge-red' : 'badge-yellow'));
+    texto.textContent = pronto ? 'Pronto'
+      : (login ? 'Pede login'
+        : (temporario ? 'Indisponível agora'
+          : (estado === 'stale' ? 'Validação vencida' : 'Validação pendente')));
+    if (resumo) resumo.textContent = pronto ? 'Pronto para gerar'
+      : (login ? 'Reconecte para voltar a gerar'
+        : (temporario ? 'Tente novamente em alguns minutos'
+          : 'Será validado no próximo uso'));
     const titulo = document.getElementById('ok-titulo');
     const hint = document.getElementById('ok-hint');
     if (!titulo || !hint) return;
-    if (lb.ok) {
+    if (pronto) {
       titulo.textContent = 'Conexão confirmada';
-      hint.textContent = instavel
-        ? 'A conta está conectada, mas o Link Builder recusou a última verificação. '
-          + 'Se a geração de links falhar, use Reconectar.'
-        : 'Sua sessão foi validada e já pode ser usada para gerar links.';
-    } else {
+      hint.textContent = 'O Chromium confirmou o campo de URL e o botão Gerar do Link Builder.';
+    } else if (login) {
       titulo.textContent = 'Conta conectada, Link Builder recusando';
       hint.textContent = 'O login do site está válido, mas o portal de afiliados pediu '
         + 'login de novo. É a mesma conexão: use Reconectar aqui e a geração de links volta.';
+    } else if (temporario) {
+      titulo.textContent = 'Conta conectada';
+      hint.textContent = 'O Link Builder ficou temporariamente indisponível. '
+        + 'Sua conta não foi invalidada; tente novamente em alguns minutos.';
+    } else {
+      titulo.textContent = 'Conta conectada';
+      hint.textContent = estado === 'stale'
+        ? 'A última validação real venceu e será refeita ao gerar um link.'
+        : 'O Link Builder ainda não foi validado e será conferido no próximo uso.';
     }
   }
   async function poll() {
@@ -778,11 +928,32 @@
     try { paint(await post(`${PREFIX}/salvar/`)); }
     finally { setTimeout(() => { salvarBtn.disabled = false; }, 1200); }
   };
-  cancelarBtn.onclick = async () => {
-    cancelarBtn.disabled = true;
+  async function cancelarFluxo(button) {
+    button.disabled = true;
     try { await post(`${PREFIX}/cancelar/`); }
-    finally { stopLive(); cancelarBtn.disabled = false; poll(); }
-  };
+    finally { stopLive(); button.disabled = false; poll(); }
+  }
+  cancelarBtn.onclick = () => cancelarFluxo(cancelarBtn);
+  if (qrCancelarBtn) qrCancelarBtn.onclick = () => cancelarFluxo(qrCancelarBtn);
+  if (qrRetryBtn) {
+    qrRetryBtn.onclick = async () => {
+      qrRetryBtn.disabled = true;
+      qrActionMsg.textContent = 'Reabrindo o Mercado Livre nesta mesma sessão…';
+      try {
+        paint(await post(`${PREFIX}/qr/retry/`));
+        setTimeout(poll, 600);
+      } catch (error) {
+        // Erros HTTP intencionais já chegam com uma orientação do backend.
+        // Falha de transporte é TypeError nos navegadores e não deve vazar o
+        // texto técnico/inglês "Failed to fetch" para o cliente.
+        qrActionMsg.textContent = error?.name === 'Error' && error.message
+          ? error.message
+          : 'Não foi possível falar com o servidor. Verifique sua conexão e tente novamente.';
+      } finally {
+        setTimeout(() => { qrRetryBtn.disabled = false; }, 1200);
+      }
+    };
+  }
 
   // O watchdog de frame só faz sentido com um stream aberto; ligá-lo sempre acordava
   // a aba 1x/s para não fazer nada.

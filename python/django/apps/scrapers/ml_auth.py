@@ -70,10 +70,14 @@ def storage_state_para(usuario):
     """storage_state do Playwright da organização deste usuário, ou None."""
     from apps.accounts.ml_session_crypto import MLSessionCryptoError
     from apps.accounts.ml_sessions import load_storage_state
+    from apps.accounts.tenant import executar_no_tenant
 
     if usuario is None or not getattr(usuario, "id", None):
         return None
     try:
+        return executar_no_tenant(load_storage_state, usuario)
+    except ValueError:
+        # Compatibilidade para comandos locais executados fora de um job tenant.
         return load_storage_state(usuario)
     except MLSessionCryptoError:
         logger.warning(

@@ -4,6 +4,7 @@ import logging
 from contextlib import contextmanager
 from django.db import close_old_connections
 from playwright.sync_api import sync_playwright
+from apps.accounts.tenant import executar_no_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -95,12 +96,25 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
     usuário — ver scrapers/ml_auth.py), `session_user` (o repositório cifrado
     resolve pela organização dele) ou `auth_path` (só o arquivo legado)."""
     from apps.accounts.ml_session_crypto import MLSessionCryptoError
-    from apps.accounts.ml_sessions import load_storage_state, save_storage_state
+    from apps.accounts.ml_sessions import load_storage_state, renew_storage_state
 
     context_kwargs.setdefault("user_agent", ua_aleatorio())
+    session_organization_id = None
     if storage_state is None and session_user is not None:
         try:
-            storage_state = load_storage_state(session_user)
+            # O SSE manual e os workers longos mantêm apenas o tenant anotado:
+            # toda leitura ORM precisa reinstalar o RLS numa transação curta.
+            storage_state = executar_no_tenant(load_storage_state, session_user)
+        except ValueError:
+            # Comandos/testes podem chamar este context manager fora de um job.
+            # Resolve o perfil antes do Playwright e abre o escopo explicitamente.
+            session_organization_id = getattr(
+                getattr(session_user, "perfil", None), "organization_id", None,
+            )
+            storage_state = executar_no_tenant(
+                load_storage_state, session_user,
+                organization_id=session_organization_id,
+            )
         except MLSessionCryptoError as exc:
             raise BrowserError("Sessão ML cifrada inválida; reconecte a conta.") from exc
     elif storage_state is None and auth_path and os.path.isfile(auth_path):
@@ -161,8 +175,12 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
         if estado_renovado is not None and session_user is not None:
             try:
                 close_old_connections()   # minutos de browser matam o socket ocioso
-                save_storage_state(session_user, estado_renovado)
+                # Renovação não é uma nova autenticação. Preserva o veredito real
+                # do Link Builder mesmo quando a navegação terminou numa tela de
+                # login/challenge.
+                executar_no_tenant(
+                    renew_storage_state, session_user, estado_renovado,
+                    organization_id=session_organization_id,
+                )
             except Exception:
                 logger.exception("Falha ao persistir renovação da sessão ML.")
-
-

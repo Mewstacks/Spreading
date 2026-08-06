@@ -240,11 +240,17 @@ def operations_dashboard(request):
     # causa era parte da confusão que esta tela produzia.
     est_lb = estado_ml_linkbuilder(request.user) if ml_ok else None
     lb_ok = est_lb.conectado if est_lb else True
-    if ml_ok and est_lb and not lb_ok:
+    if ml_ok and est_lb and est_lb.detalhe == "login_required":
         # A falha que antes só aparecia como erro dentro do stream de geração de
         # links, depois de o usuário clicar e esperar.
         alertas.append(("Link Builder pedindo login", est_lb.motivo,
                         "scraper-ml-conexao"))
+    elif ml_ok and est_lb and est_lb.detalhe == "temporarily_unavailable":
+        alertas.append((
+            "Link Builder temporariamente indisponível",
+            est_lb.motivo,
+            "scraper-ml-conexao",
+        ))
     if not ml_ok and not perfil.amazon_conectado():
         # O motivo vem do estado: "sessão expirou" e "nunca conectou" pedem ações
         # diferentes, e o texto fixo dizia a mesma coisa para os dois.
@@ -995,6 +1001,15 @@ def ml_relatorio_conexao_start(request):
 
 
 @require_POST
+def ml_relatorio_conexao_qr_retry(request):
+    """Retoma o portal na mesma thread depois que o titular ativa o QR."""
+    from apps.scrapers import ml_relatorio_conexao
+
+    ok, payload = ml_relatorio_conexao.retentar_apos_configurar_qr(request.user.id)
+    return JsonResponse(payload, status=200 if ok else 409)
+
+
+@require_POST
 def ml_relatorio_conexao_salvar(request):
     from apps.scrapers import ml_relatorio_conexao
     ml_relatorio_conexao.salvar_agora(request.user.id)
@@ -1048,6 +1063,15 @@ def ml_conexao_start(request):
     except (ValueError, UnicodeDecodeError):
         return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
     return JsonResponse(ml_conexao.criar_sessao(request.user, client))
+
+
+@require_POST
+def ml_conexao_qr_retry(request):
+    """Retoma o login na mesma thread depois que o titular ativa o QR."""
+    from apps.scrapers import ml_conexao
+
+    ok, payload = ml_conexao.retentar_apos_configurar_qr(request.user.id)
+    return JsonResponse(payload, status=200 if ok else 409)
 
 
 @require_POST

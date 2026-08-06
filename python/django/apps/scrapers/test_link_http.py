@@ -392,8 +392,25 @@ class AbrirLinkBuilderTests(SimpleTestCase):
 
         def get_by_role(self, *a, **kw):
             class _El:
-                def wait_for(self_inner, *a, **kw):
-                    return None
+                def is_visible(self_inner, *a, **kw):
+                    return True
+
+                def is_enabled(self_inner, *a, **kw):
+                    return True
+            return _El()
+
+        def locator(self, *a, **kw):
+            class _El:
+                first = None
+
+                def __init__(self):
+                    self.first = self
+
+                def is_visible(self_inner, *a, **kw):
+                    return True
+
+                def filter(self_inner, **kw):
+                    return self_inner
             return _El()
 
     def setUp(self):

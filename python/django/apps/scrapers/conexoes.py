@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 # uma ida ao ML. 5min é curto o bastante para a tela não mentir por muito tempo
 # e longo o bastante para o polling de 15s da Saúde não pesar.
 _TTL_ML_S = 300
+# O verde do Link Builder envelhece rápido: o SSO do portal pode pedir login
+# independentemente do site principal. Só um Chromium real renova este prazo.
+_TTL_LINKBUILDER_REAL_S = 15 * 60
 
 # Cache de processo (L1) na frente do veredito do banco (L2). Existe só para o
 # poll de 3s da tela de conexão não virar uma query por disparo por aba; a fonte
@@ -339,17 +342,11 @@ _ALERTA_LB_INSTAVEL = ("O Link Builder recusou a última verificação — se a 
 
 
 def estado_ml_linkbuilder(user=None, usar_cache: bool = True) -> Estado:
-    """A sessão salva serve para GERAR LINKS (portal de afiliados)?
+    """Prontidão autoritativa do Link Builder, observada pelo Chromium real.
 
-    Mesma arquitetura de três camadas de `estado_ml` (cache de processo → veredito
-    no banco → sonda HTTP) sobre as colunas `lb_*`. Existe porque `estado_ml` mede
-    `myaccount.mercadolivre.com.br` e o Link Builder mora atrás de outro SSO: sem
-    esta função, toda tela dizia "conectado" e só o clique em "Gerar links de
-    afiliado" descobria o contrário.
-
-    Nunca reporta desconectado quando não existe sessão nenhuma — nesse caso o
-    problema é o anterior (`estado_ml`), e duplicar o aviso confunde mais do que
-    ajuda.
+    A sonda HTTP permanece disponível em ``sondar_portal_afiliados_ml`` apenas
+    para diagnóstico. Um HTTP 200 é o shell da SPA e pode redirecionar para login
+    quando o JavaScript/SSO inicia; por isso ele nunca mais promove o estado.
     """
     from apps.accounts.models import organization_for_user
     from apps.accounts import ml_sessions
@@ -367,21 +364,50 @@ def estado_ml_linkbuilder(user=None, usar_cache: bool = True) -> Estado:
         if cacheado is not None:
             return Estado(**{**cacheado, "fonte": "cache"})
 
-    registro = ml_sessions.linkbuilder_snapshot(organization)
+    registro = ml_sessions.linkbuilder_readiness_snapshot(organization)
     if registro is None:
         return Estado(False, "Link Builder", "banco",
                       "Nenhuma sessão do Mercado Livre — conecte sua conta.",
                       "sem_sessao", agora)
 
-    sondado_em = registro.get("last_probe_at")
-    fresco = (
-        sondado_em is not None
-        and (agora - sondado_em).total_seconds() < _TTL_ML_S
-    )
-    if usar_cache and fresco:
-        return _cachear(chave, _estado_lb_do_registro(registro, "banco", agora))
-
-    return _cachear(chave, _sondar_e_registrar_lb(user, organization, agora))
+    estado = registro.get("lb_readiness") or "unknown"
+    verificado_em = registro.get("lb_readiness_checked_at")
+    motivo_tecnico = registro.get("lb_readiness_reason") or ""
+    if estado == "ready":
+        fresco = bool(
+            verificado_em
+            and (agora - verificado_em).total_seconds() <= _TTL_LINKBUILDER_REAL_S
+        )
+        if fresco:
+            resposta = Estado(
+                True, "Link Builder", "chromium", "", "ready", verificado_em,
+            )
+        else:
+            resposta = Estado(
+                False, "Link Builder", "banco",
+                "Validação do Link Builder venceu — será refeita ao gerar.",
+                "stale", verificado_em,
+            )
+    elif estado == "login_required":
+        resposta = Estado(
+            False, "Link Builder", "chromium",
+            "O Link Builder pediu login. Reconecte o Mercado Livre.",
+            "login_required", verificado_em,
+        )
+    elif estado == "temporarily_unavailable":
+        resposta = Estado(
+            False, "Link Builder", "chromium",
+            "Link Builder temporariamente indisponível — tente novamente em alguns minutos.",
+            "temporarily_unavailable", verificado_em,
+            alerta=motivo_tecnico,
+        )
+    else:
+        resposta = Estado(
+            False, "Link Builder", "banco",
+            "Validação pendente — o Link Builder será conferido ao gerar.",
+            "unknown", verificado_em,
+        )
+    return _cachear(chave, resposta)
 
 
 def _estado_lb_do_registro(registro: dict, fonte: str, agora) -> Estado:
@@ -445,8 +471,14 @@ def invalidar_ml(user=None) -> None:
 
     organization = organization_for_user(user) if user is not None else None
     if organization is not None:
-        cache.delete(_chave_ml_org(organization))
-        cache.delete(_chave_ml_org(organization, escopo="linkbuilder"))
+        invalidar_ml_organization(organization.pk)
+
+
+def invalidar_ml_organization(organization_id) -> None:
+    """Invalida sem ORM; seguro inclusive dentro do loop sync do Playwright."""
+    if organization_id:
+        cache.delete(f"ml_sessao:org:{organization_id}:site")
+        cache.delete(f"ml_sessao:org:{organization_id}:linkbuilder")
 
 
 def estado_amazon_relatorios(user=None) -> Estado:
