@@ -12,6 +12,16 @@ logger = logging.getLogger(__name__)
 class MercadoLivre(Marketplace):
     slug = "mercadolivre"
 
+    def scrape_para_usuario(self, usuario, termos=None) -> int:
+        """Feed público de ofertas do ML.
+
+        O catálogo do ML é pool COMPARTILHADO (owner=None), então a coleta é a mesma
+        para qualquer usuário — `usuario` serve só para o reporter de progresso.
+        """
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import mapear_ofertas
+
+        return mapear_ofertas(max_paginas=40, usuario=usuario) or 0
+
     def scrape_all(self, termos=None) -> None:
         from apps.scrapers.scraper_mercadolivre.ofertas_scraper import (
             mapear_ofertas, buscar_por_termo,

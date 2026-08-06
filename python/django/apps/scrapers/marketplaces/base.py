@@ -22,6 +22,21 @@ class Marketplace(ABC):
         Cada loja decide internamente quantas fontes/páginas usar.
         """
 
+    def scrape_para_usuario(self, usuario, termos=None) -> int:
+        """Raspa as ofertas desta loja para UM usuário. Devolve quantos itens entraram.
+
+        Existe separado de `scrape_all` por causa de quem dispara: `scrape_all` é do
+        worker de fundo e percorre todos os tenants, o que uma raspagem pedida por
+        uma pessoa na tela não pode fazer. Aqui a coleta é sempre no escopo de quem
+        clicou.
+
+        Default 0 = "esta loja não tem coleta por usuário" (Awin vive de feed). Quem
+        não puder consultar agora levanta MarketplaceIndisponivel com um motivo
+        legível: quem clicou precisa saber a diferença entre "não achei oferta" e
+        "sua conta não está conectada".
+        """
+        return 0
+
     @abstractmethod
     def build_affiliate_link(self, produto, usuario=None) -> dict | None:
         """

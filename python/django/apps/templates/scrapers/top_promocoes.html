@@ -34,6 +34,8 @@
   .links-card .btn-ghost { border-color: color-mix(in srgb, var(--accent) 32%, transparent); }
   .links-card .modal-log:empty { display: none; }
   .links-card .modal-log { margin: 0; }
+  .links-card-nota { margin: 0; font-size: 11.5px; line-height: 1.45;
+    color: color-mix(in srgb, var(--text) 62%, transparent); }
 
   /* ── Ação "Gerar links de afiliado" (sempre visível, sem dropdown) ── */
   .links-acao { display: inline-flex; align-items: center; gap: .4rem; }
@@ -315,6 +317,16 @@
           {% endif %}
           {% include "scrapers/_gerar_links.html" %}
         </div>
+        {% comment %}
+        A raspagem já gera os links no mesmo fluxo (manual_scraping._executar_ofertas).
+        Dizer isso aqui é o que impede a leitura de que ainda faltam duas ações
+        separadas — foi essa dúvida que a cliente trouxe. O botão continua existindo
+        para adiantar a fila ou refazer só esta etapa quando ela falha sozinha.
+        {% endcomment %}
+        <p class="links-card-nota">
+          A raspagem de promoções já gera estes links sozinha. Use o botão só para
+          adiantar a fila ou refazer esta etapa.
+        </p>
         <div id="links-log" class="modal-log"></div>
       </div>
     {% endif %}

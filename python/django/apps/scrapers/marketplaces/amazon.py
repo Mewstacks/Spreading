@@ -43,6 +43,37 @@ class Amazon(Marketplace):
         # Cupons públicos, preparo e links são mantidos pelo pipeline central de
         # cupons, independente do toggle desta raspagem geral.
 
+    def scrape_para_usuario(self, usuario, termos=None) -> int:
+        """Coleta a Amazon com a conta Creators de UM usuário.
+
+        A Amazon é privada por usuário (Produto.owner = user), então este é o único
+        caminho correto para uma raspagem pedida na tela: `scrape_all` percorreria
+        as contas de todos os tenants.
+        """
+        from django.utils import timezone
+        from apps.scrapers.afiliado import tag_amazon
+        from apps.scrapers.models import Produto
+        from apps.scrapers.scraper_amazon.creators_api import creds_de_usuario
+
+        if not tag_amazon(usuario):
+            raise MarketplaceIndisponivel(
+                "sua tag de afiliado da Amazon não está cadastrada (tela Conta)")
+        if not creds_de_usuario(usuario).completo():
+            raise MarketplaceIndisponivel(
+                "sua conta Amazon não está conectada (cadastre as credenciais na "
+                "tela Conta)")
+
+        inicio = timezone.now()
+        if not self._scrape_usuario(usuario):
+            from apps.accounts.models import Perfil
+            perfil = Perfil.objects.filter(user=usuario).first()
+            raise MarketplaceIndisponivel(
+                (getattr(perfil, "amazon_ultimo_erro", "") or "").strip()
+                or "a Amazon recusou a coleta agora")
+        return Produto.objects.filter(
+            marketplace="amazon", owner=usuario, ultima_observacao__gte=inicio,
+        ).count()
+
     def _scrape_usuario(self, usuario) -> bool:
         from apps.scrapers.models import ConfiguracaoEnvio
         from apps.scrapers.scraper_amazon import ofertas_scraper as az
