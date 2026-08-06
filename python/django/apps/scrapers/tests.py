@@ -1762,12 +1762,14 @@ class ConfiguracaoValidationTests(TestCase):
             for message in get_messages(response.wsgi_request)
         ))
 
-    def test_rejects_too_many_subniches_without_server_error(self):
-        """Marcar o macro-nicho inteiro estourava o CharField e devolvia 500.
+    def test_accepts_whole_macro_niche_in_a_single_rule(self):
+        """Marcar o macro-nicho inteiro numa regra só tem de funcionar.
 
-        O caminho real: os sub-nichos de Eletrodomésticos somam 395 caracteres, e o
-        insert morria com "value too long for type character varying(255)" antes de
-        qualquer validação — o afiliado ficava sem regra e sem explicação.
+        Os sub-nichos de Eletrodomésticos somam 395 caracteres. Com o CharField(255)
+        isso primeiro derrubava a tela com 500 ("value too long for type character
+        varying(255)") e depois passou a ser recusado com uma mensagem — mas as duas
+        saídas obrigavam o afiliado a criar uma regra por sub-nicho para o MESMO
+        grupo, que é justamente o que ele pediu para não precisar fazer.
         """
         from apps.scrapers.scraper_mercadolivre.ofertas_scraper import SUBNICHOS
 
@@ -1784,9 +1786,48 @@ class ConfiguracaoValidationTests(TestCase):
         })
 
         self.assertRedirects(response, self.url)
+        cfg = self.user.configuracoes.get()
+        self.assertEqual(cfg.termo_busca, ", ".join(termos))
+
+    def test_accepts_every_subniche_of_every_macro_niche(self):
+        """O teto de sanidade não pode alcançar o uso legítimo mais extremo."""
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import SUBNICHOS
+
+        termos = [t for itens in SUBNICHOS.values() for _, t in itens]
+
+        response = self.client.post(self.url, {
+            "canal": "whatsapp",
+            "grupo_id": "123@g.us",
+            "termo_busca": termos,
+            "intervalo_minutos": "60",
+            "min_desconto_percent": "15",
+        })
+
+        self.assertRedirects(response, self.url)
+        cfg = self.user.configuracoes.get()
+        # Cada sub-nicho já é uma lista de sinônimos ("aspirador robo, robot
+        # vacuum, ..."), então os 70 sub-nichos viram bem mais termos que isso —
+        # e é a contagem final que o filtro de envio percorre em OU.
+        self.assertEqual(cfg.termo_busca, ", ".join(termos))
+        individuais = [t.strip() for t in cfg.termo_busca.split(",") if t.strip()]
+        self.assertGreater(len(individuais), len(termos))
+
+    def test_rejects_forged_subniche_list(self):
+        """POST forjado ainda é recusado — e sem 500."""
+        from apps.scrapers.views import LIMITE_TERMOS_POR_REGRA
+
+        response = self.client.post(self.url, {
+            "canal": "whatsapp",
+            "grupo_id": "123@g.us",
+            "termo_busca": ["x" * (LIMITE_TERMOS_POR_REGRA + 1)],
+            "intervalo_minutos": "60",
+            "min_desconto_percent": "15",
+        })
+
+        self.assertRedirects(response, self.url)
         self.assertFalse(self.user.configuracoes.exists())
         self.assertTrue(any(
-            "Sub-nichos demais" in str(message)
+            "longa demais" in str(message)
             for message in get_messages(response.wsgi_request)
         ))
 

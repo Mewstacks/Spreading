@@ -835,7 +835,15 @@ class ConfiguracaoEnvio(models.Model):
     macro_categoria = models.CharField(max_length=100, blank=True, default="")
     # Sub-nicho opcional: só envia itens cujo nome casa com algum destes termos
     # (separados por vírgula). Ex: "aspirador robo, robot vacuum, robô aspirador".
-    termo_busca = models.CharField(max_length=255, blank=True, default="")
+    #
+    # TextField e não CharField(255): a semântica sempre foi "vários sub-nichos em
+    # OU" — todo consumidor faz split(",") (content_ranking.py, o scraper da Amazon
+    # e a busca por termo) — mas o teto de 255 obrigava a criar uma regra por
+    # sub-nicho para o MESMO
+    # grupo. Um macro-nicho grande sozinho já passava do limite: Eletrodomésticos
+    # soma 395 caracteres de termos. Não há índice nem unicidade sobre esta coluna,
+    # então soltar o tamanho não custa nada no banco.
+    termo_busca = models.TextField(blank=True, default="")
     # Canal de envio: 'whatsapp' (grupo @g.us) | 'telegram' (chat/channel id).
     canal = models.CharField(max_length=20, default="whatsapp")
     # Filtro opcional de marketplace ('' = qualquer). Ex: só 'mercadolivre'.

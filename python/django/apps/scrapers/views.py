@@ -1233,6 +1233,13 @@ def telegram_desconectar(request):
     return JsonResponse({"ok": True})
 
 
+# Sanidade contra POST forjado, não limite de produto: marcar TODOS os 70
+# sub-nichos dos 17 macro-nichos de SUBNICHOS soma 2129 caracteres, e o maior
+# macro-nicho sozinho (Eletrodomésticos) soma 395. A folga é de propósito — a
+# taxonomia cresce, e o usuário não pode voltar a esbarrar num teto invisível.
+LIMITE_TERMOS_POR_REGRA = 8000
+
+
 def configuracoes(request):
     """Painel do afiliado: cria/edita/remove regras de divulgação (nicho→grupo→intervalo)."""
     if request.method == "POST":
@@ -1261,17 +1268,17 @@ def configuracoes(request):
             # Sub-nichos: multi-select -> junta as strings de termos (OR no filtro)
             termos = [t.strip() for t in request.POST.getlist("termo_busca") if t.strip()]
             termo_busca = ", ".join(termos)
-            # Um macro-nicho grande (Eletrodomésticos soma 395 caracteres de termos)
-            # estourava o CharField e o insert derrubava a tela com 500. Recusar é
-            # melhor do que truncar: cortar no meio deixaria um termo pela metade
-            # ("cafete"), que não casa com produto nenhum e some sem avisar.
-            limite_termos = ConfiguracaoEnvio._meta.get_field("termo_busca").max_length
-            if len(termo_busca) > limite_termos:
+            # `termo_busca` é TextField: escolher muitos sub-nichos numa regra só é
+            # o uso esperado, não um erro. O teto abaixo não é o da coluna — é só
+            # sanidade contra POST forjado, já que a tela monta a lista a partir de
+            # uma taxonomia fixa. Fica largo o bastante para marcar todos os
+            # sub-nichos de todos os macro-nichos sem esbarrar nele.
+            if len(termo_busca) > LIMITE_TERMOS_POR_REGRA:
                 messages.error(
                     request,
-                    f"Sub-nichos demais para uma regra só ({len(termo_busca)} de "
-                    f"{limite_termos} caracteres). Marque menos ou divida em duas "
-                    "regras para o mesmo grupo.")
+                    "A lista de sub-nichos desta regra é longa demais "
+                    f"({len(termo_busca)} caracteres). Divida em duas regras para "
+                    "o mesmo grupo.")
                 return redirect("scraper-configuracoes")
             canal = (request.POST.get("canal") or "whatsapp").strip()
             if canal not in {"whatsapp", "telegram"}:
