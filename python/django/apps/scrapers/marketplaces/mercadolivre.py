@@ -28,6 +28,7 @@ class MercadoLivre(Marketplace):
         run = ExecucaoIngestao.objects.create(fonte=fonte)
         fonte.ultima_tentativa = timezone.now()
         fonte.save(update_fields=["ultima_tentativa"])
+        parciais = []
         try:
             ofertas = mapear_ofertas(max_paginas=40)
             cupons_codigo = mapear_cupons_codigo()
@@ -42,6 +43,7 @@ class MercadoLivre(Marketplace):
             try:
                 cupons_campanha = mapear_cupons()
             except Exception as e:
+                parciais.append("cupons de campanha")
                 logger.warning("Raspagem de cupons de campanha ML falhou: %s", e)
                 log_event("scraper", "cupons_campanha_erro",
                           f"Não foi possível raspar os cupons de campanha do ML: {e}",
@@ -53,6 +55,7 @@ class MercadoLivre(Marketplace):
             try:
                 projetar_catalogo_cupons()
             except Exception as e:
+                parciais.append("projeção de cupons")
                 logger.warning("Projeção do catálogo de cupons ML falhou: %s", e)
                 log_event("scraper", "cupons_projecao_erro",
                           "Não foi possível publicar os cupons no catálogo.",
@@ -65,6 +68,7 @@ class MercadoLivre(Marketplace):
                 try:
                     buscar_por_termo(t)
                 except Exception as e:
+                    parciais.append("busca por termo")
                     logger.warning("Busca ML '%s' falhou: %s", t, e)
         except Exception:
             now = timezone.now()
@@ -82,10 +86,23 @@ class MercadoLivre(Marketplace):
         run.finalizada_em = now
         run.save()
         fonte.ultimo_total = total
-        fonte.status = "ok" if total else "degraded"
-        fonte.erro_publico = "" if total else "Coleta vazia; catálogo anterior preservado."
-        if total:
+        coleta_parcial = bool(parciais or not ofertas or not cupons)
+        fonte.status = "degraded" if coleta_parcial else "ok"
+        if not total:
+            fonte.erro_publico = "Coleta vazia; catálogo anterior preservado."
+        elif coleta_parcial:
+            componentes = ", ".join(sorted(set(parciais))) or (
+                "ofertas" if not ofertas else "cupons"
+            )
+            fonte.erro_publico = (
+                f"Coleta parcial ({componentes}); dados anteriores preservados."
+            )[:255]
+        else:
+            fonte.erro_publico = ""
+        if total and not coleta_parcial:
             fonte.ultimo_sucesso, fonte.falhas_consecutivas = now, 0
+        elif coleta_parcial:
+            fonte.falhas_consecutivas += 1
         fonte.save()
         logger.info(
             "Raspagem ML: %s oferta(s), %s produto(s) na vitrine de cupons, "
@@ -94,11 +111,13 @@ class MercadoLivre(Marketplace):
         # Trazer 800 ofertas e ZERO cupons era reportado como sucesso: o único sinal
         # era o total zerado, e as ofertas sozinhas o mantinham positivo. Foi assim
         # que os cupons puderam sumir sem ninguém notar.
-        if ofertas and not cupons:
+        if coleta_parcial:
             log_event("scraper", "cupons_vazios",
-                      f"A raspagem trouxe {ofertas} oferta(s) e nenhum cupom.",
+                      f"A raspagem do ML terminou parcialmente: {fonte.erro_publico}",
                       level="warning", contexto={"marketplace": "mercadolivre",
-                                                 "ofertas": ofertas})
+                                                 "ofertas": ofertas,
+                                                 "cupons": cupons,
+                                                 "componentes": parciais})
 
     def build_affiliate_link(self, produto, usuario=None):
         from apps.scrapers.scraper_mercadolivre.link import gerar_link_afiliado_para_produto

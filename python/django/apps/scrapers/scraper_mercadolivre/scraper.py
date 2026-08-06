@@ -9,7 +9,8 @@ import requests
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada, ua_aleatorio
 from apps.scrapers.coupon_rules import (
-    derivar_categoria_cupom, extrair_escopo_produtos, rotulo_anunciante)
+    derivar_categoria_cupom, extrair_escopo_produtos, rotulo_anunciante,
+    tem_restricao_publico)
 from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
 from apps.scrapers.models import Cupom, Produto, CupomNormalizado, FonteIngestao
 from apps.scrapers.progresso import emitir_progresso, emitir_fase
@@ -20,6 +21,44 @@ logger = logging.getLogger(__name__)
 
 
 _SCRIPT_RE = re.compile(r"<script[^>]*>(.*?)</script>", re.S | re.I)
+_MESES_PT = {
+    "janeiro": 1, "fevereiro": 2, "marco": 3, "março": 3,
+    "abril": 4, "maio": 5, "junho": 6, "julho": 7, "agosto": 8,
+    "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12,
+}
+_VENCE_RE = re.compile(r"vence\s+(\d{1,2})\s+de\s+([a-zç]+)", re.I)
+
+
+def _valor_ml(fractional, decimal=None):
+    """Converte o par de acessibilidade do ML para reais sem perder milhar/centavos."""
+    inteiro = str(fractional or "").strip().replace(".", "").replace(" ", "")
+    if not inteiro.isdigit():
+        return None
+    centavos = str(decimal if decimal is not None else "").strip()
+    centavos = centavos if centavos.isdigit() else "0"
+    return float(inteiro) + int(centavos.ljust(2, "0")[:2]) / 100.0
+
+
+def _validade_ml(texto, agora=None):
+    """Converte apenas datas como ``Vence 19 de maio``; urgência não vira validade."""
+    match = _VENCE_RE.search(str(texto or ""))
+    if not match:
+        return None
+    mes = _MESES_PT.get(match.group(2).lower())
+    if not mes:
+        return None
+    agora = agora or timezone.now()
+    for ano in (agora.year, agora.year + 1):
+        try:
+            fim = agora.replace(
+                year=ano, month=mes, day=int(match.group(1)),
+                hour=23, minute=59, second=59, microsecond=0,
+            )
+        except ValueError:
+            return None
+        if fim >= agora:
+            return fim
+    return None
 
 
 def _parse_payload_cupons(html_text):
@@ -139,7 +178,25 @@ def _persistir_campanhas_cupons(
     rows, *, varredura_completa, motivo_parada="", pagina_final=0, tentativas=3,
 ):
     """Persiste uma varredura já concluída, reabrindo DB/RLS sem repetir a rede."""
-    ids_ativos = {row["campaignId"] for row in rows}
+    # A paginação de /cupons/filter repete campanhas entre páginas (o catálogo se
+    # move enquanto a varredura anda). Duas linhas com o mesmo `campanha_id` no
+    # MESMO `bulk_create(update_conflicts=True)` fazem o PostgreSQL abortar com
+    # "ON CONFLICT DO UPDATE command cannot affect row a second time" — e era a
+    # varredura INTEIRA que se perdia, todo ciclo, deixando a tabela Cupom velha.
+    # Sem ela, produto com campanha não gera link de afiliado e fica pendente.
+    # A última ocorrência vence: é a leitura mais recente da mesma campanha.
+    if rows:
+        unicas = {}
+        for row in rows:
+            unicas[row["campaignId"]] = row
+        if len(unicas) != len(rows):
+            logger.info("Cupons de campanha: %s duplicata(s) na varredura descartada(s)",
+                        len(rows) - len(unicas))
+        rows = list(unicas.values())
+    ids_vistos = {row["campaignId"] for row in rows}
+    ids_ativos = {
+        row["campaignId"] for row in rows if row.get("estado", "ativo") == "ativo"
+    }
     ultimo_erro = None
     for tentativa in range(1, tentativas + 1):
         connections.close_all()
@@ -153,11 +210,14 @@ def _persistir_campanhas_cupons(
                         tipo_desconto=(c.get("desconto") or {}).get("tipo", ""),
                         valor_desconto=(c.get("desconto") or {}).get("valor", 0.0),
                         valor_minimo=c.get("valor_minimo") or 0.0,
+                        desconto_maximo=c.get("desconto_maximo"),
                         link_original=c.get("link_produtos") or "",
                         codigo=c.get("codigo") or "",
                         fonte="mercadolivre-cupom",
+                        validade=c.get("validade"),
+                        restrito=bool(c.get("restrito")),
                         ultima_verificacao=agora,
-                        estado="ativo",
+                        estado=c.get("estado") or "ativo",
                     )
                     for c in rows
                 ]
@@ -167,13 +227,14 @@ def _persistir_campanhas_cupons(
                     unique_fields=["campanha_id"],
                     update_fields=[
                         "titulo", "tipo_desconto", "valor_desconto", "valor_minimo",
-                        "link_original", "codigo", "fonte", "ultima_verificacao", "estado",
+                        "desconto_maximo", "link_original", "codigo", "fonte",
+                        "validade", "restrito", "ultima_verificacao", "estado",
                     ],
                 )
                 expirados = prods_expirados = 0
                 if varredura_completa:
                     expirados = Cupom.objects.exclude(
-                        campanha_id__in=ids_ativos,
+                        campanha_id__in=ids_vistos,
                     ).update(estado="expirado", ultima_verificacao=agora)
                     prods_expirados = (
                         Produto.objects
@@ -384,31 +445,56 @@ def mapear_cupons(n=1, faixa=None, usuario=None):
                 if link_final:
                     link_final = link_final.replace("\u002F", "/").replace("\\/", "/")
 
-                desconto = None
-                if titulo_completo:
-                    match_percent = re.search(r'(\d+(?:[.,]\d+)?)\s*%', titulo_completo)
-                    match_fixed = re.search(r'R\$\s*(\d+(?:[.,]\d+)?)', titulo_completo, re.IGNORECASE)
+                # O valor estruturado inclui centavos; o texto determina se é
+                # percentual ou fixo e fica como fallback para payloads antigos.
+                texto_titulo = titulo_final if isinstance(titulo_final, str) else ""
+                tipo_desconto = ""
+                if re.search(r"\d\s*%", texto_titulo or titulo_completo or ""):
+                    tipo_desconto = "porcentagem"
+                elif re.search(r"R\$", texto_titulo or titulo_completo or "", re.I):
+                    tipo_desconto = "fixo"
+
+                acess_titulo = (
+                    (titulo_bruto or {}).get("accessibility", {}).get("title", {})
+                    if isinstance(titulo_bruto, dict) else {}
+                )
+                valor_desconto = _valor_ml(
+                    acess_titulo.get("fractionalAmount"),
+                    acess_titulo.get("decimalAmount"),
+                )
+                if valor_desconto is None and titulo_completo:
+                    match_percent = re.search(
+                        r"(\d+(?:[.,]\d+)?)\s*%", titulo_completo,
+                    )
+                    match_fixed = re.search(
+                        r"R\$\s*(\d[\d.]*(?:,\d+)?)", titulo_completo, re.I,
+                    )
                     if match_percent:
-                        desconto = {
-                            "valor": float(match_percent.group(1).replace(',', '.')),
-                            "tipo": "porcentagem"
-                        }
+                        valor_desconto = float(match_percent.group(1).replace(",", "."))
+                        tipo_desconto = "porcentagem"
                     elif match_fixed:
-                        desconto = {
-                            "valor": float(match_fixed.group(1).replace(',', '.')),
-                            "tipo": "fixo"
-                        }
+                        from apps.scrapers.coupon_rules import numero_br
+                        valor_desconto = numero_br(match_fixed.group(1))
+                        tipo_desconto = "fixo"
+
+                desconto = (
+                    {"valor": valor_desconto, "tipo": tipo_desconto}
+                    if valor_desconto is not None and tipo_desconto else None
+                )
 
                 codigo = cupom.get("code") or cupom.get("inputCode") or ""
 
-                # Extrai valor mínimo de compra (ex: Compra mínima R$399 → 399.0)
-                valor_minimo = 0.0
-                frac_minimo = (cupom.get("amount") or {}).get("accessibility", {}).get("minAmount", {}).get("fractionalAmount", "")
-                if frac_minimo:
-                    try:
-                        valor_minimo = float(str(frac_minimo).replace(",", "."))
-                    except ValueError:
-                        pass
+                acess_valores = (cupom.get("amount") or {}).get("accessibility", {})
+                minimo = acess_valores.get("minAmount", {})
+                teto = acess_valores.get("capAmount", {})
+                valor_minimo = _valor_ml(
+                    minimo.get("fractionalAmount"), minimo.get("decimalAmount"),
+                ) or 0.0
+                desconto_maximo = _valor_ml(
+                    teto.get("fractionalAmount"), teto.get("decimalAmount"),
+                )
+                status = str((cupom.get("status") or {}).get("id") or "").upper()
+                validade = _validade_ml((cupom.get("expirationDate") or {}).get("text"))
 
                 cupom_limpo = {
                     "campaignId": camp_id,
@@ -417,6 +503,12 @@ def mapear_cupons(n=1, faixa=None, usuario=None):
                     "link_produtos": link_final,
                     "codigo": codigo,
                     "valor_minimo": valor_minimo,
+                    "desconto_maximo": desconto_maximo,
+                    # Campo ausente continua ativo: só um status explícito pode
+                    # desativar em massa se o marketplace mudar o schema.
+                    "estado": "inativo" if status and status != "ACTIVE" else "ativo",
+                    "validade": validade,
+                    "restrito": tem_restricao_publico(titulo_completo),
                 }
 
                 todos_os_cupons_limpos.append(cupom_limpo)
@@ -529,7 +621,7 @@ def projetar_catalogo_cupons(faixa=None):
                         else c.tipo_desconto),
                   "valor_desconto": c.valor_desconto,
                   "valor_minimo": c.valor_minimo,
-                  "desconto_maximo": None,
+                  "desconto_maximo": c.desconto_maximo,
                   "modo_resgate": "ativacao",
                   "escopo": escopo_produtos,
                   "container_url": "",
@@ -563,6 +655,7 @@ def projetar_catalogo_cupons(faixa=None):
                     categoria_fallback=dominante_por_campanha.get(c.campanha_id, "")),
                 "link": c.link_original or "https://www.mercadolivre.com.br/cupons",
                 "validade": c.validade,
+                "restrito": c.restrito,
                 "confianca": "media",
                 "estado": "ativo",
                 "regras": regras,
@@ -609,12 +702,17 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
 
     pagina_atual = 1
 
+    falha_extracao = False
     while pagina_atual <= max_paginas:
         try:
             page.wait_for_selector(".ui-search-layout", timeout=15000)
             page.wait_for_timeout(2000)
         except Exception:
-            logger.debug("Pagina %s sem produtos encontrados ou demorou demais", pagina_atual)
+            logger.warning(
+                "Página %s do cupom não confirmou o layout; catálogo anterior preservado",
+                pagina_atual,
+            )
+            falha_extracao = True
             break
 
         categorias_por_id = {}
@@ -811,6 +909,9 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
         if not navegou:
             break
 
+    if falha_extracao:
+        return None
+
     cupom_atualizado = cupom.copy()
     cupom_atualizado["produtos_aplicaveis"] = produtos_raspados
     logger.debug("%s produtos coletados para o cupom %s", len(produtos_raspados), cupom.get("campaignId", ""))
@@ -881,7 +982,9 @@ def main(usuario=None):
 
     # Cupons que já têm produtos scraped — podem ser pulados
     ja_feitos = set(
-        Produto.objects.values_list("campanha_id", flat=True).distinct()
+        Produto.objects.filter(
+            marketplace="mercadolivre", origem="cupom", estado="ativo",
+        ).exclude(campanha_id="").values_list("campanha_id", flat=True).distinct()
     )
 
     cupons_pendentes = []

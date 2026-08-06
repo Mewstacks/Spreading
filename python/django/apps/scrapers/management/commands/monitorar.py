@@ -109,8 +109,20 @@ class Command(BaseCommand):
         from apps.scrapers.incidentes_saude import (
             fechar_conexoes_restabelecidas, reconciliar_pendentes,
         )
+        from apps.scrapers.maintenance import expire_stale
 
         r = verificar_e_notificar()
+        # A expiração não pode depender do scraper estar ligado ou de uma coleta
+        # ter terminado com sucesso. Se a fonte parar, é justamente quando o
+        # catálogo antigo precisa deixar de ser publicável.
+        expirados = expire_stale()
+        r["produtos_expirados"] = expirados["products"]
+        r["cupons_expirados"] = expirados["coupons"]
+        if expirados["products"] or expirados["coupons"]:
+            logger.info(
+                "Validade do catálogo: %s produto(s) e %s cupom(ns) expirado(s)",
+                expirados["products"], expirados["coupons"],
+            )
         r["reconciliados"] = reconciliar_pendentes()
         # Depois de reconciliar: incidente de conexão órfão (aberto por um watchdog
         # que morreu antes de registrar a queda no Perfil) não tem transição futura

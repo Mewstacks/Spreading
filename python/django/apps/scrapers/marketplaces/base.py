@@ -2,6 +2,15 @@
 from abc import ABC, abstractmethod
 
 
+class MarketplaceIndisponivel(Exception):
+    """A loja não pôde ser consultada, e o motivo é explicável ao usuário.
+
+    Distingue "esta loja não tem o que você procura" (0 itens, sucesso) de "esta
+    loja nem foi consultada" (conta desconectada, sem elegibilidade, fora do ar).
+    A mensagem é escrita para aparecer na tela, então não carrega stack nem jargão.
+    """
+
+
 class Marketplace(ABC):
     slug: str = ""
 

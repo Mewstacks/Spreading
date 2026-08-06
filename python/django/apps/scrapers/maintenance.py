@@ -1,8 +1,52 @@
 from datetime import timedelta
+from django.db.models import Q
 from django.utils import timezone
 
 
-def expire_stale(max_age_hours=48):
+PRODUCT_MAX_AGE_HOURS = 48
+COUPON_MAX_AGE_HOURS = 48
+
+
+def produtos_frescos_q(*, agora=None, max_age_hours=PRODUCT_MAX_AGE_HOURS,
+                       prefix=""):
+    """Predicado de leitura que não depende da faxina ter rodado.
+
+    `expire_stale` materializa o estado para diagnóstico, mas telas e envios não
+    podem voltar a oferecer preço velho se o worker de coleta estiver desligado.
+    """
+    agora = agora or timezone.now()
+    cutoff = agora - timedelta(hours=max_age_hours)
+    return (
+        Q(**{f"{prefix}ultima_observacao__gte": cutoff})
+        & (
+            Q(**{f"{prefix}valido_ate__isnull": True})
+            | Q(**{f"{prefix}valido_ate__gte": agora})
+        )
+    )
+
+
+def cupons_frescos_q(*, agora=None, max_age_hours=COUPON_MAX_AGE_HOURS,
+                     prefix=""):
+    """Cupom com validade explícita vale até ela; sem validade exige recência.
+
+    Cupons privados são exceção: foram cadastrados pelo usuário e permanecem
+    ativos até ele desativá-los ou informar uma validade.
+    """
+    agora = agora or timezone.now()
+    cutoff = agora - timedelta(hours=max_age_hours)
+    return (
+        Q(**{f"{prefix}validade__gte": agora})
+        | (
+            Q(**{f"{prefix}validade__isnull": True})
+            & (
+                Q(**{f"{prefix}fonte__slug": "manual-private"})
+                | Q(**{f"{prefix}ultima_observacao__gte": cutoff})
+            )
+        )
+    )
+
+
+def expire_stale(max_age_hours=PRODUCT_MAX_AGE_HOURS):
     """Expiração gradual; não remove linhas nem histórico."""
     from apps.scrapers.models import Produto, CupomNormalizado, ProdutoCupom
     now = timezone.now()
@@ -10,8 +54,12 @@ def expire_stale(max_age_hours=48):
     stale_products = Produto.objects.filter(
         ultima_observacao__lt=cutoff, estado="ativo"
     ).update(estado="stale", falha_verificacao="Fonte sem confirmar a oferta há 48h")
-    expired_coupons = CupomNormalizado.objects.filter(
-        validade__lt=now, estado="ativo"
+    expired_coupons = CupomNormalizado.objects.filter(estado="ativo").filter(
+        Q(validade__lt=now)
+        | (
+            Q(validade__isnull=True, ultima_observacao__lt=cutoff)
+            & ~Q(fonte__slug="manual-private")
+        )
     ).update(estado="expirado")
     ProdutoCupom.objects.filter(cupom__estado="expirado").exclude(
         status="expirado").update(status="expirado")
@@ -44,3 +92,18 @@ def reconciliar_publicacoes_orfas(max_age_minutes=30):
     cutoff = timezone.now() - timedelta(minutes=max_age_minutes)
     return Publicacao.objects.filter(status="pendente", criada_em__lt=cutoff).update(
         status="falhou", erro="Envio interrompido antes de concluir (worker reiniciado).")
+
+
+def reconciliar_execucoes_ingestao_orfas(max_age_hours=2):
+    """Fecha execuções técnicas abandonadas por crash/deploy do worker."""
+    from apps.scrapers.models import ExecucaoIngestao
+
+    agora = timezone.now()
+    cutoff = agora - timedelta(hours=max_age_hours)
+    return ExecucaoIngestao.objects.filter(
+        status="running", iniciada_em__lt=cutoff,
+    ).update(
+        status="error",
+        finalizada_em=agora,
+        erro_publico="Coleta interrompida antes de concluir; dados anteriores preservados.",
+    )

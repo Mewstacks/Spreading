@@ -11,7 +11,7 @@ from functools import wraps
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from django.db import close_old_connections, connection, transaction
+from django.db import close_old_connections, connection, connections, transaction
 from django.db.backends.signals import connection_created
 from django.dispatch import receiver
 
@@ -422,6 +422,31 @@ def organization_callable(organization, func, *, segurar_transacao=True):
         finally:
             close_old_connections()
     return wrapped
+
+
+def organization_thread_target(organization, func, *, segurar_transacao=True):
+    """`organization_callable` para uso como alvo de `threading.Thread`.
+
+    `django.db.connections` é thread-local: quando a thread morre, a referência
+    para a conexão vai embora mas a conexão NÃO é fechada. E `close_old_connections`
+    não resolve — com `CONN_MAX_AGE=600` em produção ela não considera velha uma
+    conexão recém-aberta, apenas órfã. Cada requisição SSE (raspagem, envio, busca
+    nas lojas, geração de links) deixava assim uma conexão pendurada no Postgres
+    até o processo reiniciar.
+
+    O fechamento fica FORA de `organization_callable` porque ele também é chamado
+    em linha, dentro da transação do chamador, onde fechar a conexão a quebraria.
+    """
+    alvo = organization_callable(organization, func,
+                                 segurar_transacao=segurar_transacao)
+
+    @wraps(func)
+    def executar():
+        try:
+            return alvo()
+        finally:
+            connections.close_all()
+    return executar
 
 
 @receiver(connection_created)

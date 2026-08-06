@@ -41,10 +41,25 @@ test.beforeEach(() => {
     process.env.WA_CAPABILITY_PUBLIC_KEYS_JSON = JSON.stringify({
         'test-v1': jwk.x,
     });
+    delete process.env.WA_CAPABILITY_PUBLIC_KEYS_JSON_B64;
     process.env.WA_CAPABILITY_ISSUER = 'spreading-web';
     process.env.WA_CAPABILITY_AUDIENCE = 'spreading-wa';
     delete process.env.API_KEY;
     resetCachesForTests();
+});
+
+test('loads public keyring from base64url secret', async () => {
+    const raw = process.env.WA_CAPABILITY_PUBLIC_KEYS_JSON;
+    process.env.WA_CAPABILITY_PUBLIC_KEYS_JSON_B64 = Buffer.from(raw)
+        .toString('base64url');
+    delete process.env.WA_CAPABILITY_PUBLIC_KEYS_JSON;
+    resetCachesForTests();
+
+    const payload = await verifyCapability(await sign(), {
+        action: 'send',
+        sessionId: 'session-a',
+    });
+    assert.equal(payload.organization_id, 'org-a');
 });
 
 test('accepts only the bound tenant, session and action', async () => {

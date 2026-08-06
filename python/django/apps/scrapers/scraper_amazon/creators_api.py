@@ -197,16 +197,23 @@ def _post(operacao: str, payload: dict, creds: Credenciais, _tentativa: int = 1)
     host = creds.host or DATA_HOST  # host de dados é fixo; creds.host só p/ override/dev.
     _throttle()
     try:
+        # Obter o token fora do ``requests.post`` evita que AmazonNotEligible seja
+        # embrulhada como AmazonAPIError. Credencial inválida é permanente para o
+        # ciclo: o chamador precisa parar na primeira keyword, não repetir o mesmo
+        # 401 dezenas de vezes.
+        token = _obter_token(creds)
         r = requests.post(
             f"https://{host}/catalog/v1/{operacao}",
             json=body,
             headers={
-                "Authorization": f"Bearer {_obter_token(creds)}",
+                "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
                 "x-marketplace": creds.marketplace,
             },
             timeout=20,
         )
+    except AmazonNotEligible:
+        raise
     except Exception as e:
         raise AmazonAPIError(f"{operacao} falhou: {e}")
 

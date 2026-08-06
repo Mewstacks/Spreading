@@ -23,6 +23,10 @@ class Cupom(models.Model):
     tipo_desconto = models.CharField(max_length=20) # 'fixo' ou 'porcentagem'
     valor_desconto = models.FloatField()
     valor_minimo = models.FloatField(default=0.0)  # compra mínima para o cupom ser válido
+    # Limite efetivo informado pelo marketplace (ex.: "10% limitado a R$ 50").
+    desconto_maximo = models.FloatField(null=True, blank=True)
+    # Condição de público/pagamento que precisa acompanhar a publicação.
+    restrito = models.BooleanField(default=False)
     link_original = models.URLField(max_length=1000)
     codigo = models.CharField(max_length=512, blank=True, default="")
     data_criacao = models.DateTimeField(auto_now_add=True)
@@ -742,13 +746,16 @@ class LinkAfiliadoUsuario(models.Model):
 
 class CupomCodigo(models.Model):
     """Cupom de CÓDIGO digitável no checkout (ex: SOUMELIMAIS). Curado manualmente."""
-    codigo = models.CharField(max_length=60)
+    codigo = models.CharField(max_length=60, unique=True)
     descricao = models.CharField(max_length=255, blank=True, default="")
     tipo_desconto = models.CharField(max_length=20, default="porcentagem")  # 'porcentagem' | 'fixo'
     valor_desconto = models.FloatField(default=0.0)
     valor_minimo = models.FloatField(default=0.0)
     validade = models.DateField(null=True, blank=True)
     ativo = models.BooleanField(default=True)
+    # Códigos descobertos automaticamente não têm associação comprovada com um
+    # produto. A marca não depende da descrição, que pode ser editada no painel.
+    automatico = models.BooleanField(default=False, db_index=True)
     # macro_categorias em que o cupom é válido, separadas por vírgula. Vazio = vale p/ todas.
     # Usado para NÃO sugerir um código que não se aplica ao item (cupons não acumulam).
     categorias = models.CharField(max_length=255, blank=True, default="")

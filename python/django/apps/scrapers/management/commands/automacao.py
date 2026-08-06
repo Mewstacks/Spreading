@@ -127,8 +127,8 @@ def _rodar_scrape_rapido(paginas=8):
     total = mapear_ofertas(max_paginas=paginas, substituir=False)
     now = timezone.now()
     fonte, _ = FonteIngestao.objects.get_or_create(
-        slug="mercadolivre-web",
-        defaults={"marketplace": "mercadolivre", "nome": "Mercado Livre — páginas públicas"},
+        slug="mercadolivre-ofertas-flash",
+        defaults={"marketplace": "mercadolivre", "nome": "Mercado Livre — ofertas flash"},
     )
     fonte.ultima_tentativa = now
     fonte.ultimo_total = total
@@ -610,9 +610,11 @@ class Command(BaseCommand):
                 time.sleep(POLL)
                 continue
             if timezone.now() < proximo:
-                # Heartbeat também entre os ticks. Sem isto o estado ficava parado
-                # pelos ~5min de espera, worker_alive() (90s) dava falso e a tela
-                # pintava "Desligado" mesmo com a flag ligada — igual ao scrape.
+                # Heartbeat também entre os ticks. O intervalo normal (~5min) é maior
+                # que o TTL de 90s do worker_alive(), então sem renovar aqui um processo
+                # vivo aparecia como morto/"Desligado" na tela — igual ao scrape.
+                # Só o timestamp: fase/erro/proximo_ciclo já vêm do fim do tick, e
+                # reescrevê-los aqui apagaria o erro do último ciclo na hora seguinte.
                 st.write_state("envio")
                 time.sleep(POLL)
                 continue
@@ -624,10 +626,19 @@ class Command(BaseCommand):
                 # o worker morreu no meio de um envio (deploy/crash). Nunca derruba o
                 # tick — envio é o que importa aqui.
                 try:
-                    from apps.scrapers.maintenance import reconciliar_publicacoes_orfas
+                    from apps.scrapers.maintenance import (
+                        reconciliar_execucoes_ingestao_orfas,
+                        reconciliar_publicacoes_orfas,
+                    )
                     orfas = reconciliar_publicacoes_orfas()
                     if orfas:
                         logger.warning("%s publicacao(oes) orfa(s) fechada(s) como falha", orfas)
+                    ingestoes_orfas = reconciliar_execucoes_ingestao_orfas()
+                    if ingestoes_orfas:
+                        logger.warning(
+                            "%s execução(ões) de ingestão órfã(s) fechada(s)",
+                            ingestoes_orfas,
+                        )
                 except Exception as e:
                     logger.warning("Reconciliacao de publicacoes falhou: %s", e)
                 # Purga do log 1x/dia. Mora neste loop porque é o único ligado o dia

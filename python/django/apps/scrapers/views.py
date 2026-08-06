@@ -21,7 +21,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
-from apps.accounts.tenant import organization_callable
+from apps.accounts.tenant import organization_thread_target
 from apps.scrapers.models import (
     CliquePublicacao, ConfiguracaoEnvio, Cupom, LinkAfiliadoUsuario, Produto,
     Publicacao, ReceitaAfiliado, RelatorioSync, FonteIngestao, CupomNormalizado,
@@ -1424,7 +1424,7 @@ def enviar_agora_stream(request):
                 q.put(None)
 
         thread = threading.Thread(
-            target=organization_callable(request.organization.pk, _run),
+            target=organization_thread_target(request.organization.pk, _run),
             daemon=True,
         )
         thread.start()
@@ -1561,8 +1561,10 @@ def enviar_cupom_stream(request):
         if not grupo_id:
             print("[ERRO] Nenhum destino informado (grupo/chat).")
             return
+        from apps.scrapers.maintenance import cupons_frescos_q
         cupom = CupomNormalizado.objects.filter(
-            Q(owner__isnull=True) | Q(owner=usuario), id=cupom_id, estado="ativo").first()
+            Q(owner__isnull=True) | Q(owner=usuario), id=cupom_id, estado="ativo",
+        ).filter(cupons_frescos_q()).first()
         if not cupom:
             print("[ERRO] Cupom não encontrado ou inativo.")
             return
@@ -1620,6 +1622,7 @@ def buscar_promocoes_stream(request):
 
     def _job():
         from django.contrib.auth import get_user_model
+        from apps.scrapers.marketplaces.base import Marketplace, MarketplaceIndisponivel
         usuario = get_user_model().objects.filter(id=uid).first()
         if not termo:
             print("[ERRO] Digite um termo de busca.")
@@ -1627,13 +1630,22 @@ def buscar_promocoes_stream(request):
         total = 0
         for slug in MARKETPLACES:
             mp = get_marketplace(slug)
+            # Loja sem busca por termo (Awin vive de feed) devolvia "0 item(ns)" e
+            # parecia uma loja vazia. Não consultar não é o mesmo que não achar.
+            if type(mp).buscar_por_termo is Marketplace.buscar_por_termo:
+                continue
             try:
                 print(f"Buscando '{termo}' em {slug}...")
                 # Amazon usa a conta do usuário (itens privados); ML é compartilhado.
                 n = mp.buscar_por_termo(termo, min_desconto=min_desc, usuario=usuario) or 0
                 total += n
                 print(f"  {slug}: {n} item(ns).")
+            except MarketplaceIndisponivel as e:
+                # Motivo escrito para o usuário: "0 itens" escondia conta
+                # desconectada atrás do mesmo texto de "não há oferta".
+                print(f"  {slug} não foi consultada: {e}")
             except Exception as e:
+                logger.exception("Busca por termo falhou em %s", slug)
                 print(f"  {slug} falhou: {e}")
         print(f"Concluído. {total} item(ns) novos no total.")
 
@@ -1741,7 +1753,10 @@ def top_promocoes(request):
 
     from django.db.models import Q
     from apps.scrapers.ofertas import anotacao_preco_publicado
-    qs = Produto.objects.filter(preco_sem_desconto__gt=0).exclude(
+    from apps.scrapers.maintenance import produtos_frescos_q
+    qs = Produto.objects.filter(
+        produtos_frescos_q(), preco_sem_desconto__gt=0,
+    ).exclude(
         estado__in=["indisponivel", "invalido", "expirado", "stale"]
     ).filter(
         # Pool compartilhado (ML, owner=None) + itens privados do usuário (Amazon dele).
@@ -1756,6 +1771,15 @@ def top_promocoes(request):
             (F("preco_sem_desconto") - F("preco_publicado")) * 100.0 / F("preco_sem_desconto"),
             output_field=FloatField(),
         ),
+    ).filter(
+        # Produto com preço "de" igual ao "por" não é promoção. Além de
+        # poluir o ranking, ele chegava ao modo padrão da Amazon com badge 0% e
+        # botão de envio, embora nenhum abatimento estivesse confirmado.
+        percent__gt=0,
+        # A seleção automática já rejeita 90%+: além de raros, esses valores
+        # quase sempre são `savingBasis` em escala errada (ex.: 63990 vs 63,99).
+        # A vitrine precisa aplicar a mesma barreira, inclusive para fontes novas.
+        percent__lt=90,
     )
     if macros_selecionados:
         qs = qs.filter(macro_categoria__in=macros_selecionados)
@@ -1784,12 +1808,29 @@ def top_promocoes(request):
     # paginava somente os afiliados que por acaso estivessem entre os 200 maiores
     # descontos. O conjunto cabe em memória e cada marketplace resolve os links em
     # lote, portanto todos os produtos afiliados podem entrar na paginação.
-    candidatos = list(qs.order_by(ordem))
+    # A mesma oferta chega por feed completo, lane rápida e busca, com querystrings
+    # diferentes. Seleciona primeiro a observação mais recente de cada identidade;
+    # só então ranqueia, evitando duplicatas e preço antigo vencer pelo desconto.
+    from apps.scrapers.product_identity import deduplicar_por_produto
+    candidatos = deduplicar_por_produto(
+        qs.order_by("-ultima_observacao", "-id")
+    )
+    campo_ordem = "economia" if ordenar == "valor" else "percent"
+    candidatos.sort(
+        key=lambda produto: (
+            float(getattr(produto, campo_ordem, 0) or 0),
+            produto.ultima_observacao or timezone.datetime.min.replace(
+                tzinfo=timezone.get_current_timezone()),
+            produto.id,
+        ),
+        reverse=True,
+    )
     cupons_visiveis = Q(owner__isnull=True) | Q(owner=request.user)
+    from apps.scrapers.maintenance import cupons_frescos_q
     cupons_qs = CupomNormalizado.objects.select_related(
         "fonte", "integracao", "programa").filter(
         cupons_visiveis, estado="ativo"
-    ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
+    ).filter(cupons_frescos_q())
     if loja_selecionada:
         cupons_qs = cupons_qs.filter(marketplace=loja_selecionada)
     if fonte_selecionada:
@@ -2026,9 +2067,13 @@ def top_promocoes(request):
         "macros_selecionados": macros_selecionados,
         "categorias_selecionadas": categorias_selecionadas,
         "loja_selecionada": loja_selecionada,
-        "lojas": list(MARKETPLACES.keys()) + (["awin"] if IntegracaoAfiliado.objects.filter(
-            owner=request.user, provedor="awin", status="conectada", habilitada=True).exists()
-            else []),
+        # Awin já está em MARKETPLACES, então somá-la de novo duplicava a opção no
+        # seletor de loja. Ela é condicional: sem integração conectada, filtrar por
+        # Awin só devolve lista vazia.
+        "lojas": [slug for slug in MARKETPLACES if slug != "awin"] + (
+            ["awin"] if IntegracaoAfiliado.objects.filter(
+                owner=request.user, provedor="awin", status="conectada",
+                habilitada=True).exists() else []),
         "canais": list(SENDERS.keys()),
         "ordenar": ordenar,
         "busca": busca,
@@ -2096,7 +2141,7 @@ def run_scraper_stream(request):
                 q.put(None)  # sentinel
 
         thread = threading.Thread(
-            target=organization_callable(request.organization.pk, _run),
+            target=organization_thread_target(request.organization.pk, _run),
             daemon=True,
         )
         thread.start()
@@ -2177,8 +2222,8 @@ def _sse_runner(fn, organization, *, segurar_transacao=True):
                 q.put(None)
 
         threading.Thread(
-            target=organization_callable(organization, _run,
-                                         segurar_transacao=segurar_transacao),
+            target=organization_thread_target(organization, _run,
+                                              segurar_transacao=segurar_transacao),
             daemon=True,
         ).start()
         while True:
@@ -2330,13 +2375,18 @@ def _produtos_sem_link(usuario, origens=None, limite=80, macros=None):
         .exclude(estado__in=["indisponivel", "invalido", "expirado", "stale"])
         .exclude(Exists(ja_tem))
     )
+    from apps.scrapers.maintenance import produtos_frescos_q
+    qs = qs.filter(produtos_frescos_q())
     if origens:
         qs = qs.filter(origem__in=origens)
     # Mesmo filtro de categoria da tela de Promoções (macro_categoria): gera link só
     # do nicho escolhido no seletor ao lado do botão.
     if macros:
         qs = qs.filter(macro_categoria__in=macros)
-    return list(qs.order_by("-ultima_observacao")[:limite])
+    from apps.scrapers.product_identity import deduplicar_por_produto
+    return deduplicar_por_produto(
+        qs.order_by("-ultima_observacao", "-id")
+    )[:limite]
 
 
 @require_GET

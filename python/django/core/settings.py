@@ -673,13 +673,34 @@ if SENTRY_DSN:
             level=logging.INFO,         # breadcrumbs a partir de INFO
             event_level=logging.ERROR,  # ERROR+ vira evento Sentry
         )
+        def _sentry_before_send(event, _hint):
+            """Nunca envia corpos HTTP ou credenciais acidentais ao Sentry.
+
+            ``send_default_pii=False`` não desliga a coleta de ``request.data``.
+            Isso é especialmente importante em ``/scrapers/ml/input/``, cujo corpo
+            transporta as teclas do login remoto (inclusive senha e 2FA).
+            """
+            request = event.get("request")
+            if isinstance(request, dict):
+                request.pop("data", None)
+                headers = request.get("headers")
+                if isinstance(headers, dict):
+                    for key in list(headers):
+                        if key.lower() in {"authorization", "cookie", "set-cookie"}:
+                            headers[key] = "[Filtered]"
+            return event
+
         sentry_sdk.init(
             dsn=SENTRY_DSN,
             integrations=[DjangoIntegration(), sentry_logging],
             traces_sample_rate=float(os.getenv("SENTRY_TRACES_RATE", "0.0")),
             send_default_pii=False,
+            max_request_body_size="never",
+            before_send=_sentry_before_send,
             environment=os.getenv("SENTRY_ENV", "prod" if not DEBUG else "dev"),
             release=os.getenv("SENTRY_RELEASE") or None,
         )
-    except Exception:  # sentry-sdk ausente ou DSN inválido — não derruba o boot
-        pass
+    except Exception as exc:  # sentry-sdk ausente ou DSN inválido — não derruba o boot
+        logging.getLogger(__name__).warning(
+            "Sentry não foi inicializado (%s).", type(exc).__name__
+        )

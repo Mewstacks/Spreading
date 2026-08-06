@@ -296,11 +296,25 @@ def _retestar_incidente(incidente) -> dict:
                 "mensagem": sync.erro or "Relatório sincronizado."}
 
     if causa == "email_falhou":
+        from django.conf import settings
         from django.core.mail import get_connection
+
+        if not (getattr(settings, "EMAIL_HOST_USER", "") and
+                getattr(settings, "EMAIL_HOST_PASSWORD", "")):
+            return {
+                "sucesso": False,
+                "mensagem": (
+                    "Credenciais SMTP não configuradas. Defina "
+                    "EMAIL_HOST_USER e EMAIL_HOST_PASSWORD."
+                ),
+            }
         connection = get_connection()
         connection.open()
         connection.close()
-        return {"sucesso": True, "mensagem": "Conexão SMTP validada sem enviar e-mail."}
+        return {
+            "sucesso": True,
+            "mensagem": "Credenciais e conexão SMTP validadas sem enviar e-mail.",
+        }
 
     # ── Conexão: agora tem reteste porque existe uma fonte única para perguntar ──
     if causa.startswith("conexao_") or causa == "links_sem_sessao":

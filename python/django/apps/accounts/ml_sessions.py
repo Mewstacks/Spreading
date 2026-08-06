@@ -304,7 +304,6 @@ def registrar_veredito_linkbuilder_para_usuario(user, resultado: str,
         organization_for_user(user) if user is not None else None, resultado, motivo,
     )
 
-
 def delete_storage_state(user) -> bool:
     organization = organization_for_user(user)
     if organization is None:
@@ -343,4 +342,3 @@ def has_storage_state(user) -> bool:
         and legacy_path(user)
         and os.path.isfile(legacy_path(user))
     )
-

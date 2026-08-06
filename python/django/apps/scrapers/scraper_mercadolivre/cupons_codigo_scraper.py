@@ -29,7 +29,9 @@ import logging
 from django.utils.dateparse import parse_datetime
 
 from apps.scrapers.auxiliar import iniciar_browser
-from apps.scrapers.coupon_rules import derivar_categoria_cupom, rotulo_anunciante
+from apps.scrapers.coupon_rules import (
+    derivar_categoria_cupom, rotulo_anunciante, tem_restricao_publico,
+)
 from apps.scrapers.models import Produto, CupomCodigo, FonteIngestao, CupomNormalizado
 from apps.scrapers.progresso import emitir_fase, emitir_progresso
 from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
@@ -210,6 +212,7 @@ def _normalizar_cupom(bruto):
         "valor_minimo": _valor_reais(valores.get("min_amount")),
         "desconto_maximo": _valor_reais(valores.get("cap_amount")),
         "validade": parse_datetime(str(bruto.get("expiration_date") or "")) or None,
+        "restrito": tem_restricao_publico(titulo_texto),
         "total_itens": segmentacoes.get("total_items"),
     }
 
@@ -250,6 +253,7 @@ def _salvar_cupons_smart(cupons):
                     c["titulo"], regras, categoria_fallback=c["categoria"]),
                 "link": c["container_url"][:1000],
                 "validade": c["validade"],
+                "restrito": c["restrito"],
                 # Oficial do ML, mas a associação item-a-item só vira 'confirmado'
                 # depois que casar_cupons_container abrir a lista.
                 "confianca": "media",
@@ -370,8 +374,10 @@ def mapear_cupons_codigo(faixa=None, usuario=None):
     # (antes só criava e nunca marcava stale → códigos mortos ficavam na lista global).
     n_novos = 0
     for cod in codigos:
+        # `automatico` marca a origem e nunca é sobrescrito por edição manual da
+        # descrição — é ele que impede o código de ser colado em qualquer produto.
         _, criado = CupomCodigo.objects.update_or_create(
-            codigo=cod, defaults={"ativo": True})
+            codigo=cod, defaults={"ativo": True, "automatico": True})
         # descricao só na criação (não sobrescreve edição manual)
         if criado:
             CupomCodigo.objects.filter(codigo=cod).update(descricao=_DESC_AUTO)
@@ -399,7 +405,7 @@ def mapear_cupons_codigo(faixa=None, usuario=None):
     n_stale = 0
     if codigos:
         stale = (CupomCodigo.objects
-                 .filter(descricao=_DESC_AUTO, ativo=True)
+                 .filter(automatico=True, ativo=True)
                  .exclude(codigo__in=codigos))
         n_stale = stale.update(ativo=False)
 

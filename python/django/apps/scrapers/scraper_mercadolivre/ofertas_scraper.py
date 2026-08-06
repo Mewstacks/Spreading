@@ -35,14 +35,67 @@ def _reconectar_db():
 
 
 def _upsert_resiliente(**kwargs):
-    """`Produto.update_or_create` tolerante a socket morto: numa OperationalError,
-    reconecta e tenta de novo uma vez (cobre a queda no meio do save)."""
+    """Upsert tolerante a socket morto e observações históricas duplicadas.
+
+    O ranking aceita múltiplas observações do mesmo anúncio (inclusive variações
+    de URL). Uma normalização pode fazer duas delas convergirem para a mesma chave;
+    nesse caso, atualizar a mais recente não pode derrubar a coleta inteira.
+    """
+    def salvar():
+        try:
+            return Produto.objects.update_or_create(**kwargs)
+        except Produto.MultipleObjectsReturned:
+            lookup = {
+                chave: valor for chave, valor in kwargs.items()
+                if chave not in {"defaults", "create_defaults"}
+            }
+            candidatos = Produto.objects.filter(**lookup).order_by(
+                "-ultima_observacao", "-pk"
+            )
+            total = candidatos.count()
+            produto = candidatos.first()
+            if produto is None:  # corrida: as duplicatas sumiram entre GET e SELECT
+                return Produto.objects.update_or_create(**kwargs)
+            for campo, valor in (kwargs.get("defaults") or {}).items():
+                setattr(produto, campo, valor() if callable(valor) else valor)
+            produto.save()
+            logger.warning(
+                "Produto duplicado no upsert; observação mais recente atualizada "
+                "(id=%s, candidatos=%s).",
+                produto.pk, total,
+            )
+            return produto, False
+
     try:
-        return Produto.objects.update_or_create(**kwargs)
+        return salvar()
     except OperationalError:
         logger.warning("Conexão do banco caiu no save; reconectando e tentando de novo.")
         _reconectar_db()
-        return Produto.objects.update_or_create(**kwargs)
+        return salvar()
+
+
+def _normalizar_link_produto(link: str) -> str:
+    """Reduz URLs de tracking do ML a um destino persistível e estável.
+
+    Alguns cards de busca entregam URLs ``click1/mclics`` com mais de 1.000
+    caracteres. Além de criarem duplicatas, elas estouram o ``URLField`` de
+    ``Produto`` só no fim de uma busca longa. O Link Builder já conhece todas as
+    formas de extrair o item MLB; reutilizamos a mesma regra e mantemos um fallback
+    sem query/fragmento para páginas de catálogo não afiliáveis.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+    from apps.scrapers.scraper_mercadolivre.link import _montar_url_isca
+
+    bruto = str(link or "").strip()
+    canonico = _montar_url_isca(bruto, "")
+    if canonico:
+        return canonico[:1000]
+    try:
+        parsed = urlsplit(bruto)
+        limpo = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    except (TypeError, ValueError):
+        limpo = bruto.split("#", 1)[0].split("?", 1)[0]
+    return limpo[:1000]
 
 # Classificação de OFERTAS por palavra-chave no nome (PT), mapeando para os mesmos
 # nomes de macro de cateorize.py. Ordem importa: mais específico primeiro.
@@ -309,7 +362,7 @@ def _coletar_cards(page):
 
             out.append({
                 "nome": nome[:255],
-                "link_produto": link.split("#")[0],
+                "link_produto": _normalizar_link_produto(link),
                 "preco_sem_desconto": de,
                 "preco_com_cupom": por,
                 "imagem_url": imagem[:1000],
@@ -344,13 +397,14 @@ def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):
     vistos = set()
     salvos = []
     for o in coletados:
-        if o["link_produto"] in vistos:
+        link_produto = _normalizar_link_produto(o["link_produto"])
+        if not link_produto or link_produto in vistos:
             continue
-        vistos.add(o["link_produto"])
+        vistos.add(link_produto)
         from apps.scrapers.scraper_mercadolivre.link import e_catalogo_universal
-        catalogo = e_catalogo_universal(o["link_produto"])
+        catalogo = e_catalogo_universal(link_produto)
         produto, _ = _upsert_resiliente(
-            marketplace="mercadolivre", owner=None, link_produto=o["link_produto"],
+            marketplace="mercadolivre", owner=None, link_produto=link_produto,
             defaults={"campanha_id": "", "origem": origem,
                       "fonte": "mercadolivre-web", "codigo_checkout": codigo_checkout,
                       "nome": o["nome"], "preco_sem_desconto": o["preco_sem_desconto"],
@@ -385,14 +439,16 @@ def _upsert_ofertas(coletados):
     _reconectar_db()  # conexão fresca: a fase de browser pode ter matado o socket
     vistos, n = set(), 0
     for o in coletados:
-        if o["link_produto"] in vistos:
+        link_produto = _normalizar_link_produto(o["link_produto"])
+        if not link_produto or link_produto in vistos:
             continue
-        vistos.add(o["link_produto"])
+        vistos.add(link_produto)
         from apps.scrapers.scraper_mercadolivre.link import e_catalogo_universal
-        catalogo = e_catalogo_universal(o["link_produto"])
+        catalogo = e_catalogo_universal(link_produto)
         produto, _ = _upsert_resiliente(
-            origem="oferta", link_produto=o["link_produto"], owner=None,
+            marketplace="mercadolivre", link_produto=link_produto, owner=None,
             defaults={
+                "origem": "oferta",
                 "nome": o["nome"],
                 "preco_sem_desconto": o["preco_sem_desconto"],
                 "preco_com_cupom": o["preco_com_cupom"],
@@ -413,7 +469,7 @@ def _upsert_ofertas(coletados):
         if catalogo:
             produto.links_usuario.all().delete()
         else:
-            registrar("mercadolivre", "", o["link_produto"], o["preco_com_cupom"])
+            registrar("mercadolivre", "", link_produto, o["preco_com_cupom"])
             n += 1
     return n
 
@@ -466,7 +522,8 @@ def mapear_ofertas(max_paginas=40, substituir=True, usuario=None):
     if not coletados:
         logger.warning("Raspagem de ofertas ML vazia; feed existente preservado")
         return 0
-    n = _salvar(coletados, origem="oferta")
+    n = (_salvar(coletados, origem="oferta") if substituir
+         else _upsert_ofertas(coletados))
     logger.info("Ofertas ML salvas/atualizadas: %s", n)
     return n
 
@@ -491,6 +548,7 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None,
     if not termos:
         return 0
     coletados = []
+    termos_confirmados = []
 
     with iniciar_browser(storage_state=storage_state(usuario), headless=True) as (page, context):
         for termo in termos:
@@ -498,6 +556,7 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None,
             if not slug:
                 continue
             vazias_seguidas = 0  # a tolerância é POR TERMO
+            coletados_termo = []
             for p in range(max_paginas):
                 desde = p * 50 + 1
                 url = f"https://lista.mercadolivre.com.br/{slug}_Discount_{int(min_desconto)}-100"
@@ -526,15 +585,25 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None,
                     pausa_humana()
                     continue
                 vazias_seguidas = 0
-                coletados.extend(cards)
+                coletados_termo.extend(cards)
                 pausa_humana()  # ritmo humano entre páginas (anti-bloqueio)
+            if coletados_termo:
+                termos_confirmados.append(termo)
+                coletados.extend(coletados_termo)
+
+    # Uma resposta inteiramente vazia é indistinguível de bloqueio, timeout ou
+    # mudança de layout. Nunca apaga o catálogo anterior nesse cenário.
+    if not coletados:
+        logger.warning("Busca ML '%s' vazia; resultados existentes preservados",
+                       termo_busca)
+        return 0
 
     # Refresh escopado: remove itens 'busca' que casam com algum termo, recria.
     # Reconecta antes: o delete é a 1ª query após a longa fase de browser.
     _reconectar_db()
     from django.db.models import Q
     cond = Q()
-    for t in termos:
+    for t in termos_confirmados:
         cond |= Q(nome__icontains=t)
     Produto.objects.filter(
         marketplace="mercadolivre", owner__isnull=True, origem="busca"

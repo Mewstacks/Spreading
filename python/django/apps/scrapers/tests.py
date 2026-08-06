@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import itertools
 import json
 import os
@@ -22,7 +24,7 @@ from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase, o
 from django.utils import timezone
 
 from apps.accounts.tenant import organization_context
-from apps.scrapers import ofertas, whatsapp_client
+from apps.scrapers import hooks, ofertas, whatsapp_client
 from apps.scrapers.afiliado import tag_ml
 from apps.scrapers.maintenance import reconciliar_publicacoes_orfas
 from apps.scrapers.management.commands.automacao import _rodar_links
@@ -87,6 +89,44 @@ class AutomationStatusSecurityTests(TestCase):
         self.assertFalse(data["worker_vivo"])
         self.assertFalse(data["rodando"])
         self.assertFalse(data["saudavel"])
+
+    @patch("apps.scrapers.maintenance.purgar_eventos_antigos", return_value=0)
+    @patch("apps.scrapers.maintenance.reconciliar_publicacoes_orfas", return_value=0)
+    @patch("apps.scrapers.ofertas.processar_configs_de_envio", return_value=[])
+    @patch("apps.scrapers.management.commands.automacao._renovar_conexoes_db")
+    @patch("apps.scrapers.management.commands.automacao.st.write_state")
+    @patch("apps.scrapers.management.commands.automacao.st.is_enabled", return_value=True)
+    def test_worker_envio_renova_heartbeat_durante_espera(
+        self, _enabled, write_state, _renovar, _processar, _orfas, _purgar,
+    ):
+        """O tick é 5 min e o heartbeat vence em 90s; a espera precisa escrever.
+
+        Três sleeps sem a correção mantinham uma única escrita `aguardando`
+        (fim do ciclo). Com ela, cada passagem de 15s renova o arquivo de estado.
+        """
+        from apps.scrapers.management.commands.automacao import Command
+
+        sleeps = {"n": 0}
+
+        def parar_depois_de_tres(_segundos):
+            sleeps["n"] += 1
+            if sleeps["n"] == 3:
+                raise RuntimeError("fim do loop de teste")
+
+        with patch(
+            "apps.scrapers.management.commands.automacao.time.sleep",
+            side_effect=parar_depois_de_tres,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "fim do loop de teste"):
+                Command()._loop_envio({"tick": 5})
+
+        # O heartbeat atualiza somente o timestamp: repetir ``fase`` apagaria o
+        # erro/proximo_ciclo persistido pelo tick anterior.
+        pulsos = [
+            chamada for chamada in write_state.call_args_list
+            if chamada.args == ("envio",) and not chamada.kwargs
+        ]
+        self.assertGreaterEqual(len(pulsos), 3)
 
 
 class AffiliateIdentityTests(TestCase):
@@ -647,6 +687,25 @@ class MensagemDeSessaoDeLinkTests(SimpleTestCase):
 
         self.assertNotEqual(link.MSG_SEM_SESSAO, link.MSG_SESSAO_EXPIRADA)
         self.assertIn("nenhuma conta", link.MSG_SEM_SESSAO.lower())
+
+    def test_veredito_do_link_builder_usa_ponte_de_orm_do_playwright(self):
+        """O veredito é persistido fora do event loop do Playwright sync."""
+        from apps.scrapers.scraper_mercadolivre import link
+
+        usuario = Mock(id=7)
+        executar = lambda fn, *args, **kwargs: fn(*args, **kwargs)
+        with (
+            patch.object(link, "executar_no_tenant", side_effect=executar) as ponte,
+            patch(
+                "apps.accounts.ml_sessions.registrar_veredito_linkbuilder_para_usuario"
+            ) as registrar,
+            patch("apps.scrapers.conexoes.invalidar_ml") as invalidar,
+        ):
+            link._registrar_veredito_lb(usuario, "conectado", "ok")
+
+        ponte.assert_called_once()
+        registrar.assert_called_once_with(usuario, "conectado", "ok")
+        invalidar.assert_called_once_with(usuario)
 
 
 class EstadoMLTests(SimpleTestCase):
@@ -1605,6 +1664,22 @@ class TopPromocoesFilterTests(TestCase):
         self.assertEqual([c.id for c in response.context["cupons_catalogo"]], [pronto.id])
         self.assertNotIn(aguardando.id, [c.id for c in response.context["cupons_catalogo"]])
 
+    def test_coupon_without_validity_older_than_ttl_is_not_collected(self):
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-stale-source", marketplace="amazon", nome="Cupons antigos")
+        antigo = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="old-no-expiry", marketplace="amazon",
+            titulo="Cupom sem validade que sumiu da fonte", codigo="VELHO20",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20}, estado="ativo",
+        )
+        CupomNormalizado.objects.filter(pk=antigo.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=49))
+
+        response = self.client.get(self.url, {"tipo": "cupom"})
+
+        self.assertEqual(response.context["cupons_coletados"], 0)
+
     def test_search_and_minimum_discount_are_applied(self):
         response = self.client.get(self.url, {"q": "fone", "min_desconto": "40"})
 
@@ -1662,6 +1737,74 @@ class TopPromocoesFilterTests(TestCase):
         response = self.client.get(self.url, {"q": "Oferta velha"})
 
         self.assertNotIn(stale.id, [p.id for p in response.context["produtos"]])
+
+    def test_active_product_older_than_catalog_ttl_is_hidden(self):
+        old = self._criar_produto(
+            marketplace="mercadolivre", nome="Oferta ativa mas vencida",
+            categoria="Cozinha", macro_categoria="Casa",
+            preco_sem_desconto=100, preco_com_cupom=50,
+            link_produto="https://produto.mercadolivre.com.br/MLB-9000001",
+            estado="ativo",
+        )
+        Produto.objects.filter(pk=old.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=49))
+
+        response = self.client.get(self.url, {"q": "Oferta ativa mas vencida"})
+
+        self.assertNotIn(old.id, [p.id for p in response.context["produtos"]])
+
+    def test_discount_at_or_above_ninety_percent_is_hidden(self):
+        incoerente = self._criar_produto(
+            marketplace="amazon", owner=self.user,
+            nome="Preço de referência em escala errada",
+            categoria="Outros", macro_categoria="Outros",
+            preco_sem_desconto=639.90, preco_com_cupom=63.99,
+            link_produto="https://example.com/preco-incoerente",
+        )
+
+        response = self.client.get(
+            self.url, {"q": "Preço de referência em escala errada"})
+
+        self.assertNotIn(
+            incoerente.id, [p.id for p in response.context["produtos"]])
+
+    def test_product_without_real_discount_is_hidden(self):
+        sem_desconto = self._criar_produto(
+            marketplace="amazon", owner=self.user,
+            nome="Produto com cupom sem abatimento confirmado",
+            categoria="Outros", macro_categoria="Outros",
+            preco_sem_desconto=2111.10, preco_com_cupom=2111.10,
+            link_produto="https://example.com/sem-desconto",
+        )
+
+        response = self.client.get(
+            self.url, {"q": "Produto com cupom sem abatimento confirmado"})
+
+        self.assertNotIn(
+            sem_desconto.id, [p.id for p in response.context["produtos"]])
+
+    def test_same_ml_item_and_title_uses_only_latest_observation(self):
+        first = self._criar_produto(
+            marketplace="mercadolivre", nome="Top Puma repetido",
+            categoria="Moda", macro_categoria="Moda",
+            preco_sem_desconto=160, preco_com_cupom=38,
+            link_produto=("https://produto.mercadolivre.com.br/MLB-3102506128-item"
+                          "?searchVariation=111"),
+        )
+        second = self._criar_produto(
+            marketplace="mercadolivre", nome="Top Puma repetido",
+            categoria="Moda", macro_categoria="Moda",
+            preco_sem_desconto=160, preco_com_cupom=40,
+            link_produto=("https://produto.mercadolivre.com.br/MLB-3102506128-item"
+                          "?searchVariation=222"),
+        )
+        Produto.objects.filter(pk=first.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=1))
+
+        response = self.client.get(self.url, {"q": "Top Puma repetido"})
+
+        self.assertEqual(
+            [p.id for p in response.context["produtos"]], [second.id])
 
     def test_products_without_affiliate_link_are_hidden_from_sending_list(self):
         """Item sem link de afiliado não pode chegar ao botão Enviar: enviá-lo não
@@ -1745,7 +1888,7 @@ class TopPromocoesFilterTests(TestCase):
            return_value=12)
     @patch("apps.scrapers.coupon_products.preparar_lote",
            return_value={"processados": 0, "prontos": 0})
-    def test_flash_scrape_marks_mercado_livre_source_healthy(self, _preparo, _mapear):
+    def test_flash_scrape_does_not_mask_full_mercado_livre_source(self, _preparo, _mapear):
         source = FonteIngestao.objects.get(slug="mercadolivre-web")
         source.status = "degraded"
         source.falhas_consecutivas = 2
@@ -1755,9 +1898,11 @@ class TopPromocoesFilterTests(TestCase):
 
         self.assertEqual(_rodar_scrape_rapido(paginas=2), 12)
         source.refresh_from_db()
-        self.assertEqual(source.status, "ok")
-        self.assertEqual(source.falhas_consecutivas, 0)
-        self.assertEqual(source.erro_publico, "")
+        self.assertEqual(source.status, "degraded")
+        self.assertEqual(source.falhas_consecutivas, 2)
+        flash = FonteIngestao.objects.get(slug="mercadolivre-ofertas-flash")
+        self.assertEqual(flash.status, "ok")
+        self.assertEqual(flash.ultimo_total, 12)
 
 
 class AttributionWorkflowTests(TestCase):
@@ -2256,6 +2401,122 @@ class RankingAndCooldownTests(TestCase):
 
         self.assertNotIn(product, selected)
 
+    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
+    def test_ranking_ignores_active_product_older_than_catalog_ttl(self, get_marketplace):
+        get_marketplace.return_value = Mock(is_alive=Mock(return_value=True))
+        product = self._product("Oferta velha no ranking", 50)
+        Produto.objects.filter(pk=product.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=49))
+
+        from apps.scrapers.ofertas import selecionar_item_para_grupo
+        selected = selecionar_item_para_grupo(
+            usuario=self.user, grupo_id=self.group_a, min_desconto_percent=10)
+
+        self.assertEqual(selected, [])
+
+    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
+    def test_ranking_collapses_duplicate_ml_variations_by_latest_observation(
+        self, get_marketplace
+    ):
+        get_marketplace.return_value = Mock(is_alive=Mock(return_value=True))
+        first = self._product("Top repetido", 30)
+        second = self._product("Top repetido", 35)
+        Produto.objects.filter(pk=first.pk).update(
+            link_produto=("https://produto.mercadolivre.com.br/MLB-3102506128-item"
+                          "?searchVariation=111"),
+            ultima_observacao=timezone.now() - timedelta(hours=1),
+        )
+        Produto.objects.filter(pk=second.pk).update(
+            link_produto=("https://produto.mercadolivre.com.br/MLB-3102506128-item"
+                          "?searchVariation=222"),
+        )
+        first.refresh_from_db()
+        second.refresh_from_db()
+
+        from apps.scrapers.ofertas import selecionar_item_para_grupo
+        selected = selecionar_item_para_grupo(
+            usuario=self.user, grupo_id=self.group_a,
+            min_desconto_percent=10, limite_envio=5)
+
+        self.assertEqual(selected, [second])
+
+
+class MonitorCatalogMaintenanceTests(SimpleTestCase):
+    @patch("apps.scrapers.incidentes_saude.fechar_conexoes_restabelecidas",
+           return_value=0)
+    @patch("apps.scrapers.incidentes_saude.reconciliar_pendentes", return_value=0)
+    @patch("apps.scrapers.maintenance.expire_stale",
+           return_value={"products": 7, "coupons": 2})
+    @patch("apps.scrapers.management.commands.monitorar.verificar_e_notificar",
+           return_value={"checados": 1, "alertas_enviados": 0})
+    def test_monitor_expires_catalog_even_without_scrape(
+        self, _connections, expire, _reconcile, _close
+    ):
+        from apps.scrapers.management.commands.monitorar import Command
+
+        result = Command()._ciclo()
+
+        expire.assert_called_once_with()
+        self.assertEqual(result["produtos_expirados"], 7)
+        self.assertEqual(result["cupons_expirados"], 2)
+
+
+class CouponCatalogFreshnessTests(TestCase):
+    def setUp(self):
+        self.public_source = FonteIngestao.objects.create(
+            slug="coupon-freshness-source", marketplace="amazon", nome="Cupons")
+        self.manual_source, _ = FonteIngestao.objects.get_or_create(
+            slug="manual-private",
+            defaults={"marketplace": "amazon", "nome": "Privados"},
+        )
+
+    def _coupon(self, source, external_id, **extra):
+        values = {
+            "fonte": source, "external_id": external_id,
+            "marketplace": "amazon", "titulo": external_id,
+            "codigo": "TESTE20", "estado": "ativo",
+        }
+        values.update(extra)
+        return CupomNormalizado.objects.create(**values)
+
+    def _age(self, coupon, hours=49):
+        CupomNormalizado.objects.filter(pk=coupon.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=hours))
+
+    def test_cleanup_expires_old_undated_coupon_but_preserves_manual_private(self):
+        from apps.scrapers.maintenance import expire_stale
+
+        public_old = self._coupon(self.public_source, "public-old")
+        manual_old = self._coupon(self.manual_source, "manual-old")
+        self._age(public_old)
+        self._age(manual_old)
+
+        result = expire_stale()
+
+        public_old.refresh_from_db()
+        manual_old.refresh_from_db()
+        self.assertEqual(result["coupons"], 1)
+        self.assertEqual(public_old.estado, "expirado")
+        self.assertEqual(manual_old.estado, "ativo")
+
+    def test_explicit_future_validity_wins_over_observation_age(self):
+        from apps.scrapers.maintenance import cupons_frescos_q, expire_stale
+
+        future = self._coupon(
+            self.public_source, "future",
+            validade=timezone.now() + timedelta(days=3),
+        )
+        self._age(future, hours=240)
+
+        result = expire_stale()
+
+        future.refresh_from_db()
+        self.assertEqual(result["coupons"], 0)
+        self.assertEqual(future.estado, "ativo")
+        self.assertTrue(
+            CupomNormalizado.objects.filter(pk=future.pk).filter(
+                cupons_frescos_q()).exists())
+
 
 class AmazonPipelineTests(TestCase):
     def setUp(self):
@@ -2584,7 +2845,51 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         browser.assert_not_called()                        # HTTP resolveu; sem Chromium
         cupom = Cupom.objects.get(campanha_id="13642210")
         self.assertIn("esquenta copa", cupom.titulo.lower())
-        self.assertEqual(cupom.estado, "ativo")
+        self.assertEqual(cupom.estado, "inativo")
+        self.assertEqual(Cupom.objects.filter(estado="ativo").count(), 3)
+        self.assertEqual(cupom.tipo_desconto, "fixo")
+        self.assertEqual(cupom.valor_desconto, 50.0)
+        self.assertEqual(cupom.valor_minimo, 399.0)
+        self.assertEqual(cupom.desconto_maximo, 50.0)
+        self.assertIsNotNone(cupom.validade)
+
+    def test_parser_preserva_milhar_centavos_e_teto(self):
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        with open(self.DUMP, encoding="utf-8") as f:
+            dados = json.load(f)
+        vazio = {"appProps": {"pageProps": {"filteredCouponsData": {"coupons": []}}}}
+        sess = self._http_falsa([dados, vazio])
+        with patch(
+            "apps.scrapers.scraper_mercadolivre.scraper._ml_http_session",
+            return_value=sess,
+        ):
+            mapear_cupons()
+
+        apple = Cupom.objects.get(titulo__icontains="em Apple")
+        self.assertEqual(apple.valor_minimo, 2000.0)
+        self.assertEqual(apple.desconto_maximo, 250.0)
+
+        smart = Cupom.objects.get(titulo__icontains="Smart Home")
+        self.assertEqual(smart.valor_minimo, 99.90)
+        self.assertEqual(smart.desconto_maximo, 42.0)
+        self.assertEqual(smart.tipo_desconto, "porcentagem")
+        self.assertEqual(smart.valor_desconto, 40.0)
+
+    def test_helpers_do_payload_nao_confundem_urgencia_com_validade(self):
+        from apps.scrapers.scraper_mercadolivre.scraper import _validade_ml, _valor_ml
+
+        agora = timezone.now().replace(month=5, day=1)
+        vence = _validade_ml("Vence 19 de maio", agora=agora)
+        self.assertEqual((vence.month, vence.day, vence.hour), (5, 19, 23))
+        for texto in (
+            "Está esgotando!", "Termina em 3 horas!", "Vence em domingo", "", None,
+        ):
+            self.assertIsNone(_validade_ml(texto, agora=agora))
+
+        self.assertEqual(_valor_ml("2.000", "0"), 2000.0)
+        self.assertEqual(_valor_ml("99", "9"), 99.90)
+        self.assertIsNone(_valor_ml(None))
 
     def test_pagina_vazia_nao_apaga_os_cupons_existentes(self):
         """Guarda anti-wipe: ML sem cupons não pode zerar o catálogo."""
@@ -3605,7 +3910,7 @@ class GeracaoDeLinksEmLoteTests(TestCase):
         return Produto.objects.create(
             marketplace="mercadolivre", nome=nome, origem="oferta",
             preco_sem_desconto=100, preco_com_cupom=50,
-            link_produto="https://example.com/fone", **extra)
+            link_produto="https://produto.mercadolivre.com.br/MLB-123456789", **extra)
 
     @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
     @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links")
@@ -4206,6 +4511,44 @@ class RetesteDaSaudeTests(TestCase):
 
         self.assertFalse(r["sucesso"])
         self.assertIn("perfil", r["mensagem"].lower())
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
+        EMAIL_HOST_USER="",
+        EMAIL_HOST_PASSWORD="",
+    )
+    @patch("django.core.mail.get_connection")
+    def test_reteste_de_email_nao_aprova_smtp_sem_credenciais(self, get_connection):
+        """Abrir o socket do Titan sem login funciona, mas todo envio é recusado.
+        O painel não pode transformar esse falso positivo em incidente concluído."""
+        from apps.scrapers.views_admin import _retestar_incidente
+
+        inc = self._incidente(
+            self.u1, causa="email_falhou", pipeline="sistema", escopo="sistema")
+
+        r = _retestar_incidente(inc)
+
+        self.assertFalse(r["sucesso"])
+        self.assertIn("credenciais smtp", r["mensagem"].lower())
+        get_connection.assert_not_called()
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
+        EMAIL_HOST_USER="mailer@example.com",
+        EMAIL_HOST_PASSWORD="segredo-de-teste",
+    )
+    @patch("django.core.mail.get_connection")
+    def test_reteste_de_email_valida_login_sem_enviar(self, get_connection):
+        from apps.scrapers.views_admin import _retestar_incidente
+
+        inc = self._incidente(
+            self.u1, causa="email_falhou", pipeline="sistema", escopo="sistema")
+
+        r = _retestar_incidente(inc)
+
+        self.assertTrue(r["sucesso"])
+        get_connection.return_value.open.assert_called_once_with()
+        get_connection.return_value.close.assert_called_once_with()
 
     def test_causas_de_conexao_e_scraper_agora_sao_retestaveis(self):
         from apps.scrapers.saude import _retestavel
@@ -4851,6 +5194,52 @@ class MelhorCupomNormalizadoTests(TestCase):
         from apps.scrapers.ofertas import _melhor_cupom_normalizado
         self._cupom("a:CONT30", "CONT30", is_mar_aberto=False, discount_num=30, min_compra=0)
         self.assertIsNone(_melhor_cupom_normalizado(self.produto))
+
+    def test_compara_percentual_e_fixo_em_reais(self):
+        from apps.scrapers.ofertas import _melhor_cupom_normalizado
+
+        self._cupom(
+            "a:PCT20", "PCT20", is_mar_aberto=True,
+            tipo_desconto="porcentagem", valor_desconto=20, valor_minimo=0,
+        )
+        self._cupom(
+            "a:FIXO15", "FIXO15", is_mar_aberto=True,
+            tipo_desconto="fixo", valor_desconto=15, valor_minimo=0,
+        )
+        self.assertEqual(_melhor_cupom_normalizado(self.produto), "PCT20")
+
+    def test_teto_e_compra_minima_usam_o_preco_de_vitrine(self):
+        from apps.scrapers.ofertas import _melhor_cupom_normalizado
+
+        self._cupom(
+            "a:PCT20", "PCT20", is_mar_aberto=True,
+            tipo_desconto="porcentagem", valor_desconto=20,
+            desconto_maximo=5, valor_minimo=0,
+        )
+        self._cupom(
+            "a:FIXO15", "FIXO15", is_mar_aberto=True,
+            tipo_desconto="fixo", valor_desconto=15, valor_minimo=0,
+        )
+        self._cupom(
+            "a:MIN150", "MIN150", is_mar_aberto=True,
+            tipo_desconto="fixo", valor_desconto=99, valor_minimo=150,
+        )
+        self.assertEqual(_melhor_cupom_normalizado(self.produto), "FIXO15")
+
+    def test_cupom_restrito_informa_a_condicao_na_mensagem(self):
+        from apps.scrapers.ofertas import montar_mensagem
+
+        cupom = self._cupom(
+            "a:APP10", "APP10", is_mar_aberto=True,
+            tipo_desconto="porcentagem", valor_desconto=10, valor_minimo=0,
+            escopo="Somente no app, primeira compra",
+        )
+        CupomNormalizado.objects.filter(pk=cupom.pk).update(restrito=True)
+
+        mensagem = montar_mensagem(self.produto, "https://meli.la/x", None)
+        self.assertIn("CUPOM: APP10", mensagem)
+        self.assertIn("Condição:", mensagem)
+        self.assertIn("Somente no app, primeira compra", mensagem)
 
 
 class CasarCuponsContainerTests(TestCase):
@@ -5753,3 +6142,162 @@ class LoteDeLinksResilienteTests(TestCase):
             with self.assertRaises(ml.LoginError):
                 ml.gerar_links_em_lote(produtos, usuario=self.user)
         falha.assert_not_called()
+
+
+class SentryHookTests(TestCase):
+    """Relay Sentry → repository_dispatch (apps.scrapers.hooks)."""
+
+    SEGREDO = "segredo-de-teste"
+
+    def setUp(self):
+        self.url = reverse("sentry-hook")
+        self.client = Client()
+
+    @contextmanager
+    def _configurado(self, **extra):
+        env = {
+            "SENTRY_HOOK_SECRET": self.SEGREDO,
+            "GITHUB_DISPATCH_TOKEN": "ghp_fake",
+            "GITHUB_REPO": "g2rmano/Spreading",
+        }
+        env.update(extra)
+        with patch.dict(os.environ, env, clear=False):
+            yield
+
+    def _post(self, payload, assinatura=None):
+        corpo = json.dumps(payload).encode()
+        if assinatura is None:
+            assinatura = hmac.new(
+                self.SEGREDO.encode(), corpo, hashlib.sha256
+            ).hexdigest()
+        return self.client.post(
+            self.url,
+            data=corpo,
+            content_type="application/json",
+            headers={"sentry-hook-signature": assinatura},
+        )
+
+    @staticmethod
+    def _payload(**over):
+        evento = {
+            "issue_id": "4507",
+            "title": "KeyError: 'preco'",
+            "culprit": "apps.scrapers.ofertas in montar",
+            "environment": "production",
+            "web_url": "https://sentry.io/organizations/x/issues/4507/",
+            "entries": [
+                {
+                    "type": "exception",
+                    "data": {
+                        "values": [
+                            {
+                                "type": "KeyError",
+                                "value": "'preco'",
+                                "stacktrace": {
+                                    "frames": [
+                                        {
+                                            "filename": "apps/scrapers/ofertas.py",
+                                            "lineNo": 120,
+                                            "function": "montar",
+                                            "vars": {"senha": "hunter2"},
+                                        }
+                                    ]
+                                },
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+        evento.update(over)
+        return {"action": "triggered", "data": {"event": evento}}
+
+    def test_assinatura_invalida_e_recusada(self):
+        with self._configurado():
+            with patch.object(hooks, "_dispara_github") as dispatch:
+                resposta = self._post(self._payload(), assinatura="deadbeef")
+        self.assertEqual(resposta.status_code, 403)
+        dispatch.assert_not_called()
+
+    def test_assinatura_ausente_e_recusada(self):
+        with self._configurado():
+            with patch.object(hooks, "_dispara_github") as dispatch:
+                resposta = self.client.post(
+                    self.url,
+                    data=json.dumps(self._payload()),
+                    content_type="application/json",
+                )
+        self.assertEqual(resposta.status_code, 403)
+        dispatch.assert_not_called()
+
+    def test_sem_credenciais_responde_503(self):
+        with patch.dict(
+            os.environ,
+            {"SENTRY_HOOK_SECRET": "", "GITHUB_DISPATCH_TOKEN": "", "GITHUB_REPO": ""},
+            clear=False,
+        ):
+            with patch.object(hooks, "_dispara_github") as dispatch:
+                resposta = self._post(self._payload())
+        self.assertEqual(resposta.status_code, 503)
+        dispatch.assert_not_called()
+
+    def test_ambiente_fora_de_producao_e_ignorado(self):
+        with self._configurado():
+            with patch.object(hooks, "_dispara_github") as dispatch:
+                resposta = self._post(self._payload(environment="staging"))
+        self.assertEqual(resposta.status_code, 204)
+        dispatch.assert_not_called()
+
+    def test_evento_sem_issue_id_e_ignorado(self):
+        with self._configurado():
+            with patch.object(hooks, "_dispara_github") as dispatch:
+                resposta = self._post(self._payload(issue_id=None))
+        self.assertEqual(resposta.status_code, 204)
+        dispatch.assert_not_called()
+
+    def test_acao_diferente_de_triggered_e_ignorada(self):
+        payload = self._payload()
+        payload["action"] = "created"
+        with self._configurado():
+            with patch.object(hooks, "_dispara_github") as dispatch:
+                resposta = self._post(payload)
+        self.assertEqual(resposta.status_code, 204)
+        dispatch.assert_not_called()
+
+    def test_dispara_dispatch_com_payload_enxuto(self):
+        with self._configurado():
+            with patch.object(hooks, "_dispara_github") as dispatch:
+                resposta = self._post(self._payload())
+        self.assertEqual(resposta.status_code, 202)
+        dispatch.assert_called_once()
+        despacho = dispatch.call_args.args[0]
+        self.assertEqual(despacho["issue_id"], "4507")
+        self.assertEqual(despacho["title"], "KeyError: 'preco'")
+        self.assertIn("apps/scrapers/ofertas.py:120 in montar", despacho["stack"])
+        # O resumo do stacktrace nunca pode carregar variáveis locais.
+        self.assertNotIn("hunter2", despacho["stack"])
+        self.assertNotIn("senha", despacho["stack"])
+
+    def test_falha_do_github_nao_derruba_o_endpoint(self):
+        with self._configurado():
+            with patch.object(
+                hooks, "_dispara_github", side_effect=OSError("github fora do ar")
+            ):
+                resposta = self._post(self._payload())
+        self.assertEqual(resposta.status_code, 502)
+
+    def test_corpo_invalido_responde_400(self):
+        corpo = b"{nao e json"
+        assinatura = hmac.new(self.SEGREDO.encode(), corpo, hashlib.sha256).hexdigest()
+        with self._configurado():
+            resposta = self.client.post(
+                self.url,
+                data=corpo,
+                content_type="application/json",
+                headers={"sentry-hook-signature": assinatura},
+            )
+        self.assertEqual(resposta.status_code, 400)
+
+    def test_get_nao_e_aceito(self):
+        with self._configurado():
+            self.assertEqual(self.client.get(self.url).status_code, 405)

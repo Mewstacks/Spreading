@@ -40,6 +40,7 @@ fonte única compartilhada com o caminho de browser e com o envio.
 import logging
 import re
 from html.parser import HTMLParser
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -54,6 +55,54 @@ logger = logging.getLogger(__name__)
 # (connect, read). O ML responde o HTML SSR rápido; quem demora é o resto da página,
 # que não nos interessa.
 _TIMEOUT = (5, 15)
+
+_REDIRECTS = {301, 302, 303, 307, 308}
+_MAX_REDIRECTS = 5
+
+
+def _url_ml_permitida(url: str) -> bool:
+    """Restringe egress a encurtadores e domínios oficiais do Mercado Livre."""
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except (TypeError, ValueError):
+        return False
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return False
+    if port not in (None, 443):
+        return False
+    return (
+        host == "meli.la"
+        or host == "mercadolivre.com.br"
+        or host.endswith(".mercadolivre.com.br")
+        or host == "mercadolivre.com"
+        or host.endswith(".mercadolivre.com")
+        or host == "mercadolibre.com"
+        or host.endswith(".mercadolibre.com")
+    )
+
+
+def _get_ml(sessao, url: str, *, timeout):
+    """GET com redirects manuais; valida cada hop antes de abrir a conexão."""
+    atual = url
+    historico = []
+    for _ in range(_MAX_REDIRECTS + 1):
+        if not _url_ml_permitida(atual):
+            raise ValueError("destino fora dos domínios permitidos do Mercado Livre")
+        resp = sessao.get(atual, allow_redirects=False, timeout=timeout)
+        if resp.status_code not in _REDIRECTS:
+            try:
+                resp.history = historico
+            except Exception:
+                pass
+            return resp
+        location = (getattr(resp, "headers", {}) or {}).get("location")
+        if not location:
+            return resp
+        historico.append(resp)
+        atual = urljoin(atual, location)
+    raise ValueError("redirecionamentos demais ao abrir link do Mercado Livre")
 
 _TERMOS_MORTO = ("anúncio pausado", "página não encontrada", "estoque indisponível")
 _RE_CUPOM = re.compile(r"com\s+cupom|cupom\s+de\s+r?\$|%\s*off\s*com\s*cupom|aplicar\s+cupom")
@@ -247,7 +296,7 @@ def relatorio_por_http(link_afiliado: str, nome_esperado: str = None,
         return relatorio
 
     try:
-        resp = _sessao().get(link_afiliado, allow_redirects=True, timeout=_TIMEOUT)
+        resp = _get_ml(_sessao(), link_afiliado, timeout=_TIMEOUT)
     except Exception as e:
         relatorio["erros"].append(f"Falha ao abrir link: {e}")
         return relatorio
@@ -316,8 +365,9 @@ def relatorio_de_preco(link: str, *, sessao=None, timeout=None) -> dict:
         resultado["bloqueio"] = "link vazio"
         return resultado
     try:
-        resp = (sessao or _sessao()).get(
-            link, allow_redirects=True, timeout=timeout or _TIMEOUT_ENVIO)
+        resp = _get_ml(
+            sessao or _sessao(), link, timeout=timeout or _TIMEOUT_ENVIO,
+        )
     except Exception as e:
         resultado["bloqueio"] = f"falha ao abrir link: {e}"
         return resultado
