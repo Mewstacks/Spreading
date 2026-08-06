@@ -22,9 +22,22 @@ logger = logging.getLogger(__name__)
 _TELA = 1080          # lado da imagem final (quadrada, padrão de card)
 _MARGEM = 12          # respiro branco entre as células
 _FUNDO = (255, 255, 255)
-_MAX_BYTES = 8 * 1024 * 1024
+_MAX_BYTES = 8 * 1024 * 1024   # teto do DOWNLOAD de cada foto de origem
 _LIMIAR_FUNDO_BRANCO = 12
 _RESPIRO_PRODUTO = 0.06
+
+# Teto do que vai para o transporte. O worker do WhatsApp tem um orçamento único
+# (SEND_REQUEST_TIMEOUT_MS, hoje 55s) para preflight MAIS upload da mídia; se o
+# sendMessage começa e estoura esse prazo, ele devolve `resultado: "incerto"` e a
+# oferta não é reenviada — para não duplicar no grupo. Ou seja: uma foto grande
+# demais não vira erro de imagem, vira uma entrega que ninguém sabe se aconteceu.
+# Ver node.js/index.js (timeoutComEnvioIniciado) e ofertas._motivo_publico_transporte.
+#
+# A colagem já saía dentro do teto por construção (1080x1080). O caminho de foto
+# única do produto não: mandava a imagem na resolução original da loja.
+LADO_MAXIMO_ENVIO = 1600
+MAX_BYTES_ENVIO = 1_500_000    # antes do base64, que ainda infla ~33%
+_QUALIDADES_JPEG = (85, 75, 65, 55)
 
 
 def _url_publica(url):
@@ -201,10 +214,31 @@ def _montar_imagens(imagens):
         oy = lin * altura_cel + (altura_cel - copia.height) // 2
         tela.paste(copia, (ox, oy))
 
-    return _para_b64(tela)
+    return preparar_jpeg_b64(tela)
 
 
-def _para_b64(img):
-    buf = BytesIO()
-    img.save(buf, format="JPEG", quality=85)
-    return base64.b64encode(buf.getvalue()).decode("ascii"), "image/jpeg"
+def preparar_jpeg_b64(img):
+    """PIL.Image -> (base64 JPEG, 'image/jpeg') dentro do teto de envio.
+
+    Reduz o lado maior e, se ainda não couber, recomprime em qualidades
+    decrescentes. A última qualidade é usada mesmo se não couber: mandar uma foto
+    grande é melhor que mandar oferta sem foto, e o teto é uma margem de segurança
+    do prazo de upload, não um limite rígido do WhatsApp.
+    """
+    from PIL import Image
+
+    if max(img.size) > LADO_MAXIMO_ENVIO:
+        img = img.copy()
+        img.thumbnail((LADO_MAXIMO_ENVIO, LADO_MAXIMO_ENVIO), Image.Resampling.LANCZOS)
+
+    dados = b""
+    for qualidade in _QUALIDADES_JPEG:
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=qualidade, optimize=True)
+        dados = buf.getvalue()
+        if len(dados) <= MAX_BYTES_ENVIO:
+            break
+    else:
+        logger.info("Foto ainda com %s bytes na menor qualidade; enviando assim.",
+                    len(dados))
+    return base64.b64encode(dados).decode("ascii"), "image/jpeg"

@@ -1539,20 +1539,24 @@ def _baixar_imagem_b64(url):
     Baixa a imagem e converte p/ JPEG -> (base64, 'image/jpeg').
     Converte porque o whatsapp-web.js falha ao enviar webp (formato padrão do ML).
     ('', '') se falhar/sem url.
+
+    Reusa o download da colagem (valida o host antes do GET, recusa redirect para
+    endereço não público e corta o corpo no teto) e o encoder dela, que reduz a
+    foto até caber no orçamento de upload do worker. Este caminho fazia o oposto
+    dos dois: GET direto na URL raspada e JPEG na resolução original da loja.
     """
     if not url or not url.startswith("http"):
         return "", ""
-    import base64
-    from io import BytesIO
+    from apps.scrapers.colagem import _baixar_imagem, preparar_jpeg_b64
     try:
-        r = requests.get(url, timeout=8)
-        if r.status_code != 200 or not r.content:
+        img = _baixar_imagem(url)
+        if img is None:
+            # Sem foto o envio continua (vai só texto), então isto não pode ser
+            # mudo: é a diferença entre "a loja não respondeu" e "a URL foi
+            # recusada pela validação" quando alguém for investigar depois.
+            logger.info("Foto da oferta não pôde ser usada (%s).", url[:120])
             return "", ""
-        from PIL import Image
-        img = Image.open(BytesIO(r.content)).convert("RGB")
-        buf = BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        return base64.b64encode(buf.getvalue()).decode("ascii"), "image/jpeg"
+        return preparar_jpeg_b64(img)
     except Exception as e:
         logger.debug("Falha ao processar imagem da oferta: %s", e)
         return "", ""
@@ -1894,6 +1898,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         # Imagem conforme o canal: Telegram aceita URL direto; WhatsApp precisa de base64.
         # Foto custom (opcional, escolhida no envio) só entra no caminho base64/WhatsApp;
         # sem ela, mantém a foto do produto como sempre.
+        foto_bytes = 0
         if sender.prefers_image == "url" and not imagem_b64_custom:
             resultado = sender.enviar_oferta(grupo_id, mensagem,
                                              imagem_url=getattr(produto, "imagem_url", "") or None,
@@ -1906,6 +1911,10 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                 imagem_b64, img_mime = imagem_b64_custom, "image/jpeg"
             else:
                 imagem_b64, img_mime = _baixar_imagem_b64(getattr(produto, "imagem_url", ""))
+            # Tamanho da mídia no evento: é a variável que decide entre o envio
+            # confirmado e o 'incerto' por estouro do prazo de upload, e sem ela
+            # os dois desfechos ficam indistinguíveis no histórico.
+            foto_bytes = len(imagem_b64 or "") * 3 // 4
             resultado = sender.enviar_oferta(grupo_id, mensagem, imagem_b64=imagem_b64 or None,
                                              mimetype=img_mime or "image/jpeg", legenda=mensagem,
                                              usuario=usuario, session=wa_session,
@@ -1928,6 +1937,8 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                     "destino": destino_nome or grupo_id,
                     "via": resultado.get("via"),
                     "publicacao_id": getattr(publicacao, "id", None),
+                    "foto_bytes": foto_bytes,
+                    "duracao_ms": resultado.get("duracao_ms", 0),
                 },
             )
             return {"sucesso": True, "link": link, "mensagem": mensagem,
@@ -1951,6 +1962,9 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                       repetir=resultado.get("repetir"),
                       etapa=resultado.get("etapa"),
                       duracao_ms=resultado.get("duracao_ms"),
+                      # É aqui que o número importa: 'incerto' com foto grande e
+                      # duracao_ms no teto é estouro de upload, não canal quebrado.
+                      foto_bytes=foto_bytes,
                       falha_infra=resultado.get("falha_infra", False))
 
     try:

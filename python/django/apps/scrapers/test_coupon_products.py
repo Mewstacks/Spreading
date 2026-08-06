@@ -600,6 +600,50 @@ class CouponCollageTests(SimpleTestCase):
         self.assertFalse(_url_publica("https://127.0.0.1/a.jpg"))
 
 
+class FotoDoEnvioTests(SimpleTestCase):
+    """Teto da mídia que vai para o worker do WhatsApp.
+
+    O worker tem um orçamento único de 55s para preflight + upload. Quando o
+    sendMessage começa e estoura esse prazo, ele devolve `resultado: "incerto"` e
+    a oferta NÃO é reenviada (para não duplicar no grupo) — a pessoa vê "a entrega
+    não pôde ser confirmada". Uma foto na resolução original da loja era o caminho
+    mais fácil para chegar lá.
+    """
+
+    def test_foto_grande_e_reduzida_para_caber_no_envio(self):
+        from PIL import Image
+        from apps.scrapers.colagem import (
+            LADO_MAXIMO_ENVIO, MAX_BYTES_ENVIO, preparar_jpeg_b64,
+        )
+
+        # Ruído aleatório: uma imagem lisa comprime a quase nada e não exercitaria
+        # nem a redução de lado nem a queda de qualidade.
+        import os
+        grande = Image.frombytes("RGB", (3000, 3000), os.urandom(3000 * 3000 * 3))
+
+        b64, mime = preparar_jpeg_b64(grande)
+
+        self.assertEqual(mime, "image/jpeg")
+        imagem = Image.open(BytesIO(base64.b64decode(b64)))
+        self.assertLessEqual(max(imagem.size), LADO_MAXIMO_ENVIO)
+        self.assertLessEqual(len(base64.b64decode(b64)), MAX_BYTES_ENVIO)
+
+    def test_foto_pequena_passa_sem_ser_ampliada(self):
+        from PIL import Image
+        from apps.scrapers.colagem import preparar_jpeg_b64
+
+        b64, _mime = preparar_jpeg_b64(Image.new("RGB", (640, 360), "blue"))
+
+        self.assertEqual(Image.open(BytesIO(base64.b64decode(b64))).size, (640, 360))
+
+    def test_url_recusada_nao_derruba_o_envio(self):
+        """Sem foto o envio segue como texto; o que não pode é estourar."""
+        from apps.scrapers.ofertas import _baixar_imagem_b64
+
+        self.assertEqual(_baixar_imagem_b64("https://127.0.0.1/a.jpg"), ("", ""))
+        self.assertEqual(_baixar_imagem_b64(""), ("", ""))
+
+
 class TelegramCouponMediaTests(SimpleTestCase):
     @patch("apps.scrapers.senders.telegram.requests.post")
     def test_colagem_e_enviada_via_multipart_com_legenda(self, post):
