@@ -300,6 +300,101 @@ class AmazonTaxonomyTests(SimpleTestCase):
         self.assertEqual(m["macro_sugerida"], "")
 
 
+class MLPaginaCategoriaTests(SimpleTestCase):
+    """O ML publica o domain_id no payload; perdê-lo esvaziava o filtro da vitrine."""
+
+    def _page(self, texto, existe=True):
+        tag = Mock()
+        tag.count.return_value = 1 if existe else 0
+        tag.text_content.return_value = texto
+        page = Mock()
+        page.locator.return_value = tag
+        return page
+
+    def _payload(self, corpo):
+        return f"window._n.ctx.r={corpo};_n.ctx.r.assets=[]"
+
+    def test_le_o_domain_id_de_cada_anuncio(self):
+        from apps.scrapers.scraper_mercadolivre.categorias_pagina import mapear_domain_ids
+
+        page = self._page(self._payload(
+            '{"results":[{"id":"MLB123456","domain_id":"MLB-VACUUM_CLEANERS"}]}'))
+
+        self.assertEqual(mapear_domain_ids(page), {"MLB123456": "VACUUM_CLEANERS"})
+
+    def test_apelido_de_catalogo_herda_a_categoria_do_anuncio(self):
+        from apps.scrapers.scraper_mercadolivre.categorias_pagina import mapear_domain_ids
+
+        page = self._page(self._payload(
+            '{"a":[{"id":"MLB999","domain_id":"MLB-CELLPHONES"},'
+            '{"product_id":"MLB777","item_id":"MLB999"}]}'))
+
+        mapa = mapear_domain_ids(page)
+        self.assertEqual(mapa["MLB777"], "CELLPHONES")
+
+    def test_script_ausente_avisa_em_vez_de_falhar_calado(self):
+        """Era o `except Exception: pass`: o catálogo inteiro ia a DESCONHECIDO
+        e não sobrava nada no log apontando para a leitura de categoria."""
+        from apps.scrapers.scraper_mercadolivre import categorias_pagina
+
+        page = self._page("", existe=False)
+
+        with self.assertLogs(categorias_pagina.logger, level="WARNING") as capturado:
+            self.assertEqual(categorias_pagina.mapear_domain_ids(page), {})
+        self.assertIn("ausente", " ".join(capturado.output))
+
+    def test_marcador_renomeado_pelo_ml_avisa(self):
+        from apps.scrapers.scraper_mercadolivre import categorias_pagina
+
+        page = self._page("window._n.ctx.OUTRO={};fim")
+
+        with self.assertLogs(categorias_pagina.logger, level="WARNING") as capturado:
+            self.assertEqual(categorias_pagina.mapear_domain_ids(page), {})
+        self.assertIn("marcadores", " ".join(capturado.output).lower())
+
+    def test_json_quebrado_avisa(self):
+        from apps.scrapers.scraper_mercadolivre import categorias_pagina
+
+        page = self._page(self._payload('{"results":[nao é json'))
+
+        with self.assertLogs(categorias_pagina.logger, level="WARNING") as capturado:
+            self.assertEqual(categorias_pagina.mapear_domain_ids(page), {})
+        self.assertIn("ilegível", " ".join(capturado.output))
+
+    def test_id_do_anuncio_sai_do_link_normalizado(self):
+        from apps.scrapers.scraper_mercadolivre.categorias_pagina import id_do_anuncio
+
+        self.assertEqual(
+            id_do_anuncio("https://www.mercadolivre.com.br/p/MLB123456"), "MLB123456")
+        self.assertEqual(id_do_anuncio("https://exemplo.com/sem-id"), "")
+
+
+class MLTaxonomiaNaoRebaixaTests(SimpleTestCase):
+    """Coleta que não descobriu categoria não pode apagar a que outra descobriu."""
+
+    def test_categoria_descoberta_entra_no_update(self):
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _taxonomia
+
+        r = _taxonomia({"nome": "Aspirador", "categoria": "VACUUM_CLEANERS"}, None, {})
+
+        self.assertEqual(r["defaults"]["categoria"], "VACUUM_CLEANERS")
+
+    def test_card_fora_do_payload_nao_apaga_categoria_existente(self):
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _taxonomia
+
+        r = _taxonomia({"nome": "Aspirador", "categoria": ""}, None, {})
+
+        self.assertNotIn("categoria", r["defaults"])
+        self.assertEqual(r["create_defaults"]["categoria"], "DESCONHECIDO")
+
+    def test_titulo_que_nao_denuncia_macro_nao_apaga_a_macro_existente(self):
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _taxonomia
+
+        r = _taxonomia({"nome": "Produto XPTO 3000", "categoria": ""}, None, {})
+
+        self.assertNotIn("macro_categoria", r["defaults"])
+
+
 class AmazonCollectionHardeningTests(SimpleTestCase):
     """Falha total da API não pode virar 'zero ofertas' silencioso."""
 

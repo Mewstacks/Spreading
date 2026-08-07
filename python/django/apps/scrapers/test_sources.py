@@ -88,6 +88,48 @@ class SourcePipelineTests(TestCase):
         self.assertEqual(coupons[0].evidence["asins"], ["B012345678", "B087654321"])
         self.assertEqual(coupons[0].coupon_rules["modo_resgate"], "ativacao")
 
+    def test_fonte_publica_nao_apaga_a_categoria_que_a_creators_api_classificou(self):
+        """O caminho público desfazia a classificação do browseNodeInfo.
+
+        As duas coletas caem na MESMA linha (marketplace + owner + asin). A pública
+        não conhece a categoria e gravava 'DESCONHECIDO' como constante, então bastava
+        um ciclo público depois da Creators API para o produto voltar a ficar invisível
+        no filtro de subcategoria da vitrine, que exclui esse valor.
+        """
+        item = list(FakeSource().discover_offers())[0]
+        Produto.objects.create(
+            marketplace="amazon", owner=self.user, asin=item.external_id,
+            nome="Fone", categoria="Fones de Ouvido",
+            macro_categoria="Áudio, Vídeo e Fotografia",
+            preco_sem_desconto=100, preco_com_cupom=80,
+            link_produto=item.canonical_url,
+        )
+
+        persist_items([item], owner=self.user)
+
+        produto = Produto.objects.get(owner=self.user, asin=item.external_id)
+        self.assertEqual(produto.categoria, "Fones de Ouvido")
+        self.assertEqual(produto.macro_categoria, "Áudio, Vídeo e Fotografia")
+
+    def test_fonte_que_conhece_a_categoria_grava_e_atualiza(self):
+        """Quem tem o sinal manda: `category` vence o que já estava na linha."""
+        item = list(FakeSource().discover_offers())[0]
+        persist_items([item], owner=self.user)
+
+        classificado = IngestedItem(**{**item.__dict__, "category": "Fones de Ouvido"})
+        persist_items([classificado], owner=self.user)
+
+        produto = Produto.objects.get(owner=self.user, asin=item.external_id)
+        self.assertEqual(produto.categoria, "Fones de Ouvido")
+
+    def test_produto_novo_sem_sinal_nasce_como_desconhecido(self):
+        """'Ninguém classificou ainda' continua sendo DESCONHECIDO, não vazio."""
+        item = list(FakeSource().discover_offers())[0]
+        persist_items([item], owner=self.user)
+
+        produto = Produto.objects.get(owner=self.user, asin=item.external_id)
+        self.assertEqual(produto.categoria, "DESCONHECIDO")
+
     def test_empty_source_preserves_existing_catalog(self):
         item = list(FakeSource().discover_offers())[0]
         persist_items([item], owner=self.user)

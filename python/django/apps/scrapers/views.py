@@ -1686,6 +1686,13 @@ def buscar_promocoes_stream(request):
 # Itens por tela em Promoções (ofertas e cupons).
 POR_PAGINA = 20
 
+# Opção de subcategoria para o item que nenhuma loja classificou. Não é um valor
+# gravado em `Produto.categoria`: é um rótulo de UI que a view traduz de volta para
+# "DESCONHECIDO, vazio ou nulo". O prefixo evita colisão com categoria real do ML
+# (domain_id, ex.: 'VACUUM_CLEANERS') ou da Amazon (nome do browse node).
+SEM_SUBCATEGORIA = "__sem_subcategoria__"
+ROTULO_SEM_SUBCATEGORIA = "Sem subcategoria"
+
 
 def top_promocoes(request):
     from apps.scrapers.models import HistoricoEnvio
@@ -1765,16 +1772,29 @@ def top_promocoes(request):
 
     def _montar_categorias_por_macro():
         agrupado = {}
+        macros_sem_categoria = set()
         for row in (
             Produto.objects
             .exclude(macro_categoria__isnull=True).exclude(macro_categoria="")
-            .exclude(categoria__isnull=True).exclude(categoria="").exclude(categoria="DESCONHECIDO")
             .values("macro_categoria", "categoria")
             .distinct()
             .order_by("macro_categoria", "categoria")
         ):
-            agrupado.setdefault(row["macro_categoria"], []).append(row["categoria"])
-        return agrupado
+            macro = row["macro_categoria"]
+            categoria = row["categoria"]
+            # 'DESCONHECIDO'/vazio significa "ninguém classificou ainda", e a loja
+            # que não classifica é justamente a que mais tem item. Omitir esses
+            # produtos da lista não os filtrava: tornava-os INALCANÇÁVEIS — quem
+            # escolhesse qualquer subcategoria perdia a loja inteira sem explicação.
+            # Eles viram uma opção própria, então a escolha fica visível e reversível.
+            if not categoria or categoria == "DESCONHECIDO":
+                macros_sem_categoria.add(macro)
+                agrupado.setdefault(macro, [])
+                continue
+            agrupado.setdefault(macro, []).append(categoria)
+        for macro in macros_sem_categoria:
+            agrupado[macro].append(SEM_SUBCATEGORIA)
+        return {macro: cats for macro, cats in agrupado.items() if cats}
 
     categorias_por_macro = _taxonomia_cacheada(
         "categorias", request, _montar_categorias_por_macro)
@@ -1815,7 +1835,14 @@ def top_promocoes(request):
     if macros_selecionados:
         qs = qs.filter(macro_categoria__in=macros_selecionados)
     if categorias_selecionadas:
-        qs = qs.filter(categoria__in=categorias_selecionadas)
+        # "Sem subcategoria" é rótulo de UI, não valor de coluna: traduz de volta
+        # para as três formas com que "ninguém classificou" chega ao banco.
+        reais = [c for c in categorias_selecionadas if c != SEM_SUBCATEGORIA]
+        condicao = Q(categoria__in=reais) if reais else Q(pk__in=[])
+        if SEM_SUBCATEGORIA in categorias_selecionadas:
+            condicao |= (Q(categoria="DESCONHECIDO") | Q(categoria="")
+                         | Q(categoria__isnull=True))
+        qs = qs.filter(condicao)
     if loja_selecionada:
         qs = qs.filter(marketplace=loja_selecionada)
     if busca:
@@ -2100,6 +2127,8 @@ def top_promocoes(request):
         "qs_base_pagina": qs_base_pagina,
         "macro_categorias": macro_categorias,
         "categorias_por_macro": categorias_por_macro,
+        "sem_subcategoria_valor": SEM_SUBCATEGORIA,
+        "sem_subcategoria_rotulo": ROTULO_SEM_SUBCATEGORIA,
         "macros_selecionados": macros_selecionados,
         "categorias_selecionadas": categorias_selecionadas,
         "loja_selecionada": loja_selecionada,

@@ -51,16 +51,35 @@ def persist_items(items, owner=None, integration=None):
             "link_produto": item.canonical_url, "fonte": item.source,
             "estado": "ativo", "confianca": "media", "evidencia": item.evidence,
             "valido_ate": item.valid_until, "falha_verificacao": "",
-            "falhas_consecutivas": 0, "categoria": "DESCONHECIDO",
-            "macro_categoria": classificar_oferta_por_nome(item.title),
+            "falhas_consecutivas": 0,
         }
         # Fontes legadas nem sempre fornecem imagem. Ausência não deve apagar uma
         # foto válida já observada por outra coleta do mesmo produto.
         if item.image_url:
             defaults["imagem_url"] = item.image_url[:1000]
+
+        # Taxonomia: só entra em `defaults` (o caminho de UPDATE) quando ESTA coleta
+        # realmente descobriu algo. O mesmo ASIN é reingerido por fontes diferentes
+        # sobre a mesma linha (marketplace + owner + asin), e as públicas não sabem a
+        # categoria. Gravá-la como constante fazia a coleta pública desfazer o que a
+        # Creators API tinha classificado pelo browseNodeInfo: o produto voltava para
+        # 'DESCONHECIDO' e sumia do filtro de subcategoria da vitrine, que exclui esse
+        # valor. Mesma armadilha na macro, que `classificar_oferta_por_nome` devolve
+        # como None quando o título não denuncia nada.
+        categoria = (item.category or "").strip()[:100]
+        macro = classificar_oferta_por_nome(item.title)
+        if categoria:
+            defaults["categoria"] = categoria
+        if macro:
+            defaults["macro_categoria"] = macro
         Produto.objects.update_or_create(
             **lookup,
             defaults=defaults,
+            # Na criação a linha precisa nascer com as colunas preenchidas, inclusive
+            # quando não há sinal nenhum — 'DESCONHECIDO' é o valor honesto para
+            # "ninguém classificou ainda", e é o que o resto do código já espera.
+            create_defaults={**defaults, "categoria": categoria or "DESCONHECIDO",
+                             "macro_categoria": macro},
         )
         # Sem esta observação as fontes públicas nunca acumulam histórico e ficam
         # de fora do gate anti-desconto-falso (precos.stats exige n >= 3).

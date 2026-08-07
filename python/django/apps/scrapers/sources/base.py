@@ -44,6 +44,12 @@ class IngestedItem:
     effective_price: float = 0
     reference_price: float = 0
     image_url: str = ""
+    # Subcategoria conforme a PRÓPRIA loja classificou (browse node da Amazon,
+    # domain_id do ML). Vazio = "esta fonte não sabe", que é o caso das fontes
+    # públicas: a busca e a página de ofertas não expõem o nó, e descobri-lo
+    # custaria uma carga de PDP por item. Vazio nunca sobrescreve uma categoria
+    # real já gravada por outra fonte — ver persist_items.
+    category: str = ""
     coupon_code: str = ""
     coupon_rules: dict[str, Any] = field(default_factory=dict)
     content_type: str = "voucher"

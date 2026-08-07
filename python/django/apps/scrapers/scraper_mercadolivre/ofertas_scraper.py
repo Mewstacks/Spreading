@@ -306,9 +306,17 @@ def _coletar_cards(page):
     pelo ML zerava a coleta e o único sinal era o total, que só cai quando TUDO
     quebra: enquanto uma parte funcionasse, ninguém via nada.
     """
+    from apps.scrapers.scraper_mercadolivre.categorias_pagina import (
+        id_do_anuncio, mapear_domain_ids,
+    )
+
     out = []
     descartes = {"sem_nome_ou_link": 0, "sem_desconto": 0, "preco_invalido": 0,
                  "erro_no_card": 0}
+    # Uma leitura por página serve todos os cards dela. Esta fonte gravava
+    # 'DESCONHECIDO' fixo, e como é a maior do catálogo era ela que deixava o filtro
+    # de subcategoria da vitrine (que exclui esse valor) sem nada para oferecer.
+    domain_ids = mapear_domain_ids(page)
     cards = page.locator(".poly-card")
     total = cards.count()
     for i in range(total):
@@ -360,14 +368,18 @@ def _coletar_cards(page):
             except Exception:
                 pass
 
+            link_normalizado = _normalizar_link_produto(link)
             out.append({
                 "nome": nome[:255],
-                "link_produto": _normalizar_link_produto(link),
+                "link_produto": link_normalizado,
                 "preco_sem_desconto": de,
                 "preco_com_cupom": por,
                 "imagem_url": imagem[:1000],
                 "frete_full": full,
                 "relampago": relampago,
+                # "" = este anúncio não estava no payload. Quem grava trata vazio
+                # como "não descobri", nunca como "sem categoria".
+                "categoria": domain_ids.get(id_do_anuncio(link_normalizado), ""),
             })
         except Exception as e:
             descartes["erro_no_card"] += 1
@@ -391,6 +403,33 @@ def _logar_descartes(total, aproveitados, descartes):
           total, aproveitados, perdidos, detalhe)
 
 
+def _taxonomia(coletado, macro_fixa, defaults):
+    """Monta `defaults`/`create_defaults` sem deixar a coleta rebaixar a taxonomia.
+
+    A mesma linha é reescrita por várias coletas (feed completo, lane rápida, busca
+    por termo). Categoria e macro só entram no caminho de UPDATE quando ESTA coleta
+    descobriu algo: o card que não veio no payload chega com "" e não pode apagar o
+    `domain_id` que outra passagem já tinha lido, do mesmo jeito que
+    `classificar_oferta_por_nome` devolve None e não pode apagar a macro. É a mesma
+    regra de `sources/persistence.py`.
+    """
+    categoria = str(coletado.get("categoria") or "").strip()[:100]
+    macro = macro_fixa or classificar_oferta_por_nome(coletado["nome"])
+    atualizacao = dict(defaults)
+    if categoria:
+        atualizacao["categoria"] = categoria
+    if macro:
+        atualizacao["macro_categoria"] = macro
+    return {
+        "defaults": atualizacao,
+        # Linha nova nasce preenchida mesmo sem sinal nenhum: 'DESCONHECIDO' é o
+        # valor que o resto do código já entende como "ninguém classificou ainda".
+        "create_defaults": {**atualizacao,
+                            "categoria": categoria or "DESCONHECIDO",
+                            "macro_categoria": macro},
+    }
+
+
 def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):
     """Upsert não destrutivo. Uma coleta parcial nunca apaga o catálogo anterior."""
     _reconectar_db()  # conexão fresca: a fase de browser pode ter matado o socket
@@ -403,23 +442,22 @@ def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):
         vistos.add(link_produto)
         from apps.scrapers.scraper_mercadolivre.link import e_catalogo_universal
         catalogo = e_catalogo_universal(link_produto)
+        defaults = {"campanha_id": "", "origem": origem,
+                    "fonte": "mercadolivre-web", "codigo_checkout": codigo_checkout,
+                    "nome": o["nome"], "preco_sem_desconto": o["preco_sem_desconto"],
+                    "preco_com_cupom": o["preco_com_cupom"],
+                    "preco_fonte": o["preco_sem_desconto"],
+                    "preco_efetivo": o["preco_com_cupom"],
+                    "estado": "invalido" if catalogo else "ativo",
+                    "falha_verificacao": (
+                        "Catálogo universal sem anúncio individual afiliável."
+                        if catalogo else ""), "falhas_consecutivas": 0,
+                    "confianca": "media", "evidencia": {"transport": "public-web"},
+                    "imagem_url": o["imagem_url"], "frete_full": o["frete_full"],
+                    "relampago": o.get("relampago", False)}
         produto, _ = _upsert_resiliente(
             marketplace="mercadolivre", owner=None, link_produto=link_produto,
-            defaults={"campanha_id": "", "origem": origem,
-                      "fonte": "mercadolivre-web", "codigo_checkout": codigo_checkout,
-                      "nome": o["nome"], "preco_sem_desconto": o["preco_sem_desconto"],
-                      "preco_com_cupom": o["preco_com_cupom"],
-                      "preco_fonte": o["preco_sem_desconto"],
-                      "preco_efetivo": o["preco_com_cupom"],
-                      "estado": "invalido" if catalogo else "ativo",
-                      "falha_verificacao": (
-                          "Catálogo universal sem anúncio individual afiliável."
-                          if catalogo else ""), "falhas_consecutivas": 0,
-                      "confianca": "media", "evidencia": {"transport": "public-web"},
-                      "categoria": "DESCONHECIDO",
-                      "macro_categoria": macro_fixa or classificar_oferta_por_nome(o["nome"]),
-                      "imagem_url": o["imagem_url"], "frete_full": o["frete_full"],
-                      "relampago": o.get("relampago", False)})
+            **_taxonomia(o, macro_fixa, defaults))
         if catalogo:
             # Falhas terminais antigas não devem continuar ocupando a tela nem a
             # fila quando a regra agora é global: catálogo universal não publica.
@@ -447,7 +485,7 @@ def _upsert_ofertas(coletados):
         catalogo = e_catalogo_universal(link_produto)
         produto, _ = _upsert_resiliente(
             marketplace="mercadolivre", link_produto=link_produto, owner=None,
-            defaults={
+            **_taxonomia(o, None, {
                 "origem": "oferta",
                 "nome": o["nome"],
                 "preco_sem_desconto": o["preco_sem_desconto"],
@@ -459,12 +497,10 @@ def _upsert_ofertas(coletados):
                 "falha_verificacao": (
                     "Catálogo universal sem anúncio individual afiliável."
                     if catalogo else ""),
-                "categoria": "DESCONHECIDO",
-                "macro_categoria": classificar_oferta_por_nome(o["nome"]),
                 "imagem_url": o["imagem_url"],
                 "frete_full": o["frete_full"],
                 "relampago": o.get("relampago", False),
-            },
+            }),
         )
         if catalogo:
             produto.links_usuario.all().delete()

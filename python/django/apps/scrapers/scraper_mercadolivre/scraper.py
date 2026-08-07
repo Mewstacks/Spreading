@@ -11,6 +11,7 @@ from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada
 from apps.scrapers.coupon_rules import (
     derivar_categoria_cupom, extrair_escopo_produtos, rotulo_anunciante,
     tem_restricao_publico)
+from apps.scrapers.scraper_mercadolivre.categorias_pagina import mapear_domain_ids
 from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
 from apps.scrapers.models import (
     Cupom, CupomNormalizado, FonteIngestao, Produto, normalizar_busca,
@@ -717,49 +718,11 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
             falha_extracao = True
             break
 
-        categorias_por_id = {}
-        try:
-            tag = page.locator("#__NORDIC_RENDERING_CTX__")
-            if tag.count() > 0:
-                texto = tag.text_content()
-                json_puro = texto.split('_n.ctx.r=')[1].split(';_n.ctx.r.assets')[0]
-                dados = json.loads(json_puro)
-
-                _item_id_para_cat = {}
-                _product_id_para_item = {}
-
-                def _buscar_domain_ids(obj):
-                    if isinstance(obj, dict):
-                        domain_id = obj.get("domain_id", "")
-                        if domain_id:
-                            item_id = obj.get("id")
-                            if item_id and re.match(r'MLB[A-Z]?\d+', str(item_id)):
-                                _item_id_para_cat[str(item_id)] = domain_id.replace("MLB-", "")
-
-                        prod_id = obj.get("product_id")
-                        item_id_ref = obj.get("item_id")
-                        if prod_id and item_id_ref and re.match(r'MLB[A-Z]?\d+', str(prod_id)):
-                            _product_id_para_item[str(prod_id)] = str(item_id_ref)
-                        cat_prod_id = obj.get("catalog_product_id")
-                        if cat_prod_id and item_id_ref and re.match(r'MLB[A-Z]?\d+', str(cat_prod_id)):
-                            _product_id_para_item[str(cat_prod_id)] = str(item_id_ref)
-
-                        for v in obj.values():
-                            _buscar_domain_ids(v)
-                    elif isinstance(obj, list):
-                        for item in obj:
-                            _buscar_domain_ids(item)
-
-                _buscar_domain_ids(dados)
-
-                categorias_por_id.update(_item_id_para_cat)
-                for pid, iid in _product_id_para_item.items():
-                    if iid in _item_id_para_cat:
-                        categorias_por_id[pid] = _item_id_para_cat[iid]
-
-                logger.debug("Dicionario de categorias criado com %s itens", len(categorias_por_id))
-        except Exception:
-            pass
+        # Mesma leitura que a coleta de ofertas usa. Estava aqui inline, dentro de um
+        # `except Exception: pass` que apagava os quatro modos de falha — todos
+        # terminam com o catálogo inteiro em 'DESCONHECIDO', e sem distingui-los não
+        # havia como saber o que consertar.
+        categorias_por_id = mapear_domain_ids(page)
 
         cards_produtos = page.locator(".ui-search-layout__item").all()
         logger.debug("Pagina %s: encontrados %s produtos", pagina_atual, len(cards_produtos))

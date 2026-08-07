@@ -367,6 +367,8 @@
 
 {{ categorias_por_macro|json_script:"cats-data" }}
 {{ categorias_selecionadas|json_script:"sel-cats-data" }}
+{{ sem_subcategoria_valor|json_script:"sem-cat-valor" }}
+{{ sem_subcategoria_rotulo|json_script:"sem-cat-rotulo" }}
 
 <form method="get" id="filtro-form" class="filtros">
   <div class="toolbar filter-main">
@@ -726,6 +728,8 @@ que era exatamente o que não resolvia.
 (function () {
   var CATS = JSON.parse(document.getElementById('cats-data').textContent);
   var SEL_CATS = JSON.parse(document.getElementById('sel-cats-data').textContent);
+  var SEM_CAT_VALOR = JSON.parse(document.getElementById('sem-cat-valor').textContent);
+  var SEM_CAT_ROTULO = JSON.parse(document.getElementById('sem-cat-rotulo').textContent);
   if (!document.getElementById('dd-macro')) return;
 
   function toggleDD(id) {
@@ -760,7 +764,11 @@ que era exatamente o que não resolvia.
         cb.type = 'checkbox'; cb.name = 'categoria'; cb.value = cat;
         if (SEL_CATS.indexOf(cat) !== -1) cb.checked = true;
         cb.addEventListener('change', updateCatBtn);
-        lbl.appendChild(cb); lbl.appendChild(document.createTextNode(' ' + cat));
+        // O item que loja nenhuma classificou aparece com nome de gente; o valor
+        // continua sendo o sentinela que a view traduz. Sem esta opção ele ficava
+        // inalcançável: escolher qualquer subcategoria o descartava calado.
+        var texto = (cat === SEM_CAT_VALOR) ? SEM_CAT_ROTULO : cat;
+        lbl.appendChild(cb); lbl.appendChild(document.createTextNode(' ' + texto));
         panel.appendChild(lbl);
       });
     });

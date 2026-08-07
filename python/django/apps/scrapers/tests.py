@@ -1903,6 +1903,59 @@ class TopPromocoesFilterTests(TestCase):
         )
         return produto
 
+    def test_item_sem_categoria_vira_opcao_em_vez_de_sumir(self):
+        """Escolher qualquer subcategoria descartava calado quem não tem categoria.
+
+        Como a maior fonte do catálogo grava 'DESCONHECIDO', isso deixava a lista de
+        subcategorias vazia e, quando havia alguma, sumia com a loja inteira.
+        """
+        from apps.scrapers.views import SEM_SUBCATEGORIA
+
+        sem_cat = self._criar_produto(
+            marketplace="mercadolivre", nome="Robô Aspirador",
+            categoria="DESCONHECIDO", macro_categoria="Eletrônicos",
+            preco_sem_desconto=200, preco_com_cupom=100,
+            link_produto="https://example.com/robo",
+        )
+
+        response = self.client.get(self.url, {"macro": "Eletrônicos"})
+        self.assertIn(SEM_SUBCATEGORIA,
+                      response.context["categorias_por_macro"]["Eletrônicos"])
+
+        response = self.client.get(
+            self.url, {"macro": "Eletrônicos", "categoria": SEM_SUBCATEGORIA})
+        self.assertEqual([p.nome for p in response.context["produtos"]], [sem_cat.nome])
+
+    def test_subcategoria_real_nao_traz_os_sem_categoria(self):
+        """A opção nova não pode virar um coringa que ignora o filtro."""
+        self._criar_produto(
+            marketplace="mercadolivre", nome="Robô Aspirador",
+            categoria="DESCONHECIDO", macro_categoria="Eletrônicos",
+            preco_sem_desconto=200, preco_com_cupom=100,
+            link_produto="https://example.com/robo",
+        )
+
+        response = self.client.get(
+            self.url, {"macro": "Eletrônicos", "categoria": "Áudio"})
+
+        self.assertEqual([p.nome for p in response.context["produtos"]],
+                         ["Fone Bluetooth"])
+
+    def test_categoria_nula_conta_como_sem_subcategoria(self):
+        """As três formas de 'ninguém classificou' têm de cair na mesma opção."""
+        from apps.scrapers.views import SEM_SUBCATEGORIA
+
+        nulo = self._criar_produto(
+            marketplace="mercadolivre", nome="Ventilador", categoria=None,
+            macro_categoria="Eletrônicos", preco_sem_desconto=200,
+            preco_com_cupom=100, link_produto="https://example.com/ventilador",
+        )
+
+        response = self.client.get(
+            self.url, {"macro": "Eletrônicos", "categoria": SEM_SUBCATEGORIA})
+
+        self.assertEqual([p.nome for p in response.context["produtos"]], [nulo.nome])
+
     def test_catalogo_de_cupons_mostra_so_prontos_e_indica_fila(self):
         from apps.scrapers.coupon_products import atualizar_chave_cupom
         from apps.scrapers.models import CupomPreparacao, ProdutoCupom
