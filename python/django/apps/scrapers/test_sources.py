@@ -791,6 +791,41 @@ class AvisoCuponsNaoSeguraTransacaoTests(TestCase):
         self.assertIn("_executar_orm(_produto_para_cupom, cupom)", fonte_resolver)
 
 
+class EnviosManuaisNaoSeguramTransacaoTests(TestCase):
+    """Os botões "enviar produto" e "enviar cupom" têm o mesmo veneno do aviso:
+    Chromium do Link Builder no meio do job. Com o tenant instalado do jeito
+    antigo (transação aberta do início ao fim), a conexão morre no meio e o
+    envio inteiro falha com "the connection is closed"."""
+
+    def test_views_de_envio_nao_seguram_transacao(self):
+        import inspect
+        from apps.scrapers import views
+        for view in (views.enviar_produto_stream, views.enviar_cupom_stream):
+            with self.subTest(view=view.__name__):
+                self.assertIn("segurar_transacao=False", inspect.getsource(view))
+
+    def test_nucleos_de_envio_isolam_o_orm_da_transacao_longa(self):
+        import inspect
+        from apps.scrapers import ofertas
+        for nucleo in (ofertas.enviar_cupom, ofertas.enviar_oferta_de_produto):
+            with self.subTest(nucleo=nucleo.__name__):
+                fonte = inspect.getsource(nucleo)
+                self.assertIn("_executar_orm(_reservar)", fonte)
+                self.assertIn("_executar_orm(wa_session_de, usuario)", fonte)
+
+    def test_banco_nao_tolera_lock_nem_transacao_ociosa_eternos(self):
+        """Sem lock_timeout, uma transação abandonada derrubava o site inteiro
+        (fila de lock prendendo todas as threads do gunicorn). O release command
+        (migrate) fica de fora: DDL espera lock legítimo do tráfego ao vivo."""
+        import inspect
+        from core import settings as core_settings
+        fonte = inspect.getsource(core_settings)
+        self.assertIn("lock_timeout=15000", fonte)
+        self.assertIn("statement_timeout=120000", fonte)
+        self.assertIn("idle_in_transaction_session_timeout=300000", fonte)
+        self.assertIn("if not RELEASE_COMMAND_PROCESS", fonte)
+
+
 class MensagensDoGerarLinksTests(TransactionTestCase):
     """Anti-bot e sessão morta pedem AÇÕES DIFERENTES do usuário: esperar vs
     reconectar. Unificar os dois num "[ERRO] sessão expirada" com link de

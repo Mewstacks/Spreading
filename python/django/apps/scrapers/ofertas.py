@@ -17,20 +17,12 @@ logger = logging.getLogger(__name__)
 def _executar_orm(fn, *args, **kwargs):
     """Query de ORM com o escopo de tenant certo em cada chamador deste núcleo.
 
-    O disparo manual (SSE) roda com `segurar_transacao=False` — sem transação nem
-    GUC presos durante o Link Builder — então cada ida ao banco precisa reinstalar
-    o tenant numa transação curta via `executar_no_tenant`. O worker de envio roda
-    com a role de sistema (BYPASSRLS) e NENHUM escopo tenant: ali
-    `executar_no_tenant` levanta ValueError e a query segue direta, como sempre
-    foi — o GUC é desnecessário com aquela role.
+    Atalho local para `tenant.executar_orm_ou_direto`: no SSE (tenant anotado)
+    instala o escopo numa transação curta; no worker de sistema (role BYPASSRLS,
+    sem escopo) cai no caminho direto de sempre.
     """
-    from apps.accounts.tenant import executar_no_tenant
-    try:
-        return executar_no_tenant(fn, *args, **kwargs)
-    except ValueError as exc:
-        if "exige organização" not in str(exc):
-            raise
-        return fn(*args, **kwargs)
+    from apps.accounts.tenant import executar_orm_ou_direto
+    return executar_orm_ou_direto(fn, *args, **kwargs)
 
 
 def _motivo_publico_transporte(resultado) -> str:
@@ -870,7 +862,7 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
     produtos = [r.produto for r in relacoes]
     mkt = str(getattr(cupom, "marketplace", "mercadolivre") or "mercadolivre").lower()
     mp = get_marketplace(mkt)
-    situacao = situacao_dos_links(usuario, produtos)
+    situacao = _executar_orm(situacao_dos_links, usuario, produtos)
 
     itens, bloqueio = [], None
     relacao_por_produto = {r.produto_id: r for r in relacoes}
@@ -905,7 +897,8 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
             if info and info.get("link_afiliado") and info.get("afiliado_ok") is not False:
                 link = info["link_afiliado"]
                 try:
-                    salvar_cache(usuario, p, link, info.get("url_isca", ""), True)
+                    _executar_orm(salvar_cache, usuario, p, link,
+                                  info.get("url_isca", ""), True)
                 except Exception:
                     pass
         if link:
@@ -1124,9 +1117,10 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     from apps.scrapers.coupon_products import (
         relacoes_preparadas_para_envio, relacoes_prontas_para_envio,
     )
-    relacoes_preparadas = relacoes_preparadas_para_envio(cupom, usuario)
+    relacoes_preparadas = _executar_orm(relacoes_preparadas_para_envio, cupom, usuario)
     if not relacoes_preparadas:
-        log_event(
+        _executar_orm(
+            log_event,
             "publicacao", "coupon_not_ready",
             "Cupom aguardando preparação ou atualização.", level="warning",
             usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
@@ -1135,9 +1129,10 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         return {"sucesso": False,
                 "motivo": "Este cupom está sendo atualizado e ainda não está disponível para envio.",
                 "classe": "transitorio", "cupom_em_preparo": True}
-    relacoes_prontas = relacoes_prontas_para_envio(cupom, usuario)
+    relacoes_prontas = _executar_orm(relacoes_prontas_para_envio, cupom, usuario)
     if not relacoes_prontas:
-        log_event(
+        _executar_orm(
+            log_event,
             "publicacao", "coupon_link_pending",
             "Cupom preparado sem link afiliado utilizável.", level="warning",
             usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
@@ -1148,8 +1143,12 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 "classe": "transitorio", "link_afiliado_pendente": True}
 
     desde = agora - timedelta(hours=24)
-    publicacao = None
-    try:
+
+    def _reservar():
+        """Transação curta de reserva: lock do usuário, deduplicação por destino,
+        cota diária e a Publicacao pendente. Roda via _executar_orm para não
+        herdar a transação longa do chamador (ver _sse_runner/segurar_transacao).
+        Devolve (cupom_relido, publicacao) ou um dict de falha."""
         with transaction.atomic():
             # O lock do usuário serializa cota e deduplicação por destino. Um cupom
             # público, porém, só é legível pelo tenant: `FOR UPDATE` exige a policy
@@ -1160,10 +1159,10 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 pk=cupom_id, estado="ativo",
             ).filter(Q(validade__isnull=True) | Q(validade__gte=agora))
             if getattr(cupom, "owner_id", None) is None:
-                cupom = cupom_qs.filter(owner__isnull=True).first()
+                cupom_atual = cupom_qs.filter(owner__isnull=True).first()
             else:
-                cupom = cupom_qs.filter(owner=usuario).select_for_update().first()
-            if not cupom:
+                cupom_atual = cupom_qs.filter(owner=usuario).select_for_update().first()
+            if not cupom_atual:
                 log_event(
                     "publicacao", "coupon_unavailable",
                     "Cupom atualizado antes da reserva do envio.", level="warning",
@@ -1174,7 +1173,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                         "motivo": "Este cupom foi atualizado e não está mais disponível. Atualize a tela e tente outro.",
                         "classe": "permanente", "cupom_atualizado": True}
             recente = Publicacao.objects.filter(
-                usuario=usuario, origem="cupom", cupom_normalizado=cupom,
+                usuario=usuario, origem="cupom", cupom_normalizado=cupom_atual,
                 canal=canal, destino_id=grupo_id,
             ).filter(
                 Q(status="pendente", criada_em__gte=agora - timedelta(minutes=30))
@@ -1202,18 +1201,22 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
             if limite and usados >= limite:
                 return {"sucesso": False, "motivo": "Limite diário de envios atingido.",
                         "classe": "permanente"}
-            publicacao = Publicacao.objects.create(
-                usuario=usuario, origem="cupom", cupom_normalizado=cupom,
+            return cupom_atual, Publicacao.objects.create(
+                usuario=usuario, origem="cupom", cupom_normalizado=cupom_atual,
                 configuracao=configuracao,
                 canal=canal, destino_id=str(grupo_id)[:100],
                 destino_nome=str(destino_nome or "")[:255],
-                cupom=str(codigo_publicavel(cupom) or cupom.titulo or "")[:255],
+                cupom=str(codigo_publicavel(cupom_atual) or cupom_atual.titulo or "")[:255],
                 categoria="Cupom", score=float(score or 0),
                 motivos_score=list(motivos_score or []),
             )
+
+    try:
+        reserva = _executar_orm(_reservar)
     except Exception as exc:
         logger.exception("Falha ao reservar envio do cupom %s", cupom_id)
-        log_event(
+        _executar_orm(
+            log_event,
             "publicacao", "coupon_reservation_failed",
             "Não foi possível reservar o envio do cupom.", level="error",
             usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
@@ -1222,8 +1225,12 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         return {"sucesso": False,
                 "motivo": "Não foi possível reservar este cupom para envio. Atualize a tela e tente novamente.",
                 "classe": "transitorio", "causa": type(exc).__name__}
+    if isinstance(reserva, dict):
+        return reserva
+    cupom, publicacao = reserva
 
-    log_event(
+    _executar_orm(
+        log_event,
         "publicacao", "send_started", "Preparando envio do cupom.",
         usuario=usuario, contexto={"publicacao_id": publicacao.id, "cupom_id": cupom.id,
                                    "canal": canal, "destino": destino_nome or grupo_id},
@@ -1232,7 +1239,8 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     def falhar(motivo, **extra):
         erro_tecnico = extra.pop("_erro_tecnico", "")
         incerto = extra.get("resultado") == "incerto"
-        try:
+
+        def _fechar_e_logar():
             with transaction.atomic():
                 Publicacao.objects.filter(pk=publicacao.pk, status="pendente").update(
                     status="incerto" if incerto else "falhou", erro=str(motivo)[:500])
@@ -1241,6 +1249,8 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                                                  "cupom_id": cupom.id, "canal": canal,
                                                  "destino": destino_nome or grupo_id,
                                                  "erro_tecnico": erro_tecnico, **extra})
+        try:
+            _executar_orm(_fechar_e_logar)
         except Exception:
             logger.exception("Falha ao fechar publicação de cupom %s", publicacao.pk)
         return {"sucesso": False, "motivo": str(motivo), **extra}
@@ -1255,8 +1265,8 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
             # Antes da IA (para a chamada nascer do preço fresco), antes do corte
             # do Telegram e antes da colagem — que é quem garante foto↔texto.
             from apps.scrapers import preco_ao_vivo
-            itens_cupom, _removidos = preco_ao_vivo.revalidar_colagem(
-                cupom, itens_cupom, usuario=usuario)
+            itens_cupom, _removidos = _executar_orm(
+                preco_ao_vivo.revalidar_colagem, cupom, itens_cupom, usuario=usuario)
             if not itens_cupom:
                 return falhar("Os preços deste cupom mudaram; nenhum produto "
                               "continua dentro das regras dele.", classe="transitorio")
@@ -1294,23 +1304,29 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         # Aqui o par é (vitrine, pós-cupom) — nas publicações de produto o par é
         # (tabela, vitrine), que é o que aquela mensagem anuncia.
         relacao_topo = itens_cupom[0].get("relacao")
-        Publicacao.objects.filter(pk=publicacao.pk).update(
-            mensagem=mensagem, link_afiliado=link_registro,
-            link_rastreado=link_registro,
-            preco_original=float(getattr(relacao_topo, "preco_atual", 0) or 0),
-            preco_final=float(getattr(relacao_topo, "preco_final", 0) or 0))
+
+        def _gravar_mensagem():
+            Publicacao.objects.filter(pk=publicacao.pk).update(
+                mensagem=mensagem, link_afiliado=link_registro,
+                link_rastreado=link_registro,
+                preco_original=float(getattr(relacao_topo, "preco_atual", 0) or 0),
+                preco_final=float(getattr(relacao_topo, "preco_final", 0) or 0))
+        _executar_orm(_gravar_mensagem)
+        sessao_wa = _executar_orm(wa_session_de, usuario)
         resultado = sender.enviar_oferta(
             grupo_id, mensagem, legenda=mensagem, usuario=usuario,
-            session=wa_session_de(usuario),
+            session=sessao_wa,
             operation_id=f"publicacao:{publicacao.pk}", **img_kwargs)
         if resultado.get("sucesso"):
-            Publicacao.objects.filter(pk=publicacao.pk).update(
-                status="enviado", enviada_em=timezone.now())
-            log_event("publicacao", "send_ok", "Cupom publicado com sucesso.",
-                      usuario=usuario, contexto={"publicacao_id": publicacao.id,
-                                                 "cupom_id": cupom.id, "canal": canal,
-                                                 "destino": destino_nome or grupo_id,
-                                                 "via": resultado.get("via")})
+            def _gravar_envio():
+                Publicacao.objects.filter(pk=publicacao.pk).update(
+                    status="enviado", enviada_em=timezone.now())
+                log_event("publicacao", "send_ok", "Cupom publicado com sucesso.",
+                          usuario=usuario, contexto={"publicacao_id": publicacao.id,
+                                                     "cupom_id": cupom.id, "canal": canal,
+                                                     "destino": destino_nome or grupo_id,
+                                                     "via": resultado.get("via")})
+            _executar_orm(_gravar_envio)
             return {"sucesso": True, "via": resultado.get("via", canal),
                     "canal": resultado.get("canal", canal),
                     "link": link_registro, "mensagem": mensagem,
@@ -1970,7 +1986,8 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
     except ValueError as exc:
         return {"sucesso": False, "motivo": str(exc), "classe": "permanente"}
     publicacao = None
-    log_event(
+    _executar_orm(
+        log_event,
         "publicacao", "send_started", f"Preparando envio para {destino_nome or grupo_id}.",
         usuario=usuario,
         contexto={
@@ -1983,9 +2000,11 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
     if usuario is not None:
         from django.contrib.auth import get_user_model
         agora_abertura = timezone.now()
-        # Reservar o envio é escrita em banco: se falhar, o usuário precisa de um
-        # motivo, não do erro genérico do runner SSE (nada foi enviado aqui).
-        try:
+
+        def _reservar():
+            """Transação curta de reserva: lock do usuário, cota, deduplicação e a
+            Publicacao pendente. Via _executar_orm para não herdar a transação
+            longa do chamador (ver _sse_runner/segurar_transacao)."""
             with transaction.atomic():
                 get_user_model().objects.select_for_update().get(pk=usuario.pk)
                 # O lock do usuário já serializa cota e deduplicação. O catálogo do ML,
@@ -2036,7 +2055,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                               else "Este destino recebeu a oferta nas últimas 24h.")
                     return {"sucesso": False, "motivo": motivo, "duplicado": True,
                             "classe": "permanente"}
-                publicacao = Publicacao.objects.create(
+                return Publicacao.objects.create(
                     usuario=usuario, origem="produto", produto=produto,
                     configuracao=configuracao, canal=canal,
                     destino_id=str(grupo_id or "")[:100],
@@ -2048,9 +2067,14 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                     motivos_score=getattr(produto, "motivos_score", []),
                 )
 
+        # Reservar o envio é escrita em banco: se falhar, o usuário precisa de um
+        # motivo, não do erro genérico do runner SSE (nada foi enviado aqui).
+        try:
+            reserva = _executar_orm(_reservar)
         except Exception as exc:
             logger.exception("Falha ao reservar envio do produto %s", produto.pk)
-            log_event(
+            _executar_orm(
+                log_event,
                 "publicacao", "offer_reservation_failed",
                 "Não foi possível reservar o envio da oferta.", level="error",
                 usuario=usuario, contexto={
@@ -2064,6 +2088,9 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                     "motivo": "Não foi possível reservar esta oferta para envio. "
                               "Atualize a tela e tente novamente.",
                     "classe": "transitorio", "causa": type(exc).__name__}
+        if isinstance(reserva, dict):
+            return reserva
+        publicacao = reserva
     def falhar(motivo, **extra):
         erro_tecnico = extra.pop("_erro_tecnico", "")
         texto_motivo = str(motivo).lower()
@@ -2081,9 +2108,6 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         )
         incerto = bool(extra.get("resultado") == "incerto")
         status = "incerto" if incerto else "falhou"
-        if publicacao:
-            Publicacao.objects.filter(pk=publicacao.pk).update(
-                status=status, erro=str(motivo)[:500])
         contexto = {
             "produto_id": getattr(produto, "id", None),
             "marketplace": getattr(produto, "marketplace", ""),
@@ -2094,16 +2118,22 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             "erro_tecnico": erro_tecnico,
             **extra,
         }
-        log_event(
-            "publicacao", "send_failed", str(motivo), level="warning",
-            usuario=usuario, contexto=contexto,
-        )
-        if extra.get("falha_infra") or incerto:
+
+        def _fechar_e_logar():
+            if publicacao:
+                Publicacao.objects.filter(pk=publicacao.pk).update(
+                    status=status, erro=str(motivo)[:500])
             log_event(
-                "whatsapp", "send_timeout",
-                "Serviço WhatsApp não confirmou o envio dentro do prazo.",
-                level="error", usuario=usuario, contexto=contexto,
+                "publicacao", "send_failed", str(motivo), level="warning",
+                usuario=usuario, contexto=contexto,
             )
+            if extra.get("falha_infra") or incerto:
+                log_event(
+                    "whatsapp", "send_timeout",
+                    "Serviço WhatsApp não confirmou o envio dentro do prazo.",
+                    level="error", usuario=usuario, contexto=contexto,
+                )
+        _executar_orm(_fechar_e_logar)
         return {"sucesso": False, "motivo": str(motivo), **extra}
 
     from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
@@ -2203,10 +2233,11 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             from apps.scrapers.afiliado import registrar_aprovacao, registrar_reprovacao
             from apps.scrapers.link_validacao import motivo_reprovacao
             if verificacao.get("ok"):
-                registrar_aprovacao(usuario, produto, link, url_canonica=link)
+                _executar_orm(registrar_aprovacao, usuario, produto, link,
+                              url_canonica=link)
             else:
-                registrar_reprovacao(
-                    usuario, produto, motivo_reprovacao(verificacao, confiar))
+                _executar_orm(registrar_reprovacao, usuario, produto,
+                              motivo_reprovacao(verificacao, confiar))
                 return falhar("link reprovado na verificação",
                               link=link, verificacao=verificacao)
 
@@ -2220,7 +2251,8 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         # um GET segue meli.la -> PDP e mede a página que o assinante vai abrir.
         if getattr(settings, "PRECO_REVALIDA_ANTES_ENVIO", True):
             from apps.scrapers import preco_ao_vivo
-            checagem = preco_ao_vivo.revalidar(
+            checagem = _executar_orm(
+                preco_ao_vivo.revalidar,
                 produto, usuario=usuario, configuracao=configuracao, url=link)
             if not checagem["ok"]:
                 return falhar(f"preço mudou antes do envio: {checagem['motivo']}",
@@ -2229,14 +2261,17 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         # Ofertas (origem='oferta') não têm Cupom; só busca quando há campanha_id
         cupom = None
         if produto.campanha_id:
-            cupom = Cupom.objects.filter(
-                campanha_id=produto.campanha_id, estado="ativo",
-            ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now())).first()
+            def _cupom_da_campanha():
+                return Cupom.objects.filter(
+                    campanha_id=produto.campanha_id, estado="ativo",
+                ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now())).first()
+            cupom = _executar_orm(_cupom_da_campanha)
         variante = "A"
         if configuracao and configuracao.variante_template == "B":
             variante = "B"
         elif configuracao and configuracao.variante_template == "alternar":
-            variante = "B" if configuracao.publicacoes.count() % 2 else "A"
+            variante = "B" if _executar_orm(
+                lambda: configuracao.publicacoes.count()) % 2 else "A"
         link_publicado = _link_publicado(publicacao, link)
         if publicacao:
             publicacao.variante = variante
@@ -2248,25 +2283,26 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             # o registro igual ao número que a mensagem anuncia.
             publicacao.preco_final = preco_publicavel(produto)
             publicacao.preco_original = produto.preco_sem_desconto
-            publicacao.save(update_fields=[
+            _executar_orm(publicacao.save, update_fields=[
                 "variante", "link_afiliado", "link_rastreado", "cupom",
                 "preco_final", "preco_original"])
-        mensagem = montar_mensagem(
+        mensagem = _executar_orm(
+            montar_mensagem,
             produto, link_publicado, cupom, markup=sender.markup, usuario=usuario,
             configuracao=configuracao, variante=variante)
         if publicacao:
             publicacao.mensagem = mensagem
-            publicacao.save(update_fields=["mensagem"])
+            _executar_orm(publicacao.save, update_fields=["mensagem"])
 
         if dry_run:
             if publicacao:
                 publicacao.status = "ignorado"
-                publicacao.save(update_fields=["status"])
+                _executar_orm(publicacao.save, update_fields=["status"])
             return {"sucesso": True, "dry_run": True, "link": link,
                     "mensagem": mensagem, "verificacao": verificacao}
 
         # Sessão WhatsApp do DONO (multi-tenant): envia pela conexão dele, não pela default.
-        wa_session = wa_session_de(usuario)
+        wa_session = _executar_orm(wa_session_de, usuario)
 
         # Imagem conforme o canal: Telegram aceita URL direto; WhatsApp precisa de base64.
         # Foto custom (opcional, escolhida no envio) só entra no caminho base64/WhatsApp;
@@ -2296,24 +2332,26 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                                                  if publicacao else None))
 
         if resultado.get("sucesso"):
-            HistoricoEnvio.objects.create(produto=produto, usuario=usuario)  # só após sucesso
-            if publicacao:
-                Publicacao.objects.filter(pk=publicacao.pk).update(
-                    status="enviado", enviada_em=timezone.now())
-            log_event(
-                "publicacao", "send_ok", "Oferta publicada com sucesso.",
-                usuario=usuario,
-                contexto={
-                    "produto_id": getattr(produto, "id", None),
-                    "marketplace": getattr(produto, "marketplace", ""),
-                    "canal": canal,
-                    "destino": destino_nome or grupo_id,
-                    "via": resultado.get("via"),
-                    "publicacao_id": getattr(publicacao, "id", None),
-                    "foto_bytes": foto_bytes,
-                    "duracao_ms": resultado.get("duracao_ms", 0),
-                },
-            )
+            def _gravar_envio():
+                HistoricoEnvio.objects.create(produto=produto, usuario=usuario)  # só após sucesso
+                if publicacao:
+                    Publicacao.objects.filter(pk=publicacao.pk).update(
+                        status="enviado", enviada_em=timezone.now())
+                log_event(
+                    "publicacao", "send_ok", "Oferta publicada com sucesso.",
+                    usuario=usuario,
+                    contexto={
+                        "produto_id": getattr(produto, "id", None),
+                        "marketplace": getattr(produto, "marketplace", ""),
+                        "canal": canal,
+                        "destino": destino_nome or grupo_id,
+                        "via": resultado.get("via"),
+                        "publicacao_id": getattr(publicacao, "id", None),
+                        "foto_bytes": foto_bytes,
+                        "duracao_ms": resultado.get("duracao_ms", 0),
+                    },
+                )
+            _executar_orm(_gravar_envio)
             return {"sucesso": True, "link": link, "mensagem": mensagem,
                     "via": resultado.get("via"), "verificacao": verificacao,
                     "canal": resultado.get("canal", canal),
@@ -2348,20 +2386,23 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         # re-levanta — o estado no banco fica honesto sem alterar o fluxo de controle
         # que os chamadores (e o loop de automacao) já esperam.
         motivo = f"erro inesperado no envio: {e}"
-        if publicacao and Publicacao.objects.filter(
-            pk=publicacao.pk, status="pendente",
-        ).update(status="falhou", erro=motivo[:500]):
-            log_event(
-                "publicacao", "send_failed", motivo, level="warning", usuario=usuario,
-                contexto={
-                    "produto_id": getattr(produto, "id", None),
-                    "marketplace": getattr(produto, "marketplace", ""),
-                    "canal": canal,
-                    "destino": destino_nome or grupo_id,
-                    "publicacao_id": publicacao.id,
-                    "causa": "publicacao_inesperada",
-                },
-            )
+
+        def _fechar_inesperado():
+            if publicacao and Publicacao.objects.filter(
+                pk=publicacao.pk, status="pendente",
+            ).update(status="falhou", erro=motivo[:500]):
+                log_event(
+                    "publicacao", "send_failed", motivo, level="warning", usuario=usuario,
+                    contexto={
+                        "produto_id": getattr(produto, "id", None),
+                        "marketplace": getattr(produto, "marketplace", ""),
+                        "canal": canal,
+                        "destino": destino_nome or grupo_id,
+                        "publicacao_id": publicacao.id,
+                        "causa": "publicacao_inesperada",
+                    },
+                )
+        _executar_orm(_fechar_inesperado)
         raise
 
 

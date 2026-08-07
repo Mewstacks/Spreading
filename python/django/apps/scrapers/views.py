@@ -1572,7 +1572,11 @@ def enviar_produto_stream(request):
 
     def _job():
         from django.contrib.auth import get_user_model
-        usuario = get_user_model().objects.filter(id=uid).first()
+        from apps.accounts.tenant import executar_no_tenant
+        # Tenant apenas ANOTADO (segurar_transacao=False): toda ida ao banco
+        # reinstala o escopo numa transação curta via executar_no_tenant.
+        usuario = executar_no_tenant(
+            lambda: get_user_model().objects.filter(id=uid).first())
         if not usuario:
             print("[ERRO] Usuário não encontrado ou sessão encerrada.")
             return
@@ -1581,8 +1585,9 @@ def enviar_produto_stream(request):
             return
         # Isolamento multi-tenant: só o pool compartilhado (owner=None, ex: ML) ou
         # itens privados DESTE usuário (Amazon dele). Impede enviar item de outro dono.
-        prod = Produto.objects.filter(
-            Q(owner__isnull=True) | Q(owner_id=uid), id=prod_id).first()
+        prod = executar_no_tenant(
+            lambda: Produto.objects.filter(
+                Q(owner__isnull=True) | Q(owner_id=uid), id=prod_id).first())
         if not prod:
             print("[ERRO] Produto não encontrado.")
             return
@@ -1597,7 +1602,8 @@ def enviar_produto_stream(request):
             logger.exception("Falha não tratada ao enviar produto %s", prod_id)
             from apps.scrapers.eventos import log_event
             try:
-                log_event(
+                executar_no_tenant(
+                    log_event,
                     "publicacao", "offer_sse_failed",
                     "Não foi possível concluir o envio da oferta.", level="error",
                     usuario=usuario, contexto={"produto_id": prod_id, "canal": canal,
@@ -1622,7 +1628,13 @@ def enviar_produto_stream(request):
             elif r.get("precisa_login_wa"):
                 print("__WA_LOGIN__")  # a UI troca por "Reconectar WhatsApp"
 
-    return _sse_runner(_job, request.organization)
+    # segurar_transacao=False: gerar/verificar o link passa minutos no Link
+    # Builder (Chromium) e uma transação aberta esse tempo todo vira
+    # `idle in transaction` até o proxy da Fly matar o socket — dentro de
+    # transação o Django não renova a conexão ("the connection is closed").
+    # As idas ao banco vão por executar_no_tenant, aqui e dentro de
+    # ofertas.enviar_oferta_de_produto.
+    return _sse_runner(_job, request.organization, segurar_transacao=False)
 
 
 @require_POST
@@ -1644,7 +1656,11 @@ def enviar_cupom_stream(request):
     def _job():
         from django.contrib.auth import get_user_model
         from apps.scrapers.coupon_rules import codigo_publicavel
-        usuario = get_user_model().objects.filter(id=uid).first()
+        from apps.accounts.tenant import executar_no_tenant
+        # Tenant apenas ANOTADO (segurar_transacao=False): toda ida ao banco
+        # reinstala o escopo numa transação curta via executar_no_tenant.
+        usuario = executar_no_tenant(
+            lambda: get_user_model().objects.filter(id=uid).first())
         if not usuario:
             print("[ERRO] Usuário não encontrado ou sessão encerrada.")
             return
@@ -1652,9 +1668,10 @@ def enviar_cupom_stream(request):
             print("[ERRO] Nenhum destino informado (grupo/chat).")
             return
         from apps.scrapers.maintenance import cupons_frescos_q
-        cupom = CupomNormalizado.objects.filter(
-            Q(owner__isnull=True) | Q(owner=usuario), id=cupom_id, estado="ativo",
-        ).filter(cupons_frescos_q()).first()
+        cupom = executar_no_tenant(
+            lambda: CupomNormalizado.objects.filter(
+                Q(owner__isnull=True) | Q(owner=usuario), id=cupom_id, estado="ativo",
+            ).filter(cupons_frescos_q()).first())
         if not cupom:
             print("[ERRO] Cupom não encontrado ou inativo.")
             return
@@ -1670,7 +1687,8 @@ def enviar_cupom_stream(request):
             logger.exception("Falha não tratada ao enviar cupom %s", cupom_id)
             from apps.scrapers.eventos import log_event
             try:
-                log_event(
+                executar_no_tenant(
+                    log_event,
                     "publicacao", "coupon_sse_failed",
                     "Não foi possível concluir o envio do cupom.", level="error",
                     usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
@@ -1694,7 +1712,13 @@ def enviar_cupom_stream(request):
             elif resultado.get("precisa_login_wa"):
                 print("__WA_LOGIN__")  # a UI troca por "Reconectar WhatsApp"
 
-    return _sse_runner(_job, request.organization)
+    # segurar_transacao=False: afiliar os produtos do cupom passa minutos no
+    # Link Builder (Chromium) e uma transação aberta esse tempo todo vira
+    # `idle in transaction` até o proxy da Fly matar o socket — dentro de
+    # transação o Django não renova a conexão ("the connection is closed").
+    # As idas ao banco vão por executar_no_tenant, aqui e dentro de
+    # ofertas.enviar_cupom.
+    return _sse_runner(_job, request.organization, segurar_transacao=False)
 
 
 @require_POST

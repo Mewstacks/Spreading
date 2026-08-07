@@ -266,6 +266,20 @@ if _DATABASE_URL:
         DATABASES["default"].setdefault("OPTIONS", {}).setdefault(
             "connect_timeout", 3,
         )
+        if not RELEASE_COMMAND_PROCESS:
+            # Um lock preso (transação abandonada segurando a linha da sessão ML)
+            # não pode travar uma request até o proxy desistir: erro em 15s e só
+            # aquela operação falha, em vez de as 8 threads do gunicorn ficarem
+            # presas numa fila de lock — foi o que tirou o site do ar por ~30min.
+            # idle_in_transaction mata a sessão que esqueceu o COMMIT (a mesma que
+            # segurava aquele lock). O release command (migrate) fica DE FORA: DDL
+            # pode esperar um lock legítimo do tráfego ao vivo e backfills longos
+            # passariam do statement_timeout.
+            DATABASES["default"]["OPTIONS"].setdefault(
+                "options",
+                "-c lock_timeout=15000 -c statement_timeout=120000 "
+                "-c idle_in_transaction_session_timeout=300000",
+            )
     if (
         APP_ENV in {"staging", "production"}
         and DATABASES["default"].get("ENGINE") != "django.db.backends.postgresql"

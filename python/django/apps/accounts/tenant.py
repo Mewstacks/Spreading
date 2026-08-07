@@ -398,6 +398,23 @@ def executar_no_tenant(fn, *args, organization_id=None, actor_id=None, **kwargs)
     return _obter_executor_orm().submit(_alvo).result()
 
 
+def executar_orm_ou_direto(fn, *args, **kwargs):
+    """`executar_no_tenant` com saída direta para processos sem escopo.
+
+    Jobs SSE rodam com o tenant apenas ANOTADO (`tenant_suspenso`): cada ida ao
+    banco precisa reinstalar o escopo numa transação curta, senão a RLS devolve
+    zero linhas. Workers de sistema (role com BYPASSRLS) não têm escopo nenhum —
+    ali `executar_no_tenant` levanta ValueError e a query segue direta, como
+    sempre funcionou. Use este wrapper em código compartilhado pelos dois mundos.
+    """
+    try:
+        return executar_no_tenant(fn, *args, **kwargs)
+    except ValueError as exc:
+        if "exige organização" not in str(exc):
+            raise
+        return fn(*args, **kwargs)
+
+
 def organization_job_sem_transacao(func):
     """Como @organization_job, mas sem segurar transação/conexão durante o job.
 

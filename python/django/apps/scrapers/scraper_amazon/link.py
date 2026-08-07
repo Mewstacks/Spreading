@@ -18,7 +18,11 @@ logger = logging.getLogger(__name__)
 
 def _tag(usuario=None) -> str:
     from apps.scrapers.afiliado import tag_amazon
-    return tag_amazon(usuario)
+    # A tag mora no Perfil (banco): com o tenant apenas anotado (job SSE sem
+    # transação presa) a leitura precisa reinstalar o escopo; no worker de
+    # sistema o helper cai no caminho direto de sempre.
+    from apps.accounts.tenant import executar_orm_ou_direto
+    return executar_orm_ou_direto(tag_amazon, usuario)
 
 
 def _asin_de(produto):
@@ -82,21 +86,26 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
     if usuario is not None:
         # Multi-tenant: cache por usuário; não sobrescreve o cache global do Produto.
         from apps.scrapers.afiliado import salvar_cache
+        from apps.accounts.tenant import executar_orm_ou_direto
         # Na Amazon a verificação é determinística e local: a URL canônica acabou
         # de ser montada com a tag cadastrada do próprio usuário. Persistir o mesmo
         # contrato de ``verificado_ok`` usado pelo ML evita que um link válido fique
         # eternamente na etapa "aguardando verificação".
-        salvar_cache(
+        executar_orm_ou_direto(
+            salvar_cache,
             usuario, produto, link_afiliado, url_isca, True,
             verificado_ok=link_tem_tag_afiliado(link_afiliado, usuario=usuario),
             url_canonica=link_afiliado,
             verificacao_motivo="tag Amazon validada localmente",
         )
     elif hasattr(produto, "save"):
+        from apps.accounts.tenant import executar_orm_ou_direto
         produto.url_isca = url_isca
         produto.link_afiliado = link_afiliado
         produto.afiliado_ok = True
-        produto.save(update_fields=["url_isca", "link_afiliado", "afiliado_ok"])
+        executar_orm_ou_direto(
+            produto.save,
+            update_fields=["url_isca", "link_afiliado", "afiliado_ok"])
 
     return {
         "link_afiliado": link_afiliado,
