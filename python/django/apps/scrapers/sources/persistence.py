@@ -1,6 +1,33 @@
 from django.utils import timezone
 
 
+def evidencia_com_cupom_preservado(evidencia, anterior):
+    """Mantém ``promotion.coupon_confirmed`` que outra coleta já provou.
+
+    Duas fontes escrevem a MESMA linha de Produto (chave marketplace+owner+asin): a
+    página oficial de cupons da Amazon, que afirma o cupom com identificador de
+    promoção e ASINs, e a Creators API, que só o deduz por regex sobre o rótulo da
+    promoção. Como as duas gravam `evidencia` inteira em `defaults`, a passada da
+    Creators API sobrescrevia `True` por `False` e a linha 🎟️ da mensagem sumia até
+    a próxima passada da página de cupons — intermitência que aparecia para a
+    cliente como "às vezes vem cupom, às vezes não".
+
+    O flag só sobe (nenhuma fonte consegue provar a AUSÊNCIA de um cupom clipável);
+    quem o derruba é a expiração do próprio produto, não uma coleta paralela.
+    """
+    if not isinstance(evidencia, dict):
+        return evidencia
+    if not isinstance(anterior, dict):
+        return evidencia
+    if not (anterior.get("promotion") or {}).get("coupon_confirmed"):
+        return evidencia
+    promocao = dict(evidencia.get("promotion") or {})
+    if promocao.get("coupon_confirmed"):
+        return evidencia
+    promocao["coupon_confirmed"] = True
+    return {**evidencia, "promotion": promocao}
+
+
 def persist_items(items, owner=None, integration=None):
     """Idempotent upsert. Empty input deliberately performs no deletion."""
     from apps.scrapers.models import (
@@ -42,6 +69,8 @@ def persist_items(items, owner=None, integration=None):
         lookup = {"marketplace": item.marketplace, "owner": owner}
         lookup["asin" if item.marketplace == "amazon" else "link_produto"] = (
             item.external_id if item.marketplace == "amazon" else item.canonical_url)
+        anterior = Produto.objects.filter(**lookup).values_list(
+            "evidencia", flat=True).first()
         defaults = {
             "origem": "oferta", "nome": item.title,
             "preco_sem_desconto": item.reference_price,
@@ -49,7 +78,8 @@ def persist_items(items, owner=None, integration=None):
             "preco_fonte": item.reference_price,
             "preco_efetivo": item.effective_price or item.current_price,
             "link_produto": item.canonical_url, "fonte": item.source,
-            "estado": "ativo", "confianca": "media", "evidencia": item.evidence,
+            "estado": "ativo", "confianca": "media",
+            "evidencia": evidencia_com_cupom_preservado(item.evidence, anterior),
             "valido_ate": item.valid_until, "falha_verificacao": "",
             "falhas_consecutivas": 0,
         }

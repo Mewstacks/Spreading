@@ -190,10 +190,20 @@ def _mapear_item(item: dict) -> dict | None:
 def _upsert_produto(m: dict, origem: str, macro=None, owner=None) -> bool:
     """Cria/atualiza Produto por (marketplace, asin, owner). Itens Amazon são PRIVADOS
     do usuário (owner=usuario), pois vêm da conta Creators dele. Preserva cache."""
+    from apps.scrapers.sources.persistence import evidencia_com_cupom_preservado
+
+    chave = {"marketplace": "amazon", "asin": m["asin"], "owner": owner}
+    # A página oficial de cupons escreve esta mesma linha e prova o cupom com
+    # promotion_id + ASINs; aqui ele é apenas deduzido por regex do rótulo. Sem
+    # preservar, esta passada apagava a prova da outra — ver o helper.
+    evidencia = evidencia_com_cupom_preservado(
+        {"promotion": {"present": m["tem_promocao"],
+                       "label": m["rotulo_promo"],
+                       "coupon_confirmed": m["cupom_confirmado"]}},
+        Produto.objects.filter(**chave).values_list("evidencia", flat=True).first(),
+    )
     Produto.objects.update_or_create(
-        marketplace="amazon",
-        asin=m["asin"],
-        owner=owner,
+        **chave,
         defaults={
             "origem": origem,
             "nome": m["nome"],
@@ -213,9 +223,7 @@ def _upsert_produto(m: dict, origem: str, macro=None, owner=None) -> bool:
             "imagem_url": m["imagem_url"],
             "frete_full": m["frete_full"],
             "codigo_checkout": "",  # Amazon: cupom é de clipar, não tem código
-            "evidencia": {"promotion": {"present": m["tem_promocao"],
-                                         "label": m["rotulo_promo"],
-                                         "coupon_confirmed": m["cupom_confirmado"]}},
+            "evidencia": evidencia,
         },
     )
     # Histórico de preços (B1): observação por asin p/ medir queda real depois.

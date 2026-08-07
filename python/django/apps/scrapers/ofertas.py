@@ -9,7 +9,7 @@ from django.db import transaction
 from django.db.models import F, FloatField, ExpressionWrapper, Count, Q
 from apps.scrapers.models import Produto, Cupom, HistoricoEnvio, Publicacao
 from apps.scrapers.precos import stats as _stats_preco
-from apps.scrapers.whatsapp_client import TRANSITORIO
+from apps.scrapers.whatsapp_client import DESCONHECIDO, PERMANENTE, TRANSITORIO
 
 logger = logging.getLogger(__name__)
 
@@ -609,6 +609,105 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
         onde = "na página do Meli" if is_meli else "na página da loja"
         linhas += ["", f"Clique no link e navegue {onde}:", "", f"➡️ {esc(link)}"]
 
+    return "\n".join(linhas)
+
+
+def _sigla_loja(marketplace) -> str:
+    """Rótulo curto da loja no cabeçalho do aviso: 'ML', 'AMAZON', ..."""
+    m = str(marketplace or "").strip().lower()
+    if m in ("mercadolivre", "mercado livre", "meli"):
+        return "ML"
+    if m == "amazon":
+        return "AMAZON"
+    return _nome_loja(marketplace).upper()
+
+
+def linha_desconto_cupom(cupom) -> str:
+    """"20% OFF em R$79, limitado a R$60 OFF" — sem markup, só o texto.
+
+    Formato pedido pela cliente (ver os modelos de mensagem). Cada parte só entra
+    quando a fonte forneceu o número; sem valor de desconto devolve '' e o cupom
+    fica de fora do aviso — anunciar "cupom BARATINHO" sem dizer o que ele abate é
+    exatamente a mensagem que ninguém clica.
+
+    Usa `_preco_br` e não `coupon_rules.formatar_numero`: este devolve '1499' onde a
+    mensagem-modelo diz 'R$1.499'.
+    """
+    from apps.scrapers.coupon_rules import regras_do_cupom
+
+    regras = regras_do_cupom(cupom)
+    valor = regras.get("valor_desconto")
+    if valor in (None, "", 0):
+        return ""
+    tipo = str(regras.get("tipo_desconto") or "").lower()
+    if tipo == "porcentagem":
+        partes = [f"{_preco_br(valor)}% OFF"]
+    elif tipo == "fixo":
+        partes = [f"R${_preco_br(valor)} OFF"]
+    else:
+        return ""
+    minimo = regras.get("valor_minimo")
+    if minimo not in (None, "", 0):
+        partes.append(f"em R${_preco_br(minimo)}")
+    linha = " ".join(partes)
+    teto = regras.get("desconto_maximo")
+    # O teto só informa quando é percentual: em desconto fixo ele repete o valor.
+    if tipo == "porcentagem" and teto not in (None, "", 0):
+        linha = f"{linha}, limitado a R${_preco_br(teto)} OFF"
+    return linha
+
+
+def montar_mensagem_aviso_cupons(cupons, marketplace, link="", markup=None) -> str:
+    """Aviso de cupons novos, sem produto — o formato que a cliente enviou:
+
+        🚨 *NOVOS CUPONS ML* 🚨
+
+        ➡️ _20% OFF em R$79, limitado a R$60 OFF_
+        🎟 cupom: *BARATINHO*
+
+        ➡️ _R$300 OFF em R$1.499_
+        🎟 cupom: *OFFMELIMAIS*
+
+        Ative em algum produto do link
+        🔗 https://...
+
+    Diferente de `montar_mensagem_cupom_produtos`, aqui não há produto, preço nem
+    colagem: a mensagem só divulga códigos. Por isso ela aceita apenas cupom com
+    CÓDIGO DIGITÁVEL — sem produto na tela, "ative no link" não teria onde ser
+    ativado, e o gate de associação cupom↔produto perde o sentido.
+
+    Devolve '' quando nenhum cupom rende linha de desconto; quem chama trata isso
+    como "nada a anunciar", não como falha.
+    """
+    from apps.scrapers.senders.base import WhatsAppMarkup
+    from apps.scrapers.coupon_rules import codigo_publicavel
+
+    m = markup or WhatsAppMarkup()
+    esc = m.escape
+
+    blocos = []
+    for cupom in cupons or []:
+        codigo = codigo_publicavel(cupom)
+        desconto = linha_desconto_cupom(cupom)
+        if not codigo or not desconto:
+            continue
+        blocos.append(f"➡️ {m.italic(esc(desconto))}\n"
+                      f"🎟 cupom: {m.bold(esc(codigo))}")
+    if not blocos:
+        return ""
+
+    titulo = ("NOVO CUPOM" if len(blocos) == 1 else "NOVOS CUPONS")
+    linhas = [f"🚨 {m.bold(f'{titulo} {esc(_sigla_loja(marketplace))}')} 🚨", ""]
+    linhas.append("\n\n".join(blocos))
+
+    link = str(link or "").strip()
+    if link:
+        linhas.append("")
+        # Só o ML precisa da instrução: lá o cupom é aplicado navegando pela vitrine
+        # do afiliado. Na Amazon o link já leva à página onde o código é digitado.
+        if _sigla_loja(marketplace) == "ML":
+            linhas.append("Ative em algum produto do link")
+        linhas.append(f"🔗 {esc(link)}")
     return "\n".join(linhas)
 
 
@@ -1212,6 +1311,219 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                       causa=type(exc).__name__, _erro_tecnico=str(exc))
 
 
+# Teto de cupons por aviso. Os modelos da cliente têm 8; acima de ~10 a mensagem
+# passa a rolar demais no celular e o WhatsApp começa a truncar a prévia.
+LIMITE_CUPONS_AVISO = 10
+
+# Origem da Publicacao do broadcast. Separada de "cupom" de propósito: o aviso não
+# anuncia produto, então misturar os dois quebraria tanto a deduplicação quanto
+# qualquer leitura futura de desempenho por tipo de mensagem.
+ORIGEM_AVISO_CUPONS = "aviso_cupons"
+
+
+def selecionar_cupons_para_aviso(configuracao, usuario, limite=LIMITE_CUPONS_AVISO):
+    """Cupons de CÓDIGO ainda não anunciados neste destino, melhores primeiro.
+
+    Deliberadamente NÃO passa por `ProdutoCupom`, `relacoes_prontas_para_envio` nem
+    pela flag de cupons de ativação: o aviso não promete produto nenhum, então o
+    portão de associação cupom↔produto — que existe para impedir "use o cupom X
+    neste item" quando X não vale ali — não tem o que proteger aqui. O que ele exige
+    é o oposto: um código que a pessoa consiga digitar no checkout.
+    """
+    from apps.scrapers.coupon_rules import codigo_publicavel, score_cupom
+    from apps.scrapers.maintenance import cupons_frescos_q
+    from apps.scrapers.models import CupomNormalizado
+
+    agora = timezone.now()
+    marketplace = str(getattr(configuracao, "marketplace", "") or "").strip().lower()
+    if not marketplace:
+        return []
+
+    base = CupomNormalizado.objects.select_related("fonte", "programa", "integracao").filter(
+        Q(owner__isnull=True) | Q(owner=usuario),
+        Q(inicio__isnull=True) | Q(inicio__lte=agora),
+        cupons_frescos_q(agora=agora),
+        marketplace=marketplace, estado="ativo",
+    ).exclude(codigo="")
+    if not getattr(configuracao, "incluir_restritos", True):
+        base = base.filter(restrito=False)
+
+    # Já anunciado neste destino dentro do cooldown não volta: o grupo receberia a
+    # mesma lista de códigos várias vezes por dia.
+    desde = agora - timedelta(hours=getattr(configuracao, "horas_cooldown", 24) or 24)
+    ja_anunciados = set(Publicacao.objects.filter(
+        usuario=usuario, destino_id=configuracao.grupo_id,
+        origem=ORIGEM_AVISO_CUPONS, cupom_normalizado__isnull=False,
+    ).filter(Q(status="enviado", enviada_em__gte=desde)
+             | Q(status__in=("pendente", "incerto"), criada_em__gte=desde)
+             ).values_list("cupom_normalizado_id", flat=True))
+
+    candidatos = []
+    for cupom in base.order_by("-ultima_observacao")[:200]:
+        if cupom.id in ja_anunciados:
+            continue
+        if not codigo_publicavel(cupom):
+            continue
+        if not linha_desconto_cupom(cupom):
+            continue
+        if cupom.programa and not (
+                cupom.programa.habilitado and cupom.programa.status_vinculo == "joined"
+                and cupom.programa.link_status == "online"):
+            continue
+        if cupom.integracao and not (
+                cupom.integracao.habilitada and cupom.integracao.status == "conectada"):
+            continue
+        candidatos.append(cupom)
+    candidatos.sort(key=score_cupom, reverse=True)
+    return candidatos[:limite]
+
+
+def enviar_aviso_cupons(cupons, grupo_id, *, canal="whatsapp", usuario=None,
+                        destino_nome="", configuracao=None):
+    """Publica o aviso de cupons novos: só códigos, banner da loja, um link.
+
+    Espelha a contabilidade de `enviar_cupom` (lock do usuário, cota diária,
+    deduplicação por destino, uma Publicacao por cupom anunciado) e dispensa tudo
+    que só faz sentido quando há produto: preparo, colagem e verificação de link
+    afiliado por item.
+    """
+    from django.contrib.auth import get_user_model
+    from apps.scrapers.banners import sortear_banner_b64
+    from apps.scrapers.coupon_rules import codigo_publicavel
+    from apps.scrapers.eventos import log_event
+    from apps.scrapers.senders.registry import get_sender
+
+    try:
+        sender = get_sender(canal)
+    except ValueError as exc:
+        return {"sucesso": False, "motivo": str(exc), "classe": PERMANENTE}
+    if not usuario or not grupo_id:
+        return {"sucesso": False, "motivo": "Usuário ou destino ausente.",
+                "classe": PERMANENTE}
+    cupons = [c for c in (cupons or []) if getattr(c, "pk", None)]
+    if not cupons:
+        return {"sucesso": False, "motivo": "Nenhum cupom novo para anunciar.",
+                "classe": TRANSITORIO}
+    erro_canal = _canal_pronto_ou_erro(canal, usuario)
+    if erro_canal:
+        return erro_canal
+
+    marketplace = str(getattr(cupons[0], "marketplace", "") or "")
+    agora = timezone.now()
+
+    # O link é UM por mensagem (o dos modelos), gerado a partir do melhor cupom do
+    # lote pelo caminho que já existe: cache por usuário+cupom, Link Builder e
+    # verificação da tag. Sessão caída aqui é transitória — a mensagem sai no
+    # próximo tick, sem contar para o freio automático da regra.
+    resolucao = resolver_link_afiliado_cupom(cupons[0], usuario)
+    if not resolucao.get("sucesso"):
+        return {"sucesso": False,
+                "motivo": resolucao.get("motivo") or "Não foi possível gerar o link do aviso.",
+                "classe": TRANSITORIO,
+                "precisa_login_ml": bool(resolucao.get("precisa_login_ml"))}
+    link = resolucao["link"]
+
+    mensagem = montar_mensagem_aviso_cupons(
+        cupons, marketplace, link=link, markup=sender.markup)
+    if not mensagem.strip():
+        return {"sucesso": False, "motivo": "Nenhum cupom novo para anunciar.",
+                "classe": TRANSITORIO}
+    # Só os cupons que realmente entraram na mensagem viram Publicacao — senão a
+    # deduplicação marcaria como "já anunciado" um código que ninguém recebeu.
+    anunciados = [c for c in cupons
+                  if codigo_publicavel(c) and linha_desconto_cupom(c)][:LIMITE_CUPONS_AVISO]
+
+    publicacoes = []
+    try:
+        with transaction.atomic():
+            get_user_model().objects.select_for_update().get(pk=usuario.pk)
+            perfil = getattr(usuario, "perfil", None)
+            if perfil and perfil.bloqueado:
+                return {"sucesso": False, "motivo": "Conta bloqueada para envios.",
+                        "classe": PERMANENTE}
+            inicio_dia = timezone.localtime(agora).replace(
+                hour=0, minute=0, second=0, microsecond=0)
+            limite = perfil.cota_max_envios_dia() if perfil else 0
+            usados = Publicacao.objects.filter(
+                usuario=usuario, criada_em__gte=inicio_dia,
+                status__in=("pendente", "enviado", "incerto"),
+            ).count()
+            # A mensagem é UMA; a cota conta uma publicação por envio, não por cupom.
+            if limite and usados >= limite:
+                return {"sucesso": False, "motivo": "Limite diário de envios atingido.",
+                        "classe": PERMANENTE}
+            for cupom in anunciados:
+                publicacoes.append(Publicacao.objects.create(
+                    usuario=usuario, origem=ORIGEM_AVISO_CUPONS,
+                    cupom_normalizado=cupom, configuracao=configuracao,
+                    canal=canal, destino_id=str(grupo_id)[:100],
+                    destino_nome=str(destino_nome or "")[:255],
+                    cupom=str(codigo_publicavel(cupom) or "")[:255],
+                    categoria="Aviso de cupons",
+                    mensagem=mensagem, link_afiliado=link, link_rastreado=link,
+                ))
+    except Exception as exc:
+        logger.exception("Falha ao reservar o aviso de cupons para %s", grupo_id)
+        return {"sucesso": False,
+                "motivo": "Não foi possível reservar este aviso para envio. Tente novamente.",
+                "classe": TRANSITORIO, "causa": type(exc).__name__}
+
+    ids = [p.pk for p in publicacoes]
+
+    def _fechar(status, erro=""):
+        Publicacao.objects.filter(pk__in=ids, status="pendente").update(
+            status=status, erro=str(erro)[:500],
+            **({"enviada_em": timezone.now()} if status == "enviado" else {}))
+
+    log_event("publicacao", "send_started", "Preparando aviso de cupons.",
+              usuario=usuario, contexto={"cupons": len(anunciados), "canal": canal,
+                                         "marketplace": marketplace,
+                                         "destino": destino_nome or grupo_id})
+    try:
+        banner_b64, banner_mime = sortear_banner_b64(marketplace)
+        img_kwargs = ({"imagem_b64": banner_b64, "mimetype": banner_mime}
+                      if banner_b64 else {})
+        resultado = sender.enviar_oferta(
+            grupo_id, mensagem, legenda=mensagem, usuario=usuario,
+            session=wa_session_de(usuario),
+            operation_id=f"aviso_cupons:{ids[0]}" if ids else None, **img_kwargs)
+    except Exception as exc:
+        logger.exception("Erro inesperado ao enviar o aviso de cupons")
+        _fechar("falhou", str(exc))
+        return {"sucesso": False, "motivo": "Falha inesperada ao enviar o aviso.",
+                "classe": DESCONHECIDO, "causa": type(exc).__name__}
+
+    if resultado.get("sucesso"):
+        _fechar("enviado")
+        log_event("publicacao", "send_ok", "Aviso de cupons publicado.",
+                  usuario=usuario, contexto={"cupons": len(anunciados), "canal": canal,
+                                             "destino": destino_nome or grupo_id,
+                                             "via": resultado.get("via")})
+        return {"sucesso": True, "via": resultado.get("via", canal),
+                "canal": resultado.get("canal", canal), "link": link,
+                "mensagem": mensagem, "cupons": len(anunciados),
+                "publicacao": publicacoes[0] if publicacoes else None,
+                "mensagem_id": resultado.get("mensagem_id"),
+                "classe": resultado.get("classe", ""),
+                "resultado": resultado.get("resultado", "confirmado"),
+                "repetir": resultado.get("repetir", False),
+                "etapa": resultado.get("etapa", "transporte"),
+                "duracao_ms": resultado.get("duracao_ms", 0)}
+
+    motivo = _motivo_publico_transporte(resultado)
+    _fechar("incerto" if resultado.get("resultado") == "incerto" else "falhou", motivo)
+    log_event("publicacao", "send_failed", motivo, level="warning", usuario=usuario,
+              contexto={"cupons": len(anunciados), "canal": canal,
+                        "destino": destino_nome or grupo_id,
+                        "erro_tecnico": resultado.get("erro") or ""})
+    return {"sucesso": False, "motivo": motivo,
+            "classe": resultado.get("classe") or DESCONHECIDO,
+            "resultado": resultado.get("resultado"),
+            "repetir": resultado.get("repetir"),
+            "etapa": resultado.get("etapa"),
+            "duracao_ms": resultado.get("duracao_ms")}
+
+
 # Emoji por macro-categoria p/ a linha do produto na mensagem curta. Fallback 🛍️.
 _EMOJI_MACRO = {
     "Celulares, Telefonia e Wearables": "📱",
@@ -1395,7 +1707,19 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
                 from apps.scrapers.coupon_rules import codigo_publicavel
                 codigo = codigo_publicavel(do_catalogo) or None
                 cupom_escolhido = do_catalogo if codigo else None
-            if not codigo:
+                # Cupom de ATIVAÇÃO (clique, sem código digitável) é hoje a quase
+                # totalidade do catálogo de campanhas do ML. Sem este ramo, um
+                # produto com cupom confirmado saía sem nenhuma linha 🎟️ — o
+                # sintoma que a cliente relatou como "cupom não vem na mensagem".
+                # O portão de confiança já foi aplicado em
+                # `_melhor_cupom_normalizado_obj`: só chega aqui cupom de site
+                # inteiro ou com `ProdutoCupom` confirmado para ESTE item.
+                if not codigo:
+                    from apps.scrapers.coupon_rules import ativacao_publicavel
+                    if ativacao_publicavel(do_catalogo):
+                        cupom_escolhido = do_catalogo
+                        linha_cupom = f"🎟️ {m.bold('CUPOM: ative no link')}"
+            if linha_cupom is None and not codigo:
                 codigo, cupom_escolhido = _melhor_codigo(produto), None
         if codigo:
             linha_cupom = f"🎟️ {m.bold(f'CUPOM: {esc(codigo)}')}"
@@ -1486,11 +1810,19 @@ def _melhor_cupom_normalizado_obj(produto):
     maior desconto — convertido para R$ e já com o teto aplicado, senão um "R$ 50 OFF"
     ganhava de "20% OFF" mesmo num item de R$ 3.000.
 
+    Aceita tanto cupom de CÓDIGO quanto de ATIVAÇÃO (`cupom_publicavel`). Exigir
+    código digitável descartava praticamente todo o catálogo de campanhas do ML, que
+    migrou para ativação por clique — e o produto saía sem linha de cupom nenhuma.
+    Empate no desconto vai para o código, que é o que o comprador consegue conferir
+    no checkout.
+
     Devolve o objeto (não só o código) porque a mensagem precisa saber se o cupom é
     restrito para imprimir a linha de condição.
     """
     from apps.scrapers.models import CupomNormalizado, ProdutoCupom
-    from apps.scrapers.coupon_rules import regras_do_cupom, codigo_publicavel
+    from apps.scrapers.coupon_rules import (
+        codigo_publicavel, cupom_publicavel, regras_do_cupom,
+    )
     from apps.scrapers.maintenance import cupons_frescos_q
     if getattr(produto, "marketplace", "mercadolivre") not in ("mercadolivre", ""):
         return None
@@ -1506,12 +1838,12 @@ def _melhor_cupom_normalizado_obj(produto):
         ).values_list("cupom_id", flat=True))
 
     preco = getattr(produto, "preco_com_cupom", 0) or 0
-    melhor, melhor_desc = None, 0.0
+    melhor, melhor_chave = None, None
     for c in base:
         regras = regras_do_cupom(c)
         if not (regras.get("is_mar_aberto") or c.id in ids_confirmados):
             continue
-        if not codigo_publicavel(c):
+        if not cupom_publicavel(c):
             continue
         try:
             minimo = float(regras.get("valor_minimo") or 0)
@@ -1522,8 +1854,11 @@ def _melhor_cupom_normalizado_obj(produto):
         desc = _desconto_em_reais(preco, regras.get("tipo_desconto"),
                                   regras.get("valor_desconto"),
                                   regras.get("desconto_maximo"))
-        if desc > melhor_desc:
-            melhor, melhor_desc = c, desc
+        if desc <= 0:
+            continue
+        chave = (desc, 1 if codigo_publicavel(c) else 0)
+        if melhor_chave is None or chave > melhor_chave:
+            melhor, melhor_chave = c, chave
     return melhor
 
 
@@ -2147,8 +2482,19 @@ def processar_configs_de_envio():
         # 0. Dono suspenso ou cota diária estourada → nunca envia.
         if _cota_estourada(cfg.owner):
             continue
-        # 1. Respeita a janela de horário (ex: 8h-20h). Fora dela, nunca envia.
-        if not cfg.dentro_da_janela(agora):
+        # 0.5. Freio automático de falhas seguidas. Diferente de `ativo=False`, ele
+        # expira sozinho no próximo dia habilitado — sair dele zera o contador e a
+        # regra volta a tentar sem depender de alguém lembrar de religá-la.
+        if cfg.freio_ativo(agora):
+            continue
+        if cfg.pausada_ate is None and cfg.motivo_pausa:
+            # `freio_ativo` acabou de expirar o freio: persiste a soltura mesmo que
+            # este tick pare mais adiante (fora da janela, sem estoque, cota).
+            cfg.motivo_pausa = ""
+            cfg.save(update_fields=["pausada_ate", "falhas_consecutivas",
+                                    "motivo_pausa"])
+        # 1. Respeita a janela de horário (ex: 8h-20h) e os dias da semana marcados.
+        if not cfg.dentro_da_janela(agora) or not cfg.dia_permitido(agora):
             continue
         # 2. Vencido = sem agendamento ainda OU passou do proximo_envio (intervalo + jitter).
         vencido = cfg.proximo_envio is None or agora >= cfg.proximo_envio
@@ -2166,19 +2512,26 @@ def processar_configs_de_envio():
                 "Config %s pulada: WhatsApp do dono não está conectado.", cfg.id)
             continue
 
-        macros = [cfg.macro_categoria] if cfg.macro_categoria else None  # vazio = qualquer (inclui ofertas)
-        r = selecionar_e_enviar(
-            macros, cfg.grupo_id,
-            min_desconto_percent=cfg.min_desconto_percent,
-            horas_cooldown=cfg.horas_cooldown,
-            verificar=True,
-            termo=cfg.termo_busca,
-            canal=getattr(cfg, "canal", "whatsapp"),
-            marketplace=getattr(cfg, "marketplace", "") or None,
-            usuario=cfg.owner,
-            configuracao=cfg,
-            destino_nome=cfg.grupo_nome,
-        )
+        if getattr(cfg, "tipo", "") == ConfiguracaoEnvio.TIPO_AVISO_CUPONS:
+            r = enviar_aviso_cupons(
+                selecionar_cupons_para_aviso(cfg, cfg.owner), cfg.grupo_id,
+                canal=getattr(cfg, "canal", "whatsapp"), usuario=cfg.owner,
+                destino_nome=cfg.grupo_nome, configuracao=cfg,
+            )
+        else:
+            macros = [cfg.macro_categoria] if cfg.macro_categoria else None  # vazio = qualquer (inclui ofertas)
+            r = selecionar_e_enviar(
+                macros, cfg.grupo_id,
+                min_desconto_percent=cfg.min_desconto_percent,
+                horas_cooldown=cfg.horas_cooldown,
+                verificar=True,
+                termo=cfg.termo_busca,
+                canal=getattr(cfg, "canal", "whatsapp"),
+                marketplace=getattr(cfg, "marketplace", "") or None,
+                usuario=cfg.owner,
+                configuracao=cfg,
+                destino_nome=cfg.grupo_nome,
+            )
         # Reagenda sempre (sucesso ou não) p/ não ficar martelando o mesmo tick;
         # jitter ±1-10min deixa o ritmo humano. ultimo_envio só em sucesso (display).
         cfg.agendar_proximo(agora)
@@ -2186,6 +2539,7 @@ def processar_configs_de_envio():
             cfg.ultimo_envio = agora
             cfg.falhas_consecutivas = 0
             cfg.motivo_pausa = ""
+            cfg.pausada_ate = None
             if cfg.owner_id is not None:
                 _envios_hoje[cfg.owner_id] = _envios_hoje.get(cfg.owner_id, 0) + 1
         elif r.get("classe") == TRANSITORIO:
@@ -2197,18 +2551,18 @@ def processar_configs_de_envio():
             logger.info("Config %s: falha transitória ignorada (%s).",
                         cfg.id, r.get("motivo"))
         else:
-            # 'permanente' e 'desconhecido' seguem contando. Pausar no 'desconhecido'
+            # 'permanente' e 'desconhecido' seguem contando. Frear no 'desconhecido'
             # é o comportamento que já existia: na dúvida, para de martelar o grupo.
             cfg.falhas_consecutivas += 1
             if cfg.pausar_apos_falhas and cfg.falhas_consecutivas >= cfg.pausar_apos_falhas:
-                cfg.ativo = False
-                cfg.motivo_pausa = (r.get("motivo") or "Falhas consecutivas")[:255]
-                # Nível error: a automação do usuário acabou de morrer e só volta
-                # com ação humana. É a falha mais cara do produto (ele para de
-                # receber ofertas e não é avisado), então precisa saltar no relatório.
+                cfg.frear(agora, r.get("motivo"))
+                # Nível error: a automação do usuário acabou de parar. Ela volta
+                # sozinha no próximo dia habilitado, mas se a causa for crônica o
+                # ciclo se repete — então o evento continua saltando no relatório.
                 log_event(
                     "publicacao", "config_pausada",
-                    f"Automação pausada após {cfg.falhas_consecutivas} falhas: {cfg.motivo_pausa}",
+                    f"Automação pausada após {cfg.falhas_consecutivas} falhas até "
+                    f"{timezone.localtime(cfg.pausada_ate):%d/%m %H:%M}: {cfg.motivo_pausa}",
                     level="error", usuario=cfg.owner,
                     contexto={
                         "config_id": cfg.id,
@@ -2216,10 +2570,11 @@ def processar_configs_de_envio():
                         "canal": getattr(cfg, "canal", "whatsapp"),
                         "falhas_consecutivas": cfg.falhas_consecutivas,
                         "motivo": cfg.motivo_pausa,
+                        "pausada_ate": cfg.pausada_ate.isoformat(),
                     },
                 )
         cfg.save(update_fields=[
             "proximo_envio", "ultimo_envio", "falhas_consecutivas",
-            "motivo_pausa", "ativo"])
+            "motivo_pausa", "pausada_ate", "ativo"])
         resultados.append({"config": cfg.id, **r})
     return resultados

@@ -389,11 +389,34 @@ def estado_ml_linkbuilder(user=None, usar_cache: bool = True) -> Estado:
                 "stale", verificado_em,
             )
     elif estado == "login_required":
-        resposta = Estado(
-            False, "Link Builder", "chromium",
-            "O Link Builder pediu login. Reconecte o Mercado Livre.",
-            "login_required", verificado_em,
+        # A linha do SITE se recupera sozinha: `estado_ml` re-sonda quando o veredito
+        # passa de `_TTL_ML_S` e um único "conectado" limpa o histórico. A do Link
+        # Builder não tinha nada disso — só o Chromium a escreve —, então um
+        # `login_required` de UMA corrida ruim (gateway anti-bot da Fly, experimento
+        # de layout, soluço do SSO) grudava indefinidamente e a tela mandava
+        # reconectar uma sessão perfeita, em looping.
+        #
+        # Passada a janela, o veredito vira "pendente": ninguém promove para verde
+        # sem uma abertura real do portal, mas o vermelho também para de ser eterno.
+        # A próxima geração de link reacende o vermelho em segundos se o problema
+        # for de verdade.
+        vencido = bool(
+            verificado_em
+            and (agora - verificado_em).total_seconds() > _TTL_LINKBUILDER_REAL_S
         )
+        if vencido:
+            resposta = Estado(
+                False, "Link Builder", "banco",
+                "Validação pendente — o Link Builder será conferido ao gerar.",
+                "unknown", verificado_em,
+                alerta="A última verificação pediu login; ainda não foi refeita.",
+            )
+        else:
+            resposta = Estado(
+                False, "Link Builder", "chromium",
+                "O Link Builder pediu login. Reconecte o Mercado Livre.",
+                "login_required", verificado_em,
+            )
     elif estado == "temporarily_unavailable":
         resposta = Estado(
             False, "Link Builder", "chromium",

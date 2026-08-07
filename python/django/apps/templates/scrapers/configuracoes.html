@@ -52,6 +52,19 @@
   .grupo-sync .help { margin-top: 0; }
   .hora-row { display: flex; align-items: center; gap: .5rem; }
   .hora-row input { flex: 1; }
+  /* Dias da semana: chips que também são alvo de toque de 44px no celular. */
+  .dias-semana { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .dia-chip { position: relative; display: inline-flex; }
+  .dia-chip input { position: absolute; inset: 0; width: 100%; height: 100%;
+    margin: 0; opacity: 0; cursor: pointer; }
+  .dia-chip span { display: inline-flex; align-items: center; justify-content: center;
+    min-width: 44px; min-height: 44px; padding: 0 .7rem; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--surface);
+    font-size: 13px; color: var(--muted); user-select: none; transition: .12s; }
+  .dia-chip input:checked + span { border-color: var(--accent); color: var(--text);
+    background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .dia-chip input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .rule-pausa { margin-top: .3rem; font-size: 12px; line-height: 1.4; max-width: 34ch; }
   .switch-text { font-size: 13px; color: var(--text-2); }
   .adv-checks { grid-column: 1 / -1; display: flex; flex-direction: column; gap: .65rem; }
 
@@ -138,20 +151,40 @@
       <tr>
         <td data-label="Regra" class="cell-grow">
           <div class="rule-main">
-            <div class="rule-title"><b>{{ c.macro_categoria|default:"Todas" }}</b>{% if c.termo_busca %} <span class="muted">{{ c.termo_busca }}</span>{% endif %}</div>
+            {% comment %}
+              A regra de aviso não tem nicho nem desconto mínimo: mostrá-la como
+              "Todas · mín 15%" descrevia um comportamento que ela não tem.
+            {% endcomment %}
+            <div class="rule-title">
+              {% if c.tipo == "aviso_cupons" %}<b>Aviso de cupons novos</b>
+              {% else %}<b>{{ c.macro_categoria|default:"Todas" }}</b>{% if c.termo_busca %} <span class="muted">{{ c.termo_busca }}</span>{% endif %}{% endif %}
+            </div>
             <div class="rule-tags">
               <span class="tech-tag"><i data-lucide="store"></i>{% if c.marketplace == "mercadolivre" %}Mercado Livre{% elif c.marketplace == "amazon" %}Amazon{% elif c.marketplace %}{{ c.marketplace|title }}{% else %}Todas as lojas{% endif %}</span>
-              <span class="tech-tag"><i data-lucide="percent"></i>mín {{ c.min_desconto_percent }}%</span>
+              {% if c.tipo != "aviso_cupons" %}<span class="tech-tag"><i data-lucide="percent"></i>mín {{ c.min_desconto_percent }}%</span>{% endif %}
               <span class="tech-tag"><i data-lucide="clock"></i>{{ c.janela_inicio }}h–{{ c.janela_fim }}h · {{ c.intervalo_minutos }}min</span>
+              <span class="tech-tag"><i data-lucide="calendar-days"></i>{{ c.rotulo_dias }}</span>
             </div>
-            {% if c.previa_conteudo %}<div class="muted rank-preview">Prévia: {{ c.previa_conteudo.titulo }}{% if c.previa_conteudo.score %} · score {{ c.previa_conteudo.score }}{% endif %} · {{ c.previa_conteudo.motivos|join:", " }}</div>{% endif %}
+            {% if c.tipo == "aviso_cupons" %}
+              <div class="muted rank-preview">Prévia: {% if c.previa_aviso %}{{ c.previa_aviso }}{% else %}nenhum cupom com código novo nesta loja{% endif %}</div>
+            {% elif c.previa_conteudo %}<div class="muted rank-preview">Prévia: {{ c.previa_conteudo.titulo }}{% if c.previa_conteudo.score %} · score {{ c.previa_conteudo.score }}{% endif %} · {{ c.previa_conteudo.motivos|join:", " }}</div>{% endif %}
           </div>
         </td>
         <td data-label="Destino">
           {% if c.canal == "telegram" %}<span class="badge badge-accent"><i data-lucide="send"></i> Telegram</span>{% else %}<span class="badge badge-green"><i data-lucide="message-circle"></i> WhatsApp</span>{% endif %}
           <span class="dest-grupo">{{ c.grupo_nome|default:c.grupo_id }}</span>
         </td>
-        <td data-label="Status">{% if c.ativo %}<span class="badge badge-green"><span class="dot"></span>ativo</span>{% else %}<span class="badge badge-muted">pausado</span>{% endif %}</td>
+        {% comment %}
+          "pausado" sozinho não dizia nada: o usuário não sabia se tinha desligado a
+          regra, se ela quebrou, nem quando voltaria. Agora o freio automático mostra
+          motivo e prazo, e ele mesmo expira.
+        {% endcomment %}
+        <td data-label="Status">
+          {% if not c.ativo %}<span class="badge badge-muted">desligada</span>
+          {% elif c.pausada_ate %}<span class="badge badge-yellow" title="{{ c.motivo_pausa }}"><span class="dot"></span>pausada até {{ c.pausada_ate|date:"d/m H:i" }}</span>
+          {% else %}<span class="badge badge-green"><span class="dot"></span>ativo</span>{% endif %}
+          {% if c.ativo and c.pausada_ate and c.motivo_pausa %}<div class="muted rule-pausa">{{ c.motivo_pausa }}</div>{% endif %}
+        </td>
         <td data-label="Último envio" class="muted" style="font-size:12.5px;">{{ c.ultimo_envio|default:"—" }}</td>
         <td data-label="Ações" class="col-actions">
           <div class="row-actions">
@@ -191,6 +224,13 @@
       <div class="form-section">
         <div class="fs-title"><i data-lucide="package"></i> Conteúdo</div>
         <div class="form-grid">
+          <div style="grid-column:1/-1;">
+            <label>O que esta regra envia</label>
+            <select name="tipo" id="sel-tipo" onchange="aplicarTipoRegra()">
+              {% for valor, rotulo in tipos_regra %}<option value="{{ valor }}">{{ rotulo }}</option>{% endfor %}
+            </select>
+            <span class="help" id="tipo-help">Uma oferta ou cupom por envio, com foto, preço e link.</span>
+          </div>
           <div>
             <label>Categoria</label>
             <select name="macro_categoria" id="sel-macro" onchange="msFilter()">
@@ -198,7 +238,7 @@
               {% for m in macros %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
             </select>
           </div>
-          <div>
+          <div data-so-ofertas>
             <label>Nichos (opcional)</label>
             <div class="ms" id="ms-sub">
               <div class="ms-box" onclick="document.getElementById('ms-sub').classList.toggle('open')">
@@ -224,7 +264,7 @@
               {% for mk in marketplaces %}<option value="{{ mk }}">{% if mk == "mercadolivre" %}Mercado Livre{% elif mk == "amazon" %}Amazon{% else %}{{ mk|title }}{% endif %}</option>{% endfor %}
             </select>
           </div>
-          <div>
+          <div data-so-ofertas>
             <label>Desconto mínimo (%)</label>
             <input name="min_desconto_percent" type="number" value="15" min="0" step="0.5">
           </div>
@@ -274,6 +314,18 @@
             <label>Intervalo entre envios (minutos)</label>
             <input name="intervalo_minutos" type="number" value="60" min="1">
             <span class="help">Com variação aleatória de até 10 min.</span>
+          </div>
+          <div style="grid-column:1/-1;">
+            <label>Dias da semana</label>
+            <div class="dias-semana" role="group" aria-label="Dias da semana em que a regra envia">
+              {% for valor, rotulo in dias_semana_opcoes %}
+              <label class="dia-chip">
+                <input name="dias_semana" type="checkbox" value="{{ valor }}" checked>
+                <span>{{ rotulo }}</span>
+              </label>
+              {% endfor %}
+            </div>
+            <span class="help">Desmarque um dia para a regra não enviar nele. Sem nenhum marcado, ela envia todos os dias.</span>
           </div>
         </div>
       </div>
@@ -339,6 +391,25 @@
     document.getElementById('rule-scrim').classList.remove('open');
   }
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeRuleDrawer(); });
+
+  // --- Tipo de regra: o aviso de cupons não usa desconto mínimo nem nichos ---
+  const AJUDA_TIPO = {
+    ofertas: 'Uma oferta ou cupom por envio, com foto, preço e link.',
+    aviso_cupons: 'Uma mensagem só com os códigos novos da loja, sem produto. '
+                + 'Só entram cupons com código digitável.'
+  };
+  function aplicarTipoRegra() {
+    const sel = document.getElementById('sel-tipo');
+    if (!sel) return;
+    const aviso = sel.value === 'aviso_cupons';
+    document.getElementById('tipo-help').textContent = AJUDA_TIPO[sel.value] || '';
+    // Os campos continuam no POST (o ranking de cupons também os respeita), mas
+    // escondê-los evita a pergunta "que desconto mínimo tem um aviso de cupom?".
+    document.querySelectorAll('[data-so-ofertas]').forEach(el => {
+      el.style.display = aviso ? 'none' : '';
+    });
+  }
+  document.addEventListener('DOMContentLoaded', aplicarTipoRegra);
 
   // --- Envio automático (tipo=envio, independente da raspagem) ---
   function getCookie(nome) {

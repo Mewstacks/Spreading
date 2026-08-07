@@ -3,6 +3,7 @@ import queue
 import threading
 from contextlib import redirect_stdout
 from functools import wraps
+from types import SimpleNamespace
 
 from django.conf import settings
 from django.contrib import messages
@@ -1239,6 +1240,39 @@ def telegram_desconectar(request):
 # taxonomia cresce, e o usuário não pode voltar a esbarrar num teto invisível.
 LIMITE_TERMOS_POR_REGRA = 8000
 
+# Dias da semana em ISO (1=segunda … 7=domingo), na ordem em que o Brasil lê a
+# semana. Fonte única do formulário e do rótulo da listagem.
+DIAS_SEMANA_OPCOES = [(1, "Seg"), (2, "Ter"), (3, "Qua"), (4, "Qui"),
+                      (5, "Sex"), (6, "Sáb"), (7, "Dom")]
+
+
+def _dias_semana_do_post(request) -> str:
+    """CSV normalizado de dias ISO a partir do POST. '' = todos os dias.
+
+    Marcar os sete equivale a não marcar nenhum, e gravar '' nesse caso mantém a
+    coluna com um único valor para "sem restrição" — o resto do código só precisa
+    conhecer uma forma de dizer isso.
+    """
+    escolhidos = set()
+    for bruto in request.POST.getlist("dias_semana"):
+        bruto = str(bruto or "").strip()
+        if bruto.isdigit() and 1 <= int(bruto) <= 7:
+            escolhidos.add(int(bruto))
+    if len(escolhidos) == 7:
+        return ""
+    return ",".join(str(d) for d in sorted(escolhidos))
+
+
+def _rotulo_dias(cfg) -> str:
+    dias = cfg.dias_permitidos()
+    if not dias:
+        return "todos os dias"
+    if dias == {1, 2, 3, 4, 5}:
+        return "seg a sex"
+    if dias == {6, 7}:
+        return "fins de semana"
+    return ", ".join(rotulo for valor, rotulo in DIAS_SEMANA_OPCOES if valor in dias)
+
 
 def configuracoes(request):
     """Painel do afiliado: cria/edita/remove regras de divulgação (nicho→grupo→intervalo)."""
@@ -1325,6 +1359,10 @@ def configuracoes(request):
                 intervalo_minutos=intervalo,
                 janela_inicio=janela_inicio,
                 janela_fim=janela_fim,
+                dias_semana=_dias_semana_do_post(request),
+                tipo=(ConfiguracaoEnvio.TIPO_AVISO_CUPONS
+                      if request.POST.get("tipo") == ConfiguracaoEnvio.TIPO_AVISO_CUPONS
+                      else ConfiguracaoEnvio.TIPO_OFERTAS),
                 min_desconto_percent=desconto,
                 max_envios_dia=max_envios_dia,
                 pausar_apos_falhas=pausar_apos_falhas,
@@ -1338,6 +1376,12 @@ def configuracoes(request):
                 incluir_restritos=bool(request.POST.get("incluir_restritos")),
                 incluir_sem_desconto=bool(request.POST.get("incluir_sem_desconto")),
                 ativo=bool(request.POST.get("ativo")),
+                # Salvar a regra é ação humana deliberada: solta o freio automático e
+                # zera o contador. Sem isto, corrigir o que causou as falhas não
+                # bastava — a regra continuava dormindo até o prazo vencer.
+                pausada_ate=None,
+                motivo_pausa="",
+                falhas_consecutivas=0,
             )
             program_ids = list(ProgramaAfiliado.objects.filter(
                 id__in=request.POST.getlist("programas"),
@@ -1382,10 +1426,25 @@ def configuracoes(request):
         "programas").order_by("macro_categoria")
     configs = list(configs_qs)
     from apps.scrapers.content_ranking import previa_melhor_conteudo
+    from apps.scrapers.ofertas import selecionar_cupons_para_aviso
     for config in configs:
+        config.rotulo_dias = _rotulo_dias(config)
+        if config.tipo == ConfiguracaoEnvio.TIPO_AVISO_CUPONS:
+            # A prévia do ranking de ofertas não descreve este tipo de regra. O que
+            # importa aqui é quantos códigos novos entrariam na próxima mensagem.
+            config.previa_conteudo = None
+            novos = selecionar_cupons_para_aviso(config, request.user)
+            config.previa_aviso = (
+                f"{len(novos)} cupom(ns) com código novo: "
+                + ", ".join(c.codigo for c in novos[:4])
+                + ("…" if len(novos) > 4 else "")) if novos else ""
+            continue
         config.previa_conteudo = previa_melhor_conteudo(config) if config.ativo else None
+        config.previa_aviso = ""
     return render(request, "scrapers/configuracoes.html", {
         "configs": configs,
+        "dias_semana_opcoes": DIAS_SEMANA_OPCOES,
+        "tipos_regra": ConfiguracaoEnvio.TIPOS,
         "macros": macros,
         "subnichos": subnichos,
         "marketplaces": list(MARKETPLACES.keys()),
@@ -1638,6 +1697,71 @@ def enviar_cupom_stream(request):
     return _sse_runner(_job, request.organization)
 
 
+@require_POST
+@throttle_sse(6)
+def enviar_aviso_cupons_stream(request):
+    """SSE — dispara na hora o aviso "NOVOS CUPONS" de uma loja para um destino.
+
+    Mesmo núcleo que a regra automática usa, então o texto que sai daqui é o mesmo
+    que sairá sozinho — é o botão que a cliente usa para conferir antes de agendar.
+    """
+    from apps.scrapers.ofertas import (
+        LIMITE_CUPONS_AVISO, enviar_aviso_cupons, selecionar_cupons_para_aviso,
+    )
+
+    grupo_id = (request.POST.get("grupo") or "").strip()[:100]
+    grupo_nome = (request.POST.get("grupo_nome") or "").strip()[:255]
+    canal = (request.POST.get("canal") or "whatsapp").strip().lower()
+    marketplace = (request.POST.get("marketplace") or "").strip().lower()[:20]
+    uid = request.user.id
+
+    def _job():
+        from django.contrib.auth import get_user_model
+        usuario = get_user_model().objects.filter(id=uid).first()
+        if not usuario:
+            print("[ERRO] Usuário não encontrado ou sessão encerrada.")
+            return
+        if not grupo_id:
+            print("[ERRO] Nenhum destino informado (grupo/chat).")
+            return
+        if marketplace not in ("mercadolivre", "amazon"):
+            print("[ERRO] Escolha a loja do aviso (Mercado Livre ou Amazon).")
+            return
+        # Objeto solto no lugar da regra salva: o núcleo só lê estes campos, e o
+        # disparo manual não deve depender de existir uma ConfiguracaoEnvio.
+        avulso = SimpleNamespace(
+            marketplace=marketplace, grupo_id=grupo_id, horas_cooldown=24,
+            incluir_restritos=True,
+        )
+        cupons = selecionar_cupons_para_aviso(avulso, usuario, limite=LIMITE_CUPONS_AVISO)
+        if not cupons:
+            print("[ERRO] Nenhum cupom com código novo para anunciar nesta loja. "
+                  "Cupons de ativação (sem código digitável) não entram neste aviso.")
+            return
+        print(f"Enviando aviso com {len(cupons)} cupom(ns) → "
+              f"{grupo_nome or grupo_id} ({canal})...")
+        try:
+            resultado = enviar_aviso_cupons(
+                cupons, grupo_id, canal=canal, usuario=usuario,
+                destino_nome=grupo_nome)
+        except Exception as exc:
+            logger.exception("Falha não tratada no aviso de cupons")
+            print("[ERRO] O envio encontrou uma falha temporária. Nenhum aviso foi "
+                  f"confirmado ({type(exc).__name__}); tente novamente em instantes.")
+            return
+        if resultado.get("sucesso"):
+            print(f"__SENT__ OK Aviso com {resultado.get('cupons', 0)} cupom(ns) "
+                  f"enviado (via {resultado.get('via', canal)}).")
+        else:
+            print(f"[ERRO] {resultado.get('motivo') or 'falha ao enviar o aviso'}")
+            if resultado.get("precisa_login_ml"):
+                print("__ML_LOGIN__")
+            elif resultado.get("precisa_login_wa"):
+                print("__WA_LOGIN__")
+
+    return _sse_runner(_job, request.organization)
+
+
 @require_GET
 @throttle_sse(6)
 def buscar_promocoes_stream(request):
@@ -1692,6 +1816,11 @@ POR_PAGINA = 20
 # (domain_id, ex.: 'VACUUM_CLEANERS') ou da Amazon (nome do browse node).
 SEM_SUBCATEGORIA = "__sem_subcategoria__"
 ROTULO_SEM_SUBCATEGORIA = "Sem subcategoria"
+
+# A partir de quanto tempo sem tentativa uma fonte deixa de ser lida como "com
+# defeito" e passa a ser lida como "parada". O ciclo mais lento é o `scrape` do
+# Procfile (--scrape-horas 3), então 8h cobre duas janelas perdidas com folga.
+HORAS_FONTE_SILENCIOSA = 8
 
 
 def top_promocoes(request):
@@ -1998,6 +2127,33 @@ def top_promocoes(request):
         if not creds_de_usuario(request.user).completo():
             fontes_qs = fontes_qs.exclude(slug="amazon-creators-api")
     fontes = list(fontes_qs)
+    # `status` é um texto persistido que ninguém envelhece: uma fonte que parou de
+    # rodar guarda o último veredito para sempre. Sem esta derivação, "Atenção" tanto
+    # significava "falhou agora" quanto "ninguém a executa há dias" — dois problemas
+    # com soluções opostas. A coluna não muda; só a leitura da tela.
+    _limite_silencio = timezone.now() - timezone.timedelta(
+        hours=HORAS_FONTE_SILENCIOSA)
+    fontes_com_aviso, _paradas = [], []
+    for fonte in fontes:
+        fonte.silenciosa = (
+            fonte.ultima_tentativa is None or fonte.ultima_tentativa < _limite_silencio)
+        fonte.status_exibicao = "silent" if fonte.silenciosa else fonte.status
+        fonte.motivo_exibicao = (
+            f"Sem coleta há mais de {HORAS_FONTE_SILENCIOSA}h."
+            if fonte.silenciosa else (fonte.erro_publico or ""))
+        # Só o que exige leitura desce para a lista abaixo da faixa. Fonte parada tem
+        # sempre o mesmo motivo, então vai numa linha agregada: repetir a frase seis
+        # vezes é ruído que esconde o aviso específico de quem falhou de verdade.
+        if fonte.silenciosa:
+            _paradas.append(fonte.nome)
+        elif fonte.motivo_exibicao:
+            fontes_com_aviso.append(
+                {"nome": fonte.nome, "motivo": fonte.motivo_exibicao})
+    if _paradas:
+        fontes_com_aviso.append({
+            "nome": f"Sem coleta há mais de {HORAS_FONTE_SILENCIOSA}h:",
+            "motivo": ", ".join(_paradas),
+        })
     from apps.scrapers.afiliado import resumo_afiliacao
     afiliacao = resumo_afiliacao(request.user)
     afiliacao_ultimo_erro = (
@@ -2147,6 +2303,7 @@ def top_promocoes(request):
         "fontes": fontes,
         "afiliacao": afiliacao,
         "afiliacao_ultimo_erro": afiliacao_ultimo_erro,
+        "fontes_com_aviso": fontes_com_aviso,
         "fonte_selecionada": fonte_selecionada,
         "confianca_selecionada": confianca_selecionada,
         "atualizado_desde": atualizado_desde,

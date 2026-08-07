@@ -185,6 +185,45 @@ def codigo_publicavel(cupom) -> str:
 
 _FONTES_ML_ATIVACAO = ("mercadolivre-web", "ml-cupons-afiliados")
 
+# Subdomínio de LISTAGEM do ML. Por construção toda URL aqui é uma lista de anúncios
+# filtrada (`/_Container_<id>`, `/_CustId_<id>?coupon_campaign_id=<id>`) — pública e
+# reproduzível por qualquer pessoa. `www.mercadolivre.com.br/cupons`, que é o link de
+# fallback da projeção de campanhas, fica de fora de propósito: é a vitrine genérica e
+# não prova escopo nenhum.
+_HOST_LISTAGEM_ML = "lista.mercadolivre.com.br"
+
+
+def listagem_publica_ml(cupom) -> str:
+    """URL pública que delimita o escopo do cupom ML, ou '' quando não há.
+
+    Preferência para `regras.container_url`, que é onde o scraper do carrossel grava
+    o container. A projeção de campanhas (`scraper.projetar_catalogo_cupons`) não
+    conhece o container e grava só `link` — mas para 2062 dos 2073 cupons de campanha
+    em produção esse `link` É a listagem pública da campanha. Exigir apenas
+    `container_url` descartava 98% do catálogo publicável do ML sem ganho de
+    segurança: `coupon_products._coletar_ml_remoto` já aceitava `cupom.link` como
+    listagem para preparar o mesmo cupom.
+
+    O host é conferido com `urlsplit` e comparação exata — `in`/`endswith` numa
+    string crua aceitaria `lista.mercadolivre.com.br.evil.com`.
+    """
+    from urllib.parse import urlsplit
+
+    regras = regras_do_cupom(cupom)
+    for candidato in (regras.get("container_url"), getattr(cupom, "link", "")):
+        url = _texto(candidato)
+        if not url:
+            continue
+        try:
+            partes = urlsplit(url)
+        except ValueError:
+            continue
+        if partes.scheme not in ("http", "https"):
+            continue
+        if (partes.hostname or "").casefold().rstrip(".") == _HOST_LISTAGEM_ML:
+            return url
+    return ""
+
 
 def _ativacao_ml_publicavel(cupom, regras) -> bool:
     """Cupom de ATIVAÇÃO do Mercado Livre (clique, não código digitável).
@@ -223,7 +262,7 @@ def _ativacao_ml_publicavel(cupom, regras) -> bool:
     # se aplica ao item divulgado.
     if regras.get("is_mar_aberto"):
         return False
-    if not regras.get("container_url"):
+    if not listagem_publica_ml(cupom):
         return False
     # Sem valor de desconto não há promessa a fazer na mensagem.
     return regras.get("valor_desconto") not in (None, "", 0)

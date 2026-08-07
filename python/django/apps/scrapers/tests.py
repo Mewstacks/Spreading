@@ -1569,7 +1569,9 @@ class EnvioResilienciaTests(TestCase):
         self.assertTrue(self.cfg.ativo, "nicho estreito não pode desligar a regra")
 
     def test_permanent_failures_still_pause_the_config(self):
-        # A contrapartida: se o grupo sumiu, insistir só martela o WhatsApp.
+        # A contrapartida: se o grupo sumiu, insistir só martela o WhatsApp. O freio
+        # agora é `pausada_ate`, não `ativo=False` — `ativo` voltou a ser exclusivo
+        # do usuário, e o freio expira sozinho (ver test_the_pause_expires_...).
         falha = {"sucesso": False, "motivo": "Grupo de destino nao encontrado.",
                  "classe": "permanente"}
         for _ in range(self.cfg.pausar_apos_falhas):
@@ -1577,8 +1579,32 @@ class EnvioResilienciaTests(TestCase):
             self.cfg.save(update_fields=["proximo_envio"])
             self._processar({"conectado": True}, envio=falha)
 
-        self.assertFalse(self.cfg.ativo)
+        self.assertTrue(self.cfg.ativo, "o freio automático não desliga a regra")
+        self.assertIsNotNone(self.cfg.pausada_ate)
+        self.assertGreater(self.cfg.pausada_ate, timezone.now())
         self.assertIn("Grupo de destino", self.cfg.motivo_pausa)
+
+    def test_the_pause_expires_and_the_rule_tries_again(self):
+        # O defeito relatado pela cliente: "programei e durou só ontem". Antes o
+        # freio era definitivo e ninguém avisava; agora ele vence e a regra volta.
+        falha = {"sucesso": False, "motivo": "Grupo de destino nao encontrado.",
+                 "classe": "permanente"}
+        for _ in range(self.cfg.pausar_apos_falhas):
+            self.cfg.proximo_envio = None
+            self.cfg.save(update_fields=["proximo_envio"])
+            self._processar({"conectado": True}, envio=falha)
+        self.assertIsNotNone(self.cfg.pausada_ate)
+
+        # Prazo vencido: o próximo tick solta o freio e tenta de novo.
+        ConfiguracaoEnvio.objects.filter(pk=self.cfg.pk).update(
+            pausada_ate=timezone.now() - timedelta(minutes=1), proximo_envio=None)
+        _st, _cli, enviar, _ = self._processar(
+            {"conectado": True}, envio={"sucesso": True, "via": "whatsapp"})
+
+        enviar.assert_called()
+        self.assertIsNone(self.cfg.pausada_ate)
+        self.assertEqual(self.cfg.falhas_consecutivas, 0)
+        self.assertEqual(self.cfg.motivo_pausa, "")
 
     def test_unclassified_failure_keeps_the_old_behaviour(self):
         # Node antigo no ar, ou o throw minificado do bundle: na dúvida, conta.
@@ -1588,7 +1614,7 @@ class EnvioResilienciaTests(TestCase):
             self.cfg.save(update_fields=["proximo_envio"])
             self._processar({"conectado": True}, envio=falha)
 
-        self.assertFalse(self.cfg.ativo)
+        self.assertIsNotNone(self.cfg.pausada_ate)
 
 
 class SelecionarEEnviarAbortTests(TestCase):
@@ -6401,6 +6427,210 @@ class RenovacaoDeSessaoPersistidaTests(TestCase):
 
         self.assertNotIn("sessao_gravada", ordem)
 
+    def test_recusa_de_sessao_nao_sobrescreve_a_credencial(self):
+        # A tela de login do portal limpa/rotaciona o SSO. Gravar os cookies que ela
+        # deixou trocava a credencial boa pela degradada, e a corrida seguinte já
+        # partia quebrada — era assim que UMA recusa do Link Builder virava uma
+        # sequência delas.
+        from apps.scrapers.auxiliar import iniciar_browser
+        from apps.scrapers.scraper_mercadolivre.link import LoginError
+
+        ordem = []
+        with self._cenario(ordem, {"cookies": [{"name": "velho"}]}):
+            with self.assertRaises(LoginError):
+                with iniciar_browser(session_user=self.user):
+                    raise LoginError("o portal pediu login")
+
+        self.assertNotIn("sessao_gravada", ordem)
+
+    def test_falha_tecnica_continua_renovando(self):
+        # A contrapartida do teste acima: timeout/seletor ausente não tocou a
+        # autenticação, então os cookies renovados até ali seguem valendo.
+        from apps.scrapers.auxiliar import iniciar_browser
+
+        ordem = []
+        with self._cenario(ordem, {"cookies": [{"name": "velho"}]}):
+            with self.assertRaises(TimeoutError):
+                with iniciar_browser(session_user=self.user):
+                    raise TimeoutError("o seletor não apareceu")
+
+        self.assertIn("sessao_gravada", ordem)
+
+
+class ContextoCoerenteDoBrowserTests(TestCase):
+    """O Chromium da geração de link era o único que ainda se contradizia.
+
+    `ua_aleatorio()` sorteava Safari/Firefox para um Chromium, sem locale nem fuso —
+    exatamente o fingerprint que `contexto_login.py` documenta como causa do
+    anti-bot do ML, já corrigido no login e nas sondas HTTP.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("coerente", password="test")
+
+    def test_usa_ua_do_binario_locale_e_fuso(self):
+        from apps.scrapers.auxiliar import iniciar_browser
+
+        contexto = Mock()
+        contexto.storage_state.return_value = {"cookies": []}
+        navegador = Mock()
+        navegador.new_context.return_value = contexto
+        ua_real = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+
+        @contextmanager
+        def playwright_falso():
+            yield Mock()
+
+        with patch("apps.scrapers.auxiliar.sync_playwright", playwright_falso), \
+             patch("apps.scrapers.auxiliar._iniciar_chromium", return_value=navegador), \
+             patch("apps.scrapers.contexto_login.user_agent_do_binario",
+                   return_value=ua_real), \
+             patch("apps.accounts.ml_sessions.load_storage_state",
+                   return_value={"cookies": []}), \
+             patch("apps.accounts.ml_sessions.renew_storage_state"):
+            with iniciar_browser(session_user=self.user) as (_p, _c):
+                pass
+
+        kwargs = navegador.new_context.call_args.kwargs
+        self.assertEqual(kwargs["user_agent"], ua_real)
+        self.assertEqual(kwargs["locale"], "pt-BR")
+        self.assertEqual(kwargs["timezone_id"], "America/Sao_Paulo")
+        self.assertIn("Accept-Language", kwargs["extra_http_headers"])
+
+    def test_o_chamador_ainda_manda_no_contexto(self):
+        from apps.scrapers.auxiliar import iniciar_browser
+
+        contexto = Mock()
+        contexto.storage_state.return_value = {"cookies": []}
+        navegador = Mock()
+        navegador.new_context.return_value = contexto
+
+        @contextmanager
+        def playwright_falso():
+            yield Mock()
+
+        with patch("apps.scrapers.auxiliar.sync_playwright", playwright_falso), \
+             patch("apps.scrapers.auxiliar._iniciar_chromium", return_value=navegador), \
+             patch("apps.scrapers.contexto_login.user_agent_do_binario",
+                   return_value="Chrome/141"):
+            with iniciar_browser(locale="en-US") as (_p, _c):
+                pass
+
+        self.assertEqual(navegador.new_context.call_args.kwargs["locale"], "en-US")
+
+
+class SaudeDasFontesTests(TestCase):
+    """As duas fontes legadas viviam em "Atenção" por regras estritas demais."""
+
+    def test_ml_com_ofertas_e_sem_cupons_continua_operacional(self):
+        # O defeito exato: 800 ofertas + zero produtos na vitrine de cupons (uma
+        # página gated por login) marcava degraded para sempre.
+        from apps.scrapers.marketplaces.mercadolivre import MercadoLivre
+
+        with patch("apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
+                   return_value=800), \
+             patch("apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper."
+                   "mapear_cupons_codigo", return_value=0), \
+             patch("apps.scrapers.scraper_mercadolivre.scraper.mapear_cupons",
+                   return_value=0), \
+             patch("apps.scrapers.scraper_mercadolivre.scraper.projetar_catalogo_cupons"):
+            MercadoLivre().scrape_all()
+
+        fonte = FonteIngestao.objects.get(slug="mercadolivre-web")
+        self.assertEqual(fonte.status, "ok")
+        self.assertIsNotNone(fonte.ultimo_sucesso)
+        self.assertEqual(fonte.falhas_consecutivas, 0)
+        self.assertIn("vitrine de cupons", fonte.erro_publico)
+
+    def test_ml_sem_ofertas_degrada(self):
+        from apps.scrapers.marketplaces.mercadolivre import MercadoLivre
+
+        with patch("apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
+                   return_value=0), \
+             patch("apps.scrapers.scraper_mercadolivre.cupons_codigo_scraper."
+                   "mapear_cupons_codigo", return_value=12), \
+             patch("apps.scrapers.scraper_mercadolivre.scraper.mapear_cupons",
+                   return_value=0), \
+             patch("apps.scrapers.scraper_mercadolivre.scraper.projetar_catalogo_cupons"):
+            MercadoLivre().scrape_all()
+
+        self.assertEqual(
+            FonteIngestao.objects.get(slug="mercadolivre-web").status, "degraded")
+
+    def test_amazon_sem_itens_novos_nao_e_avaria(self):
+        # A Creators API repete itens já observados; um ciclo sem novidade é rotina.
+        from apps.scrapers.marketplaces.amazon import Amazon
+
+        Amazon._reportar_fonte(timezone.now(), contas=1, falhas=0)
+
+        fonte = FonteIngestao.objects.get(slug="amazon-creators-api")
+        self.assertEqual(fonte.status, "ok")
+        self.assertIsNotNone(fonte.ultimo_sucesso)
+        self.assertEqual(fonte.nome, "Amazon Creators API")
+
+    def test_amazon_com_todas_as_contas_falhando_degrada(self):
+        from apps.scrapers.marketplaces.amazon import Amazon
+
+        Amazon._reportar_fonte(timezone.now(), contas=2, falhas=2)
+
+        fonte = FonteIngestao.objects.get(slug="amazon-creators-api")
+        self.assertEqual(fonte.status, "degraded")
+        self.assertEqual(fonte.falhas_consecutivas, 1)
+
+    def test_falha_da_loja_nao_rebaixa_fonte_que_ja_reportou(self):
+        # Uma exceção tardia em scrape_all marcava as TRÊS linhas da Amazon de uma
+        # vez, inclusive as que tinham acabado de reportar sucesso.
+        from apps.scrapers.management.commands import automacao
+
+        FonteIngestao.objects.create(
+            slug="az-ok", marketplace="amazon", nome="Reportou agora",
+            status="ok", ultima_tentativa=timezone.now() + timedelta(seconds=5))
+        FonteIngestao.objects.create(
+            slug="az-mudo", marketplace="amazon", nome="Não reportou",
+            status="ok", ultima_tentativa=timezone.now() - timedelta(hours=2))
+
+        loja = Mock()
+        loja.scrape_all.side_effect = RuntimeError("a Amazon caiu no fim do ciclo")
+        with patch.dict("apps.scrapers.marketplaces.registry.MARKETPLACES",
+                        {"amazon": loja}, clear=True), \
+             patch.object(automacao, "log_event"), \
+             patch("apps.scrapers.maintenance.expire_stale"):
+            with self.assertRaises(RuntimeError):
+                automacao._rodar_scrape()
+
+        self.assertEqual(FonteIngestao.objects.get(slug="az-ok").status, "ok")
+        self.assertEqual(FonteIngestao.objects.get(slug="az-mudo").status, "degraded")
+
+
+class EvidenciaDeCupomAmazonTests(SimpleTestCase):
+    """Duas fontes escrevem a mesma linha de Produto; a prova do cupom não pode
+    ser apagada pela que só o deduz por regex."""
+
+    def test_preserva_cupom_ja_confirmado(self):
+        from apps.scrapers.sources.persistence import evidencia_com_cupom_preservado
+
+        nova = {"promotion": {"present": True, "label": "Oferta do dia",
+                              "coupon_confirmed": False}}
+        anterior = {"promotion": {"coupon_confirmed": True,
+                                  "label": "Cupom de R$ 20"}}
+
+        resultado = evidencia_com_cupom_preservado(nova, anterior)
+
+        self.assertTrue(resultado["promotion"]["coupon_confirmed"])
+        # Só o flag sobe: o resto da evidência nova continua valendo.
+        self.assertEqual(resultado["promotion"]["label"], "Oferta do dia")
+
+    def test_sem_prova_anterior_nada_muda(self):
+        from apps.scrapers.sources.persistence import evidencia_com_cupom_preservado
+
+        nova = {"promotion": {"coupon_confirmed": False}}
+
+        self.assertIs(evidencia_com_cupom_preservado(nova, None), nova)
+        self.assertIs(evidencia_com_cupom_preservado(nova, {}), nova)
+        self.assertIs(
+            evidencia_com_cupom_preservado(nova, {"promotion": {}}), nova)
+
 
 class LoteDeLinksResilienteTests(TestCase):
     """O lote parava inteiro no primeiro soluço do Link Builder — e, pior, marcava
@@ -6696,3 +6926,385 @@ class SentryHookTests(TestCase):
     def test_get_nao_e_aceito(self):
         with self._configurado():
             self.assertEqual(self.client.get(self.url).status_code, 405)
+
+
+class AvisoCuponsMensagemTests(SimpleTestCase):
+    """O texto tem de sair CARACTERE A CARACTERE como nos modelos da cliente.
+
+    Comparação exata de propósito: o formato foi combinado com ela olhando prints
+    de um grupo concorrente, e "quase igual" (um R$ com espaço, um milhar sem
+    ponto) é a diferença entre a mensagem parecer profissional ou improvisada.
+    """
+
+    @staticmethod
+    def _cupom(codigo, **regras):
+        base = {"modo_resgate": "codigo"}
+        base.update(regras)
+        return SimpleNamespace(
+            marketplace=regras.pop("marketplace", "mercadolivre"),
+            codigo=codigo, titulo=f"Cupom {codigo}", regras=base, restrito=False,
+        )
+
+    def test_modelo_do_mercado_livre_com_oito_cupons(self):
+        from apps.scrapers.senders.base import Markup
+        from apps.scrapers.ofertas import montar_mensagem_aviso_cupons
+
+        cupons = [
+            self._cupom("BARATINHO", tipo_desconto="porcentagem", valor_desconto=20,
+                        valor_minimo=79, desconto_maximo=60),
+            self._cupom("ACHADINHO", tipo_desconto="porcentagem", valor_desconto=15,
+                        valor_minimo=199, desconto_maximo=150),
+            self._cupom("BRINCAR", tipo_desconto="porcentagem", valor_desconto=15,
+                        valor_minimo=59, desconto_maximo=50),
+            self._cupom("SUPERPROMO", tipo_desconto="porcentagem", valor_desconto=20,
+                        valor_minimo=29, desconto_maximo=500),
+            self._cupom("HORADOCUPOM", tipo_desconto="porcentagem", valor_desconto=18,
+                        valor_minimo=29, desconto_maximo=500),
+            self._cupom("DESCOTOSMELI", tipo_desconto="porcentagem", valor_desconto=25,
+                        valor_minimo=29, desconto_maximo=500),
+            self._cupom("MAISPORMENOS", tipo_desconto="porcentagem", valor_desconto=22,
+                        valor_minimo=29, desconto_maximo=500),
+            # Desconto fixo e milhar: 'R$1.499', não 'R$1499' nem 'R$ 1.499'.
+            self._cupom("OFFMELIMAIS", tipo_desconto="fixo", valor_desconto=300,
+                        valor_minimo=1499),
+        ]
+        esperado = (
+            "🚨 NOVOS CUPONS ML 🚨\n"
+            "\n"
+            "➡️ 20% OFF em R$79, limitado a R$60 OFF\n"
+            "🎟 cupom: BARATINHO\n"
+            "\n"
+            "➡️ 15% OFF em R$199, limitado a R$150 OFF\n"
+            "🎟 cupom: ACHADINHO\n"
+            "\n"
+            "➡️ 15% OFF em R$59, limitado a R$50 OFF\n"
+            "🎟 cupom: BRINCAR\n"
+            "\n"
+            "➡️ 20% OFF em R$29, limitado a R$500 OFF\n"
+            "🎟 cupom: SUPERPROMO\n"
+            "\n"
+            "➡️ 18% OFF em R$29, limitado a R$500 OFF\n"
+            "🎟 cupom: HORADOCUPOM\n"
+            "\n"
+            "➡️ 25% OFF em R$29, limitado a R$500 OFF\n"
+            "🎟 cupom: DESCOTOSMELI\n"
+            "\n"
+            "➡️ 22% OFF em R$29, limitado a R$500 OFF\n"
+            "🎟 cupom: MAISPORMENOS\n"
+            "\n"
+            "➡️ R$300 OFF em R$1.499\n"
+            "🎟 cupom: OFFMELIMAIS\n"
+            "\n"
+            "Ative em algum produto do link\n"
+            "🔗 https://www.mercadolivre.com.br/social/economizanq/lists"
+        )
+
+        # Markup neutro: compara o TEXTO, não a marcação de um canal específico.
+        mensagem = montar_mensagem_aviso_cupons(
+            cupons, "mercadolivre", markup=Markup(),
+            link="https://www.mercadolivre.com.br/social/economizanq/lists")
+
+        self.assertEqual(mensagem, esperado)
+
+    def test_modelo_da_amazon_com_um_cupom_so(self):
+        from apps.scrapers.senders.base import Markup
+        from apps.scrapers.ofertas import montar_mensagem_aviso_cupons
+
+        cupom = self._cupom("SOAMAZON", marketplace="amazon",
+                            tipo_desconto="porcentagem", valor_desconto=10,
+                            valor_minimo=800, desconto_maximo=150)
+        cupom.marketplace = "amazon"
+        esperado = (
+            "🚨 NOVO CUPOM AMAZON 🚨\n"
+            "\n"
+            "➡️ 10% OFF em R$800, limitado a R$150 OFF\n"
+            "🎟 cupom: SOAMAZON\n"
+            "\n"
+            "🔗 https://amzn.divulgador.link/Qn1guu7A"
+        )
+
+        mensagem = montar_mensagem_aviso_cupons(
+            [cupom], "amazon", markup=Markup(),
+            link="https://amzn.divulgador.link/Qn1guu7A")
+
+        # Sem "Ative em algum produto do link": na Amazon o código é digitado.
+        self.assertEqual(mensagem, esperado)
+
+    def test_whatsapp_marca_cabecalho_desconto_e_codigo(self):
+        from apps.scrapers.ofertas import montar_mensagem_aviso_cupons
+
+        cupom = self._cupom("TESTE", tipo_desconto="porcentagem", valor_desconto=10,
+                            valor_minimo=50)
+        mensagem = montar_mensagem_aviso_cupons([cupom], "mercadolivre", link="http://x")
+
+        self.assertIn("*NOVO CUPOM ML*", mensagem)
+        self.assertIn("_10% OFF em R$50_", mensagem)
+        self.assertIn("cupom: *TESTE*", mensagem)
+
+    def test_cupom_sem_valor_de_desconto_fica_de_fora(self):
+        from apps.scrapers.ofertas import montar_mensagem_aviso_cupons
+
+        sem_valor = self._cupom("VAZIO", tipo_desconto="porcentagem")
+        com_valor = self._cupom("VALE", tipo_desconto="porcentagem", valor_desconto=5)
+
+        mensagem = montar_mensagem_aviso_cupons(
+            [sem_valor, com_valor], "mercadolivre", link="http://x")
+
+        self.assertNotIn("VAZIO", mensagem)
+        self.assertIn("VALE", mensagem)
+        # Um cupom sobrou: o cabeçalho volta ao singular.
+        self.assertIn("NOVO CUPOM ML", mensagem)
+
+    def test_sem_nenhum_cupom_publicavel_devolve_vazio(self):
+        from apps.scrapers.ofertas import montar_mensagem_aviso_cupons
+
+        sem_codigo = SimpleNamespace(
+            marketplace="mercadolivre", codigo="", titulo="Campanha",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20}, restrito=False)
+
+        self.assertEqual(
+            montar_mensagem_aviso_cupons([sem_codigo], "mercadolivre", link="http://x"),
+            "")
+
+
+class AvisoCuponsSelecaoTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("aviso-user", password="test")
+        self.user.perfil.marcar_verificado()
+        self.fonte = FonteIngestao.objects.create(
+            slug="aviso-fonte", marketplace="mercadolivre", nome="Cupons ML")
+        self.cfg = ConfiguracaoEnvio.objects.create(
+            owner=self.user, grupo_id="900@g.us", canal="whatsapp",
+            marketplace="mercadolivre", tipo=ConfiguracaoEnvio.TIPO_AVISO_CUPONS,
+        )
+
+    def _cupom(self, codigo, **extra):
+        campos = {"tipo_desconto": "porcentagem", "valor_desconto": 20,
+                  "valor_minimo": 50, "modo_resgate": "codigo"}
+        campos.update(extra.pop("regras", {}))
+        return CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id=f"aviso:{codigo}",
+            marketplace=extra.pop("marketplace", "mercadolivre"),
+            titulo=f"Cupom {codigo}", codigo=codigo, regras=campos,
+            estado="ativo", ultima_observacao=timezone.now(), **extra)
+
+    def test_pega_codigo_sem_exigir_produto_preparado(self):
+        # O ponto do broadcast: ele NÃO passa pelo portão de associação
+        # cupom↔produto, que é o que segurava todo cupom fora das mensagens.
+        from apps.scrapers.ofertas import selecionar_cupons_para_aviso
+
+        self._cupom("CODIGO10")
+        escolhidos = selecionar_cupons_para_aviso(self.cfg, self.user)
+
+        self.assertEqual([c.codigo for c in escolhidos], ["CODIGO10"])
+
+    def test_ignora_cupom_de_ativacao_sem_codigo(self):
+        from apps.scrapers.ofertas import selecionar_cupons_para_aviso
+
+        CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id="campanha:123", marketplace="mercadolivre",
+            titulo="Campanha", codigo="",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 30},
+            estado="ativo", ultima_observacao=timezone.now())
+
+        self.assertEqual(selecionar_cupons_para_aviso(self.cfg, self.user), [])
+
+    def test_nao_repete_cupom_ja_anunciado_no_destino(self):
+        from apps.scrapers.ofertas import ORIGEM_AVISO_CUPONS, selecionar_cupons_para_aviso
+
+        cupom = self._cupom("JAFOI")
+        Publicacao.objects.create(
+            usuario=self.user, origem=ORIGEM_AVISO_CUPONS, cupom_normalizado=cupom,
+            canal="whatsapp", destino_id=self.cfg.grupo_id,
+            status="enviado", enviada_em=timezone.now())
+
+        self.assertEqual(selecionar_cupons_para_aviso(self.cfg, self.user), [])
+
+    def test_respeita_a_loja_da_regra(self):
+        from apps.scrapers.ofertas import selecionar_cupons_para_aviso
+
+        self._cupom("SOAMAZON", marketplace="amazon")
+        self.assertEqual(selecionar_cupons_para_aviso(self.cfg, self.user), [])
+
+
+class AvisoCuponsEnvioTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("aviso-envio", password="test")
+        self.user.perfil.marcar_verificado()
+        self.fonte = FonteIngestao.objects.create(
+            slug="aviso-envio-fonte", marketplace="mercadolivre", nome="Cupons ML")
+        self.cupom = CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id="aviso:ENVIO", marketplace="mercadolivre",
+            titulo="Cupom ENVIO", codigo="ENVIO10",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 10, "valor_minimo": 50},
+            estado="ativo", ultima_observacao=timezone.now())
+
+    @contextmanager
+    def _transporte(self, resultado):
+        with patch("apps.scrapers.ofertas._canal_pronto_ou_erro", return_value=None), \
+             patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom",
+                   return_value={"sucesso": True, "link": "https://meli.la/x"}), \
+             patch("apps.scrapers.ofertas.sortear_banner_b64", create=True), \
+             patch("apps.scrapers.senders.whatsapp.WhatsAppSender.enviar_oferta",
+                   return_value=resultado) as enviar:
+            yield enviar
+
+    def test_envia_e_registra_uma_publicacao_por_cupom(self):
+        from apps.scrapers.ofertas import ORIGEM_AVISO_CUPONS, enviar_aviso_cupons
+
+        with self._transporte({"sucesso": True, "via": "whatsapp",
+                               "mensagem_id": "wa1"}) as enviar:
+            resultado = enviar_aviso_cupons(
+                [self.cupom], "900@g.us", usuario=self.user, destino_nome="Grupo")
+
+        self.assertTrue(resultado["sucesso"])
+        enviar.assert_called_once()
+        publicacoes = Publicacao.objects.filter(origem=ORIGEM_AVISO_CUPONS)
+        self.assertEqual(publicacoes.count(), 1)
+        self.assertEqual(publicacoes.first().status, "enviado")
+        self.assertIn("ENVIO10", enviar.call_args.args[1])
+
+    def test_falha_de_transporte_nao_deixa_publicacao_pendente(self):
+        from apps.scrapers.ofertas import ORIGEM_AVISO_CUPONS, enviar_aviso_cupons
+
+        with self._transporte({"sucesso": False, "erro": "sem conexão",
+                               "classe": "transitorio"}):
+            resultado = enviar_aviso_cupons(
+                [self.cupom], "900@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertEqual(
+            Publicacao.objects.filter(origem=ORIGEM_AVISO_CUPONS, status="pendente").count(),
+            0)
+
+    def test_sessao_do_ml_caida_e_transitoria_e_nao_freia_a_regra(self):
+        # Se isto virasse falha permanente, cinco quedas de sessão seguidas
+        # pausariam a automação por um problema que se resolve reconectando.
+        from apps.scrapers.ofertas import enviar_aviso_cupons
+
+        with patch("apps.scrapers.ofertas._canal_pronto_ou_erro", return_value=None), \
+             patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom",
+                   return_value={"sucesso": False, "motivo": "Sessão expirada.",
+                                 "precisa_login_ml": True}):
+            resultado = enviar_aviso_cupons([self.cupom], "900@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertEqual(resultado["classe"], "transitorio")
+        self.assertTrue(resultado["precisa_login_ml"])
+
+
+class AgendamentoPorDiaTests(SimpleTestCase):
+    def test_vazio_significa_todos_os_dias(self):
+        cfg = ConfiguracaoEnvio(dias_semana="")
+        for dia in range(1, 8):
+            agora = timezone.make_aware(
+                timezone.datetime(2026, 8, 3 + (dia - 1), 12, 0),  # 03/08/2026 = segunda
+                timezone.get_current_timezone())
+            self.assertTrue(cfg.dia_permitido(agora), f"dia ISO {dia}")
+
+    def test_so_dias_uteis(self):
+        cfg = ConfiguracaoEnvio(dias_semana="1,2,3,4,5")
+        tz = timezone.get_current_timezone()
+        sexta = timezone.make_aware(timezone.datetime(2026, 8, 7, 12, 0), tz)
+        sabado = timezone.make_aware(timezone.datetime(2026, 8, 8, 12, 0), tz)
+
+        self.assertTrue(cfg.dia_permitido(sexta))
+        self.assertFalse(cfg.dia_permitido(sabado))
+
+    def test_o_dia_e_o_local_nao_o_utc(self):
+        # 22h de sábado em São Paulo já é domingo em UTC. Sem localtime a regra
+        # pararia um dia antes do que o usuário marcou.
+        cfg = ConfiguracaoEnvio(dias_semana="6")   # só sábado
+        sabado_tarde = timezone.make_aware(
+            timezone.datetime(2026, 8, 8, 22, 0), timezone.get_current_timezone())
+
+        self.assertEqual(sabado_tarde.astimezone(timezone.UTC).isoweekday(), 7)
+        self.assertTrue(cfg.dia_permitido(sabado_tarde))
+
+    def test_o_freio_pula_para_o_proximo_dia_habilitado(self):
+        # Freia numa sexta com a regra rodando só de segunda a sexta: o próximo
+        # dia habilitado é a segunda, não o sábado.
+        cfg = ConfiguracaoEnvio(dias_semana="1,2,3,4,5")
+        sexta = timezone.make_aware(
+            timezone.datetime(2026, 8, 7, 18, 0), timezone.get_current_timezone())
+
+        cfg.frear(sexta, "grupo sumiu")
+
+        self.assertEqual(timezone.localtime(cfg.pausada_ate).isoweekday(), 1)
+        self.assertEqual(cfg.motivo_pausa, "grupo sumiu")
+
+
+class ListagemPublicaDoCupomTests(SimpleTestCase):
+    """O portão de publicabilidade não pode ser mais estrito que o do preparo.
+
+    Em produção, 2062 dos 2073 cupons de campanha do ML eram reprovados por
+    `container_url` vazio — enquanto o `link` deles já era a listagem pública da
+    campanha, que `coupon_products._coletar_ml_remoto` aceitava para preparar o
+    MESMO cupom. Era catálogo publicável sendo descartado, não segurança.
+    """
+
+    @staticmethod
+    def _cupom(link="", container_url="", **extra):
+        regras = {"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                  "valor_desconto": 20, "container_url": container_url}
+        regras.update(extra.pop("regras", {}))
+        return SimpleNamespace(
+            marketplace="mercadolivre", codigo="", link=link, titulo="Campanha",
+            external_id="campanha:123", regras=regras,
+            fonte=SimpleNamespace(slug="mercadolivre-web"), owner=None, **extra)
+
+    def test_aceita_o_link_de_listagem_da_campanha(self):
+        from apps.scrapers.coupon_rules import listagem_publica_ml
+
+        url = "https://lista.mercadolivre.com.br/_CustId_353130616?coupon_campaign_id=13998892"
+        self.assertEqual(listagem_publica_ml(self._cupom(link=url)), url)
+
+    def test_aceita_container_e_prefere_ele_ao_link(self):
+        from apps.scrapers.coupon_rules import listagem_publica_ml
+
+        container = "https://lista.mercadolivre.com.br/_Container_13011675"
+        cupom = self._cupom(link="https://lista.mercadolivre.com.br/outra",
+                            container_url=container)
+        self.assertEqual(listagem_publica_ml(cupom), container)
+
+    def test_recusa_a_vitrine_generica_de_cupons(self):
+        # É o link de fallback da projeção de campanhas e não prova escopo nenhum.
+        from apps.scrapers.coupon_rules import listagem_publica_ml
+
+        self.assertEqual(
+            listagem_publica_ml(
+                self._cupom(link="https://www.mercadolivre.com.br/cupons")),
+            "")
+
+    def test_recusa_host_parecido(self):
+        # `endswith`/`in` numa string crua aceitaria este domínio.
+        from apps.scrapers.coupon_rules import listagem_publica_ml
+
+        self.assertEqual(
+            listagem_publica_ml(
+                self._cupom(link="https://lista.mercadolivre.com.br.evil.com/_Container_1")),
+            "")
+
+    def test_recusa_esquema_nao_http(self):
+        from apps.scrapers.coupon_rules import listagem_publica_ml
+
+        self.assertEqual(
+            listagem_publica_ml(self._cupom(link="javascript:alert(1)")), "")
+
+    @override_settings(ML_CUPONS_ATIVACAO_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
+    def test_campanha_com_link_de_lista_vira_publicavel(self):
+        from apps.scrapers.coupon_rules import ativacao_publicavel
+
+        cupom = self._cupom(
+            link="https://lista.mercadolivre.com.br/_CustId_1?coupon_campaign_id=2")
+        self.assertTrue(ativacao_publicavel(cupom))
+
+    @override_settings(ML_CUPONS_ATIVACAO_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
+    def test_campanha_sem_listagem_continua_reprovada(self):
+        from apps.scrapers.coupon_rules import ativacao_publicavel
+
+        self.assertFalse(ativacao_publicavel(
+            self._cupom(link="https://www.mercadolivre.com.br/cupons")))

@@ -149,6 +149,44 @@ def _assert_privileged_database_role():
                 )
 
 
+def _reinstalar_escopo_ambiente():
+    """Reaplica nos GUCs o escopo que os ContextVars descrevem NESTE instante.
+
+    Sair de um escopo aninhado zerando os GUCs (`system_context='off'`,
+    `organization_id=''`) só está certo quando não havia escopo por baixo. Quando
+    havia, o reset apagava o do chamador — e como o ContextVar dele continuava
+    intacto, nada nunca o reinstalava: a conexão seguia anônima até o processo
+    morrer.
+
+    Era esse o defeito que parava a automação em produção. O worker de envio roda
+    inteiro sob `@system_job`; a geração de link chama `executar_no_tenant`, que
+    FORA do Playwright roda em linha, na mesma conexão, e abre um
+    `organization_context`. Ao sair, ele desligava o `system_context` do worker.
+    O `cfg.save()` seguinte caía na RLS como sessão anônima, `organization_for_user`
+    devolvia None e o tick inteiro morria em ValidationError — sem reagendar, sem
+    contar falha e sem enviar nada. Todo tick, das 20h de um dia em diante.
+
+    Restaura em vez de zerar: nunca concede mais do que o chamador já tinha. E o
+    `system_expr` da RLS continua exigindo `current_user IN (system, migration)`,
+    então nem um 'on' indevido aqui abriria dado para uma role de aplicação.
+    """
+    if connection.vendor != "postgresql":
+        return
+    if in_system_context():
+        _set_postgres_context(system=True, local=False)
+        return
+    _set_postgres_context(
+        organization_id=current_organization_id(), system=False, local=False,
+    )
+
+
+def _reinstalar_actor_ambiente():
+    """Versão de `_reinstalar_escopo_ambiente` para `app.actor_id`."""
+    if connection.vendor != "postgresql":
+        return
+    _set_postgres_actor(current_actor_id(), local=False)
+
+
 @contextmanager
 def actor_context(actor):
     """Autoriza somente a descoberta das organizações do usuário autenticado."""
@@ -161,11 +199,13 @@ def actor_context(actor):
             _set_postgres_actor(actor_id, local=True)
             yield
     finally:
+        # Ordem importa: o ContextVar volta ao valor de fora ANTES de reinstalar,
+        # senão reinstalaríamos o escopo que está sendo desmontado.
+        _current_actor_id.reset(token)
         try:
-            _set_postgres_actor(None, local=False)
+            _reinstalar_actor_ambiente()
         except Exception:
             pass
-        _current_actor_id.reset(token)
 
 
 @contextmanager
@@ -183,12 +223,12 @@ def organization_context(organization):
             )
             yield
     finally:
-        try:
-            _set_postgres_context(local=False)
-        except Exception:
-            pass
         _system_context.reset(token_system)
         _current_organization_id.reset(token_org)
+        try:
+            _reinstalar_escopo_ambiente()
+        except Exception:
+            pass
 
 
 @contextmanager
@@ -204,13 +244,13 @@ def system_context():
         _set_postgres_context(system=True, local=False)
         yield
     finally:
+        _system_context.reset(token_system)
+        _current_organization_id.reset(token_org)
         try:
-            _set_postgres_context(system=False, local=False)
+            _reinstalar_escopo_ambiente()
         except Exception:
             # A conexão pode ter caído; a próxima nasce sem contexto por default.
             pass
-        _system_context.reset(token_system)
-        _current_organization_id.reset(token_org)
 
 
 def system_job(func):

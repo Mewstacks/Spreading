@@ -4,8 +4,15 @@ Existe porque produção roda com RLS: sem `system_context` uma consulta de supo
 enxerga zero linha e o diagnóstico mente. Este comando NÃO escreve nada — nenhum
 save/update/create/delete — para poder ser rodado em produção durante incidente.
 
+`TENANT_SYSTEM_PROCESS=1` é OBRIGATÓRIO e não é decoração: é ele que faz o settings
+escolher SYSTEM_DATABASE_URL (role `spreading_system`) em vez da DATABASE_URL da web.
+`system_context` verifica a role do banco e recusa qualquer outra, então sem o env var
+o comando morre em PermissionDenied ("A role de banco desta máquina não pode abrir
+contexto cross-tenant") antes de imprimir uma linha. Mesmo prefixo que o Procfile usa
+em todos os workers cross-tenant.
+
     fly ssh console -a spreading-web -C \
-        "python3 /app/django/manage.py diagnostico_producao"
+        "env TENANT_SYSTEM_PROCESS=1 python3 /app/django/manage.py diagnostico_producao"
 
 `--secao` limita a saída (catalogo, amazon, cupons, envios, eventos).
 """
@@ -73,8 +80,9 @@ class Command(BaseCommand):
             return "external_id não é campanha:"
         if regras.get("is_mar_aberto"):
             return "campanha site-wide (mar aberto)"
-        if not regras.get("container_url"):
-            return "campanha sem container_url público"
+        from apps.scrapers.coupon_rules import listagem_publica_ml
+        if not listagem_publica_ml(cupom):
+            return "campanha sem listagem pública (container_url nem link de lista)"
         if regras.get("valor_desconto") in (None, "", 0):
             return "campanha sem valor de desconto"
         if not settings.ML_CUPONS_ATIVACAO_ENABLED:
@@ -206,12 +214,13 @@ class Command(BaseCommand):
                 self._linha("  POR QUE cada um foi reprovado:")
                 self._linha("  " + str(Counter(
                     self._motivo_reprovacao(c) for c in reprovados).most_common(12)))
-                # `_ativacao_ml_publicavel` exige `regras.container_url`, mas o
-                # preparo (`_coletar_ml_remoto`) aceita `cupom.link` como listagem.
-                # Saber a CARA desses links decide se a diferença é um portão a mais
-                # de segurança ou catálogo publicável sendo descartado.
+                # Esta sonda já cumpriu o papel: em produção mostrou que os 2062
+                # reprovados tinham `link` em lista.mercadolivre.com.br — listagem
+                # pública que o preparo (`_coletar_ml_remoto`) já aceitava. O portão
+                # passou a aceitá-la (`coupon_rules.listagem_publica_ml`). Fica no ar
+                # para o caso de a fonte voltar a mudar a cara desses links.
                 sem_container = [c for c in reprovados
-                                 if "container_url" in self._motivo_reprovacao(c)]
+                                 if "listagem pública" in self._motivo_reprovacao(c)]
                 if sem_container:
                     hosts = Counter()
                     for c in sem_container:

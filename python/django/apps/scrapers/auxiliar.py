@@ -39,14 +39,39 @@ class SessaoExpirada(BrowserError):
     pass
 
 
+def _e_recusa_de_sessao(exc) -> bool:
+    """A navegação terminou numa tela de login ou verificação do ML?
+
+    São os dois desfechos em que os cookies do contexto NÃO valem mais do que os
+    guardados: a tela de login costuma limpar/rotacionar o SSO, e o interstitial
+    anti-bot serve um documento que não é a sessão do usuário. Qualquer outra falha
+    (timeout, seletor ausente, erro técnico) deixou a sessão intacta e a renovação
+    segue valendo.
+
+    Import local: `scraper_mercadolivre.link` importa deste módulo.
+    """
+    if isinstance(exc, SessaoExpirada):
+        return True
+    try:
+        from apps.scrapers.scraper_mercadolivre.link import AntiBotError, LoginError
+    except Exception:  # pragma: no cover - só em import quebrado
+        return False
+    return isinstance(exc, (LoginError, AntiBotError))
+
+
 def _iniciar_chromium(playwright, *, headless):
     """Abre o Chromium do Playwright, com fallback seguro para Chrome instalado.
 
     Em desenvolvimento é comum instalar o pacote Python sem baixar o binário de
     ~centenas de MB do Playwright. Nesse caso, usar o Chrome já instalado mantém os
     workers de cupons e links funcionais. Outros erros continuam sendo propagados.
+
+    Os argumentos são os mesmos do login interativo (`contexto_login.LAUNCH_ARGS`),
+    incluindo `--lang=pt-BR`: sem ele o próprio navegador negocia em inglês, e a
+    incoerência com o resto do contexto é sinal barato para o anti-bot do ML.
     """
-    args = ["--disable-blink-features=AutomationControlled"]
+    from apps.scrapers.contexto_login import LAUNCH_ARGS
+    args = list(LAUNCH_ARGS)
     try:
         return playwright.chromium.launch(headless=headless, args=args)
     except Exception as erro:
@@ -98,7 +123,6 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
     from apps.accounts.ml_session_crypto import MLSessionCryptoError
     from apps.accounts.ml_sessions import load_storage_state, renew_storage_state
 
-    context_kwargs.setdefault("user_agent", ua_aleatorio())
     session_organization_id = None
     if storage_state is None and session_user is not None:
         try:
@@ -142,6 +166,12 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
             try:
                 browser = _iniciar_chromium(p, headless=headless)
 
+                # Contexto coerente: UA do binário, pt-BR, America/Sao_Paulo. O
+                # chamador ainda pode sobrescrever qualquer chave.
+                from apps.scrapers.contexto_login import opcoes_de_coerencia
+                for chave, valor in opcoes_de_coerencia(browser).items():
+                    context_kwargs.setdefault(chave, valor)
+
                 if storage_state is not None:
                     context = browser.new_context(storage_state=storage_state, **context_kwargs)
                 else:
@@ -151,13 +181,23 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
             except Exception as e:
                 raise BrowserError(f"Falha crítica ao abrir o navegador: {e}")
 
+            sessao_recusada = False
             try:
                 yield page, context # yield serve para passar o controle para o bloco de código que usa o contexto, coisa fofa
 
+            except BaseException as exc:
+                # Terminar numa tela de login/challenge NÃO é uma renovação: os
+                # cookies que sobraram ali são os que aquela tela deixou, muitas
+                # vezes com o SSO do portal já revogado. Gravá-los sobrescrevia a
+                # credencial boa pela degradada, e a corrida seguinte partia dela —
+                # foi assim que uma recusa isolada do Link Builder virava uma
+                # sequência delas.
+                sessao_recusada = _e_recusa_de_sessao(exc)
+                raise
             finally:
                 # Persiste cookies renovados SÓ se já havia sessão salva — um contexto
                 # anônimo (sem auth) não pode criar uma sessão fantasma.
-                if tinha_auth:
+                if tinha_auth and not sessao_recusada:
                     try:
                         estado_renovado = context.storage_state()
                         if session_user is None and auth_path:
@@ -169,9 +209,10 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
                 context.close()
                 browser.close()
     finally:
-        # Aqui o loop do Playwright já morreu: o ORM está liberado. Roda mesmo quando o
-        # corpo levantou (LoginError, SessaoExpirada) — a sessão renovada até ali continua
-        # valendo, e era assim que o `finally` de dentro se comportava.
+        # Aqui o loop do Playwright já morreu: o ORM está liberado. Roda também quando o
+        # corpo levantou por falha técnica — a sessão renovada até ali continua valendo.
+        # O que NÃO chega aqui é a recusa de sessão: `_e_recusa_de_sessao` zera
+        # `estado_renovado` lá em cima para não gravar cookies de tela de login.
         if estado_renovado is not None and session_user is not None:
             try:
                 close_old_connections()   # minutos de browser matam o socket ocioso

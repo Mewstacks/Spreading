@@ -96,32 +96,38 @@ class MercadoLivre(Marketplace):
         run.finalizada_em = now
         run.save()
         fonte.ultimo_total = total
-        coleta_parcial = bool(parciais or not ofertas or not cupons)
-        fonte.status = "degraded" if coleta_parcial else "ok"
-        if not total:
-            fonte.erro_publico = "Coleta vazia; catálogo anterior preservado."
-        elif coleta_parcial:
-            componentes = ", ".join(sorted(set(parciais))) or (
-                "ofertas" if not ofertas else "cupons"
-            )
+        # O produto DESTA fonte são as ofertas das páginas públicas. A vitrine de
+        # cupons (`/ofertas/cupons`) é gated por login e devolve zero produto por
+        # experimento de layout, variação geográfica ou sessão ausente — situações
+        # rotineiras que não significam que a fonte quebrou.
+        #
+        # Antes as duas medições eram um AND só (`not ofertas or not cupons`), então
+        # 800 ofertas + zero produtos na vitrine de cupons marcava `degraded`,
+        # nunca gravava `ultimo_sucesso` e somava `falhas_consecutivas` a cada ciclo.
+        # O badge ficava em "Atenção" para sempre enquanto a coleta principal ia bem,
+        # e uma quebra de verdade virava indistinguível do estado normal.
+        degradou = bool(parciais or not ofertas)
+        fonte.status = "degraded" if degradou else "ok"
+        if degradou:
+            componentes = ", ".join(sorted(set(parciais))) or "ofertas"
             fonte.erro_publico = (
                 f"Coleta parcial ({componentes}); dados anteriores preservados."
             )[:255]
-        else:
-            fonte.erro_publico = ""
-        if total and not coleta_parcial:
-            fonte.ultimo_sucesso, fonte.falhas_consecutivas = now, 0
-        elif coleta_parcial:
             fonte.falhas_consecutivas += 1
+        else:
+            fonte.ultimo_sucesso, fonte.falhas_consecutivas = now, 0
+            # Vitrine vazia continua visível como aviso — só não derruba a fonte.
+            fonte.erro_publico = "" if cupons else (
+                "Ofertas coletadas; a vitrine de cupons não devolveu itens.")
         fonte.save()
         logger.info(
             "Raspagem ML: %s oferta(s), %s produto(s) na vitrine de cupons, "
             "%s campanha(s) personalizada(s) interna(s)",
             ofertas, cupons_codigo, cupons_campanha)
-        # Trazer 800 ofertas e ZERO cupons era reportado como sucesso: o único sinal
-        # era o total zerado, e as ofertas sozinhas o mantinham positivo. Foi assim
-        # que os cupons puderam sumir sem ninguém notar.
-        if coleta_parcial:
+        # Cupons sumirem em silêncio foi um incidente real: o evento continua saindo
+        # mesmo quando a fonte segue verde, porque é o único sinal de que a vitrine
+        # parou de render.
+        if degradou or not cupons:
             log_event("scraper", "cupons_vazios",
                       f"A raspagem do ML terminou parcialmente: {fonte.erro_publico}",
                       level="warning", contexto={"marketplace": "mercadolivre",

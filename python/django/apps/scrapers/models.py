@@ -888,11 +888,23 @@ class ConfiguracaoEnvio(models.Model):
     incluir_sem_desconto = models.BooleanField(default=True)
     grupo_id = models.CharField(max_length=100)          # ex '12345@g.us' (WA) ou '@canal'/-100... (TG)
     grupo_nome = models.CharField(max_length=255, blank=True, default="")
+    # O que esta regra publica. 'ofertas' é tudo que existia: produto ou cupom com
+    # produtos comprovados, um item por envio. 'aviso_cupons' é o broadcast de
+    # códigos novos, sem produto — ver ofertas.enviar_aviso_cupons.
+    TIPO_OFERTAS = "ofertas"
+    TIPO_AVISO_CUPONS = "aviso_cupons"
+    TIPOS = [(TIPO_OFERTAS, "Ofertas e cupons com produto"),
+             (TIPO_AVISO_CUPONS, "Aviso de cupons novos")]
+    tipo = models.CharField(max_length=20, choices=TIPOS, default=TIPO_OFERTAS)
     intervalo_minutos = models.PositiveIntegerField(default=60)
     # Janela de envio (hora local 0-23). Só envia dentro de [inicio, fim).
     # Se fim <= inicio, a janela cruza a meia-noite (ex: 20→6).
     janela_inicio = models.PositiveSmallIntegerField(default=8)
     janela_fim = models.PositiveSmallIntegerField(default=20)
+    # Dias da semana permitidos, em ISO (1=segunda … 7=domingo), separados por
+    # vírgula. VAZIO = todos os dias, que é o comportamento de sempre — assim toda
+    # regra já existente continua igual sem precisar preencher nada.
+    dias_semana = models.CharField(max_length=20, blank=True, default="")
     min_desconto_percent = models.FloatField(default=15.0)
     # Anti-repetição do MESMO produto p/ este grupo (não é o ritmo de envio). Oculto na UI.
     horas_cooldown = models.PositiveIntegerField(default=24)
@@ -904,6 +916,11 @@ class ConfiguracaoEnvio(models.Model):
     falhas_consecutivas = models.PositiveIntegerField(default=0)
     pausar_apos_falhas = models.PositiveIntegerField(default=5)
     motivo_pausa = models.CharField(max_length=255, blank=True, default="")
+    # Freio temporário depois de falhas seguidas. Antes o freio era `ativo=False`, que
+    # só ação humana desfaz: a automação morria em silêncio e o usuário descobria dias
+    # depois que não recebia mais nada ("programei e durou só ontem"). `ativo` volta a
+    # ser exclusivamente a chave do usuário; o freio automático mora aqui e expira.
+    pausada_ate = models.DateTimeField(null=True, blank=True)
     variante_template = models.CharField(max_length=10, default="alternar")
     nome_marca = models.CharField(max_length=80, blank=True, default="")
     tom_marca = models.CharField(max_length=20, blank=True, default="")
@@ -923,12 +940,60 @@ class ConfiguracaoEnvio(models.Model):
             return i <= h < f                # mesma data: 8..20
         return h >= i or h < f               # cruza meia-noite: 20..6
 
+    def dias_permitidos(self) -> set:
+        """Dias ISO habilitados. Conjunto vazio significa 'todos os dias'."""
+        dias = set()
+        for parte in str(self.dias_semana or "").split(","):
+            parte = parte.strip()
+            if parte.isdigit() and 1 <= int(parte) <= 7:
+                dias.add(int(parte))
+        return dias
+
+    def dia_permitido(self, agora) -> bool:
+        """True se o dia da semana LOCAL de `agora` está habilitado nesta regra.
+
+        Local, e não UTC, pelo mesmo motivo de `dentro_da_janela`: às 22h de sábado
+        em São Paulo já é domingo em UTC, e a regra pararia (ou começaria) um dia
+        antes do que o usuário marcou na tela.
+        """
+        dias = self.dias_permitidos()
+        return not dias or timezone.localtime(agora).isoweekday() in dias
+
+    def proximo_dia_habilitado(self, agora):
+        """Início do próximo dia local em que esta regra pode enviar.
+
+        Usado pelo freio automático: reagendar para "amanhã" cru faria a regra
+        acordar num dia que o usuário desmarcou, gastar um tick e dormir de novo.
+        """
+        local = timezone.localtime(agora)
+        for adiante in range(1, 9):
+            candidato = (local + timedelta(days=adiante)).replace(
+                hour=0, minute=0, second=0, microsecond=0)
+            if self.dia_permitido(candidato):
+                return candidato
+        return local + timedelta(days=1)
+
     def agendar_proximo(self, agora):
         """Define proximo_envio = agora + intervalo ± jitter(1-10min). Anti-padrão robótico."""
         import random
         jitter = random.randint(1, 10) * random.choice((-1, 1))
         minutos = max(1, self.intervalo_minutos + jitter)
         self.proximo_envio = agora + timedelta(minutes=minutos)
+
+    def frear(self, agora, motivo: str):
+        """Aplica o freio automático até o próximo dia habilitado."""
+        self.motivo_pausa = str(motivo or "Falhas consecutivas")[:255]
+        self.pausada_ate = self.proximo_dia_habilitado(agora)
+
+    def freio_ativo(self, agora) -> bool:
+        """True enquanto o freio automático vale. Ao expirar, limpa-se sozinho."""
+        if self.pausada_ate is None:
+            return False
+        if agora < self.pausada_ate:
+            return True
+        self.pausada_ate = None
+        self.falhas_consecutivas = 0
+        return False
 
     def __str__(self):
         return f"{self.macro_categoria} → {self.grupo_nome or self.grupo_id} (a cada {self.intervalo_minutos}min)"

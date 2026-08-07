@@ -93,6 +93,30 @@ def habilitar_foco(context, page) -> None:
         logger.debug("Emulação de foco indisponível nesta página.", exc_info=True)
 
 
+def opcoes_de_coerencia(browser) -> dict:
+    """Base de ``new_context`` que não se contradiz: UA do binário + pt-BR + GRU.
+
+    É o mínimo que qualquer contexto Chromium que carregue cookies do ML precisa, com
+    ou sem usuário na frente da tela. Nasceu no login interativo, mas a geração de
+    link (``auxiliar.iniciar_browser``) ficou de fora e continuou sorteando o UA de
+    ``ua_aleatorio()`` — um pool que inclui Safari e Firefox — sem locale nem fuso.
+    Ou seja: o fluxo que MAIS depende da sessão era o que mais se contradizia diante
+    do SSO do portal de afiliados, e era ele que fazia o Link Builder pedir login.
+
+    Sem UA legível do binário, devolve o dicionário sem a chave: o default do
+    Playwright é ruim, mas um UA inventado e contraditório é pior.
+    """
+    opcoes = {
+        "locale": LOCALE,
+        "timezone_id": TIMEZONE_ID,
+        "extra_http_headers": {"Accept-Language": ACCEPT_LANGUAGE},
+    }
+    user_agent = user_agent_do_binario(browser)
+    if user_agent:
+        opcoes["user_agent"] = user_agent
+    return opcoes
+
+
 def opcoes_de_contexto(browser, viewport: dict, *, permissions=None) -> dict:
     """kwargs de ``browser.new_context`` para uma sessão de login interativo.
 
@@ -108,17 +132,12 @@ def opcoes_de_contexto(browser, viewport: dict, *, permissions=None) -> dict:
     desktop com a janela estreita é uma combinação perfeitamente comum.
     """
     opcoes = {
+        **opcoes_de_coerencia(browser),
         "viewport": {"width": viewport["width"], "height": viewport["height"]},
         "device_scale_factor": viewport["device_pixel_ratio"],
         "is_mobile": viewport["device_class"] == "mobile",
         "has_touch": viewport["pointer"] == "coarse",
-        "locale": LOCALE,
-        "timezone_id": TIMEZONE_ID,
-        "extra_http_headers": {"Accept-Language": ACCEPT_LANGUAGE},
     }
-    user_agent = user_agent_do_binario(browser)
-    if user_agent:
-        opcoes["user_agent"] = user_agent
     if permissions:
         opcoes["permissions"] = list(permissions)
     return opcoes

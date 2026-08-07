@@ -64,7 +64,12 @@ class Amazon(Marketplace):
                 "tela Conta)")
 
         inicio = timezone.now()
-        if not self._scrape_usuario(usuario):
+        ok = self._scrape_usuario(usuario)
+        # A tela de Fontes também precisa saber desta coleta. Sem isto o badge só
+        # se movia no ciclo do worker: raspar pela tela funcionava e o painel
+        # continuava dizendo "Atenção".
+        self._reportar_fonte(inicio, 1, 0 if ok else 1)
+        if not ok:
             from apps.accounts.models import Perfil
             perfil = Perfil.objects.filter(user=usuario).first()
             raise MarketplaceIndisponivel(
@@ -122,6 +127,10 @@ class Amazon(Marketplace):
         coletado centenas de produtos. O painel dizia que a fonte estava quebrada
         justamente enquanto ela funcionava, e uma quebra real ficava
         indistinguível do estado normal.
+
+        Chamada tanto pelo worker (`scrape_all`) quanto pela raspagem pedida na tela
+        (`scrape_para_usuario`). Só o worker reportava, então o usuário podia raspar
+        com sucesso o dia inteiro sem o badge sair de "Atenção".
         """
         from django.utils import timezone
         from apps.scrapers.models import FonteIngestao, Produto
@@ -133,7 +142,9 @@ class Amazon(Marketplace):
         ).count()
         fonte, _ = FonteIngestao.objects.get_or_create(
             slug="amazon-creators-api",
-            defaults={"marketplace": "amazon", "nome": "Amazon — Creators API"},
+            # Mesmo rótulo semeado pela migration 0031: a busca é por slug, mas um
+            # banco novo que rodasse o scraper antes dela mostrava outro nome na tela.
+            defaults={"marketplace": "amazon", "nome": "Amazon Creators API"},
         )
         fonte.ultima_tentativa = agora
         fonte.ultimo_total = total
@@ -151,11 +162,15 @@ class Amazon(Marketplace):
                 f"{falhas} de {contas} conta(s) Amazon não concluíram a coleta."
             )
         else:
-            fonte.status = "ok" if total else "degraded"
-            fonte.ultimo_sucesso = agora if total else fonte.ultimo_sucesso
+            # Toda conta respondeu: a fonte está de pé. Ciclo sem item NOVO é
+            # rotina (o feed da Creators API repete itens já observados e a janela
+            # começa em `inicio`), não avaria — marcar `degraded` aqui deixava o
+            # badge âmbar em operação perfeitamente normal.
+            fonte.status = "ok"
+            fonte.ultimo_sucesso = agora
             fonte.falhas_consecutivas = 0
             fonte.erro_publico = "" if total else (
-                "Coleta vazia; catálogo anterior preservado.")
+                "Coleta concluída sem itens novos; catálogo anterior preservado.")
         fonte.save(update_fields=[
             "ultima_tentativa", "ultimo_total", "status", "ultimo_sucesso",
             "falhas_consecutivas", "erro_publico",

@@ -585,3 +585,98 @@ class PonteORMForaDoLoopTests(TransactionTestCase):
         # fechado e o dado capturado perdido.
         with self.assertRaises(ValueError):
             executar_no_tenant(lambda: None)
+
+
+class EscopoAninhadoRestauraContextoTests(TestCase):
+    """Sair de um escopo aninhado não pode apagar o escopo do chamador.
+
+    Reproduz o incidente de produção: o worker de envio roda inteiro sob
+    `@system_job`; ao gerar um link ele chama `executar_no_tenant`, que fora do
+    Playwright abre um `organization_context` NA MESMA CONEXÃO. Ao sair, esse
+    contexto zerava `app.system_context`, e como o ContextVar do worker continuava
+    True nada nunca o reinstalava — o `cfg.save()` seguinte caía na RLS como sessão
+    anônima e o tick inteiro morria em ValidationError, todo ciclo.
+
+    Os GUCs são espionados em vez de exercitados de verdade porque o RLS é
+    exclusivo do Postgres e a suíte roda em SQLite; o que importa aqui é a ORDEM e
+    o CONTEÚDO das reinstalações, que são os mesmos nos dois backends.
+    """
+
+    def setUp(self):
+        from apps.accounts import tenant
+        self.tenant = tenant
+        self.chamadas = []
+
+        def _espiao(*, organization_id=None, system=False, local=True):
+            self.chamadas.append(
+                {"organization_id": str(organization_id or ""),
+                 "system": bool(system), "local": bool(local)})
+
+        remendo_ctx = patch.object(tenant, "_set_postgres_context", _espiao)
+        # `_reinstalar_escopo_ambiente` sai cedo fora do Postgres; forçamos o corpo.
+        remendo_vendor = patch.object(
+            tenant.connection, "vendor", "postgresql", create=False)
+        remendo_role = patch.object(tenant, "_assert_privileged_database_role")
+        for remendo in (remendo_ctx, remendo_vendor, remendo_role):
+            remendo.start()
+            self.addCleanup(remendo.stop)
+
+    def test_organization_aninhada_devolve_o_system_do_worker(self):
+        org = "11111111-1111-1111-1111-111111111111"
+        with self.tenant.system_context():
+            self.assertTrue(self.tenant.in_system_context())
+            with self.tenant.organization_context(org):
+                self.assertFalse(self.tenant.in_system_context())
+            # O ponto do incidente: aqui o worker precisa continuar em system.
+            self.assertTrue(self.tenant.in_system_context())
+
+        # Última reinstalação de dentro do `with`: system de volta, não 'off'.
+        reinstalacao = self.chamadas[-2]
+        self.assertTrue(reinstalacao["system"])
+        self.assertFalse(reinstalacao["local"])
+        # E ao fechar o system_context externo, aí sim o escopo é liberado.
+        self.assertFalse(self.chamadas[-1]["system"])
+        self.assertEqual(self.chamadas[-1]["organization_id"], "")
+
+    def test_organization_aninhada_devolve_a_organizacao_de_fora(self):
+        fora = "22222222-2222-2222-2222-222222222222"
+        dentro = "33333333-3333-3333-3333-333333333333"
+        with self.tenant.organization_context(fora):
+            with self.tenant.organization_context(dentro):
+                pass
+            self.assertEqual(self.tenant.current_organization_id(), fora)
+
+        reinstalacao = self.chamadas[-2]
+        self.assertEqual(reinstalacao["organization_id"], fora)
+        self.assertFalse(reinstalacao["system"])
+
+    def test_sem_escopo_por_baixo_continua_zerando(self):
+        # A garantia oposta: fora de qualquer aninhamento, sair LIMPA a conexão.
+        # Sem isto uma organização vazaria na conexão persistente do executor.
+        with self.tenant.organization_context(
+                "44444444-4444-4444-4444-444444444444"):
+            pass
+
+        self.assertEqual(self.chamadas[-1],
+                         {"organization_id": "", "system": False, "local": False})
+
+    def test_excecao_no_corpo_tambem_restaura(self):
+        with self.assertRaises(ZeroDivisionError):
+            with self.tenant.system_context():
+                with self.tenant.organization_context(
+                        "55555555-5555-5555-5555-555555555555"):
+                    raise ZeroDivisionError("falha no meio do job")
+        self.assertFalse(self.tenant.in_system_context())
+
+    def test_actor_aninhado_devolve_o_actor_de_fora(self):
+        atores = []
+        with patch.object(self.tenant, "_set_postgres_actor",
+                          lambda actor_id=None, *, local=True: atores.append(
+                              str(actor_id or ""))):
+            with self.tenant.actor_context(7):
+                with self.tenant.actor_context(9):
+                    pass
+                self.assertEqual(self.tenant.current_actor_id(), "7")
+
+        self.assertEqual(atores[-2], "7")
+        self.assertEqual(atores[-1], "")

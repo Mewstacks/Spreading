@@ -19,3 +19,7 @@ django/**/auth_*.json
 falta.txt
 *.txt
 !requirements.txt
+# Banners do aviso de cupons são código versionado, não sobra de desenvolvimento.
+# Sem esta exceção o `*.png` acima os descartava da imagem em silêncio, e a mensagem
+# saía sem imagem só em produção — o pior lugar para descobrir isso.
+!django/apps/scrapers/assets/**

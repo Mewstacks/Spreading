@@ -78,6 +78,26 @@
     margin-top: .7rem; padding-top: .7rem; border-top: 1px solid var(--border);
     font-size: 12.5px; color: var(--muted); }
   .fontes-sub .lucide { width: 1em; height: 1em; }
+  .fontes-motivos { list-style: none; margin: .55rem 0 0; padding: 0;
+    display: flex; flex-direction: column; gap: .3rem;
+    font-size: 12.5px; line-height: 1.45; color: var(--muted); }
+  .fontes-motivos li { display: flex; flex-wrap: wrap; gap: .35rem; }
+  .fonte-motivo-nome { color: var(--text); font-weight: 500; }
+
+  /* ── Aviso de cupons novos (aba Cupons) ── */
+  .aviso-cupons-bar { display: flex; flex-direction: column; gap: .7rem;
+    padding: .9rem 1rem; margin-bottom: 1rem; border: 1px solid var(--border);
+    border-radius: 12px; background: var(--surface); }
+  .aviso-cupons-bar b { display: block; font-size: 14px; }
+  .aviso-cupons-bar .muted { display: block; margin-top: .2rem; font-size: 12.5px;
+    line-height: 1.45; }
+  .aviso-cupons-acoes { display: flex; flex-wrap: wrap; gap: .5rem; }
+  .aviso-cupons-acoes .btn { min-height: 44px; }
+  @media (min-width: 768px) {
+    .aviso-cupons-bar { flex-direction: row; align-items: center;
+      justify-content: space-between; gap: 1.2rem; }
+    .aviso-cupons-acoes { flex-shrink: 0; }
+  }
 
   /* ── Filtros: toolbar integrada à listagem, sem caixa ── */
   .filtros { padding-bottom: 1rem; margin-bottom: 1.1rem; border-bottom: 1px solid var(--border); }
@@ -337,14 +357,14 @@
   <div class="fontes-bar">
     <span class="fontes-label">Fontes</span>
     {% if fontes %}
-      {% with fontes_ord=fontes|dictsort:"status" %}
-      {% regroup fontes_ord by status as fontes_grupos %}
+      {% with fontes_ord=fontes|dictsort:"status_exibicao" %}
+      {% regroup fontes_ord by status_exibicao as fontes_grupos %}
       {% for g in fontes_grupos %}
       <span class="fonte-grupo">
-        <span class="fonte-grupo-label">{% if g.grouper == 'ok' %}Operacional{% elif g.grouper == 'degraded' %}Atenção{% elif g.grouper == 'blocked' %}Degradado{% else %}Desconectado{% endif %}</span>
+        <span class="fonte-grupo-label">{% if g.grouper == 'ok' %}Operacional{% elif g.grouper == 'degraded' %}Atenção{% elif g.grouper == 'blocked' %}Degradado{% elif g.grouper == 'silent' %}Parada{% else %}Desconectado{% endif %}</span>
         {% for f in g.list %}
-        <span class="badge {% if f.status == 'ok' %}badge-green{% elif f.status == 'blocked' %}badge-red{% elif f.status == 'degraded' %}badge-yellow{% else %}badge-muted{% endif %}"
-              title="{{ f.erro_publico|default:'Sem erro recente' }}"><span class="dot"></span>{{ f.nome }}</span>
+        <span class="badge {% if f.status_exibicao == 'ok' %}badge-green{% elif f.status_exibicao == 'blocked' %}badge-red{% elif f.status_exibicao == 'degraded' %}badge-yellow{% else %}badge-muted{% endif %}"
+              title="{{ f.motivo_exibicao|default:'Sem erro recente' }}"><span class="dot"></span>{{ f.nome }}</span>
         {% endfor %}
       </span>
       {% endfor %}
@@ -363,6 +383,17 @@
   <div class="fontes-sub">
     <span><i data-lucide="info"></i> {{ amazon_diagnostico }}</span>
   </div>
+  {% comment %}
+    O motivo só existia no title= do badge, que não abre em toque. Quem usa o painel
+    pelo celular via "Atenção" sem nenhuma pista do que fazer.
+  {% endcomment %}
+  {% if fontes_com_aviso %}
+  <ul class="fontes-motivos">
+    {% for f in fontes_com_aviso %}
+    <li><span class="fonte-motivo-nome">{{ f.nome }}</span> {{ f.motivo }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
 </section>
 
 {{ categorias_por_macro|json_script:"cats-data" }}
@@ -507,6 +538,22 @@
 </details>{% endif %}
 
 {% if tipo == 'cupom' %}
+  {% comment %}
+    Mensagem que anuncia SÓ os códigos novos, sem produto. É o mesmo núcleo que a
+    regra automática "Aviso de cupons novos" usa, então o texto conferido aqui é o
+    que sairá sozinho depois.
+  {% endcomment %}
+  <div class="aviso-cupons-bar">
+    <div>
+      <b>Avisar cupons novos no grupo</b>
+      <span class="muted">Uma mensagem só com os códigos ainda não anunciados. Cupons de ativação (sem código digitável) não entram.</span>
+    </div>
+    <div class="aviso-cupons-acoes">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="abrirEnvioAviso('mercadolivre', 'Mercado Livre')"><i data-lucide="megaphone"></i> Mercado Livre</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="abrirEnvioAviso('amazon', 'Amazon')"><i data-lucide="megaphone"></i> Amazon</button>
+    </div>
+  </div>
+
   <details class="collapse-card" id="cupom-manual">
     <summary><i data-lucide="plus-circle"></i> Adicionar cupom privado <i data-lucide="chevron-down" class="chev"></i></summary>
     <p class="muted" style="font-size:12.5px;margin-top:0;">Visível somente na sua conta. O link afiliado é preparado antes da publicação.</p>
@@ -931,6 +978,24 @@ function abrirEnvioCupom(id, codigo) {
   renderIcons();
   document.getElementById('env-canal').focus();
 }
+// Aviso "NOVOS CUPONS": mesmo popup, mas o conteúdo não é UM item — é a lista de
+// códigos novos da loja, montada no servidor. Por isso `envProdId` guarda o
+// marketplace, e não um id.
+function abrirEnvioAviso(marketplace, rotulo) {
+  envTipo = 'aviso';
+  envProdId = marketplace;
+  document.getElementById('env-prod').textContent = 'Cupons novos · ' + rotulo;
+  document.getElementById('env-titulo').innerHTML = '<i data-lucide="megaphone"></i> Avisar cupons novos';
+  document.getElementById('env-log').textContent = '';
+  document.getElementById('env-foto').value = '';
+  document.getElementById('env-foto-bloco').style.display = 'none';
+  document.getElementById('env-go').disabled = false;
+  document.getElementById('modal-envio').classList.add('open');
+  envGruposParar();
+  envToggleCanal();
+  renderIcons();
+  document.getElementById('env-canal').focus();
+}
 function fecharEnvio() {
   document.getElementById('modal-envio').classList.remove('open');
   // Sem isto a cadeia de repoll continua batendo em /api/grupos com o modal
@@ -1045,20 +1110,24 @@ async function dispararEnvio() {
   if (!grupo) { log.innerHTML = '<span class="err">Escolha ou digite o grupo de destino.</span>'; return; }
   document.getElementById('env-go').disabled = true;
   log.textContent = '';
-  var url = envTipo === 'cupom' ? '/scrapers/enviar-cupom/' : '/scrapers/enviar-produto/';
+  var URLS = {produto: '/scrapers/enviar-produto/', cupom: '/scrapers/enviar-cupom/',
+              aviso: '/scrapers/enviar-aviso-cupons/'};
+  var url = URLS[envTipo] || URLS.produto;
+  var CAMPO = {produto: 'produto', cupom: 'cupom', aviso: 'marketplace'};
+  var campo = CAMPO[envTipo] || 'produto';
   var fotoEl = document.getElementById('env-foto');
   var foto = envTipo === 'produto' && fotoEl && fotoEl.files && fotoEl.files[0];
   // Sem foto: form-urlencoded (fluxo de sempre). Com foto: multipart p/ subir o arquivo.
   var form, headers;
   if (foto) {
     form = new FormData();
-    form.set(envTipo === 'cupom' ? 'cupom' : 'produto', envProdId);
+    form.set(campo, envProdId);
     form.set('canal', canal); form.set('grupo', grupo); form.set('grupo_nome', nome);
     form.set('foto', foto);
     headers = {'X-CSRFToken': getCookie('csrftoken')};  // browser define o boundary
   } else {
     form = new URLSearchParams();
-    form.set(envTipo === 'cupom' ? 'cupom' : 'produto', envProdId);
+    form.set(campo, envProdId);
     form.set('canal', canal); form.set('grupo', grupo); form.set('grupo_nome', nome);
     headers = {'X-CSRFToken': getCookie('csrftoken'),
                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'};

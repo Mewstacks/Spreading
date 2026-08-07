@@ -91,6 +91,7 @@ def _rodar_scrape():
             "scrape", fase="raspando", loja_atual=slug,
             loja_idx=i + 1, lojas_total=len(lojas), ultima_msg=msg,
         )
+        inicio_loja = timezone.now()
         try:
             mp.scrape_all(termos=termos)
         except Exception as e:
@@ -100,8 +101,17 @@ def _rodar_scrape():
             log_event("scraper", "fonte_falhou", f"A coleta da loja {slug} falhou.",
                       level="error", contexto={"marketplace": slug}, exc=e)
             falhas.append(slug)
+            from django.db.models import Q
             from apps.scrapers.models import FonteIngestao
-            FonteIngestao.objects.filter(marketplace=slug, habilitada=True).update(
+            # SÓ as fontes que ainda não deram veredito próprio neste ciclo. Sem o
+            # recorte por `ultima_tentativa`, uma exceção tardia em `scrape_all`
+            # rebaixava as três linhas da Amazon de uma vez — inclusive as que
+            # tinham acabado de reportar sucesso —, e nada nunca as promovia de
+            # volta a não ser um ciclo inteiro sem nenhum defeito.
+            FonteIngestao.objects.filter(
+                Q(ultima_tentativa__isnull=True) | Q(ultima_tentativa__lt=inicio_loja),
+                marketplace=slug, habilitada=True,
+            ).update(
                 status="degraded", ultima_tentativa=timezone.now(),
                 erro_publico="Falha temporária na coleta; dados anteriores preservados.")
             st.write_state("scrape", erro=ERRO_PUBLICO)
