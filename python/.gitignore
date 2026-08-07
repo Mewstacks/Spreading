@@ -5,6 +5,10 @@
 # Imagens geradas
 *.png
 *.yml
+# Os banners do aviso de cupons são código versionado, não imagem gerada. Sem esta
+# exceção o `git add` os ignora em silêncio — nem erro, nem aviso, e `git status`
+# segue dizendo "working tree clean". Mesma pegadinha existia no .dockerignore.
+!django/apps/scrapers/assets/banners/**
 # Python
 __pycache__/
 *.py[cod]
