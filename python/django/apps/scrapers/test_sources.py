@@ -752,6 +752,45 @@ class GerarLinksNaoSeguraTransacaoTests(TestCase):
         fechar_em_linha.assert_not_called()
 
 
+class AvisoCuponsNaoSeguraTransacaoTests(TestCase):
+    """O aviso de cupons gera o link da mensagem no Link Builder (Chromium),
+    minutos sem tocar no banco — o mesmo veneno do job de gerar links: tenant
+    instalado com transação aberta vira `idle in transaction`, o proxy da Fly
+    derruba o socket e a query seguinte estoura "the connection is closed"
+    (foi o OperationalError do disparo manual em produção). A saída é a mesma:
+    escopo anotado (segurar_transacao=False) e ORM sempre via executar_no_tenant.
+    """
+
+    def test_view_do_aviso_nao_segura_transacao(self):
+        import inspect
+        from apps.scrapers import views
+        fonte = inspect.getsource(views.enviar_aviso_cupons_stream)
+        self.assertIn("segurar_transacao=False", fonte)
+
+    def test_leituras_da_view_passam_por_executar_no_tenant(self):
+        """Sem transação não há GUC de tenant: leitura direta seria filtrada pela
+        RLS e o aviso diria "nenhum cupom novo" havendo cupons."""
+        import inspect
+        from apps.scrapers import views
+        fonte = inspect.getsource(views.enviar_aviso_cupons_stream)
+        codigo = " ".join(l for l in fonte.split("\n")
+                          if not l.strip().startswith("#")).split()
+        codigo = " ".join(codigo)   # normaliza quebras de linha da chamada
+        self.assertIn("executar_no_tenant( selecionar_cupons_para_aviso", codigo)
+
+    def test_nucleo_do_aviso_isola_o_orm_da_transacao_longa(self):
+        """O núcleo é chamado também pelo worker (role de sistema, sem escopo):
+        por isso o ORM dele passa por _executar_orm, que instala o tenant quando
+        há escopo anotado e cai no caminho direto quando a role dispensa GUC."""
+        import inspect
+        from apps.scrapers import ofertas
+        fonte = inspect.getsource(ofertas.enviar_aviso_cupons)
+        self.assertIn("_executar_orm(_reservar)", fonte)
+        self.assertIn("_executar_orm(wa_session_de, usuario)", fonte)
+        fonte_resolver = inspect.getsource(ofertas.resolver_link_afiliado_cupom)
+        self.assertIn("_executar_orm(_produto_para_cupom, cupom)", fonte_resolver)
+
+
 class MensagensDoGerarLinksTests(TransactionTestCase):
     """Anti-bot e sessão morta pedem AÇÕES DIFERENTES do usuário: esperar vs
     reconectar. Unificar os dois num "[ERRO] sessão expirada" com link de

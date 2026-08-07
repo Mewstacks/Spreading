@@ -14,6 +14,25 @@ from apps.scrapers.whatsapp_client import DESCONHECIDO, PERMANENTE, TRANSITORIO
 logger = logging.getLogger(__name__)
 
 
+def _executar_orm(fn, *args, **kwargs):
+    """Query de ORM com o escopo de tenant certo em cada chamador deste núcleo.
+
+    O disparo manual (SSE) roda com `segurar_transacao=False` — sem transação nem
+    GUC presos durante o Link Builder — então cada ida ao banco precisa reinstalar
+    o tenant numa transação curta via `executar_no_tenant`. O worker de envio roda
+    com a role de sistema (BYPASSRLS) e NENHUM escopo tenant: ali
+    `executar_no_tenant` levanta ValueError e a query segue direta, como sempre
+    foi — o GUC é desnecessário com aquela role.
+    """
+    from apps.accounts.tenant import executar_no_tenant
+    try:
+        return executar_no_tenant(fn, *args, **kwargs)
+    except ValueError as exc:
+        if "exige organização" not in str(exc):
+            raise
+        return fn(*args, **kwargs)
+
+
 def _motivo_publico_transporte(resultado) -> str:
     """Traduz falhas externas para mensagens estáveis; o detalhe fica no evento."""
     resultado = resultado or {}
@@ -54,7 +73,7 @@ def _canal_pronto_ou_erro(canal, usuario) -> dict | None:
     from apps.scrapers import whatsapp_client
     from apps.scrapers.conexoes import estado_whatsapp
 
-    sessao = wa_session_de(usuario)
+    sessao = _executar_orm(wa_session_de, usuario)
     if not sessao:
         return {"sucesso": False,
                 "motivo": "Conecte o WhatsApp antes de enviar.",
@@ -974,8 +993,10 @@ def resolver_link_afiliado_cupom(cupom, usuario):
     marketplace = str(getattr(cupom, "marketplace", "") or "").strip().lower()
     origem = str(getattr(cupom, "link", "") or "").strip()
     if marketplace == "awin":
-        integracao = getattr(cupom, "integracao", None)
-        programa = getattr(cupom, "programa", None)
+        def _vinculos_awin():
+            return (getattr(cupom, "integracao", None),
+                    getattr(cupom, "programa", None))
+        integracao, programa = _executar_orm(_vinculos_awin)
         if (integracao and integracao.owner_id == usuario.id
                 and integracao.habilitada and integracao.status == "conectada"
                 and programa and programa.habilitado and programa.status_vinculo == "joined"
@@ -985,7 +1006,7 @@ def resolver_link_afiliado_cupom(cupom, usuario):
     if marketplace == "amazon":
         from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
         from apps.scrapers.afiliado import tag_amazon
-        tag = tag_amazon(usuario)
+        tag = _executar_orm(tag_amazon, usuario)
         if not tag or not origem.startswith(("http://", "https://")):
             return {"sucesso": False, "motivo": "Cadastre sua tag Amazon para usar este cupom."}
         parts = urlsplit(origem)
@@ -999,14 +1020,23 @@ def resolver_link_afiliado_cupom(cupom, usuario):
     if marketplace != "mercadolivre":
         return {"sucesso": False,
                 "motivo": "Esta loja ainda não oferece link afiliado para cupons."}
-    cache = LinkAfiliadoCupomUsuario.objects.filter(
-        usuario=usuario, cupom=cupom, afiliado_ok=True,
-    ).first()
+    def _cache_do_par():
+        return LinkAfiliadoCupomUsuario.objects.filter(
+            usuario=usuario, cupom=cupom, afiliado_ok=True,
+        ).first()
+    cache = _executar_orm(_cache_do_par)
     # O cache pertence ao par usuario+cupom. A URL de origem pode ser a pagina
     # do cupom ou um produto fallback comprovado; em ambos os casos o link salvo
     # já passou pela verificacao de comissionamento.
     if cache and cache.link_afiliado:
         return {"sucesso": True, "link": cache.link_afiliado, "cache": True}
+
+    def _gravar_cache(url_origem, link):
+        LinkAfiliadoCupomUsuario.objects.update_or_create(
+            usuario=usuario, cupom=cupom,
+            defaults={"url_origem": url_origem, "link_afiliado": link,
+                      "afiliado_ok": True},
+        )
 
     erro_direto = ""
     if origem:
@@ -1015,11 +1045,7 @@ def resolver_link_afiliado_cupom(cupom, usuario):
             link = afiliate_link_builder(origem, usuario=usuario)
             if link and get_marketplace(marketplace).verify_affiliate_tag(
                     link, usuario=usuario):
-                LinkAfiliadoCupomUsuario.objects.update_or_create(
-                    usuario=usuario, cupom=cupom,
-                    defaults={"url_origem": origem, "link_afiliado": link,
-                              "afiliado_ok": True},
-                )
+                _executar_orm(_gravar_cache, origem, link)
                 return {"sucesso": True, "link": link, "cache": False}
             erro_direto = "A página do cupom não foi aceita pelo programa de afiliados."
         except Exception as exc:
@@ -1033,7 +1059,7 @@ def resolver_link_afiliado_cupom(cupom, usuario):
             logger.warning("Falha ao afiliar pagina do cupom %s: %s", cupom.pk, exc)
             erro_direto = "Não foi possível gerar o link afiliado da página do cupom."
 
-    produto = _produto_para_cupom(cupom)
+    produto = _executar_orm(_produto_para_cupom, cupom)
     if produto:
         mp = get_marketplace(marketplace)
         try:
@@ -1051,11 +1077,7 @@ def resolver_link_afiliado_cupom(cupom, usuario):
         if info and info.get("link_afiliado"):
             link = info["link_afiliado"]
             if info.get("afiliado_ok") is not False:
-                LinkAfiliadoCupomUsuario.objects.update_or_create(
-                    usuario=usuario, cupom=cupom,
-                    defaults={"url_origem": produto.link_produto, "link_afiliado": link,
-                              "afiliado_ok": True},
-                )
+                _executar_orm(_gravar_cache, produto.link_produto, link)
                 return {"sucesso": True, "link": link, "produto": produto}
 
     return {"sucesso": False, "motivo": erro_direto or
@@ -1433,8 +1455,11 @@ def enviar_aviso_cupons(cupons, grupo_id, *, canal="whatsapp", usuario=None,
     anunciados = [c for c in cupons
                   if codigo_publicavel(c) and linha_desconto_cupom(c)][:LIMITE_CUPONS_AVISO]
 
-    publicacoes = []
-    try:
+    def _reservar():
+        """Transação curta de reserva: lock do usuário, cota diária e uma
+        Publicacao por cupom anunciado. Roda via _executar_orm para não herdar
+        a transação longa do chamador (ver _sse_runner/segurar_transacao)."""
+        pubs = []
         with transaction.atomic():
             get_user_model().objects.select_for_update().get(pk=usuario.pk)
             perfil = getattr(usuario, "perfil", None)
@@ -1453,7 +1478,7 @@ def enviar_aviso_cupons(cupons, grupo_id, *, canal="whatsapp", usuario=None,
                 return {"sucesso": False, "motivo": "Limite diário de envios atingido.",
                         "classe": PERMANENTE}
             for cupom in anunciados:
-                publicacoes.append(Publicacao.objects.create(
+                pubs.append(Publicacao.objects.create(
                     usuario=usuario, origem=ORIGEM_AVISO_CUPONS,
                     cupom_normalizado=cupom, configuracao=configuracao,
                     canal=canal, destino_id=str(grupo_id)[:100],
@@ -1462,30 +1487,41 @@ def enviar_aviso_cupons(cupons, grupo_id, *, canal="whatsapp", usuario=None,
                     categoria="Aviso de cupons",
                     mensagem=mensagem, link_afiliado=link, link_rastreado=link,
                 ))
+        return pubs
+
+    try:
+        reserva = _executar_orm(_reservar)
     except Exception as exc:
         logger.exception("Falha ao reservar o aviso de cupons para %s", grupo_id)
         return {"sucesso": False,
                 "motivo": "Não foi possível reservar este aviso para envio. Tente novamente.",
                 "classe": TRANSITORIO, "causa": type(exc).__name__}
+    if isinstance(reserva, dict):
+        return reserva
+    publicacoes = reserva
 
     ids = [p.pk for p in publicacoes]
 
     def _fechar(status, erro=""):
-        Publicacao.objects.filter(pk__in=ids, status="pendente").update(
-            status=status, erro=str(erro)[:500],
-            **({"enviada_em": timezone.now()} if status == "enviado" else {}))
+        def _update():
+            Publicacao.objects.filter(pk__in=ids, status="pendente").update(
+                status=status, erro=str(erro)[:500],
+                **({"enviada_em": timezone.now()} if status == "enviado" else {}))
+        _executar_orm(_update)
 
-    log_event("publicacao", "send_started", "Preparando aviso de cupons.",
-              usuario=usuario, contexto={"cupons": len(anunciados), "canal": canal,
-                                         "marketplace": marketplace,
-                                         "destino": destino_nome or grupo_id})
+    _executar_orm(
+        log_event, "publicacao", "send_started", "Preparando aviso de cupons.",
+        usuario=usuario, contexto={"cupons": len(anunciados), "canal": canal,
+                                   "marketplace": marketplace,
+                                   "destino": destino_nome or grupo_id})
     try:
         banner_b64, banner_mime = sortear_banner_b64(marketplace)
         img_kwargs = ({"imagem_b64": banner_b64, "mimetype": banner_mime}
                       if banner_b64 else {})
+        sessao_wa = _executar_orm(wa_session_de, usuario)
         resultado = sender.enviar_oferta(
             grupo_id, mensagem, legenda=mensagem, usuario=usuario,
-            session=wa_session_de(usuario),
+            session=sessao_wa,
             operation_id=f"aviso_cupons:{ids[0]}" if ids else None, **img_kwargs)
     except Exception as exc:
         logger.exception("Erro inesperado ao enviar o aviso de cupons")
@@ -1495,10 +1531,11 @@ def enviar_aviso_cupons(cupons, grupo_id, *, canal="whatsapp", usuario=None,
 
     if resultado.get("sucesso"):
         _fechar("enviado")
-        log_event("publicacao", "send_ok", "Aviso de cupons publicado.",
-                  usuario=usuario, contexto={"cupons": len(anunciados), "canal": canal,
-                                             "destino": destino_nome or grupo_id,
-                                             "via": resultado.get("via")})
+        _executar_orm(
+            log_event, "publicacao", "send_ok", "Aviso de cupons publicado.",
+            usuario=usuario, contexto={"cupons": len(anunciados), "canal": canal,
+                                       "destino": destino_nome or grupo_id,
+                                       "via": resultado.get("via")})
         return {"sucesso": True, "via": resultado.get("via", canal),
                 "canal": resultado.get("canal", canal), "link": link,
                 "mensagem": mensagem, "cupons": len(anunciados),
@@ -1512,10 +1549,11 @@ def enviar_aviso_cupons(cupons, grupo_id, *, canal="whatsapp", usuario=None,
 
     motivo = _motivo_publico_transporte(resultado)
     _fechar("incerto" if resultado.get("resultado") == "incerto" else "falhou", motivo)
-    log_event("publicacao", "send_failed", motivo, level="warning", usuario=usuario,
-              contexto={"cupons": len(anunciados), "canal": canal,
-                        "destino": destino_nome or grupo_id,
-                        "erro_tecnico": resultado.get("erro") or ""})
+    _executar_orm(
+        log_event, "publicacao", "send_failed", motivo, level="warning",
+        usuario=usuario, contexto={"cupons": len(anunciados), "canal": canal,
+                                   "destino": destino_nome or grupo_id,
+                                   "erro_tecnico": resultado.get("erro") or ""})
     return {"sucesso": False, "motivo": motivo,
             "classe": resultado.get("classe") or DESCONHECIDO,
             "resultado": resultado.get("resultado"),

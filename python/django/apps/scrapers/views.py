@@ -1717,7 +1717,11 @@ def enviar_aviso_cupons_stream(request):
 
     def _job():
         from django.contrib.auth import get_user_model
-        usuario = get_user_model().objects.filter(id=uid).first()
+        from apps.accounts.tenant import executar_no_tenant
+        # Tenant apenas ANOTADO (segurar_transacao=False): toda ida ao banco
+        # reinstala o escopo numa transação curta via executar_no_tenant.
+        usuario = executar_no_tenant(
+            lambda: get_user_model().objects.filter(id=uid).first())
         if not usuario:
             print("[ERRO] Usuário não encontrado ou sessão encerrada.")
             return
@@ -1733,7 +1737,9 @@ def enviar_aviso_cupons_stream(request):
             marketplace=marketplace, grupo_id=grupo_id, horas_cooldown=24,
             incluir_restritos=True,
         )
-        cupons = selecionar_cupons_para_aviso(avulso, usuario, limite=LIMITE_CUPONS_AVISO)
+        cupons = executar_no_tenant(
+            selecionar_cupons_para_aviso, avulso, usuario,
+            limite=LIMITE_CUPONS_AVISO)
         if not cupons:
             print("[ERRO] Nenhum cupom com código novo para anunciar nesta loja. "
                   "Cupons de ativação (sem código digitável) não entram neste aviso.")
@@ -1759,7 +1765,14 @@ def enviar_aviso_cupons_stream(request):
             elif resultado.get("precisa_login_wa"):
                 print("__WA_LOGIN__")
 
-    return _sse_runner(_job, request.organization)
+    # segurar_transacao=False: gerar o link do aviso passa minutos no Link
+    # Builder (Chromium), e uma transação aberta esse tempo todo vira
+    # `idle in transaction` até o proxy da Fly matar o socket — dentro de
+    # transação o Django não renova a conexão e a query seguinte estoura
+    # "the connection is closed" (o OperationalError do disparo manual). As
+    # idas ao banco deste job vão por executar_no_tenant, aqui e dentro de
+    # ofertas.enviar_aviso_cupons.
+    return _sse_runner(_job, request.organization, segurar_transacao=False)
 
 
 @require_GET
