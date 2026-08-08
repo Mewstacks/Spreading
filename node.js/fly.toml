@@ -13,7 +13,10 @@ primary_region = "gru"
   PORT = "3000"
   WA_CAPABILITY_ISSUER = "spreading-web"
   WA_CAPABILITY_AUDIENCE = "spreading-wa"
-  MAX_WHATSAPP_SESSIONS = "4"
+  # 2, não 4: cada sessão é um Chromium rodando o WhatsApp Web inteiro. Com 4 o
+  # worker aceitava mais sessões do que a VM consegue escalonar, e a fome de CPU
+  # derrubava TODAS elas juntas. Subir este número exige subir o [[vm]] junto.
+  MAX_WHATSAPP_SESSIONS = "2"
   SESSION_START_STAGGER_MS = "12000"
   SESSION_INIT_TIMEOUT_MS = "90000"
   # O watchdog mede bloqueio do event loop, não duração de uma operação async.
@@ -21,9 +24,13 @@ primary_region = "gru"
   QR_BOOTSTRAP_TIMEOUT_MS = "90000"
   QR_BOOTSTRAP_MAX_ATTEMPTS = "2"
   QR_BOOTSTRAP_RETRY_MS = "2000"
-  GROUP_SYNC_TIMEOUT_MS = "45000"
+  # GROUP_SYNC_TIMEOUT_MS e SEND_TIMEOUT_MS saíram daqui de propósito: os dois
+  # sobrepunham o código com valores que o próprio código já descartava.
+  # GROUP_SYNC_TIMEOUT_MS=45000 era o valor da época do getChats completo; hoje a
+  # leitura é em memória e o default de 15s é deliberado. SEND_TIMEOUT_MS=60000
+  # era limitado a 55000 pelo SEND_REQUEST_TIMEOUT_MS, ou seja, anunciava um teto
+  # inalcançável. Sem as linhas, valem os defaults do index.js.
   QR_IDLE_DESTROY_MS = "180000"
-  SEND_TIMEOUT_MS = "60000"
   SEND_REQUEST_TIMEOUT_MS = "55000"
 
 # Sessão do WhatsApp (LocalAuth) persiste no volume — sobrevive a restart/deploy.
@@ -45,8 +52,17 @@ primary_region = "gru"
     method = "get"
     path = "/health"
 
-# Cada WhatsApp conectado = 1 Chromium (~350MB). Dimensione a memória pela
-# quantidade de instâncias simultâneas: 2gb ~ 3-4 sessões. Suba se OOM.
+# CPU DEDICADA, não compartilhada — o mesmo que o staging já usa e pelo mesmo
+# motivo. Medido em 30/07: com shared-cpu-2x o /proc/stat acusava steal de ~70%
+# de todo o CPU do período, loadavg 5.7 e tempo útil de ~3%; o Chromium ficava
+# tão sem CPU que TODO page.evaluate falhava. Em 08/08 isso cobrou o preço final:
+# a VM inteira travou (TCP aceitava em 0,03s e nenhuma resposta HTTP saía em 8s,
+# o SSH não entrava e o processo passou 20min sem escrever um log) até um restart
+# manual. shared-cpu só entrega burst; Chromium + WA Web com centenas de chats é
+# carga sustentada, e quando o burst acaba a página trava.
+#
+# Memória: cada WhatsApp conectado = 1 Chromium. 4gb comporta as 2 sessões de
+# MAX_WHATSAPP_SESSIONS com folga. Suba os dois juntos para aceitar mais números.
 [[vm]]
-  size = "shared-cpu-2x"
+  size = "performance-2x"
   memory = "4gb"
