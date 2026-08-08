@@ -10,11 +10,14 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
 const fs = require('fs');
-const { spawn, execFileSync } = require('child_process');
+const { spawn, execFileSync, execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileAsync = promisify(execFile);
 const {
     reconnectDelay, shouldPurgeAuth, reconnectAction, isRevokedReason, ocupaSlot,
     groupRetryDelay, qrBootstrapOutcome, preAuthEventIsStale, estadoIndicaQueda,
     keepaliveIndicaQueda, KEEPALIVE_FALHAS_ATE_QUEDA,
+    deveReciclarAposTimeoutDeEnvio, veredictoDeTimeoutDeEnvio, STALLS_ATE_RECICLAR,
 } = require('./session_policy');
 const {
     resetSessionForQr, markResetFailure, markQrBootstrap, finalizeQrBootstrapFailure,
@@ -52,6 +55,7 @@ const {
     qrAtivo, limparQr, registrarCarregamento, iniciarRecuperacaoLogout,
     rejeicaoRecuperavelDuranteLogout,
 } = require('./qr_lifecycle');
+const { SONDAS_HTTP_PARA_MATAR, GRACA_BOOT_MS } = require('./watchdog_policy');
 
 const app = express();
 
@@ -105,6 +109,13 @@ const PUPPETEER_EXECUTABLE_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || undef
 const PRINT_QR_TO_LOGS = process.env.PRINT_QR_TO_LOGS === '1';
 const WATCHDOG_TIMEOUT_MS = parseInt(process.env.WATCHDOG_TIMEOUT_MS, 10) || 45000;
 const WATCHDOG_INTERVAL_MS = parseInt(process.env.WATCHDOG_INTERVAL_MS, 10) || 5000;
+// Espelha o grace_period do check do Fly: o servidor sobe ~2s apos o boot e
+// antes de restaurar sessoes, entao sondar antes disso mediria o alvo errado.
+const WATCHDOG_GRACA_MS = parseInt(process.env.WATCHDOG_GRACA_MS, 10) || GRACA_BOOT_MS;
+const WATCHDOG_RESPAWN_BASE_MS = 5000;
+const WATCHDOG_RESPAWN_TETO_MS = 60000;
+// Filho que viveu mais que isso prova que o spawn funciona; o backoff zera.
+const WATCHDOG_VIDA_SAUDAVEL_MS = 60000;
 const MAX_WHATSAPP_SESSIONS = parseInt(process.env.MAX_WHATSAPP_SESSIONS, 10) || 4;
 // takeoverOnConflict=TRUE fazia o worker ROUBAR o socket de qualquer outra sessao
 // WhatsApp Web do mesmo numero. Se esse numero tambem esta aberto no navegador do
@@ -187,34 +198,120 @@ const READY_STORE_WAIT_MS = parseInt(process.env.READY_STORE_WAIT_MS, 10) || 100
 const CONNECTION_STABILIZATION_MS = parseInt(process.env.CONNECTION_STABILIZATION_MS, 10) || 120000;
 const READY_RETRY_MS = parseInt(process.env.READY_RETRY_MS, 10) || 5000;
 
+// O watchdog filho mede DUAS coisas, porque o incidente de 08/08 mostrou que
+// uma so nao basta: o heartbeat do pai por stdin (event loop mudo) E uma sonda
+// HTTP ao proprio /health (o sinal que o check do Fly mede — o TCP aceitava e
+// nenhuma resposta saia por 20 minutos com o heartbeat correndo). A decisao
+// matar/esperar vem da watchdog_policy, modulo puro testado; aqui so ha I/O.
+const WATCHDOG_SCRIPT = `
+    const http = require('http');
+    const { decisaoWatchdog } = require(process.argv[6]);
+    const pid = Number(process.argv[1]);
+    const heartbeatTimeoutMs = Number(process.argv[2]);
+    const intervaloMs = Number(process.argv[3]);
+    const porta = Number(process.argv[4]);
+    const gracaMs = Number(process.argv[5]);
+    const sondasParaMatar = Number(process.argv[7]);
+    const bootEm = Date.now();
+    let ultimoHeartbeat = Date.now();
+    let sondasFalhas = 0;
+    let sondando = false;
+    process.stdin.on('data', () => { ultimoHeartbeat = Date.now(); });
+    // Pai morreu sem nos matar (SIGKILL de fora): o pipe fecha e o filho nao
+    // pode ficar orfao para sempre segurando um intervalo vivo.
+    process.stdin.on('end', () => process.exit(0));
+    const sondar = () => new Promise((resolve) => {
+        const req = http.get({ host: '127.0.0.1', port: porta, path: '/health', timeout: 4000 }, (res) => {
+            res.resume();
+            resolve(res.statusCode >= 200 && res.statusCode < 400);
+        });
+        req.on('timeout', () => { req.destroy(); resolve(false); });
+        req.on('error', () => resolve(false));
+    });
+    setInterval(async () => {
+        if (sondando) return;
+        sondando = true;
+        try {
+            const agora = Date.now();
+            // Sonda so depois da graca: antes disso o servidor pode nem ter
+            // subido e toda falha seria falso positivo.
+            if (agora - bootEm >= gracaMs) {
+                sondasFalhas = (await sondar()) ? 0 : sondasFalhas + 1;
+            }
+            const msSemHeartbeat = agora - ultimoHeartbeat;
+            const decisao = decisaoWatchdog({
+                msDesdeBoot: agora - bootEm,
+                msSemHeartbeat,
+                sondasHttpFalhasSeguidas: sondasFalhas,
+            }, { gracaMs, heartbeatTimeoutMs, sondasParaMatar });
+            if (decisao !== 'matar') return;
+            if (msSemHeartbeat >= heartbeatTimeoutMs) {
+                console.error('Watchdog: processo sem resposta. Reiniciando.');
+            } else {
+                console.error('Watchdog: /health sem resposta em ' + sondasFalhas + ' sondas seguidas. Reiniciando.');
+            }
+            try { process.kill(pid, 'SIGKILL'); } catch (err) { /* pai ja morreu */ }
+            process.exit(1);
+        } finally {
+            sondando = false;
+        }
+    }, intervaloMs);
+`;
+
+let watchdogRespawnAtrasoMs = WATCHDOG_RESPAWN_BASE_MS;
+
 const startWatchdog = () => {
     if (process.env.DISABLE_WATCHDOG === '1') return null;
 
-    const script = `
-        const pid = Number(process.argv[1]);
-        const timeoutMs = Number(process.argv[2]);
-        let lastHeartbeat = Date.now();
-        process.stdin.on('data', () => { lastHeartbeat = Date.now(); });
-        setInterval(() => {
-            if (Date.now() - lastHeartbeat > timeoutMs) {
-                console.error('Watchdog: processo sem resposta. Reiniciando.');
-                try { process.kill(pid, 'SIGKILL'); } catch (err) { process.exit(1); }
-            }
-        }, 5000);
-    `;
-
-    const watchdog = spawn(process.execPath, ['-e', script, String(process.pid), String(WATCHDOG_TIMEOUT_MS)], {
+    const filho = spawn(process.execPath, [
+        '-e', WATCHDOG_SCRIPT,
+        String(process.pid),
+        String(WATCHDOG_TIMEOUT_MS),
+        String(WATCHDOG_INTERVAL_MS),
+        // PORT e lido aqui de novo porque o const PORT do app.listen so e
+        // definido no fim do arquivo, depois desta chamada.
+        String(process.env.PORT || 3000),
+        String(WATCHDOG_GRACA_MS),
+        path.join(__dirname, 'watchdog_policy.js'),
+        String(SONDAS_HTTP_PARA_MATAR),
+    ], {
         stdio: ['pipe', 'inherit', 'inherit'],
     });
+    const nasceuEm = Date.now();
 
-    setInterval(() => {
-        if (!watchdog.killed && watchdog.stdin.writable) watchdog.stdin.write('.');
-    }, WATCHDOG_INTERVAL_MS).unref();
+    // Sem este handler, um filho morto fazia o proximo write virar EPIPE ->
+    // uncaughtException -> process.exit(1): o watchdog morto derrubava o worker.
+    filho.stdin.on('error', (err) => {
+        if (err.code !== 'EPIPE') console.error('Watchdog stdin:', err.message);
+    });
 
-    return watchdog;
+    // Sem respawn, um filho morto deixava o worker desguarnecido para sempre —
+    // foi o estado em que a producao passou o incidente inteiro.
+    filho.on('exit', (code, signal) => {
+        if (encerrando) return; // shutdown em curso: nao repor
+        if (Date.now() - nasceuEm > WATCHDOG_VIDA_SAUDAVEL_MS) {
+            watchdogRespawnAtrasoMs = WATCHDOG_RESPAWN_BASE_MS;
+        }
+        const atraso = watchdogRespawnAtrasoMs;
+        watchdogRespawnAtrasoMs = Math.min(atraso * 2, WATCHDOG_RESPAWN_TETO_MS);
+        console.error(`Watchdog saiu (code=${code}, signal=${signal}); recriando em ${atraso}ms.`);
+        const timer = setTimeout(() => {
+            if (!encerrando) watchdog = startWatchdog();
+        }, atraso);
+        if (timer.unref) timer.unref();
+    });
+
+    return filho;
 };
 
-const watchdog = startWatchdog();
+let watchdog = startWatchdog();
+
+// Um unico emissor de heartbeat, escrevendo no filho da vez (respawn troca o
+// processo; o intervalo nao pode ficar preso ao filho antigo).
+const watchdogHeartbeat = setInterval(() => {
+    if (watchdog && !watchdog.killed && watchdog.stdin.writable) watchdog.stdin.write('.');
+}, WATCHDOG_INTERVAL_MS);
+watchdogHeartbeat.unref();
 
 // Le a linha de comando de um PID. Especifico de plataforma: no Linux do
 // container o /proc e a fonte barata e sempre presente (node:20-slim nao traz
@@ -283,17 +380,40 @@ const liberarPerfilChromium = (authPath) => {
     }
 };
 
-const listarProcessos = () => {
+// Variante assincrona para as varreduras em massa: N leituras de /proc em
+// paralelo fora do event loop, em vez de N readFileSync seguidos dentro dele.
+const lerCmdlineAsync = async (pid) => {
     try {
         if (process.platform === 'linux') {
-            const pids = fs.readdirSync('/proc')
+            // /proc/<pid>/cmdline separa os argumentos com NUL.
+            const data = await fs.promises.readFile(`/proc/${pid}/cmdline`, 'utf8');
+            return data.replace(/\0/g, ' ').trim();
+        }
+        const { stdout } = await execFileAsync('ps', ['-o', 'command=', '-p', String(pid)], {
+            encoding: 'utf8', timeout: 5000,
+        });
+        return stdout.trim();
+    } catch (err) {
+        return ''; // processo morto, ou ps indisponivel: trata como "nao confirmado"
+    }
+};
+
+const listarProcessos = async () => {
+    try {
+        if (process.platform === 'linux') {
+            const entries = await fs.promises.readdir('/proc');
+            const pids = entries
                 .filter((entry) => /^\d+$/.test(entry))
                 .map(Number);
-            return pids.map((pid) => ({ pid, cmdline: lerCmdline(pid) }));
+            return Promise.all(pids.map(async (pid) => ({
+                pid,
+                cmdline: await lerCmdlineAsync(pid),
+            })));
         }
-        return execFileSync('ps', ['-axo', 'pid=,command='], {
+        const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,command='], {
             encoding: 'utf8', timeout: 5000,
-        }).split('\n').map((line) => {
+        });
+        return stdout.split('\n').map((line) => {
             const match = /^\s*(\d+)\s+(.*)$/.exec(line);
             return match ? { pid: Number(match[1]), cmdline: match[2] } : null;
         }).filter(Boolean);
@@ -308,11 +428,11 @@ const listarProcessos = () => {
 // lacuna sem tocar nos Chromiums das outras sessões.
 const encerrarChromiumsDoPerfil = async (authPath) => {
     const perfilDir = path.join(authPath, 'session');
-    const encontrar = () => {
-        const processos = listarProcessos();
+    const encontrar = async () => {
+        const processos = await listarProcessos();
         return processos === null ? null : pidsDoPerfil(processos, perfilDir);
     };
-    const encontrados = encontrar();
+    const encontrados = await encontrar();
     if (encontrados === null) return false;
     for (const pid of encontrados) {
         try {
@@ -329,13 +449,16 @@ const encerrarChromiumsDoPerfil = async (authPath) => {
         );
     }
 
-    for (let tentativa = 0; tentativa < 20; tentativa += 1) {
-        const restantes = encontrar();
+    // SIGKILL assenta em milissegundos; 10 sondas de 100ms ja sao folga de sobra.
+    // O teto antigo (20) so esticava o recycle — e cada sonda era uma varredura
+    // SINCRONA do /proc no event loop. Hoje a varredura e async.
+    for (let tentativa = 0; tentativa < 10; tentativa += 1) {
+        const restantes = await encontrar();
         if (restantes === null) return false;
         if (!restantes.length) return true;
         await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    const restantes = encontrar();
+    const restantes = await encontrar();
     if (restantes === null) return false;
     if (restantes.length) {
         console.error(
@@ -346,17 +469,27 @@ const encerrarChromiumsDoPerfil = async (authPath) => {
     return true;
 };
 
-const removerLocksChromium = (dir) => {
-    if (!fs.existsSync(dir)) return;
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const fullPath = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-            removerLocksChromium(fullPath);
-        } else if (entry.name === 'SingletonLock' || entry.name === 'SingletonCookie') {
-            fs.unlinkSync(fullPath);
+// Os singletons do Chromium moram na RAIZ do userDataDir, nunca no meio da
+// arvore. A versao anterior recursava o perfil inteiro atras deles: em producao
+// isso e um readdir por diretorio de um perfil de ~280MB e ~3000 arquivos,
+// sincrono, no mesmo event loop que deve uma resposta ao health check do Fly —
+// e rodava a CADA recycle. Mirar os caminhos conhecidos da o mesmo resultado
+// com tres unlink, feitos via fs.promises para ficarem fora do event loop.
+const LOCKS_CHROMIUM = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+
+const removerLocksChromium = async (dir) => {
+    const raiz = path.join(dir, 'session');
+    await Promise.all(LOCKS_CHROMIUM.map(async (nome) => {
+        const fullPath = path.join(raiz, nome);
+        try {
+            await fs.promises.unlink(fullPath);
             console.log(`🔓 Lock removido: ${fullPath}`);
+        } catch (err) {
+            if (err.code !== 'ENOENT') {
+                console.warn(`Falha ao remover lock ${fullPath}:`, err.message);
+            }
         }
-    }
+    }));
 };
 
 const createSessionState = (instanceId) => ({
@@ -407,6 +540,8 @@ const createSessionState = (instanceId) => ({
     keepaliveEmVoo: false,  // um getState de vigia por sessao, nunca dois
     keepaliveFalhas: 0,     // leituras de estado seguidas que nao responderam
     enviosEmVoo: 0,         // >0 suprime o keepalive: o envio ja checa o estado
+    stallsSeguidos: 0,      // timeouts de envio seguidos com a pagina viva
+    recyclePendente: false, // um recycle agendado por sessao, nunca dois
     faseMsg: 'Iniciando serviço…',
 });
 
@@ -680,7 +815,11 @@ const encerrarClienteChromium = async (session, client, motivo) => {
     // processo que nao seja o do pupBrowser. So roda quando ja ha indicio de
     // sujeira — sem isso, um recycle normal poderia matar o Chromium que uma
     // reconexao concorrente acabou de subir sobre o mesmo perfil.
-    if (destroyFalhou || sobreviveu) await encerrarChromiumsDoPerfil(session.authPath);
+    //
+    // `!pid` tambem e indicio: se pupBrowser.process() lancou, o browser ja
+    // estava desmontado e o pid fica desconhecido — sem a varredura, os filhos
+    // orfaos do perfil escapavam e seguravam o user-data-dir para sempre.
+    if (destroyFalhou || sobreviveu || !pid) await encerrarChromiumsDoPerfil(session.authPath);
 };
 
 const destroySessionRuntime = async (session, reason, removeFromMap = false) => {
@@ -1109,6 +1248,8 @@ const scheduleReconnect = (session, reason, msgOverride = null) => {
         console.log(`[${session.id}] Tentando reconectar...`);
         initializeSession(session);
     }, delay);
+    // Timer de ciclo de vida: nao pode segurar o event loop aberto sozinho.
+    if (session.reconnectTimer.unref) session.reconnectTimer.unref();
 };
 
 // ensureSession so inicializa sessao ausente do Map, e initializeSession sai
@@ -1169,19 +1310,81 @@ const recycleSession = async (session, reason, purgeAuth = false, msgOverride = 
     scheduleReconnect(session, reason, msgOverride);
 };
 
-const limparCachesChromium = (dir) => {
-    if (!fs.existsSync(dir)) return;
-    const caches = new Set(['Cache', 'Code Cache', 'GPUCache', 'DawnCache']);
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const fullPath = path.join(dir, entry.name);
-        if (entry.isDirectory() && caches.has(entry.name)) {
-            try { fs.rmSync(fullPath, { recursive: true, force: true }); } catch (err) {
-                console.warn(`Falha ao limpar cache Chromium ${fullPath}:`, err.message);
-            }
-        } else if (entry.isDirectory()) {
-            limparCachesChromium(fullPath);
-        }
+// Coalesce os recycles pedidos pelo caminho de envio. Varios envios da mesma
+// sessao podem estourar quase juntos (o worker envia em cadeia, mas o Django
+// dispara varias configs no mesmo tick); cada recycle a mais so tira CPU de
+// quem esta tentando voltar. Mesmo desenho do _preflightRecoveryPending em
+// preflight_recovery.js. recycleSession ja ignora chamada sem client, mas ai o
+// primeiro recycle ja pagou a conta inteira antes do segundo desistir.
+const agendarRecycleUnico = (session, motivo) => {
+    if (session.recyclePendente) return false;
+    session.recyclePendente = true;
+    const timer = setTimeout(() => {
+        Promise.resolve(recycleSession(session, motivo))
+            .catch(() => undefined)
+            .finally(() => { session.recyclePendente = false; });
+    }, 0);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+    return true;
+};
+
+// Caches descartaveis de um perfil do Chromium, por posicao conhecida.
+//
+// A versao anterior recursava a arvore inteira procurando os nomes, e a maior
+// subarvore do perfil (Service Worker, ~39MB) era percorrida em cheio a cada
+// recycle para nao apagar nada la dentro. Aqui as posicoes sao fixas: o custo
+// deixa de depender do tamanho do perfil.
+//
+// Service Worker fica DE FORA de proposito: e o bundle do WhatsApp Web em
+// cache. Apaga-lo economiza disco, mas faz cada reconexao rebaixar o bundle
+// inteiro de novo — exatamente a CPU que estamos tentando poupar.
+const CACHES_DO_PERFIL = [
+    'Cache', 'Code Cache', 'GPUCache', 'DawnCache',
+    'DawnWebGPUCache', 'DawnGraphiteCache',
+];
+// Baixados pelo component updater do Chromium e inuteis para o WhatsApp Web.
+// Em producao somavam ~110MB por perfil (component_crx_cache 58MB, WasmTtsEngine
+// 23MB, WidevineCdm 21MB, OnDeviceHeadSuggestModel 7,6MB) num volume de 1GB.
+// O --disable-component-update nos args do Chromium impede que voltem; esta
+// lista limpa o que os perfis antigos ja acumularam.
+const COMPONENTES_DESCARTAVEIS = [
+    'component_crx_cache', 'WasmTtsEngine', 'WidevineCdm',
+    'OnDeviceHeadSuggestModel', 'GraphiteDawnCache', 'GrShaderCache',
+    'ShaderCache', 'GPUPersistentCache', 'Crashpad',
+];
+
+const removerArvore = async (fullPath) => {
+    try {
+        await fs.promises.rm(fullPath, { recursive: true, force: true });
+    } catch (err) {
+        console.warn(`Falha ao limpar cache Chromium ${fullPath}:`, err.message);
     }
+};
+
+const limparCachesChromium = async (dir) => {
+    const raiz = path.join(dir, 'session');
+    // Tudo via fs.promises: um component_crx_cache tem dezenas de MB e milhares
+    // de arquivos; rmSync disso no event loop segurava o health check do Fly.
+    let entradas = [];
+    try {
+        entradas = await fs.promises.readdir(raiz, { withFileTypes: true });
+    } catch (err) {
+        if (err.code !== 'ENOENT') {
+            console.warn(`Falha ao varrer o perfil Chromium ${raiz}:`, err.message);
+        }
+        return;
+    }
+    await Promise.all(COMPONENTES_DESCARTAVEIS.map(
+        (nome) => removerArvore(path.join(raiz, nome))
+    ));
+    // Perfis do Chromium: 'Default' e eventuais 'Profile N'. IndexedDB, Local
+    // Storage e Cookies vivem aqui dentro e sao a CREDENCIAL — nunca entram
+    // em nenhuma das listas acima.
+    const perfis = entradas.filter((entry) => entry.isDirectory()
+        && (entry.name === 'Default' || entry.name.startsWith('Profile ')));
+    await Promise.all(perfis.flatMap((entry) => CACHES_DO_PERFIL.map(
+        (cache) => removerArvore(path.join(raiz, entry.name, cache))
+    )));
 };
 
 const initializeSession = (session) => {
@@ -1197,8 +1400,14 @@ const initializeSession = (session) => {
     // Ordem obrigatoria: liberar ANTES de remover os locks. Invertido, apagariamos
     // o SingletonLock e perderiamos o unico ponteiro para o orfao que segura o perfil.
     liberarPerfilChromium(session.authPath);
-    removerLocksChromium(session.authPath);
-    limparCachesChromium(session.authPath);
+    // Locks e caches saem do event loop (fs.promises), mas o initialize do
+    // Chromium ESPERA a limpeza terminar: subir o navegador antes do unlink
+    // poderia apagar o SingletonLock VIVO dele. As duas funcoes engolem os
+    // proprios erros (logam e seguem), entao esta promise nunca rejeita.
+    const limpezaPerfil = Promise.all([
+        removerLocksChromium(session.authPath),
+        limparCachesChromium(session.authPath),
+    ]);
     // Enquanto o QR nao chega, deixa um rastro no volume. Se o worker reiniciar
     // agora, o boot re-arma um QR novo em vez de largar a sessao em 'inativo'.
     if (session.qrBootstrapAtivo) marcarQrBootstrap(session);
@@ -1226,6 +1435,11 @@ const initializeSession = (session) => {
                 '--disk-cache-size=16777216',
                 '--media-cache-size=16777216',
                 '--no-first-run',
+                // O component updater baixava ~110MB por perfil que o WhatsApp
+                // Web nunca usa (component_crx_cache, WasmTtsEngine, WidevineCdm,
+                // OnDeviceHeadSuggestModel). Num volume de 1GB com dois perfis
+                // isso era um terco do disco, mais a CPU e a rede do download.
+                '--disable-component-update',
             ]
         }
     });
@@ -1268,6 +1482,8 @@ const initializeSession = (session) => {
                 console.error(`[${session.id}] Falha ao reciclar sessao travada:`, err.message);
             }
         }, timeoutMs);
+        // Timer de ciclo de vida: nao pode segurar o event loop aberto sozinho.
+        if (session.initTimer.unref) session.initTimer.unref();
     };
     armInitializationTimeout('inicializacao');
 
@@ -1503,7 +1719,7 @@ const initializeSession = (session) => {
         scheduleReconnect(session, reason);
     });
 
-    client.initialize().catch((error) => {
+    limpezaPerfil.then(() => client.initialize()).catch((error) => {
         if (session.client !== client) return;
         if (session.initTimer) clearTimeout(session.initTimer);
         session.initTimer = null;
@@ -1785,6 +2001,8 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             );
         }
         session.lastSendAt = Date.now();
+        // Uma midia que sobe zera a suspeita: os stalls so contam quando SEGUIDOS.
+        session.stallsSeguidos = 0;
         console.log(`[${session.id}] Envio confirmado: ${confirmacao.mensagemId} -> ${chatId}`);
         return {
             sucesso: true,
@@ -1813,7 +2031,7 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
                 `[${session.id}] Frame do WhatsApp foi recarregado após iniciar o envio; `
                 + `mantendo como envio protegido (${confirmacao.mensagemId}).`
             );
-            setTimeout(() => recycleSession(session, 'frame destacado durante envio'), 0).unref();
+            agendarRecycleUnico(session, 'frame destacado durante envio');
             return {
                 sucesso: true,
                 via: 'local',
@@ -1838,16 +2056,34 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             //   nao responde -> a pagina morreu (CPU/recurso) e o recycle e o certo.
             // A sonda tem de ser barata e curta: aqui o prazo do usuario JA acabou.
             const paginaViva = await sondarVivacidadePagina(session);
+            const veredito = veredictoDeTimeoutDeEnvio(paginaViva);
+            session.stallsSeguidos = veredito === 'stall_no_upload'
+                ? (session.stallsSeguidos || 0) + 1
+                : 0;
+            const reciclar = deveReciclarAposTimeoutDeEnvio(veredito, session.stallsSeguidos);
             registrarLifecycle(session, 'send_timeout', {
                 tipo,
                 etapa,
                 pagina_viva: paginaViva,
-                veredito: paginaViva === true ? 'stall_no_upload'
-                    : paginaViva === false ? 'pagina_travada' : 'indeterminado',
+                veredito,
+                stalls_seguidos: session.stallsSeguidos,
+                reciclando: reciclar,
                 duracao_ms: duracao(),
             });
-            console.warn(`[${session.id}] Resultado incerto apos timeout de envio; reciclando sessao.`);
-            setTimeout(() => recycleSession(session, 'timeout com entrega incerta'), 0).unref();
+            if (reciclar) {
+                session.stallsSeguidos = 0;
+                console.warn(`[${session.id}] Resultado incerto apos timeout de envio; reciclando sessao.`);
+                agendarRecycleUnico(session, 'timeout com entrega incerta');
+            } else {
+                // A pagina respondeu a sonda: o Chromium esta bem e quem travou foi
+                // o upload. Derrubar a sessao aqui so custa CPU e ainda ressincroniza
+                // centenas de grupos. O envio segue devolvido como 'incerto' logo
+                // abaixo, entao o Django continua sem repetir nada.
+                console.warn(
+                    `[${session.id}] Upload da midia travou com a pagina viva; mantendo a sessao `
+                    + `(${session.stallsSeguidos}/${STALLS_ATE_RECICLAR} antes de reciclar).`
+                );
+            }
             return {
                 sucesso: false,
                 erro: 'O WhatsApp não confirmou o envio a tempo; confirme no grupo antes de tentar novamente.',
@@ -1893,7 +2129,7 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             // Ainda não chamamos sendMessage: não há risco de duplicar. A sessão
             // está no meio de uma recarga e será restaurada para a próxima ação.
             console.warn(`[${session.id}] WhatsApp Web ainda instável antes do envio; reciclando sessão.`);
-            setTimeout(() => recycleSession(session, 'recarga do WA Web antes do envio'), 0).unref();
+            agendarRecycleUnico(session, 'recarga do WA Web antes do envio');
             return {
                 sucesso: false,
                 erro: 'WhatsApp Web estava recarregando. A conexão será recuperada automaticamente; aguarde alguns segundos e tente novamente.',
@@ -1928,7 +2164,7 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         console.error(`[${session.id}] Falha no envio:`, descrito);
         // Comparacao segue em erro.message: o texto descrito traz nome e stack.
         if (erro && erro.message === 'sendMessage timeout') {
-            setTimeout(() => recycleSession(session, 'timeout ao enviar mensagem'), 0).unref();
+            agendarRecycleUnico(session, 'timeout ao enviar mensagem');
         }
         return {
             sucesso: false,

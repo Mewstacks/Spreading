@@ -13,6 +13,9 @@ const {
     classificarEstadoWa,
     estadoIndicaQueda,
     keepaliveIndicaQueda,
+    deveReciclarAposTimeoutDeEnvio,
+    veredictoDeTimeoutDeEnvio,
+    STALLS_ATE_RECICLAR,
     KEEPALIVE_FALHAS_ATE_QUEDA,
     syncGroupsOutcome,
     groupRetryDelay,
@@ -271,4 +274,29 @@ test('keepalive so declara queda depois de falhas seguidas', () => {
     assert.equal(keepaliveIndicaQueda(KEEPALIVE_FALHAS_ATE_QUEDA), true);
     assert.equal(keepaliveIndicaQueda(KEEPALIVE_FALHAS_ATE_QUEDA + 1), true);
     assert.equal(keepaliveIndicaQueda(0), false);
+});
+
+test('stall_no_upload segura a sessao: pagina viva nao se conserta reciclando', () => {
+    // O veredito significa que a sonda respondeu — o Chromium esta bem e quem
+    // travou foi o upload. Ate 08/08 o codigo reciclava mesmo assim, e cada
+    // envio lento derrubava um Chromium saudavel em plena falta de CPU.
+    assert.equal(deveReciclarAposTimeoutDeEnvio('stall_no_upload', 1), false);
+    assert.equal(deveReciclarAposTimeoutDeEnvio('stall_no_upload', 2), false);
+    // Pagina viva mas nenhuma midia sai nunca mais: a partir do 3o stall
+    // seguido reciclar e a unica saida que resta.
+    assert.equal(deveReciclarAposTimeoutDeEnvio('stall_no_upload', STALLS_ATE_RECICLAR), true);
+    assert.equal(deveReciclarAposTimeoutDeEnvio('stall_no_upload', STALLS_ATE_RECICLAR + 1), true);
+});
+
+test('pagina travada ou veredito indeterminado reciclam na hora', () => {
+    assert.equal(deveReciclarAposTimeoutDeEnvio('pagina_travada', 0), true);
+    assert.equal(deveReciclarAposTimeoutDeEnvio('indeterminado', 0), true);
+    assert.equal(deveReciclarAposTimeoutDeEnvio(undefined, 0), true);
+});
+
+test('veredictoDeTimeoutDeEnvio traduz a sonda de vivacidade', () => {
+    assert.equal(veredictoDeTimeoutDeEnvio(true), 'stall_no_upload');
+    assert.equal(veredictoDeTimeoutDeEnvio(false), 'pagina_travada');
+    assert.equal(veredictoDeTimeoutDeEnvio(null), 'indeterminado');
+    assert.equal(veredictoDeTimeoutDeEnvio(undefined), 'indeterminado');
 });

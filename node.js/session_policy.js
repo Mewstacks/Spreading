@@ -120,6 +120,37 @@ function keepaliveIndicaQueda(falhasConsecutivas) {
     return Number(falhasConsecutivas) >= KEEPALIVE_FALHAS_ATE_QUEDA;
 }
 
+// Quantos timeouts de envio seguidos com a PAGINA VIVA a sessao aguenta antes
+// de ser reciclada assim mesmo. Nao e 1: um upload lento e rotina.
+const STALLS_ATE_RECICLAR = 3;
+
+// Decide se um timeout de envio deve derrubar o Chromium.
+//
+// O veredito vem de sondarVivacidadePagina, e 'stall_no_upload' significa que a
+// pagina RESPONDEU a sonda: o Chromium esta vivo e quem travou foi o
+// prep/upload da midia, do lado do WhatsApp/rede. Reciclar ali nao conserta
+// nada e custa caro — derruba um Chromium saudavel, varre o perfil, sobe outro
+// e ressincroniza centenas de grupos. Ate 08/08 o codigo calculava o veredito,
+// escrevia no log que reciclar "nao resolve nada" e reciclava mesmo assim, nos
+// tres vereditos. Com a CPU no limite isso virou tempestade: cada envio que
+// estourava derrubava a sessao, a sessao voltava consumindo CPU, e o envio
+// seguinte estourava de novo.
+//
+// A excecao e o pipeline de upload morto de vez: a pagina responde '1+1' e
+// nenhuma midia sai nunca mais. Por isso o veredito so segura a sessao ate o
+// terceiro timeout seguido; dai em diante reciclar e a unica saida que resta.
+function deveReciclarAposTimeoutDeEnvio(veredito, stallsSeguidos = 0) {
+    if (veredito !== 'stall_no_upload') return true;
+    return (Number(stallsSeguidos) || 0) >= STALLS_ATE_RECICLAR;
+}
+
+// Traduz a sonda de vivacidade (true/false/null) no veredito registrado no log.
+function veredictoDeTimeoutDeEnvio(paginaViva) {
+    if (paginaViva === true) return 'stall_no_upload';
+    if (paginaViva === false) return 'pagina_travada';
+    return 'indeterminado';
+}
+
 // Decide o que fazer quando syncGroups e chamado com um sync ja em voo.
 // Um getChats por sessao de cada vez e inegociavel (dezenas de MB de Chromium),
 // entao 'repicar' NAO paraleliza: reaproveita a promise em voo e re-roda depois.
@@ -179,6 +210,9 @@ module.exports = {
     estadoIndicaQueda,
     keepaliveIndicaQueda,
     KEEPALIVE_FALHAS_ATE_QUEDA,
+    deveReciclarAposTimeoutDeEnvio,
+    veredictoDeTimeoutDeEnvio,
+    STALLS_ATE_RECICLAR,
     syncGroupsOutcome,
     groupRetryDelay,
     syncPollDelay,
