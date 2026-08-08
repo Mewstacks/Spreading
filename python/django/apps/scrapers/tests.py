@@ -1168,7 +1168,8 @@ class WhatsAppStatusCacheTests(SimpleTestCase):
         request.assert_called_once_with(
             "POST", "http://whatsapp.internal:3000/api/sessoes/reset",
             headers=_TEST_WA_HEADERS,
-            params=None, json={"session": "user-42"}, timeout=25,
+            params=None, json={"session": "user-42"},
+            timeout=(whatsapp_client._TIMEOUT_CONNECT_S, 25),
         )
 
 
@@ -1202,7 +1203,8 @@ class WhatsAppIsolationTests(SimpleTestCase):
         request.assert_called_once_with(
             "POST", "http://whatsapp.internal:3000/api/sessoes",
             headers=_TEST_WA_HEADERS,
-            params=None, json={"session": "user-42"}, timeout=10,
+            params=None, json={"session": "user-42"},
+            timeout=(whatsapp_client._TIMEOUT_CONNECT_S, 10),
         )
 
     @override_settings(
@@ -1424,7 +1426,8 @@ class WhatsAppTransportContractTests(SimpleTestCase):
         request.assert_called_once_with(
             "POST", "http://whatsapp.internal:3000/api/sessoes/logout",
             headers=_TEST_WA_HEADERS,
-            params=None, json={"session": "user-42"}, timeout=25,
+            params=None, json={"session": "user-42"},
+            timeout=(whatsapp_client._TIMEOUT_CONNECT_S, 25),
         )
 
 

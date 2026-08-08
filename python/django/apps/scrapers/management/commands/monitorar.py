@@ -13,6 +13,11 @@ por isso este loop não tem flag de liga/desliga.
 Também reconcilia os eventos ainda sem incidente projetado. Isso era feito DENTRO do
 GET da tela de Saúde (escrita em request de leitura), o que impedia o auto-refresh:
 com polling, cada carregamento inflaria as ocorrências.
+
+E abriga o vigia externo do worker WhatsApp (wa_supervisor): a cada POLL de 15s ele
+sonda o /health do spreading-wa e reinicia a máquina pela API do Fly se ela parar de
+responder — o Fly não reinicia máquina por health check critical, então sem alguém de
+fora uma VM travada ficava assim para sempre (incidente de 08/08).
 """
 import logging
 import time
@@ -22,6 +27,7 @@ from django.core.management.base import BaseCommand
 from django.db import DatabaseError, connections
 
 from apps.scrapers import automacao_state as st
+from apps.scrapers import wa_supervisor
 from apps.scrapers.monitor_conexao import verificar_e_notificar
 
 logger = logging.getLogger(__name__)
@@ -53,6 +59,10 @@ class Command(BaseCommand):
         proximo = time.monotonic()
         falhas_banco = 0
         while True:
+            # Vigia externo do worker WhatsApp: na cadência do POLL (15s), não no
+            # tick — com 6 falhas a 15s a recuperação leva ~90s em vez de ~30min.
+            # verificar() nunca levanta; o vigia não pode derrubar o monitor.
+            wa_supervisor.verificar()
             if time.monotonic() < proximo:
                 st.write_state(JOB, fase="aguardando")
                 time.sleep(POLL)

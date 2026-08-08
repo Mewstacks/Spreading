@@ -114,14 +114,24 @@ def _params(session=None) -> dict:
     return {"session": session} if session else None
 
 
+# Connect curto, read no valor do chamador: numa 6PN saudável o connect completa
+# em ~0,03s, então esperar mais de 2s por ele nunca vale — com a máquina morta é
+# o CONNECT que pendura, e 2s × 2 tentativas cortam o pior caso de ~10s para ~4s.
+# (Com a VM travada mas aceitando TCP quem delata é o read, que segue do chamador.)
+_TIMEOUT_CONNECT_S = 2
+
+
 def _request_json(method: str, path: str, *, headers=None, params=None, json=None,
                   timeout=5, attempts=2) -> dict:
+    """`timeout` é o orçamento de READ de cada tentativa; o connect usa
+    _TIMEOUT_CONNECT_S. O contrato {"erro": ...} é deliberado: nada de
+    raise_for_status aqui."""
     url = f"{_base_url()}{path}"
     last_error = None
     for attempt in range(attempts):
         try:
             r = requests.request(method, url, headers=headers, params=params,
-                                 json=json, timeout=timeout)
+                                 json=json, timeout=(_TIMEOUT_CONNECT_S, timeout))
             return r.json()
         except Exception as e:
             last_error = e
@@ -146,10 +156,10 @@ def status(session=None) -> dict:
     """Retorna {conectado: bool}. Exige api-key (rota fechada).
 
     Cacheado por _STATUS_TTL_S porque o painel faz polling e cada chamada custa um
-    request ao Node — que, com o Node fora do ar, leva até 10s (timeout 5 × 2
-    tentativas) segurando uma thread do gunicorn. Com poucas threads e várias abas
-    abertas isso derrubava o app inteiro. Cachear a resposta de erro é intencional:
-    é justamente quando não se deve martelar o Node.
+    request ao Node — que, com a máquina fora do ar, leva ~4s (connect 2s × 2
+    tentativas; ver _TIMEOUT_CONNECT_S) segurando uma thread do gunicorn. Com poucas
+    threads e várias abas abertas isso derrubava o app inteiro. Cachear a resposta
+    de erro é intencional: é justamente quando não se deve martelar o Node.
     """
     if not _enabled(session):
         return _disabled_payload()

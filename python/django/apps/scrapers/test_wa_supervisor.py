@@ -1,0 +1,119 @@
+from unittest.mock import MagicMock, patch
+
+from django.core.cache import cache
+from django.test import SimpleTestCase, override_settings
+
+from apps.scrapers import wa_supervisor
+
+_SETTINGS = dict(
+    WA_SUPERVISOR_ENABLED=True,
+    WA_SUPERVISOR_FALHAS=3,
+    WA_SUPERVISOR_COOLDOWN_MIN=15,
+    WA_MACHINE_APP="spreading-wa",
+    FLY_API_TOKEN="token-teste",
+    WHATSAPP_API_URL="http://wa-interno:3000",
+)
+
+
+class DecidirAcaoTests(SimpleTestCase):
+    """A decisão pura: sem token vira no-op, o limite é seguido e o cooldown
+    segura o restart — é ele que impede o loop de restarts."""
+
+    def test_sem_token_e_noop_mesmo_com_limite_estourado(self):
+        self.assertEqual(
+            wa_supervisor.decidir_acao(token="", falhas_seguidas=99,
+                                       em_cooldown=False, falhas_limite=3),
+            "noop",
+        )
+
+    def test_abaixo_do_limite_aguarda(self):
+        for falhas in (1, 2):
+            self.assertEqual(
+                wa_supervisor.decidir_acao(token="t", falhas_seguidas=falhas,
+                                           em_cooldown=False, falhas_limite=3),
+                "aguardar",
+            )
+
+    def test_no_limite_reinicia(self):
+        self.assertEqual(
+            wa_supervisor.decidir_acao(token="t", falhas_seguidas=3,
+                                       em_cooldown=False, falhas_limite=3),
+            "reiniciar",
+        )
+
+    def test_no_limite_mas_em_cooldown_aguarda(self):
+        self.assertEqual(
+            wa_supervisor.decidir_acao(token="t", falhas_seguidas=99,
+                                       em_cooldown=True, falhas_limite=3),
+            "aguardar",
+        )
+
+
+@override_settings(**_SETTINGS)
+class VerificarTests(SimpleTestCase):
+    """O wrapper stateful: contador e cooldown no cache (falso, locmem), sonda e
+    API do Fly mockadas — nenhum IO real."""
+
+    def setUp(self):
+        cache.clear()
+        wa_supervisor._avisou_sem_token = False
+
+    def _rodar_falhas(self, n, reiniciar, listar):
+        with patch.object(wa_supervisor, "_sonda_saudavel", return_value=False), \
+             patch.object(wa_supervisor.fly_infra, "_listar_maquinas", listar), \
+             patch.object(wa_supervisor.fly_infra, "reiniciar_maquina", reiniciar), \
+             patch.object(wa_supervisor, "log_event") as evento:
+            return [wa_supervisor.verificar() for _ in range(n)], evento
+
+    def test_contador_sobe_nas_falhas_e_reinicia_no_limite(self):
+        listar = MagicMock(return_value=[{"id": "mach-123"}])
+        reiniciar = MagicMock()
+        acoes, evento = self._rodar_falhas(3, reiniciar, listar)
+        self.assertEqual(acoes, ["aguardar", "aguardar", "reiniciado"])
+        # O id veio da API (nada de id fixo no código) e o restart foi UMA vez.
+        listar.assert_called_once_with("spreading-wa")
+        reiniciar.assert_called_once_with("spreading-wa", "mach-123")
+        # O restart aparece na Saúde em vez de ser silencioso.
+        self.assertEqual(evento.call_args[0][0], "whatsapp")
+        self.assertEqual(evento.call_args[0][1], "worker_reiniciado")
+        self.assertEqual(evento.call_args[1]["level"], "error")
+
+    def test_sonda_ok_zera_o_contador(self):
+        cache.set("wa_supervisor_falhas", 2)
+        with patch.object(wa_supervisor, "_sonda_saudavel", return_value=True), \
+             patch.object(wa_supervisor.fly_infra, "reiniciar_maquina") as reiniciar:
+            self.assertEqual(wa_supervisor.verificar(), "ok")
+        self.assertEqual(cache.get("wa_supervisor_falhas"), 0)
+        reiniciar.assert_not_called()
+
+    def test_cooldown_impede_loop_de_restart(self):
+        listar = MagicMock(return_value=[{"id": "mach-123"}])
+        reiniciar = MagicMock()
+        self._rodar_falhas(3, reiniciar, listar)  # atinge o limite e reinicia
+        self.assertEqual(reiniciar.call_count, 1)
+        # Falhas continuam (worker subindo) — sem cooldown cada passada reiniciaria.
+        acoes, _ = self._rodar_falhas(6, reiniciar, listar)
+        self.assertEqual(acoes, ["aguardar"] * 6)
+        self.assertEqual(reiniciar.call_count, 1)
+
+    def test_sem_token_nem_sonda(self):
+        with override_settings(FLY_API_TOKEN=""):
+            with patch.object(wa_supervisor, "_sonda_saudavel") as sonda, \
+                 patch.object(wa_supervisor.fly_infra, "reiniciar_maquina") as reiniciar:
+                self.assertEqual(wa_supervisor.verificar(), "sem_token")
+                self.assertEqual(wa_supervisor.verificar(), "sem_token")
+        sonda.assert_not_called()
+        reiniciar.assert_not_called()
+
+    def test_desligado_pela_flag_nao_faz_nada(self):
+        with override_settings(WA_SUPERVISOR_ENABLED=False):
+            with patch.object(wa_supervisor, "_sonda_saudavel") as sonda:
+                self.assertEqual(wa_supervisor.verificar(), "desligado")
+        sonda.assert_not_called()
+
+    def test_falha_da_api_fly_nao_derruba_o_monitor(self):
+        listar = MagicMock(side_effect=RuntimeError("API Fly fora"))
+        cache.set("wa_supervisor_falhas", 2)  # a próxima falha atinge o limite
+        with patch.object(wa_supervisor, "_sonda_saudavel", return_value=False), \
+             patch.object(wa_supervisor.fly_infra, "_listar_maquinas", listar):
+            self.assertEqual(wa_supervisor.verificar(), "erro")

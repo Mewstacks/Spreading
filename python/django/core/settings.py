@@ -650,6 +650,19 @@ FLY_APPS = [a.strip() for a in os.getenv(
 FLY_CUSTO_MENSAL_USD = os.getenv("FLY_CUSTO_MENSAL_USD", "15-30")
 
 # ─────────────────────────────────────────────────────────────
+# Vigia externo do worker WhatsApp (wa_supervisor). O watchdog interno morre
+# junto quando a VM congela, e o Fly não reinicia máquina por health check
+# critical — alguém de fora precisa derrubá-la. Roda no POLL de 15s do processo
+# `monitor`: com 6 falhas a recuperação leva ~90s. Sem FLY_API_TOKEN = no-op.
+# WA_SUPERVISOR_FALHAS: sondas /health seguidas falhando antes de reiniciar.
+# WA_SUPERVISOR_COOLDOWN_MIN: intervalo mínimo entre restarts (anti-loop).
+# ─────────────────────────────────────────────────────────────
+WA_SUPERVISOR_ENABLED = os.getenv("WA_SUPERVISOR_ENABLED", "1") == "1"
+WA_SUPERVISOR_FALHAS = int(os.getenv("WA_SUPERVISOR_FALHAS", "6"))
+WA_SUPERVISOR_COOLDOWN_MIN = int(os.getenv("WA_SUPERVISOR_COOLDOWN_MIN", "15"))
+WA_MACHINE_APP = os.getenv("WA_MACHINE_APP", "spreading-wa")
+
+# ─────────────────────────────────────────────────────────────
 # Observabilidade: logging estruturado no console (capturado pelo honcho/Fly) +
 # Sentry opcional. Os loops (scrape/envio/senders) engolem exceções com try/except;
 # logar no logger 'apps' garante que apareçam nos logs (e no Sentry, se configurado).

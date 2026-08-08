@@ -817,7 +817,13 @@ def whatsapp_painel(request):
 def whatsapp_status_json(request):
     """JSON de status para polling do front."""
     from apps.scrapers import whatsapp_client
-    return JsonResponse(whatsapp_client.status(_wa_session(request)))
+    try:
+        return JsonResponse(whatsapp_client.status(_wa_session(request)))
+    except whatsapp_client.WhatsAppError as e:
+        # Falha de assinatura/RLS não é worker fora do ar: devolve o motivo real
+        # no contrato {"erro": ...} em vez de vazar 500 para o front.
+        logger.warning("status WhatsApp sem autorização: %s", e)
+        return JsonResponse({"erro": str(e)})
 
 
 @require_POST
@@ -837,7 +843,13 @@ def whatsapp_refresh_grupos(request):
 def whatsapp_grupos_json(request):
     """Lista grupos (GET leve) para o front carregar via AJAX sem travar o render."""
     from apps.scrapers import whatsapp_client
-    return JsonResponse(whatsapp_client.listar_grupos(_wa_session(request)))
+    try:
+        return JsonResponse(whatsapp_client.listar_grupos(_wa_session(request)))
+    except whatsapp_client.WhatsAppError as e:
+        # Idem whatsapp_status_json: erro de chave vira {"erro": ...} com o
+        # motivo real, não um 500 indistinguível de worker morto.
+        logger.warning("grupos WhatsApp sem autorização: %s", e)
+        return JsonResponse({"erro": str(e)})
 
 
 @require_POST
