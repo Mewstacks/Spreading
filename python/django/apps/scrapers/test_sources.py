@@ -826,6 +826,42 @@ class EnviosManuaisNaoSeguramTransacaoTests(TestCase):
         self.assertIn("if not RELEASE_COMMAND_PROCESS", fonte)
 
 
+class ChecagensDeConexaoTemEscopoDeTenantTests(TestCase):
+    """As checagens de conexão também vão ao banco — e as delas ficaram de fora.
+
+    Quando os envios manuais passaram a `segurar_transacao=False`, as queries
+    VISÍVEIS foram convertidas, mas as escondidas dentro das próprias checagens
+    (capability do WhatsApp, flags de piloto, sessão do ML, cache de link) seguiram
+    nuas. Sob RLS elas voltam zero linhas, e o resultado é o pior possível: a tela de
+    conexão verde e o envio recusando por "desconectado".
+    """
+
+    def test_capability_do_whatsapp_le_com_escopo(self):
+        import inspect
+        from apps.accounts import wa_capabilities
+        fonte = inspect.getsource(wa_capabilities.connection_for_session)
+        self.assertIn("executar_orm_ou_direto", fonte)
+
+    def test_flags_de_piloto_leem_com_escopo(self):
+        import inspect
+        from apps.accounts import feature_flags
+        for flag in (feature_flags.enabled_for_user,
+                     feature_flags.enabled_for_whatsapp_session):
+            with self.subTest(flag=flag.__name__):
+                self.assertIn("_no_tenant(", inspect.getsource(flag))
+
+    def test_link_afiliado_do_ml_le_e_grava_com_escopo(self):
+        """Sem escopo, `link_cacheado` some e `has_storage_state` diz "sem sessão":
+        o envio pede reconexão de uma conta que nunca caiu."""
+        import inspect
+        from apps.scrapers.scraper_mercadolivre import link as ml
+        fonte = inspect.getsource(ml.gerar_link_afiliado_para_produto)
+        for chamada in ("_no_tenant(link_cacheado", "_no_tenant(has_storage_state",
+                        "_no_tenant(salvar_cache", "_no_tenant(registrar_falha"):
+            with self.subTest(chamada=chamada):
+                self.assertIn(chamada, fonte)
+
+
 class MensagensDoGerarLinksTests(TransactionTestCase):
     """Anti-bot e sessão morta pedem AÇÕES DIFERENTES do usuário: esperar vs
     reconectar. Unificar os dois num "[ERRO] sessão expirada" com link de

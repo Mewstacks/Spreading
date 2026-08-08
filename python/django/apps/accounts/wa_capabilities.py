@@ -37,13 +37,28 @@ def _decode_private_key() -> Ed25519PrivateKey:
 
 
 def connection_for_session(session_id: str) -> WhatsAppConnection:
+    """A conexão WhatsApp desta sessão, lida SEMPRE com o escopo de tenant instalado.
+
+    `accounts_whatsappconnection` está sob RLS. Esta função é chamada de dentro de
+    `whatsapp_client._headers`, ou seja: de todo request ao worker, inclusive os que
+    partem de um job SSE rodando com o tenant apenas ANOTADO (`segurar_transacao=False`).
+    Sem reinstalar o escopo a query volta zero linhas, o PermissionDenied vira
+    "não foi possível autorizar a sessão" e o envio acusa desconexão enquanto a tela
+    — que roda dentro da request, com escopo — mostra tudo conectado.
+    """
+    from .tenant import executar_orm_ou_direto
+
     session_id = str(session_id or "").strip()
     if not session_id:
         raise PermissionDenied("Sessão WhatsApp ausente.")
-    connection = WhatsAppConnection.objects.select_related("organization").filter(
-        instance_id=session_id,
-        organization__status="active",
-    ).first()
+
+    def _buscar():
+        return WhatsAppConnection.objects.select_related("organization").filter(
+            instance_id=session_id,
+            organization__status="active",
+        ).first()
+
+    connection = executar_orm_ou_direto(_buscar)
     if connection is None:
         raise PermissionDenied("Sessão WhatsApp não pertence a organização ativa.")
     return connection

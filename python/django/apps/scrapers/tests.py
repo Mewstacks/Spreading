@@ -7308,3 +7308,234 @@ class ListagemPublicaDoCupomTests(SimpleTestCase):
 
         self.assertFalse(ativacao_publicavel(
             self._cupom(link="https://www.mercadolivre.com.br/cupons")))
+
+
+class EscopoDeTenantNasChecagensDeConexaoTests(TestCase):
+    """Regressão: tela verde e envio dizendo "desconectado" (WhatsApp e ML).
+
+    Os streams de envio passaram a rodar com `segurar_transacao=False`, em que o
+    tenant fica apenas ANOTADO — nenhum GUC instalado na conexão. As queries
+    visíveis foram convertidas para `executar_no_tenant`, mas as que vivem DENTRO
+    das checagens de conexão continuaram nuas: sob RLS elas voltam zero linhas e
+    cada checagem conclui "não conectado", enquanto a tela — que roda dentro de uma
+    request, com escopo instalado — mostra tudo conectado.
+
+    O suite roda em SQLite, onde não existe RLS: o que se observa aqui é o escopo
+    vigente NO MOMENTO da query. Escopo ausente é exatamente o que a RLS pune em
+    produção.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("escopo-conexao", password="test")
+        self.organization = self.user.personal_organization
+        self.sessao = self.user.perfil.sessao_whatsapp()
+
+    @contextmanager
+    def _espiar_escopo(self, alvo, atributo, modelo):
+        """Troca `alvo.<atributo>` por um espião que anota o escopo e delega ao real."""
+        from apps.accounts.tenant import current_organization_id
+
+        visto = {"escopo": "__nao_consultado__"}
+        gerente = modelo.objects
+
+        class _Espiao:
+            def __getattr__(_self, nome):
+                visto["escopo"] = current_organization_id()
+                return getattr(gerente, nome)
+
+        with patch.object(alvo, atributo, SimpleNamespace(objects=_Espiao())):
+            yield visto
+
+    # ── WhatsApp ──
+
+    def test_capability_e_emitida_com_o_tenant_instalado(self):
+        from apps.accounts import wa_capabilities
+        from apps.accounts.models import WhatsAppConnection
+        from apps.accounts.tenant import tenant_suspenso
+
+        with self._espiar_escopo(
+            wa_capabilities, "WhatsAppConnection", WhatsAppConnection,
+        ) as visto:
+            with tenant_suspenso(self.organization.pk, actor_id=self.user.pk):
+                token = wa_capabilities.issue_capability(self.sessao, ["status"])
+
+        self.assertTrue(token)
+        self.assertEqual(visto["escopo"], str(self.organization.pk))
+
+    @override_settings(WHATSAPP_WEB_ENABLED=True)
+    def test_flag_do_whatsapp_le_o_vinculo_com_o_tenant_instalado(self):
+        from apps.accounts import feature_flags
+        from apps.accounts.models import WhatsAppConnection
+        from apps.accounts.tenant import tenant_suspenso
+
+        with override_settings(PILOT_ORGANIZATION_IDS={str(self.organization.pk)}):
+            with self._espiar_escopo(
+                feature_flags, "WhatsAppConnection", WhatsAppConnection,
+            ) as visto:
+                with tenant_suspenso(self.organization.pk, actor_id=self.user.pk):
+                    liberado = feature_flags.enabled_for_whatsapp_session(self.sessao)
+
+        self.assertTrue(liberado)
+        self.assertEqual(visto["escopo"], str(self.organization.pk))
+
+    @override_settings(ML_LINK_BUILDER_ENABLED=True)
+    def test_flag_por_usuario_resolve_a_organizacao_com_o_tenant_instalado(self):
+        from apps.accounts import feature_flags
+        from apps.accounts.tenant import current_organization_id, tenant_suspenso
+        from apps.accounts.models import organization_for_user
+
+        visto = {}
+
+        def _espiao(user):
+            visto["escopo"] = current_organization_id()
+            return organization_for_user(user)
+
+        with override_settings(PILOT_ORGANIZATION_IDS={str(self.organization.pk)}):
+            with patch.object(feature_flags, "organization_for_user", _espiao):
+                with tenant_suspenso(self.organization.pk, actor_id=self.user.pk):
+                    liberado = feature_flags.enabled_for_user(
+                        "ML_LINK_BUILDER_ENABLED", self.user)
+
+        self.assertTrue(liberado)
+        self.assertEqual(visto["escopo"], str(self.organization.pk))
+
+    @override_settings(WHATSAPP_WEB_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
+    def test_gate_de_envio_aprova_whatsapp_conectado_sob_tenant_suspenso(self):
+        from apps.accounts.tenant import tenant_suspenso
+
+        whatsapp_client.invalidar_status(self.sessao)
+        with patch.object(whatsapp_client, "_request_json",
+                          return_value={"conectado": True, "fase": "conectado"}):
+            with tenant_suspenso(self.organization.pk, actor_id=self.user.pk):
+                erro = ofertas._canal_pronto_ou_erro("whatsapp", self.user)
+
+        self.assertIsNone(erro)
+
+    def test_falha_de_autorizacao_nao_pede_para_reler_o_qr(self):
+        """"Não falamos com o worker" != "seu pareamento caiu".
+
+        Marcar precisa_login_wa aqui mandava o usuário reescanear um QR Code que
+        estava perfeito, sem nunca revelar que o defeito era do nosso lado.
+        """
+        from apps.scrapers.conexoes import Estado
+
+        fora = Estado(False, "WhatsApp", "worker",
+                      "Não foi possível falar com o serviço de WhatsApp.",
+                      "servico_fora")
+        with patch("apps.scrapers.conexoes.estado_whatsapp", return_value=fora):
+            erro = ofertas._canal_pronto_ou_erro("whatsapp", self.user)
+
+        self.assertIsNotNone(erro)
+        self.assertFalse(erro.get("precisa_login_wa"))
+        self.assertEqual(erro["classe"], ofertas.TRANSITORIO)
+
+    # ── Mercado Livre ──
+
+    def _produto(self):
+        return Produto.objects.create(
+            marketplace="mercadolivre", nome="Item escopo", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=70,
+            link_produto="https://produto.mercadolivre.com.br/MLB-556677",
+        )
+
+    def test_link_em_cache_e_lido_com_o_tenant_instalado(self):
+        """Sem escopo o cache some, o gate seguinte diz "sem sessão" e o envio
+        acusa "Sessão do Mercado Livre expirada" com a tela de conexão verde."""
+        from apps.accounts.tenant import tenant_suspenso
+        from apps.scrapers.marketplaces.registry import get_marketplace
+
+        produto = self._produto()
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto,
+            link_afiliado="https://meli.la/escopo", afiliado_ok=True,
+            verificado_ok=True, estado="pronto",
+            url_canonica="https://meli.la/escopo",
+        )
+
+        with tenant_suspenso(self.organization.pk, actor_id=self.user.pk):
+            info = get_marketplace("mercadolivre").build_affiliate_link(
+                produto, usuario=self.user)
+
+        self.assertEqual(info["link_afiliado"], "https://meli.la/escopo")
+
+    def test_sessao_do_ml_e_consultada_com_o_tenant_instalado(self):
+        from apps.accounts.tenant import current_organization_id, tenant_suspenso
+        from apps.scrapers.scraper_mercadolivre import link as ml
+
+        produto = self._produto()
+        visto = {}
+
+        def _espiao(user):
+            visto["escopo"] = current_organization_id()
+            return False
+
+        with patch.object(ml, "has_storage_state", _espiao):
+            with tenant_suspenso(self.organization.pk, actor_id=self.user.pk):
+                with self.assertRaises(ml.LoginError):
+                    ml.gerar_link_afiliado_para_produto(produto, usuario=self.user)
+
+        self.assertEqual(visto["escopo"], str(self.organization.pk))
+
+    # ── O caminho inteiro, como roda em produção ──
+
+    @contextmanager
+    def _rls_simulada(self, alvo, atributo, modelo):
+        """Emula a policy do Postgres: sem escopo instalado, a tabela some.
+
+        O suite roda em SQLite, onde RLS não existe — sem esta emulação o teste
+        passaria com e sem a correção, que é exatamente o que deixou o bug chegar
+        em produção.
+        """
+        from apps.accounts.tenant import current_organization_id
+
+        gerente = modelo.objects
+
+        class _SobPolicy:
+            def __getattr__(_self, nome):
+                visivel = gerente if current_organization_id() else gerente.none()
+                return getattr(visivel, nome)
+
+        with patch.object(alvo, atributo, SimpleNamespace(objects=_SobPolicy())):
+            yield
+
+    @override_settings(WHATSAPP_WEB_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
+    def test_envio_no_runner_real_nao_acusa_desconexao(self):
+        """Exatamente o que o usuário vê: o núcleo do envio rodando dentro do alvo de
+        thread do SSE, com `segurar_transacao=False` e a RLS valendo. O cupom até pode
+        não sair (falta link preparado), mas o motivo NUNCA pode ser "reconecte sua
+        conta" — e o worker tem de ter sido realmente consultado."""
+        from apps.accounts import wa_capabilities
+        from apps.accounts.models import WhatsAppConnection
+        from apps.accounts.tenant import organization_thread_target
+
+        fonte = FonteIngestao.objects.create(
+            slug="escopo-runner-fonte", marketplace="mercadolivre", nome="Cupons ML")
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="escopo:RUNNER", marketplace="mercadolivre",
+            titulo="Cupom RUNNER", codigo="RUNNER10",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 10},
+            estado="ativo", ultima_observacao=timezone.now())
+
+        resultado = {}
+
+        def _job():
+            resultado["envio"] = ofertas.enviar_cupom(
+                cupom, "900@g.us", canal="whatsapp", usuario=self.user,
+                destino_nome="Grupo")
+
+        whatsapp_client.invalidar_status(self.sessao)
+        with patch.object(whatsapp_client, "_request_json",
+                          return_value={"conectado": True, "fase": "conectado"}) as worker, \
+             self._rls_simulada(wa_capabilities, "WhatsAppConnection", WhatsAppConnection):
+            organization_thread_target(
+                self.organization, _job, segurar_transacao=False)()
+
+        envio = resultado["envio"]
+        # Sem a correção a capability nem é emitida: o gate desiste antes de existir
+        # qualquer pergunta ao worker.
+        self.assertTrue(worker.called, "o worker WhatsApp nunca foi consultado")
+        self.assertFalse(envio.get("precisa_login_wa"), envio.get("motivo"))
+        self.assertFalse(envio.get("precisa_login_ml"), envio.get("motivo"))
+        self.assertNotIn("Reconecte", envio.get("motivo") or "")
+        self.assertNotIn("desconectado", (envio.get("motivo") or "").lower())

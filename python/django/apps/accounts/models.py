@@ -373,15 +373,26 @@ class Perfil(models.Model):
         self.save(update_fields=["email_verificado", "verificado_em"])
 
     def sessao_whatsapp(self) -> str:
-        """Sessão WA do usuário (default = id do usuário em string)."""
-        organization = organization_for_user(self.user)
-        if organization is not None:
+        """Sessão WA do usuário (default = id do usuário em string).
+
+        Lê com o escopo de tenant instalado: `accounts_whatsappconnection` está sob
+        RLS, e sem escopo a consulta volta vazia e cai no fallback em silêncio. Hoje
+        o fallback dá no mesmo valor (o instance_id nasce de `wa_session or user_id`,
+        ver a migration 0015), mas depender dessa coincidência é o que transforma um
+        rename de instância num "WhatsApp desconectado" só no envio.
+        """
+        from .tenant import executar_orm_ou_direto
+
+        def _instancia():
+            organization = organization_for_user(self.user)
+            if organization is None:
+                return ""
             connection = WhatsAppConnection.objects.filter(
                 organization=organization,
             ).first()
-            if connection:
-                return connection.instance_id
-        return self.wa_session or str(self.user_id)
+            return connection.instance_id if connection else ""
+
+        return executar_orm_ou_direto(_instancia) or self.wa_session or str(self.user_id)
 
     def __str__(self):
         return f"Perfil<{self.user.get_username()}>"

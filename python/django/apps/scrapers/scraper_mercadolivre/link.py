@@ -86,6 +86,43 @@ MSG_SEM_SESSAO = ("Nenhuma conta do Mercado Livre conectada. Conecte em Conexão
                   "Mercado Livre para gerar links de afiliado.")
 
 
+def _organization_id_de(usuario):
+    """Id da organização do usuário, resolvido com o escopo de tenant instalado.
+
+    Anota o resultado em `usuario._spreading_organization_id` porque o resto do
+    trabalho acontece com o Playwright vivo, numa thread onde `organization_for_user`
+    não teria como se resolver sozinha.
+    """
+    if usuario is None:
+        return None
+    from apps.accounts.models import organization_for_user
+    from apps.accounts.tenant import executar_orm_ou_direto
+
+    organization = executar_orm_ou_direto(organization_for_user, usuario)
+    organization_id = getattr(organization, "pk", None)
+    usuario._spreading_organization_id = organization_id
+    return organization_id
+
+
+def _executor_no_tenant(organization_id):
+    """Devolve um `_no_tenant(fn, ...)` preso a esta organização.
+
+    Mesmo contrato de `tenant.executar_orm_ou_direto`, com a organização explícita:
+    no SSE (tenant só anotado) reinstala o escopo numa transação curta; em comandos
+    e testes sem escopo nenhum, chama direto.
+    """
+    def _no_tenant(fn, *args, **kwargs):
+        try:
+            return executar_no_tenant(
+                fn, *args, organization_id=organization_id, **kwargs,
+            )
+        except ValueError as exc:
+            if "exige organização" not in str(exc):
+                raise
+            return fn(*args, **kwargs)
+    return _no_tenant
+
+
 def _registrar_veredito_lb(usuario, veredito: str, motivo: str = "") -> None:
     """Publica no estado compartilhado o que ACABOU de acontecer com o portal.
 
@@ -435,16 +472,8 @@ def afiliate_link_builder(link_base, auth_path=None, usuario=None):
             "Link Builder por navegador está desativado para esta organização."
         )
     if usuario is not None:
-        try:
-            from apps.accounts.models import organization_for_user
-            organization = executar_no_tenant(organization_for_user, usuario)
-        except ValueError:
-            organization = organization_for_user(usuario)
-        organization_id = getattr(organization, "pk", None)
-        usuario._spreading_organization_id = organization_id
-        if not executar_no_tenant(
-            has_storage_state, usuario, organization_id=organization_id,
-        ):
+        organization_id = _organization_id_de(usuario)
+        if not _executor_no_tenant(organization_id)(has_storage_state, usuario):
             # A guarda acontece antes de iniciar_browser: nunca cria contexto
             # Chromium anônimo para um usuário sem credencial.
             raise LoginError(MSG_SEM_SESSAO)
@@ -629,20 +658,11 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
         # Resolve o tenant antes de abrir o Playwright. No SSE/worker ele já está
         # apenas anotado; em chamadas diretas (comandos/testes) descobrimos a
         # organização numa consulta curta e passamos o id explicitamente.
-        try:
-            from apps.accounts.models import organization_for_user
-            organization = executar_no_tenant(organization_for_user, usuario)
-        except ValueError:
-            organization = organization_for_user(usuario)
-        organization_id = getattr(organization, "pk", None)
-        usuario._spreading_organization_id = organization_id
-        if not executar_no_tenant(
-            has_storage_state, usuario, organization_id=organization_id,
-        ):
+        organization_id = _organization_id_de(usuario)
+        _no_escopo = _executor_no_tenant(organization_id)
+        if not _no_escopo(has_storage_state, usuario):
             raise LoginError(MSG_SEM_SESSAO)
-        prontos = executar_no_tenant(
-            ids_com_link, usuario, produtos, organization_id=organization_id,
-        )
+        prontos = _no_escopo(ids_com_link, usuario, produtos)
         pendentes = [p for p in produtos if p.id not in prontos]
     else:
         pendentes = [p for p in produtos if not p.link_afiliado]
@@ -1077,6 +1097,14 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
     camp_id = produto.campanha_id if hasattr(produto, "campanha_id") else produto["campanha_id"]
     url_produto = produto.link_produto if hasattr(produto, "link_produto") else produto["link_produto"]
 
+    # Todo ORM daqui para baixo passa por _no_tenant. LinkAfiliadoUsuario e
+    # MercadoLivreSession estão sob RLS, e esta função é o caminho do envio manual,
+    # que roda em SSE com o tenant apenas ANOTADO: a query nua volta zero linhas, o
+    # cache do link some e has_storage_state diz "sem sessão" — era o
+    # "Sessão do Mercado Livre expirada" com a tela de conexão verde.
+    organization_id = _organization_id_de(usuario)
+    _no_tenant = _executor_no_tenant(organization_id)
+
     # Ofertas (origem='oferta') não têm Cupom; cupom fica None
     cupom = None
     if camp_id:
@@ -1086,21 +1114,21 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
             # de Cupom não dá para montar a URL com coupon_campaign_id. Retentável —
             # a próxima raspagem pode trazer o cupom.
             logger.info("Cupom %s nao encontrado no banco", camp_id)
-            registrar_falha(usuario, produto,
-                            f"A campanha {camp_id} deste produto ainda não foi raspada.")
+            _no_tenant(registrar_falha, usuario, produto,
+                       f"A campanha {camp_id} deste produto ainda não foi raspada.")
             return None
 
     if not url_produto:
         logger.info("Produto sem link_produto salvo (campanha %s)", camp_id)
-        registrar_falha(usuario, produto, "O produto não tem link de origem.",
-                        terminal=True)
+        _no_tenant(registrar_falha, usuario, produto,
+                   "O produto não tem link de origem.", terminal=True)
         return None
 
     # ── Multi-tenant: link por usuário, sempre com a sessão ML dele ──
     if usuario is not None:
         from apps.scrapers.afiliado import link_cacheado, salvar_cache
 
-        cacheado = link_cacheado(usuario, produto)
+        cacheado = _no_tenant(link_cacheado, usuario, produto)
         if cacheado and cacheado.link_afiliado:
             # O envio ainda passa pelo gate A3 e, quando solicitado, pela
             # revalidação da PDP em ofertas.py. Reaproveitar o cache aqui só
@@ -1122,7 +1150,7 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
                     url_produto, camp_id),
             }
 
-        if not has_storage_state(usuario):
+        if not _no_tenant(has_storage_state, usuario):
             # Não há sessão NENHUMA — nada foi aberto, então não é a mensagem do
             # Link Builder. Antes as duas causas compartilhavam o mesmo texto e
             # "pediu login de novo" aparecia para quem nunca havia conectado.
@@ -1131,20 +1159,20 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
         if not url_isca:
             motivo = _motivo_url_recusada(url_produto)
             logger.info("URL de produto invalida para afiliacao ML: %s", motivo)
-            registrar_falha(usuario, produto, motivo, terminal=True)
+            _no_tenant(registrar_falha, usuario, produto, motivo, terminal=True)
             return None
         link_afiliado = afiliate_link_builder(url_isca, usuario=usuario)
         if not link_afiliado:
             # afiliate_link_builder já logou a causa; aqui garantimos que ela também
             # fique gravada no item, senão a tela só sabe dizer "pendente".
-            registrar_falha(
-                usuario, produto,
+            _no_tenant(
+                registrar_falha, usuario, produto,
                 "O Programa de Afiliados não aceitou a URL deste produto.",
                 terminal=True,
             )
             return None
         afiliado_ok = True
-        salvar_cache(usuario, produto, link_afiliado, url_isca, afiliado_ok)
+        _no_tenant(salvar_cache, usuario, produto, link_afiliado, url_isca, afiliado_ok)
         return {
             "link_afiliado": link_afiliado, "afiliado_ok": afiliado_ok,
             "produto_nome": getattr(produto, "nome", ""),

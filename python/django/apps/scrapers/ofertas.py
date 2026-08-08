@@ -85,6 +85,15 @@ def _canal_pronto_ou_erro(canal, usuario) -> dict | None:
                 "motivo": estado.motivo
                 or "WhatsApp reativando a conexão — tente novamente em instantes.",
                 "classe": TRANSITORIO}
+    # Não falamos com o worker: o pareamento pode estar perfeito. Pedir "reconecte
+    # sua conta" aqui mandava o usuário reler um QR Code que não era o problema —
+    # o defeito está entre o Django e o worker, e é nosso, não dele.
+    if estado.detalhe == "servico_fora":
+        logger.warning("Gate de envio sem resposta do worker WhatsApp (sessão %s): %s",
+                       sessao, estado.motivo)
+        return {"sucesso": False,
+                "motivo": estado.motivo or "Serviço de WhatsApp indisponível.",
+                "classe": TRANSITORIO}
     # 'inativo': o worker tem a credencial mas ela saiu do Map (restore pulado no
     # boot, runtime destruído). Religar é seguro e não precisa de QR.
     religou = False
