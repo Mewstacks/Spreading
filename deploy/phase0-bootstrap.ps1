@@ -1,22 +1,18 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('staging', 'production')]
+    [ValidateSet('production')]
     [string]$Environment
 )
 
 $ErrorActionPreference = 'Stop'
 
-if ($Environment -eq 'staging') {
-    $webApp = 'spreading-web-staging'
-    $waApp = 'spreading-wa-staging'
-    $dbHost = 'spreading-staging-db.flycast'
-    $dbName = 'postgres'
-} else {
-    $webApp = 'spreading-web'
-    $waApp = 'spreading-wa'
-    $dbHost = 'spreading-db.flycast'
-    $dbName = 'spreading_web'
-}
+# O ambiente de homologação foi desativado em 09/08/2026 para cortar custo: os apps
+# spreading-web-staging, spreading-wa-staging e spreading-staging-db foram destruídos
+# no Fly junto com seus volumes. Só existe 'production'.
+$webApp = 'spreading-web'
+$waApp = 'spreading-wa'
+$dbHost = 'spreading-db.flycast'
+$dbName = 'spreading_web'
 
 function Assert-LastExit([string]$message) {
     if ($LASTEXITCODE -ne 0) {

@@ -48,11 +48,20 @@ primary_region = "gru"
     path = "/healthz"
     headers = { Host = "spreading-web.fly.dev", X-Forwarded-Proto = "https" }
 
-# CPU dedicada, não compartilhada: esta máquina roda gunicorn + 5 workers de automação
-# + Chromium (raspagem, Link Builder e o live view do login ML) ao mesmo tempo. Em
-# shared-cpu-* a Fly cobra por cota de baseline e aplica throttle agressivo quando ela
-# acaba — o Chromium sozinho queima a cota inteira e o painel inteiro fica lento junto,
-# inclusive o healthcheck. Playwright na mesma VM do servidor web exige dedicada.
+# ATENÇÃO — este bloco é o que a máquina REALMENTE roda. Não suba sem decidir o custo.
+#
+# Esta VM roda gunicorn + 5 workers de automação + Chromium (raspagem, Link Builder e o
+# live view do login ML) ao mesmo tempo, em CPU compartilhada. Isso tem um preço técnico
+# conhecido e aceito: a Fly cobra o shared-cpu por cota de baseline e aplica throttle
+# quando ela acaba. Medido em 09/08 nesta máquina: loadavg 7,29 em 2 vCPUs e CPU pressure
+# de 73% (avg300) com apenas ~15% de CPU efetivamente consumida — ou seja, os processos
+# ficam prontos e não são escalonados. O painel fica lento sob raspagem por causa disso.
+# Quem impede que o throttle vire indisponibilidade são os watchdogs (bdc278b, 1a30213).
+#
+# performance-2x/4gb resolveria o throttle, mas custa US$100,15/mês em gru contra US$18,40
+# deste shared-cpu-2x/2gb — 5,4×. O passo intermediário barato, se o throttle apertar, é
+# shared-cpu-4x/2gb (US$20,64): dobra vCPU e cota de baseline por +US$2,24/mês.
+# Preços da tabela da região gru, que tem markup de ~1,55× sobre a tabela base.
 [[vm]]
-  size = "performance-2x"
-  memory = "4gb"
+  size = "shared-cpu-2x"
+  memory = "2gb"

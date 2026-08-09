@@ -52,17 +52,24 @@ primary_region = "gru"
     method = "get"
     path = "/health"
 
-# CPU DEDICADA, não compartilhada — o mesmo que o staging já usa e pelo mesmo
-# motivo. Medido em 30/07: com shared-cpu-2x o /proc/stat acusava steal de ~70%
-# de todo o CPU do período, loadavg 5.7 e tempo útil de ~3%; o Chromium ficava
-# tão sem CPU que TODO page.evaluate falhava. Em 08/08 isso cobrou o preço final:
-# a VM inteira travou (TCP aceitava em 0,03s e nenhuma resposta HTTP saía em 8s,
-# o SSH não entrava e o processo passou 20min sem escrever um log) até um restart
-# manual. shared-cpu só entrega burst; Chromium + WA Web com centenas de chats é
-# carga sustentada, e quando o burst acaba a página trava.
+# ATENÇÃO — este bloco é o que a máquina REALMENTE roda. Não suba sem decidir o custo.
 #
-# Memória: cada WhatsApp conectado = 1 Chromium. 4gb comporta as 2 sessões de
-# MAX_WHATSAPP_SESSIONS com folga. Suba os dois juntos para aceitar mais números.
+# Histórico: em 30/07 o shared-cpu-2x acusava steal de ~70% do CPU do período, loadavg
+# 5.7 e tempo útil de ~3%, e todo page.evaluate falhava; em 08/08 a VM inteira travou
+# (TCP aceitava em 0,03s, nenhuma resposta HTTP em 8s, SSH fora, 20min sem um log) até
+# restart manual. A resposta a isso NÃO foi CPU dedicada: foram os watchdogs e o vigia
+# externo (bdc278b, 1a30213), que é o que segura este serviço hoje.
+#
+# Medido em 09/08 nesta máquina: loadavg 0,03 e CPU pressure 0,5% (avg300) — ociosa em
+# repouso. A carga é em picos (envio de campanha), e é neles que o throttle de baseline
+# do shared-cpu morde. performance-2x/4gb custaria US$100,15/mês em gru contra US$34,56
+# deste shared-cpu-2x/4gb. Se os picos voltarem a travar, o passo barato é
+# shared-cpu-4x/4gb (US$36,80): dobra vCPU e cota de baseline por +US$2,24/mês.
+#
+# Memória: cada WhatsApp conectado = 1 Chromium. Medido com as 2 sessões de
+# MAX_WHATSAPP_SESSIONS ativas: 1,77GB em uso, 2,2GB livres. NÃO desça de 4gb — 3gb
+# deixaria ~1,2GB de folga para os picos de Chromium, que é o cenário do travamento de
+# 08/08, e economizaria só US$8,08/mês. Suba os dois juntos para aceitar mais números.
 [[vm]]
-  size = "performance-2x"
+  size = "shared-cpu-2x"
   memory = "4gb"

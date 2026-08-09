@@ -4,6 +4,19 @@ Este roteiro é o procedimento operacional da Fase 0. Enquanto ele estiver em
 andamento, cadastro público e criação de contas pelo superadmin permanecem
 bloqueados, e ML/WhatsApp/Telethon ficam desligados salvo piloto explícito.
 
+> **⚠️ A homologação não existe mais.** Em 09/08/2026 os apps
+> `spreading-web-staging`, `spreading-wa-staging` e `spreading-staging-db` foram
+> destruídos no Fly (com seus volumes) para cortar custo, e os `fly.staging.toml`
+> saíram do repo. Todos os comandos abaixo que citam `*-staging` ou
+> `--config fly.staging.toml` **não rodam como estão**.
+>
+> Este runbook foi escrito para ensaiar cada passo em homologação antes de tocar
+> produção — e essa rede de proteção sumiu. Antes de executar a Fase 0, escolha:
+> recriar a homologação temporariamente (custa ~US$200/mês enquanto estiver de pé,
+> ou ~US$63/mês se você recriar em `shared-cpu-2x` em vez de `performance`), ou
+> reescrever o roteiro para rodar direto em produção — com snapshot validado do
+> banco e dos volumes, e ciente de que não haverá ensaio.
+
 ## Resultado obrigatório
 
 - `spreading_runtime`, `spreading_system` e `spreading_migration` sem

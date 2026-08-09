@@ -11,8 +11,29 @@ Two Fly apps in region **gru** (São Paulo):
 - **spreading-wa** — Node WhatsApp service. Volume `wa_data` at `/app/.wwebjs_auth`. Private-only.
 - **spreading-db** — Fly Postgres, attached to web.
 
-> Fill placeholders in `.env.fly` first. Logged in as `germano@garantiabpo.com` (`fly auth whoami`).
-> Rough cost: ~US$15–30/mo (1× web 2GB, 1× wa 1GB, Postgres shared-cpu-1x, 2× small volumes).
+> Fill placeholders in `.env.fly` first. Logged in as `pedro@mewstack.com.br`
+> (`fly auth whoami`), org `germano-argenta`.
+
+## Custo (medido em 09/08/2026, tabela da região `gru`)
+
+`gru` tem markup de ~1,55× sobre a tabela base do Fly — o mesmo preset custa bem mais
+em São Paulo do que em `ams`. Valores por mês:
+
+| Item | US$/mês |
+|---|---|
+| `spreading-web` — `shared-cpu-2x` 2GB | 18,40 |
+| `spreading-wa` — `shared-cpu-2x` 4GB | 34,56 |
+| `spreading-db` — `shared-cpu-1x` 1GB | 9,20 |
+| Volumes (7GB × US$0,15) | 1,05 |
+| **Total** | **~63,21** + egress (~US$0,04/GB na América do Sul) |
+
+Não há homologação: foi destruída em 09/08/2026 para cortar custo.
+
+**Antes de mexer em `[[vm]]`, saiba o preço.** Trocar os dois serviços para
+`performance-2x`/4gb leva a conta de ~US$63 para ~US$210/mês. O passo intermediário
+barato é `shared-cpu-4x` (+US$2,24/mês por VM), que dobra vCPU e cota de baseline.
+Há ainda reservation blocks do Fly: 40% de desconto em compute, com pagamento anual
+adiantado (levaria o compute de ~US$62 para ~US$40/mês).
 
 Run from repo root `C:\Users\gege\Documents\Spreading`.
 
