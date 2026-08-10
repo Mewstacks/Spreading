@@ -6154,7 +6154,7 @@ class EnvioCupomTests(TestCase):
     def test_link_builder_desativado_nao_pede_reconexao(self):
         """Flag desligada não é sessão caída.
 
-        ML_LINK_BUILDER_ENABLED nasce desligada em produção (core/settings.py), e
+        ML_LINK_BUILDER_ENABLED pode ser desligada por env var (kill switch), e
         antes esse BrowserError era agrupado com as exceções de sessão: o usuário
         lia "Sessão expirada, reconecte" e reconectava em looping uma conta que
         estava perfeita.

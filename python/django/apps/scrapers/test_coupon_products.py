@@ -701,8 +701,19 @@ class CupomAtivacaoMercadoLivreTests(TestCase):
     def test_campanha_com_container_publico_e_publicavel(self):
         self.assertTrue(cupom_publicavel(self._cupom(), usuario=self.user))
 
-    def test_sem_override_continua_desligado(self):
+    def test_sem_override_nasce_ligado(self):
+        """Funcionalidade básica: sem override a organização já está liberada."""
         outro = get_user_model().objects.create_user("ml-no-activation", password="test")
+        self.assertTrue(cupom_publicavel(self._cupom(), usuario=outro))
+
+    def test_override_disabled_ainda_vence(self):
+        """O kill switch por organização continua disponível para contenção."""
+        from apps.accounts.models import OrganizationFeatureOverride
+        outro = get_user_model().objects.create_user("ml-disabled", password="test")
+        OrganizationFeatureOverride.objects.create(
+            organization=outro.perfil.active_organization,
+            feature="ML_CUPONS_ATIVACAO_ENABLED", state="disabled",
+        )
         self.assertFalse(cupom_publicavel(self._cupom(), usuario=outro))
 
     def test_site_wide_nunca_e_publicavel(self):
@@ -722,8 +733,7 @@ class CupomAtivacaoMercadoLivreTests(TestCase):
 
     @override_settings(ML_CUPONS_ATIVACAO_ENABLED=False)
     def test_flag_desligada_mantem_comportamento_anterior(self):
-        """A flag nasce desligada: ligar joga milhares de cupons no ranking de envio
-        de uma vez, e o worker publica em grupo real."""
+        """O kill switch global (env var) continua disponível para contenção."""
         self.assertFalse(cupom_publicavel(self._cupom()))
 
     def test_amazon_continua_intacta(self):

@@ -19,11 +19,11 @@ from .models import (
 # Ligar a setting global destes recursos apenas abre a possibilidade de rollout.
 # Uma organização ainda precisa de override ``enabled`` ou estar na allowlist.
 # Isso evita que uma lista de pilotos acidentalmente vazia libere comportamento
-# com efeito externo para todas as contas.
+# com efeito externo para todas as contas. Só o pipeline de envio v2 (efeitos
+# externos reais) continua exigindo rollout explícito; cupons de ativação e
+# relatórios da Amazon são funcionalidades básicas e nascem liberadas para todos.
 _EXPLICIT_ROLLOUT_FLAGS = frozenset({
-    "ML_CUPONS_ATIVACAO_ENABLED",
     "SEND_PIPELINE_V2_ENABLED",
-    "AMAZON_BROWSER_REPORTS_ENABLED",
 })
 
 

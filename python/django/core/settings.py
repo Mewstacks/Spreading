@@ -63,7 +63,11 @@ SECURITY_FREEZE_NEW_TENANTS = os.getenv(
     "SECURITY_FREEZE_NEW_TENANTS",
     "1" if APP_ENV in {"staging", "production"} else "0",
 ) == "1"
-_AUTOMATION_DEFAULT = "0" if APP_ENV in {"staging", "production"} else "1"
+# Automação de browser (logins ML/Amazon, Link Builder, relatórios, WhatsApp Web)
+# nasce LIGADA em todos os ambientes: são funcionalidades básicas do produto e
+# ficar desligada por padrão em produção quebrava login e coletas. Cada recurso
+# ainda pode ser desligado pontualmente pela sua env var (kill switch por deploy).
+_AUTOMATION_DEFAULT = "1"
 ML_BROWSER_LOGIN_ENABLED = os.getenv(
     "ML_BROWSER_LOGIN_ENABLED", _AUTOMATION_DEFAULT,
 ) == "1"
@@ -95,10 +99,10 @@ ML_VERIFICACAO_TRANSPORTE = os.getenv("ML_VERIFICACAO_TRANSPORTE", "browser")
 # ao ML a partir de um IP de datacenter: subir demais convida rate-limit.
 ML_VERIFICACAO_THREADS = int(os.getenv("ML_VERIFICACAO_THREADS", "4"))
 # Cupons de ATIVAÇÃO do Mercado Livre (clique no container público, sem código
-# digitável). Nasce DESLIGADA: ligar faz milhares de cupons entrarem no ranking
-# automático de envio de uma vez, e o worker publica em grupo real. Ligue numa
-# organização (PILOT_ORGANIZATION_IDS), observe, e só então generalize.
-ML_CUPONS_ATIVACAO_ENABLED = os.getenv("ML_CUPONS_ATIVACAO_ENABLED", "0") == "1"
+# digitável). Nasce LIGADA: é funcionalidade básica — sem ela milhares de cupons
+# válidos são descartados como "feature_global_kill_switch". Para conter um
+# problema sem deploy, desligue com ML_CUPONS_ATIVACAO_ENABLED=0 no ambiente.
+ML_CUPONS_ATIVACAO_ENABLED = os.getenv("ML_CUPONS_ATIVACAO_ENABLED", "1") == "1"
 PILOT_ORGANIZATION_IDS = {
     value.strip() for value in os.getenv("PILOT_ORGANIZATION_IDS", "").split(",")
     if value.strip()
@@ -110,7 +114,7 @@ PILOT_ORGANIZATION_IDS = {
 ML_AFFILIATE_REPORT_URL = os.getenv("ML_AFFILIATE_REPORT_URL", "")
 AMAZON_ASSOCIATES_REPORT_URL = os.getenv("AMAZON_ASSOCIATES_REPORT_URL", "")
 AMAZON_BROWSER_REPORTS_ENABLED = os.getenv(
-    "AMAZON_BROWSER_REPORTS_ENABLED", "0",
+    "AMAZON_BROWSER_REPORTS_ENABLED", "1",
 ) == "1"
 AMAZON_COUPON_MAX_PAGES = int(os.getenv("AMAZON_COUPON_MAX_PAGES", "5"))
 AMAZON_COUPON_MAX_ITEMS = int(os.getenv("AMAZON_COUPON_MAX_ITEMS", "500"))
