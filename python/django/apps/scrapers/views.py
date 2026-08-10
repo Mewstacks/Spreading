@@ -2160,16 +2160,20 @@ def top_promocoes(request):
     for cupom_catalogo in cupons_lista:
         cupom_catalogo.codigo_publico = codigo_publicavel(cupom_catalogo)
         cupom_catalogo.modo_resgate = regras_do_cupom(cupom_catalogo)["modo_resgate"]
-    from apps.scrapers.coupon_readiness import (
-        disponibilidade_resumo, projetar_disponibilidade_cupons,
-    )
-    # O pipeline materializa a projeção em background. Uma conta criada depois da
-    # última coleta recebe um backfill único; requests seguintes permanecem
-    # somente leitura, em vez de atualizar milhares de linhas no processo web.
-    if not CupomDisponibilidade.objects.filter(usuario=request.user).exists():
-        readiness = projetar_disponibilidade_cupons(request.user)
-    else:
-        readiness = disponibilidade_resumo(request.user)
+    from apps.scrapers.coupon_readiness import disponibilidade_resumo
+    # SOMENTE LEITURA, sempre. Não chame aqui `projetar_disponibilidade_cupons`:
+    # quem materializa a projeção é o worker `cupons` (Procfile) e o comando
+    # `backfill_disponibilidade_cupons`, que rodam fora do processo web.
+    #
+    # O guard anterior ("projeta só se o usuário não tem nenhuma linha") não
+    # fechava nunca: OrganizationContextMiddleware envolve a request inteira num
+    # transaction.atomic() para instalar o escopo RLS com SET LOCAL, então o
+    # atomic() por cupom lá dentro é savepoint, não commit. O laço de ~5.800
+    # cupons morria no lock_timeout de 15s contra o worker, TODO o trabalho
+    # voltava atrás, o usuário seguia com zero linhas e o reload seguinte
+    # recomeçava do zero -- 500 em /scrapers/top/ e as 8 threads do gunicorn
+    # presas em transações de escrita longas (o /healthz caía junto).
+    readiness = disponibilidade_resumo(request.user)
     projecoes = {
         row.cupom_id: row
         for row in CupomDisponibilidade.objects.filter(

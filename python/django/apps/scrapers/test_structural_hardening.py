@@ -1192,6 +1192,28 @@ class CouponReadinessReasonTests(TestCase):
         projection.refresh_from_db()
         self.assertEqual(projection.stage, "ready")
 
+    def test_tela_de_promocoes_nao_materializa_projecao(self):
+        """A tela é somente leitura mesmo com a conta zerada.
+
+        O backfill dentro da request não commitava: OrganizationContextMiddleware
+        envolve a response inteira num atomic() para instalar o escopo RLS, então
+        o atomic() por cupom virava savepoint, o laço de milhares de cupons batia
+        no lock_timeout contra o worker e tudo voltava atrás -- 500 em loop. Quem
+        materializa é o worker `cupons` e o comando backfill_disponibilidade_cupons.
+        """
+        self._code()
+        self.assertFalse(CupomDisponibilidade.objects.filter(usuario=self.user).exists())
+
+        self.user.perfil.marcar_verificado()
+        self.client.force_login(self.user)
+        response = self.client.get("/scrapers/top/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(
+            CupomDisponibilidade.objects.filter(usuario=self.user).exists(),
+            "A tela de Promoções voltou a escrever projeção dentro da request.",
+        )
+
 
 class MarketplaceParserResilienceTests(SimpleTestCase):
     def test_ml_aceita_simbolo_renomeado_e_json_ssr_deslocado(self):
