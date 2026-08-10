@@ -15,8 +15,11 @@ from apps.scrapers.models import (
 
 class CouponOperationalDashboardE2ETests(StaticLiveServerTestCase):
     def setUp(self):
+        # is_staff porque é o painel OPERACIONAL de cupons que está sob teste
+        # (contadores por etapa e "Motivos de indisponibilidade"). Ele deixou de ser
+        # exibido para o usuário comum — ver `diagnostico` em `top_promocoes`.
         self.user = get_user_model().objects.create_user(
-            "coupon-e2e", password="e2e-password",
+            "coupon-e2e", password="e2e-password", is_staff=True,
         )
         self.user.perfil.marcar_verificado()
         organization = ensure_personal_organization(self.user)

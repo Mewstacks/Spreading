@@ -2003,14 +2003,31 @@ def top_promocoes(request):
     # `tem_filtros_na_url` de propósito — paginar não pode reescrever os filtros.
     pagina = request.GET.get("pagina")
 
-    macro_categorias = _taxonomia_cacheada("macros", request, lambda: list(
-        Produto.objects
-        .exclude(macro_categoria__isnull=True)
-        .exclude(macro_categoria="")
-        .values_list("macro_categoria", flat=True)
-        .distinct()
-        .order_by("macro_categoria")
-    ))
+    # A tela tem duas abas EXCLUSIVAS no template (`{% if tipo == 'cupom' %}` /
+    # `{% else %}`), mas a view montava as duas em todo GET: quem abria Ofertas
+    # pagava o catálogo inteiro de cupons (materializar, normalizar regras, pontuar
+    # e paginar) para renderizar zero cupom, e vice-versa. Cada aba agora só monta o
+    # que a sua metade do template lê.
+    aba_cupons = tipo == "cupom"
+
+    # Painel técnico (saúde das fontes, fila de afiliação, motivos de
+    # indisponibilidade, contadores de etapa) é leitura de operação, não de quem só
+    # quer escolher uma oferta e enviar. Fora de `is_staff` ele não é apenas ruído:
+    # cada bloco desses custa consulta agregada sobre o catálogo inteiro, então
+    # esconder também é o que tira o peso do GET do usuário comum.
+    diagnostico = request.user.is_staff
+
+    # Os dois DISTINCT varrem a tabela de produtos e alimentam só os seletores da
+    # aba Ofertas; na aba Cupons eles não têm leitor no template.
+    macro_categorias = [] if aba_cupons else _taxonomia_cacheada(
+        "macros", request, lambda: list(
+            Produto.objects
+            .exclude(macro_categoria__isnull=True)
+            .exclude(macro_categoria="")
+            .values_list("macro_categoria", flat=True)
+            .distinct()
+            .order_by("macro_categoria")
+        ))
 
     def _montar_categorias_por_macro():
         agrupado = {}
@@ -2038,202 +2055,27 @@ def top_promocoes(request):
             agrupado[macro].append(SEM_SUBCATEGORIA)
         return {macro: cats for macro, cats in agrupado.items() if cats}
 
-    categorias_por_macro = _taxonomia_cacheada(
+    categorias_por_macro = {} if aba_cupons else _taxonomia_cacheada(
         "categorias", request, _montar_categorias_por_macro)
 
     # Ordenação: 'percent' (padrão — melhor p/ deal bot) ou 'valor' (R$ absoluto economizado).
     ordenar = "valor" if filtros.get("ordenar") == "valor" else "percent"
 
     from django.db.models import Q
-    from apps.scrapers.ofertas import anotacao_preco_publicado
     from apps.scrapers.maintenance import produtos_frescos_q
-    qs = Produto.objects.filter(
-        produtos_frescos_q(), preco_sem_desconto__gt=0,
-    ).exclude(
-        estado__in=["indisponivel", "invalido", "expirado", "stale"]
-    ).filter(
-        # Pool compartilhado (ML, owner=None) + itens privados do usuário (Amazon dele).
-        Q(owner__isnull=True) | Q(owner=request.user)
-    ).annotate(
-        # A tela tem de mostrar o MESMO número que a mensagem anuncia — fonte única
-        # em ofertas.py, ao lado de preco_publicavel().
-        preco_publicado=anotacao_preco_publicado(),
-    ).annotate(
-        economia=ExpressionWrapper(F("preco_sem_desconto") - F("preco_publicado"), output_field=FloatField()),
-        percent=ExpressionWrapper(
-            (F("preco_sem_desconto") - F("preco_publicado")) * 100.0 / F("preco_sem_desconto"),
-            output_field=FloatField(),
-        ),
-    ).filter(
-        # Produto com preço "de" igual ao "por" não é promoção. Além de
-        # poluir o ranking, ele chegava ao modo padrão da Amazon com badge 0% e
-        # botão de envio, embora nenhum abatimento estivesse confirmado.
-        percent__gt=0,
-        # A seleção automática já rejeita 90%+: além de raros, esses valores
-        # quase sempre são `savingBasis` em escala errada (ex.: 63990 vs 63,99).
-        # A vitrine precisa aplicar a mesma barreira, inclusive para fontes novas.
-        percent__lt=90,
-    )
-    if macros_selecionados:
-        qs = qs.filter(macro_categoria__in=macros_selecionados)
-    if categorias_selecionadas:
-        # "Sem subcategoria" é rótulo de UI, não valor de coluna: traduz de volta
-        # para as três formas com que "ninguém classificou" chega ao banco.
-        reais = [c for c in categorias_selecionadas if c != SEM_SUBCATEGORIA]
-        condicao = Q(categoria__in=reais) if reais else Q(pk__in=[])
-        if SEM_SUBCATEGORIA in categorias_selecionadas:
-            condicao |= (Q(categoria="DESCONHECIDO") | Q(categoria="")
-                         | Q(categoria__isnull=True))
-        qs = qs.filter(condicao)
-    if loja_selecionada:
-        qs = qs.filter(marketplace=loja_selecionada)
-    if busca:
-        # Casa contra a coluna normalizada: "robo", "Robô" e "ROBÔ" têm de trazer
-        # o mesmo conjunto. Categoria e macro-categoria continuam em icontains —
-        # são valores da nossa taxonomia, não texto livre da loja, e normalizá-las
-        # exigiria mais duas colunas para nada.
-        busca_norm = normalizar_busca(busca)
-        qs = qs.filter(
-            Q(nome_norm__icontains=busca_norm)
-            | Q(categoria__icontains=busca)
-            | Q(macro_categoria__icontains=busca)
-        )
-    if min_desconto:
-        qs = qs.filter(percent__gte=min_desconto)
-    if fonte_selecionada:
-        qs = qs.filter(fonte=fonte_selecionada)
-    if confianca_selecionada:
-        qs = qs.filter(confianca=confianca_selecionada)
-    if atualizado_desde:
-        qs = qs.filter(ultima_observacao__gte=timezone.now() - timezone.timedelta(hours=atualizado_desde))
 
-    ordem = "-economia" if ordenar == "valor" else "-percent"
-    # A afiliação é resolvida antes da paginação. Não pode haver um corte de ranking
-    # aqui: ele fazia a tela anunciar centenas de links prontos no resumo, mas
-    # paginava somente os afiliados que por acaso estivessem entre os 200 maiores
-    # descontos. O conjunto cabe em memória e cada marketplace resolve os links em
-    # lote, portanto todos os produtos afiliados podem entrar na paginação.
-    # A mesma oferta chega por feed completo, lane rápida e busca, com querystrings
-    # diferentes. Seleciona primeiro a observação mais recente de cada identidade;
-    # só então ranqueia, evitando duplicatas e preço antigo vencer pelo desconto.
-    from apps.scrapers.product_identity import deduplicar_por_produto
-    candidatos = deduplicar_por_produto(
-        qs.order_by("-ultima_observacao", "-id")
-    )
-    campo_ordem = "economia" if ordenar == "valor" else "percent"
-    candidatos.sort(
-        key=lambda produto: (
-            float(getattr(produto, campo_ordem, 0) or 0),
-            produto.ultima_observacao or timezone.datetime.min.replace(
-                tzinfo=timezone.get_current_timezone()),
-            produto.id,
-        ),
-        reverse=True,
-    )
-    cupons_visiveis = Q(owner__isnull=True) | Q(owner=request.user)
-    from apps.scrapers.maintenance import cupons_frescos_q
-    cupons_qs = CupomNormalizado.objects.select_related(
-        "fonte", "integracao", "programa").filter(
-        cupons_visiveis, estado="ativo"
-    ).filter(cupons_frescos_q())
-    if loja_selecionada:
-        cupons_qs = cupons_qs.filter(marketplace=loja_selecionada)
-    if fonte_selecionada:
-        cupons_qs = cupons_qs.filter(fonte__slug=fonte_selecionada)
-    # Confiança não é mais filtrável na aba Cupons (todos são "media"); ignora um
-    # valor herdado da aba Ofertas para não zerar a lista sem querer.
-    if categoria_cupom_selecionada:
-        cupons_qs = cupons_qs.filter(categoria=categoria_cupom_selecionada)
-    if anunciante_selecionado:
-        cupons_qs = cupons_qs.filter(anunciante_nome=anunciante_selecionado)
-    if busca:
-        cupons_qs = cupons_qs.filter(Q(titulo__icontains=busca) | Q(codigo__icontains=busca))
-    # "Como usar" (código vs. ativar no link) vem da normalização de `regras`, não
-    # de coluna — então materializa, calcula por cupom e filtra em Python, igual ao
-    # corte de afiliação das ofertas. O conjunto de cupons ativos é pequeno.
-    from apps.scrapers.coupon_rules import (
-        codigo_publicavel, cupom_publicavel, regras_do_cupom, score_cupom,
-    )
-    # Base por recência (desempate estável); depois ordena por qualidade do cupom —
-    # feedback da cliente: bons cupons vendem mais, então os melhores vêm primeiro.
-    cupons_lista = list(cupons_qs.order_by("-ultima_observacao"))
-    for cupom_catalogo in cupons_lista:
-        cupom_catalogo.codigo_publico = codigo_publicavel(cupom_catalogo)
-        cupom_catalogo.modo_resgate = regras_do_cupom(cupom_catalogo)["modo_resgate"]
-    from apps.scrapers.coupon_readiness import disponibilidade_resumo
-    # SOMENTE LEITURA, sempre. Não chame aqui `projetar_disponibilidade_cupons`:
-    # quem materializa a projeção é o worker `cupons` (Procfile) e o comando
-    # `backfill_disponibilidade_cupons`, que rodam fora do processo web.
-    #
-    # O guard anterior ("projeta só se o usuário não tem nenhuma linha") não
-    # fechava nunca: OrganizationContextMiddleware envolve a request inteira num
-    # transaction.atomic() para instalar o escopo RLS com SET LOCAL, então o
-    # atomic() por cupom lá dentro é savepoint, não commit. O laço de ~5.800
-    # cupons morria no lock_timeout de 15s contra o worker, TODO o trabalho
-    # voltava atrás, o usuário seguia com zero linhas e o reload seguinte
-    # recomeçava do zero -- 500 em /scrapers/top/ e as 8 threads do gunicorn
-    # presas em transações de escrita longas (o /healthz caía junto).
-    readiness = disponibilidade_resumo(request.user)
-    projecoes = {
-        row.cupom_id: row
-        for row in CupomDisponibilidade.objects.filter(
-            usuario=request.user, cupom_id__in=[c.pk for c in cupons_lista],
-        )
-    }
-    cupons_publicaveis = []
-    for cupom in cupons_lista:
-        projecao = projecoes.get(cupom.pk)
-        cupom.disponibilidade = projecao
-        if not projecao:
-            continue
-        # Código validado pode ser listado sem produto. Ativação permanece oculta
-        # até produto, preço e link estarem comprovados.
-        if cupom.codigo_publico:
-            if projecao.stage != "discarded":
-                cupons_publicaveis.append(cupom)
-        elif projecao.stage == "ready":
-            cupons_publicaveis.append(cupom)
-    if como_usar_selecionado == "codigo":
-        cupons_publicaveis = [c for c in cupons_publicaveis if c.codigo_publico]
-    elif como_usar_selecionado == "ativacao":
-        cupons_publicaveis = [c for c in cupons_publicaveis if not c.codigo_publico]
-    stages = readiness.get("stages", {})
-    cupons_coletados = readiness.get("total", 0)
-    cupons_elegiveis = stages.get("eligible", 0)
-    cupons_preparados = stages.get("prepared", 0)
-    cupons_prontos = stages.get("ready", 0)
-    cupons_descartados = stages.get("discarded", 0)
-    cupons_aguardando_preparo = stages.get("collected", 0) + stages.get("eligible", 0)
-    cupons_aguardando_link = stages.get("prepared", 0) + stages.get("waiting_link", 0)
-    cupons_aguardando_verificacao = sum(
-        count for reason, count in readiness.get("reasons", {}).items()
-        if "verification" in reason
-    )
-    cupons_aguardando_conexao = sum(
-        count for reason, count in readiness.get("reasons", {}).items()
-        if "session" in reason or "login_required" in reason or "disconnected" in reason
-    )
-    cupons_motivos = list(
-        CupomDisponibilidade.objects.filter(usuario=request.user)
-        .exclude(reason_code="")
-        .values("reason_code", "safe_detail")
-        .annotate(total=Count("id"))
-        .order_by("-total", "reason_code")[:12]
-    )
-    cupons_fontes_sem_resultado = FonteIngestao.objects.filter(
-        habilitada=True, ultimo_total=0,
-        status__in=("degraded", "blocked"),
-    ).count()
-    # A lista continua estrita: o contador torna a fila visível sem oferecer um
-    # cupom cujo envio ainda não consegue montar produtos, imagem e link afiliado.
-    cupons_lista = cupons_publicaveis
-    # Os filtros tambem devem refletir somente o catalogo realmente publicavel.
-    cupom_categorias = sorted({c.categoria for c in cupons_lista if c.categoria})
-    cupom_anunciantes = sorted({c.anunciante_nome for c in cupons_lista
-                                if c.anunciante_nome})
-    cupons_lista.sort(key=lambda c: score_cupom(c, usuario=request.user), reverse=True)
-    cupons_page = Paginator(cupons_lista, POR_PAGINA).get_page(pagina)
-    cupons_catalogo = list(cupons_page)
+    # Cada aba preenche apenas o seu lado. A outra fica nestes neutros: o template
+    # ainda cita as variáveis, mas dentro de um `{% if tipo %}` que não abre.
+    cupons_catalogo, cupom_categorias, cupom_anunciantes, cupons_motivos = [], [], [], []
+    cupons_page = Paginator([], POR_PAGINA).get_page(1)
+    cupons_coletados = cupons_elegiveis = cupons_preparados = cupons_prontos = 0
+    cupons_descartados = cupons_aguardando_preparo = cupons_aguardando_link = 0
+    cupons_aguardando_verificacao = cupons_aguardando_conexao = 0
+    cupons_fontes_sem_resultado = 0
+    produtos, pendentes_ocultos, amazon_diagnostico = [], 0, ""
+    page_obj = Paginator([], POR_PAGINA).get_page(1)
+    afiliacao, afiliacao_ultimo_erro, fontes_com_aviso = None, "", []
+
     perfil = getattr(request.user, "perfil", None)
     fontes_qs = FonteIngestao.objects.filter(habilitada=True).exclude(
         slug="manual-private").order_by("marketplace", "nome")
@@ -2243,115 +2085,334 @@ def top_promocoes(request):
     if not perfil or not creds_de_usuario(request.user).completo():
         fontes_qs = fontes_qs.exclude(slug="amazon-creators-api")
     fontes = list(fontes_qs)
-    # `status` é um texto persistido que ninguém envelhece: uma fonte que parou de
-    # rodar guarda o último veredito para sempre. Sem esta derivação, "Atenção" tanto
-    # significava "falhou agora" quanto "ninguém a executa há dias" — dois problemas
-    # com soluções opostas. A coluna não muda; só a leitura da tela.
-    _limite_silencio = timezone.now() - timezone.timedelta(
-        hours=HORAS_FONTE_SILENCIOSA)
-    fontes_com_aviso, _paradas = [], []
-    for fonte in fontes:
-        fonte.silenciosa = (
-            fonte.ultima_tentativa is None or fonte.ultima_tentativa < _limite_silencio)
-        fonte.status_exibicao = "silent" if fonte.silenciosa else fonte.status
-        fonte.motivo_exibicao = (
-            f"Sem coleta há mais de {HORAS_FONTE_SILENCIOSA}h."
-            if fonte.silenciosa else (fonte.erro_publico or ""))
-        # Só o que exige leitura desce para a lista abaixo da faixa. Fonte parada tem
-        # sempre o mesmo motivo, então vai numa linha agregada: repetir a frase seis
-        # vezes é ruído que esconde o aviso específico de quem falhou de verdade.
-        if fonte.silenciosa:
-            _paradas.append(fonte.nome)
-        elif fonte.motivo_exibicao:
-            fontes_com_aviso.append(
-                {"nome": fonte.nome, "motivo": fonte.motivo_exibicao})
-    if _paradas:
-        fontes_com_aviso.append({
-            "nome": f"Sem coleta há mais de {HORAS_FONTE_SILENCIOSA}h:",
-            "motivo": ", ".join(_paradas),
-        })
-    from apps.scrapers.afiliado import resumo_afiliacao
-    afiliacao = resumo_afiliacao(request.user)
-    afiliacao_ultimo_erro = (
-        LinkAfiliadoUsuario.objects
-        .filter(usuario=request.user, estado="erro")
-        .exclude(ultimo_erro="")
-        .order_by("-ultima_tentativa", "-id")
-        .values_list("ultimo_erro", flat=True)
-        .first()
-    ) or ""
-    amazon_count = qs.filter(marketplace="amazon").count()
-    if amazon_count:
-        amazon_diagnostico = "Amazon ativa para sua conta."
-    elif perfil and not perfil.afiliado_tag_amazon:
-        amazon_diagnostico = (
-            "O catálogo público é coletado sem tag; cadastre a tag Amazon para liberar links e envios."
+
+    if aba_cupons:
+        cupons_visiveis = Q(owner__isnull=True) | Q(owner=request.user)
+        from apps.scrapers.maintenance import cupons_frescos_q
+        cupons_qs = CupomNormalizado.objects.select_related(
+            "fonte", "integracao", "programa").filter(
+            cupons_visiveis, estado="ativo"
+        ).filter(cupons_frescos_q())
+        if loja_selecionada:
+            cupons_qs = cupons_qs.filter(marketplace=loja_selecionada)
+        if fonte_selecionada:
+            cupons_qs = cupons_qs.filter(fonte__slug=fonte_selecionada)
+        # Confiança não é mais filtrável na aba Cupons (todos são "media"); ignora um
+        # valor herdado da aba Ofertas para não zerar a lista sem querer.
+        if categoria_cupom_selecionada:
+            cupons_qs = cupons_qs.filter(categoria=categoria_cupom_selecionada)
+        if anunciante_selecionado:
+            cupons_qs = cupons_qs.filter(anunciante_nome=anunciante_selecionado)
+        if busca:
+            cupons_qs = cupons_qs.filter(Q(titulo__icontains=busca) | Q(codigo__icontains=busca))
+        # "Como usar" (código vs. ativar no link) vem da normalização de `regras`, não
+        # de coluna — então materializa, calcula por cupom e filtra em Python, igual ao
+        # corte de afiliação das ofertas. O conjunto de cupons ativos é pequeno.
+        from apps.scrapers.coupon_rules import (
+            codigo_publicavel, cupom_publicavel, regras_do_cupom, score_cupom,
         )
-    elif perfil and perfil.amazon_elegivel is False:
-        amazon_diagnostico = "Creators API inelegível; o fallback público tentará alimentar sua conta."
+        # Base por recência (desempate estável); depois ordena por qualidade do cupom —
+        # feedback da cliente: bons cupons vendem mais, então os melhores vêm primeiro.
+        cupons_lista = list(cupons_qs.order_by("-ultima_observacao"))
+        for cupom_catalogo in cupons_lista:
+            cupom_catalogo.codigo_publico = codigo_publicavel(cupom_catalogo)
+            cupom_catalogo.modo_resgate = regras_do_cupom(cupom_catalogo)["modo_resgate"]
+        from apps.scrapers.coupon_readiness import disponibilidade_resumo
+        # SOMENTE LEITURA, sempre. Não chame aqui `projetar_disponibilidade_cupons`:
+        # quem materializa a projeção é o worker `cupons` (Procfile) e o comando
+        # `backfill_disponibilidade_cupons`, que rodam fora do processo web.
+        #
+        # O guard anterior ("projeta só se o usuário não tem nenhuma linha") não
+        # fechava nunca: OrganizationContextMiddleware envolve a request inteira num
+        # transaction.atomic() para instalar o escopo RLS com SET LOCAL, então o
+        # atomic() por cupom lá dentro é savepoint, não commit. O laço de ~5.800
+        # cupons morria no lock_timeout de 15s contra o worker, TODO o trabalho
+        # voltava atrás, o usuário seguia com zero linhas e o reload seguinte
+        # recomeçava do zero -- 500 em /scrapers/top/ e as 8 threads do gunicorn
+        # presas em transações de escrita longas (o /healthz caía junto).
+        readiness = disponibilidade_resumo(request.user)
+        projecoes = {
+            row.cupom_id: row
+            for row in CupomDisponibilidade.objects.filter(
+                usuario=request.user, cupom_id__in=[c.pk for c in cupons_lista],
+            )
+        }
+        cupons_publicaveis = []
+        for cupom in cupons_lista:
+            projecao = projecoes.get(cupom.pk)
+            cupom.disponibilidade = projecao
+            if not projecao:
+                continue
+            # Código validado pode ser listado sem produto. Ativação permanece oculta
+            # até produto, preço e link estarem comprovados.
+            if cupom.codigo_publico:
+                if projecao.stage != "discarded":
+                    cupons_publicaveis.append(cupom)
+            elif projecao.stage == "ready":
+                cupons_publicaveis.append(cupom)
+        if como_usar_selecionado == "codigo":
+            cupons_publicaveis = [c for c in cupons_publicaveis if c.codigo_publico]
+        elif como_usar_selecionado == "ativacao":
+            cupons_publicaveis = [c for c in cupons_publicaveis if not c.codigo_publico]
+        if diagnostico:
+            stages = readiness.get("stages", {})
+            cupons_coletados = readiness.get("total", 0)
+            cupons_elegiveis = stages.get("eligible", 0)
+            cupons_preparados = stages.get("prepared", 0)
+            cupons_prontos = stages.get("ready", 0)
+            cupons_descartados = stages.get("discarded", 0)
+            cupons_aguardando_preparo = stages.get("collected", 0) + stages.get("eligible", 0)
+            cupons_aguardando_link = stages.get("prepared", 0) + stages.get("waiting_link", 0)
+            cupons_aguardando_verificacao = sum(
+                count for reason, count in readiness.get("reasons", {}).items()
+                if "verification" in reason
+            )
+            cupons_aguardando_conexao = sum(
+                count for reason, count in readiness.get("reasons", {}).items()
+                if "session" in reason or "login_required" in reason or "disconnected" in reason
+            )
+            cupons_motivos = list(
+                CupomDisponibilidade.objects.filter(usuario=request.user)
+                .exclude(reason_code="")
+                .values("reason_code", "safe_detail")
+                .annotate(total=Count("id"))
+                .order_by("-total", "reason_code")[:12]
+            )
+            cupons_fontes_sem_resultado = FonteIngestao.objects.filter(
+                habilitada=True, ultimo_total=0,
+                status__in=("degraded", "blocked"),
+            ).count()
+        # A lista continua estrita: o contador torna a fila visível sem oferecer um
+        # cupom cujo envio ainda não consegue montar produtos, imagem e link afiliado.
+        cupons_lista = cupons_publicaveis
+        # Os filtros tambem devem refletir somente o catalogo realmente publicavel.
+        cupom_categorias = sorted({c.categoria for c in cupons_lista if c.categoria})
+        cupom_anunciantes = sorted({c.anunciante_nome for c in cupons_lista
+                                    if c.anunciante_nome})
+        cupons_lista.sort(key=lambda c: score_cupom(c, usuario=request.user), reverse=True)
+        cupons_page = Paginator(cupons_lista, POR_PAGINA).get_page(pagina)
+        cupons_catalogo = list(cupons_page)
     else:
-        amazon_diagnostico = "Nenhuma oferta Amazon confirmada no último ciclo."
-    # Atribuição é regra de cada loja (ver Marketplace.preparar_exibicao). Em lote e
-    # agrupado por loja: por item seria uma query por produto da página.
-    from apps.scrapers.marketplaces.registry import get_marketplace
+        from apps.scrapers.ofertas import anotacao_preco_publicado
+        qs = Produto.objects.filter(
+            produtos_frescos_q(), preco_sem_desconto__gt=0,
+        ).exclude(
+            estado__in=["indisponivel", "invalido", "expirado", "stale"]
+        ).filter(
+            # Pool compartilhado (ML, owner=None) + itens privados do usuário (Amazon dele).
+            Q(owner__isnull=True) | Q(owner=request.user)
+        ).annotate(
+            # A tela tem de mostrar o MESMO número que a mensagem anuncia — fonte única
+            # em ofertas.py, ao lado de preco_publicavel().
+            preco_publicado=anotacao_preco_publicado(),
+        ).annotate(
+            economia=ExpressionWrapper(F("preco_sem_desconto") - F("preco_publicado"), output_field=FloatField()),
+            percent=ExpressionWrapper(
+                (F("preco_sem_desconto") - F("preco_publicado")) * 100.0 / F("preco_sem_desconto"),
+                output_field=FloatField(),
+            ),
+        ).filter(
+            # Produto com preço "de" igual ao "por" não é promoção. Além de
+            # poluir o ranking, ele chegava ao modo padrão da Amazon com badge 0% e
+            # botão de envio, embora nenhum abatimento estivesse confirmado.
+            percent__gt=0,
+            # A seleção automática já rejeita 90%+: além de raros, esses valores
+            # quase sempre são `savingBasis` em escala errada (ex.: 63990 vs 63,99).
+            # A vitrine precisa aplicar a mesma barreira, inclusive para fontes novas.
+            percent__lt=90,
+        )
+        if macros_selecionados:
+            qs = qs.filter(macro_categoria__in=macros_selecionados)
+        if categorias_selecionadas:
+            # "Sem subcategoria" é rótulo de UI, não valor de coluna: traduz de volta
+            # para as três formas com que "ninguém classificou" chega ao banco.
+            reais = [c for c in categorias_selecionadas if c != SEM_SUBCATEGORIA]
+            condicao = Q(categoria__in=reais) if reais else Q(pk__in=[])
+            if SEM_SUBCATEGORIA in categorias_selecionadas:
+                condicao |= (Q(categoria="DESCONHECIDO") | Q(categoria="")
+                             | Q(categoria__isnull=True))
+            qs = qs.filter(condicao)
+        if loja_selecionada:
+            qs = qs.filter(marketplace=loja_selecionada)
+        if busca:
+            # Casa contra a coluna normalizada: "robo", "Robô" e "ROBÔ" têm de trazer
+            # o mesmo conjunto. Categoria e macro-categoria continuam em icontains —
+            # são valores da nossa taxonomia, não texto livre da loja, e normalizá-las
+            # exigiria mais duas colunas para nada.
+            busca_norm = normalizar_busca(busca)
+            qs = qs.filter(
+                Q(nome_norm__icontains=busca_norm)
+                | Q(categoria__icontains=busca)
+                | Q(macro_categoria__icontains=busca)
+            )
+        if min_desconto:
+            qs = qs.filter(percent__gte=min_desconto)
+        if fonte_selecionada:
+            qs = qs.filter(fonte=fonte_selecionada)
+        if confianca_selecionada:
+            qs = qs.filter(confianca=confianca_selecionada)
+        if atualizado_desde:
+            qs = qs.filter(ultima_observacao__gte=timezone.now() - timezone.timedelta(hours=atualizado_desde))
 
-    def _preparar(itens):
-        por_loja = {}
-        for p in itens:
-            por_loja.setdefault(p.marketplace, []).append(p)
-        for slug, do_slug in por_loja.items():
-            get_marketplace(slug).preparar_exibicao(do_slug, request.user)
+        # A afiliação é resolvida antes da paginação. Não pode haver um corte de ranking
+        # aqui: ele fazia a tela anunciar centenas de links prontos no resumo, mas
+        # paginava somente os afiliados que por acaso estivessem entre os 200 maiores
+        # descontos. O conjunto cabe em memória e cada marketplace resolve os links em
+        # lote, portanto todos os produtos afiliados podem entrar na paginação.
+        # A mesma oferta chega por feed completo, lane rápida e busca, com querystrings
+        # diferentes. Seleciona primeiro a observação mais recente de cada identidade;
+        # só então ranqueia, evitando duplicatas e preço antigo vencer pelo desconto.
+        from apps.scrapers.product_identity import deduplicar_por_produto
+        # O catálogo INTEIRO é materializado aqui (a dedup e o ranking são em Python),
+        # mas a página mostra 20 itens: trazer as ~30 colunas de cada linha era o
+        # grosso do custo do GET — em especial `evidencia`, que é JSONField e cobrava
+        # um json.loads por linha. `only` limita ao que este caminho realmente lê:
+        # dedup (product_identity), `preparar_exibicao` de cada loja, o histórico de
+        # preço e as colunas do template.
+        #
+        # Ao acrescentar um campo ao template desta tela, acrescente-o AQUI também:
+        # campo de fora da lista continua correto, mas custa uma query por item
+        # exibido (Django busca sob demanda o que ficou deferido).
+        candidatos = deduplicar_por_produto(
+            qs.order_by("-ultima_observacao", "-id").only(
+                "id", "marketplace", "asin", "nome", "campanha_id",
+                "link_produto", "link_afiliado", "imagem_url",
+                "categoria", "macro_categoria",
+                "preco_sem_desconto", "preco_com_cupom", "preco_efetivo",
+                "ultima_observacao",
+            )
+        )
+        campo_ordem = "economia" if ordenar == "valor" else "percent"
+        candidatos.sort(
+            key=lambda produto: (
+                float(getattr(produto, campo_ordem, 0) or 0),
+                produto.ultima_observacao or timezone.datetime.min.replace(
+                    tzinfo=timezone.get_current_timezone()),
+                produto.id,
+            ),
+            reverse=True,
+        )
+        # Atribuição é regra de cada loja (ver Marketplace.preparar_exibicao). Em lote e
+        # agrupado por loja: por item seria uma query por produto da página.
+        from apps.scrapers.marketplaces.registry import get_marketplace
 
-    # O corte por afiliação é em Python, e não em SQL, de propósito —
-    # `afiliado_pronto` é contrato de cada loja (na Amazon sai de tag + ASIN, não de
-    # linha no banco), então só `preparar_exibicao` sabe respondê-lo. Isso obriga a
-    # preparar o conjunto INTEIRO quando o filtro está ligado: paginar antes contaria
-    # itens que a tela nunca mostra.
-    #
-    # Quando o filtro está DESLIGADO, porém, nada depende de `afiliado_pronto` fora
-    # da página exibida — e preparar o catálogo inteiro só para renderizar 20 linhas
-    # era trabalho jogado fora em cima da consulta mais pesada do sistema.
-    pendentes_ocultos = 0
-    if so_afiliados:
-        _preparar(candidatos)
-        prontos = [p for p in candidatos if getattr(p, "afiliado_pronto", False)]
-        pendentes_ocultos = len(candidatos) - len(prontos)
-        candidatos = prontos
-        page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
-        produtos = list(page_obj)
-    else:
-        page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
-        produtos = list(page_obj)
-        _preparar(produtos)
+        def _preparar(itens):
+            por_loja = {}
+            for p in itens:
+                por_loja.setdefault(p.marketplace, []).append(p)
+            for slug, do_slug in por_loja.items():
+                get_marketplace(slug).preparar_exibicao(do_slug, request.user)
 
-    cupons_map = {
-        c.campanha_id: c
-        for c in Cupom.objects.filter(
-            campanha_id__in=[p.campanha_id for p in produtos],
-            estado="ativo",
-        ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
-    }
-    # Marca itens já enviados POR ESTE usuário (manual OU automático): bloqueia reenvio na UI.
-    ja_enviados = set(
-        HistoricoEnvio.objects.filter(
-            produto_id__in=[p.id for p in produtos], usuario=request.user)
-        .values_list("produto_id", flat=True)
-    )
+        # O corte por afiliação é em Python, e não em SQL, de propósito —
+        # `afiliado_pronto` é contrato de cada loja (na Amazon sai de tag + ASIN, não de
+        # linha no banco), então só `preparar_exibicao` sabe respondê-lo. Isso obriga a
+        # preparar o conjunto INTEIRO quando o filtro está ligado: paginar antes contaria
+        # itens que a tela nunca mostra.
+        #
+        # Quando o filtro está DESLIGADO, porém, nada depende de `afiliado_pronto` fora
+        # da página exibida — e preparar o catálogo inteiro só para renderizar 20 linhas
+        # era trabalho jogado fora em cima da consulta mais pesada do sistema.
+        pendentes_ocultos = 0
+        if so_afiliados:
+            _preparar(candidatos)
+            prontos = [p for p in candidatos if getattr(p, "afiliado_pronto", False)]
+            pendentes_ocultos = len(candidatos) - len(prontos)
+            candidatos = prontos
+            page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
+            produtos = list(page_obj)
+        else:
+            page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
+            produtos = list(page_obj)
+            _preparar(produtos)
 
-    # Histórico de preço de todos os itens da página numa query só (era uma por item).
-    from apps.scrapers.precos import chave_produto, stats_em_lote
-    historico = stats_em_lote(produtos, dias=30)
+        cupons_map = {
+            c.campanha_id: c
+            for c in Cupom.objects.filter(
+                campanha_id__in=[p.campanha_id for p in produtos],
+                estado="ativo",
+            ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now()))
+        }
+        # Marca itens já enviados POR ESTE usuário (manual OU automático): bloqueia reenvio na UI.
+        ja_enviados = set(
+            HistoricoEnvio.objects.filter(
+                produto_id__in=[p.id for p in produtos], usuario=request.user)
+            .values_list("produto_id", flat=True)
+        )
 
-    for p in produtos:
-        p.cupom = cupons_map.get(p.campanha_id)
-        p.ja_enviado = p.id in ja_enviados
-        p.motivos_score = [f"{p.percent:.0f}% de desconto"]
-        hist_preco = historico.get(chave_produto(p))
-        # Contra o preço publicado: o histórico é gravado com o valor que o cliente
-        # paga, então comparar a vitrine com ele daria selo em item que não está na
-        # mínima (e tiraria de item que está).
-        if hist_preco and hist_preco["n"] >= 3 and p.preco_publicado <= hist_preco["minimo"] * 1.02:
-            p.motivos_score.append("mínima de 30 dias")
+        # Histórico de preço de todos os itens da página numa query só (era uma por item).
+        from apps.scrapers.precos import chave_produto, stats_em_lote
+        historico = stats_em_lote(produtos, dias=30)
+
+        for p in produtos:
+            p.cupom = cupons_map.get(p.campanha_id)
+            p.ja_enviado = p.id in ja_enviados
+            p.motivos_score = [f"{p.percent:.0f}% de desconto"]
+            hist_preco = historico.get(chave_produto(p))
+            # Contra o preço publicado: o histórico é gravado com o valor que o cliente
+            # paga, então comparar a vitrine com ele daria selo em item que não está na
+            # mínima (e tiraria de item que está).
+            if hist_preco and hist_preco["n"] >= 3 and p.preco_publicado <= hist_preco["minimo"] * 1.02:
+                p.motivos_score.append("mínima de 30 dias")
+    if diagnostico:
+        # Fora do `if aba_cupons`/`else` de propósito: a faixa que mostra esta frase
+        # aparece nas DUAS abas. Enquanto ela morava no ramo de Ofertas, abrir Cupons
+        # apagava a linha da Amazon.
+        #
+        # `.exists()` no lugar do `.count()` que existia aqui: a frase só distingue
+        # "tem oferta Amazon" de "não tem", e contar percorria de novo a consulta
+        # mais cara da tela para jogar o número fora.
+        tem_oferta_amazon = Produto.objects.filter(
+            produtos_frescos_q(), preco_sem_desconto__gt=0, marketplace="amazon",
+        ).filter(Q(owner__isnull=True) | Q(owner=request.user)).exclude(
+            estado__in=["indisponivel", "invalido", "expirado", "stale"]
+        ).exists()
+        if tem_oferta_amazon:
+            amazon_diagnostico = "Amazon ativa para sua conta."
+        elif perfil and not perfil.afiliado_tag_amazon:
+            amazon_diagnostico = (
+                "O catálogo público é coletado sem tag; cadastre a tag Amazon para liberar links e envios."
+            )
+        elif perfil and perfil.amazon_elegivel is False:
+            amazon_diagnostico = "Creators API inelegível; o fallback público tentará alimentar sua conta."
+        else:
+            amazon_diagnostico = "Nenhuma oferta Amazon confirmada no último ciclo."
+        # `status` é um texto persistido que ninguém envelhece: uma fonte que parou de
+        # rodar guarda o último veredito para sempre. Sem esta derivação, "Atenção" tanto
+        # significava "falhou agora" quanto "ninguém a executa há dias" — dois problemas
+        # com soluções opostas. A coluna não muda; só a leitura da tela.
+        _limite_silencio = timezone.now() - timezone.timedelta(
+            hours=HORAS_FONTE_SILENCIOSA)
+        fontes_com_aviso, _paradas = [], []
+        for fonte in fontes:
+            fonte.silenciosa = (
+                fonte.ultima_tentativa is None or fonte.ultima_tentativa < _limite_silencio)
+            fonte.status_exibicao = "silent" if fonte.silenciosa else fonte.status
+            fonte.motivo_exibicao = (
+                f"Sem coleta há mais de {HORAS_FONTE_SILENCIOSA}h."
+                if fonte.silenciosa else (fonte.erro_publico or ""))
+            # Só o que exige leitura desce para a lista abaixo da faixa. Fonte parada tem
+            # sempre o mesmo motivo, então vai numa linha agregada: repetir a frase seis
+            # vezes é ruído que esconde o aviso específico de quem falhou de verdade.
+            if fonte.silenciosa:
+                _paradas.append(fonte.nome)
+            elif fonte.motivo_exibicao:
+                fontes_com_aviso.append(
+                    {"nome": fonte.nome, "motivo": fonte.motivo_exibicao})
+        if _paradas:
+            fontes_com_aviso.append({
+                "nome": f"Sem coleta há mais de {HORAS_FONTE_SILENCIOSA}h:",
+                "motivo": ", ".join(_paradas),
+            })
+        from apps.scrapers.afiliado import resumo_afiliacao
+        afiliacao = resumo_afiliacao(request.user)
+        afiliacao_ultimo_erro = (
+            LinkAfiliadoUsuario.objects
+            .filter(usuario=request.user, estado="erro")
+            .exclude(ultimo_erro="")
+            .order_by("-ultima_tentativa", "-id")
+            .values_list("ultimo_erro", flat=True)
+            .first()
+        ) or ""
 
     # base da querystring (mantém filtros ao trocar a ordenação)
     from urllib.parse import urlencode
@@ -2395,6 +2456,9 @@ def top_promocoes(request):
     qs_base_pagina = (urlencode(qs_pagina) + "&") if qs_pagina else ""
 
     return render(request, "scrapers/top_promocoes.html", {
+        # Gate único do painel técnico. O template consulta só esta chave, para que
+        # ligar/desligar o painel não dependa de lembrar de dez `{% if %}`.
+        "diagnostico": diagnostico,
         "produtos": produtos,
         "page_obj": page_obj,
         "cupons_page": cupons_page,

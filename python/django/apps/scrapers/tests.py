@@ -2022,6 +2022,11 @@ class TopPromocoesFilterTests(TestCase):
         self.assertEqual([p.nome for p in response.context["produtos"]], [nulo.nome])
 
     def test_catalogo_de_cupons_mostra_so_prontos_e_indica_fila(self):
+        # `cupons_coletados` e companhia são contadores por ETAPA da esteira: hoje só
+        # o admin os recebe no contexto (ver `diagnostico` em `top_promocoes`). A
+        # lista de cupons em si, checada no fim, vale para qualquer usuário.
+        self.user.is_staff = True
+        self.user.save(update_fields=["is_staff"])
         from apps.accounts.models import MercadoLivreSession
         from apps.scrapers.coupon_products import atualizar_chave_cupom
         from apps.scrapers.models import (
@@ -3864,7 +3869,7 @@ class AfiliacaoPorMarketplaceTests(TestCase):
         listados = {p.id: p for p in response.context["produtos"]}
         self.assertTrue(listados[produto.id].afiliado_pronto)
 
-    def test_tela_promocoes_mostra_resumo_e_ultimo_erro_da_afiliacao(self):
+    def _catalogo_com_afiliacao_pronta_e_com_erro(self):
         pronto = self._produto_ml("Fone pronto")
         LinkAfiliadoUsuario.objects.create(
             usuario=self.user, produto=pronto, estado="pronto",
@@ -3875,6 +3880,11 @@ class AfiliacaoPorMarketplaceTests(TestCase):
             usuario=self.user, produto=falhou, estado="erro",
             ultimo_erro="O Link Builder recusou a URL.",
             ultima_tentativa=timezone.now())
+
+    def test_tela_promocoes_mostra_resumo_e_ultimo_erro_da_afiliacao_ao_admin(self):
+        self._catalogo_com_afiliacao_pronta_e_com_erro()
+        self.user.is_staff = True
+        self.user.save(update_fields=["is_staff"])
         self.client.force_login(self.user)
 
         response = self.client.get(
@@ -3885,6 +3895,28 @@ class AfiliacaoPorMarketplaceTests(TestCase):
         self.assertContains(response, "Afiliação: 1 prontos")
         self.assertContains(response, "1 com erro")
         self.assertContains(response, "O Link Builder recusou a URL.")
+
+    def test_usuario_comum_nao_ve_a_faixa_de_diagnostico_nem_o_erro_cru(self):
+        """Fila de afiliação e mensagem do Link Builder são leitura de operação.
+
+        Quem usa a tela não religa fonte nem reconecta sessão compartilhada — o
+        painel só lhe dava um texto técnico sem ação possível. E o resumo custava
+        três agregações sobre o catálogo inteiro em todo GET, então escondê-lo é
+        também o que tira esse peso da request do usuário comum.
+        """
+        self._catalogo_com_afiliacao_pronta_e_com_erro()
+        self.assertFalse(self.user.is_staff)
+        self.client.force_login(self.user)
+
+        response = self.client.get(
+            reverse("scraper-top"), {"loja": "mercadolivre"})
+
+        self.assertIsNone(response.context["afiliacao"])
+        self.assertNotContains(response, "Afiliação:")
+        self.assertNotContains(response, "O Link Builder recusou a URL.")
+        self.assertNotContains(response, "Saúde das fontes")
+        # A lista em si continua inteira: escondemos o diagnóstico, não as ofertas.
+        self.assertEqual(response.context["page_obj"].paginator.count, 1)
 
     def test_tela_promocoes_resolve_afiliacao_em_lote(self):
         # preparar_exibicao existe pra isto: uma query por página, não por produto.

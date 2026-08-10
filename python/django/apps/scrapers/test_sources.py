@@ -875,10 +875,18 @@ class ChecagensDeConexaoTemEscopoDeTenantTests(TestCase):
     def test_flags_de_piloto_leem_com_escopo(self):
         import inspect
         from apps.accounts import feature_flags
-        for flag in (feature_flags.enabled_for_user,
+        # `_decisao_memorizada` é onde a resolução por usuário toca o banco:
+        # `enabled_for_user` e `feature_decision` delegam a ela (o memo por
+        # instância de usuário evitava mil consultas por GET na tela de Promoções).
+        # A garantia continua a mesma — nenhuma leitura de flag sai sem escopo.
+        for flag in (feature_flags._decisao_memorizada,
                      feature_flags.enabled_for_whatsapp_session):
             with self.subTest(flag=flag.__name__):
                 self.assertIn("_no_tenant(", inspect.getsource(flag))
+        for atalho in (feature_flags.enabled_for_user,
+                       feature_flags.feature_decision):
+            with self.subTest(flag=atalho.__name__):
+                self.assertIn("_decisao_memorizada(", inspect.getsource(atalho))
 
     def test_link_afiliado_do_ml_le_e_grava_com_escopo(self):
         """Sem escopo, `link_cacheado` some e `has_storage_state` diz "sem sessão":

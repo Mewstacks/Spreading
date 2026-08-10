@@ -308,7 +308,12 @@
     {% if tipo == 'cupom' %}
     <span class="tech-tag"><i data-lucide="list"></i> {{ cupons_page.paginator.count }} resultado(s)</span>
     {% endif %}
-    {% if tipo == 'cupom' %}
+    {% comment %}
+    Contadores de ETAPA da esteira de cupons (coletado -> elegível -> preparado ->
+    pronto). São nomes internos do worker: para quem usa a tela, o que importa é a
+    lista de cupons prontos que está logo abaixo.
+    {% endcomment %}
+    {% if tipo == 'cupom' and diagnostico %}
       <span class="tech-tag"><i data-lucide="database"></i> {{ cupons_coletados }} coletado(s)</span>
       <span class="tech-tag"><i data-lucide="filter"></i> {{ cupons_elegiveis }} elegível(is)</span>
       <span class="tech-tag"><i data-lucide="package-check"></i> {{ cupons_preparados }} preparado(s)</span>
@@ -356,6 +361,15 @@
   </div>
 </div>
 
+{% comment %}
+Faixa de diagnóstico de OPERAÇÃO: saúde de cada fonte, motivo de quem falhou,
+fila de afiliação e estado da Amazon. Quem só quer escolher uma oferta e enviar
+não tem o que fazer com "a fonte X respondeu em Y" — e não tem como agir sobre
+isso, porque quem religa raspagem e conexões é o admin. Fica atrás de
+`diagnostico` (= is_staff), que é o mesmo gate que impede a view de rodar as
+consultas agregadas que alimentam esta faixa.
+{% endcomment %}
+{% if diagnostico %}
 <section class="fontes-strip" aria-label="Saúde das fontes">
   <div class="fontes-bar">
     <span class="fontes-label">Fontes</span>
@@ -398,6 +412,7 @@
   </ul>
   {% endif %}
 </section>
+{% endif %}
 
 {{ categorias_por_macro|json_script:"cats-data" }}
 {{ categorias_selecionadas|json_script:"sel-cats-data" }}
@@ -594,11 +609,11 @@
   <div class="table-flat"><table><thead><tr><th>Como usar</th><th class="cell-grow">Cupom</th><th>Loja</th><th>Validade</th><th class="col-actions">Ação</th></tr></thead><tbody>
   {% for c in cupons_catalogo %}<tr>
     <td data-label="Como usar" class="cell-code"><div class="td-val">{% if c.codigo_publico %}<span class="tech-tag" style="font-size:12px;color:var(--text);">{{ c.codigo_publico }}</span>{% else %}<span class="tech-tag">Ativar no link</span>{% endif %}</div></td>
-    <td data-label="Cupom"><div class="td-val"><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.3rem;">{% if c.relampago %}<span class="badge badge-yellow">Relâmpago</span>{% endif %}{% if c.restrito %}<span class="badge badge-muted">Restrito</span>{% endif %}{% if c.marketplace == 'awin' %}<span class="badge badge-accent">Awin</span>{% endif %}{% if c.fonte.slug == 'manual-private' %}<span class="badge badge-green">Privado</span>{% endif %}{% if not c.codigo_publico %}<span class="badge badge-muted">Ativação no link</span>{% endif %}{% if c.disponibilidade.stage == 'ready' %}<span class="badge badge-green">Pronto</span>{% else %}<span class="badge badge-yellow">{{ c.disponibilidade.get_stage_display }}</span>{% endif %}</div><div class="muted" style="font-size:11.5px;margin-top:.25rem;">{% if c.disponibilidade.safe_detail %}{{ c.disponibilidade.safe_detail }}{% elif c.restrito %}Confira as condições antes de publicar.{% else %}Confirme a aplicação no checkout.{% endif %}</div></div></td>
+    <td data-label="Cupom"><div class="td-val"><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.3rem;">{% if c.relampago %}<span class="badge badge-yellow">Relâmpago</span>{% endif %}{% if c.restrito %}<span class="badge badge-muted">Restrito</span>{% endif %}{% if c.marketplace == 'awin' %}<span class="badge badge-accent">Awin</span>{% endif %}{% if c.fonte.slug == 'manual-private' %}<span class="badge badge-green">Privado</span>{% endif %}{% if not c.codigo_publico %}<span class="badge badge-muted">Ativação no link</span>{% endif %}{% if c.disponibilidade.stage == 'ready' %}<span class="badge badge-green">Pronto</span>{% elif diagnostico %}<span class="badge badge-yellow">{{ c.disponibilidade.get_stage_display }}</span>{% else %}<span class="badge badge-yellow">Preparando</span>{% endif %}</div><div class="muted" style="font-size:11.5px;margin-top:.25rem;">{# `safe_detail` diz em que etapa da esteira o cupom parou: leitura de operação, não do usuário. #}{% if diagnostico and c.disponibilidade.safe_detail %}{{ c.disponibilidade.safe_detail }}{% elif c.restrito %}Confira as condições antes de publicar.{% else %}Confirme a aplicação no checkout.{% endif %}</div></div></td>
     <td data-label="Loja"><div class="td-val">{% if c.anunciante_nome %}{{ c.anunciante_nome }}<div class="muted" style="font-size:11.5px;">{% if c.marketplace == 'mercadolivre' %}Mercado Livre{% else %}{{ c.marketplace|title }}{% endif %}</div>{% elif c.marketplace == 'mercadolivre' %}Mercado Livre{% else %}{{ c.marketplace|title }}{% endif %}</div></td>
     <td data-label="Validade"><div class="td-val tnum">{% if c.validade %}{{ c.validade|date:"d/m/Y H:i" }}{% else %}<span class="muted">Não informada</span>{% endif %}</div></td>
     <td data-label="Ação" class="col-actions"><div class="td-val row-actions" style="justify-content:flex-end;">
-      {% if c.disponibilidade.stage == 'ready' %}<button class="btn btn-accent btn-sm" onclick="abrirEnvioCupom({{ c.id }}, '{{ c.codigo_publico|escapejs }}')"><i data-lucide="send"></i> Enviar</button>{% else %}<span class="muted" title="{{ c.disponibilidade.safe_detail }}">indisponível</span>{% endif %}
+      {% if c.disponibilidade.stage == 'ready' %}<button class="btn btn-accent btn-sm" onclick="abrirEnvioCupom({{ c.id }}, '{{ c.codigo_publico|escapejs }}')"><i data-lucide="send"></i> Enviar</button>{% else %}<span class="muted" {% if diagnostico %}title="{{ c.disponibilidade.safe_detail }}"{% else %}title="O link deste cupom ainda está sendo preparado."{% endif %}>indisponível</span>{% endif %}
       {% if c.fonte.slug == 'manual-private' %}<form method="post" action="{% url 'scraper-cupom-manual-desativar' c.id %}" style="display:inline">{% csrf_token %}<button class="icon-btn danger" title="Desativar cupom"><i data-lucide="x"></i></button></form>{% endif %}
     </div></td>
   </tr>{% endfor %}</tbody></table></div>
@@ -607,17 +622,24 @@
   <div class="empty">
     <i data-lucide="ticket-percent"></i>
     <div class="empty-title">Nenhum cupom pronto para envio</div>
-    {% if cupons_coletados %}
+    {% comment %}
+    A quebra por etapa da esteira ("N aguardam preparo, N aguardam geração de
+    link…") só faz sentido para quem opera os workers. Para o usuário, a
+    informação útil cabe numa frase: ainda não há cupom pronto e a busca se repete
+    sozinha — não há botão que ele deva apertar.
+    {% endcomment %}
+    {% if filtros_ativos %}
+      <p>Nenhum cupom pronto corresponde aos filtros atuais.</p>
+    {% elif diagnostico and cupons_coletados %}
       <p>{{ cupons_coletados }} cupom(ns) foram coletado(s), mas
       {% if cupons_aguardando_preparo %}{{ cupons_aguardando_preparo }} aguardam preparo{% endif %}{% if cupons_aguardando_preparo and cupons_aguardando_link %}, {% endif %}
       {% if cupons_aguardando_link %}{{ cupons_aguardando_link }} aguardam geração de link{% endif %}{% if cupons_aguardando_verificacao %}{% if cupons_aguardando_preparo or cupons_aguardando_link %}, {% endif %}{{ cupons_aguardando_verificacao }} aguardam verificação{% endif %}{% if cupons_aguardando_conexao %}{% if cupons_aguardando_preparo or cupons_aguardando_link or cupons_aguardando_verificacao %}, {% endif %}{{ cupons_aguardando_conexao }} aguardam conexão da conta{% endif %}.
       O worker de cupons tenta novamente a cada 15 minutos.</p>
-    {% elif filtros_ativos %}
-      <p>Nenhum cupom pronto corresponde aos filtros atuais.</p>
-    {% elif cupons_fontes_sem_resultado %}
+    {% elif diagnostico and cupons_fontes_sem_resultado %}
       <p>As fontes habilitadas não retornaram resultados na última coleta; o catálogo anterior foi preservado.</p>
     {% else %}
-      <p>As fontes habilitadas ainda não encontraram cupons publicáveis.</p>
+      <p>Ainda não há cupom pronto para envio. A busca por novos cupons roda
+        sozinha e a lista se atualiza aqui assim que algum ficar disponível.</p>
     {% endif %}
   </div>
   {% endif %}
@@ -648,11 +670,11 @@
                 {% endcomment %}
                 {% if p.afiliado_pronto %}<span class="badge badge-green" title="Link verificado: abre o anúncio certo e está pronto para envio"><i data-lucide="check"></i> afiliado</span>
                 {% elif p.marketplace == "amazon" %}<span class="badge badge-yellow" title="Cadastre sua tag de afiliado Amazon na tela Conta para comissionar este item"><i data-lucide="alert-triangle"></i> pendente</span>
-                {% elif p.afiliado_estado == "nao_afiliavel" %}<span class="badge badge-muted" title="{{ p.afiliado_motivo|default:'O Programa de Afiliados não aceita este item.' }}"><i data-lucide="slash"></i> não afiliável</span>
-                {% elif p.afiliado_estado == "link_invalido" %}<span class="badge badge-red" title="{{ p.afiliado_motivo|default:'O link não abre o anúncio certo; não pode ser enviado.' }}"><i data-lucide="link-2-off"></i> link inválido</span>
+                {% elif p.afiliado_estado == "nao_afiliavel" %}<span class="badge badge-muted" title="{% if diagnostico %}{{ p.afiliado_motivo|default:'O Programa de Afiliados não aceita este item.' }}{% else %}O Programa de Afiliados não aceita este item.{% endif %}"><i data-lucide="slash"></i> não afiliável</span>
+                {% elif p.afiliado_estado == "link_invalido" %}<span class="badge badge-red" title="{% if diagnostico %}{{ p.afiliado_motivo|default:'O link não abre o anúncio certo; não pode ser enviado.' }}{% else %}O link não abre o anúncio certo; não pode ser enviado.{% endif %}"><i data-lucide="link-2-off"></i> link inválido</span>
                 {% elif p.afiliado_estado == "verificando" %}<span class="badge badge-muted" title="Conferindo se o link abre o anúncio certo antes de liberar o envio."><i data-lucide="loader"></i> verificando</span>
-                {% elif p.afiliado_estado == "erro" %}<span class="badge badge-red" title="{{ p.afiliado_motivo|default:'A geração do link falhou.' }}"><i data-lucide="alert-circle"></i> erro</span>
-                {% else %}<span class="badge badge-yellow" title="{% if p.afiliado_motivo %}{{ p.afiliado_motivo }} — nova tentativa em instantes.{% else %}Na fila para gerar o link de afiliado.{% endif %}"><i data-lucide="clock"></i> pendente</span>{% endif %}
+                {% elif p.afiliado_estado == "erro" %}<span class="badge badge-red" title="{% if diagnostico %}{{ p.afiliado_motivo|default:'A geração do link falhou.' }}{% else %}A geração do link falhou; será tentada de novo.{% endif %}"><i data-lucide="alert-circle"></i> erro</span>
+                {% else %}<span class="badge badge-yellow" title="{% if diagnostico and p.afiliado_motivo %}{{ p.afiliado_motivo }} — nova tentativa em instantes.{% else %}Na fila para gerar o link de afiliado.{% endif %}"><i data-lucide="clock"></i> pendente</span>{% endif %}
               </div>
               {% if p.motivos_score %}
               <div class="muted" style="font-size:11.5px;margin-top:.3rem;"><i data-lucide="sparkles"></i> {{ p.motivos_score|join:" · " }}</div>
@@ -690,11 +712,11 @@
             <button class="btn btn-accent btn-sm"
                     onclick="abrirEnvio({{ p.id }}, '{{ p.nome|escapejs }}')"><i data-lucide="send"></i> Enviar</button>
             {% elif p.afiliado_estado == "link_invalido" %}
-            <span class="muted" style="font-size:12px;" title="{{ p.afiliado_motivo|default:'O link não abre o anúncio certo.' }}"><i data-lucide="link-2-off"></i> link inválido</span>
+            <span class="muted" style="font-size:12px;" title="{% if diagnostico %}{{ p.afiliado_motivo|default:'O link não abre o anúncio certo.' }}{% else %}O link não abre o anúncio certo.{% endif %}"><i data-lucide="link-2-off"></i> link inválido</span>
             {% elif p.afiliado_estado == "verificando" %}
             <span class="muted" style="font-size:12px;" title="Conferindo o link antes de liberar o envio."><i data-lucide="loader"></i> verificando…</span>
             {% else %}
-            <span class="muted" style="font-size:12px;" title="{{ p.afiliado_motivo|default:'Sem link de afiliado pronto para envio.' }}">indisponível</span>
+            <span class="muted" style="font-size:12px;" title="{% if diagnostico %}{{ p.afiliado_motivo|default:'Sem link de afiliado pronto para envio.' }}{% else %}Sem link de afiliado pronto para envio.{% endif %}">indisponível</span>
             {% endif %}
           </div>
         </td>
@@ -713,9 +735,16 @@ que era exatamente o que não resolvia.
 <div class="empty">
   <i data-lucide="hourglass"></i>
   <div class="empty-title">Nenhum item afiliado ainda</div>
+  {% comment %}
+  O texto e o botão ficam para todo mundo: link de afiliado é o vocabulário de quem
+  usa o produto, e "Gerar links agora" é uma ação que ele mesmo executa. Só a
+  contagem por estado da fila (`afiliacao`) é de operação — a view nem a calcula
+  fora do `diagnostico`.
+  {% endcomment %}
   <p>A raspagem trouxe {{ pendentes_ocultos }} produto(s), mas eles só aparecem aqui
-    depois que o link de afiliado sai — enviar sem link não comissiona.<br>
-    {{ afiliacao.pendente }} na fila{% if afiliacao.erro %} · {{ afiliacao.erro }} com erro{% endif %}{% if afiliacao.nao_afiliavel %} · {{ afiliacao.nao_afiliavel }} não afiliáveis{% endif %}.</p>
+    depois que o link de afiliado sai — enviar sem link não comissiona.
+    {% if diagnostico %}<br>
+    {{ afiliacao.pendente }} na fila{% if afiliacao.erro %} · {{ afiliacao.erro }} com erro{% endif %}{% if afiliacao.nao_afiliavel %} · {{ afiliacao.nao_afiliavel }} não afiliáveis{% endif %}.{% endif %}</p>
   {% comment %}
   Antes: "Use Gerar links de afiliado acima" — apontando para um controle que o CSS
   mantinha invisível. O botão da ação vem junto do texto que pede a ação.
@@ -727,7 +756,7 @@ que era exatamente o que não resolvia.
       <i data-lucide="eye"></i> Ver os pendentes assim mesmo</a>
   </div>
   <p class="muted" style="margin-top:.6rem;font-size:12.5px;">
-    Se o log acusar sessão expirada,
+    Se continuar sem sair link,
     <a class="link" href="/scrapers/ml/">reconecte o Mercado Livre</a>.</p>
 </div>
 {% else %}

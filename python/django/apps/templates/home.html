@@ -119,7 +119,16 @@
             <tr>
               <td class="cell-grow"><b>{% if p.origem == "cupom" %}{{ p.cupom_normalizado.titulo|default:p.cupom|default:"Cupom"|truncatechars:55 }}{% else %}{{ p.produto.nome|default:"Oferta removida"|truncatechars:55 }}{% endif %}</b><div class="pub-meta">{{ p.criada_em|date:"d/m H:i" }} · variante {{ p.variante }}</div></td>
               <td>{{ p.destino_nome|default:p.destino_id|truncatechars:24 }}</td>
-              <td><span class="badge {% if p.status == 'enviado' %}badge-green{% elif p.status == 'falhou' %}badge-red{% elif p.status == 'incerto' %}badge-yellow{% else %}badge-muted{% endif %}"><span class="dot"></span>{{ p.get_status_display }}</span><div class="pub-meta">etapa {{ p.stage }} · tentativa {{ p.attempt_count }}{% if p.duration_ms %} · {{ p.duration_ms }} ms{% endif %}</div>{% if p.next_retry_at %}<div class="pub-meta">próximo retry {{ p.next_retry_at|date:"d/m H:i:s" }}</div>{% endif %}{% if p.ultima_tentativa.reason_code %}<div class="pub-meta">causa {{ p.ultima_tentativa.reason_code }}</div>{% endif %}{% if p.erro_publico %}<div class="pub-erro" title="{{ p.erro_publico }}">{{ p.erro_publico }}</div>{% endif %}{% if p.acao_recomendada %}<div class="pub-meta">{{ p.acao_recomendada }}</div>{% endif %}</td>
+              <td><span class="badge {% if p.status == 'enviado' %}badge-green{% elif p.status == 'falhou' %}badge-red{% elif p.status == 'incerto' %}badge-yellow{% else %}badge-muted{% endif %}"><span class="dot"></span>{{ p.get_status_display }}</span>{% comment %}
+Telemetria do pipeline — etapa, número da tentativa, duração em ms, horário exato
+do próximo retry e o `reason_code` — é o que se lê para depurar um envio. Nada
+disso é acionável para quem só publica ofertas, e o `reason_code` é literalmente um
+identificador interno.
+
+O que fica para todo mundo: status, `erro_publico` (já traduzido para linguagem de
+usuário por `_erro_publicacao`, não é o erro cru) e a ação recomendada. O retry vira
+uma frase em vez de um horário com segundos.
+{% endcomment %}{% if user.is_staff %}<div class="pub-meta">etapa {{ p.stage }} · tentativa {{ p.attempt_count }}{% if p.duration_ms %} · {{ p.duration_ms }} ms{% endif %}</div>{% if p.next_retry_at %}<div class="pub-meta">próximo retry {{ p.next_retry_at|date:"d/m H:i:s" }}</div>{% endif %}{% if p.ultima_tentativa.reason_code %}<div class="pub-meta">causa {{ p.ultima_tentativa.reason_code }}</div>{% endif %}{% elif p.next_retry_at %}<div class="pub-meta">Nova tentativa automática já agendada.</div>{% endif %}{% if p.erro_publico %}<div class="pub-erro" title="{{ p.erro_publico }}">{{ p.erro_publico }}</div>{% endif %}{% if p.acao_recomendada %}<div class="pub-meta">{{ p.acao_recomendada }}</div>{% endif %}</td>
             </tr>
           {% endfor %}
           </tbody>

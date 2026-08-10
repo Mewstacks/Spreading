@@ -32,15 +32,46 @@ def _no_tenant(fn, *args, **kwargs):
     return executar_orm_ou_direto(fn, *args, **kwargs)
 
 
-def enabled_for_user(flag_name: str, user=None) -> bool:
+def _decisao_memorizada(flag_name, user):
+    """Decide a flag no MÁXIMO uma vez por instância de usuário.
+
+    `organization_for_user` custa 2 queries e o override custa mais uma. A tela de
+    Promoções pergunta ML_CUPONS_ATIVACAO_ENABLED uma vez POR CUPOM (`score_cupom`
+    -> `ativacao_publicavel`), então um catálogo de ~5.800 cupons virava mais de mil
+    idas ao banco por GET — era daí que vinha a maior parte da lentidão da tela.
+
+    O escopo do memo é a instância de `user`, como o `_perm_cache` do próprio Django:
+    a request web carrega um usuário novo a cada vez, e um job SSE decide a flag uma
+    vez e mantém a MESMA resposta do início ao fim — que é o comportamento desejado
+    para uma decisão de rollout no meio de um envio.
+    """
+    if user is None or not getattr(user, "is_authenticated", False):
+        return _feature_decision(flag_name, None)
+    try:
+        memo = user._feature_flag_cache
+    except AttributeError:
+        memo = {}
+        try:
+            user._feature_flag_cache = memo
+        except AttributeError:
+            # Usuário imutável/proxy: segue sem memo, só mais lento.
+            memo = None
+    if memo is not None and flag_name in memo:
+        return memo[flag_name]
     organization = _no_tenant(organization_for_user, user)
-    return _feature_decision(flag_name, organization)[0]
+    decisao = _feature_decision(flag_name, organization)
+    if memo is not None:
+        memo[flag_name] = decisao
+    return decisao
+
+
+def enabled_for_user(flag_name: str, user=None) -> bool:
+    return _decisao_memorizada(flag_name, user)[0]
 
 
 def feature_decision(flag_name: str, user=None) -> tuple[bool, str]:
     """Retorna decisão e motivo estável, sem expor configuração sensível."""
-    organization = _no_tenant(organization_for_user, user)
-    return _feature_decision(flag_name, organization)
+    return _decisao_memorizada(flag_name, user)
 
 
 def _feature_decision(flag_name, organization):
