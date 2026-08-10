@@ -10,10 +10,11 @@ validado localmente; não significa que a mudança já esteja publicada.
 
 ## Estado do release
 
-**Não está em produção.** As alterações estão no workspace local sobre a branch
-`main`, commit-base `7c03561`, sem push nem deploy. O deploy permanece
-intencionalmente bloqueado até os builds das duas imagens e os smoke tests
-autenticados em um ambiente de staging.
+**Não está em produção.** O trabalho está commitado no `main` local sob a tag
+`hardening-2026-08-10` (código em `982344f`), sobre o commit-base `7c03561`.
+**Sem push e sem deploy.** O deploy permanece intencionalmente bloqueado até os builds
+das duas imagens, os smoke tests autenticados em staging e a conferência dos secrets
+exigidos pelo novo `release_command`.
 
 Status técnico local:
 
@@ -581,8 +582,9 @@ como concluído apenas porque o código correspondente existe localmente.
       1 milhão de linhas passa de 2,5 min só de backfill, e a VM da Fly é mais lenta
       que o host da medição. Se a contagem for alta, mover o preenchimento para um
       comando pós-deploy e deixar só o DDL na migração.
-- [ ] Commitar no `main` com tag de release; registrar o SHA e não fazer deploy a
-      partir do worktree sujo.
+- [x] Commitar no `main` com tag de release; registrar o SHA e não fazer deploy a
+      partir do worktree sujo. Tag `hardening-2026-08-10`, código em `982344f`, em
+      2026-08-10. **Ainda sem push.**
 - [x] Executar novamente:
       `APP_ENV=test python3 manage.py test --verbosity 1`, `npm test`,
       `npm run audit:production`, `git diff --check` e
