@@ -39,6 +39,7 @@ from apps.scrapers.ml_live_transport import (
     ActivePage,
     LiveTransport,
     despachar_input as despachar_input_v2,
+    interactive_browser_slot,
 )
 
 logger = logging.getLogger(__name__)
@@ -527,7 +528,7 @@ def _worker(user_id: int):
             user_id, fase="iniciando", desafio={}, retentar_qr=False,
             aviso="", erro="",
         )
-        with sync_playwright() as p:
+        with interactive_browser_slot(), sync_playwright() as p:
             # Flags do scraper (auxiliar.iniciar_browser) + dev-shm p/ não crashar o
             # Chromium em container com /dev/shm pequeno (Fly) + locale, ver
             # contexto_login.

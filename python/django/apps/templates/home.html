@@ -119,7 +119,7 @@
             <tr>
               <td class="cell-grow"><b>{% if p.origem == "cupom" %}{{ p.cupom_normalizado.titulo|default:p.cupom|default:"Cupom"|truncatechars:55 }}{% else %}{{ p.produto.nome|default:"Oferta removida"|truncatechars:55 }}{% endif %}</b><div class="pub-meta">{{ p.criada_em|date:"d/m H:i" }} · variante {{ p.variante }}</div></td>
               <td>{{ p.destino_nome|default:p.destino_id|truncatechars:24 }}</td>
-              <td><span class="badge {% if p.status == 'enviado' %}badge-green{% elif p.status == 'falhou' %}badge-red{% elif p.status == 'incerto' %}badge-yellow{% else %}badge-muted{% endif %}"><span class="dot"></span>{{ p.get_status_display }}</span>{% if p.erro_publico %}<div class="pub-erro" title="{{ p.erro_publico }}">{{ p.erro_publico }}</div>{% endif %}</td>
+              <td><span class="badge {% if p.status == 'enviado' %}badge-green{% elif p.status == 'falhou' %}badge-red{% elif p.status == 'incerto' %}badge-yellow{% else %}badge-muted{% endif %}"><span class="dot"></span>{{ p.get_status_display }}</span><div class="pub-meta">etapa {{ p.stage }} · tentativa {{ p.attempt_count }}{% if p.duration_ms %} · {{ p.duration_ms }} ms{% endif %}</div>{% if p.next_retry_at %}<div class="pub-meta">próximo retry {{ p.next_retry_at|date:"d/m H:i:s" }}</div>{% endif %}{% if p.ultima_tentativa.reason_code %}<div class="pub-meta">causa {{ p.ultima_tentativa.reason_code }}</div>{% endif %}{% if p.erro_publico %}<div class="pub-erro" title="{{ p.erro_publico }}">{{ p.erro_publico }}</div>{% endif %}{% if p.acao_recomendada %}<div class="pub-meta">{{ p.acao_recomendada }}</div>{% endif %}</td>
             </tr>
           {% endfor %}
           </tbody>
@@ -152,6 +152,7 @@
               {% if sync.ultimo_sucesso %}Última sincronização: <span class="tnum">{{ sync.ultimo_sucesso|date:"d/m H:i" }}</span>{% else %}Nenhuma sincronização concluída até agora{% endif %}
             </div>
             {% if sync.erro_publico %}<div class="row-sub err">{{ sync.erro_publico }}</div>{% endif %}
+            {% if not sync.preflight.ok %}<div class="row-sub err">{{ sync.preflight.instruction }} <span class="tech-tag">{{ sync.preflight.code }}</span></div>{% endif %}
           </div>
           <div class="row-side">
             {% if sync.status == 'acao' and sync.marketplace == 'mercadolivre' %}
@@ -227,9 +228,9 @@
           <div class="row-side"><a class="btn-link" href="{% url 'scraper-ml-conexao' %}">{% if ml_ok %}Gerenciar{% else %}Conectar{% endif %}</a></div>
         </div>
         <div class="row-item">
-          <span class="dot {% if wa_ok %}on{% elif est_wa.detalhe == "conectando" %}warn{% else %}off{% endif %}"></span>
+          <span class="dot {% if wa_ok %}on{% elif est_wa.availability_code == "recovering" or est_wa.availability_code == "global_capacity" %}warn{% else %}off{% endif %}"></span>
           <div class="row-main">
-            <div style="font-weight:600;font-size:13.5px;">WhatsApp{% if est_wa.detalhe == "conectando" and not wa_ok %} <span class="row-sub" style="display:inline;margin:0;">· conectando</span>{% endif %}</div>
+            <div style="font-weight:600;font-size:13.5px;">WhatsApp{% if not wa_ok and est_wa.availability_code %} <span class="row-sub" style="display:inline;margin:0;">· {{ est_wa.availability_code }}</span>{% endif %}</div>
             {% if not wa_ok and est_wa.motivo %}<div class="row-sub">{{ est_wa.motivo }}</div>{% endif %}
           </div>
           <div class="row-side"><a class="btn-link" href="{% url 'scraper-whatsapp' %}">{% if wa_ok %}Gerenciar{% else %}Conectar{% endif %}</a></div>

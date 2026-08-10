@@ -1,7 +1,7 @@
 let josePromise;
 let keyCache;
 const replayCache = new Map();
-const idempotencyCache = new Map();
+const ledger = require('./idempotency_ledger');
 
 const loadJose = () => {
     if (!josePromise) josePromise = import('jose');
@@ -99,7 +99,6 @@ const capabilityAuth = (action, resolveSessionId, { singleUse = false } = {}) =>
 );
 
 const idempotencyGuard = (req, res, next) => {
-    prune(idempotencyCache);
     const key = String(req.headers['idempotency-key'] || '');
     if (!/^[A-Za-z0-9._:-]{8,128}$/.test(key)) {
         return res.status(400).json({
@@ -107,23 +106,29 @@ const idempotencyGuard = (req, res, next) => {
             classe: 'permanente',
         });
     }
-    const scopedKey = [
-        req.capability.organization_id,
-        req.capability?.session_id || 'unknown',
-        key,
-    ].join(':');
-    const cached = idempotencyCache.get(scopedKey);
-    if (cached) return res.status(cached.status).json(cached.body);
+    const operation = ledger.begin({
+        organizationId: req.capability.organization_id,
+        sessionId: req.capability?.session_id || 'unknown',
+        operationKey: key,
+    });
+    if (operation.replay) {
+        return res.status(operation.replay.status || 503).json(operation.replay.body);
+    }
+    if (operation.inProgress) {
+        return res.status(409).json({
+            sucesso: false, resultado: 'em_andamento', repetir: true,
+            classe: 'transitorio', etapa: 'fila',
+            erro: 'Esta operação já está em andamento.',
+        });
+    }
+    req.deliveryOperation = {
+        scope: operation.scope,
+        markTransportStarted: () => ledger.markTransportStarted(operation.scope),
+    };
 
     const originalJson = res.json.bind(res);
     res.json = (body) => {
-        if (res.statusCode < 500 || body?.sucesso || body?.resultado_incerto) {
-            idempotencyCache.set(scopedKey, {
-                status: res.statusCode,
-                body,
-                expiresAt: Date.now() + 10 * 60 * 1000,
-            });
-        }
+        ledger.finish(operation.scope, res.statusCode, body);
         return originalJson(body);
     };
     next();
@@ -132,7 +137,7 @@ const idempotencyGuard = (req, res, next) => {
 const resetCachesForTests = () => {
     keyCache = null;
     replayCache.clear();
-    idempotencyCache.clear();
+    ledger.resetForTests();
 };
 
 module.exports = {

@@ -310,7 +310,10 @@
     {% endif %}
     {% if tipo == 'cupom' %}
       <span class="tech-tag"><i data-lucide="database"></i> {{ cupons_coletados }} coletado(s)</span>
+      <span class="tech-tag"><i data-lucide="filter"></i> {{ cupons_elegiveis }} elegível(is)</span>
+      <span class="tech-tag"><i data-lucide="package-check"></i> {{ cupons_preparados }} preparado(s)</span>
       <span class="tech-tag"><i data-lucide="circle-check"></i> {{ cupons_prontos }} pronto(s)</span>
+      <span class="tech-tag"><i data-lucide="circle-x"></i> {{ cupons_descartados }} descartado(s)</span>
       {% if cupons_aguardando_preparo %}<span class="tech-tag"><i data-lucide="loader-circle"></i> {{ cupons_aguardando_preparo }} aguardando preparo</span>{% endif %}
       {% if cupons_aguardando_link %}<span class="tech-tag"><i data-lucide="link"></i> {{ cupons_aguardando_link }} aguardando link</span>{% endif %}
       {% if cupons_aguardando_verificacao %}<span class="tech-tag"><i data-lucide="scan-search"></i> {{ cupons_aguardando_verificacao }} aguardando verificação</span>{% endif %}
@@ -554,6 +557,11 @@
     </div>
   </div>
 
+  {% if cupons_motivos %}<details class="collapse-card">
+    <summary><i data-lucide="list-checks"></i> Motivos de indisponibilidade <i data-lucide="chevron-down" class="chev"></i></summary>
+    {% for motivo in cupons_motivos %}<p class="muted" style="margin:.35rem 0;"><b>{{ motivo.total }}</b> · {{ motivo.safe_detail|default:motivo.reason_code }} <span class="tech-tag">{{ motivo.reason_code }}</span></p>{% endfor %}
+  </details>{% endif %}
+
   <details class="collapse-card" id="cupom-manual">
     <summary><i data-lucide="plus-circle"></i> Adicionar cupom privado <i data-lucide="chevron-down" class="chev"></i></summary>
     <p class="muted" style="font-size:12.5px;margin-top:0;">Visível somente na sua conta. O link afiliado é preparado antes da publicação.</p>
@@ -586,11 +594,11 @@
   <div class="table-flat"><table><thead><tr><th>Como usar</th><th class="cell-grow">Cupom</th><th>Loja</th><th>Validade</th><th class="col-actions">Ação</th></tr></thead><tbody>
   {% for c in cupons_catalogo %}<tr>
     <td data-label="Como usar" class="cell-code"><div class="td-val">{% if c.codigo_publico %}<span class="tech-tag" style="font-size:12px;color:var(--text);">{{ c.codigo_publico }}</span>{% else %}<span class="tech-tag">Ativar no link</span>{% endif %}</div></td>
-    <td data-label="Cupom"><div class="td-val"><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.3rem;">{% if c.relampago %}<span class="badge badge-yellow">Relâmpago</span>{% endif %}{% if c.restrito %}<span class="badge badge-muted">Restrito</span>{% endif %}{% if c.marketplace == 'awin' %}<span class="badge badge-accent">Awin</span>{% endif %}{% if c.fonte.slug == 'manual-private' %}<span class="badge badge-green">Privado</span>{% endif %}{% if not c.codigo_publico %}<span class="badge badge-muted">Ativação no link</span>{% endif %}</div><div class="muted" style="font-size:11.5px;margin-top:.25rem;">{% if c.restrito %}Confira as condições antes de publicar.{% else %}Confirme a aplicação no checkout.{% endif %}</div></div></td>
+    <td data-label="Cupom"><div class="td-val"><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.3rem;">{% if c.relampago %}<span class="badge badge-yellow">Relâmpago</span>{% endif %}{% if c.restrito %}<span class="badge badge-muted">Restrito</span>{% endif %}{% if c.marketplace == 'awin' %}<span class="badge badge-accent">Awin</span>{% endif %}{% if c.fonte.slug == 'manual-private' %}<span class="badge badge-green">Privado</span>{% endif %}{% if not c.codigo_publico %}<span class="badge badge-muted">Ativação no link</span>{% endif %}{% if c.disponibilidade.stage == 'ready' %}<span class="badge badge-green">Pronto</span>{% else %}<span class="badge badge-yellow">{{ c.disponibilidade.get_stage_display }}</span>{% endif %}</div><div class="muted" style="font-size:11.5px;margin-top:.25rem;">{% if c.disponibilidade.safe_detail %}{{ c.disponibilidade.safe_detail }}{% elif c.restrito %}Confira as condições antes de publicar.{% else %}Confirme a aplicação no checkout.{% endif %}</div></div></td>
     <td data-label="Loja"><div class="td-val">{% if c.anunciante_nome %}{{ c.anunciante_nome }}<div class="muted" style="font-size:11.5px;">{% if c.marketplace == 'mercadolivre' %}Mercado Livre{% else %}{{ c.marketplace|title }}{% endif %}</div>{% elif c.marketplace == 'mercadolivre' %}Mercado Livre{% else %}{{ c.marketplace|title }}{% endif %}</div></td>
     <td data-label="Validade"><div class="td-val tnum">{% if c.validade %}{{ c.validade|date:"d/m/Y H:i" }}{% else %}<span class="muted">Não informada</span>{% endif %}</div></td>
     <td data-label="Ação" class="col-actions"><div class="td-val row-actions" style="justify-content:flex-end;">
-      <button class="btn btn-accent btn-sm" onclick="abrirEnvioCupom({{ c.id }}, '{{ c.codigo_publico|escapejs }}')"><i data-lucide="send"></i> Enviar</button>
+      {% if c.disponibilidade.stage == 'ready' %}<button class="btn btn-accent btn-sm" onclick="abrirEnvioCupom({{ c.id }}, '{{ c.codigo_publico|escapejs }}')"><i data-lucide="send"></i> Enviar</button>{% else %}<span class="muted" title="{{ c.disponibilidade.safe_detail }}">indisponível</span>{% endif %}
       {% if c.fonte.slug == 'manual-private' %}<form method="post" action="{% url 'scraper-cupom-manual-desativar' c.id %}" style="display:inline">{% csrf_token %}<button class="icon-btn danger" title="Desativar cupom"><i data-lucide="x"></i></button></form>{% endif %}
     </div></td>
   </tr>{% endfor %}</tbody></table></div>
@@ -911,12 +919,11 @@ function gerarLinks() {
       return;
     }
     var ln = document.createElement('div');
-    if (e.data.indexOf('__LINKS_OCUPADO__') !== -1) {
-      // Antes do teste de __ML_LOGIN__: não é problema de conta, é fila.
+    if (e.data.indexOf('__LINKS_ENFILEIRADOS__') !== -1) {
+      // Não é problema de conta nem pedido para repetir: o worker assumiu a fila.
       ocupado = true;
       ln.className = 'warn';
-      ln.innerHTML = '&rarr; <a href="#" onclick="gerarLinks();return false;" ' +
-        'style="color:inherit;font-weight:600;text-decoration:underline">Tentar de novo</a>';
+      ln.textContent = 'O worker continuará a geração em segundo plano.';
     } else if (e.data.indexOf('__ML_LOGIN__') !== -1) {
       ln.className = 'err';
       ln.innerHTML = '&rarr; <a href="/scrapers/ml/" style="color:inherit;font-weight:600;text-decoration:underline">Reconectar Mercado Livre</a>';

@@ -512,6 +512,10 @@ def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") ->
     )
     sinais = [{"nome": nome, "n": contagens.get(ev, 0)} for ev, nome in SINAIS]
     workers = _workers()
+    from apps.scrapers.manual_scraping import queue_wait_metrics
+    queue_metrics = queue_wait_metrics(
+        since=desde, now=agora, usuario=usuario,
+    )
 
     if grupos_criticos:
         estado = "critico"
@@ -536,5 +540,6 @@ def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") ->
         "sinais": sinais, "workers": workers,
         "conexoes": _conexoes_ao_vivo(usuario),
         "configuracao": _configuracao_silenciosa(),
+        "manual_queue": queue_metrics,
         "total": qs.count(),
     }

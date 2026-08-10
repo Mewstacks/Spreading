@@ -47,7 +47,7 @@ class ManualScrapingApiTests(TestCase):
         payload = response.json()
         self.assertEqual(payload["tipo"], "ofertas")
         self.assertEqual(payload["status"], "queued")
-        spawn.assert_called_once_with("scrape")
+        spawn.assert_called_once_with("manual")
         self.assertEqual(self.client.get("/scrapers/ofertas/").status_code, 405)
 
     def test_disparo_exige_csrf(self):

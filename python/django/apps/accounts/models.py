@@ -4,8 +4,9 @@ Guarda: estado de verificação de e-mail, tags de afiliado por usuário (ML + A
 sessão de WhatsApp do usuário e o último estado conhecido das conexões (p/ alertas).
 """
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from django.utils import timezone
 from django.utils.text import slugify
@@ -170,6 +171,17 @@ class WhatsAppConnection(models.Model):
     )
     instance_id = models.CharField(max_length=64, unique=True)
     status = models.CharField(max_length=24, default="inactive", db_index=True)
+    worker_instance = models.CharField(max_length=120, blank=True, default="")
+    phase = models.CharField(max_length=32, blank=True, default="", db_index=True)
+    masked_number = models.CharField(max_length=24, blank=True, default="")
+    last_event = models.CharField(max_length=80, blank=True, default="")
+    last_event_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    unavailable_reason = models.CharField(max_length=80, blank=True, default="")
+    capacity_used = models.PositiveSmallIntegerField(default=0)
+    capacity_max = models.PositiveSmallIntegerField(default=0)
+    consistency_status = models.CharField(
+        max_length=24, default="unknown", db_index=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -221,6 +233,19 @@ def organization_for_user(user) -> Organization | None:
     """Resolve o tenant ativo sem confiar em um id vindo do cliente."""
     if not user or not getattr(user, "is_authenticated", False):
         return None
+    active = (
+        Perfil.objects.select_related("active_organization")
+        .filter(
+            user=user,
+            active_organization__status="active",
+            active_organization__memberships__user=user,
+            active_organization__memberships__is_active=True,
+        )
+        .values_list("active_organization", flat=True)
+        .first()
+    )
+    if active:
+        return Organization.objects.filter(pk=active, status="active").first()
     personal = Organization.objects.filter(
         personal_owner=user, status="active",
     ).first()
@@ -243,6 +268,23 @@ class Perfil(models.Model):
         on_delete=models.CASCADE,
         related_name="profile_settings",
     )
+    # Organização efetivamente usada pelos fluxos tenant-aware. O vínculo pessoal
+    # acima é mantido durante a janela de compatibilidade/rollback; este FK permite
+    # que vários usuários compartilhem a mesma organização e, portanto, a mesma
+    # WhatsAppConnection OneToOne.
+    active_organization = models.ForeignKey(
+        Organization, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="active_profiles",
+    )
+
+    def clean(self):
+        super().clean()
+        if self.active_organization_id and self.user_id and not Membership.objects.filter(
+                organization_id=self.active_organization_id, user_id=self.user_id,
+                is_active=True).exists():
+            raise ValidationError(
+                {"active_organization": "O usuário não possui membership ativa nesta organização."}
+            )
 
     # ── Verificação de e-mail ──
     email_verificado = models.BooleanField(default=False)
@@ -392,7 +434,10 @@ class Perfil(models.Model):
             ).first()
             return connection.instance_id if connection else ""
 
-        return executar_orm_ou_direto(_instancia) or self.wa_session or str(self.user_id)
+        # `wa_session` é legado e não pode voltar a criar uma segunda identidade
+        # para o mesmo tenant. Ausência da conexão autoritativa é um estado
+        # observável, não um convite para adivinhar o clientId.
+        return executar_orm_ou_direto(_instancia) or ""
 
     def __str__(self):
         return f"Perfil<{self.user.get_username()}>"
@@ -403,6 +448,7 @@ def _criar_ou_atualizar_perfil(instance, organization, created):
         Perfil.objects.create(
             user=instance,
             organization=organization,
+            active_organization=organization,
             email_verificado=bool(instance.is_superuser),
             verificado_em=timezone.now() if instance.is_superuser else None,
         )
@@ -410,11 +456,51 @@ def _criar_ou_atualizar_perfil(instance, organization, created):
         # Garante perfil p/ usuários antigos criados antes do model existir.
         profile, _ = Perfil.objects.get_or_create(
             user=instance,
-            defaults={"organization": organization},
+            defaults={
+                "organization": organization,
+                "active_organization": organization,
+            },
         )
         if profile.organization_id != organization.pk:
             profile.organization = organization
             profile.save(update_fields=["organization"])
+        if profile.active_organization_id is None:
+            profile.active_organization = organization
+            profile.save(update_fields=["active_organization"])
+
+
+class OrganizationFeatureOverride(models.Model):
+    """Override explícito de feature por organização, sem furar o kill switch global."""
+
+    STATES = [
+        ("inherit", "Herdar"),
+        ("enabled", "Habilitada"),
+        ("disabled", "Desabilitada"),
+    ]
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name="feature_overrides",
+    )
+    feature = models.CharField(max_length=80)
+    state = models.CharField(max_length=12, choices=STATES, default="inherit")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "feature"],
+                name="uniq_organization_feature_override",
+            ),
+        ]
+
+
+@receiver(pre_save, sender=Perfil)
+def validar_organizacao_ativa_do_perfil(sender, instance, **kwargs):
+    if instance.active_organization_id and instance.user_id and not Membership.objects.filter(
+            organization_id=instance.active_organization_id,
+            user_id=instance.user_id, is_active=True).exists():
+        raise ValidationError(
+            {"active_organization": "O usuário não possui membership ativa nesta organização."}
+        )
 
 
 @receiver(post_save, sender=settings.AUTH_USER_MODEL)

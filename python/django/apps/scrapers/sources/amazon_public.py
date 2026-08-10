@@ -1,9 +1,11 @@
 import re
+from contextlib import contextmanager
 from urllib.parse import quote_plus
 from django.conf import settings
 from django.utils import timezone
 
 from apps.scrapers.auxiliar import iniciar_browser
+from apps.scrapers.carga import BrowserResourceUnavailable, browser_resource
 from .base import IngestedItem, SourceAdapter, normalizar_dinheiro
 
 ASIN_RE = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})", re.I)
@@ -23,9 +25,20 @@ def _precos_publicaveis(current, previous):
     return current > 0 and previous > current and previous < current * 10
 
 
+@contextmanager
+def _browser_slot(owner_kind):
+    with browser_resource(owner_kind=owner_kind) as acquired:
+        if not acquired:
+            raise BrowserResourceUnavailable(
+                "Capacidade de browser ocupada; a operação Amazon será retomada."
+            )
+        yield
+
+
 def verify_product_url(url, nome_esperado=None):
     """Validação JIT pública usada antes de qualquer publicação Amazon."""
-    with iniciar_browser(headless=True) as (page, _):
+    with _browser_slot("amazon_product_verify"), \
+            iniciar_browser(headless=True) as (page, _):
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
         body = page.locator("body").inner_text(timeout=5000)
         lower = body.lower()
@@ -48,11 +61,13 @@ class AmazonPublicSource(SourceAdapter):
     slug = "amazon-public-web"
     marketplace = "amazon"
     name = "Amazon — catálogo público"
+    requires_chromium = True
 
     def discover_offers(self, terms=None, **kwargs):
         terms = terms or getattr(settings, "AMAZON_FEED_KEYWORDS", []) or ["ofertas"]
         seen = set()
-        with iniciar_browser(headless=True) as (page, _):
+        with _browser_slot("amazon_public_offers"), \
+                iniciar_browser(headless=True) as (page, _):
             for term in terms[:12]:
                 page.goto(f"https://www.amazon.com.br/s?k={quote_plus(term)}",
                           wait_until="domcontentloaded", timeout=45000)
@@ -92,7 +107,8 @@ class AmazonPublicSource(SourceAdapter):
         return []
 
     def refresh_offer(self, item, **kwargs):
-        with iniciar_browser(headless=True) as (page, _):
+        with _browser_slot("amazon_offer_refresh"), \
+                iniciar_browser(headless=True) as (page, _):
             page.goto(item.canonical_url, wait_until="domcontentloaded", timeout=45000)
             body = page.locator("body").inner_text(timeout=5000).lower()
             if "não disponível" in body or "indisponível" in body:

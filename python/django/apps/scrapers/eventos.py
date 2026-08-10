@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import traceback
 
+from core.logging import redact_log_text
+
 
 SENSITIVE_KEYS = {
     "password", "senha", "token", "secret", "api_key", "authorization",
@@ -37,7 +39,15 @@ def _report_sentry(exc, *, pipeline, evento, level, usuario, contexto):
             scope.set_context("evento_operacional", _clean(contexto or {}))
             if usuario is not None:
                 scope.set_user({"id": getattr(usuario, "pk", None)})
-            sentry_sdk.capture_exception(exc)
+            # A exceção original pode conter URL assinada, cookie ou capability.
+            # Mandá-la a um backend externo contornaria a redação do formatter.
+            scope.set_tag("exception_type", type(exc).__name__)
+            sentry_sdk.capture_message(
+                redact_log_text(
+                    f"{type(exc).__name__}: {exc}"
+                )[:1000],
+                level=_SENTRY_LEVEL.get(level, "error"),
+            )
     except Exception:
         pass  # observabilidade nunca pode virar outra fonte de falha
 
@@ -55,9 +65,9 @@ def _clean(value):
     if isinstance(value, (list, tuple)):
         return [_clean(v) for v in value[:25]]
     if isinstance(value, (str, int, float, bool)) or value is None:
-        text = value if not isinstance(value, str) else value[:500]
+        text = value if not isinstance(value, str) else redact_log_text(value)[:500]
         return text
-    return str(value)[:500]
+    return redact_log_text(value)[:500]
 
 
 def log_event(pipeline: str, evento: str, mensagem: str, *, level="info",
@@ -69,12 +79,14 @@ def log_event(pipeline: str, evento: str, mensagem: str, *, level="info",
         from apps.scrapers.models import EventoOperacional
         erro = ""
         if exc is not None:
-            erro = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:]
+            erro = redact_log_text("".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            ))[-4000:]
         evento_criado = EventoOperacional.objects.create(
             pipeline=pipeline,
             evento=evento[:80],
             level=level,
-            mensagem=(mensagem or "")[:500],
+            mensagem=redact_log_text(mensagem or "")[:500],
             usuario=usuario,
             contexto=_clean(contexto or {}),
             erro=erro,

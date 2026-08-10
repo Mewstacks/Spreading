@@ -29,6 +29,7 @@ import logging
 from django.utils.dateparse import parse_datetime
 
 from apps.scrapers.auxiliar import iniciar_browser
+from apps.scrapers.carga import coordinated_ml_browser
 from apps.scrapers.coupon_rules import (
     derivar_categoria_cupom, rotulo_anunciante, tem_restricao_publico,
 )
@@ -122,14 +123,74 @@ def _payload_nordic(html):
     Mesmo recorte usado no scraper de campanhas: o script é
     `_n.ctx.r={...};_n.ctx.r.assets.manifest=...`, então o JSON termina no `;`.
     """
-    if not isinstance(html, str) or "_n.ctx.r=" not in html:
+    if not isinstance(html, str):
         return None
-    try:
-        bruto = html.split("_n.ctx.r=", 1)[1].split(";_n.ctx.r.assets", 1)[0]
-        return json.loads(bruto)
-    except Exception as e:
-        logger.warning("Payload __NORDIC_RENDERING_CTX__ da página de cupons ilegível: %s", e)
+
+    def recortar(inicio):
+        if inicio < 0 or inicio >= len(html) or html[inicio] not in "[{":
+            return None
+        pares = {"[": "]", "{": "}"}
+        pilha, em_string, escape = [], False, False
+        for pos in range(inicio, len(html)):
+            ch = html[pos]
+            if em_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    em_string = False
+                continue
+            if ch == '"':
+                em_string = True
+            elif ch in pares:
+                pilha.append(pares[ch])
+            elif ch in "]}":
+                if not pilha or pilha.pop() != ch:
+                    return None
+                if not pilha:
+                    return html[inicio:pos + 1]
         return None
+
+    candidatos = []
+    conhecido = re.search(r"_n\.ctx\.r\s*=\s*\{", html)
+    if conhecido:
+        candidatos.append(("nordic", conhecido.end() - 1))
+    for match in re.finditer(
+            r"(?:\b(?:const|let|var)\s+)?[A-Za-z_$][\w$\.]*\s*=\s*\{", html):
+        candidatos.append(("assignment", match.end() - 1))
+    for match in re.finditer(
+            r"<script[^>]+type=[\"']application/(?:ld\+)?json[\"'][^>]*>(.*?)</script>",
+            html, re.I | re.S):
+        try:
+            dados = json.loads(match.group(1).strip())
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if _cupons_do_payload(dados):
+            return dados
+
+    erros = 0
+    vistos = set()
+    for _origem, inicio in candidatos:
+        if inicio in vistos:
+            continue
+        vistos.add(inicio)
+        bruto = recortar(inicio)
+        if not bruto:
+            continue
+        try:
+            dados = json.loads(bruto)
+        except json.JSONDecodeError:
+            erros += 1
+            continue
+        if _cupons_do_payload(dados):
+            return dados
+    if erros:
+        logger.warning(
+            "Payload SSR da página de cupons ilegível (%s candidato(s)); schema_fingerprint=unreadable",
+            erros,
+        )
+    return None
 
 
 def _cupons_do_payload(dados):
@@ -241,7 +302,7 @@ def _salvar_cupons_smart(cupons):
             "is_mar_aberto": False,
             "dia_inicio": "", "dia_fim": "",
         }
-        CupomNormalizado.objects.update_or_create(
+        cupom_obj, _ = CupomNormalizado.objects.update_or_create(
             fonte=fonte, external_id=f"campanha:{c['campanha_id']}",
             defaults={
                 "marketplace": "mercadolivre",
@@ -262,6 +323,11 @@ def _salvar_cupons_smart(cupons):
                 "evidencia": {"transport": "public-web", "association": "unverified",
                               "total_items": c["total_itens"]},
             },
+        )
+        from apps.scrapers.sources.persistence import record_coupon_observation
+        record_coupon_observation(
+            cupom_obj, health_status="healthy", outcome="accepted",
+            evidence={"association": "ssr_container", "public": True},
         )
         n += 1
     logger.info("Cupons oficiais do carrossel ML: %s upsert(s)", n)
@@ -299,7 +365,10 @@ def mapear_cupons_codigo(faixa=None, usuario=None):
     smart = []
     links_vistos = set()
 
-    with iniciar_browser(storage_state=state, headless=True) as (page, context):
+    with coordinated_ml_browser(
+        usuario=usuario, authenticated=state is not None,
+        owner_kind="ml_checkout_coupons",
+    ), iniciar_browser(storage_state=state, headless=True) as (page, context):
         for n in range(1, 6):  # algumas páginas
             emitir_fase(f"Cupons de checkout — página {n}/5", n / 5, faixa)
             url = "https://www.mercadolivre.com.br/ofertas/cupons"
@@ -390,7 +459,7 @@ def mapear_cupons_codigo(faixa=None, usuario=None):
                       "modo_resgate": "codigo", "escopo": "",
                       "container_url": "", "container_name": "",
                       "is_mar_aberto": False, "dia_inicio": "", "dia_fim": ""}
-        CupomNormalizado.objects.update_or_create(
+        cupom_obj, _ = CupomNormalizado.objects.update_or_create(
             fonte=fonte, external_id=f"checkout:{cod}",
             defaults={"marketplace": "mercadolivre", "titulo": f"Cupom {cod}",
                       "codigo": cod, "link": "https://www.mercadolivre.com.br/ofertas/cupons",
@@ -398,6 +467,11 @@ def mapear_cupons_codigo(faixa=None, usuario=None):
                       "regras": regras_cod,
                       "confianca": "baixa", "estado": "ativo",
                       "evidencia": {"transport": "public-web", "association": "unverified"}},
+        )
+        from apps.scrapers.sources.persistence import record_coupon_observation
+        record_coupon_observation(
+            cupom_obj, health_status="healthy", outcome="accepted",
+            evidence={"association": "ssr_code", "public": True},
         )
 
     # Uma página pode continuar trazendo produtos e ocultar os banners/códigos por

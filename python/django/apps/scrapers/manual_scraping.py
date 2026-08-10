@@ -1,7 +1,7 @@
 """Fila durável e executor das raspagens manuais de ofertas e cupons.
 
 O processo web somente cria/consulta ``ExecucaoRaspagem``. O trabalho pesado roda
-no processo ``scrape`` (que já possui contexto de sistema e advisory lock), sem
+no processo ``manual`` e adquire um lease observável de ``django_chromium``, sem
 segurar a transação RLS da request durante Playwright.
 """
 
@@ -20,6 +20,8 @@ from django.db import (
     transaction,
 )
 from django.db.models import Exists, OuterRef, Q
+from django.db.models import Prefetch
+from django.conf import settings
 from django.utils import timezone
 
 from apps.accounts.tenant import executar_no_tenant, system_context
@@ -64,6 +66,18 @@ _ERRORS = {
         "O serviço de raspagem foi interrompido duas vezes.",
         "Verifique o worker de raspagem antes de tentar novamente.",
     ),
+    "worker_unavailable": (
+        "O worker de raspagem manual não respondeu dentro do limite.",
+        "Verifique o processo manual no Fly.io e tente novamente.",
+    ),
+    "queue_timeout": (
+        "A raspagem não obteve o recurso de navegador dentro do limite de espera.",
+        "Verifique a fila e o consumo de Chromium antes de tentar novamente.",
+    ),
+    "execution_timeout": (
+        "A raspagem excedeu o limite operacional de 45 minutos.",
+        "Verifique a origem e o Chromium antes de iniciar uma nova raspagem.",
+    ),
     "unknown": (
         "Ocorreu uma falha inesperada durante a raspagem.",
         "Os dados anteriores foram preservados. Consulte a Saúde se o erro persistir.",
@@ -101,12 +115,26 @@ def criar_execucao(*, organization, usuario, tipo: str):
         raise ValueError("Tipo de raspagem inválido.")
     try:
         with transaction.atomic():
-            return ExecucaoRaspagem.objects.create(
+            job = ExecucaoRaspagem.objects.create(
                 organization=organization,
                 solicitada_por=usuario,
                 tipo=tipo,
                 etapa="Aguardando o worker",
-            ), True
+                motivo_espera="worker_absent",
+                espera_iniciada_em=timezone.now(),
+                recurso_esperado="django_chromium",
+                deadline_em=(
+                    timezone.now()
+                    + timedelta(seconds=settings.MANUAL_QUEUE_MAX_WAIT_SECONDS)
+                ),
+            )
+            EventoRaspagem.objects.create(
+                execucao=job, organization=organization,
+                nivel="info", etapa="Fila:worker_absent",
+                mensagem="Execução criada; aguardando heartbeat do worker manual.",
+                progresso=0,
+            )
+            return job, True
     except IntegrityError:
         ativo = ExecucaoRaspagem.objects.filter(
             organization=organization, status__in=ACTIVE,
@@ -129,6 +157,21 @@ def serializar_execucao(execucao: ExecucaoRaspagem, *, after=0) -> dict:
         "progresso": execucao.progresso,
         "contagens": execucao.contagens or {},
         "tentativas": execucao.tentativas,
+        "fila": {
+            "posicao": execucao.posicao_fila,
+            "motivo": execucao.motivo_espera,
+            "espera_iniciada_em": (
+                execucao.espera_iniciada_em.isoformat()
+                if execucao.espera_iniciada_em else None
+            ),
+            "worker": execucao.worker_id or None,
+            "recurso": execucao.recurso_esperado or None,
+            "lock_owner_tipo": execucao.lock_owner_tipo or None,
+            "deadline_em": execucao.deadline_em.isoformat() if execucao.deadline_em else None,
+            "eta_min_em": execucao.eta_min_em.isoformat() if execucao.eta_min_em else None,
+            "eta_max_em": execucao.eta_max_em.isoformat() if execucao.eta_max_em else None,
+            "eta_amostra": execucao.eta_amostra,
+        },
         "criada_em": execucao.criada_em.isoformat() if execucao.criada_em else None,
         "iniciada_em": execucao.iniciada_em.isoformat() if execucao.iniciada_em else None,
         "finalizada_em": (
@@ -626,9 +669,31 @@ def _recuperar_interrompidos(now):
     stale = now - timedelta(seconds=STALE_SECONDS)
     interrompidos = list(
         ExecucaoRaspagem.objects.select_for_update()
-        .filter(status="running", heartbeat_em__lt=stale)
+        .filter(status="running")
+        .filter(
+            Q(heartbeat_em__isnull=True) | Q(heartbeat_em__lt=stale)
+            | Q(iniciada_em__lte=now - timedelta(seconds=MAX_JOB_SECONDS))
+        )
     )
     for job in interrompidos:
+        if job.iniciada_em and job.iniciada_em <= now - timedelta(seconds=MAX_JOB_SECONDS):
+            message, action = _erro_publico("execution_timeout")
+            job.status = "failed"
+            job.etapa = "Execução encerrada"
+            job.codigo_erro = "execution_timeout"
+            job.erro_publico = message
+            job.acao_recomendada = action
+            job.finalizada_em = now
+            job.save(update_fields=(
+                "status", "etapa", "codigo_erro", "erro_publico",
+                "acao_recomendada", "finalizada_em",
+            ))
+            EventoRaspagem.objects.create(
+                execucao=job, organization_id=job.organization_id,
+                nivel="error", etapa=job.etapa, mensagem=message,
+                progresso=job.progresso,
+            )
+            continue
         if job.tentativas < MAX_ATTEMPTS:
             job.status = "queued"
             job.etapa = "Retomando após interrupção"
@@ -658,7 +723,15 @@ def _recuperar_interrompidos(now):
             )
 
 
-def claim_next_job():
+def recuperar_jobs_abandonados():
+    with transaction.atomic():
+        before = ExecucaoRaspagem.objects.filter(status="running").count()
+        _recuperar_interrompidos(timezone.now())
+        after = ExecucaoRaspagem.objects.filter(status="running").count()
+    return max(0, before - after)
+
+
+def claim_next_job(worker_id="", lease_token=""):
     now = timezone.now()
     with transaction.atomic():
         _recuperar_interrompidos(now)
@@ -682,6 +755,10 @@ def claim_next_job():
         job.etapa = "Iniciando"
         job.iniciada_em = job.iniciada_em or now
         job.heartbeat_em = now
+        job.worker_id = str(worker_id or "")[:120]
+        job.motivo_espera = ""
+        job.lock_owner_tipo = "manual"
+        job.lease_token = str(lease_token or "")[:64]
         job.tentativas += 1
         job.codigo_erro = ""
         job.erro_publico = ""
@@ -689,6 +766,7 @@ def claim_next_job():
         job.save(update_fields=(
             "status", "etapa", "iniciada_em", "heartbeat_em", "tentativas",
             "codigo_erro", "erro_publico", "acao_recomendada",
+            "worker_id", "motivo_espera", "lock_owner_tipo", "lease_token",
         ))
         EventoRaspagem.objects.create(
             execucao=job, organization_id=job.organization_id,
@@ -699,8 +777,8 @@ def claim_next_job():
         return job
 
 
-def processar_proximo_job() -> bool:
-    job = _db_retry(claim_next_job)
+def processar_proximo_job(worker_id="", lease_token="") -> bool:
+    job = _db_retry(lambda: claim_next_job(worker_id, lease_token))
     if job is None:
         return False
     executar_job(job)
@@ -709,3 +787,153 @@ def processar_proximo_job() -> bool:
 
 def existe_job_pendente() -> bool:
     return ExecucaoRaspagem.objects.filter(status__in=ACTIVE).exists()
+
+
+def _duracoes_recentes(tipo):
+    jobs = list(
+        ExecucaoRaspagem.objects.filter(
+            tipo=tipo, status__in=("succeeded", "partial"),
+            iniciada_em__isnull=False, finalizada_em__isnull=False,
+        ).order_by("-finalizada_em").values_list("iniciada_em", "finalizada_em")[:30]
+    )
+    return sorted(max(1, int((fim - inicio).total_seconds())) for inicio, fim in jobs)
+
+
+def atualizar_diagnostico_fila(*, resource_owner=""):
+    """Atualiza posição/deadlines sem transformar ausência operacional em fila infinita."""
+    from apps.scrapers.models import ResourceLease, WorkerHeartbeat
+
+    now = timezone.now()
+    stale = now - timedelta(seconds=STALE_SECONDS)
+    worker = WorkerHeartbeat.objects.filter(
+        worker_type="manual", heartbeat_at__gte=stale,
+    ).order_by("-heartbeat_at").first()
+    if not resource_owner:
+        lease = ResourceLease.objects.filter(
+            resource_key="django_chromium", expires_at__gt=now,
+        ).only("owner_kind").first()
+        resource_owner = lease.owner_kind if lease else ""
+    queued = list(
+        ExecucaoRaspagem.objects.filter(status="queued").order_by("criada_em", "pk")
+    )
+    for position, job in enumerate(queued, 1):
+        waited = (now - job.criada_em).total_seconds()
+        code = ""
+        if not worker and waited >= settings.MANUAL_QUEUE_NO_WORKER_TIMEOUT_SECONDS:
+            code = "worker_unavailable"
+        elif job.deadline_em and job.deadline_em <= now:
+            code = "queue_timeout"
+        if code:
+            message, action = _erro_publico(code)
+            ExecucaoRaspagem.objects.filter(pk=job.pk, status="queued").update(
+                status="failed", etapa="Fila encerrada", codigo_erro=code,
+                erro_publico=message, acao_recomendada=action, finalizada_em=now,
+                posicao_fila=None,
+            )
+            EventoRaspagem.objects.create(
+                execucao=job, organization_id=job.organization_id,
+                nivel="error", etapa="Fila encerrada", mensagem=message,
+            )
+            continue
+
+        reason = "worker_absent" if not worker else (
+            "previous_job" if position > 1 else (
+                "resource_busy" if resource_owner else "waiting_worker"
+            )
+        )
+        if job.motivo_espera != reason:
+            EventoRaspagem.objects.create(
+                execucao=job, organization_id=job.organization_id,
+                nivel="info", etapa=f"Fila:{reason}",
+                mensagem=(
+                    f"Motivo de espera atualizado para {reason}; "
+                    f"posição={position}; recurso=django_chromium."
+                ),
+                progresso=job.progresso,
+            )
+        durations = _duracoes_recentes(job.tipo)
+        eta_min = eta_max = None
+        if len(durations) >= 10:
+            median = durations[len(durations) // 2]
+            p90 = durations[min(len(durations) - 1, int(len(durations) * .9))]
+            eta_min = now + timedelta(seconds=median * position)
+            eta_max = now + timedelta(seconds=p90 * position)
+        ExecucaoRaspagem.objects.filter(pk=job.pk, status="queued").update(
+            posicao_fila=position,
+            motivo_espera=reason,
+            espera_iniciada_em=job.espera_iniciada_em or job.criada_em,
+            worker_id=worker.worker_id if worker else "",
+            recurso_esperado="django_chromium",
+            lock_owner_tipo=str(resource_owner or "")[:40],
+            eta_min_em=eta_min, eta_max_em=eta_max, eta_amostra=len(durations),
+        )
+        if waited >= 5 * 60 and not EventoRaspagem.objects.filter(
+                execucao=job, etapa="Espera excedida").exists():
+            EventoRaspagem.objects.create(
+                execucao=job, organization_id=job.organization_id,
+                nivel="warning", etapa="Espera excedida",
+                mensagem=(
+                    f"Espera superior a 5 minutos; motivo={reason}; "
+                    f"recurso=django_chromium; posição={position}."
+                ),
+            )
+    return len(queued)
+
+
+def queue_wait_metrics(*, since, now=None, usuario=None):
+    """Agrega somente intervalos comprovados pelos eventos duráveis da fila."""
+    now = now or timezone.now()
+    jobs = ExecucaoRaspagem.objects.filter(criada_em__lte=now).filter(
+        Q(finalizada_em__isnull=True) | Q(finalizada_em__gte=since),
+    )
+    if usuario is not None:
+        from apps.accounts.models import organization_for_user
+        organization = organization_for_user(usuario)
+        jobs = jobs.filter(organization=organization) if organization else jobs.none()
+    queue_events = EventoRaspagem.objects.filter(
+        etapa__startswith="Fila:", criado_em__lte=now,
+    ).order_by("criado_em", "id")
+    jobs = jobs.prefetch_related(Prefetch("eventos", queryset=queue_events))
+
+    samples = {}
+    current = {}
+    for job in jobs:
+        events = list(job.eventos.all())
+        for index, event in enumerate(events):
+            reason = event.etapa.split(":", 1)[1]
+            start = max(event.criado_em, since)
+            if index + 1 < len(events):
+                end = events[index + 1].criado_em
+            else:
+                end = job.iniciada_em or job.finalizada_em or now
+            end = min(end, now)
+            if end > start:
+                samples.setdefault(reason, []).append(int((end - start).total_seconds()))
+        if job.status == "queued":
+            reason = job.motivo_espera or "unknown"
+            current[reason] = current.get(reason, 0) + 1
+
+    by_reason = []
+    for reason, values in sorted(samples.items()):
+        ordered = sorted(values)
+        by_reason.append({
+            "reason": reason,
+            "samples": len(ordered),
+            "total_seconds": sum(ordered),
+            "p50_seconds": ordered[len(ordered) // 2],
+            "p90_seconds": ordered[min(len(ordered) - 1, int(len(ordered) * .9))],
+            "max_seconds": ordered[-1],
+            "current": current.get(reason, 0),
+        })
+    for reason, count in sorted(current.items()):
+        if reason not in samples:
+            by_reason.append({
+                "reason": reason, "samples": 0, "total_seconds": 0,
+                "p50_seconds": None, "p90_seconds": None, "max_seconds": None,
+                "current": count,
+            })
+    return {
+        "by_reason": by_reason,
+        "current_total": sum(current.values()),
+        "measured_intervals": sum(len(values) for values in samples.values()),
+    }

@@ -122,6 +122,11 @@ class Command(BaseCommand):
         from apps.scrapers.maintenance import expire_stale
 
         r = verificar_e_notificar()
+        from apps.scrapers.manual_scraping import (
+            atualizar_diagnostico_fila, recuperar_jobs_abandonados,
+        )
+        r["raspagens_recuperadas"] = recuperar_jobs_abandonados()
+        r["raspagens_na_fila"] = atualizar_diagnostico_fila()
         # A expiração não pode depender do scraper estar ligado ou de uma coleta
         # ter terminado com sucesso. Se a fonte parar, é justamente quando o
         # catálogo antigo precisa deixar de ser publicável.

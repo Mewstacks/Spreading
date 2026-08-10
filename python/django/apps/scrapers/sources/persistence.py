@@ -1,4 +1,75 @@
+import hashlib
+
 from django.utils import timezone
+
+
+_SOURCE_PRECEDENCE = {
+    "ml-cupons-afiliados": 10,
+    "mercadolivre-web": 20,
+    "ml-public-containers": 30,
+    "licensed-affiliate-feed": 40,
+    "amazon-public-coupons": 10,
+}
+
+
+def _coupon_canonical_key(item):
+    rules = item.coupon_rules if isinstance(item.coupon_rules, dict) else {}
+    code = str(item.coupon_code or "").strip().upper()
+    if code:
+        scope = str(rules.get("container_name") or rules.get("escopo") or "site").strip().lower()
+        period = f"{rules.get('dia_inicio') or ''}:{rules.get('dia_fim') or ''}"
+        raw = f"code:{item.marketplace}:{code}:{scope}:{period}"
+    else:
+        evidence = item.evidence if isinstance(item.evidence, dict) else {}
+        promotion = evidence.get("promotion_id") or item.external_id
+        raw = f"activation:{item.marketplace}:{promotion}:{rules.get('container_name') or ''}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _model_coupon_canonical_key(coupon):
+    rules = coupon.regras if isinstance(coupon.regras, dict) else {}
+    code = str(coupon.codigo or "").strip().upper()
+    if code:
+        scope = str(rules.get("container_name") or rules.get("escopo") or "site").strip().lower()
+        period = f"{rules.get('dia_inicio') or ''}:{rules.get('dia_fim') or ''}"
+        raw = f"code:{coupon.marketplace}:{code}:{scope}:{period}"
+    else:
+        evidence = coupon.evidencia if isinstance(coupon.evidencia, dict) else {}
+        promotion = evidence.get("promotion_id") or coupon.external_id
+        raw = f"activation:{coupon.marketplace}:{promotion}:{rules.get('container_name') or ''}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def record_coupon_observation(coupon, *, source=None, health_status="healthy",
+                              outcome="accepted", reason_code="", evidence=None,
+                              precedence=None):
+    """Registra veredito de uma fonte legada sem copiar HTML ou URLs sensíveis."""
+    from apps.scrapers.models import CupomFonteObservacao
+
+    source = source or coupon.fonte
+    safe_evidence = evidence if isinstance(evidence, dict) else {}
+    return CupomFonteObservacao.objects.update_or_create(
+        organization_id=coupon.organization_id,
+        fonte=source,
+        canonical_key=_model_coupon_canonical_key(coupon),
+        source_external_id=str(coupon.external_id or "")[:180],
+        defaults={
+            "cupom": coupon,
+            "precedence": (
+                _SOURCE_PRECEDENCE.get(source.slug, 100)
+                if precedence is None else int(precedence)
+            ),
+            "health_status": str(health_status or "unknown")[:24],
+            "outcome": str(outcome or "invalid")[:32],
+            "reason_code": str(reason_code or "")[:64],
+            "evidence": {
+                "association": str(safe_evidence.get("association") or "")[:80],
+                "product_ids": max(0, int(safe_evidence.get("product_ids") or 0)),
+                "public": bool(safe_evidence.get("public")),
+            },
+            "observed_at": timezone.now(),
+        },
+    )
 
 
 def evidencia_com_cupom_preservado(evidencia, anterior):
@@ -28,10 +99,11 @@ def evidencia_com_cupom_preservado(evidencia, anterior):
     return {**evidencia, "promotion": promocao}
 
 
-def persist_items(items, owner=None, integration=None):
+def persist_items(items, owner=None, integration=None, source_health="healthy"):
     """Idempotent upsert. Empty input deliberately performs no deletion."""
     from apps.scrapers.models import (
-        Produto, FonteIngestao, CupomNormalizado, ProgramaAfiliado,
+        Produto, FonteIngestao, CupomFonteObservacao, CupomNormalizado,
+        ProgramaAfiliado,
     )
     from apps.scrapers.scraper_mercadolivre.ofertas_scraper import classificar_oferta_por_nome
     offers = coupons = 0
@@ -64,6 +136,27 @@ def persist_items(items, owner=None, integration=None):
             )
             from apps.scrapers.coupon_products import atualizar_chave_cupom
             atualizar_chave_cupom(cupom_obj)
+            evidence = item.evidence if isinstance(item.evidence, dict) else {}
+            CupomFonteObservacao.objects.update_or_create(
+                organization_id=cupom_obj.organization_id,
+                fonte=fonte,
+                canonical_key=_coupon_canonical_key(item),
+                source_external_id=str(item.external_id or "")[:180],
+                defaults={
+                    "cupom": cupom_obj,
+                    "precedence": _SOURCE_PRECEDENCE.get(item.source, 100),
+                    "health_status": str(source_health or "unknown")[:24],
+                    "outcome": "accepted",
+                    "reason_code": "",
+                    # Somente prova tipada; nunca HTML, cookies ou query strings.
+                    "evidence": {
+                        "association": str(evidence.get("association") or "")[:80],
+                        "has_promotion_id": bool(evidence.get("promotion_id")),
+                        "product_ids": len(evidence.get("asins") or evidence.get("product_ids") or []),
+                    },
+                    "observed_at": item.observed_at or timezone.now(),
+                },
+            )
             coupons += 1
             continue
         lookup = {"marketplace": item.marketplace, "owner": owner}

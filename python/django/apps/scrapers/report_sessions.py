@@ -92,7 +92,12 @@ def registrar_veredito(usuario, marketplace: str, resultado: str, motivo: str = 
     """
     atual = probe_snapshot(usuario, marketplace)
     falhas = 0 if resultado == "conectado" else atual["falhas"] + 1
-    dados = {"falhas": falhas, "resultado": resultado, "motivo": (motivo or "")[:200]}
+    from core.logging import redact_log_text
+    dados = {
+        "falhas": falhas,
+        "resultado": str(resultado or "")[:40],
+        "motivo": redact_log_text(motivo or "")[:200],
+    }
     caminho = _probe_path(usuario, marketplace)
     try:
         caminho.parent.mkdir(parents=True, exist_ok=True)

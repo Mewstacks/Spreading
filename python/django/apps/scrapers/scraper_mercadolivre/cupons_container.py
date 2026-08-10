@@ -20,8 +20,13 @@ from django.db.models import Max, Q
 from django.utils import timezone
 
 from apps.scrapers.auxiliar import iniciar_browser, pausa_humana
+from apps.scrapers.carga import (
+    BrowserResourceUnavailable, ml_site_browser_resource,
+)
 from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
-from apps.scrapers.models import CupomNormalizado, Produto, ProdutoCupom
+from apps.scrapers.models import (
+    CupomNormalizado, FonteIngestao, Produto, ProdutoCupom,
+)
 from .link import _extrair_item_id
 from .scraper import _ml_http_session
 
@@ -181,7 +186,7 @@ def _ids_por_http(sessao, url, max_paginas):
 
 
 def _coletar(cupons, coletor, max_paginas, orcamento_s=ORCAMENTO_S):
-    """Só navegação: [(cupom, ids)]. Roda DENTRO do Playwright.
+    """Só navegação: [(cupom, ids, motivo)]. Roda DENTRO do Playwright.
 
     Separado de `_confirmar_todos` porque o ORM não pode ser chamado de dentro de
     `with sync_playwright()`: a API sync mantém um event loop vivo num greenlet da
@@ -197,26 +202,111 @@ def _coletar(cupons, coletor, max_paginas, orcamento_s=ORCAMENTO_S):
         if time.monotonic() >= fim:
             logger.info("Orçamento de %ss esgotado no casamento de container; "
                         "%s de %s cupons processados", orcamento_s, i, len(cupons))
+            pares.extend(
+                (restante, None, "container_budget_exhausted")
+                for restante in cupons[i:]
+            )
             break
         url = (cupom.regras or {}).get("container_url")
         try:
-            pares.append((cupom, coletor(url, max_paginas)))
+            ids = coletor(url, max_paginas)
+            pares.append((
+                cupom, ids,
+                "" if ids else (
+                    "container_fetch_failed" if ids is None
+                    else "container_empty_unproven"
+                ),
+            ))
         except Exception as e:
             logger.warning("Coleta do container do cupom %s falhou: %s", cupom.codigo, e)
+            pares.append((cupom, None, "container_fetch_failed"))
     return pares
 
 
 def _confirmar_todos(pares, idx, agora):
     """Só ORM: grava os ProdutoCupom. Roda FORA do Playwright."""
-    total = sum(_confirmar(cupom, ids, idx, agora) for cupom, ids in pares)
+    total = sum(
+        _confirmar(cupom, ids, idx, agora)
+        for cupom, ids, _motivo in pares if ids
+    )
     logger.info("Casamento cupom-container: %s vinculo(s) confirmado(s)", total)
     return total
 
 
+def _registrar_saude_containers(resultados, agora):
+    """Persiste a saúde da terceira fonte ML sem guardar URL ou HTML.
+
+    ``resultados`` contém ``(cupom, ids, publico, motivo)``. Um conjunto vazio não
+    comprova um container legitimamente vazio; por isso degrada a fonte. ``None``
+    representa falha operacional ou recurso ausente e também preserva os vínculos
+    anteriormente confirmados.
+    """
+    from apps.scrapers.sources.persistence import record_coupon_observation
+
+    fonte, _ = FonteIngestao.objects.get_or_create(
+        slug="ml-public-containers",
+        defaults={
+            "marketplace": "mercadolivre",
+            "nome": "Mercado Livre — containers públicos",
+        },
+    )
+    aceitos = 0
+    falhas = 0
+    for cupom, ids, publico, motivo in resultados:
+        comprovado = bool(ids)
+        if comprovado:
+            aceitos += 1
+        else:
+            falhas += 1
+        record_coupon_observation(
+            cupom,
+            source=fonte,
+            health_status="healthy" if comprovado else "degraded",
+            outcome=(
+                "accepted" if comprovado
+                else "waiting" if motivo == "ml_session_missing"
+                else "operational_failure" if ids is None
+                else "invalid"
+            ),
+            reason_code=(
+                "container_items_proven" if comprovado
+                else motivo or "container_empty_unproven"
+            ),
+            evidence={
+                "association": (
+                    "public_container" if publico else "authenticated_container"
+                ),
+                "product_ids": len(ids or ()),
+                "public": publico,
+            },
+        )
+    fonte.ultima_tentativa = agora
+    fonte.ultimo_total = aceitos
+    if resultados and not falhas:
+        fonte.status = "ok"
+        fonte.ultimo_sucesso = agora
+        fonte.falhas_consecutivas = 0
+        fonte.erro_publico = ""
+    else:
+        fonte.status = "degraded"
+        fonte.falhas_consecutivas += 1
+        fonte.erro_publico = (
+            "Alguns containers não puderam ser comprovados; vínculos anteriores preservados."
+        )
+    fonte.save(update_fields=[
+        "ultima_tentativa", "ultimo_total", "status", "ultimo_sucesso",
+        "falhas_consecutivas", "erro_publico",
+    ])
+
+
 def _rodar(cupons, idx, agora, coletor, max_paginas, orcamento_s=ORCAMENTO_S):
     """Coleta + confirmação em sequência (sem browser em voo)."""
-    return _confirmar_todos(
-        _coletar(cupons, coletor, max_paginas, orcamento_s), idx, agora)
+    pares = _coletar(cupons, coletor, max_paginas, orcamento_s)
+    _registrar_saude_containers([
+        (cupom, ids, True, motivo)
+        for cupom, ids, motivo in pares
+    ], agora)
+    return _confirmar_todos(pares, idx, agora)
 
 
 def casar_cupons_container(coletor=None, max_paginas=2, usuario=None,
@@ -255,7 +345,7 @@ def casar_cupons_container(coletor=None, max_paginas=2, usuario=None,
         if ids is None:
             pendentes.append((cupom, url))
         else:
-            pares.append((cupom, ids))
+            pares.append((cupom, ids, ""))
 
     if pendentes:
         if state is None:
@@ -263,6 +353,12 @@ def casar_cupons_container(coletor=None, max_paginas=2, usuario=None,
             # sessão. Abrir Chromium anônimo só repetiria o vazio e faria o pipeline
             # relatar "0 falhas". Persiste os pares públicos já confirmados e degrada
             # explicitamente a etapa autenticada.
+            _registrar_saude_containers(
+                [(cupom, ids, True, motivo) for cupom, ids, motivo in pares]
+                + [(cupom, None, False, "ml_session_missing")
+                   for cupom, _url in pendentes],
+                agora,
+            )
             if pares:
                 _confirmar_todos(pares, idx, agora)
             raise SessaoMLObrigatoriaError(
@@ -274,9 +370,27 @@ def casar_cupons_container(coletor=None, max_paginas=2, usuario=None,
                     len(pares), len(pendentes))
         # A gravação fica FORA do `with`: dentro dele o ORM levanta
         # SynchronousOnlyOperation (event loop do Playwright vivo nesta thread).
-        with iniciar_browser(storage_state=state, headless=True) as (page, _context):
-            pares += _coletar(
-                [c for c, _ in pendentes],
-                lambda url, paginas: _ids_do_container(page, url, paginas),
-                max_paginas, restante)
+        with ml_site_browser_resource(
+            usuario, owner_kind="coupon_container",
+        ) as acquired:
+            if not acquired:
+                raise BrowserResourceUnavailable(
+                    "Capacidade de browser ocupada; casamento de containers será retomado."
+                )
+            with iniciar_browser(storage_state=state, headless=True) as (page, _context):
+                pares_browser = _coletar(
+                    [c for c, _ in pendentes],
+                    lambda url, paginas: _ids_do_container(page, url, paginas),
+                    max_paginas, restante)
+        _registrar_saude_containers(
+            [(cupom, ids, True, motivo) for cupom, ids, motivo in pares]
+            + [(cupom, ids, False, motivo)
+               for cupom, ids, motivo in pares_browser],
+            agora,
+        )
+        pares += pares_browser
+    else:
+        _registrar_saude_containers(
+            [(cupom, ids, True, motivo) for cupom, ids, motivo in pares], agora,
+        )
     return _confirmar_todos(pares, idx, agora)

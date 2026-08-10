@@ -1,5 +1,6 @@
 import json
 import queue
+import threading
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
@@ -13,11 +14,28 @@ from apps.scrapers.ml_live_transport import (
     CAPTURE_BURST_INTERVAL_S,
     CAPTURE_IDLE_INTERVAL_S,
     ActivePage,
+    InteractiveBrowserCapacityError,
     LiveTransport,
     despachar_input,
+    interactive_browser_slot,
     intervalo_de_captura,
     normalizar_viewport,
 )
+
+
+class InteractiveBrowserCapacityTests(SimpleTestCase):
+    def test_slot_compartilhado_rejeita_segundo_chromium_e_e_liberado(self):
+        from apps.scrapers import ml_live_transport
+
+        semaphore = threading.BoundedSemaphore(1)
+        with patch.object(ml_live_transport, "_interactive_browser_slots", semaphore):
+            with interactive_browser_slot():
+                with self.assertRaises(InteractiveBrowserCapacityError):
+                    with interactive_browser_slot():
+                        self.fail("um segundo Chromium interativo não poderia abrir")
+            # A saída, inclusive após a recusa concorrente, devolve o slot.
+            with interactive_browser_slot():
+                pass
 
 
 class ViewportRemotoTests(SimpleTestCase):

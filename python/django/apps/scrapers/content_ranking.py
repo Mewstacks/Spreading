@@ -139,7 +139,8 @@ def _coupon_candidates(config, limit):
         config.owner, config.grupo_id, "cupom_normalizado_id", prontos)
     candidates = []
     for coupon in pool:
-        if coupon.id not in prontos or not cupom_publicavel(coupon):
+        if coupon.id not in prontos or not cupom_publicavel(
+                coupon, usuario=config.owner):
             continue
         if coupon.programa and not (
             coupon.programa.habilitado and coupon.programa.status_vinculo == "joined"

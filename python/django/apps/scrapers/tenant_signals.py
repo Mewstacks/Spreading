@@ -1,7 +1,7 @@
 """Preenche e valida a organização em toda escrita de dados privados."""
 
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db.models.signals import pre_save
+from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 
 from apps.accounts.models import organization_for_user
@@ -80,3 +80,11 @@ def assign_organization(sender, instance, **kwargs):
     if sender is models.EventoRaspagem:
         instance.organization_id = instance.execucao.organization_id
         _validate_current_scope(instance)
+
+
+@receiver(post_save, sender=models.Publicacao)
+def initialize_publication_state(sender, instance, created, **kwargs):
+    if not created or not instance.organization_id:
+        return
+    from apps.scrapers.send_pipeline import initialize_publication
+    initialize_publication(instance)

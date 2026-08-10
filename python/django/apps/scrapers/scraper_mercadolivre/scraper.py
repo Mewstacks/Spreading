@@ -3,11 +3,12 @@ import json
 import re
 import time
 import logging
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 
 import requests
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada, ua_aleatorio
+from apps.scrapers.carga import coordinated_ml_browser
 from apps.scrapers.coupon_rules import (
     derivar_categoria_cupom, extrair_escopo_produtos, rotulo_anunciante,
     tem_restricao_publico)
@@ -126,7 +127,7 @@ def _ml_http_session(state):
 
 
 @contextmanager
-def _transporte_cupons(state):
+def _transporte_cupons(state, usuario=None):
     """Fornece `fetch(n) -> str|None` para /cupons/filter, agnóstico ao transporte.
 
     Tenta HTTP primeiro (rápido, sem Chromium). O caller liga `estado['forcar_browser']`
@@ -145,7 +146,8 @@ def _transporte_cupons(state):
     browser.
     """
     session = _ml_http_session(state)
-    estado = {"forcar_browser": False, "usou_browser": False, "_cm": None, "_page": None}
+    estado = {"forcar_browser": False, "usou_browser": False, "_page": None}
+    stack = ExitStack()
 
     def fetch(n):
         if not estado["forcar_browser"]:
@@ -157,9 +159,13 @@ def _transporte_cupons(state):
                 logger.debug("Falha HTTP na pagina %s de cupons: %s", n, e)
                 return None
         if estado["_page"] is None:
-            cm = iniciar_browser(storage_state=state, headless=True)
-            page, _ctx = cm.__enter__()
-            estado["_cm"] = cm
+            stack.enter_context(coordinated_ml_browser(
+                usuario=usuario, authenticated=state is not None,
+                owner_kind="ml_campaign_coupons",
+            ))
+            page, _ctx = stack.enter_context(
+                iniciar_browser(storage_state=state, headless=True)
+            )
             estado["_page"] = page
             estado["usou_browser"] = True
         page = estado["_page"]
@@ -173,8 +179,7 @@ def _transporte_cupons(state):
     try:
         yield fetch, estado
     finally:
-        if estado["_cm"] is not None:
-            estado["_cm"].__exit__(None, None, None)
+        stack.close()
 
 
 def _persistir_campanhas_cupons(
@@ -314,13 +319,14 @@ def mapear_cupons(n=1, faixa=None, usuario=None):
     PAGINAS_TIPICAS = 8
     varredura_completa = False
     motivo_parada = ""
+    ids_observados = set()
 
     state = storage_state(usuario)
     if state is None:
         avisar_sem_sessao("Raspagem de cupons de campanha", usuario)
     logger.info("Iniciando raspagem e limpeza de cupons")
 
-    with _transporte_cupons(state) as (fetch_html, _estado):
+    with _transporte_cupons(state, usuario=usuario) as (fetch_html, _estado):
         while True:
             if n > MAX_PAGINAS:
                 logger.warning("Limite de %s páginas atingido na varredura de cupons; encerrando", MAX_PAGINAS)
@@ -372,11 +378,26 @@ def mapear_cupons(n=1, faixa=None, usuario=None):
                 varredura_completa = True
                 break
 
+            ids_da_pagina = {
+                str(item.get("campaignId") or "").strip()
+                for item in lista_da_pagina if isinstance(item, dict)
+            } - {""}
+            novos_ids = ids_da_pagina - ids_observados
+            if ids_da_pagina and not novos_ids:
+                motivo_parada = (
+                    f"a página {n} repetiu campanhas já observadas; a origem "
+                    "não comprovou avanço da paginação"
+                )
+                logger.warning("Paginação de cupons repetida na página %s; encerrando", n)
+                break
+
             tracking_list = dados.get("tracking", {}).get("view", {}).get("eventData", {}).get("coupons_list", [])
             tracking_dict = {str(t.get("campaign_id")): t for t in tracking_list if "campaign_id" in t}
 
             for cupom in lista_da_pagina:
                 camp_id = str(cupom.get("campaignId", ""))
+                if camp_id in ids_observados:
+                    continue
                 titulo_bruto = cupom.get("title", "Sem titulo")
                 titulo_final = titulo_bruto.get("text") if isinstance(titulo_bruto, dict) else titulo_bruto
                 subtitulo = cupom.get("initialSubtitle", {}).get("text", "")
@@ -515,6 +536,8 @@ def mapear_cupons(n=1, faixa=None, usuario=None):
                 }
 
                 todos_os_cupons_limpos.append(cupom_limpo)
+
+            ids_observados.update(novos_ids)
 
             logger.debug("Pagina %s processada: %s cupons limpos; total=%s", n, len(lista_da_pagina), len(todos_os_cupons_limpos))
 
@@ -668,6 +691,11 @@ def projetar_catalogo_cupons(faixa=None):
         )
         from apps.scrapers.coupon_products import atualizar_chave_cupom
         atualizar_chave_cupom(cupom_normalizado)
+        from apps.scrapers.sources.persistence import record_coupon_observation
+        record_coupon_observation(
+            cupom_normalizado, health_status="healthy", outcome="accepted",
+            evidence={"association": "campaign", "public": True},
+        )
 
     # Sincroniza o catálogo com o estado do `Cupom`: campanhas que saíram do ar
     # deixam de aparecer. Só mexe nas projeções de campanha (external_id
@@ -986,7 +1014,10 @@ def main(usuario=None):
 
     resultados_pendentes = []
     total = len(cupons_pendentes)
-    with iniciar_browser(storage_state=state, headless=True) as (page, context):
+    with coordinated_ml_browser(
+        usuario=usuario, authenticated=state is not None,
+        owner_kind="ml_coupon_products",
+    ), iniciar_browser(storage_state=state, headless=True) as (page, context):
         for i, cupom in enumerate(cupons_pendentes, 1):
             emitir_progresso(f"[PROGRESSO] Cupom {i}/{total} ({i*100//total}%)")
             resultado = listar_itens_por_cupom(cupom, page)

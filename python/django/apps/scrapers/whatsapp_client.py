@@ -27,6 +27,7 @@ import uuid
 import requests
 from django.conf import settings
 from django.core.cache import cache
+from django.utils import timezone
 
 # Classificação de falha de envio. Espelha node.js/error_taxonomy.js — o Node
 # manda a `classe` no corpo de /api/enviar e ela tem precedência aqui.
@@ -41,6 +42,43 @@ DESCONHECIDO = "desconhecido"
 
 _CLASSES = frozenset({TRANSITORIO, PERMANENTE, DESCONHECIDO})
 _SEND_HTTP_TIMEOUT_S = 65
+
+_SAFE_SEND_FIELDS = frozenset({
+    "sucesso", "via", "tipo", "instancia", "mensagem_id", "confirmacao",
+    "resultado", "repetir", "ack", "etapa", "duracao_ms", "falha_infra",
+    "classe", "erro", "causa",
+})
+
+
+def _safe_send_body(body) -> dict:
+    """Aceita somente telemetria conhecida e redige texto vindo do worker.
+
+    Mesmo sendo um serviço interno, o Node processa erros do navegador e conteúdo
+    de terceiros. Nunca confie que um corpo inesperado não ecoará capability,
+    destino, mídia ou cookie para o banco/dashboard Django.
+    """
+    if not isinstance(body, dict):
+        return {"erro": "O worker WhatsApp devolveu uma resposta ilegível."}
+    from core.logging import redact_log_text
+
+    result = {}
+    for key in _SAFE_SEND_FIELDS:
+        if key not in body:
+            continue
+        value = body[key]
+        if key in {"erro", "causa", "etapa", "instancia", "mensagem_id",
+                   "confirmacao", "resultado", "via", "tipo", "classe"}:
+            result[key] = redact_log_text(value)[:500]
+        elif key == "duracao_ms":
+            try:
+                result[key] = max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+        elif key == "ack":
+            result[key] = value if isinstance(value, int) else None
+        elif key in {"sucesso", "repetir", "falha_infra"}:
+            result[key] = bool(value)
+    return result
 
 
 class WhatsAppError(Exception):
@@ -137,7 +175,10 @@ def _request_json(method: str, path: str, *, headers=None, params=None, json=Non
             last_error = e
             if attempt + 1 < attempts:
                 time.sleep(0.35)
-    return {"erro": str(last_error)}
+    return {
+        "erro": "Não foi possível falar com o serviço de WhatsApp.",
+        "causa": type(last_error).__name__ if last_error else "transport_error",
+    }
 
 
 _STATUS_TTL_S = 5
@@ -150,6 +191,50 @@ def _chave_status(session=None) -> str:
 def invalidar_status(session=None) -> None:
     """Descarta o status cacheado — chame depois de mexer no pareamento."""
     cache.delete(_chave_status(session))
+
+
+def _persistir_telemetria(session, data) -> None:
+    """Projeção compartilhada do payload seguro do Node; nunca persiste QR/erro cru."""
+    if not session or not isinstance(data, dict):
+        return
+    from apps.accounts.models import WhatsAppConnection
+    from apps.accounts.tenant import executar_orm_ou_direto
+
+    capacidade = data.get("capacidade") if isinstance(data.get("capacidade"), dict) else {}
+    fase = str(data.get("fase") or "")
+    consistencia = str(data.get("consistency_status") or "")
+    if consistencia not in {"unknown", "consistent", "adopted", "orphan", "mismatch"}:
+        consistencia = ""
+    numero = str(data.get("numero_mascarado") or "")
+    if numero and (not numero.startswith("***") or not numero[3:].isdigit()):
+        numero = ""
+    fields = {
+        "status": "active" if data.get("conectado", fase == "conectado") else "inactive",
+        "worker_instance": str(data.get("worker") or "")[:120],
+        "phase": fase[:32],
+        "masked_number": numero[:24],
+        "last_event": str(data.get("ultimo_evento") or "")[:80],
+        "last_event_at": timezone.now(),
+        "unavailable_reason": str(
+            data.get("motivo_indisponibilidade") or (
+                "worker_unavailable" if data.get("erro") else ""
+            )
+        )[:80],
+        "capacity_used": max(0, int(capacidade.get("usadas") or 0)),
+        "capacity_max": max(0, int(capacidade.get("maximas") or 0)),
+        "consistency_status": consistencia or (
+            "mismatch" if fase == "inconsistente" else "consistent"
+        ),
+    }
+
+    def _update():
+        WhatsAppConnection.objects.filter(instance_id=str(session)).update(**fields)
+
+    try:
+        executar_orm_ou_direto(_update)
+    except Exception:
+        # Telemetria jamais pode transformar uma leitura de status em indisponibilidade.
+        return
 
 
 def status(session=None) -> dict:
@@ -170,6 +255,7 @@ def status(session=None) -> dict:
     data = _request_json("GET", "/api/status", headers=_headers(session, "status"),
                          params=_params(session), timeout=5)
     data.setdefault("conectado", False)
+    _persistir_telemetria(session, data)
     cache.set(chave, data, timeout=_STATUS_TTL_S)
     return data
 
@@ -223,6 +309,53 @@ def reiniciar_com_qr(session) -> dict:
         # Um GET concorrente pode repopular o cache entre a invalidação acima e
         # o fim do reset. Limpar de novo impede a UI de reviver estado antigo.
         invalidar_status(session)
+
+
+def reconciliar_sessao(session) -> dict:
+    if not session or not _enabled(session):
+        return _disabled_payload()
+    cache_key = f"wa_reconcile:{session}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    data = _request_json(
+        "POST", "/api/sessoes/reconcile",
+        headers=_headers(session, "session_reconcile"),
+        json={"session": session}, timeout=10, attempts=1,
+    )
+    if "erro" not in data:
+        _persistir_telemetria(session, {
+            "fase": data.get("runtime"),
+            "worker": data.get("worker"),
+            "capacidade": data.get("capacidade"),
+            "consistency_status": (
+                "mismatch" if data.get("consistencia") == "manifest_mismatch"
+                else data.get("consistencia")
+            ),
+            "motivo_indisponibilidade": (
+                "" if data.get("consistencia") in {"consistent", "adopted"}
+                else data.get("consistencia")
+            ),
+        })
+    cache.set(
+        cache_key, data,
+        timeout=(
+            max(1, int(settings.WA_SESSION_RECONCILE_SECONDS))
+            if "erro" not in data else 10
+        ),
+    )
+    return data
+
+
+def consultar_operacao(session, operation_key) -> dict:
+    if not session or not operation_key:
+        return {"encontrado": False}
+    from urllib.parse import quote
+    return _request_json(
+        "GET", f"/api/envios/status/{quote(str(operation_key), safe='')}",
+        headers=_headers(session, "send_status"), params=_params(session),
+        timeout=8, attempts=1,
+    )
 
 
 def qrcode(session=None) -> dict:
@@ -335,9 +468,9 @@ def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
             timeout=_SEND_HTTP_TIMEOUT_S,
         )
         try:
-            corpo = r.json()
+            corpo = _safe_send_body(r.json())
         except ValueError:
-            corpo = {"erro": r.text[:200]}
+            corpo = {"erro": "O worker WhatsApp devolveu uma resposta ilegível."}
         # Node devolve 200 com sucesso:true, ou 4xx/503 com erro.
         if r.status_code == 200 and corpo.get("sucesso") and corpo.get("mensagem_id"):
             return corpo
@@ -353,19 +486,24 @@ def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
                 "classe": TRANSITORIO,
             }
         classe = _classe_do_corpo(corpo) or _classe_do_status(r.status_code)
-        return {"sucesso": False, "status": r.status_code, **corpo, "classe": classe,
+        return {**corpo, "sucesso": False, "status": r.status_code, "classe": classe,
                 "duracao_ms": corpo.get("duracao_ms", round((time.monotonic() - inicio) * 1000))}
     except WhatsAppError as e:
         # Falha no signer/vínculo não é defeito da configuração do usuário.
-        return {"sucesso": False, "erro": str(e), "classe": TRANSITORIO}
+        return {"sucesso": False,
+                "erro": "Não foi possível autorizar a sessão WhatsApp.",
+                "causa": type(e).__name__, "classe": TRANSITORIO}
     except (requests.Timeout, requests.ConnectionError) as e:
         # Os dois piores casos nunca chegam classificados: o Node não responde
         # (worker reiniciando/deploy) ou demora mais que o timeout. Ambos somem
         # sozinhos — e eram justamente estes que desligavam a automação.
-        return {"sucesso": False, "erro": f"Falha de transporte: {e}",
+        return {"sucesso": False,
+                "erro": "O serviço WhatsApp não respondeu dentro do prazo.",
+                "causa": type(e).__name__,
                 "classe": TRANSITORIO, "etapa": "http",
                 "duracao_ms": _SEND_HTTP_TIMEOUT_S * 1000,
                 "falha_infra": True}
     except Exception as e:
-        return {"sucesso": False, "erro": f"Falha de transporte: {e}",
-                "classe": DESCONHECIDO}
+        return {"sucesso": False,
+                "erro": "Falha inesperada ao acessar o serviço WhatsApp.",
+                "causa": type(e).__name__, "classe": DESCONHECIDO}

@@ -14,6 +14,11 @@ from apps.scrapers.whatsapp_client import DESCONHECIDO, PERMANENTE, TRANSITORIO
 logger = logging.getLogger(__name__)
 
 
+def _send_pipeline_v2_enabled(user) -> bool:
+    from apps.accounts.feature_flags import send_pipeline_v2_enabled
+    return send_pipeline_v2_enabled(user)
+
+
 def _executar_orm(fn, *args, **kwargs):
     """Query de ORM com o escopo de tenant certo em cada chamador deste núcleo.
 
@@ -73,18 +78,14 @@ def _canal_pronto_ou_erro(canal, usuario) -> dict | None:
     estado = estado_whatsapp(usuario, session=sessao)
     if estado.conectado:
         return None
-    # Reconexão em curso: ESPERA em vez de recusar o envio. A queda de segundos é o
-    # caso comum (oscilação de rede, CONFLICT, reciclagem do Chromium) e o worker
-    # religa sozinho — recusar na hora era o que fazia "estou enviando e do nada o
-    # canal não é mais válido" aparecer no meio de uma fila.
+    # Request web nunca espera o Chromium/worker reconectar. A operação permanece
+    # transitória e o pipeline assíncrono decide o retry.
     if estado.detalhe in ("conectando", "capacidade"):
-        estado = _esperar_wa_reconectar(usuario, sessao)
-        if estado.conectado:
-            return None
         return {"sucesso": False,
                 "motivo": estado.motivo
                 or "WhatsApp reativando a conexão — tente novamente em instantes.",
-                "classe": TRANSITORIO}
+                "classe": TRANSITORIO,
+                "etapa": "transport_queued"}
     # Não falamos com o worker: o pareamento pode estar perfeito. Pedir "reconecte
     # sua conta" aqui mandava o usuário reler um QR Code que não era o problema —
     # o defeito está entre o Django e o worker, e é nosso, não dele.
@@ -105,11 +106,9 @@ def _canal_pronto_ou_erro(canal, usuario) -> dict | None:
     except Exception:
         pass
     if religou:
-        # Antes o clique que religava a sessão nunca era o que enviava: devolvia erro
-        # e só a tentativa SEGUINTE encontrava a sessão de pé.
-        estado = _esperar_wa_reconectar(usuario, sessao)
-        if estado.conectado:
-            return None
+        return {"sucesso": False,
+                "motivo": "WhatsApp reativando a conexão — tente novamente em instantes.",
+                "classe": TRANSITORIO, "etapa": "transport_queued"}
     return {"sucesso": False,
             "motivo": estado.motivo
             or "WhatsApp desconectado. Reconecte sua conta para enviar.",
@@ -1087,7 +1086,8 @@ def resolver_link_afiliado_cupom(cupom, usuario):
 
 
 def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nome="",
-                 imagem_b64_custom=None, configuracao=None, score=0, motivos_score=None):
+                 imagem_b64_custom=None, configuracao=None, score=0, motivos_score=None,
+                 enqueue_only=False, _reserved_publication=None):
     """Nucleo auditavel do envio manual de CupomNormalizado.
 
     `imagem_b64_custom` (opcional): foto escolhida no envio. Cupom não tem foto de
@@ -1107,7 +1107,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 "classe": "permanente"}
     # Pré-checa a conexão do canal ANTES de criar a Publicacao ou preparar a
     # mensagem: sem WhatsApp conectado nada sai, e o usuário precisa reconectar.
-    erro_canal = _canal_pronto_ou_erro(canal, usuario)
+    erro_canal = None if enqueue_only else _canal_pronto_ou_erro(canal, usuario)
     if erro_canal:
         return erro_canal
     agora = timezone.now()
@@ -1120,14 +1120,36 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         return {"sucesso": False, "motivo": "Cupom não encontrado, inativo ou vencido.",
                 "classe": "permanente"}
 
-    # A página só oferece cupons preparados, mas o catálogo pode mudar entre o
-    # render e o clique. Validar novamente é leitura pura: nunca re-prepara nem
-    # escreve em linhas públicas sob o contexto RLS do usuário.
+    # Cupom de código é um aviso de loja: não inventa produto nem associação. Ele
+    # exige um destino afiliado válido, mas não passa pelo gate de ProdutoCupom que
+    # pertence exclusivamente às ativações. A página pode mudar entre render e
+    # clique, então ambos os modos são revalidados aqui.
+    tem_codigo = bool(codigo_publicavel(cupom))
     from apps.scrapers.coupon_products import (
         relacoes_preparadas_para_envio, relacoes_prontas_para_envio,
     )
-    relacoes_preparadas = _executar_orm(relacoes_preparadas_para_envio, cupom, usuario)
-    if not relacoes_preparadas:
+    relacoes_preparadas = _executar_orm(
+        relacoes_preparadas_para_envio, cupom, usuario,
+    )
+    # Se uma fonte realmente comprovou produtos, preservamos a publicação rica com
+    # colagem e preço por item. Sem essa prova, o código continua publicável apenas
+    # como aviso de loja, que é o contrato seguro pedido para cupons digitáveis.
+    modo_codigo = bool(tem_codigo and not relacoes_preparadas)
+    link_codigo = ""
+    if modo_codigo and not enqueue_only:
+        resolucao_codigo = resolver_link_afiliado_cupom(cupom, usuario)
+        if not resolucao_codigo.get("sucesso"):
+            return {
+                "sucesso": False,
+                "motivo": resolucao_codigo.get("motivo")
+                or "O link afiliado deste cupom ainda não está disponível.",
+                "classe": "transitorio",
+                "precisa_login_ml": bool(resolucao_codigo.get("precisa_login_ml")),
+                "link_afiliado_pendente": True,
+            }
+        link_codigo = resolucao_codigo["link"]
+
+    if not modo_codigo and not relacoes_preparadas:
         _executar_orm(
             log_event,
             "publicacao", "coupon_not_ready",
@@ -1138,8 +1160,11 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         return {"sucesso": False,
                 "motivo": "Este cupom está sendo atualizado e ainda não está disponível para envio.",
                 "classe": "transitorio", "cupom_em_preparo": True}
-    relacoes_prontas = _executar_orm(relacoes_prontas_para_envio, cupom, usuario)
-    if not relacoes_prontas:
+    relacoes_prontas = (
+        [] if modo_codigo
+        else _executar_orm(relacoes_prontas_para_envio, cupom, usuario)
+    )
+    if not modo_codigo and not relacoes_prontas:
         _executar_orm(
             log_event,
             "publicacao", "coupon_link_pending",
@@ -1220,23 +1245,57 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 motivos_score=list(motivos_score or []),
             )
 
-    try:
-        reserva = _executar_orm(_reservar)
-    except Exception as exc:
-        logger.exception("Falha ao reservar envio do cupom %s", cupom_id)
-        _executar_orm(
-            log_event,
-            "publicacao", "coupon_reservation_failed",
-            "Não foi possível reservar o envio do cupom.", level="error",
-            usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
-                                       "destino": destino_nome or grupo_id}, exc=exc,
-        )
-        return {"sucesso": False,
-                "motivo": "Não foi possível reservar este cupom para envio. Atualize a tela e tente novamente.",
-                "classe": "transitorio", "causa": type(exc).__name__}
-    if isinstance(reserva, dict):
-        return reserva
-    cupom, publicacao = reserva
+    if _reserved_publication is None:
+        try:
+            reserva = _executar_orm(_reservar)
+        except Exception as exc:
+            logger.exception("Falha ao reservar envio do cupom %s", cupom_id)
+            _executar_orm(
+                log_event,
+                "publicacao", "coupon_reservation_failed",
+                "Não foi possível reservar o envio do cupom.", level="error",
+                usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                           "destino": destino_nome or grupo_id}, exc=exc,
+            )
+            return {"sucesso": False,
+                    "motivo": "Não foi possível reservar este cupom para envio. Atualize a tela e tente novamente.",
+                    "classe": "transitorio", "causa": type(exc).__name__}
+        if isinstance(reserva, dict):
+            return reserva
+        cupom, publicacao = reserva
+    else:
+        publicacao = _reserved_publication
+
+    if enqueue_only:
+        from apps.scrapers.send_pipeline import queue_publications
+        try:
+            queue_publications(
+                [publicacao], image_b64=imagem_b64_custom, mime="image/jpeg",
+            )
+        except ValueError as exc:
+            Publicacao.objects.filter(pk=publicacao.pk, status="pendente").update(
+                status="falhou", stage="rejected", transport_state="invalid_payload",
+                erro=str(exc)[:500],
+            )
+            return {"sucesso": False, "motivo": str(exc), "classe": "permanente"}
+        return {
+            "sucesso": True, "queued": True, "publicacao": publicacao,
+            "motivo": "Cupom reservado e aguardando o worker.",
+        }
+
+    # No worker v2 o link do aviso de código é resolvido somente depois do claim.
+    if modo_codigo and not link_codigo:
+        resolucao_codigo = resolver_link_afiliado_cupom(cupom, usuario)
+        if not resolucao_codigo.get("sucesso"):
+            return {
+                "sucesso": False,
+                "motivo": resolucao_codigo.get("motivo")
+                or "O link afiliado deste cupom ainda não está disponível.",
+                "classe": "transitorio",
+                "precisa_login_ml": bool(resolucao_codigo.get("precisa_login_ml")),
+                "link_afiliado_pendente": True,
+            }
+        link_codigo = resolucao_codigo["link"]
 
     _executar_orm(
         log_event,
@@ -1247,12 +1306,14 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
 
     def falhar(motivo, **extra):
         erro_tecnico = extra.pop("_erro_tecnico", "")
+        pipeline_recorded = extra.pop("_pipeline_recorded", False)
         incerto = extra.get("resultado") == "incerto"
 
         def _fechar_e_logar():
             with transaction.atomic():
-                Publicacao.objects.filter(pk=publicacao.pk, status="pendente").update(
-                    status="incerto" if incerto else "falhou", erro=str(motivo)[:500])
+                if not pipeline_recorded:
+                    Publicacao.objects.filter(pk=publicacao.pk, status="pendente").update(
+                        status="incerto" if incerto else "falhou", erro=str(motivo)[:500])
             log_event("publicacao", "send_failed", str(motivo), level="warning",
                       usuario=usuario, contexto={"publicacao_id": publicacao.id,
                                                  "cupom_id": cupom.id, "canal": canal,
@@ -1265,12 +1326,25 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         return {"sucesso": False, "motivo": str(motivo), **extra}
 
     try:
-        # Cupom publicavel exige produtos comprovados. Nao existe mais fallback de
-        # texto puro nem foto manual que burle a associacao cupom-produto.
-        itens_cupom, bloqueio_afiliacao = _preparar_itens_cupom(
-            cupom, usuario, relacoes_prontas)
+        # Código validado é aviso sem produto. Ativação continua estrita e nunca usa
+        # foto manual para aparentar associação que a fonte não comprovou.
         img_kwargs = {}
-        if itens_cupom and getattr(settings, "PRECO_REVALIDA_ANTES_ENVIO", True):
+        relacao_topo = None
+        if modo_codigo:
+            link_registro = link_codigo
+            mensagem = montar_mensagem_cupom(
+                cupom, link_afiliado=link_registro, markup=sender.markup,
+            )
+            if imagem_b64_custom:
+                img_kwargs = {
+                    "imagem_b64": imagem_b64_custom,
+                    "mimetype": "image/jpeg",
+                }
+        else:
+            itens_cupom, bloqueio_afiliacao = _preparar_itens_cupom(
+                cupom, usuario, relacoes_prontas)
+        if (not modo_codigo and itens_cupom
+                and getattr(settings, "PRECO_REVALIDA_ANTES_ENVIO", True)):
             # Antes da IA (para a chamada nascer do preço fresco), antes do corte
             # do Telegram e antes da colagem — que é quem garante foto↔texto.
             from apps.scrapers import preco_ao_vivo
@@ -1279,7 +1353,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
             if not itens_cupom:
                 return falhar("Os preços deste cupom mudaram; nenhum produto "
                               "continua dentro das regras dele.", classe="transitorio")
-        if itens_cupom:
+        if not modo_codigo and itens_cupom:
             _preparar_conteudo_ia_cupom(itens_cupom)
             # Telegram limita legendas de foto a 1024 caracteres. Como a regra e
             # "ate 9", remove os itens de menor prioridade ate a mensagem caber.
@@ -1296,14 +1370,14 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 cupom, itens_cupom, markup=sender.markup)
             link_registro = itens_cupom[0]["link"]
             img_kwargs = {"imagem_b64": colagem_b64, "mimetype": colagem_mime}
-        elif bloqueio_afiliacao:
+        elif not modo_codigo and bloqueio_afiliacao:
             # Havia produtos comprovados, mas a sessão do Mercado Livre caiu na
             # hora de gerar os links afiliados. Não é "cupom sem produtos": é
             # reconexão. Transitório para não pausar a automação por queda de
             # sessão, e com o flag que a UI usa para oferecer o botão de reconectar.
             return falhar(bloqueio_afiliacao["mensagem"], classe="transitorio",
                           precisa_login_ml=bloqueio_afiliacao["precisa_login_ml"])
-        else:
+        elif not modo_codigo:
             return falhar("Cupom sem produtos comprovadamente aplicáveis, com foto e link afiliado.",
                           classe="permanente")
         if not mensagem.strip():
@@ -1312,7 +1386,8 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         # com 0/0 e não havia como reconciliar "o preço anunciado não bate".
         # Aqui o par é (vitrine, pós-cupom) — nas publicações de produto o par é
         # (tabela, vitrine), que é o que aquela mensagem anuncia.
-        relacao_topo = itens_cupom[0].get("relacao")
+        if not modo_codigo:
+            relacao_topo = itens_cupom[0].get("relacao")
 
         def _gravar_mensagem():
             Publicacao.objects.filter(pk=publicacao.pk).update(
@@ -1322,10 +1397,16 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 preco_final=float(getattr(relacao_topo, "preco_final", 0) or 0))
         _executar_orm(_gravar_mensagem)
         sessao_wa = _executar_orm(wa_session_de, usuario)
+        from apps.scrapers.send_pipeline import begin_transport, finish_transport
+        publicacao_transporte, tentativa = _executar_orm(begin_transport, publicacao)
         resultado = sender.enviar_oferta(
             grupo_id, mensagem, legenda=mensagem, usuario=usuario,
             session=sessao_wa,
-            operation_id=f"publicacao:{publicacao.pk}", **img_kwargs)
+            operation_id=publicacao_transporte.operation_key, **img_kwargs)
+        _executar_orm(
+            finish_transport, publicacao_transporte, tentativa, resultado,
+            duration_ms=resultado.get("duracao_ms", 0),
+        )
         if resultado.get("sucesso"):
             def _gravar_envio():
                 Publicacao.objects.filter(pk=publicacao.pk).update(
@@ -1348,6 +1429,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                     "duracao_ms": resultado.get("duracao_ms", 0)}
         return falhar(_motivo_publico_transporte(resultado),
                       _erro_tecnico=resultado.get("erro") or "",
+                      _pipeline_recorded=True,
                       classe=resultado.get("classe"), resultado=resultado.get("resultado"),
                       repetir=resultado.get("repetir"), etapa=resultado.get("etapa"),
                       duracao_ms=resultado.get("duracao_ms"),
@@ -1426,7 +1508,8 @@ def selecionar_cupons_para_aviso(configuracao, usuario, limite=LIMITE_CUPONS_AVI
 
 
 def enviar_aviso_cupons(cupons, grupo_id, *, canal="whatsapp", usuario=None,
-                        destino_nome="", configuracao=None):
+                        destino_nome="", configuracao=None, enqueue_only=False,
+                        _reserved_publications=None):
     """Publica o aviso de cupons novos: só códigos, banner da loja, um link.
 
     Espelha a contabilidade de `enviar_cupom` (lock do usuário, cota diária,
@@ -1451,34 +1534,46 @@ def enviar_aviso_cupons(cupons, grupo_id, *, canal="whatsapp", usuario=None,
     if not cupons:
         return {"sucesso": False, "motivo": "Nenhum cupom novo para anunciar.",
                 "classe": TRANSITORIO}
-    erro_canal = _canal_pronto_ou_erro(canal, usuario)
+    erro_canal = None if enqueue_only else _canal_pronto_ou_erro(canal, usuario)
     if erro_canal:
         return erro_canal
 
-    marketplace = str(getattr(cupons[0], "marketplace", "") or "")
     agora = timezone.now()
+    # Só os cupons realmente publicáveis pertencem ao lote. Esta seleção é barata
+    # e pode ocorrer no request; link, banner e transporte ficam no worker v2.
+    anunciados = [c for c in cupons
+                  if codigo_publicavel(c) and linha_desconto_cupom(c)][:LIMITE_CUPONS_AVISO]
+    if not anunciados:
+        return {"sucesso": False, "motivo": "Nenhum cupom novo para anunciar.",
+                "classe": TRANSITORIO}
+    marketplace = str(getattr(anunciados[0], "marketplace", "") or "")
+    # Um aviso tem um único banner e um único destino afiliado. Mesmo que um
+    # chamador interno passe uma lista mista, nunca atribua cupons de outra loja ao
+    # link escolhido para o primeiro item válido.
+    anunciados = [
+        coupon for coupon in anunciados
+        if str(getattr(coupon, "marketplace", "") or "") == marketplace
+    ]
 
     # O link é UM por mensagem (o dos modelos), gerado a partir do melhor cupom do
     # lote pelo caminho que já existe: cache por usuário+cupom, Link Builder e
     # verificação da tag. Sessão caída aqui é transitória — a mensagem sai no
     # próximo tick, sem contar para o freio automático da regra.
-    resolucao = resolver_link_afiliado_cupom(cupons[0], usuario)
-    if not resolucao.get("sucesso"):
-        return {"sucesso": False,
-                "motivo": resolucao.get("motivo") or "Não foi possível gerar o link do aviso.",
-                "classe": TRANSITORIO,
-                "precisa_login_ml": bool(resolucao.get("precisa_login_ml"))}
-    link = resolucao["link"]
+    link = mensagem = ""
+    if not enqueue_only:
+        resolucao = resolver_link_afiliado_cupom(anunciados[0], usuario)
+        if not resolucao.get("sucesso"):
+            return {"sucesso": False,
+                    "motivo": resolucao.get("motivo") or "Não foi possível gerar o link do aviso.",
+                    "classe": TRANSITORIO,
+                    "precisa_login_ml": bool(resolucao.get("precisa_login_ml"))}
+        link = resolucao["link"]
 
-    mensagem = montar_mensagem_aviso_cupons(
-        cupons, marketplace, link=link, markup=sender.markup)
-    if not mensagem.strip():
-        return {"sucesso": False, "motivo": "Nenhum cupom novo para anunciar.",
-                "classe": TRANSITORIO}
-    # Só os cupons que realmente entraram na mensagem viram Publicacao — senão a
-    # deduplicação marcaria como "já anunciado" um código que ninguém recebeu.
-    anunciados = [c for c in cupons
-                  if codigo_publicavel(c) and linha_desconto_cupom(c)][:LIMITE_CUPONS_AVISO]
+        mensagem = montar_mensagem_aviso_cupons(
+            anunciados, marketplace, link=link, markup=sender.markup)
+        if not mensagem.strip():
+            return {"sucesso": False, "motivo": "Nenhum cupom novo para anunciar.",
+                    "classe": TRANSITORIO}
 
     def _reservar():
         """Transação curta de reserva: lock do usuário, cota diária e uma
@@ -1514,24 +1609,47 @@ def enviar_aviso_cupons(cupons, grupo_id, *, canal="whatsapp", usuario=None,
                 ))
         return pubs
 
-    try:
-        reserva = _executar_orm(_reservar)
-    except Exception as exc:
-        logger.exception("Falha ao reservar o aviso de cupons para %s", grupo_id)
-        return {"sucesso": False,
-                "motivo": "Não foi possível reservar este aviso para envio. Tente novamente.",
-                "classe": TRANSITORIO, "causa": type(exc).__name__}
-    if isinstance(reserva, dict):
-        return reserva
-    publicacoes = reserva
+    if _reserved_publications is None:
+        try:
+            reserva = _executar_orm(_reservar)
+        except Exception as exc:
+            logger.exception("Falha ao reservar o aviso de cupons para %s", grupo_id)
+            return {"sucesso": False,
+                    "motivo": "Não foi possível reservar este aviso para envio. Tente novamente.",
+                    "classe": TRANSITORIO, "causa": type(exc).__name__}
+        if isinstance(reserva, dict):
+            return reserva
+        publicacoes = reserva
+    else:
+        publicacoes = list(_reserved_publications)
+
+    if enqueue_only:
+        from apps.scrapers.send_pipeline import queue_publications
+        try:
+            queue_publications(publicacoes)
+        except ValueError as exc:
+            Publicacao.objects.filter(
+                pk__in=[row.pk for row in publicacoes], status="pendente",
+            ).update(
+                status="falhou", stage="rejected", transport_state="invalid_payload",
+                erro=str(exc)[:500],
+            )
+            return {"sucesso": False, "motivo": str(exc), "classe": PERMANENTE}
+        return {
+            "sucesso": True, "queued": True,
+            "publicacao": publicacoes[0] if publicacoes else None,
+            "cupons": len(publicacoes),
+            "motivo": "Aviso reservado e aguardando o worker.",
+        }
 
     ids = [p.pk for p in publicacoes]
 
-    def _fechar(status, erro=""):
+    def _fechar(status, erro="", pipeline_recorded=False):
         def _update():
-            Publicacao.objects.filter(pk__in=ids, status="pendente").update(
-                status=status, erro=str(erro)[:500],
-                **({"enviada_em": timezone.now()} if status == "enviado" else {}))
+            if not pipeline_recorded:
+                Publicacao.objects.filter(pk__in=ids, status="pendente").update(
+                    status=status, erro=str(erro)[:500],
+                    **({"enviada_em": timezone.now()} if status == "enviado" else {}))
         _executar_orm(_update)
 
     _executar_orm(
@@ -1539,23 +1657,47 @@ def enviar_aviso_cupons(cupons, grupo_id, *, canal="whatsapp", usuario=None,
         usuario=usuario, contexto={"cupons": len(anunciados), "canal": canal,
                                    "marketplace": marketplace,
                                    "destino": destino_nome or grupo_id})
+    transportes = []
     try:
         banner_b64, banner_mime = sortear_banner_b64(marketplace)
         img_kwargs = ({"imagem_b64": banner_b64, "mimetype": banner_mime}
                       if banner_b64 else {})
         sessao_wa = _executar_orm(wa_session_de, usuario)
+        from apps.scrapers.send_pipeline import begin_transport, finish_transport
+        transportes = [
+            _executar_orm(begin_transport, publicacao)
+            for publicacao in publicacoes
+        ]
         resultado = sender.enviar_oferta(
             grupo_id, mensagem, legenda=mensagem, usuario=usuario,
             session=sessao_wa,
-            operation_id=f"aviso_cupons:{ids[0]}" if ids else None, **img_kwargs)
+            operation_id=transportes[0][0].operation_key if transportes else None,
+            **img_kwargs)
+        for publicacao_transporte, tentativa in transportes:
+            _executar_orm(
+                finish_transport, publicacao_transporte, tentativa, resultado,
+                duration_ms=resultado.get("duracao_ms", 0),
+            )
     except Exception as exc:
         logger.exception("Erro inesperado ao enviar o aviso de cupons")
-        _fechar("falhou", str(exc))
+        if transportes:
+            from apps.scrapers.send_pipeline import finish_transport
+            incerto = {
+                "sucesso": False, "resultado": "incerto", "repetir": False,
+                "etapa": "transport_started", "causa": type(exc).__name__,
+            }
+            for publicacao_transporte, tentativa in transportes:
+                _executar_orm(
+                    finish_transport, publicacao_transporte, tentativa, incerto,
+                )
+        _fechar("incerto" if transportes else "falhou", str(exc),
+                pipeline_recorded=bool(transportes))
         return {"sucesso": False, "motivo": "Falha inesperada ao enviar o aviso.",
-                "classe": DESCONHECIDO, "causa": type(exc).__name__}
+                "classe": DESCONHECIDO, "causa": type(exc).__name__,
+                "resultado": "incerto" if transportes else "falha"}
 
     if resultado.get("sucesso"):
-        _fechar("enviado")
+        _fechar("enviado", pipeline_recorded=True)
         _executar_orm(
             log_event, "publicacao", "send_ok", "Aviso de cupons publicado.",
             usuario=usuario, contexto={"cupons": len(anunciados), "canal": canal,
@@ -1573,7 +1715,10 @@ def enviar_aviso_cupons(cupons, grupo_id, *, canal="whatsapp", usuario=None,
                 "duracao_ms": resultado.get("duracao_ms", 0)}
 
     motivo = _motivo_publico_transporte(resultado)
-    _fechar("incerto" if resultado.get("resultado") == "incerto" else "falhou", motivo)
+    _fechar(
+        "incerto" if resultado.get("resultado") == "incerto" else "falhou",
+        motivo, pipeline_recorded=True,
+    )
     _executar_orm(
         log_event, "publicacao", "send_failed", motivo, level="warning",
         usuario=usuario, contexto={"cupons": len(anunciados), "canal": canal,
@@ -1779,7 +1924,7 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
                 # inteiro ou com `ProdutoCupom` confirmado para ESTE item.
                 if not codigo:
                     from apps.scrapers.coupon_rules import ativacao_publicavel
-                    if ativacao_publicavel(do_catalogo):
+                    if ativacao_publicavel(do_catalogo, usuario=usuario):
                         cupom_escolhido = do_catalogo
                         linha_cupom = f"🎟️ {m.bold('CUPOM: ative no link')}"
             if linha_cupom is None and not codigo:
@@ -1975,7 +2120,8 @@ def _link_publicado(publicacao, link_afiliado: str) -> str:
 
 def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                              canal="whatsapp", usuario=None, configuracao=None,
-                             destino_nome="", imagem_b64_custom=None):
+                             destino_nome="", imagem_b64_custom=None,
+                             enqueue_only=False, _reserved_publication=None):
     """
     Núcleo de envio reutilizável e AGNÓSTICO de loja/canal:
       resolve marketplace (link afiliado + verificação) e sender (transporte) via registry.
@@ -1994,7 +2140,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         sender = get_sender(canal)
     except ValueError as exc:
         return {"sucesso": False, "motivo": str(exc), "classe": "permanente"}
-    publicacao = None
+    publicacao = _reserved_publication
     _executar_orm(
         log_event,
         "publicacao", "send_started", f"Preparando envio para {destino_nome or grupo_id}.",
@@ -2006,7 +2152,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             "destino": destino_nome or grupo_id,
         },
     )
-    if usuario is not None:
+    if usuario is not None and publicacao is None:
         from django.contrib.auth import get_user_model
         agora_abertura = timezone.now()
 
@@ -2100,8 +2246,29 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         if isinstance(reserva, dict):
             return reserva
         publicacao = reserva
+    if enqueue_only:
+        if publicacao is None:
+            return {"sucesso": False, "motivo": "Envio sem usuário não pode ser enfileirado.",
+                    "classe": "permanente"}
+        from apps.scrapers.send_pipeline import queue_publications
+        try:
+            queue_publications(
+                [publicacao], image_b64=imagem_b64_custom, mime="image/jpeg",
+            )
+        except ValueError as exc:
+            Publicacao.objects.filter(pk=publicacao.pk, status="pendente").update(
+                status="falhou", stage="rejected", transport_state="invalid_payload",
+                erro=str(exc)[:500],
+            )
+            return {"sucesso": False, "motivo": str(exc), "classe": "permanente"}
+        return {
+            "sucesso": True, "queued": True, "publicacao": publicacao,
+            "motivo": "Envio reservado e aguardando o worker.",
+        }
+    transport_context = {}
     def falhar(motivo, **extra):
         erro_tecnico = extra.pop("_erro_tecnico", "")
+        pipeline_recorded = extra.pop("_pipeline_recorded", False)
         texto_motivo = str(motivo).lower()
         etapa = extra.get("etapa") or ""
         causa = extra.get("causa") or (
@@ -2129,7 +2296,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         }
 
         def _fechar_e_logar():
-            if publicacao:
+            if publicacao and not pipeline_recorded:
                 Publicacao.objects.filter(pk=publicacao.pk).update(
                     status=status, erro=str(motivo)[:500])
             log_event(
@@ -2317,13 +2484,23 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         # Foto custom (opcional, escolhida no envio) só entra no caminho base64/WhatsApp;
         # sem ela, mantém a foto do produto como sempre.
         foto_bytes = 0
+        from apps.scrapers.send_pipeline import begin_transport, finish_transport
+        if publicacao:
+            publicacao_transporte, tentativa = _executar_orm(
+                begin_transport, publicacao,
+            )
+            transport_context.update(
+                publicacao=publicacao_transporte, tentativa=tentativa,
+            )
+            operation_id = publicacao_transporte.operation_key
+        else:
+            publicacao_transporte = tentativa = None
+            operation_id = None
         if sender.prefers_image == "url" and not imagem_b64_custom:
             resultado = sender.enviar_oferta(grupo_id, mensagem,
                                              imagem_url=getattr(produto, "imagem_url", "") or None,
                                              legenda=mensagem, usuario=usuario, session=wa_session,
-                                             operation_id=(
-                                                 f"publicacao:{publicacao.pk}"
-                                                 if publicacao else None))
+                                             operation_id=operation_id)
         else:
             if imagem_b64_custom:
                 imagem_b64, img_mime = imagem_b64_custom, "image/jpeg"
@@ -2336,9 +2513,14 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             resultado = sender.enviar_oferta(grupo_id, mensagem, imagem_b64=imagem_b64 or None,
                                              mimetype=img_mime or "image/jpeg", legenda=mensagem,
                                              usuario=usuario, session=wa_session,
-                                             operation_id=(
-                                                 f"publicacao:{publicacao.pk}"
-                                                 if publicacao else None))
+                                             operation_id=operation_id)
+
+        if publicacao_transporte:
+            _executar_orm(
+                finish_transport, publicacao_transporte, tentativa, resultado,
+                duration_ms=resultado.get("duracao_ms", 0),
+            )
+            transport_context.clear()
 
         if resultado.get("sucesso"):
             def _gravar_envio():
@@ -2376,6 +2558,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         # chegaria ao orquestrador como 'desconhecido' e a taxonomia não valeria nada.
         return falhar(_motivo_publico_transporte(resultado),
                       _erro_tecnico=resultado.get("erro") or "",
+                      _pipeline_recorded=bool(publicacao_transporte),
                       link=link, verificacao=verificacao,
                       classe=resultado.get("classe"),
                       resultado=resultado.get("resultado"),
@@ -2395,6 +2578,23 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         # re-levanta — o estado no banco fica honesto sem alterar o fluxo de controle
         # que os chamadores (e o loop de automacao) já esperam.
         motivo = f"erro inesperado no envio: {e}"
+
+        if transport_context:
+            from apps.scrapers.send_pipeline import finish_transport
+            incerto = {
+                "sucesso": False, "resultado": "incerto", "repetir": False,
+                "etapa": "transport_started", "causa": type(e).__name__,
+            }
+            try:
+                _executar_orm(
+                    finish_transport, transport_context["publicacao"],
+                    transport_context["tentativa"], incerto,
+                )
+            except Exception:
+                logger.exception(
+                    "Falha ao registrar resultado incerto da publicação %s",
+                    getattr(publicacao, "pk", None),
+                )
 
         def _fechar_inesperado():
             if publicacao and Publicacao.objects.filter(
@@ -2428,7 +2628,7 @@ def wa_session_de(usuario):
 def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
                         horas_cooldown=24, max_tentativas=8, verificar=True, dry_run=False,
                         termo=None, canal="whatsapp", marketplace=None, usuario=None,
-                        configuracao=None, destino_nome=""):
+                        configuracao=None, destino_nome="", enqueue_only=False):
     """
     Seleciona um POOL de candidatos do nicho e tenta enviar um por um até o primeiro
     que passa na verificação. Devolve o resultado do envio bem-sucedido, ou o último
@@ -2467,14 +2667,16 @@ def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
             r = enviar_cupom(
                 prod, grupo_id, canal=canal, usuario=usuario,
                 configuracao=configuracao, destino_nome=destino_nome,
-                score=candidate.score, motivos_score=candidate.reasons)
+                score=candidate.score, motivos_score=candidate.reasons,
+                enqueue_only=enqueue_only)
         else:
             if candidate:
                 prod.score_oferta = candidate.score
                 prod.motivos_score = candidate.reasons
             r = enviar_oferta_de_produto(
                 prod, grupo_id, verificar=verificar, dry_run=dry_run, canal=canal,
-                usuario=usuario, configuracao=configuracao, destino_nome=destino_nome)
+                usuario=usuario, configuracao=configuracao, destino_nome=destino_nome,
+                enqueue_only=enqueue_only)
         if r.get("sucesso"):
             return r
         logger.debug("Produto id=%s reprovado no envio: %s", getattr(prod, "id", None), r.get("motivo"))
@@ -2605,6 +2807,7 @@ def processar_configs_de_envio():
                 selecionar_cupons_para_aviso(cfg, cfg.owner), cfg.grupo_id,
                 canal=getattr(cfg, "canal", "whatsapp"), usuario=cfg.owner,
                 destino_nome=cfg.grupo_nome, configuracao=cfg,
+                enqueue_only=_send_pipeline_v2_enabled(cfg.owner),
             )
         else:
             macros = [cfg.macro_categoria] if cfg.macro_categoria else None  # vazio = qualquer (inclui ofertas)
@@ -2619,18 +2822,22 @@ def processar_configs_de_envio():
                 usuario=cfg.owner,
                 configuracao=cfg,
                 destino_nome=cfg.grupo_nome,
+                enqueue_only=_send_pipeline_v2_enabled(cfg.owner),
             )
         # Reagenda sempre (sucesso ou não) p/ não ficar martelando o mesmo tick;
         # jitter ±1-10min deixa o ritmo humano. ultimo_envio só em sucesso (display).
         cfg.agendar_proximo(agora)
-        if r.get("sucesso"):
+        if r.get("sucesso") and not r.get("queued"):
             cfg.ultimo_envio = agora
             cfg.falhas_consecutivas = 0
             cfg.motivo_pausa = ""
             cfg.pausada_ate = None
             if cfg.owner_id is not None:
                 _envios_hoje[cfg.owner_id] = _envios_hoje.get(cfg.owner_id, 0) + 1
-        elif r.get("classe") == TRANSITORIO:
+        elif not r.get("sucesso"):
+            from apps.scrapers.send_pipeline import classify_result
+            failure_class = classify_result(r)
+        if not r.get("sucesso") and failure_class in {"transient", "uncertain"}:
             # Falha que some sozinha (worker piscou, timeout, 429, estoque vazio).
             # Não conta e não pausa: era exatamente isto que desligava a automação
             # de quem não tinha defeito nenhum na regra. Também não zera o
@@ -2638,9 +2845,9 @@ def processar_configs_de_envio():
             # ainda precisa chegar ao teto.
             logger.info("Config %s: falha transitória ignorada (%s).",
                         cfg.id, r.get("motivo"))
-        else:
-            # 'permanente' e 'desconhecido' seguem contando. Frear no 'desconhecido'
-            # é o comportamento que já existia: na dúvida, para de martelar o grupo.
+        elif not r.get("sucesso"):
+            # Somente destino/payload inválido ou credencial explicitamente revogada
+            # são permanentes. Desconhecido é infraestrutura até prova em contrário.
             cfg.falhas_consecutivas += 1
             if cfg.pausar_apos_falhas and cfg.falhas_consecutivas >= cfg.pausar_apos_falhas:
                 cfg.frear(agora, r.get("motivo"))

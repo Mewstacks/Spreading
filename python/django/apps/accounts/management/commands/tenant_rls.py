@@ -8,6 +8,7 @@ from apps.accounts.rls import (
     ALL_TENANT_TABLES,
     CONTROL_TENANT_TABLES,
     MIXED_TENANT_TABLES,
+    SYSTEM_ONLY_TABLES,
     policy_statements,
 )
 
@@ -67,6 +68,7 @@ class Command(BaseCommand):
                     for sql in policy_statements(
                         table,
                         mixed=table in MIXED_TENANT_TABLES,
+                        system_only=table in SYSTEM_ONLY_TABLES,
                         system_role=system_role,
                         migration_role=migration_role,
                     ):

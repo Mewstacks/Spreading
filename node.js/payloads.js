@@ -40,6 +40,19 @@ const buildSessionPayload = (session) => ({
     grupos_sincronizando: gruposEmRecuperacao(session),
     grupos_indisponivel: gruposIndisponivel(session),
     qr: qrAtivo(session) ? session.ultimoQR : null,
+    organizacao: session.organizationId || null,
+    worker: process.env.FLY_MACHINE_ID || process.env.HOSTNAME || 'local',
+    numero_mascarado: (() => {
+        const digits = String(session.whatsappId || '').replace(/\D/g, '');
+        return digits.length >= 4 ? `***${digits.slice(-4)}` : '';
+    })(),
+    ultimo_evento: session.lastEvent || '',
+    ultimo_evento_em: session.lastEventAt || null,
+    motivo_indisponibilidade: session.unavailableReason || '',
+    capacidade: {
+        usadas: Number(session.capacityUsed || 0),
+        maximas: Number(session.capacityMax || 0),
+    },
 });
 
 const buildGruposPayload = (session) => ({

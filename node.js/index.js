@@ -41,6 +41,10 @@ const {
     donoDoSingletonLock, decidirSobreDono, pidsDoPerfil,
 } = require('./chromium_locks');
 const authStore = require('./auth_store');
+const sessionManifest = require('./session_manifest');
+const sendLedger = require('./idempotency_ledger');
+const { redactSensitive, installConsoleRedaction } = require('./safe_logging');
+installConsoleRedaction(console);
 const { runtimePronto } = require('./session_readiness');
 const {
     criarPrazo, restante, expirou, timeoutDaEtapa, timeoutDePreflight, timeoutComEnvioIniciado,
@@ -60,8 +64,8 @@ const { SONDAS_HTTP_PARA_MATAR, GRACA_BOOT_MS } = require('./watchdog_policy');
 const app = express();
 
 app.use(helmet());
-app.use(express.json({ limit: '12mb' }));
-app.use(express.urlencoded({ limit: '12mb', extended: true }));
+app.use(express.json({ limit: '24mb' }));
+app.use(express.urlencoded({ limit: '24mb', extended: true }));
 
 // Path-scoped de proposito: montado global, alcancaria /api/status e /api/grupos
 // e injetaria `erro` neles — a chave que o Django le como "Node inalcancavel"
@@ -87,6 +91,82 @@ const MIMETYPES_PERMITIDOS = new Set([
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 ]);
+const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
+const IMAGE_MAGIC = {
+    'image/jpeg': [[0xff, 0xd8, 0xff]],
+    'image/png': [[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]],
+    'image/gif': [[0x47, 0x49, 0x46, 0x38]],
+    'image/webp': [[0x52, 0x49, 0x46, 0x46]],
+};
+
+const maskedIdentifier = (value) => {
+    const text = String(value || '');
+    const local = text.split('@', 1)[0];
+    const suffix = local.slice(-4);
+    return suffix ? `***${suffix}@${text.split('@')[1] || 'id'}` : '[identificador]';
+};
+
+const validContainerMagic = (bytes, mimetype) => {
+    if (mimetype === 'application/pdf') return bytes.subarray(0, 5).toString() === '%PDF-';
+    if (mimetype.includes('openxmlformats')) {
+        return bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
+    }
+    if (mimetype === 'audio/ogg' || mimetype === 'audio/opus') {
+        return bytes.subarray(0, 4).toString('ascii') === 'OggS';
+    }
+    if (mimetype === 'audio/mpeg') {
+        return bytes.subarray(0, 3).toString('ascii') === 'ID3'
+            || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0);
+    }
+    if (mimetype === 'video/mp4' || mimetype === 'video/3gpp') {
+        return bytes.length >= 12 && bytes.subarray(4, 8).toString('ascii') === 'ftyp';
+    }
+    return true;
+};
+
+const validarMidiaBase64 = (encoded, mimetype) => {
+    if (typeof encoded !== 'string' || !encoded.length
+        || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)
+        || encoded.length % 4 !== 0) {
+        return { ok: false, reason: 'base64_invalido' };
+    }
+    if (encoded.length > Math.ceil(MAX_MEDIA_BYTES / 3) * 4) {
+        return { ok: false, reason: 'midia_muito_grande' };
+    }
+    let bytes;
+    try { bytes = Buffer.from(encoded, 'base64'); } catch (_) {
+        return { ok: false, reason: 'base64_invalido' };
+    }
+    if (!bytes.length || bytes.length > MAX_MEDIA_BYTES) {
+        return { ok: false, reason: 'midia_muito_grande' };
+    }
+    const signatures = IMAGE_MAGIC[mimetype];
+    if (signatures && !signatures.some((signature) => signature.every(
+        (value, index) => bytes[index] === value,
+    ))) return { ok: false, reason: 'imagem_invalida' };
+    if (mimetype === 'image/webp' && bytes.subarray(8, 12).toString('ascii') !== 'WEBP') {
+        return { ok: false, reason: 'imagem_invalida' };
+    }
+    if (mimetype === 'image/jpeg'
+        && (bytes.length < 4 || bytes[bytes.length - 2] !== 0xff || bytes[bytes.length - 1] !== 0xd9)) {
+        return { ok: false, reason: 'imagem_invalida' };
+    }
+    if (mimetype === 'image/png'
+        && !bytes.includes(Buffer.from('IEND', 'ascii'))) {
+        return { ok: false, reason: 'imagem_invalida' };
+    }
+    if (mimetype === 'image/gif' && bytes[bytes.length - 1] !== 0x3b) {
+        return { ok: false, reason: 'imagem_invalida' };
+    }
+    if (mimetype === 'image/webp') {
+        const declaredSize = bytes.readUInt32LE(4) + 8;
+        if (declaredSize > bytes.length) return { ok: false, reason: 'imagem_invalida' };
+    }
+    if (!validContainerMagic(bytes, mimetype)) {
+        return { ok: false, reason: 'mimetype_incompativel' };
+    }
+    return { ok: true, bytes: bytes.length };
+};
 
 
 const authRootPath = path.join(process.cwd(), '.wwebjs_auth');
@@ -106,7 +186,6 @@ const RECONNECT_MAX_DELAY_MS = parseInt(process.env.RECONNECT_MAX_DELAY_MS, 10) 
 const RECONNECT_MAX_ATTEMPTS = parseInt(process.env.RECONNECT_MAX_ATTEMPTS, 10) || 6;
 const SESSION_START_STAGGER_MS = parseInt(process.env.SESSION_START_STAGGER_MS, 10) || 12000;
 const PUPPETEER_EXECUTABLE_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
-const PRINT_QR_TO_LOGS = process.env.PRINT_QR_TO_LOGS === '1';
 const WATCHDOG_TIMEOUT_MS = parseInt(process.env.WATCHDOG_TIMEOUT_MS, 10) || 45000;
 const WATCHDOG_INTERVAL_MS = parseInt(process.env.WATCHDOG_INTERVAL_MS, 10) || 5000;
 // Espelha o grace_period do check do Fly: o servidor sobe ~2s apos o boot e
@@ -116,7 +195,7 @@ const WATCHDOG_RESPAWN_BASE_MS = 5000;
 const WATCHDOG_RESPAWN_TETO_MS = 60000;
 // Filho que viveu mais que isso prova que o spawn funciona; o backoff zera.
 const WATCHDOG_VIDA_SAUDAVEL_MS = 60000;
-const MAX_WHATSAPP_SESSIONS = parseInt(process.env.MAX_WHATSAPP_SESSIONS, 10) || 4;
+const MAX_WHATSAPP_SESSIONS = parseInt(process.env.MAX_WHATSAPP_SESSIONS, 10) || 2;
 // takeoverOnConflict=TRUE fazia o worker ROUBAR o socket de qualquer outra sessao
 // WhatsApp Web do mesmo numero. Se esse numero tambem esta aberto no navegador do
 // dono (o celular mostra o aparelho "Google Chrome (macOS)"), os dois lados ficam
@@ -492,8 +571,9 @@ const removerLocksChromium = async (dir) => {
     }));
 };
 
-const createSessionState = (instanceId) => ({
+const createSessionState = (instanceId, organizationId = '') => ({
     id: instanceId,
+    organizationId: String(organizationId || ''),
     authPath: path.join(authRootPath, instanceId),
     client: null,
     initialized: false,
@@ -510,6 +590,7 @@ const createSessionState = (instanceId) => ({
     fase: 'iniciando',
     progresso: 0,
     reconnectTimer: null,
+    registryRestoreTimer: null,
     qrBootstrapTimer: null,
     logoutRecoveryTimer: null,
     reconnectAttempts: 0,
@@ -534,6 +615,11 @@ const createSessionState = (instanceId) => ({
     lastRecoveryReason: null,
     lastRecoveryAt: null,
     whatsappId: null,
+    lastEvent: 'session_created',
+    lastEventAt: new Date().toISOString(),
+    unavailableReason: '',
+    capacityUsed: 0,
+    capacityMax: MAX_WHATSAPP_SESSIONS,
     sendChain: Promise.resolve(),
     lastSendAt: 0,
     keepaliveTimer: null,   // vigia o WAState enquanto a sessao esta conectada
@@ -545,9 +631,10 @@ const createSessionState = (instanceId) => ({
     faseMsg: 'Iniciando serviço…',
 });
 
-const createCapacitySessionState = (instanceId) => ({
-    ...createSessionState(instanceId),
+const createCapacitySessionState = (instanceId, organizationId = '') => ({
+    ...createSessionState(instanceId, organizationId),
     fase: 'capacidade',
+    unavailableReason: 'global_capacity',
     faseMsg: `Capacidade do serviço WhatsApp atingida (${MAX_WHATSAPP_SESSIONS} sessões).`,
 });
 
@@ -565,6 +652,8 @@ const registrarLifecycle = (session, evento, extra = {}) => {
             : 0,
         ...extra,
     };
+    session.lastEvent = evento;
+    session.lastEventAt = new Date(agora).toISOString();
     console.log(`[WA_LIFECYCLE] ${JSON.stringify(payload)}`);
 };
 
@@ -752,10 +841,26 @@ const encerrarSessoesDuplicadas = async (current) => {
 
 // Wrappers finos: os modulos puros nao conhecem authRootPath.
 const authPathDe = (instanceId) => path.join(authRootPath, instanceId);
-const purgeAuthDir = (session, reason) => authStore.purgeAuthDir(authRootPath, session.authPath, reason);
-const purgeAuthDirPorId = (instanceId, reason) => authStore.purgeAuthDir(
-    authRootPath, authPathDe(instanceId), reason
-);
+const purgeAuthDir = (session, reason) => {
+    const verified = sessionManifest.verifyManifest(
+        session.authPath, session.organizationId, session.id,
+    );
+    if (!verified.ok) {
+        sessionManifest.quarantine(session.authPath, verified.status);
+        console.error(`[${session.id}] Purge recusado: vínculo de sessão inconsistente.`);
+        return false;
+    }
+    return authStore.purgeAuthDir(authRootPath, session.authPath, reason);
+};
+const purgeAuthDirPorId = (instanceId, organizationId, reason) => {
+    const authPath = authPathDe(instanceId);
+    const verified = sessionManifest.verifyManifest(authPath, organizationId, instanceId);
+    if (!verified.ok) {
+        sessionManifest.quarantine(authPath, verified.status);
+        return false;
+    }
+    return authStore.purgeAuthDir(authRootPath, authPath, reason);
+};
 const markPaired = (session) => authStore.markPaired(authRootPath, session.authPath);
 const clearPaired = (session) => authStore.clearPaired(authRootPath, session.authPath);
 const hasStoredAuth = (instanceId) => authStore.hasStoredAuth(authRootPath, authPathDe(instanceId));
@@ -827,12 +932,14 @@ const destroySessionRuntime = async (session, reason, removeFromMap = false) => 
     if (session.initTimer) clearTimeout(session.initTimer);
     if (session.qrIdleTimer) clearTimeout(session.qrIdleTimer);
     if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
+    if (session.registryRestoreTimer) clearTimeout(session.registryRestoreTimer);
     if (session.qrBootstrapTimer) clearTimeout(session.qrBootstrapTimer);
     limparLogoutRecovery(session);
     if (session.preparationTimer) clearTimeout(session.preparationTimer);
     session.initTimer = null;
     session.qrIdleTimer = null;
     session.reconnectTimer = null;
+    session.registryRestoreTimer = null;
     session.qrBootstrapTimer = null;
     session.preparationTimer = null;
     limparKeepalive(session);
@@ -1390,6 +1497,23 @@ const limparCachesChromium = async (dir) => {
 const initializeSession = (session) => {
     if (session.initialized) return session;
 
+    if (!session.organizationId) {
+        session.fase = 'inconsistente';
+        session.faseMsg = 'Sessão sem vínculo com uma organização.';
+        session.unavailableReason = 'orphan';
+        sessionManifest.quarantine(session.authPath, 'orphan');
+        return session;
+    }
+    const binding = sessionManifest.bindManifest(
+        session.authPath, session.organizationId, session.id,
+    );
+    if (!binding.ok) {
+        session.fase = 'inconsistente';
+        session.faseMsg = 'A sessão não pertence a esta organização.';
+        session.unavailableReason = binding.status;
+        return session;
+    }
+
     try {
         fs.unlinkSync(disabledMarkerPath(session));
     } catch (err) {
@@ -1505,7 +1629,8 @@ const initializeSession = (session) => {
         registrarLifecycle(session, 'qr_generated');
         console.log(`[${session.id}] Sessão não encontrada ou expirada. QR disponivel na API.`);
         scheduleQrIdleDestroy(session);
-        if (PRINT_QR_TO_LOGS) qrcode.generate(qr, { small: true });
+        // QR é uma credencial temporária. Ele existe somente no payload privado
+        // da UI e nunca é impresso, mesmo se um env legado pedir o contrário.
     });
 
     client.on('loading_screen', (percent, message) => {
@@ -1743,25 +1868,54 @@ const initializeSession = (session) => {
 
 const sessoesOcupandoSlot = () => Array.from(sessions.values()).filter(ocupaSlot).length;
 
-const ensureSession = (instanceId) => {
+const ensureSession = (instanceId, organizationId = '') => {
     const normalizedId = sanitizeInstanceId(instanceId);
+    const organization = String(organizationId || '');
+    if (organization) {
+        const binding = sessionManifest.bindManifest(
+            authPathDe(normalizedId), organization, normalizedId,
+        );
+        if (!binding.ok) {
+            const inconsistent = createSessionState(normalizedId, organization);
+            inconsistent.fase = 'inconsistente';
+            inconsistent.faseMsg = 'A sessão não pertence a esta organização.';
+            inconsistent.unavailableReason = binding.status;
+            return inconsistent;
+        }
+    }
     if (!sessions.has(normalizedId)) {
         if (sessoesOcupandoSlot() >= MAX_WHATSAPP_SESSIONS) {
             console.warn(`[${normalizedId}] Capacidade maxima atingida: ${MAX_WHATSAPP_SESSIONS} sessoes.`);
-            return createCapacitySessionState(normalizedId);
+            return createCapacitySessionState(normalizedId, organization);
         }
-        const session = createSessionState(normalizedId);
+        const manifest = sessionManifest.readManifest(authPathDe(normalizedId));
+        const session = createSessionState(
+            normalizedId, organization || manifest?.organization_id || '',
+        );
         sessions.set(normalizedId, session);
         initializeSession(session);
     }
     const session = sessions.get(normalizedId);
+    if (organization && session.organizationId !== organization) {
+        const inconsistent = createSessionState(normalizedId, organization);
+        inconsistent.fase = 'inconsistente';
+        inconsistent.faseMsg = 'A sessão não pertence a esta organização.';
+        inconsistent.unavailableReason = 'organization_mismatch';
+        return inconsistent;
+    }
     session.requestedAt = Date.now();
+    session.capacityUsed = sessoesOcupandoSlot();
+    session.capacityMax = MAX_WHATSAPP_SESSIONS;
     return session;
 };
 
 const findSession = (instanceId, touch = true) => {
     const session = sessions.get(sanitizeInstanceId(instanceId));
-    if (session && touch) session.requestedAt = Date.now();
+    if (session) {
+        if (touch) session.requestedAt = Date.now();
+        session.capacityUsed = sessoesOcupandoSlot();
+        session.capacityMax = MAX_WHATSAPP_SESSIONS;
+    }
     return session || null;
 };
 
@@ -1796,7 +1950,7 @@ const esperarReconexao = async (session, {
 };
 
 const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes = {}) => {
-    const session = ensureSession(instanceId);
+    const session = ensureSession(instanceId, opcoes.organizationId || '');
     const iniciadoEm = Date.now();
     const prazo = criarPrazo(SEND_REQUEST_TIMEOUT_MS, iniciadoEm);
     const duracao = () => Date.now() - iniciadoEm;
@@ -1961,6 +2115,9 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         let enviada;
         etapa = 'sendMessage';
         if (tipo === 'texto') {
+            if (typeof opcoes.onTransportStarted === 'function') {
+                opcoes.onTransportStarted();
+            }
             envioIniciado = true;
             const promessaEnvio = session.client.sendMessage(chatId, dados, opcoesDeEnvio());
             envioAindaEmVoo = Promise.resolve(promessaEnvio).then(() => undefined, () => undefined);
@@ -1981,6 +2138,9 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
                 mimetype: opcoes.mimetype || null,
                 prazo_restante_ms: restante(prazo),
             });
+            if (typeof opcoes.onTransportStarted === 'function') {
+                opcoes.onTransportStarted();
+            }
             envioIniciado = true;
             const promessaEnvio = session.client.sendMessage(chatId, midia, opcoesDeEnvio(opcoes.legenda));
             envioAindaEmVoo = Promise.resolve(promessaEnvio).then(() => undefined, () => undefined);
@@ -2003,14 +2163,17 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         session.lastSendAt = Date.now();
         // Uma midia que sobe zera a suspeita: os stalls so contam quando SEGUIDOS.
         session.stallsSeguidos = 0;
-        console.log(`[${session.id}] Envio confirmado: ${confirmacao.mensagemId} -> ${chatId}`);
+        console.log(`[${session.id}] Envio confirmado: ${confirmacao.mensagemId} -> ${maskedIdentifier(chatId)}`);
+        const confirmada = confirmacao.confirmacao === 'nativa';
         return {
-            sucesso: true,
+            sucesso: confirmada,
             via: 'local',
             tipo,
             instancia: session.id,
             mensagem_id: confirmacao.mensagemId,
             confirmacao: confirmacao.confirmacao,
+            resultado: confirmada ? 'confirmado' : 'incerto',
+            repetir: false,
             // Na variante "aceita_sem_id", enviada e undefined por definição.
             // ACK é telemetria opcional; jamais pode transformar um envio aceito
             // em erro depois que já chegou ao grupo.
@@ -2033,12 +2196,14 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             );
             agendarRecycleUnico(session, 'frame destacado durante envio');
             return {
-                sucesso: true,
+                sucesso: false,
                 via: 'local',
                 tipo,
                 instancia: session.id,
                 mensagem_id: confirmacao.mensagemId,
                 confirmacao: 'incerta_pos_frame',
+                resultado: 'incerto',
+                repetir: false,
                 ack: null,
                 etapa,
                 duracao_ms: duracao(),
@@ -2160,7 +2325,7 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         }
         // descreverErro, nao erro.message: o bundle minificado lanca objetos que
         // nao sao Error, e era isso que chegava ao usuario como "[ERRO] r".
-        const descrito = descreverErro(erro);
+        const descrito = redactSensitive(descreverErro(erro));
         console.error(`[${session.id}] Falha no envio:`, descrito);
         // Comparacao segue em erro.message: o texto descrito traz nome e stack.
         if (erro && erro.message === 'sendMessage timeout') {
@@ -2247,7 +2412,19 @@ process.on('unhandledRejection', (reason) => {
 // Liveness público p/ o load balancer: sem contadores (evita vazar quantas sessões
 // existem/estão conectadas a quem não tem a API key). Detalhes ficam em /api/status.
 app.get('/health', (req, res) => {
-    res.json({ ok: true });
+    let orphaned = 0;
+    try {
+        orphaned = fs.readdirSync(authRootPath, { withFileTypes: true }).filter((entry) => (
+            entry.isDirectory()
+            && sessionManifest.isQuarantined(path.join(authRootPath, entry.name))
+        )).length;
+    } catch (_) { orphaned = 0; }
+    res.json({
+        ok: true,
+        worker: process.env.FLY_MACHINE_ID || process.env.HOSTNAME || 'local',
+        capacity: { used: sessoesOcupandoSlot(), max: MAX_WHATSAPP_SESSIONS },
+        orphaned_sessions: orphaned,
+    });
 });
 
 // Nunca usar ensureSession aqui: o monitor_conexao do Django chama esta rota
@@ -2270,6 +2447,14 @@ app.get(['/api/status', '/api/status/:instance'],
             qr: null,
         });
     }
+    if (session.organizationId
+        && session.organizationId !== String(req.capability.organization_id)) {
+        return res.status(409).json({
+            instancia: instanceId, conectado: false, fase: 'inconsistente',
+            mensagem: 'A sessão não pertence a esta organização.',
+            motivo_indisponibilidade: 'organization_mismatch',
+        });
+    }
     const status = session.fase === 'capacidade' ? 503 : 200;
     res.status(status).json(buildSessionPayload(session));
 });
@@ -2283,10 +2468,89 @@ app.get(['/api/sessoes', '/api/sessoes/:instance'],
     return res.status(404).json({ sessao: buildInativoPayload(requestedId) });
 });
 
+let nextRegistryRestoreAt = 0;
+const scheduleRegistryRestore = (instanceId, organizationId, action) => {
+    const existing = findSession(instanceId, false);
+    if (existing) return existing;
+    if (sessoesOcupandoSlot() >= MAX_WHATSAPP_SESSIONS) {
+        return createCapacitySessionState(instanceId, organizationId);
+    }
+    const session = createSessionState(instanceId, organizationId);
+    session.fase = 'recuperando';
+    session.faseMsg = 'Sessão validada; aguardando restauração controlada.';
+    session.unavailableReason = 'recovering';
+    const now = Date.now();
+    const startAt = Math.max(now, nextRegistryRestoreAt);
+    nextRegistryRestoreAt = startAt + SESSION_START_STAGGER_MS;
+    session.registryRestoreTimer = setTimeout(() => {
+        session.registryRestoreTimer = null;
+        if (sessions.get(instanceId) !== session) return;
+        if (action === 'rearmar') {
+            rearmarQrBootstrap(instanceId, organizationId);
+        } else {
+            initializeSession(session);
+        }
+    }, Math.max(0, startAt - now));
+    session.registryRestoreTimer.unref();
+    sessions.set(instanceId, session);
+    return session;
+};
+
+app.post('/api/sessoes/reconcile',
+    capabilityAuth('session_reconcile', resolveInstanceId), (req, res) => {
+    const instanceId = resolveInstanceId(req);
+    const organizationId = String(req.capability.organization_id);
+    const binding = sessionManifest.bindManifest(
+        authPathDe(instanceId), organizationId, instanceId,
+    );
+    let session = findSession(instanceId, false);
+    // O boot nunca restaura um Chromium apenas porque encontrou um diretório no
+    // volume. Esta capability foi emitida a partir da WhatsAppConnection vigente
+    // no Django e é a prova de registry exigida antes de consumir capacidade.
+    if (binding.ok && !session) {
+        const authPath = authPathDe(instanceId);
+        const action = decidirRestauracao({
+            pareado: hasStoredAuth(instanceId),
+            desabilitado: fs.existsSync(disabledMarkerPathFor(authPath)),
+            qrEmPreparo: fs.existsSync(qrBootstrapMarkerPathFor(authPath)),
+        });
+        if (action === 'rearmar') {
+            session = scheduleRegistryRestore(instanceId, organizationId, action);
+        } else if (action === 'restaurar') {
+            session = scheduleRegistryRestore(instanceId, organizationId, action);
+        }
+    }
+    return res.status(binding.ok ? 200 : 409).json({
+        sucesso: binding.ok,
+        instancia: instanceId,
+        consistencia: binding.status,
+        runtime: session ? session.fase : 'inativo',
+        capacidade: { usadas: sessoesOcupandoSlot(), maximas: MAX_WHATSAPP_SESSIONS },
+        worker: process.env.FLY_MACHINE_ID || process.env.HOSTNAME || 'local',
+    });
+});
+
+app.get('/api/envios/status/:operation',
+    capabilityAuth('send_status', resolveInstanceId), (req, res) => {
+    const operation = sendLedger.getOperation({
+        organizationId: req.capability.organization_id,
+        sessionId: req.capability.session_id,
+        operationKey: String(req.params.operation || ''),
+    });
+    if (!operation) return res.status(404).json({ encontrado: false });
+    return res.json({
+        encontrado: true,
+        fase: operation.phase,
+        atualizado_em: operation.updated_at,
+        status: operation.status,
+        resultado: operation.body || null,
+    });
+});
+
 app.post('/api/sessoes',
     capabilityAuth('provision', resolveInstanceId, { singleUse: true }), (req, res) => {
     const instanceId = sanitizeInstanceId(req.body?.instance || req.body?.session || req.body?.userId);
-    const session = ensureSession(instanceId);
+    const session = ensureSession(instanceId, req.capability.organization_id);
     // Pedido explicito do usuario (abrir a aba WhatsApp) e o unico caminho que
     // tira uma sessao de uma fase terminal.
     reviveSession(session);
@@ -2298,6 +2562,12 @@ app.post('/api/sessoes',
             status: buildSessionPayload(session),
         });
     }
+    if (session.fase === 'inconsistente') {
+        return res.status(409).json({
+            sucesso: false, erro: session.faseMsg, instancia: session.id,
+            status: buildSessionPayload(session),
+        });
+    }
     res.json({ sucesso: true, instancia: session.id, status: buildSessionPayload(session) });
 });
 
@@ -2306,11 +2576,21 @@ app.post('/api/sessoes',
 app.post('/api/sessoes/reset',
     capabilityAuth('reset', resolveInstanceId, { singleUse: true }), async (req, res) => {
     const instanceId = sanitizeInstanceId(req.body?.instance || req.body?.session || req.body?.userId);
+    const organizationId = String(req.capability.organization_id);
+    const binding = sessionManifest.bindManifest(
+        authPathDe(instanceId), organizationId, instanceId,
+    );
+    if (!binding.ok) {
+        return res.status(409).json({
+            sucesso: false, causa: binding.status,
+            mensagem: 'A sessão não pertence a esta organização.',
+        });
+    }
     let session = findSession(instanceId, false);
     if (!session) {
         // Placeholder deliberadamente não inicializado: primeiro apaga qualquer
         // LocalAuth órfão; só depois cria o Chromium que produzirá o QR.
-        session = createSessionState(instanceId);
+        session = createSessionState(instanceId, organizationId);
         sessions.set(instanceId, session);
     }
 
@@ -2320,8 +2600,8 @@ app.post('/api/sessoes/reset',
         ),
         cleanupProfile: (current) => encerrarChromiumsDoPerfil(current.authPath),
         purgeAuth: (current) => purgeAuthDir(current, 'novo QR solicitado pelo usuario'),
-        createState: createSessionState,
-        createCapacityState: createCapacitySessionState,
+        createState: (id) => createSessionState(id, organizationId),
+        createCapacityState: (id) => createCapacitySessionState(id, organizationId),
         replaceSession: (fresh) => sessions.set(instanceId, fresh),
         hasCapacity: () => sessoesOcupandoSlot() < MAX_WHATSAPP_SESSIONS,
         initialize: initializeSession,
@@ -2348,11 +2628,23 @@ app.post('/api/sessoes/reset',
 app.post('/api/sessoes/logout',
     capabilityAuth('logout', resolveInstanceId, { singleUse: true }), async (req, res) => {
     const instanceId = sanitizeInstanceId(req.body?.instance || req.body?.session || req.body?.userId);
+    const organizationId = String(req.capability.organization_id);
+    const verified = sessionManifest.verifyManifest(
+        authPathDe(instanceId), organizationId, instanceId,
+    );
+    if (!verified.ok) {
+        return res.status(409).json({
+            sucesso: false, causa: verified.status,
+            mensagem: 'Logout recusado: vínculo da sessão inconsistente.',
+        });
+    }
     const session = findSession(instanceId, false);
 
     // Sem sessao viva no Map, ainda assim limpar o volume: o usuario quer desparear.
     if (!session) {
-        const removido = purgeAuthDirPorId(instanceId, 'logout sem sessao ativa');
+        const removido = purgeAuthDirPorId(
+            instanceId, organizationId, 'logout sem sessao ativa',
+        );
         return res.json({
             sucesso: true, logout_remoto: false, auth_removido: removido,
             ...buildInativoPayload(instanceId),
@@ -2524,7 +2816,7 @@ app.post(['/api/enviar', '/api/enviar/:instance'],
     // usa quando a lista de grupos nao carrega.
     if (!idChatValido(chatId)) {
         return res.status(400).json({
-            erro: `Destino invalido: "${chatId}". Use o codigo do grupo (termina em @g.us)`
+            erro: 'Destino invalido. Use o codigo do grupo (termina em @g.us)'
                 + ` ou um numero so com digitos.`,
             classe: PERMANENTE,
             instancia: instanceId,
@@ -2539,18 +2831,34 @@ app.post(['/api/enviar', '/api/enviar/:instance'],
                 instancia: instanceId,
             });
         }
+        if (String(legenda || mensagem || '').length > 4096) {
+            return res.status(400).json({
+                erro: 'Legenda muito longa.', classe: PERMANENTE,
+                causa: 'legenda_muito_longa', instancia: instanceId,
+            });
+        }
+        const mediaValidation = validarMidiaBase64(base64, mimetype);
+        if (!mediaValidation.ok) {
+            return res.status(400).json({
+                erro: 'A mídia é inválida ou excede o limite permitido.',
+                causa: mediaValidation.reason, classe: PERMANENTE,
+                instancia: instanceId,
+            });
+        }
 
-        console.log(`[${instanceId}] [AUTO] Detectada Mídia para ${chatId}`);
+        console.log(`[${instanceId}] [AUTO] Detectada Mídia para ${maskedIdentifier(chatId)}`);
         const resultado = await executarEnvioInteligente(instanceId, chatId, 'midia', base64, {
             mimetype,
             nomeArquivo: nomeArquivo || 'arquivo',
-            legenda: legenda || mensagem
+            legenda: legenda || mensagem,
+            onTransportStarted: req.deliveryOperation?.markTransportStarted,
+            organizationId: req.capability.organization_id,
         });
         return res.status(resultado.sucesso ? 200 : 503).json(resultado);
     }
 
     if (mensagem) {
-        console.log(`[${instanceId}] [AUTO] Detectado Texto para ${chatId}`);
+        console.log(`[${instanceId}] [AUTO] Detectado Texto para ${maskedIdentifier(chatId)}`);
         if (mensagem.length > 4096) {
             return res.status(400).json({
                 erro: 'Mensagem muito longa.',
@@ -2559,7 +2867,10 @@ app.post(['/api/enviar', '/api/enviar/:instance'],
             });
         }
 
-        const resultado = await executarEnvioInteligente(instanceId, chatId, 'texto', mensagem);
+        const resultado = await executarEnvioInteligente(instanceId, chatId, 'texto', mensagem, {
+            onTransportStarted: req.deliveryOperation?.markTransportStarted,
+            organizationId: req.capability.organization_id,
+        });
         return res.status(resultado.sucesso ? 200 : 503).json(resultado);
     }
 
@@ -2570,10 +2881,10 @@ app.post(['/api/enviar', '/api/enviar/:instance'],
     });
 });
 
-// Religa as sessoes ja pareadas depois de um restart/deploy. Sem isto o Map
-// nasce vazio e a sessao so voltava quando alguem abria a aba WhatsApp — o que
-// fazia a aba Envios acusar "desconectado", o primeiro envio pos-deploy falhar,
-// e o monitor_conexao mandar e-mail de "WhatsApp caiu" para todo mundo.
+// Audita o volume no boot, mas não religa Chromiums ainda. Um manifest prova o
+// vínculo gravado no volume, não prova que a WhatsAppConnection continua vigente
+// no banco. A restauração acontece somente em /api/sessoes/reconcile, depois de
+// uma capability assinada emitida pelo Django a partir do registry atual.
 const restaurarSessoesDoVolume = () => {
     if (process.env.DISABLE_SESSION_RESTORE === '1') {
         console.log('Restauracao de sessoes desabilitada por env.');
@@ -2581,57 +2892,42 @@ const restaurarSessoesDoVolume = () => {
     }
     if (!fs.existsSync(authRootPath)) return;
 
-    let candidatos = [];
+    let aguardandoReconciliacao = 0;
+    let quarentenadas = 0;
     try {
-        candidatos = fs.readdirSync(authRootPath, { withFileTypes: true })
+        fs.readdirSync(authRootPath, { withFileTypes: true })
             .filter((e) => e.isDirectory())
             .map((e) => e.name)
+            .filter((id) => !id.startsWith('.'))
             .filter((id) => id === sanitizeInstanceId(id)) // ignora lixo no volume
-            .map((id) => ({
-                id,
-                acao: decidirRestauracao({
-                    pareado: hasStoredAuth(id),
-                    desabilitado: fs.existsSync(disabledMarkerPathFor(authPathDe(id))),
-                    qrEmPreparo: fs.existsSync(qrBootstrapMarkerPathFor(authPathDe(id))),
-                }),
-            }))
-            .filter((c) => c.acao !== 'ignorar')
-            .sort((a, b) => a.id.localeCompare(b.id))
-            .slice(0, MAX_WHATSAPP_SESSIONS);
+            .forEach((id) => {
+                const authPath = authPathDe(id);
+                const manifest = sessionManifest.readManifest(authPath);
+                if (!manifest || manifest.instance_id !== id
+                    || sessionManifest.isQuarantined(authPath)) {
+                    sessionManifest.quarantine(authPath, manifest ? 'manifest_mismatch' : 'orphan');
+                    quarentenadas += 1;
+                    return;
+                }
+                aguardandoReconciliacao += 1;
+            });
     } catch (err) {
         console.error('Falha ao varrer o volume de sessoes:', err.message);
         return;
     }
-
-    if (!candidatos.length) {
-        console.log('Nenhuma sessao pareada no volume para restaurar.');
-        return;
-    }
-
-    const resumo = candidatos.map((c) => `${c.id}:${c.acao}`).join(', ');
-    console.log(`Restaurando ${candidatos.length} sessao(oes) do volume: ${resumo}.`);
-    candidatos.forEach(({ id, acao }, i) => {
-        // Escalonado: cada sessao sobe um Chromium (~350MB); subir todas juntas
-        // faz um pico de memoria e de CPU no boot.
-        setTimeout(() => {
-            if (acao === 'rearmar') {
-                console.log(`[${id}] QR estava em preparo no restart; re-armando um QR novo.`);
-                rearmarQrBootstrap(id);
-            } else {
-                console.log(`[${id}] Restaurando sessao do volume (${i + 1}/${candidatos.length}).`);
-                ensureSession(id);
-            }
-        }, i * SESSION_START_STAGGER_MS).unref();
-    });
+    console.log(
+        `Volume WhatsApp auditado: ${aguardandoReconciliacao} sessão(ões) aguardando `
+        + `registry assinado; ${quarentenadas} quarentenada(s).`
+    );
 };
 
 // Recomeça um bootstrap de QR para uma sessao cujo "novo QR" foi interrompido por
 // um restart (marcador .qr-bootstrap, sem .paired). Espelha o /api/sessoes/reset,
 // mas sem destroy: no boot nao ha client vivo, so um perfil parcial em disco.
-const rearmarQrBootstrap = (instanceId) => {
+const rearmarQrBootstrap = (instanceId, organizationId = '') => {
     const id = sanitizeInstanceId(instanceId);
-    purgeAuthDirPorId(id, 're-armar QR apos restart'); // descarta o perfil parcial
-    const fresh = markQrBootstrap(createSessionState(id));
+    purgeAuthDirPorId(id, organizationId, 're-armar QR apos restart');
+    const fresh = markQrBootstrap(createSessionState(id, organizationId));
     sessions.set(id, fresh);
     try {
         initializeSession(fresh); // reescreve o marcador; se cair de novo, re-arma de novo

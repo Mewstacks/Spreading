@@ -221,5 +221,16 @@ class MercadoLivre(Marketplace):
         O pool ML é compartilhado, mas a SESSÃO é por usuário: `usuario` diz qual
         auth_{id}.json abrir. Sem ele, link.py resolve a sessão disponível.
         """
+        from apps.scrapers.carga import (
+            BrowserResourceUnavailable, ml_site_browser_resource,
+        )
         from apps.scrapers.scraper_mercadolivre.link import gerar_links_em_lote
-        return gerar_links_em_lote(produtos, usuario=usuario, faixa=faixa)
+
+        with ml_site_browser_resource(
+            usuario, owner_kind="links_generate",
+        ) as acquired:
+            if not acquired:
+                raise BrowserResourceUnavailable(
+                    "Capacidade de browser ou sessão ML ocupada; links serão retomados."
+                )
+            return gerar_links_em_lote(produtos, usuario=usuario, faixa=faixa)

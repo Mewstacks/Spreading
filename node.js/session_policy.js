@@ -195,6 +195,7 @@ function ocupaSlot(session) {
     return Boolean(
         session.client || session.initialized
         || session.reconnectTimer || session.qrBootstrapTimer
+        || session.registryRestoreTimer
     );
 }
 

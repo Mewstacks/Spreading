@@ -53,7 +53,11 @@ class PublicacaoAdmin(admin.ModelAdmin):
     list_display = ("usuario", "produto", "destino_nome", "canal", "status", "variante", "criada_em")
     list_filter = ("status", "canal", "variante", "usuario")
     search_fields = ("produto__nome", "destino_nome", "erro")
-    readonly_fields = [field.name for field in Publicacao._meta.fields]
+    exclude = ("queued_media",)
+    readonly_fields = [
+        field.name for field in Publicacao._meta.fields
+        if field.name != "queued_media"
+    ]
 
 
 @admin.register(CliquePublicacao)

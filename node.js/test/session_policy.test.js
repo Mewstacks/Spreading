@@ -152,6 +152,8 @@ test('only sessions holding a Chromium count against the cap', () => {
         'reconectando: vai subir um Chromium quando o timer disparar');
     assert.equal(ocupaSlot({ client: null, initialized: false, qrBootstrapTimer: 1 }), true,
         'gerando QR: vai subir um Chromium quando o timer disparar');
+    assert.equal(ocupaSlot({ client: null, initialized: false, registryRestoreTimer: 1 }), true,
+        'registry validado: reserva capacidade enquanto aguarda o stagger');
 
     // Terminais: sem client, sem init, sem timer.
     assert.equal(ocupaSlot({ client: null, initialized: false, reconnectTimer: null }), false,

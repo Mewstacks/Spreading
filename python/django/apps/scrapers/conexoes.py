@@ -66,6 +66,7 @@ class Estado:
     # de quem está desconectado, e misturar os dois fazia o estado se contradizer
     # (conectado=True com motivo preenchido).
     alerta: str = ""
+    availability_code: str = ""
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -87,7 +88,8 @@ def estado_whatsapp(user=None, session=None) -> Estado:
         session = _sessao_wa(user)
         if not session:
             return Estado(False, "WhatsApp", "worker",
-                          "Nenhuma sessão de WhatsApp para esta conta.", "sem_sessao", agora)
+                          "Nenhuma sessão de WhatsApp para esta organização.", "sem_sessao", agora,
+                          availability_code="organization_disconnected")
     # session=None com user=None é a consulta legada à sessão global do worker —
     # o whatsapp_client já sabe tratar (params sem `session`). Não é erro.
     try:
@@ -95,13 +97,16 @@ def estado_whatsapp(user=None, session=None) -> Estado:
     except Exception as e:
         logger.warning("Sonda WhatsApp falhou para a sessão %s: %s", session, e)
         return Estado(False, "WhatsApp", "worker",
-                      "Não foi possível falar com o serviço de WhatsApp.", "servico_fora", agora)
+                      "O worker do WhatsApp está indisponível.", "servico_fora", agora,
+                      availability_code="worker_unavailable")
 
     if data.get("conectado"):
-        return Estado(True, "WhatsApp", "worker", "", "", agora)
+        return Estado(True, "WhatsApp", "worker", "", "", agora,
+                      availability_code="ready")
     if data.get("erro"):
         return Estado(False, "WhatsApp", "worker",
-                      "Serviço de WhatsApp indisponível.", "servico_fora", agora)
+                      "O worker do WhatsApp está indisponível.", "servico_fora", agora,
+                      availability_code="worker_unavailable")
     fase = data.get("fase") or ""
     # Fase transitória (worker religando após deploy/restart) não é falta de
     # pareamento: a tela de WhatsApp mostra essas fases como progresso azul, e a
@@ -111,18 +116,20 @@ def estado_whatsapp(user=None, session=None) -> Estado:
                 "sincronizando", "reconectando"}:
         return Estado(False, "WhatsApp", "worker",
                       "WhatsApp reativando a conexão — aguarde alguns instantes.",
-                      "conectando", agora)
+                      "conectando", agora, availability_code="recovering")
     if fase == "capacidade":
         return Estado(False, "WhatsApp", "worker",
-                      "Serviço de WhatsApp no limite de conexões — tente novamente em instantes.",
-                      "capacidade", agora)
+            "O limite da capacidade global de sessões do worker foi atingido.",
+                      "capacidade", agora, availability_code="global_capacity")
     if fase == "recuperacao_pausada":
         # Terminal com credencial preservada: reviver resolve sem QR novo.
         return Estado(False, "WhatsApp", "worker",
                       "WhatsApp pausou a reconexão após falhas — abra a tela do WhatsApp para reativar.",
-                      "recuperacao_pausada", agora)
+                      "recuperacao_pausada", agora, availability_code="recovering")
     return Estado(False, "WhatsApp", "worker",
-                  "WhatsApp não está pareado — escaneie o QR Code.", "sem_pareamento", agora)
+                  "A sessão WhatsApp desta organização está desconectada.",
+                  "sem_pareamento", agora,
+                  availability_code="organization_disconnected")
 
 
 def _sessao_wa(user) -> str:

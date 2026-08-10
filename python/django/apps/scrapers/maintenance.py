@@ -87,11 +87,96 @@ def reconciliar_publicacoes_orfas(max_age_minutes=30):
     'falhou'; sobra o processo morto (deploy/crash) entre o create e o desfecho, que
     nenhum except captura. Um envio real leva no máximo dezenas de segundos (Playwright
     do ML), então 'pendente' há 30min não é um envio em curso — é uma órfã.
+
+    O desfecho depende de haver quem retome: só a fila v2, ligada para a organização
+    da linha, tem consumidor. Sem ela, a órfã é fechada como sempre foi, em vez de
+    ficar 'pendente' para sempre reciclando eventos a cada ciclo.
     """
-    from apps.scrapers.models import Publicacao
+    from django.conf import settings
+    from apps.accounts.feature_flags import send_pipeline_v2_enabled
+    from apps.scrapers.models import Publicacao, PublicacaoEvento
+    from apps.scrapers.send_pipeline import QUEUE_STATES, TERMINALS
     cutoff = timezone.now() - timedelta(minutes=max_age_minutes)
-    return Publicacao.objects.filter(status="pendente", criada_em__lt=cutoff).update(
-        status="falhou", erro="Envio interrompido antes de concluir (worker reiniciado).")
+    reconciled = 0
+    # A decisão é por organização, mas a flag é resolvida a partir do usuário. Um lote
+    # órfão costuma pertencer a poucos donos; sem este cache o ciclo faria duas queries
+    # por linha só para reler a mesma resposta.
+    rollout_por_usuario = {}
+
+    def _tem_consumidor(publication):
+        # Reagendar só é honesto quando existe consumidor: quem drena a fila v2 é
+        # `process_queued_publications`, e ele só roda com o rollout ligado PARA A
+        # ORGANIZAÇÃO da linha. Com a flag no default (e no estado de rollback), uma
+        # órfã devolvida para 'transport_queued' continuava 'pendente' para sempre,
+        # voltava a casar com este filtro a cada ciclo e gravava um evento novo a
+        # cada 30 min, sem teto. Sem consumidor, o desfecho é terminal — como era
+        # antes da fila v2 existir.
+        if publication.transport_state not in QUEUE_STATES:
+            return False
+        if publication.usuario_id not in rollout_por_usuario:
+            rollout_por_usuario[publication.usuario_id] = send_pipeline_v2_enabled(
+                publication.usuario,
+            )
+        return rollout_por_usuario[publication.usuario_id]
+
+    for publication in Publicacao.objects.select_related("usuario").filter(
+            status="pendente", criada_em__lt=cutoff).order_by("pk")[:1000]:
+        if publication.stage in {"transport_started", "confirmation_pending"}:
+            publication.status = "incerto"
+            publication.stage = "uncertain"
+            publication.transport_state = "uncertain_after_restart"
+            publication.next_retry_at = None
+            publication.erro = (
+                "Transporte iniciado antes do reinício; reenvio automático bloqueado."
+            )
+            reason = "restart_after_transport"
+        elif not _tem_consumidor(publication):
+            publication.status = "falhou"
+            publication.stage = "cancelled"
+            publication.transport_state = "no_queue_consumer"
+            publication.next_retry_at = None
+            publication.erro = (
+                "Envio interrompido antes de concluir e sem fila que possa retomá-lo "
+                "(worker reiniciado)."
+            )
+            reason = "restart_without_queue_consumer"
+        elif publication.attempt_count < int(settings.SEND_MAX_ATTEMPTS):
+            # A tentativa perdida precisa ser contada aqui: sem isso o teto de
+            # SEND_MAX_ATTEMPTS nunca era alcançado por este caminho e o ramo
+            # `retry_exhausted` abaixo era inalcançável.
+            publication.attempt_count += 1
+            publication.stage = "transport_queued"
+            publication.transport_state = "retry_after_restart"
+            publication.next_retry_at = timezone.now()
+            publication.erro = "Processamento interrompido antes do transporte; retomada agendada."
+            reason = "restart_before_transport"
+        else:
+            publication.status = "falhou"
+            publication.stage = "cancelled"
+            publication.transport_state = "retry_exhausted"
+            publication.next_retry_at = None
+            publication.erro = "Tentativas esgotadas após reinício do worker."
+            reason = "restart_retry_exhausted"
+        campos = [
+            "attempt_count", "status", "stage", "transport_state", "next_retry_at",
+            "erro",
+        ]
+        if publication.stage in TERMINALS:
+            # Terminal não volta ao transporte: a imagem enfileirada (até 16 MiB por
+            # linha, replicada no lote) deixa de ter uso e não pode ficar residente
+            # no Postgres. O caminho feliz já limpa em send_pipeline; este era o
+            # único desfecho que guardava os bytes indefinidamente.
+            publication.queued_media = None
+            publication.queued_media_mime = ""
+            campos += ["queued_media", "queued_media_mime"]
+        publication.save(update_fields=campos)
+        PublicacaoEvento.objects.create(
+            organization_id=publication.organization_id, publicacao=publication,
+            stage=publication.stage, reason_code=reason,
+            safe_detail=publication.erro[:255],
+        )
+        reconciled += 1
+    return reconciled
 
 
 def reconciliar_execucoes_ingestao_orfas(max_age_hours=2):

@@ -139,12 +139,42 @@ class SourcePipelineTests(TestCase):
         self.assertTrue(Produto.objects.filter(owner=self.user).exists())
 
     def test_source_failure_is_isolated_and_sanitized(self):
-        with patch.dict(registry.SOURCES, {"broken-source": BrokenSource()}):
+        broken = BrokenSource()
+        broken.last_health_status = "blocked"
+        broken.last_metrics = {
+            "duration_ms": 17,
+            "duration_by_stage_ms": {"navigation": 11, "parsing": 6},
+            "schema_fingerprint": "a" * 64,
+        }
+        with patch.dict(registry.SOURCES, {"broken-source": broken}):
             result = registry.run_source("broken-source")
         self.assertEqual(result["status"], "error")
         state = FonteIngestao.objects.get(slug="broken-source")
         self.assertEqual(state.status, "degraded")
         self.assertNotIn("Traceback", state.erro_publico)
+        run = state.execucoes.latest("pk")
+        self.assertEqual(run.health_status, "blocked")
+        self.assertEqual(run.duracoes, {
+            "navigation": 11, "parsing": 6, "total_ms": 17,
+        })
+        self.assertEqual(run.schema_fingerprint, "a" * 64)
+
+    def test_source_com_itens_mas_inventario_parcial_fica_degradada(self):
+        partial = FakeSource()
+        partial.slug = "partial-source"
+        partial.name = "Partial"
+        partial.last_health_status = "partial"
+        partial.last_metrics = {
+            "complete": False, "stop_reason": "max_pages", "duration_ms": 9,
+        }
+        with patch.dict(registry.SOURCES, {"partial-source": partial}):
+            result = registry.run_source("partial-source")
+
+        self.assertEqual(result["status"], "degraded")
+        state = FonteIngestao.objects.get(slug="partial-source")
+        self.assertEqual(state.status, "degraded")
+        self.assertIsNone(state.ultimo_sucesso)
+        self.assertIn("parcial", state.erro_publico.lower())
 
     def test_lock_prevents_duplicate_cycle(self):
         from django.core.cache import cache
@@ -863,9 +893,7 @@ class ChecagensDeConexaoTemEscopoDeTenantTests(TestCase):
 
 
 class MensagensDoGerarLinksTests(TransactionTestCase):
-    """Anti-bot e sessão morta pedem AÇÕES DIFERENTES do usuário: esperar vs
-    reconectar. Unificar os dois num "[ERRO] sessão expirada" com link de
-    Reconectar fazia o usuário refazer um login que estava perfeito.
+    """A request web só registra a pendência; o worker diagnostica o browser.
 
     TransactionTestCase (e não TestCase) porque o job SSE roda em thread própria:
     dentro da transação do TestCase o SQLite trava a tabela para a outra thread.
@@ -883,30 +911,33 @@ class MensagensDoGerarLinksTests(TransactionTestCase):
 
     def _corpo(self, excecao):
         from apps.scrapers.marketplaces.mercadolivre import MercadoLivre
-        with patch.object(MercadoLivre, "prefetch_links", side_effect=excecao):
+        with patch.object(MercadoLivre, "prefetch_links", side_effect=excecao) as prefetch:
             resp = self.client.get("/scrapers/gerar-links/")
-            return b"".join(resp.streaming_content).decode()
+            return b"".join(resp.streaming_content).decode(), prefetch
 
     def test_antibot_nao_manda_reconectar(self):
         from apps.scrapers.scraper_mercadolivre.link import AntiBotError
-        corpo = self._corpo(AntiBotError("verificação"))
-        self.assertIn("verificação de segurança", corpo)
+        corpo, prefetch = self._corpo(AntiBotError("verificação"))
+        prefetch.assert_not_called()
+        self.assertIn("fila segura de links", corpo)
         self.assertNotIn("__ML_LOGIN__", corpo)
         self.assertNotIn("expirou", corpo)
-        self.assertIn("[AVISO]", corpo)
+        self.assertIn("__LINKS_ENFILEIRADOS__", corpo)
 
     def test_sessao_morta_continua_mandando_reconectar(self):
         """O caminho legítimo não pode regredir."""
         from apps.scrapers.scraper_mercadolivre.link import LoginError
-        corpo = self._corpo(LoginError("Sua sessão do Mercado Livre expirou."))
-        self.assertIn("__ML_LOGIN__", corpo)
-        self.assertIn("[ERRO]", corpo)
+        corpo, prefetch = self._corpo(LoginError("Sua sessão do Mercado Livre expirou."))
+        prefetch.assert_not_called()
+        self.assertNotIn("__ML_LOGIN__", corpo)
+        self.assertIn("__LINKS_ENFILEIRADOS__", corpo)
 
     def test_ml_fora_do_ar_nao_manda_reconectar(self):
         from apps.scrapers.scraper_mercadolivre.link import AuthError
-        corpo = self._corpo(AuthError("sem resposta"))
+        corpo, prefetch = self._corpo(AuthError("sem resposta"))
+        prefetch.assert_not_called()
         self.assertNotIn("__ML_LOGIN__", corpo)
-        self.assertIn("[AVISO]", corpo)
+        self.assertIn("__LINKS_ENFILEIRADOS__", corpo)
 
     def test_progresso_do_lote_chega_na_tela(self):
         """O emitir_fase já existia em gerar_links_em_lote, mas ia só para o logger:
@@ -918,14 +949,16 @@ class MensagensDoGerarLinksTests(TransactionTestCase):
             emitir_fase("Link 1/2", 0.5, (0, 100))
             return (1, 0)
 
-        with patch.object(MercadoLivre, "prefetch_links", side_effect=_fingir):
+        with patch.object(MercadoLivre, "prefetch_links", side_effect=_fingir) as prefetch:
             resp = self.client.get("/scrapers/gerar-links/")
             corpo = b"".join(resp.streaming_content).decode()
-        self.assertIn("Link 1/2", corpo)
+        prefetch.assert_not_called()
+        self.assertNotIn("Link 1/2", corpo)
+        self.assertIn("__LINKS_ENFILEIRADOS__", corpo)
 
 
-class BotaoDisputaOLockDoWorkerTests(TransactionTestCase):
-    """A causa raiz: o botão manual não pegava o advisory lock que o worker pega."""
+class BotaoEnfileiraNoWorkerTests(TransactionTestCase):
+    """O botão web não abre Chromium nem acessa o lease global system-only."""
 
     def setUp(self):
         self.user = get_user_model().objects.create_user("lock-links", password="test")
@@ -936,41 +969,27 @@ class BotaoDisputaOLockDoWorkerTests(TransactionTestCase):
             preco_sem_desconto=100, preco_com_cupom=70,
             link_produto="https://produto.mercadolivre.com.br/MLB-111111")
 
-    def _corpo(self, conseguiu):
-        from contextlib import contextmanager
+    def _corpo(self):
         from apps.scrapers.marketplaces.mercadolivre import MercadoLivre
 
-        @contextmanager
-        def _lock(*a, **kw):
-            yield conseguiu
-
-        # O import em gerar_links_stream é local, então o patch vai no módulo de
-        # origem — é ele que a chamada resolve em tempo de execução.
-        with patch("apps.scrapers.carga.operacao_pesada_com_espera", _lock), \
-             patch.object(MercadoLivre, "prefetch_links",
+        with patch.object(MercadoLivre, "prefetch_links",
                           return_value=(1, 0)) as prefetch:
             resp = self.client.get("/scrapers/gerar-links/")
             corpo = b"".join(resp.streaming_content).decode()
         return corpo, prefetch
 
-    def test_sem_lock_nao_abre_navegador_e_avisa_a_fila(self):
-        corpo, prefetch = self._corpo(False)
+    def test_nao_abre_navegador_e_avisa_a_fila(self):
+        corpo, prefetch = self._corpo()
         prefetch.assert_not_called()          # nada de segundo Chromium
-        self.assertIn("__LINKS_OCUPADO__", corpo)
-        self.assertIn("continuam na fila", corpo)
+        self.assertIn("__LINKS_ENFILEIRADOS__", corpo)
+        self.assertIn("fila segura de links", corpo)
         # Fila não é problema de conta: não pode oferecer "Reconectar".
         self.assertNotIn("__ML_LOGIN__", corpo)
         self.assertNotIn("expirada", corpo)
 
-    def test_com_lock_gera_normalmente(self):
-        corpo, prefetch = self._corpo(True)
-        prefetch.assert_called_once()
-        self.assertNotIn("__LINKS_OCUPADO__", corpo)
-
     def test_amazon_nao_espera_o_lock(self):
         """A Amazon é Python puro e não abre navegador — fazer um usuário
         só-Amazon esperar o worker seria dano gratuito."""
-        from contextlib import contextmanager
         from apps.scrapers.marketplaces.amazon import Amazon
 
         Produto.objects.filter(marketplace="mercadolivre").delete()
@@ -979,17 +998,8 @@ class BotaoDisputaOLockDoWorkerTests(TransactionTestCase):
             nome="Item Amazon", origem="oferta", preco_sem_desconto=100,
             preco_com_cupom=70, link_produto="https://www.amazon.com.br/dp/B0LOCK0001")
 
-        pediu_lock = {"sim": False}
-
-        @contextmanager
-        def _lock(*a, **kw):
-            pediu_lock["sim"] = True
-            yield False
-
-        with patch("apps.scrapers.carga.operacao_pesada_com_espera", _lock), \
-             patch.object(Amazon, "prefetch_links", return_value=(1, 0)) as prefetch:
+        with patch.object(Amazon, "prefetch_links", return_value=(1, 0)) as prefetch:
             resp = self.client.get("/scrapers/gerar-links/")
             b"".join(resp.streaming_content)
 
         prefetch.assert_called_once()
-        self.assertFalse(pediu_lock["sim"])

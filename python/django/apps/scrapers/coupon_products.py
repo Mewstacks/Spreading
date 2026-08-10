@@ -24,6 +24,9 @@ from django.utils import timezone
 from apps.scrapers.models import (
     CupomPreparacao, LinkAfiliadoUsuario, Produto, ProdutoCupom,
 )
+from apps.scrapers.carga import (
+    BrowserResourceUnavailable, ml_site_browser_resource,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +274,9 @@ def _base_produtos(cupom, usuario):
     ).exclude(imagem_url="").filter(preco_com_cupom__gt=0)
     from apps.scrapers.maintenance import produtos_frescos_q
     qs = qs.filter(produtos_frescos_q())
-    if mkt in ("amazon", "awin"):
+    if mkt == "amazon":
+        qs = qs.filter(Q(owner__isnull=True) | Q(owner=usuario))
+    elif mkt == "awin":
         qs = qs.filter(owner=usuario)
     else:
         qs = qs.filter(Q(owner__isnull=True) | Q(owner=usuario))
@@ -438,10 +443,17 @@ def _coletar_ml_remoto(cupom, usuario=None):
     if resultado is None and state is None:
         return 0
     if resultado is None:
-        with iniciar_browser(
-            storage_state=state, headless=True,
-        ) as (page, _context):
-            resultado = listar_itens_por_cupom(payload, page, max_paginas=2)
+        with ml_site_browser_resource(
+            usuario, owner_kind="coupon_products",
+        ) as acquired:
+            if not acquired:
+                raise BrowserResourceUnavailable(
+                    "Capacidade de browser ocupada; preparo do cupom será retomado."
+                )
+            with iniciar_browser(
+                storage_state=state, headless=True,
+            ) as (page, _context):
+                resultado = listar_itens_por_cupom(payload, page, max_paginas=2)
     total = 0
     for row in (resultado or {}).get("produtos_aplicaveis", []):
         link_produto = str(row.get("link_produto") or "")[:1000]
@@ -499,7 +511,7 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
         cached.sort(key=_ordem_por_valor_do_cupom, reverse=True)
         return cached[:9]
 
-    if not cupom_publicavel(cupom):
+    if not cupom_publicavel(cupom, usuario=usuario):
         CupomPreparacao.objects.filter(pk=preparo.pk).update(
             status="vazio", produtos_chave=chave, verificado_em=timezone.now(),
             proxima_tentativa=timezone.now() + BACKOFF_VAZIO,
@@ -758,10 +770,20 @@ def preparar_lote(
     )
     buckets = defaultdict(list)
     for cupom in cupons:
-        if not cupom_publicavel(cupom):
-            continue
-        contextos = [None] if _usuario_do_preparo(cupom, None) is None else (
-            [cupom.owner] if cupom.owner_id else usuarios)
+        compartilhado = _usuario_do_preparo(cupom, None) is None
+        if compartilhado:
+            # O preparo de catálogo público é compartilhado, mas a habilitação de
+            # ativação ML é por organização. Basta uma organização elegível para
+            # materializar a prova; a projeção por usuário continua decidindo quem
+            # pode vê-la/enviá-la.
+            elegivel = next(
+                (u for u in usuarios if cupom_publicavel(cupom, usuario=u)), None
+            )
+            if not elegivel:
+                continue
+            contextos = [elegivel]
+        else:
+            contextos = [cupom.owner] if cupom.owner_id else usuarios
         for usuario in contextos:
             if usuario is None and cupom.owner_id:
                 continue

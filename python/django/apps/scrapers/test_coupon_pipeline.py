@@ -229,10 +229,10 @@ class CouponPipelineTests(TestCase):
         }
         result = coletar_cupons(usuarios=[self.user])
 
-        self.assertEqual(result["falhos"], 1)
+        self.assertEqual(result["falhos"], 2)
         self.assertEqual(
             result["fontes"]["ml-cupons-afiliados"]["status"], "error",
         )
         self.assertEqual(
-            result["fontes"]["amazon-public-coupons"]["status"], "skipped",
+            result["fontes"]["amazon-public-coupons"]["status"], "error",
         )

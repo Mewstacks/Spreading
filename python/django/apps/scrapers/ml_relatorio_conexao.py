@@ -26,7 +26,7 @@ from apps.scrapers.ml_conexao import (
     GOTO_TIMEOUT_MS, LOGIN_DEADLINE_S, LOOP_MS, MAX_EVENTOS_POR_POST,
 )
 from apps.scrapers.ml_live_transport import (
-    ActivePage, LiveTransport, despachar_input,
+    ActivePage, LiveTransport, despachar_input, interactive_browser_slot,
 )
 from apps.scrapers.report_sessions import has_report_session, save_report_state
 from apps.accounts.tenant import organization_job_sem_transacao
@@ -145,7 +145,7 @@ def _worker(user):
             uid, fase="iniciando", desafio={}, retentar_qr=False,
             aviso="", erro="",
         )
-        with sync_playwright() as p:
+        with interactive_browser_slot(), sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=LAUNCH_ARGS)
             try:
                 context = browser.new_context(

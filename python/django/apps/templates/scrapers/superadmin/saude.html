@@ -150,7 +150,7 @@ bem quanto um worker parado.
       <div class="row-main"><strong>{{ c.servico }}</strong></div>
       <div class="row-side" style="font-size:12.5px;">
         {# Conectado COM alerta = a última sonda não passou, mas a sessão vale. #}
-        {% if c.conectado %}{% if c.alerta %}<span style="color:var(--yellow);">{{ c.alerta }}</span>{% else %}<span class="muted">Conectado</span>{% endif %}{% elif c.detalhe == 'conectando' or c.detalhe == 'capacidade' %}<span style="color:var(--yellow);">{{ c.motivo }}</span>{% else %}<span style="color:var(--red);">{{ c.motivo }}</span>{% endif %}
+        {% if c.conectado %}{% if c.alerta %}<span style="color:var(--yellow);">{{ c.alerta }}</span>{% else %}<span class="muted">Conectado</span>{% endif %}{% elif c.availability_code == 'recovering' or c.availability_code == 'global_capacity' %}<span style="color:var(--yellow);">{{ c.motivo }}</span>{% else %}<span style="color:var(--red);">{{ c.motivo }}</span>{% endif %}
       </div>
     </div>
     {% endfor %}
@@ -199,6 +199,28 @@ mentindo por omissão — nada roda, então nada falha.
       </div>
       {% endif %}
     </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="section section-lined">
+  <div class="section-head">
+    <h2>Espera da fila manual por motivo</h2>
+    <span class="hint">{{ r.manual_queue.current_total }} aguardando agora</span>
+  </div>
+  <div class="rows" id="manual-queue-metrics">
+    {% for item in r.manual_queue.by_reason %}
+    <div class="row-item">
+      <span class="dot {% if item.current %}off{% else %}on{% endif %}"></span>
+      <div class="row-main">
+        <div class="row-title"><strong>{{ item.reason }}</strong>{% if item.current %}<span class="badge badge-yellow">{{ item.current }} na fila</span>{% endif %}</div>
+        <div class="row-note">
+          {% if item.samples %}{{ item.samples }} intervalo(s) medido(s) — p50 {{ item.p50_seconds }}s, p90 {{ item.p90_seconds }}s, máximo {{ item.max_seconds }}s.{% else %}Sem intervalo finalizado suficiente nesta janela; nenhuma estimativa exibida.{% endif %}
+        </div>
+      </div>
+    </div>
+    {% empty %}
+    <div class="empty"><div class="empty-title">Sem espera observada no período</div><p>O histórico começa nos eventos duráveis da fila nova; dados anteriores não são estimados.</p></div>
     {% endfor %}
   </div>
 </section>

@@ -31,7 +31,10 @@ from apps.accounts.models import (
     MercadoLivreSession,
     WhatsAppConnection,
 )
-from apps.accounts.rls import STRICT_TENANT_TABLES, policy_statements
+from apps.accounts.rls import (
+    MIXED_TENANT_TABLES, STRICT_TENANT_TABLES, SYSTEM_ONLY_TABLES,
+    policy_statements,
+)
 from apps.accounts.tenant import (
     _context_signature, current_organization_id, executar_no_tenant,
     organization_context,
@@ -492,6 +495,38 @@ class RLSPolicyTests(SimpleTestCase):
             'ALTER TABLE "accounts_mercadolivresession" FORCE ROW LEVEL SECURITY',
             statements,
         )
+
+    def test_perfil_pessoal_continua_gravavel_pelo_proprio_actor_em_org_compartilhada(self):
+        statements = policy_statements("accounts_perfil", mixed=False)
+        update_policy = next(
+            sql for sql in statements if "CREATE POLICY tenant_update" in sql
+        )
+        self.assertIn("app.actor_id", update_policy)
+        self.assertIn("tenant_security.context_valid('actor'", update_policy)
+
+    def test_novas_projecoes_e_controles_estao_na_classe_rls_correta(self):
+        strict = {
+            "accounts_organizationfeatureoverride",
+            "scrapers_execucaoraspagem",
+            "scrapers_eventoraspagem",
+            "scrapers_cupomdisponibilidade",
+            "scrapers_cupomdisponibilidadeevento",
+            "scrapers_publicacaotentativa",
+            "scrapers_publicacaoevento",
+            "scrapers_relatoriosync",
+        }
+        self.assertTrue(strict.issubset(set(STRICT_TENANT_TABLES)))
+        self.assertIn("scrapers_execucaoingestao", MIXED_TENANT_TABLES)
+        self.assertEqual(
+            set(SYSTEM_ONLY_TABLES),
+            {"scrapers_workerheartbeat", "scrapers_resourcelease"},
+        )
+
+        system_sql = " ".join(policy_statements(
+            "scrapers_resourcelease", mixed=False, system_only=True,
+        ))
+        self.assertIn("app.system_signature", system_sql)
+        self.assertNotIn("app.organization_id", system_sql)
 
 
 class TenantContextSigningTests(SimpleTestCase):

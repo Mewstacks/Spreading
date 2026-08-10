@@ -1,5 +1,5 @@
 import tempfile
-from datetime import timedelta
+from datetime import date, timedelta
 from unittest.mock import patch
 from unittest.mock import MagicMock
 
@@ -77,10 +77,11 @@ class ReportSessionTests(TestCase):
     def test_report_csv_is_mapped_by_header_not_column_position(self):
         from apps.scrapers.relatorios import _parse_delimited_report
 
+        report_day = date(2026, 7, 17)
         rows = _parse_delimited_report(
-            "Comissão;Etiqueta;Data;Cliques;Receita;Pedidos\n"
-            "R$ 12,50;grupo-casa;17/07/2026;9;R$ 199,90;2\n".encode(),
-            "amazon", timezone.localdate(), timezone.localdate(),
+            "Comissão;Etiqueta;Data;Cliques;Conversões;Receita;Pedidos\n"
+            "R$ 12,50;grupo-casa;17/07/2026;9;1;R$ 199,90;2\n".encode(),
+            "amazon", report_day, report_day,
         )
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].etiqueta, "grupo-casa")
@@ -91,22 +92,38 @@ class ReportSessionTests(TestCase):
 
 
 class HeavyPipelineLockTests(SimpleTestCase):
+    @patch("apps.scrapers.carga.leased_resource")
     @patch("apps.scrapers.carga.connections")
-    def test_postgres_lock_releases_only_when_acquired(self, connections):
+    @patch("apps.scrapers.carga.in_system_context", return_value=True)
+    def test_postgres_lease_releases_only_when_acquired(
+        self, _system_context, connections, lease,
+    ):
         from apps.scrapers.carga import operacao_pesada
 
         connection = connections.__getitem__.return_value
         connection.vendor = "postgresql"
-        cursor = MagicMock()
-        cursor.fetchone.return_value = (True,)
-        connection.cursor.return_value.__enter__.return_value = cursor
+        lease.return_value.__enter__.return_value = (True, {"owner_kind": "scheduled"})
 
         with operacao_pesada() as acquired:
             self.assertTrue(acquired)
 
-        self.assertEqual(cursor.execute.call_count, 2)
-        self.assertIn("pg_try_advisory_lock", cursor.execute.call_args_list[0].args[0])
-        self.assertIn("pg_advisory_unlock", cursor.execute.call_args_list[1].args[0])
+        lease.assert_called_once_with(
+            "django_chromium", owner_kind="scheduled", organization=None,
+        )
+        lease.return_value.__exit__.assert_called_once()
+
+    @patch("apps.scrapers.carga.leased_resource")
+    @patch("apps.scrapers.carga.connections")
+    @patch("apps.scrapers.carga.in_system_context", return_value=False)
+    def test_request_web_nao_adquire_slot_global(
+        self, _system_context, connections, lease,
+    ):
+        from apps.scrapers.carga import operacao_pesada
+
+        connections.__getitem__.return_value.vendor = "postgresql"
+        with operacao_pesada() as acquired:
+            self.assertFalse(acquired)
+        lease.assert_not_called()
 
 
 class DatabaseUnavailableMiddlewareTests(SimpleTestCase):
@@ -140,41 +157,42 @@ class DatabaseUnavailableMiddlewareTests(SimpleTestCase):
 
 
 class LockComEsperaTests(SimpleTestCase):
-    """O botão manual disputa o MESMO advisory lock do worker. Sem isso, clicar
+    """O botão manual disputa o MESMO lease do worker. Sem isso, clicar
     enquanto o worker está no Link Builder abria um segundo Chromium no mesmo
     portal SSO com a mesma sessão — e o ML derrubava um dos dois para login."""
 
-    def _conexao(self, respostas):
-        cursor = MagicMock()
-        cursor.fetchone.side_effect = [(r,) for r in respostas]
-        conexao = MagicMock()
-        conexao.vendor = "postgresql"
-        conexao.cursor.return_value.__enter__.return_value = cursor
-        return conexao, cursor
+    @staticmethod
+    def _leases(respostas):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def lease(*args, **kwargs):
+            yield respostas.pop(0), {}
+        return lease
 
     def test_espera_e_consegue_na_terceira(self):
         from apps.scrapers import carga
-        conexao, cursor = self._conexao([False, False, True])
+        conexao = MagicMock(vendor="postgresql")
         avisos = []
         with patch.object(carga, "connections", {"default": conexao}), \
+             patch.object(carga, "in_system_context", return_value=True), \
+             patch.object(carga, "leased_resource", self._leases([False, False, True])), \
              patch.object(carga.time, "sleep"):
             with carga.operacao_pesada_com_espera(
                     poll_s=0, aviso=avisos.append) as conseguiu:
                 self.assertTrue(conseguiu)
         self.assertEqual(len(avisos), 2)
-        sqls = [c.args[0] for c in cursor.execute.call_args_list]
-        self.assertEqual(sum("pg_advisory_unlock" in s for s in sqls), 1)
 
     def test_timeout_nao_adquire_e_nao_desbloqueia(self):
         """Soltar um lock que não é nosso derrubaria o worker no meio do lote."""
         from apps.scrapers import carga
-        conexao, cursor = self._conexao([False] * 20)
+        conexao = MagicMock(vendor="postgresql")
         with patch.object(carga, "connections", {"default": conexao}), \
+             patch.object(carga, "in_system_context", return_value=True), \
+             patch.object(carga, "leased_resource", self._leases([False])), \
              patch.object(carga.time, "sleep"):
             with carga.operacao_pesada_com_espera(timeout_s=0, poll_s=0) as conseguiu:
                 self.assertFalse(conseguiu)
-        sqls = [c.args[0] for c in cursor.execute.call_args_list]
-        self.assertFalse(any("pg_advisory_unlock" in s for s in sqls))
 
     def test_sqlite_nao_espera(self):
         """Em dev/testes não há processos concorrentes e a função nem existe."""
@@ -185,3 +203,13 @@ class LockComEsperaTests(SimpleTestCase):
             with carga.operacao_pesada_com_espera(timeout_s=999) as conseguiu:
                 self.assertTrue(conseguiu)
         conexao.cursor.assert_not_called()
+
+    def test_runtime_web_falha_fechado_sem_tocar_lease_global(self):
+        from apps.scrapers import carga
+        conexao = MagicMock(vendor="postgresql")
+        with patch.object(carga, "connections", {"default": conexao}), \
+             patch.object(carga, "in_system_context", return_value=False), \
+             patch.object(carga, "leased_resource") as lease:
+            with carga.operacao_pesada_com_espera() as conseguiu:
+                self.assertFalse(conseguiu)
+        lease.assert_not_called()

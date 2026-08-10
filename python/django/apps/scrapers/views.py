@@ -26,12 +26,18 @@ from apps.accounts.tenant import organization_thread_target
 from apps.scrapers.models import (
     CliquePublicacao, ConfiguracaoEnvio, Cupom, LinkAfiliadoUsuario, Produto,
     Publicacao, ReceitaAfiliado, RelatorioSync, FonteIngestao, CupomNormalizado,
-    IntegracaoAfiliado, ProgramaAfiliado, ExecucaoRaspagem, normalizar_busca,
+    CupomDisponibilidade, IntegracaoAfiliado, ProgramaAfiliado, ExecucaoRaspagem,
+    normalizar_busca,
 )
 from apps.scrapers.progresso import emitir_fase
 from apps.scrapers.scraper_mercadolivre.scraper import main as scrapper_main
 
 logger = logging.getLogger(__name__)
+
+
+def _send_pipeline_v2_enabled(user) -> bool:
+    from apps.accounts.feature_flags import send_pipeline_v2_enabled
+    return send_pipeline_v2_enabled(user)
 
 
 def staff_required(view):
@@ -273,7 +279,9 @@ def operations_dashboard(request):
     for marketplace in ("mercadolivre", "amazon"):
         syncs.setdefault(marketplace, RelatorioSync(
             usuario=request.user, marketplace=marketplace))
+    from apps.scrapers.relatorios import report_prerequisites
     for sync in syncs.values():
+        sync.preflight = report_prerequisites(request.user, sync.marketplace)
         # "nao_configurado" fica de fora: não é incidente e não há ação do usuário —
         # alertar sobre isso era um aviso permanente que ele não podia resolver. O
         # estado aparece na lista de sincronizações, que é onde ele pertence.
@@ -291,9 +299,21 @@ def operations_dashboard(request):
             ))
     publicacoes = list(
         pubs.select_related("produto", "configuracao", "cupom_normalizado")
+        .prefetch_related("tentativas")
         .order_by("-criada_em")[:10])
     for p in publicacoes:
         p.erro_publico = _erro_publicacao(p.erro)
+        p.ultima_tentativa = max(p.tentativas.all(), key=lambda t: t.numero, default=None)
+        if p.stage == "uncertain":
+            p.acao_recomendada = "Verifique o destino; não reenvie automaticamente."
+        elif p.next_retry_at:
+            p.acao_recomendada = "Retry automático agendado."
+        elif p.stage == "permanent_failed":
+            p.acao_recomendada = "Revise destino, payload ou credencial revogada."
+        elif p.status == "falhou":
+            p.acao_recomendada = "Revise a causa e tente novamente após corrigir."
+        else:
+            p.acao_recomendada = ""
     return render(request, "home.html", {
         "resumo": resumo, "financeiro": financeiro,
         "melhores_categorias": melhores_categorias,
@@ -354,6 +374,18 @@ def sincronizar_receitas(request):
     marketplace = (request.POST.get("marketplace") or "").lower()
     if marketplace not in {"mercadolivre", "amazon"}:
         messages.error(request, "Marketplace inválido para sincronização.")
+        return redirect("home")
+    from apps.scrapers.relatorios import report_prerequisites
+    preflight = report_prerequisites(request.user, marketplace)
+    if not preflight["ok"]:
+        status = "acao" if preflight["code"] == "session_missing" else "nao_configurado"
+        sync, _ = RelatorioSync.objects.get_or_create(
+            usuario=request.user, marketplace=marketplace)
+        RelatorioSync.objects.filter(pk=sync.pk).update(
+            status=status, prerequisite_code=preflight["code"],
+            erro=preflight["instruction"][:500], proxima_execucao=None,
+        )
+        messages.error(request, preflight["instruction"])
         return redirect("home")
     sync, _ = RelatorioSync.objects.get_or_create(
         usuario=request.user, marketplace=marketplace)
@@ -1508,8 +1540,11 @@ def enviar_agora_stream(request):
                         usuario=cfg.owner,
                         configuracao=cfg,
                         destino_nome=cfg.grupo_nome,
+                        enqueue_only=_send_pipeline_v2_enabled(cfg.owner),
                     )
-                    if r.get("sucesso"):
+                    if r.get("queued"):
+                        print("__QUEUED__ OK Envio reservado; o worker fará a preparação e o transporte.")
+                    elif r.get("sucesso"):
                         from django.utils import timezone
                         cfg.ultimo_envio = timezone.now()
                         cfg.save(update_fields=["ultimo_envio"])
@@ -1544,13 +1579,16 @@ def enviar_agora_stream(request):
 
 
 def _imagem_upload_b64(arquivo, max_bytes=5 * 1024 * 1024):
-    """Foto anexada no envio -> base64 JPEG, ou None. Valida decodificando via PIL
-    (rejeita não-imagem) e reconverte p/ JPEG (formato que o worker aceita)."""
+    """Foto anexada no envio -> base64 JPEG, ou None quando não houve upload.
+
+    Arquivo presente e inválido levanta ``ValueError``: ignorá-lo silenciosamente
+    fazia o usuário acreditar que a foto escolhida tinha sido enviada.
+    """
     if not arquivo:
         return None
     try:
         if getattr(arquivo, "size", 0) and arquivo.size > max_bytes:
-            return None
+            raise ValueError("A foto excede o limite de 5 MiB.")
         import base64
         from io import BytesIO
         from PIL import Image
@@ -1558,8 +1596,10 @@ def _imagem_upload_b64(arquivo, max_bytes=5 * 1024 * 1024):
         buf = BytesIO()
         img.save(buf, format="JPEG", quality=85)
         return base64.b64encode(buf.getvalue()).decode("ascii")
-    except Exception:
-        return None
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("A foto enviada não é uma imagem válida.") from exc
 
 
 @require_POST
@@ -1579,7 +1619,11 @@ def enviar_produto_stream(request):
     grupo_nome = (request.POST.get("grupo_nome") or "").strip()[:255]
     canal = (request.POST.get("canal") or "whatsapp").strip().lower()
     # Foto opcional: lida AQUI (presa ao request), fora da thread _job.
-    imagem_custom = _imagem_upload_b64(request.FILES.get("foto"))
+    try:
+        imagem_custom = _imagem_upload_b64(request.FILES.get("foto"))
+        imagem_erro = ""
+    except ValueError as exc:
+        imagem_custom, imagem_erro = None, str(exc)
     uid = request.user.id  # capturado fora da thread
 
     def _job():
@@ -1587,6 +1631,9 @@ def enviar_produto_stream(request):
         from apps.accounts.tenant import executar_no_tenant
         # Tenant apenas ANOTADO (segurar_transacao=False): toda ida ao banco
         # reinstala o escopo numa transação curta via executar_no_tenant.
+        if imagem_erro:
+            print(f"[ERRO] {imagem_erro}")
+            return
         usuario = executar_no_tenant(
             lambda: get_user_model().objects.filter(id=uid).first())
         if not usuario:
@@ -1607,7 +1654,8 @@ def enviar_produto_stream(request):
         try:
             r = enviar_oferta_de_produto(
                 prod, grupo_id, verificar=True, canal=canal, usuario=usuario,
-                destino_nome=grupo_nome, imagem_b64_custom=imagem_custom)
+                destino_nome=grupo_nome, imagem_b64_custom=imagem_custom,
+                enqueue_only=_send_pipeline_v2_enabled(usuario))
         except Exception as exc:
             # O núcleo re-levanta o inesperado para fechar a Publicacao; o SSE não pode
             # devolver o erro genérico do runner e esconder a regressão do log.
@@ -1631,7 +1679,9 @@ def enviar_produto_stream(request):
             logger.error("Envio do produto %s retornou resultado inválido: %r", prod_id, r)
             print("[ERRO] Não foi possível concluir o envio. Atualize a tela e tente novamente.")
             return
-        if r.get("sucesso"):
+        if r.get("queued"):
+            print("__QUEUED__ OK Envio reservado; acompanhe o resultado no painel de falhas.")
+        elif r.get("sucesso"):
             print(f"__SENT__ OK Enviado (via {r.get('via')}). Link: {r.get('link')}")
         else:
             print(f"[ERRO] {r.get('motivo')}")
@@ -1662,7 +1712,11 @@ def enviar_cupom_stream(request):
     grupo_id = (request.POST.get("grupo") or "").strip()[:100]
     grupo_nome = (request.POST.get("grupo_nome") or "").strip()[:255]
     canal = (request.POST.get("canal") or "whatsapp").strip().lower()
-    imagem_custom = _imagem_upload_b64(request.FILES.get("foto"))
+    try:
+        imagem_custom = _imagem_upload_b64(request.FILES.get("foto"))
+        imagem_erro = ""
+    except ValueError as exc:
+        imagem_custom, imagem_erro = None, str(exc)
     uid = request.user.id  # capturado fora da thread
 
     def _job():
@@ -1671,6 +1725,9 @@ def enviar_cupom_stream(request):
         from apps.accounts.tenant import executar_no_tenant
         # Tenant apenas ANOTADO (segurar_transacao=False): toda ida ao banco
         # reinstala o escopo numa transação curta via executar_no_tenant.
+        if imagem_erro:
+            print(f"[ERRO] {imagem_erro}")
+            return
         usuario = executar_no_tenant(
             lambda: get_user_model().objects.filter(id=uid).first())
         if not usuario:
@@ -1692,7 +1749,8 @@ def enviar_cupom_stream(request):
         try:
             resultado = enviar_cupom(
                 cupom, grupo_id, canal=canal, usuario=usuario, destino_nome=grupo_nome,
-                imagem_b64_custom=imagem_custom)
+                imagem_b64_custom=imagem_custom,
+                enqueue_only=_send_pipeline_v2_enabled(usuario))
         except Exception as exc:
             # O núcleo deve devolver um dict, mas o SSE não pode esconder uma
             # regressão nova atrás do erro genérico do runner.
@@ -1715,7 +1773,9 @@ def enviar_cupom_stream(request):
             logger.error("Envio de cupom %s retornou resultado inválido: %r", cupom_id, resultado)
             print("[ERRO] Não foi possível concluir o envio do cupom. Atualize a tela e tente novamente.")
             return
-        if resultado.get("sucesso"):
+        if resultado.get("queued"):
+            print("__QUEUED__ OK Cupom reservado; o worker fará a preparação e o transporte.")
+        elif resultado.get("sucesso"):
             print(f"__SENT__ OK Cupom enviado (via {resultado.get('via', canal)}).")
         else:
             print(f"[ERRO] {resultado.get('motivo') or 'falha ao enviar o cupom'}")
@@ -1785,13 +1845,17 @@ def enviar_aviso_cupons_stream(request):
         try:
             resultado = enviar_aviso_cupons(
                 cupons, grupo_id, canal=canal, usuario=usuario,
-                destino_nome=grupo_nome)
+                destino_nome=grupo_nome,
+                enqueue_only=_send_pipeline_v2_enabled(usuario))
         except Exception as exc:
             logger.exception("Falha não tratada no aviso de cupons")
             print("[ERRO] O envio encontrou uma falha temporária. Nenhum aviso foi "
                   f"confirmado ({type(exc).__name__}); tente novamente em instantes.")
             return
-        if resultado.get("sucesso"):
+        if resultado.get("queued"):
+            print(f"__QUEUED__ OK Aviso com {resultado.get('cupons', 0)} cupom(ns) reservado; "
+                  "o worker fará o transporte.")
+        elif resultado.get("sucesso"):
             print(f"__SENT__ OK Aviso com {resultado.get('cupons', 0)} cupom(ns) "
                   f"enviado (via {resultado.get('via', canal)}).")
         else:
@@ -2096,72 +2160,74 @@ def top_promocoes(request):
     for cupom_catalogo in cupons_lista:
         cupom_catalogo.codigo_publico = codigo_publicavel(cupom_catalogo)
         cupom_catalogo.modo_resgate = regras_do_cupom(cupom_catalogo)["modo_resgate"]
-    from apps.scrapers.coupon_products import mapa_relacoes_prontas
-    # Filtrar publicáveis ANTES de consultar. A ordem invertida cobrava 3 queries
-    # por cupom do catálogo inteiro (~7 mil com os 2379 de homologação) e jogava
-    # quase todo o resultado fora na linha seguinte.
-    cupons_publicaveis = [c for c in cupons_lista if cupom_publicavel(c)]
+    from apps.scrapers.coupon_readiness import (
+        disponibilidade_resumo, projetar_disponibilidade_cupons,
+    )
+    # O pipeline materializa a projeção em background. Uma conta criada depois da
+    # última coleta recebe um backfill único; requests seguintes permanecem
+    # somente leitura, em vez de atualizar milhares de linhas no processo web.
+    if not CupomDisponibilidade.objects.filter(usuario=request.user).exists():
+        readiness = projetar_disponibilidade_cupons(request.user)
+    else:
+        readiness = disponibilidade_resumo(request.user)
+    projecoes = {
+        row.cupom_id: row
+        for row in CupomDisponibilidade.objects.filter(
+            usuario=request.user, cupom_id__in=[c.pk for c in cupons_lista],
+        )
+    }
+    cupons_publicaveis = []
+    for cupom in cupons_lista:
+        projecao = projecoes.get(cupom.pk)
+        cupom.disponibilidade = projecao
+        if not projecao:
+            continue
+        # Código validado pode ser listado sem produto. Ativação permanece oculta
+        # até produto, preço e link estarem comprovados.
+        if cupom.codigo_publico:
+            if projecao.stage != "discarded":
+                cupons_publicaveis.append(cupom)
+        elif projecao.stage == "ready":
+            cupons_publicaveis.append(cupom)
     if como_usar_selecionado == "codigo":
         cupons_publicaveis = [c for c in cupons_publicaveis if c.codigo_publico]
     elif como_usar_selecionado == "ativacao":
         cupons_publicaveis = [c for c in cupons_publicaveis if not c.codigo_publico]
-    # Uma passada em lote responde as duas perguntas (preparado? pronto?) num número
-    # de queries que não cresce com a quantidade de cupons.
-    relacoes_por_cupom, relacoes_prontas = mapa_relacoes_prontas(
-        request.user, cupons_publicaveis)
-    ids_preparados = set(relacoes_por_cupom)
-    ids_prontos = set(relacoes_prontas)
-    cupons_prontos = len(ids_prontos)
-    cupons_aguardando_preparo = len(cupons_publicaveis) - len(ids_preparados)
-    ids_produtos_preparados = {
-        relacao.produto_id
-        for relacoes in relacoes_por_cupom.values()
-        for relacao in relacoes
-    }
-    links_por_produto = {
-        link.produto_id: link
-        for link in LinkAfiliadoUsuario.objects.filter(
-            usuario=request.user, produto_id__in=ids_produtos_preparados,
-        )
-    }
-    cupons_aguardando_verificacao = 0
-    cupons_aguardando_conexao = 0
-    cupons_aguardando_link = 0
-    try:
-        from apps.scrapers.conexoes import estado_ml
-        ml_conectado = estado_ml(request.user).conectado
-    except Exception:
-        ml_conectado = False
-    for cupom in cupons_publicaveis:
-        if cupom.id not in ids_preparados or cupom.id in ids_prontos:
-            continue
-        relacoes = relacoes_por_cupom[cupom.id]
-        links = [links_por_produto.get(relacao.produto_id) for relacao in relacoes]
-        if any(link and link.link_afiliado and link.verificado_ok is None for link in links):
-            cupons_aguardando_verificacao += 1
-        elif cupom.marketplace == "mercadolivre" and not ml_conectado:
-            cupons_aguardando_conexao += 1
-        elif (
-            cupom.marketplace == "awin"
-            and cupom.integracao_id
-            and getattr(cupom.integracao, "status", "") in ("reconectar", "erro")
-        ):
-            cupons_aguardando_conexao += 1
-        else:
-            cupons_aguardando_link += 1
-    cupons_coletados = len(cupons_publicaveis)
+    stages = readiness.get("stages", {})
+    cupons_coletados = readiness.get("total", 0)
+    cupons_elegiveis = stages.get("eligible", 0)
+    cupons_preparados = stages.get("prepared", 0)
+    cupons_prontos = stages.get("ready", 0)
+    cupons_descartados = stages.get("discarded", 0)
+    cupons_aguardando_preparo = stages.get("collected", 0) + stages.get("eligible", 0)
+    cupons_aguardando_link = stages.get("prepared", 0) + stages.get("waiting_link", 0)
+    cupons_aguardando_verificacao = sum(
+        count for reason, count in readiness.get("reasons", {}).items()
+        if "verification" in reason
+    )
+    cupons_aguardando_conexao = sum(
+        count for reason, count in readiness.get("reasons", {}).items()
+        if "session" in reason or "login_required" in reason or "disconnected" in reason
+    )
+    cupons_motivos = list(
+        CupomDisponibilidade.objects.filter(usuario=request.user)
+        .exclude(reason_code="")
+        .values("reason_code", "safe_detail")
+        .annotate(total=Count("id"))
+        .order_by("-total", "reason_code")[:12]
+    )
     cupons_fontes_sem_resultado = FonteIngestao.objects.filter(
         habilitada=True, ultimo_total=0,
         status__in=("degraded", "blocked"),
     ).count()
     # A lista continua estrita: o contador torna a fila visível sem oferecer um
     # cupom cujo envio ainda não consegue montar produtos, imagem e link afiliado.
-    cupons_lista = [c for c in cupons_publicaveis if c.id in ids_prontos]
+    cupons_lista = cupons_publicaveis
     # Os filtros tambem devem refletir somente o catalogo realmente publicavel.
     cupom_categorias = sorted({c.categoria for c in cupons_lista if c.categoria})
     cupom_anunciantes = sorted({c.anunciante_nome for c in cupons_lista
                                 if c.anunciante_nome})
-    cupons_lista.sort(key=score_cupom, reverse=True)
+    cupons_lista.sort(key=lambda c: score_cupom(c, usuario=request.user), reverse=True)
     cupons_page = Paginator(cupons_lista, POR_PAGINA).get_page(pagina)
     cupons_catalogo = list(cupons_page)
     perfil = getattr(request.user, "perfil", None)
@@ -2169,12 +2235,9 @@ def top_promocoes(request):
         slug="manual-private").order_by("marketplace", "nome")
     # Fontes Amazon are account-specific. Do not present an adapter that cannot
     # run for this user as an operational incident.
-    if not perfil or not perfil.afiliado_tag_amazon:
-        fontes_qs = fontes_qs.exclude(marketplace="amazon")
-    else:
-        from apps.scrapers.scraper_amazon.creators_api import creds_de_usuario
-        if not creds_de_usuario(request.user).completo():
-            fontes_qs = fontes_qs.exclude(slug="amazon-creators-api")
+    from apps.scrapers.scraper_amazon.creators_api import creds_de_usuario
+    if not perfil or not creds_de_usuario(request.user).completo():
+        fontes_qs = fontes_qs.exclude(slug="amazon-creators-api")
     fontes = list(fontes_qs)
     # `status` é um texto persistido que ninguém envelhece: uma fonte que parou de
     # rodar guarda o último veredito para sempre. Sem esta derivação, "Atenção" tanto
@@ -2217,7 +2280,9 @@ def top_promocoes(request):
     if amazon_count:
         amazon_diagnostico = "Amazon ativa para sua conta."
     elif perfil and not perfil.afiliado_tag_amazon:
-        amazon_diagnostico = "Cadastre sua tag de afiliado Amazon para habilitar o catálogo."
+        amazon_diagnostico = (
+            "O catálogo público é coletado sem tag; cadastre a tag Amazon para liberar links e envios."
+        )
     elif perfil and perfil.amazon_elegivel is False:
         amazon_diagnostico = "Creators API inelegível; o fallback público tentará alimentar sua conta."
     else:
@@ -2363,7 +2428,11 @@ def top_promocoes(request):
         "como_usar_selecionado": como_usar_selecionado,
         "cupons_catalogo": cupons_catalogo,
         "cupons_coletados": cupons_coletados,
+        "cupons_elegiveis": cupons_elegiveis,
+        "cupons_preparados": cupons_preparados,
         "cupons_prontos": cupons_prontos,
+        "cupons_descartados": cupons_descartados,
+        "cupons_motivos": cupons_motivos,
         "cupons_aguardando_preparo": cupons_aguardando_preparo,
         "cupons_aguardando_link": cupons_aguardando_link,
         "cupons_aguardando_verificacao": cupons_aguardando_verificacao,
@@ -2441,7 +2510,7 @@ def _criar_raspagem_manual(request, tipo):
     )
     # Em produção o processo já vive no Procfile. Em desenvolvimento, garante o
     # worker sem ligar o toggle da raspagem automática.
-    state.spawn_worker("scrape")
+    state.spawn_worker("manual")
     payload = serializar_execucao(execucao)
     payload["reutilizada"] = not criada
     if not criada and execucao.tipo != tipo:
@@ -2685,13 +2754,12 @@ def buscar_termo_stream(request):
 @require_GET
 @throttle_sse(10)
 def gerar_links_stream(request):
-    """SSE endpoint — gera links de afiliado em lote para produtos sem link.
+    """SSE endpoint — prepara links leves e enfileira o browser no worker.
 
     Não é mais só para staff: a fila é por usuário (LinkAfiliadoUsuario) e a tela de
     Promoções só lista item afiliado, então quem não é staff precisava esperar o
     worker para ter QUALQUER produto enviável.
     """
-    from apps.scrapers.carga import operacao_pesada_com_espera
     from apps.scrapers.marketplaces.registry import get_marketplace
     from apps.scrapers.auxiliar import SessaoExpirada
     from apps.scrapers.progresso import usar_reporter
@@ -2733,8 +2801,6 @@ def gerar_links_stream(request):
         alvo = f" ({', '.join(macros)})" if macros else ""
         print(f"Gerando link de afiliado para {len(pendentes)} produto(s){alvo}...")
 
-        _esperou = False
-
         def _quando_o_robo_volta():
             """" — ele os pega no próximo ciclo, às HH:MM" quando dá para saber."""
             try:
@@ -2748,14 +2814,6 @@ def gerar_links_stream(request):
                 pass
             return " — o robô os pega no próximo ciclo"
 
-        def _avisar_espera(segundos):
-            nonlocal _esperou
-            if not _esperou:
-                _esperou = True
-                print("O robô está usando o navegador agora. Sua vez assim que ele "
-                      "soltar — costuma levar menos de 2 minutos.")
-                return
-            print(f"Aguardando o navegador ficar livre… ({segundos // 60:02d}:{segundos % 60:02d})")
         # Agrupa por loja: cada marketplace gera seus links (ML=Playwright,
         # Amazon=puro Python). Evita rodar o Link Builder do ML num ASIN.
         por_loja = {}
@@ -2804,19 +2862,14 @@ def gerar_links_stream(request):
 
         grupo_ml = por_loja.get("mercadolivre")
         if grupo_ml:
-            # O ML disputa o MESMO advisory lock do worker. Sem isto, clicar o botão
-            # enquanto o worker está no Link Builder abria um segundo Chromium no
-            # mesmo portal SSO com a mesma sessão — e o ML derrubava um dos dois para
-            # login. Era a causa do falso "sessão expirada".
-            with operacao_pesada_com_espera(aviso=_avisar_espera) as conseguiu:
-                if conseguiu:
-                    if _esperou:
-                        print("Navegador liberado.")
-                    _gerar("mercadolivre", grupo_ml)
-                else:
-                    print(f"O robô ainda está ocupado. Seus {len(grupo_ml)} produto(s) "
-                          f"continuam na fila{_quando_o_robo_volta()}.")
-                    print("__LINKS_OCUPADO__")
+            # A ausência de LinkAfiliadoUsuario já é a fila durável e idempotente
+            # consumida pelo processo `links`. A request web nunca adquire o lease
+            # system-only nem abre Chromium: isso preserva FORCE RLS, evita dois
+            # browsers na mesma sessão ML e impede uma conexão SSE de ficar presa
+            # durante o Link Builder.
+            print(f"Seus {len(grupo_ml)} produto(s) do Mercado Livre continuam na "
+                  f"fila segura de links{_quando_o_robo_volta()}.")
+            print("__LINKS_ENFILEIRADOS__")
         # O resumo é informativo: se ELE falhar, o lote já feito continua válido e
         # não pode ser reportado como erro da operação inteira.
         try:

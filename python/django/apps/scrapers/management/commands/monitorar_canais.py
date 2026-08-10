@@ -74,6 +74,7 @@ class Command(BaseCommand):
 
     def _processar_canal(self, client, canal, EnvioCanal, reescrever_mensagem,
                          get_sender, extrair_urls):
+        from django.db.models import Q
         from django.utils import timezone
         from apps.scrapers.models import Publicacao
         from apps.scrapers.eventos import log_event
@@ -112,17 +113,32 @@ class Command(BaseCommand):
                 logger.info("Canal %s pulado: cota diaria atingida", canal.handle)
                 continue
             session = perfil.sessao_whatsapp() if perfil else str(canal.owner_id)
-            publicacao = Publicacao.objects.create(
-                usuario=canal.owner, origem="canal_monitorado", canal=canal.destino_canal,
-                destino_id=canal.destino_grupo_id, destino_nome=canal.handle,
-                mensagem=novo_texto, categoria="Canal monitorado",
-            )
+            publicacao = Publicacao.objects.filter(
+                usuario=canal.owner, origem="canal_monitorado",
+                canal=canal.destino_canal, destino_id=canal.destino_grupo_id,
+                mensagem=novo_texto, status="pendente",
+            ).filter(
+                Q(next_retry_at__isnull=True)
+                | Q(next_retry_at__lte=timezone.now())
+            ).order_by("criada_em").first()
+            if publicacao is None:
+                publicacao = Publicacao.objects.create(
+                    usuario=canal.owner, origem="canal_monitorado",
+                    canal=canal.destino_canal,
+                    destino_id=canal.destino_grupo_id, destino_nome=canal.handle,
+                    mensagem=novo_texto, categoria="Canal monitorado",
+                )
+            from apps.scrapers.send_pipeline import begin_transport, finish_transport
+            publicacao_transporte, tentativa = begin_transport(publicacao)
             resultado = sender.enviar_oferta(
                 canal.destino_grupo_id, novo_texto, legenda=novo_texto,
-                usuario=canal.owner, session=session)
+                usuario=canal.owner, session=session,
+                operation_id=publicacao_transporte.operation_key)
+            finish_transport(
+                publicacao_transporte, tentativa, resultado,
+                duration_ms=resultado.get("duracao_ms", 0),
+            )
             if resultado.get("sucesso"):
-                Publicacao.objects.filter(pk=publicacao.pk).update(
-                    status="enviado", enviada_em=timezone.now())
                 EnvioCanal.objects.bulk_create(
                     [EnvioCanal(owner=canal.owner, chave=c) for c in novas],
                     ignore_conflicts=True,
@@ -134,8 +150,6 @@ class Command(BaseCommand):
                                     "destino": canal.destino_grupo_id})
                 logger.info("Canal %s -> %s divulgado", canal.handle, canal.destino_grupo_id)
             elif resultado.get("resultado") == "incerto":
-                Publicacao.objects.filter(pk=publicacao.pk).update(
-                    status="incerto", erro=str(resultado.get("erro") or "")[:500])
                 # Não retentar: o transporte pode ter entregue antes de perder a confirmação.
                 EnvioCanal.objects.bulk_create(
                     [EnvioCanal(owner=canal.owner, chave=c) for c in novas],
@@ -146,8 +160,6 @@ class Command(BaseCommand):
                           contexto={"publicacao_id": publicacao.id,
                                     "resultado": "incerto", "repetir": False})
             else:
-                Publicacao.objects.filter(pk=publicacao.pk).update(
-                    status="falhou", erro=str(resultado.get("erro") or "Falha")[:500])
                 raise RuntimeError(resultado.get("erro") or "Falha no envio do canal")
         # Avança o cursor mesmo sem envio (não reprocessa msgs antigas no restart).
         if maior_id > canal.ultimo_id:

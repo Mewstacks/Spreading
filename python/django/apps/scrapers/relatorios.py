@@ -11,6 +11,7 @@ import csv
 import io
 import math
 import re
+import unicodedata
 from datetime import datetime
 from dataclasses import dataclass
 from datetime import timedelta
@@ -42,6 +43,26 @@ class ReportSyncNaoConfigurado(Exception):
     """
 
 
+class ReportCellInvalid(ValueError):
+    """Célula presente mas ilegível; nunca deve ser convertida para zero."""
+
+
+class ReportCellEmpty(ValueError):
+    """Célula esperada veio vazia; é diferente do número zero."""
+
+
+class ReportPeriodMismatch(ReportSyncError):
+    """O portal devolveu uma linha fora da janela cuja aplicação foi solicitada."""
+
+
+class ParsedRows(list):
+    def __init__(self, rows=(), *, seen=0, rejected=0, schema_fingerprint=""):
+        super().__init__(rows)
+        self.seen = seen
+        self.rejected = rejected
+        self.schema_fingerprint = schema_fingerprint
+
+
 @dataclass
 class ReportRow:
     marketplace: str
@@ -69,12 +90,19 @@ def _num(value) -> float:
     float() direto engolia tudo isso como 0.0 — e como o sync gravava status "ok" do
     mesmo jeito, o dashboard exibia R$ 0,00 com selo verde de "sincronizado".
     """
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if isinstance(value, bool):
+        raise ReportCellInvalid("booleano não é métrica")
+    if isinstance(value, (int, float)):
         v = float(value)
-        return v if math.isfinite(v) else 0.0
-    texto = _SO_NUMERO.sub("", str(value or "").replace("\xa0", " ")).strip()
-    if not texto or texto in {"-", "."}:
+        if not math.isfinite(v):
+            raise ReportCellInvalid("número não finito")
+        return v
+    raw = str(value or "").replace("\xa0", " ").strip()
+    texto = _SO_NUMERO.sub("", raw).strip()
+    if not raw or raw in {"-", "—", "–", "."}:
         return 0.0
+    if not texto:
+        raise ReportCellInvalid("número ilegível")
     if "," in texto:
         # pt-BR: '.' é milhar, ',' é decimal.
         texto = texto.replace(".", "").replace(",", ".")
@@ -85,8 +113,28 @@ def _num(value) -> float:
     try:
         v = float(texto)
     except (TypeError, ValueError):
-        return 0.0
-    return v if math.isfinite(v) else 0.0
+        raise ReportCellInvalid("número ilegível")
+    if not math.isfinite(v):
+        raise ReportCellInvalid("número não finito")
+    return v
+
+
+def _num_typed(value) -> tuple[str, float | None]:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return "empty", None
+    if isinstance(value, str) and value.strip() in {"-", "—", "–", "."}:
+        return "empty", None
+    try:
+        return "valid", _num(value)
+    except ReportCellInvalid:
+        return "invalid", None
+
+
+def _counter(value, field):
+    number = _num(value)
+    if number < 0 or not float(number).is_integer():
+        raise ReportCellInvalid(f"{field}: contador negativo ou fracionário")
+    return int(number)
 
 
 def _digest(usuario, row: ReportRow) -> str:
@@ -128,15 +176,20 @@ def _upsert_rows(usuario, rows: list[ReportRow]) -> tuple[int, int]:
     criadas = atualizadas = 0
     with transaction.atomic():
         for row in rows:
+            metrics = (row.cliques, row.conversoes, row.pedidos, row.receita, row.comissao)
+            if any(value is None for value in metrics):
+                raise ReportSyncError(
+                    f"{row.marketplace}: linha contém métrica vazia; nada foi persistido."
+                )
             defaults = {
                 "usuario": usuario,
                 "marketplace": row.marketplace,
                 "data": row.data,
                 "etiqueta": row.etiqueta[:120],
                 "produto_nome": row.produto_nome[:255],
-                "cliques": max(0, int(_num(row.cliques))),
-                "conversoes": max(0, int(_num(row.conversoes))),
-                "pedidos": max(0, int(_num(row.pedidos))),
+                "cliques": _counter(row.cliques, "cliques"),
+                "conversoes": _counter(row.conversoes, "conversoes"),
+                "pedidos": _counter(row.pedidos, "pedidos"),
                 "receita": _num(row.receita),
                 "comissao": _num(row.comissao),
                 "periodo_inicio": row.periodo_inicio,
@@ -164,26 +217,11 @@ class MercadoLivreReportAdapter(BaseReportAdapter):
     marketplace = "mercadolivre"
 
     def fetch(self, usuario, desde, ate) -> list[ReportRow]:
-        from django.conf import settings
-        from apps.accounts.feature_flags import enabled_for_user
-        from apps.scrapers.report_sessions import has_report_session
-        if not enabled_for_user("ML_BROWSER_REPORTS_ENABLED", usuario):
-            raise ReportSyncNaoConfigurado(
-                "Relatórios ML por navegador estão desativados para esta organização."
-            )
-        # A sessão de relatório é a do PORTAL DE AFILIADOS (SSO próprio), não a do
-        # site principal. Antes o gate sondava o site principal (my_purchases) e
-        # mandava "reconectar" uma conta que já estava conectada — para sempre.
-        if not has_report_session(usuario, self.marketplace):
-            raise ReportSyncNaoConfigurado(
-                "Conecte o portal de afiliados do Mercado Livre para sincronizar relatórios.")
-        # A landing /afiliados/ não tem tabela de relatório. A página real de
-        # métricas é configurada por ML_AFFILIATE_REPORT_URL (secret). Sem ela, não
-        # há o que ler automaticamente — e insistir só recriava o loop.
-        url = (getattr(settings, "ML_AFFILIATE_REPORT_URL", "") or "").strip()
-        if not url:
-            raise ReportSyncNaoConfigurado(
-                "Defina ML_AFFILIATE_REPORT_URL com a página de relatório do portal de afiliados.")
+        preflight = report_prerequisites(usuario, self.marketplace)
+        if not preflight["ok"]:
+            exc = ReportSyncActionRequired if preflight["code"] == "session_missing" else ReportSyncNaoConfigurado
+            raise exc(preflight["instruction"])
+        url = preflight["url"]
         return _fetch_browser_report(usuario, self.marketplace, url, desde, ate)
 
 
@@ -191,11 +229,101 @@ class AmazonReportAdapter(BaseReportAdapter):
     marketplace = "amazon"
 
     def fetch(self, usuario, desde, ate) -> list[ReportRow]:
-        from apps.scrapers.report_sessions import has_report_session
-        if not has_report_session(usuario, self.marketplace):
-            raise ReportSyncActionRequired("Conecte o portal Amazon Associados para sincronizar relatórios.")
-        return _fetch_browser_report(usuario, self.marketplace,
-                                     "https://associados.amazon.com.br/home/reports", desde, ate)
+        preflight = report_prerequisites(usuario, self.marketplace)
+        if not preflight["ok"]:
+            exc = ReportSyncActionRequired if preflight["code"] == "session_missing" else ReportSyncNaoConfigurado
+            raise exc(preflight["instruction"])
+        return _fetch_browser_report(
+            usuario, self.marketplace, preflight["url"], desde, ate,
+        )
+
+
+def report_prerequisites(usuario, marketplace):
+    """Diagnóstico sem browser, próprio para UI e scheduler."""
+    from apps.accounts.feature_flags import enabled_for_user
+    from apps.scrapers.report_sessions import has_report_session
+
+    marketplace = str(marketplace or "").lower()
+    if marketplace == "mercadolivre":
+        if not enabled_for_user("ML_BROWSER_REPORTS_ENABLED", usuario):
+            return {"ok": False, "code": "feature_disabled", "url": "",
+                    "instruction": "Habilite ML_BROWSER_REPORTS_ENABLED para esta organização."}
+        url_setting = "ML_AFFILIATE_REPORT_URL"
+        portal = "Mercado Livre"
+    elif marketplace == "amazon":
+        if not enabled_for_user("AMAZON_BROWSER_REPORTS_ENABLED", usuario):
+            return {"ok": False, "code": "feature_disabled", "url": "",
+                    "instruction": "Habilite AMAZON_BROWSER_REPORTS_ENABLED para esta organização."}
+        url_setting = "AMAZON_ASSOCIATES_REPORT_URL"
+        portal = "Amazon Associados"
+    else:
+        return {"ok": False, "code": "unsupported_marketplace", "url": "",
+                "instruction": "Marketplace sem adaptador de relatórios."}
+    url = str(getattr(settings, url_setting, "") or "").strip()
+    if not url:
+        return {"ok": False, "code": "url_missing", "url": "",
+                "instruction": f"Defina {url_setting} com a página real do relatório."}
+    if not has_report_session(usuario, marketplace):
+        return {"ok": False, "code": "session_missing", "url": "",
+                "instruction": f"Conecte a sessão exclusiva de relatórios do {portal}."}
+    return {"ok": True, "code": "ready", "url": url, "instruction": ""}
+
+
+def _login_detected(page):
+    try:
+        url = str(page.url or "").lower()
+    except Exception:
+        url = ""
+    if any(marker in url for marker in ("/login", "/signin", "/ap/signin", "/lgz/")):
+        return True
+    return bool(page.locator(
+        "input[type='password'], input[name*='password' i]"
+    ).count())
+
+
+def _apply_period(page, desde, ate):
+    """Aplica o período e falha se o portal não oferecer controles comprováveis."""
+    start_selectors = (
+        "input[name*='start' i]", "input[name*='inicio' i]",
+        "input[aria-label*='início' i]", "input[placeholder*='início' i]",
+    )
+    end_selectors = (
+        "input[name*='end' i]", "input[name*='fim' i]",
+        "input[aria-label*='fim' i]", "input[placeholder*='fim' i]",
+    )
+
+    def first(selectors):
+        for selector in selectors:
+            locator = page.locator(selector)
+            if locator.count():
+                return locator.first
+        return None
+
+    start, end = first(start_selectors), first(end_selectors)
+    if start is None or end is None:
+        raise ReportSyncError(
+            "Controles de período não reconhecidos; o relatório não foi sincronizado."
+        )
+    start.fill(desde.strftime("%Y-%m-%d"))
+    end.fill(ate.strftime("%Y-%m-%d"))
+    applied = False
+    for selector in (
+        "button:has-text('Aplicar')", "button:has-text('Filtrar')",
+        "button:has-text('Atualizar')", "button[type='submit']",
+    ):
+        control = page.locator(selector)
+        if control.count():
+            control.first.click(timeout=2000)
+            applied = True
+            break
+    if not applied:
+        raise ReportSyncError(
+            "Ação para aplicar o período não foi reconhecida; nada foi persistido."
+        )
+    try:
+        page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:
+        pass
 
 
 def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> list[ReportRow]:
@@ -211,20 +339,48 @@ def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> li
     # (report_sessions), não da sessão do site principal. Para o ML isso separa a
     # sessão do portal de afiliados (comissão) da sessão do Link Builder.
     from apps.scrapers.report_sessions import load_report_state, registrar_veredito
+    from apps.accounts.models import organization_for_user
+    from apps.scrapers.carga import operacao_pesada
     storage_state = load_report_state(usuario, marketplace)
+    organization = organization_for_user(usuario)
+    resource = (
+        f"amazon_report_session:{organization.pk}"
+        if marketplace == "amazon" else f"ml_report_session:{organization.pk}"
+    )
 
     try:
         if not storage_state:
             raise ReportSyncActionRequired(f"Conecte o portal de relatórios {marketplace}.")
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(storage_state=storage_state)
-            page = context.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            exported = _download_delimited_report(page)
-            rows = (_parse_delimited_report(exported, marketplace, desde, ate)
-                    if exported is not None else _extract_table_rows(page, marketplace, desde, ate))
-            browser.close()
+        with operacao_pesada(
+            resource_key="django_chromium", owner_kind="reports",
+            organization=organization,
+        ) as chromium_acquired:
+            if not chromium_acquired:
+                raise ReportSyncError("Chromium ocupado por outra tarefa; tente novamente.")
+            with operacao_pesada(
+                resource_key=resource, owner_kind="reports",
+                organization=organization,
+            ) as session_acquired:
+                if not session_acquired:
+                    raise ReportSyncError("Sessão de relatório ocupada por outra tarefa.")
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True)
+                    try:
+                        context = browser.new_context(storage_state=storage_state)
+                        page = context.new_page()
+                        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                        if _login_detected(page):
+                            raise ReportSyncActionRequired(
+                                f"Sessão de relatórios {marketplace} expirada. Reconecte a conta."
+                            )
+                        _apply_period(page, desde, ate)
+                        exported = _download_delimited_report(page)
+                        rows = (_parse_export(
+                            exported[1], exported[0], marketplace, desde, ate,
+                        ) if exported is not None else _extract_paginated_table_rows(
+                            page, marketplace, desde, ate))
+                    finally:
+                        browser.close()
             # O sync é o ÚNICO fluxo que usa a sessão de relatórios de verdade, então
             # é o único que sabe se ela vale. A tela lê este veredito — antes ela só
             # checava se o arquivo existia, e por isso mostrava verde para sempre.
@@ -236,11 +392,19 @@ def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> li
         registrar_veredito(usuario, marketplace, "suspeito", str(exc))
         raise
     except Exception as exc:
-        raise ReportSyncError(f"{marketplace}: falha ao ler relatório automático: {exc}")
+        # A exceção de Playwright/requests pode carregar URL com query, headers ou
+        # fragmentos do portal. O encadeamento preserva a causa para tooling local,
+        # mas banco, UI e log recebem somente a categoria segura.
+        raise ReportSyncError(
+            f"{marketplace}: falha operacional ao ler o relatório automático "
+            f"({type(exc).__name__})."
+        ) from exc
 
 
 def _header_key(texto: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", (texto or "").lower().replace("ç", "c").replace("ã", "a"))
+    normal = unicodedata.normalize("NFKD", str(texto or "")).encode(
+        "ascii", "ignore").decode("ascii").lower()
+    return re.sub(r"[^a-z0-9]", "", normal)
 
 
 _HEADERS = {
@@ -249,9 +413,13 @@ _HEADERS = {
     "produto": {"produto", "item", "nomeproduto"},
     "cliques": {"cliques", "clicks"},
     "pedidos": {"pedidos", "itenspedidos", "orders"},
+    "conversoes": {"conversoes", "conversions", "itensconvertidos"},
     "receita": {"receita", "vendas", "faturamento", "revenue"},
     "comissao": {"comissao", "ganhos", "earnings", "commission"},
 }
+_REQUIRED_METRICS = frozenset({
+    "cliques", "conversoes", "pedidos", "receita", "comissao",
+})
 
 
 def _header_indices(headers) -> dict[str, int]:
@@ -264,15 +432,42 @@ def _header_indices(headers) -> dict[str, int]:
     return indices
 
 
+def _require_metric_schema(indices, marketplace, formato):
+    missing = sorted(_REQUIRED_METRICS - set(indices))
+    if missing:
+        raise ReportSyncError(
+            f"{marketplace}: {formato} sem coluna(s) obrigatória(s): "
+            f"{', '.join(missing)}. Nenhuma métrica foi persistida."
+        )
+
+
 def _rows_from_cells(cells, indices, marketplace: str, desde, ate) -> ReportRow:
     def get(campo, default=""):
         pos = indices.get(campo)
         return cells[pos] if pos is not None and pos < len(cells) else default
+    parsed = {}
+    for campo in ("cliques", "conversoes", "pedidos", "receita", "comissao"):
+        state, value = _num_typed(get(campo))
+        if state == "empty":
+            raise ReportCellEmpty(f"{campo}: célula vazia")
+        if state == "invalid":
+            raise ReportCellInvalid(f"{campo}: célula ilegível")
+        parsed[campo] = value
+    data = _date(get("data"), None) if "data" in indices else ate
+    if data is None:
+        raise ReportCellInvalid("data ilegível")
+    if data < desde or data > ate:
+        raise ReportPeriodMismatch(
+            f"{marketplace}: o portal devolveu data fora do período solicitado."
+        )
     return ReportRow(
-        marketplace=marketplace, data=_date(get("data"), ate), etiqueta=get("etiqueta"),
-        produto_nome=get("produto"), cliques=_num(get("cliques")),
-        pedidos=int(_num(get("pedidos"))), receita=_num(get("receita")),
-        comissao=_num(get("comissao")), periodo_inicio=desde, periodo_fim=ate,
+        marketplace=marketplace, data=data, etiqueta=get("etiqueta"),
+        produto_nome=get("produto"),
+        cliques=_counter(parsed["cliques"], "cliques"),
+        conversoes=_counter(parsed["conversoes"], "conversoes"),
+        pedidos=_counter(parsed["pedidos"], "pedidos"),
+        receita=parsed["receita"], comissao=parsed["comissao"],
+        periodo_inicio=desde, periodo_fim=ate,
         granularidade="dia",
     )
 
@@ -290,13 +485,82 @@ def _parse_delimited_report(content: bytes, marketplace: str, desde, ate) -> lis
     except StopIteration:
         raise ReportSyncError(f"{marketplace}: exportação vazia.")
     indices = _header_indices(headers)
-    if not indices or not any(k in indices for k in ("cliques", "pedidos", "receita", "comissao")):
+    if not indices:
         raise ReportSyncError(f"{marketplace}: cabeçalhos da exportação não reconhecidos.")
-    return [_rows_from_cells(cells, indices, marketplace, desde, ate)
-            for cells in reader if any(str(cell).strip() for cell in cells)]
+    _require_metric_schema(indices, marketplace, "exportação")
+    rows, seen, rejected = [], 0, 0
+    for cells in reader:
+        if not any(str(cell).strip() for cell in cells):
+            continue
+        seen += 1
+        try:
+            rows.append(_rows_from_cells(cells, indices, marketplace, desde, ate))
+        except (ReportCellInvalid, ReportCellEmpty):
+            rejected += 1
+    if seen and not rows:
+        raise ReportSyncError(
+            f"{marketplace}: {seen} linha(s) vistas e nenhuma métrica legível."
+        )
+    fingerprint = hashlib.sha256(
+        "|".join(_header_key(h) for h in headers).encode("utf-8")
+    ).hexdigest()
+    return ParsedRows(rows, seen=seen, rejected=rejected,
+                      schema_fingerprint=fingerprint)
 
 
-def _download_delimited_report(page) -> bytes | None:
+def _parse_xlsx_report(content: bytes, marketplace: str, desde, ate) -> list[ReportRow]:
+    """Lê XLSX em modo read-only; fórmulas usam somente o valor calculado salvo."""
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise ReportSyncNaoConfigurado(
+            "Instale openpyxl para ler exportações XLSX de relatórios."
+        ) from exc
+    try:
+        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except Exception as exc:
+        raise ReportSyncError(f"{marketplace}: arquivo XLSX ilegível.") from exc
+    try:
+        sheet = workbook.active
+        iterator = sheet.iter_rows(values_only=True)
+        try:
+            headers = ["" if value is None else str(value) for value in next(iterator)]
+        except StopIteration:
+            raise ReportSyncError(f"{marketplace}: exportação XLSX vazia.")
+        indices = _header_indices(headers)
+        if not indices:
+            raise ReportSyncError(f"{marketplace}: cabeçalhos XLSX não reconhecidos.")
+        _require_metric_schema(indices, marketplace, "XLSX")
+        rows, seen, rejected = [], 0, 0
+        for raw in iterator:
+            if not any(value not in (None, "") for value in raw):
+                continue
+            seen += 1
+            try:
+                rows.append(_rows_from_cells(list(raw), indices, marketplace, desde, ate))
+            except (ReportCellInvalid, ReportCellEmpty):
+                rejected += 1
+        if seen and not rows:
+            raise ReportSyncError(
+                f"{marketplace}: {seen} linha(s) XLSX e nenhuma métrica legível."
+            )
+        fingerprint = hashlib.sha256(
+            "|".join(_header_key(h) for h in headers).encode("utf-8")
+        ).hexdigest()
+        return ParsedRows(rows, seen=seen, rejected=rejected,
+                          schema_fingerprint=fingerprint)
+    finally:
+        workbook.close()
+
+
+def _parse_export(content: bytes, filename: str, marketplace: str, desde, ate):
+    lower = str(filename or "").lower()
+    if lower.endswith(".xlsx") or content[:4] == b"PK\x03\x04":
+        return _parse_xlsx_report(content, marketplace, desde, ate)
+    return _parse_delimited_report(content, marketplace, desde, ate)
+
+
+def _download_delimited_report(page) -> tuple[str, bytes] | None:
     """Prefere uma exportação do portal sem assumir um seletor específico.
 
     Portais mudam ids e estruturas com frequência, mas a ação costuma preservar uma
@@ -310,25 +574,30 @@ def _download_delimited_report(page) -> bytes | None:
             label = control.inner_text(timeout=300).strip()
         except Exception:
             continue
-        if not re.search(r"(?:export|baixar|download).*(?:csv|tsv)|(?:csv|tsv).*(?:export|baixar|download)", label, re.I):
+        if not re.search(r"(?:export|baixar|download).*(?:csv|tsv|xlsx|excel)|(?:csv|tsv|xlsx|excel).*(?:export|baixar|download)", label, re.I):
             continue
         try:
             with page.expect_download(timeout=2500) as event:
                 control.click(timeout=1000)
             download = event.value
             name = (download.suggested_filename or "").lower()
-            if not name.endswith((".csv", ".tsv", ".txt")):
+            if not name.endswith((".csv", ".tsv", ".txt", ".xlsx")):
                 continue
             path = download.path()
             if path:
                 with open(path, "rb") as handle:
-                    return handle.read()
+                    return name, handle.read()
         except Exception:
             continue
     return None
 
 
 def _date(value, fallback):
+    if hasattr(value, "date") and not isinstance(value, str):
+        try:
+            return value.date()
+        except (TypeError, ValueError):
+            pass
     texto = str(value or "").strip()
     for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
         try:
@@ -357,16 +626,16 @@ def _extract_table_rows(page, marketplace: str, desde, ate) -> list[ReportRow]:
         if not legacy_fixture:
             raise ReportSyncError(f"{marketplace}: colunas de métricas não reconhecidas.")
         indices = {"etiqueta": 0, "produto": 1, "cliques": 2,
-                   "pedidos": 3, "receita": 4, "comissao": 5}
+                   "conversoes": 3, "pedidos": 4, "receita": 5, "comissao": 6}
     table_rows = page.locator("table tbody tr")
     count = table_rows.count()
     if count == 0:
         raise ReportSyncError(
             f"{marketplace}: relatório sem tabela detectável; parser precisa ser ajustado."
         )
-    if not any(k in indices for k in ("cliques", "pedidos", "receita", "comissao")):
-        raise ReportSyncError(f"{marketplace}: nenhuma métrica reconhecida na tabela.")
+    _require_metric_schema(indices, marketplace, "tabela HTML")
     out: list[ReportRow] = []
+    rejected = 0
     for idx in range(count):
         cells = [
             table_rows.nth(idx).locator("td").nth(i).inner_text(timeout=1000).strip()
@@ -374,16 +643,69 @@ def _extract_table_rows(page, marketplace: str, desde, ate) -> list[ReportRow]:
         ]
         if not cells:
             continue
-        out.append(_rows_from_cells(cells, indices, marketplace, desde, ate))
-    # Uma tabela de métricas inteiramente ilegível não pode aparecer como sync
-    # saudável de receita zero. Exportações oficiais passam por esta mesma validação
-    # na etapa de importação; o portal sem números deve exigir ajuste do parser.
-    if out and not any(r.cliques or r.pedidos or r.receita or r.comissao for r in out):
+        try:
+            out.append(_rows_from_cells(cells, indices, marketplace, desde, ate))
+        except (ReportCellInvalid, ReportCellEmpty):
+            rejected += 1
+    if count and not out:
         raise ReportSyncError(
-            f"{marketplace}: {len(out)} linha(s) lidas e nenhum número reconhecido; "
-            "o parser precisa ser ajustado ao formato do portal."
+            f"{marketplace}: {count} linha(s) lidas e nenhuma métrica legível."
         )
-    return out
+    fingerprint = hashlib.sha256(
+        "|".join(_header_key(h) for h in headers).encode("utf-8")
+    ).hexdigest()
+    return ParsedRows(out, seen=count, rejected=rejected,
+                      schema_fingerprint=fingerprint)
+
+
+def _extract_paginated_table_rows(page, marketplace: str, desde, ate, max_pages=100):
+    rows, seen, rejected, schemas = [], 0, 0, []
+    page_fingerprints = set()
+    for _page_number in range(max_pages):
+        current = _extract_table_rows(page, marketplace, desde, ate)
+        raw = "|".join(
+            f"{row.data}:{row.etiqueta}:{row.produto_nome}:{row.cliques}:{row.pedidos}:"
+            f"{row.receita}:{row.comissao}" for row in current
+        )
+        fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        if fingerprint in page_fingerprints:
+            raise ReportSyncError(
+                f"{marketplace}: paginação repetiu a página anterior; dados não persistidos."
+            )
+        page_fingerprints.add(fingerprint)
+        rows.extend(current)
+        seen += current.seen
+        rejected += current.rejected
+        schemas.append(current.schema_fingerprint)
+
+        next_control = None
+        for selector in (
+            "a[rel='next']", "button[aria-label*='próxima' i]",
+            "button[aria-label*='next' i]", "a:has-text('Próxima')",
+        ):
+            candidate = page.locator(selector)
+            if candidate.count():
+                next_control = candidate.first
+                break
+        if next_control is None:
+            break
+        disabled = (
+            next_control.get_attribute("disabled") is not None
+            or str(next_control.get_attribute("aria-disabled") or "").lower() == "true"
+        )
+        if disabled:
+            break
+        next_control.click(timeout=2000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
+    else:
+        raise ReportSyncError(
+            f"{marketplace}: paginação excedeu o limite seguro de {max_pages} páginas."
+        )
+    schema = hashlib.sha256("|".join(schemas).encode("utf-8")).hexdigest()
+    return ParsedRows(rows, seen=seen, rejected=rejected, schema_fingerprint=schema)
 
 
 ADAPTERS = {
@@ -401,12 +723,16 @@ def sync_marketplace(usuario, marketplace: str, dias: int = 14) -> RelatorioSync
     desde = ate - timedelta(days=max(1, dias))
     sync, _ = RelatorioSync.objects.get_or_create(
         usuario=usuario, marketplace=marketplace)
+    preflight = report_prerequisites(usuario, marketplace)
     log_event("relatorios", "sync_started", f"Iniciando sync {marketplace}.",
               usuario=usuario, contexto={"marketplace": marketplace, "dias": dias})
     sync.status = "rodando"
     sync.ultimo_inicio = agora
     sync.erro = ""
-    sync.save(update_fields=["status", "ultimo_inicio", "erro", "atualizado_em"])
+    sync.prerequisite_code = preflight["code"]
+    sync.save(update_fields=[
+        "status", "ultimo_inicio", "erro", "prerequisite_code", "atualizado_em",
+    ])
     try:
         rows = ADAPTERS[marketplace].fetch(usuario, desde, ate)
         criadas, atualizadas = _upsert_rows(usuario, rows)
@@ -414,6 +740,7 @@ def sync_marketplace(usuario, marketplace: str, dias: int = 14) -> RelatorioSync
         sync.status = "nao_configurado"
         sync.erro = str(exc)[:500]
         sync.ultimo_fim = timezone.now()
+        sync.prerequisite_code = preflight["code"]
         # Sem retry curto: não é falha transitória, é uma feature que não existe.
         sync.proxima_execucao = timezone.now() + timedelta(days=1)
         sync.save()
@@ -424,6 +751,7 @@ def sync_marketplace(usuario, marketplace: str, dias: int = 14) -> RelatorioSync
         sync.status = "acao"
         sync.erro = str(exc)[:500]
         sync.ultimo_fim = timezone.now()
+        sync.prerequisite_code = "session_expired" if preflight["ok"] else preflight["code"]
         sync.proxima_execucao = timezone.now() + timedelta(hours=6)
         sync.save()
         log_event("relatorios", "sync_action_required", str(exc), level="warning",
@@ -431,11 +759,16 @@ def sync_marketplace(usuario, marketplace: str, dias: int = 14) -> RelatorioSync
         return sync
     except Exception as exc:
         sync.status = "erro"
-        sync.erro = str(exc)[:500]
+        safe_error = (
+            f"{marketplace}: falha operacional durante a sincronização "
+            f"({type(exc).__name__})."
+        )
+        sync.erro = safe_error
         sync.ultimo_fim = timezone.now()
+        sync.prerequisite_code = "operational_failure"
         sync.proxima_execucao = timezone.now() + timedelta(hours=6)
         sync.save()
-        log_event("relatorios", "sync_failed", str(exc), level="error",
+        log_event("relatorios", "sync_failed", safe_error, level="error",
                   usuario=usuario, contexto={"marketplace": marketplace}, exc=exc)
         return sync
 
@@ -446,6 +779,13 @@ def sync_marketplace(usuario, marketplace: str, dias: int = 14) -> RelatorioSync
     sync.registros_criados = criadas
     sync.registros_atualizados = atualizadas
     sync.erro = ""
+    sync.prerequisite_code = "ready"
+    sync.schema_fingerprint = str(getattr(rows, "schema_fingerprint", "") or "")[:64]
+    sync.linhas_vistas = int(getattr(rows, "seen", len(rows)))
+    sync.linhas_aceitas = len(rows)
+    sync.linhas_rejeitadas = int(getattr(rows, "rejected", 0))
+    sync.periodo_aplicado_inicio = desde
+    sync.periodo_aplicado_fim = ate
     sync.save()
     log_event(
         "relatorios", "sync_ok", f"{marketplace}: sync concluído.",

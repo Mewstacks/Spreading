@@ -32,6 +32,8 @@ primary_region = "gru"
   # inalcançável. Sem as linhas, valem os defaults do index.js.
   QR_IDLE_DESTROY_MS = "180000"
   SEND_REQUEST_TIMEOUT_MS = "55000"
+  WA_SEND_LEDGER_DIR = "/app/.wwebjs_auth/.send-ledger"
+  WA_SEND_LEDGER_RETENTION_HOURS = "168"
 
 # Sessão do WhatsApp (LocalAuth) persiste no volume — sobrevive a restart/deploy.
 # IMPORTANTE: volume Fly prende a UMA máquina. Rode `fly scale count 1` para garantir

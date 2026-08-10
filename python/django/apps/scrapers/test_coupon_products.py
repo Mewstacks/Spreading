@@ -674,6 +674,12 @@ class CupomAtivacaoMercadoLivreTests(TestCase):
     digitável). Sem este ramo, 2357 de 2379 cupons ficavam inpublicáveis."""
 
     def setUp(self):
+        from apps.accounts.models import OrganizationFeatureOverride
+        self.user = get_user_model().objects.create_user("ml-activation", password="test")
+        OrganizationFeatureOverride.objects.create(
+            organization=self.user.perfil.active_organization,
+            feature="ML_CUPONS_ATIVACAO_ENABLED", state="enabled",
+        )
         self.fonte, _ = FonteIngestao.objects.get_or_create(
             slug="mercadolivre-web",
             defaults={"marketplace": "mercadolivre", "nome": "ML público"})
@@ -693,7 +699,11 @@ class CupomAtivacaoMercadoLivreTests(TestCase):
         return CupomNormalizado.objects.create(**campos)
 
     def test_campanha_com_container_publico_e_publicavel(self):
-        self.assertTrue(cupom_publicavel(self._cupom()))
+        self.assertTrue(cupom_publicavel(self._cupom(), usuario=self.user))
+
+    def test_sem_override_continua_desligado(self):
+        outro = get_user_model().objects.create_user("ml-no-activation", password="test")
+        self.assertFalse(cupom_publicavel(self._cupom(), usuario=outro))
 
     def test_site_wide_nunca_e_publicavel(self):
         """Sem escopo não há como provar que o desconto se aplica ao item."""

@@ -23,7 +23,9 @@ Formato de cada cupom (campos que a página emite):
 """
 import json
 import re
+import hashlib
 from datetime import datetime
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from django.conf import settings
@@ -31,10 +33,40 @@ from django.utils import timezone
 
 from .base import IngestedItem, SourceAdapter
 from apps.scrapers.coupon_rules import normalizar_regras_cupom
+from apps.scrapers.source_diagnostics import capture_public_text_diagnostic
 
 DEFAULT_URL = ("https://afiliadosmercadolivre.github.io/"
                "cupons-afiliadosmercadolivre/")
 _HTTP_CACHE = {}
+
+
+def _recortar_json_balanceado(html, inicio):
+    """Recorta um array/objeto JSON sem contar delimitadores dentro de strings."""
+    if inicio < 0 or inicio >= len(html) or html[inicio] not in "[{":
+        return None
+    abertura = html[inicio]
+    fechamento = "]" if abertura == "[" else "}"
+    profundidade = 0
+    em_string = escape = False
+    for i in range(inicio, len(html)):
+        ch = html[i]
+        if em_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                em_string = False
+            continue
+        if ch == '"':
+            em_string = True
+        elif ch == abertura:
+            profundidade += 1
+        elif ch == fechamento:
+            profundidade -= 1
+            if profundidade == 0:
+                return html[inicio:i + 1]
+    return None
 
 
 def _extrair_array_js(html, nome_var):
@@ -43,31 +75,167 @@ def _extrair_array_js(html, nome_var):
     marcador = re.search(rf"{nome_var}\s*=\s*\[", html)
     if not marcador:
         return []
-    inicio = marcador.end() - 1  # aponta para o '[' de abertura
-    profundidade = 0
-    for i in range(inicio, len(html)):
-        ch = html[i]
-        if ch == "[":
-            profundidade += 1
-        elif ch == "]":
-            profundidade -= 1
-            if profundidade == 0:
-                try:
-                    return json.loads(html[inicio:i + 1])
-                except json.JSONDecodeError:
-                    return []
-    return []
+    bruto = _recortar_json_balanceado(html, marcador.end() - 1)
+    try:
+        return json.loads(bruto) if bruto else []
+    except json.JSONDecodeError:
+        return []
+
+
+def _parece_lista_cupons(valor):
+    if not isinstance(valor, list):
+        return False
+    if not valor:
+        # Um array vazio qualquer (menus, banners, analytics) não comprova que o
+        # catálogo de cupons está legitimamente vazio.
+        return False
+    amostra = [item for item in valor[:10] if isinstance(item, dict)]
+    if not amostra:
+        return False
+    assinaturas = ({"nome", "dia_fim"}, {"codigo", "validade"},
+                   {"coupon_code", "end_date"})
+    return any(any(chaves <= set(item) for chaves in assinaturas) for item in amostra)
+
+
+def _procurar_listas_cupons(valor):
+    """Encontra listas pela assinatura dos itens, inclusive dentro de JSON SSR."""
+    achados = []
+    if isinstance(valor, list):
+        if _parece_lista_cupons(valor):
+            achados.append(valor)
+        else:
+            for item in valor:
+                achados.extend(_procurar_listas_cupons(item))
+    elif isinstance(valor, dict):
+        for item in valor.values():
+            achados.extend(_procurar_listas_cupons(item))
+    return achados
+
+
+def _extrair_cupons_html(html):
+    """Extrai cupons sem depender do nome ``COUPONS``.
+
+    A precedência é deliberada: contrato histórico conhecido, demais atribuições
+    JavaScript e, por fim, scripts JSON/SSR. O retorno distingue schema ilegível de
+    uma lista explicitamente vazia para que zero itens não pareça saúde por engano.
+    """
+    diagnostico = {"parser": "none", "schema_ok": False, "explicit_empty": False}
+    tradicional = _extrair_array_js(html, "COUPONS")
+    if tradicional:
+        return tradicional, {**diagnostico, "parser": "named", "schema_ok": True}
+    if re.search(r"\bCOUPONS\s*=\s*\[\s*\]", html or ""):
+        return [], {**diagnostico, "parser": "named", "schema_ok": True,
+                    "explicit_empty": True}
+
+    candidatos = []
+    for match in re.finditer(
+            r"(?:\b(?:const|let|var)\s+)?(?P<name>[A-Za-z_$][\w$\.]*)\s*=\s*\[",
+            html or ""):
+        inicio = match.end() - 1
+        bruto = _recortar_json_balanceado(html, inicio)
+        if not bruto:
+            continue
+        try:
+            valor = json.loads(bruto)
+        except json.JSONDecodeError:
+            continue
+        if _parece_lista_cupons(valor):
+            candidatos.append(valor)
+        elif valor == [] and re.search(r"coupon|cupom", match.group("name"), re.I):
+            return [], {
+                **diagnostico, "parser": "schema-array", "schema_ok": True,
+                "explicit_empty": True,
+            }
+    if candidatos:
+        return max(candidatos, key=len), {
+            **diagnostico, "parser": "schema-array", "schema_ok": True,
+            "explicit_empty": not any(candidatos),
+        }
+
+    for match in re.finditer(
+            r"<script[^>]+type=[\"']application/(?:ld\+)?json[\"'][^>]*>(.*?)</script>",
+            html or "", re.I | re.S):
+        try:
+            valor = json.loads(match.group(1).strip())
+        except (json.JSONDecodeError, TypeError):
+            continue
+        listas = _procurar_listas_cupons(valor)
+        if listas:
+            return max(listas, key=len), {
+                **diagnostico, "parser": "script-json", "schema_ok": True,
+            }
+    return [], diagnostico
 
 
 def _validade_fim_do_dia(dia_fim):
     """"dd/mm/aaaa" -> datetime aware no fim daquele dia (cupom vale o dia inteiro)."""
     if not dia_fim:
         return None
-    try:
-        d = datetime.strptime(dia_fim.strip(), "%d/%m/%Y")
-    except (ValueError, AttributeError):
+    raw = str(dia_fim or "").strip()
+    d = None
+    for formato in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            d = datetime.strptime(raw[:10], formato)
+            break
+        except ValueError:
+            continue
+    if d is None:
         return None
     return timezone.make_aware(d.replace(hour=23, minute=59, second=59))
+
+
+def _inicio_do_dia(dia_inicio):
+    if not dia_inicio:
+        return None
+    raw = str(dia_inicio or "").strip()
+    for formato in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return timezone.make_aware(datetime.strptime(raw[:10], formato))
+        except ValueError:
+            continue
+    return None
+
+
+def _campo(cupom, *nomes, default=None):
+    for nome in nomes:
+        valor = cupom.get(nome)
+        if valor not in (None, ""):
+            return valor
+    return default
+
+
+def _boolean(valor):
+    if isinstance(valor, str):
+        return valor.strip().casefold() in {"1", "true", "sim", "yes"}
+    return bool(valor)
+
+
+def _safe_source_url(url):
+    try:
+        parsed = urlsplit(str(url or ""))
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _safe_ml_container_url(url):
+    try:
+        parsed = urlsplit(str(url or ""))
+    except ValueError:
+        return ""
+    hostname = (parsed.hostname or "").lower()
+    allowed = (
+        hostname == "meli.la" or hostname.endswith(".meli.la")
+        or hostname == "mercadolivre.com.br"
+        or hostname.endswith(".mercadolivre.com.br")
+        or hostname == "mercadolivre.com"
+        or hostname.endswith(".mercadolivre.com")
+    )
+    if parsed.scheme not in {"http", "https"} or not allowed:
+        return ""
+    return urlunsplit(("https", parsed.netloc, parsed.path, "", ""))
 
 
 class MLPublicCouponsSource(SourceAdapter):
@@ -75,6 +243,10 @@ class MLPublicCouponsSource(SourceAdapter):
     slug = "ml-cupons-afiliados"
     marketplace = "mercadolivre"
     name = "Cupons de afiliados (Mercado Livre)"
+
+    def __init__(self):
+        self.last_metrics = {}
+        self.last_health = "unknown"
 
     def _url(self):
         return getattr(settings, "ML_CUPONS_AFILIADOS_URL", "") or DEFAULT_URL
@@ -89,42 +261,116 @@ class MLPublicCouponsSource(SourceAdapter):
             headers["If-Modified-Since"] = cached["modified"]
         resp = requests.get(url, timeout=20, headers=headers)
         if resp.status_code == 304:
+            self.last_metrics = dict(cached.get("metrics") or {})
+            self.last_health = cached.get("health", "unknown")
             return cached.get("coupons", [])
         resp.raise_for_status()
-        coupons = _extrair_array_js(resp.text, "COUPONS")
+        coupons, diagnostico = _extrair_cupons_html(resp.text)
+        schema_ok = bool(diagnostico["schema_ok"])
+        explicit_empty = bool(diagnostico["explicit_empty"])
+        schema_signature = "|".join([
+            str(diagnostico.get("parser") or "none"),
+            *sorted({
+                str(key) for coupon in coupons[:20] if isinstance(coupon, dict)
+                for key in coupon.keys()
+            }),
+        ])
+        fingerprint = hashlib.sha256(
+            schema_signature.encode("utf-8")
+        ).hexdigest()
+        self.last_health = (
+            "healthy_empty" if schema_ok and explicit_empty
+            else "healthy" if coupons and schema_ok
+            else "degraded"
+        )
+        if self.last_health == "degraded":
+            capture_public_text_diagnostic(
+                resp.text, self.slug, "coupon_schema_unrecognized",
+            )
+        self.last_metrics = {
+            "items_seen": len(coupons),
+            "parser": diagnostico["parser"],
+            "schema_ok": schema_ok,
+            "explicit_empty": explicit_empty,
+            # O payload oficial é um inventário, não uma página truncada. Zero só
+            # é completo quando a própria fonte publica um vazio explícito.
+            "complete": bool(schema_ok and (coupons or explicit_empty)),
+            "schema_fingerprint": fingerprint,
+        }
         _HTTP_CACHE[url] = {
             "etag": resp.headers.get("ETag", ""),
             "modified": resp.headers.get("Last-Modified", ""),
             "coupons": coupons,
+            "metrics": self.last_metrics,
+            "health": self.last_health,
         }
         return coupons
 
     def discover_coupons(self, **kwargs):
         agora = timezone.now()
         vistos = set()
+        aceitos = duplicados = rejeitados = 0
+        rejeicoes = {}
         for c in self._cupons_brutos():
-            nome = str(c.get("nome") or "").strip()
+            nome = str(_campo(c, "nome", "codigo", "coupon_code", default="") or "").strip()
             if not nome:
+                rejeitados += 1
+                rejeicoes["missing_code"] = rejeicoes.get("missing_code", 0) + 1
                 continue
-            validade = _validade_fim_do_dia(c.get("dia_fim"))
+            dia_inicio = _campo(c, "dia_inicio", "inicio", "start_date", default="")
+            dia_fim = _campo(c, "dia_fim", "validade", "end_date", default="")
+            inicio = _inicio_do_dia(dia_inicio)
+            validade = _validade_fim_do_dia(dia_fim)
+            if validade is None:
+                rejeitados += 1
+                rejeicoes["invalid_end_date"] = rejeicoes.get("invalid_end_date", 0) + 1
+                continue
             # A página só lista cupons com verba confirmada, mas um dia_fim já vencido
             # (fuso/atualização atrasada) não deve entrar como ativo.
             if validade and validade < agora:
+                rejeitados += 1
+                rejeicoes["expired"] = rejeicoes.get("expired", 0) + 1
                 continue
-            container_name = str(c.get("container_name") or "").strip()
-            is_site = bool(c.get("is_mar_aberto"))
-            # external_id estável por (código + container): o mesmo código pode existir
-            # para containers diferentes; site-wide colapsa em um só.
-            external_id = f"afiliados:{nome}:{'site' if is_site else container_name or 'geral'}"
+            container_name = str(_campo(
+                c, "container_name", "container", "scope_id", default="",
+            ) or "").strip()
+            is_site = _boolean(_campo(
+                c, "is_mar_aberto", "site_wide", default=False,
+            ))
+            # external_id estável por (código + escopo + vigência): o mesmo código
+            # pode ser reutilizado em campanhas/períodos ou containers diferentes.
+            normalized_code = nome.upper()
+            period_key = f"{dia_inicio or 'unknown'}:{dia_fim}"
+            scope_key = "site" if is_site else container_name or "geral"
+            identity_digest = hashlib.sha256(
+                f"{normalized_code}\0{scope_key}\0{period_key}".encode("utf-8")
+            ).hexdigest()[:16]
+            external_id = (
+                f"afiliados:{normalized_code[:70]}:{scope_key[:40]}:"
+                f"{identity_digest}"
+            )
             if external_id in vistos:
+                duplicados += 1
                 continue
             vistos.add(external_id)
+            aceitos += 1
 
-            valor = str(c.get("valor_desconto") or "").strip()
-            acao = str(c.get("acao") or "").strip()
+            valor = str(_campo(
+                c, "valor_desconto", "desconto", "discount", default="",
+            ) or "").strip()
+            acao = str(_campo(c, "acao", "scope", "categoria", default="") or "").strip()
             escopo = "site inteiro" if is_site else (acao or "produtos selecionados")
             titulo = f"{nome} — {valor} OFF ({escopo})".strip()[:255]
-            link = str(c.get("container_url") or "").strip()
+            raw_link = str(_campo(
+                c, "container_url", "url", "scope_url", default="",
+            ) or "").strip()
+            link = _safe_ml_container_url(raw_link)
+            if not is_site and not link:
+                rejeitados += 1
+                aceitos -= 1
+                vistos.discard(external_id)
+                rejeicoes["invalid_container"] = rejeicoes.get("invalid_container", 0) + 1
+                continue
 
             yield IngestedItem(
                 external_id=external_id[:160],
@@ -133,31 +379,42 @@ class MLPublicCouponsSource(SourceAdapter):
                 kind="coupon",
                 canonical_url=link[:1000],
                 title=titulo,
-                coupon_code=nome[:120],
+                coupon_code=normalized_code[:120],
                 coupon_rules=normalizar_regras_cupom({
                     "tipo_desconto": "porcentagem",
-                    "discount_num": c.get("discount_num"),
+                    "discount_num": _campo(c, "discount_num", "discount_value"),
                     "valor_desconto": valor,
-                    "min_compra": c.get("min_compra"),
-                    "desconto_max": c.get("desconto_max"),
+                    "min_compra": _campo(c, "min_compra", "minimum_purchase"),
+                    "desconto_max": _campo(c, "desconto_max", "max_discount"),
                     "acao": acao,
                     "container_url": link,
                     "container_name": container_name,
                     "is_mar_aberto": is_site,
-                    "dia_inicio": c.get("dia_inicio"),
-                    "dia_fim": c.get("dia_fim"),
+                    "dia_inicio": dia_inicio,
+                    "dia_fim": dia_fim,
                     "modo_resgate": "codigo",
                     "escopo": escopo,
                 }, external_id=external_id, codigo=nome),
                 restricted=not is_site,
-                flash=bool(c.get("days_left") in (0, "0")),
+                flash=bool(_campo(c, "days_left", "dias_restantes") in (0, "0")),
+                starts_at=inicio,
                 valid_until=validade,
                 observed_at=agora,
-                evidence={"fonte": "afiliados-github", "url": self._url()},
+                evidence={"fonte": "afiliados-github",
+                          "url": _safe_source_url(self._url())},
             )
+        self.last_metrics.update({
+            "accepted": aceitos,
+            "duplicates": duplicados,
+            "rejected": rejeitados,
+            "rejections": rejeicoes,
+        })
 
     def healthcheck(self):
         try:
-            return {"ok": bool(self._cupons_brutos())}
+            self._cupons_brutos()
+            return {"ok": self.last_health in {"healthy", "healthy_empty"},
+                    "health": self.last_health, "metrics": self.last_metrics}
         except Exception as exc:  # noqa: BLE001 — healthcheck não deve propagar
-            return {"ok": False, "erro": str(exc)}
+            return {"ok": False, "erro": "Falha temporária na fonte pública.",
+                    "cause": type(exc).__name__}

@@ -20,6 +20,7 @@ from apps.scrapers.link_validacao import (
     aprovado_por_relatorio, eh_pagina_produto, eh_vitrine_social, motivo_reprovacao,
 )
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
+from apps.scrapers.carga import coordinated_ml_browser
 from apps.scrapers.progresso import emitir_fase
 from apps.accounts.ml_sessions import has_storage_state
 from apps.accounts.tenant import executar_no_tenant
@@ -477,7 +478,10 @@ def afiliate_link_builder(link_base, auth_path=None, usuario=None):
             # A guarda acontece antes de iniciar_browser: nunca cria contexto
             # Chromium anônimo para um usuário sem credencial.
             raise LoginError(MSG_SEM_SESSAO)
-    with iniciar_browser(
+    with coordinated_ml_browser(
+        usuario=usuario, authenticated=usuario is not None,
+        owner_kind="ml_link_single",
+    ), iniciar_browser(
         auth_path=auth_path,
         session_user=usuario,
         headless=True
@@ -679,7 +683,10 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
     # DJANGO_ALLOW_ASYNC_UNSAFE no os.environ do PROCESSO — global às 8 threads do
     # gunicorn — e o `finally` dele removia a permissão debaixo de outro fluxo que
     # ainda estava usando. Era a origem do "às vezes funciona".
-    with iniciar_browser(
+    with coordinated_ml_browser(
+        usuario=usuario, authenticated=usuario is not None,
+        owner_kind="ml_links_batch",
+    ), iniciar_browser(
         session_user=usuario,
         headless=True
     ) as (page, context):
@@ -828,7 +835,9 @@ def _verificar_com_browser(link_afiliado: str, screenshot_path: str = None,
             "preco_visivel": None, "nome_confere": None,
             "erros": ["link_afiliado vazio."],
         }
-    with iniciar_browser(headless=True) as (page, context):
+    with coordinated_ml_browser(
+        authenticated=False, owner_kind="ml_link_verify_single",
+    ), iniciar_browser(headless=True) as (page, context):
         return _relatorio_na_pagina(page, link_afiliado, screenshot_path,
                                     nome_esperado, confiar_desconto)
 
@@ -1020,35 +1029,41 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
     # Com o Playwright vivo nesta thread, o ORM levanta SynchronousOnlyOperation:
     # por isso as gravações vão por executar_no_tenant, que as desvia para a thread
     # dedicada (a mesma solução que gerar_links_em_lote já usa).
-    with iniciar_browser(headless=True) as (page, _ctx):
-        for linha in linhas:
-            confiar = _confiar_desconto(linha.produto)
-            try:
-                relatorio = _relatorio_na_pagina(
-                    page, linha.link_afiliado,
-                    nome_esperado=getattr(linha.produto, "nome", None),
-                    confiar_desconto=confiar)
-            except Exception as e:
-                logger.warning("Verificação de destino falhou p/ produto %s: %s",
-                               getattr(linha.produto, "id", None), e)
-                _no_tenant(_adiar, linha)
-                transitorios += 1
-                continue
-            if relatorio.get("ok"):
-                _no_tenant(registrar_aprovacao, usuario, linha.produto,
-                                   linha.link_afiliado,
-                                   url_canonica=linha.link_afiliado)
-                aprovados += 1
-            elif any("Falha ao abrir link" in str(e)
-                     for e in relatorio.get("erros", [])):
-                # Rede, timeout ou challenge do anti-bot: o destino nunca foi visto.
-                # Reprovar aqui derrubaria links bons em massa.
-                _no_tenant(_adiar, linha)
-                transitorios += 1
-            else:
-                _no_tenant(registrar_reprovacao, usuario, linha.produto,
-                                   motivo_reprovacao(relatorio, confiar))
-                reprovados += 1
+    from apps.scrapers.carga import BrowserResourceUnavailable, browser_resource
+
+    with browser_resource(owner_kind="links_verify") as acquired:
+        if not acquired:
+            raise BrowserResourceUnavailable(
+                "Capacidade de browser ocupada; verificação será retomada."
+            )
+        with iniciar_browser(headless=True) as (page, _ctx):
+            for linha in linhas:
+                confiar = _confiar_desconto(linha.produto)
+                try:
+                    relatorio = _relatorio_na_pagina(
+                        page, linha.link_afiliado,
+                        nome_esperado=getattr(linha.produto, "nome", None),
+                        confiar_desconto=confiar)
+                except Exception as e:
+                    logger.warning("Verificação de destino falhou p/ produto %s: %s",
+                                   getattr(linha.produto, "id", None), e)
+                    _no_tenant(_adiar, linha)
+                    transitorios += 1
+                    continue
+                if relatorio.get("ok"):
+                    _no_tenant(registrar_aprovacao, usuario, linha.produto,
+                                       linha.link_afiliado,
+                                       url_canonica=linha.link_afiliado)
+                    aprovados += 1
+                elif any("Falha ao abrir link" in str(e)
+                         for e in relatorio.get("erros", [])):
+                    # Rede/timeout/challenge: o destino nunca foi visto.
+                    _no_tenant(_adiar, linha)
+                    transitorios += 1
+                else:
+                    _no_tenant(registrar_reprovacao, usuario, linha.produto,
+                                       motivo_reprovacao(relatorio, confiar))
+                    reprovados += 1
     logger.info("Verificação de destino ML p/ %s: %s aprovado(s), %s reprovado(s), "
                 "%s transitório(s)", usuario, aprovados, reprovados, transitorios)
     return {"aprovados": aprovados, "reprovados": reprovados,

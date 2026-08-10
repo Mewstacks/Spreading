@@ -225,7 +225,7 @@ def listagem_publica_ml(cupom) -> str:
     return ""
 
 
-def _ativacao_ml_publicavel(cupom, regras) -> bool:
+def _ativacao_ml_publicavel(cupom, regras, usuario=None) -> bool:
     """Cupom de ATIVAÇÃO do Mercado Livre (clique, não código digitável).
 
     O ML migrou a página /ofertas/cupons para cupons ativados por clique: o campo
@@ -251,7 +251,8 @@ def _ativacao_ml_publicavel(cupom, regras) -> bool:
     """
     from apps.accounts.feature_flags import enabled_for_user
 
-    if not enabled_for_user("ML_CUPONS_ATIVACAO_ENABLED", getattr(cupom, "owner", None)):
+    ator = usuario or getattr(cupom, "owner", None)
+    if not enabled_for_user("ML_CUPONS_ATIVACAO_ENABLED", ator):
         return False
     if getattr(getattr(cupom, "fonte", None), "slug", "") not in _FONTES_ML_ATIVACAO:
         return False
@@ -268,7 +269,7 @@ def _ativacao_ml_publicavel(cupom, regras) -> bool:
     return regras.get("valor_desconto") not in (None, "", 0)
 
 
-def ativacao_publicavel(cupom) -> bool:
+def ativacao_publicavel(cupom, usuario=None) -> bool:
     """Aceita ativação quando a loja prova promoção + produtos.
 
     Amazon: a página oficial de cupons fornece identificador da promoção, ASINs e
@@ -281,7 +282,7 @@ def ativacao_publicavel(cupom) -> bool:
         return False
     marketplace = str(getattr(cupom, "marketplace", "") or "").casefold()
     if marketplace == "mercadolivre":
-        return _ativacao_ml_publicavel(cupom, regras)
+        return _ativacao_ml_publicavel(cupom, regras, usuario=usuario)
     if marketplace != "amazon":
         return False
     evidence = getattr(cupom, "evidencia", {}) or {}
@@ -294,8 +295,8 @@ def ativacao_publicavel(cupom) -> bool:
     )
 
 
-def cupom_publicavel(cupom) -> bool:
-    return bool(codigo_publicavel(cupom) or ativacao_publicavel(cupom))
+def cupom_publicavel(cupom, usuario=None) -> bool:
+    return bool(codigo_publicavel(cupom) or ativacao_publicavel(cupom, usuario=usuario))
 
 
 def formatar_numero(valor) -> str:
@@ -357,7 +358,7 @@ def rotulo_anunciante(titulo="", regras=None, categoria_fallback="") -> str:
     return (categoria_fallback or "").strip()[:100]
 
 
-def score_cupom(cupom) -> float:
+def score_cupom(cupom, usuario=None) -> float:
     """Ranking de qualidade de um cupom p/ ordenar a aba Cupons (maior = melhor).
 
     Combina codigo publicavel (peso alto), valor do desconto, validade futura e
@@ -368,7 +369,7 @@ def score_cupom(cupom) -> float:
     score = 0.0
     if codigo_publicavel(cupom):
         score += 50.0
-    elif ativacao_publicavel(cupom):
+    elif ativacao_publicavel(cupom, usuario=usuario):
         score += 25.0
     valor = _numero(regras.get("valor_desconto"))
     if valor is not None:

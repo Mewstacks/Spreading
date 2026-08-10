@@ -53,6 +53,23 @@ def _usuarios_ativos(usuarios=None):
     return list(get_user_model().objects.filter(is_active=True, id__in=ids))
 
 
+def _materializar_ausencias_saudaveis(slug, payload, rows, *, owner=None):
+    """Projeta ausência somente depois de persistir o inventário correspondente."""
+    metrics = payload.get("metrics") or {}
+    health = str(payload.get("health") or "")
+    if (
+        owner is not None
+        or not bool(metrics.get("complete"))
+        or health not in {"ok", "healthy", "healthy_empty"}
+    ):
+        return 0
+    from apps.scrapers.coupon_readiness import marcar_ausentes_execucao_saudavel
+
+    fonte = FonteIngestao.objects.get(slug=slug)
+    seen_coupon_ids = [row.external_id for row in rows if row.kind == "coupon"]
+    return marcar_ausentes_execucao_saudavel(fonte, seen_coupon_ids)
+
+
 def _coletar_adaptador(slug, resultado, *, owner=None, items=("coupons",), **kwargs):
     """Executa uma fonte isolada; vazio/bloqueado/desabilitado nunca apaga dados."""
     from apps.scrapers.sources import run_source
@@ -65,12 +82,24 @@ def _coletar_adaptador(slug, resultado, *, owner=None, items=("coupons",), **kwa
         for kind in items:
             rows.extend(payload.get(kind, []))
         if rows:
+            health_kwargs = (
+                {"source_health": payload["health"]} if payload.get("health") else {}
+            )
             persistidos = (
-                persist_items(rows, owner=owner)
-                if owner is not None else persist_items(rows)
+                persist_items(rows, owner=owner, **health_kwargs)
+                if owner is not None else persist_items(
+                    rows, **health_kwargs,
+                )
             )
         else:
             persistidos = {"offers": 0, "coupons": 0}
+        if "coupons" in items:
+            # Só um inventário público, saudável e explicitamente completo pode
+            # dizer que um item anterior não foi encontrado. Coleta parcial,
+            # CAPTCHA, schema ilegível, erro ou zero implícito preservam a projeção.
+            _materializar_ausencias_saudaveis(
+                slug, payload, rows, owner=owner,
+            )
         total_persistido = persistidos["offers"] + persistidos["coupons"]
         _fonte(
             resultado, slug, status=status, encontrados=len(rows),
@@ -78,6 +107,8 @@ def _coletar_adaptador(slug, resultado, *, owner=None, items=("coupons",), **kwa
             motivo=payload.get("error") or (
                 "Fonte desabilitada ou não configurada."
                 if status == "disabled" else
+                "Coleta parcial/degradada; catálogo anterior preservado."
+                if status == "degraded" else
                 "Coleta vazia; catálogo anterior preservado."
                 if status == "empty" else
                 "Coleta já está em execução."
@@ -88,9 +119,15 @@ def _coletar_adaptador(slug, resultado, *, owner=None, items=("coupons",), **kwa
         )
         return payload
     except Exception as exc:
-        logger.exception("Fonte de cupons %s falhou isoladamente", slug)
-        _fonte(resultado, slug, status="error", motivo=str(exc))
-        return {"status": "error", "offers": [], "coupons": [], "error": str(exc)}
+        logger.error(
+            "Fonte de cupons %s falhou isoladamente (%s)", slug, type(exc).__name__,
+        )
+        public_error = "Falha operacional na fonte; catálogo anterior preservado."
+        _fonte(resultado, slug, status="error", motivo=public_error)
+        return {
+            "status": "error", "offers": [], "coupons": [],
+            "error": public_error, "cause": type(exc).__name__,
+        }
 
 
 def coletar_feed_licenciado(resultado=None):
@@ -139,46 +176,37 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
 
     _coletar_adaptador("ml-cupons-afiliados", resultado)
 
-    from apps.scrapers.afiliado import tag_amazon
-
-    amazon = [usuario for usuario in usuarios if tag_amazon(usuario)]
-    if amazon:
-        payload = _coletar_adaptador(
-            "amazon-public-coupons", resultado, items=(),
-        )
-        rows = payload.get("offers", []) + payload.get("coupons", [])
-        persistidos = 0
-        falhas_amazon = 0
-        if rows:
-            from apps.scrapers.sources.persistence import persist_items
-
-            for usuario in amazon:
-                try:
-                    counts = persist_items(rows, owner=usuario)
-                    persistidos += counts["offers"] + counts["coupons"]
-                except Exception:
-                    falhas_amazon += 1
-                    logger.exception(
-                        "Persistência Amazon falhou isoladamente para usuário %s",
-                        usuario.pk,
-                    )
+    # A fonte é pública e existe independentemente de alguma conta já possuir tag.
+    # O vínculo de afiliado continua por usuário na etapa de link/envio.
+    payload = _coletar_adaptador("amazon-public-coupons", resultado, items=())
+    rows = payload.get("offers", []) + payload.get("coupons", [])
+    if rows:
+        from apps.scrapers.sources.persistence import persist_items
+        try:
+            health_kwargs = (
+                {"source_health": payload["health"]} if payload.get("health") else {}
+            )
+            counts = persist_items(rows, owner=None, **health_kwargs)
+            persistidos = counts["offers"] + counts["coupons"]
+            # A Amazon é persistida fora de ``_coletar_adaptador`` porque ofertas
+            # e cupons compartilham o mesmo snapshot. Compare ausências somente
+            # agora, com todas as linhas do inventário já gravadas.
+            _materializar_ausencias_saudaveis(
+                "amazon-public-coupons", payload, rows, owner=None,
+            )
             info = resultado["fontes"]["amazon-public-coupons"]
             info["encontrados"] = len(rows)
             info["persistidos"] = persistidos
-            if falhas_amazon:
-                info["status"] = "error"
-                info["motivo"] = (
-                    f"Persistência falhou para {falhas_amazon} conta(s); "
-                    "as demais foram preservadas."
-                )
-                resultado["falhos"] += falhas_amazon
+            info["metricas"] = payload.get("metrics", {})
             resultado["encontrados"] += len(rows)
             resultado["persistidos"] += persistidos
-    else:
-        _fonte(
-            resultado, "amazon-public-coupons", status="skipped",
-            motivo="Nenhuma conta ativa possui tag Amazon configurada.",
-        )
+        except Exception:
+            logger.exception("Persistência do catálogo público Amazon falhou")
+            resultado["falhos"] += 1
+            resultado["fontes"]["amazon-public-coupons"].update(
+                status="error",
+                motivo="Falha ao persistir catálogo público; dados anteriores preservados.",
+            )
 
     coletar_feed_licenciado(resultado)
 
@@ -206,7 +234,10 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
                 total += int(sync.get("coupons", 0) or 0)
             except Exception as exc:
                 falhas += 1
-                logger.warning("Integração Awin %s falhou: %s", integracao.pk, exc)
+                logger.warning(
+                    "Integração Awin %s falhou (%s)",
+                    integracao.pk, type(exc).__name__,
+                )
         _fonte(
             resultado, "awin",
             status="error" if falhas else (
@@ -251,7 +282,10 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None):
     from apps.scrapers.coupon_rules import cupom_publicavel
     from apps.scrapers.marketplaces.registry import get_marketplace
 
-    cupons = [cupom for cupom in _cupons_visiveis(usuario) if cupom_publicavel(cupom)]
+    cupons = [
+        cupom for cupom in _cupons_visiveis(usuario)
+        if cupom_publicavel(cupom, usuario=usuario)
+    ]
     produtos = {}
     for cupom in cupons:
         for relacao in relacoes_preparadas_para_envio(cupom, usuario):
@@ -318,10 +352,14 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None):
                 detalhe.update(verificacao)
         except Exception as exc:
             falhas += len(itens)
-            detalhe["erro"] = str(exc)[:300]
+            detalhe["erro"] = "Falha operacional ao gerar ou verificar links."
+            detalhe["causa"] = type(exc).__name__
             from apps.scrapers.afiliado import registrar_falha
             for produto in itens:
-                registrar_falha(usuario, produto, str(exc))
+                registrar_falha(
+                    usuario, produto,
+                    f"Falha operacional de afiliação ({type(exc).__name__}).",
+                )
             logger.exception("Afiliação de cupons %s falhou para %s", slug, usuario)
         after = set(LinkAfiliadoUsuario.objects.filter(
             usuario=usuario, produto_id__in=[p.id for p in itens],
@@ -353,12 +391,12 @@ def executar_pipeline_cupons(
             casar_cupons_container,
         )
         resultado["associacoes_container"] = casar_cupons_container()
-    except Exception as exc:
+    except Exception:
         # A associação é uma etapa independente: os vínculos diretos de Amazon,
         # Awin, feed e cupons privados continuam sendo preparados.
         resultado["associacoes_container"] = 0
         resultado["falhos"] += 1
-        logger.exception("Casamento de containers de cupons falhou: %s", exc)
+        logger.exception("Casamento de containers de cupons falhou")
 
     from apps.scrapers.coupon_products import preparar_lote
 
@@ -376,7 +414,11 @@ def executar_pipeline_cupons(
             afiliacao = afiliar_cupons(usuario, limite=limite_links)
         except Exception as exc:
             logger.exception("Pipeline de cupons falhou para usuário %s", usuario.pk)
-            afiliacao = {"links_falhos": 1, "erro": str(exc)[:300]}
+            afiliacao = {
+                "links_falhos": 1,
+                "erro": "Falha operacional no preparo de links.",
+                "causa": type(exc).__name__,
+            }
             resultado["falhos"] += 1
         por_usuario[str(usuario.pk)] = afiliacao
         for key in (
@@ -384,5 +426,14 @@ def executar_pipeline_cupons(
             "links_reprovados", "links_transitorios", "links_falhos", "prontos",
         ):
             resultado[key] += int(afiliacao.get(key, 0) or 0)
+        try:
+            from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+            afiliacao["disponibilidade"] = projetar_disponibilidade_cupons(usuario)
+        except Exception:
+            resultado["falhos"] += 1
+            logger.exception(
+                "Projeção de disponibilidade de cupons falhou para usuário %s",
+                usuario.pk,
+            )
     resultado["usuarios"] = por_usuario
     return resultado

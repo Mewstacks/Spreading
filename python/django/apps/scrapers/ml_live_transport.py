@@ -16,7 +16,10 @@ import queue
 import secrets
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +48,37 @@ STREAM_POLL_IDLE_S = 0.05
 HEARTBEAT_INTERVAL_S = 10.0
 MAX_EVENTOS_POR_POST = 60
 MAX_QUEUE_SIZE = 2000
+
+# Os três live views (site ML, relatórios ML e Associados Amazon) vivem no mesmo
+# processo gunicorn. Eles não podem usar ResourceLease: a role web é tenant-only e
+# a tabela do control plane tem FORCE RLS. Um semáforo compartilhado no processo
+# ainda é suficiente para o recurso que realmente dividem — CPU/memória da VM web.
+# Scrapers e report sync, em outros process groups, continuam coordenados pelos
+# leases PostgreSQL duráveis.
+_INTERACTIVE_BROWSER_CAPACITY = max(
+    1, int(getattr(settings, "CHROMIUM_GLOBAL_SLOTS", 1)),
+)
+_interactive_browser_slots = threading.BoundedSemaphore(
+    _INTERACTIVE_BROWSER_CAPACITY,
+)
+
+
+class InteractiveBrowserCapacityError(RuntimeError):
+    """A VM web já está atendendo outro login interativo."""
+
+
+@contextmanager
+def interactive_browser_slot():
+    acquired = _interactive_browser_slots.acquire(blocking=False)
+    if not acquired:
+        raise InteractiveBrowserCapacityError(
+            "Outro login interativo já está usando o navegador. "
+            "Aguarde ele terminar ou cancele-o antes de tentar novamente."
+        )
+    try:
+        yield
+    finally:
+        _interactive_browser_slots.release()
 
 SPECIAL_KEYS = frozenset({
     "Enter", "Backspace", "Tab", "Delete", "Escape",

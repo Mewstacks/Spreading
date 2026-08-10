@@ -14,6 +14,7 @@ import logging
 from django.db import OperationalError, connections
 
 from apps.scrapers.auxiliar import iniciar_browser, pausa_humana
+from apps.scrapers.carga import coordinated_ml_browser
 from apps.scrapers.ml_auth import storage_state
 from apps.scrapers.models import Produto
 from apps.scrapers.progresso import emitir_progresso
@@ -521,7 +522,11 @@ def mapear_ofertas(max_paginas=40, substituir=True, usuario=None):
     coletados = []
 
     vazias_seguidas = 0
-    with iniciar_browser(storage_state=storage_state(usuario), headless=True) as (page, context):
+    state = storage_state(usuario)
+    with coordinated_ml_browser(
+        usuario=usuario, authenticated=state is not None,
+        owner_kind="ml_offers",
+    ), iniciar_browser(storage_state=state, headless=True) as (page, context):
         for n in range(1, max_paginas + 1):
             emitir_progresso(f"[PROGRESSO] Ofertas página {n}/{max_paginas} ({n*100//max_paginas}%)")
             try:
@@ -586,7 +591,11 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None,
     coletados = []
     termos_confirmados = []
 
-    with iniciar_browser(storage_state=storage_state(usuario), headless=True) as (page, context):
+    state = storage_state(usuario)
+    with coordinated_ml_browser(
+        usuario=usuario, authenticated=state is not None,
+        owner_kind="ml_search",
+    ), iniciar_browser(storage_state=state, headless=True) as (page, context):
         for termo in termos:
             slug = _slug_busca(termo)
             if not slug:

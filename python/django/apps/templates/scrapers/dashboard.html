@@ -282,8 +282,22 @@ passos.1 = portal de afiliados.
       partial: 'parcial',
       failed: 'falha',
     };
+    const waitLabels = {
+      worker_absent: 'Aguardando o worker manual ficar disponível',
+      waiting_worker: 'Aguardando o worker assumir a execução',
+      resource_busy: 'Aguardando o navegador usado por ' + ((job.fila || {}).lock_owner_tipo || 'outra tarefa'),
+      previous_job: 'Aguardando a execução anterior da fila',
+      database_unavailable: 'Aguardando o banco de dados',
+      capacity: 'Aguardando capacidade de navegador',
+    };
+    let currentLabel = terminalLabels[job.status] || job.etapa || 'Processando…';
+    if (job.status === 'queued' && job.fila) {
+      currentLabel = waitLabels[job.fila.motivo] || currentLabel;
+      if (job.fila.posicao) currentLabel += ' · posição ' + job.fila.posicao;
+      if (!job.fila.eta_min_em) currentLabel += ' · estimativa indisponível';
+    }
     progressSet(
-      terminalLabels[job.status] || job.etapa || 'Processando…',
+      currentLabel,
       Number(job.progresso || 0),
       stateStyle[job.status] || ''
     );

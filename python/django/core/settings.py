@@ -109,6 +109,25 @@ PILOT_ORGANIZATION_IDS = {
 # Preencha com a URL do relatório de verdade, já dentro da conta.
 ML_AFFILIATE_REPORT_URL = os.getenv("ML_AFFILIATE_REPORT_URL", "")
 AMAZON_ASSOCIATES_REPORT_URL = os.getenv("AMAZON_ASSOCIATES_REPORT_URL", "")
+AMAZON_BROWSER_REPORTS_ENABLED = os.getenv(
+    "AMAZON_BROWSER_REPORTS_ENABLED", "0",
+) == "1"
+AMAZON_COUPON_MAX_PAGES = int(os.getenv("AMAZON_COUPON_MAX_PAGES", "5"))
+AMAZON_COUPON_MAX_ITEMS = int(os.getenv("AMAZON_COUPON_MAX_ITEMS", "500"))
+AMAZON_COUPON_MAX_SECONDS = int(os.getenv("AMAZON_COUPON_MAX_SECONDS", "180"))
+CHROMIUM_GLOBAL_SLOTS = int(os.getenv("CHROMIUM_GLOBAL_SLOTS", "1"))
+MANUAL_QUEUE_NO_WORKER_TIMEOUT_SECONDS = int(os.getenv(
+    "MANUAL_QUEUE_NO_WORKER_TIMEOUT_SECONDS", "600",
+))
+MANUAL_QUEUE_MAX_WAIT_SECONDS = int(os.getenv("MANUAL_QUEUE_MAX_WAIT_SECONDS", "2700"))
+SEND_PIPELINE_V2_ENABLED = os.getenv("SEND_PIPELINE_V2_ENABLED", "0") == "1"
+SEND_RETRY_BASE_SECONDS = int(os.getenv("SEND_RETRY_BASE_SECONDS", "30"))
+SEND_RETRY_MAX_SECONDS = int(os.getenv("SEND_RETRY_MAX_SECONDS", "900"))
+SEND_MAX_ATTEMPTS = int(os.getenv("SEND_MAX_ATTEMPTS", "5"))
+WA_SESSION_RECONCILE_SECONDS = int(os.getenv("WA_SESSION_RECONCILE_SECONDS", "60"))
+SCRAPER_DIAGNOSTIC_RETENTION_DAYS = int(os.getenv(
+    "SCRAPER_DIAGNOSTIC_RETENTION_DAYS", "7",
+))
 if DEBUG and not ALLOWED_HOSTS:
     ALLOWED_HOSTS = ["localhost", "127.0.0.1", ".fly.dev", ".trycloudflare.com"]
 elif DEBUG:
@@ -677,7 +696,11 @@ LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "formatters": {
-        "verbose": {"format": "{levelname} {asctime} {name} {message}", "style": "{"},
+        "verbose": {
+            "()": "core.logging.RedactingFormatter",
+            "format": "{levelname} {asctime} {name} {message}",
+            "style": "{",
+        },
     },
     "handlers": {
         "console": {"class": "logging.StreamHandler", "formatter": "verbose"},

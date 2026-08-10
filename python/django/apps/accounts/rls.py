@@ -6,6 +6,7 @@ STRICT_TENANT_TABLES = (
     "accounts_perfil",
     "accounts_mercadolivresession",
     "accounts_whatsappconnection",
+    "accounts_organizationfeatureoverride",
     "scrapers_integracaoafiliado",
     "scrapers_programaafiliado",
     "scrapers_historicoenvio",
@@ -20,6 +21,10 @@ STRICT_TENANT_TABLES = (
     "scrapers_configuracaoenvio",
     "scrapers_execucaoraspagem",
     "scrapers_eventoraspagem",
+    "scrapers_cupomdisponibilidade",
+    "scrapers_cupomdisponibilidadeevento",
+    "scrapers_publicacaotentativa",
+    "scrapers_publicacaoevento",
 )
 
 MIXED_TENANT_TABLES = (
@@ -30,6 +35,12 @@ MIXED_TENANT_TABLES = (
     "scrapers_execucaoingestao",
     "scrapers_eventooperacional",
     "scrapers_incidentesaude",
+    "scrapers_cupomfonteobservacao",
+)
+
+SYSTEM_ONLY_TABLES = (
+    "scrapers_workerheartbeat",
+    "scrapers_resourcelease",
 )
 
 CONTROL_TENANT_TABLES = (
@@ -39,6 +50,7 @@ CONTROL_TENANT_TABLES = (
 
 ALL_TENANT_TABLES = (
     STRICT_TENANT_TABLES + MIXED_TENANT_TABLES + CONTROL_TENANT_TABLES
+    + SYSTEM_ONLY_TABLES
 )
 
 
@@ -107,11 +119,14 @@ def policy_statements(
     table: str,
     *,
     mixed: bool,
+    system_only: bool = False,
     system_role: str = "spreading_system",
     migration_role: str = "spreading_migration",
 ) -> list[str]:
     system = system_expr(system_role, migration_role)
-    if table == "accounts_organization":
+    if system_only:
+        visible = writable = f"({system})"
+    elif table == "accounts_organization":
         visible = (
             f"(({system}) OR "
             f"{organization_expr('accounts_organization.id')} OR "
@@ -124,6 +139,13 @@ def policy_statements(
     elif table == "accounts_membership":
         visible = f"(({system}) OR {ORG_EXPR} OR {ACTOR_EXPR})"
         writable = f"(({system}) OR {ORG_EXPR})"
+    elif table == "accounts_perfil":
+        visible = f"(({system}) OR {ORG_EXPR} OR {ACTOR_EXPR})"
+        # Perfil continua fisicamente ligado à organização pessoal durante a
+        # compatibilidade, mesmo quando o usuário atua em uma organização
+        # compartilhada. O actor assinado pode ler/escrever somente a própria linha;
+        # a validação de active_organization ainda exige Membership ativa.
+        writable = f"(({system}) OR {ORG_EXPR} OR {ACTOR_EXPR})"
     else:
         visible = f"(({system}) OR {ORG_EXPR}"
         if mixed:

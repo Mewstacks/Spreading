@@ -254,6 +254,13 @@ class ExecucaoIngestao(models.Model):
     total_ofertas = models.PositiveIntegerField(default=0)
     total_cupons = models.PositiveIntegerField(default=0)
     erro_publico = models.CharField(max_length=255, blank=True, default="")
+    metricas = models.JSONField(default=dict, blank=True)
+    rejeicoes = models.JSONField(default=dict, blank=True)
+    duracoes = models.JSONField(default=dict, blank=True)
+    paginas_processadas = models.PositiveIntegerField(default=0)
+    schema_fingerprint = models.CharField(max_length=64, blank=True, default="")
+    health_status = models.CharField(max_length=24, blank=True, default="unknown",
+                                     db_index=True)
 
 
 class ExecucaoRaspagem(models.Model):
@@ -297,6 +304,17 @@ class ExecucaoRaspagem(models.Model):
     iniciada_em = models.DateTimeField(null=True, blank=True)
     heartbeat_em = models.DateTimeField(null=True, blank=True, db_index=True)
     finalizada_em = models.DateTimeField(null=True, blank=True, db_index=True)
+    posicao_fila = models.PositiveIntegerField(null=True, blank=True)
+    motivo_espera = models.CharField(max_length=40, blank=True, default="", db_index=True)
+    espera_iniciada_em = models.DateTimeField(null=True, blank=True)
+    worker_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    recurso_esperado = models.CharField(max_length=160, blank=True, default="")
+    lock_owner_tipo = models.CharField(max_length=40, blank=True, default="")
+    lease_token = models.CharField(max_length=64, blank=True, default="")
+    deadline_em = models.DateTimeField(null=True, blank=True, db_index=True)
+    eta_min_em = models.DateTimeField(null=True, blank=True)
+    eta_max_em = models.DateTimeField(null=True, blank=True)
+    eta_amostra = models.PositiveIntegerField(default=0)
 
     class Meta:
         ordering = ("-criada_em",)
@@ -398,6 +416,111 @@ class CupomNormalizado(models.Model):
                 condition=models.Q(owner__isnull=False),
                 name="uniq_cupom_privado_owner_fonte_external"),
         ]
+
+
+class CupomFonteObservacao(models.Model):
+    """Evidência normalizada por fonte; nunca contém HTML autenticado ou segredo."""
+
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="observacoes_fontes_cupom",
+    )
+    fonte = models.ForeignKey(
+        FonteIngestao, on_delete=models.CASCADE, related_name="observacoes_cupons",
+    )
+    cupom = models.ForeignKey(
+        CupomNormalizado, on_delete=models.CASCADE, null=True, blank=True,
+        related_name="observacoes_fontes",
+    )
+    canonical_key = models.CharField(max_length=220, db_index=True)
+    source_external_id = models.CharField(max_length=180, blank=True, default="")
+    precedence = models.PositiveSmallIntegerField(default=100)
+    health_status = models.CharField(max_length=24, default="unknown", db_index=True)
+    outcome = models.CharField(max_length=32, default="accepted", db_index=True)
+    reason_code = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    evidence = models.JSONField(default=dict, blank=True)
+    observed_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["fonte", "canonical_key", "source_external_id"],
+                condition=models.Q(organization__isnull=True),
+                name="uniq_public_coupon_source_observation",
+            ),
+            models.UniqueConstraint(
+                fields=[
+                    "organization", "fonte", "canonical_key", "source_external_id",
+                ],
+                condition=models.Q(organization__isnull=False),
+                name="uniq_tenant_coupon_source_observation",
+            ),
+        ]
+
+
+class CupomDisponibilidade(models.Model):
+    STAGES = [
+        ("collected", "Coletado"),
+        ("eligible", "Elegível"),
+        ("prepared", "Preparado"),
+        ("waiting_link", "Aguardando link"),
+        ("ready", "Pronto"),
+        ("discarded", "Descartado"),
+    ]
+    CATEGORIES = [
+        ("", "Sem bloqueio"),
+        ("not_found", "Não encontrado"),
+        ("rejected", "Rejeitado"),
+        ("waiting", "Aguardando"),
+        ("no_session", "Sem sessão"),
+        ("no_link", "Sem link"),
+        ("invalid", "Inválido"),
+        ("operational_failure", "Falha operacional"),
+    ]
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE,
+        related_name="disponibilidades_cupons",
+    )
+    usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="disponibilidades_cupons",
+    )
+    cupom = models.ForeignKey(
+        CupomNormalizado, on_delete=models.CASCADE, related_name="disponibilidades",
+    )
+    channel = models.CharField(max_length=20, default="whatsapp")
+    use_mode = models.CharField(max_length=24, default="product_activation")
+    stage = models.CharField(max_length=24, choices=STAGES, default="collected",
+                             db_index=True)
+    category = models.CharField(max_length=32, choices=CATEGORIES, blank=True,
+                                default="", db_index=True)
+    reason_code = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    safe_detail = models.CharField(max_length=255, blank=True, default="")
+    retry_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "usuario", "cupom", "channel", "use_mode"],
+                name="uniq_coupon_readiness_projection",
+            ),
+        ]
+
+
+class CupomDisponibilidadeEvento(models.Model):
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE,
+        related_name="eventos_disponibilidade_cupom",
+    )
+    disponibilidade = models.ForeignKey(
+        CupomDisponibilidade, on_delete=models.CASCADE, related_name="eventos",
+    )
+    from_stage = models.CharField(max_length=24, blank=True, default="")
+    to_stage = models.CharField(max_length=24)
+    category = models.CharField(max_length=32, blank=True, default="")
+    reason_code = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
 
 class ProdutoCupom(models.Model):
@@ -533,11 +656,64 @@ class Publicacao(models.Model):
     motivos_score = models.JSONField(default=list, blank=True)
     criada_em = models.DateTimeField(auto_now_add=True, db_index=True)
     enviada_em = models.DateTimeField(null=True, blank=True, db_index=True)
+    operation_key = models.CharField(max_length=160, null=True, blank=True, unique=True)
+    stage = models.CharField(max_length=32, default="selected", db_index=True)
+    attempt_count = models.PositiveSmallIntegerField(default=0)
+    next_retry_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    duration_ms = models.PositiveIntegerField(default=0)
+    transport_state = models.CharField(max_length=32, blank=True, default="")
+    # Payload binário privado usado apenas entre a reserva web e o worker v2. Nunca
+    # entra em logs/eventos/admin e é apagado ao atingir estado terminal.
+    queued_media = models.BinaryField(null=True, blank=True, editable=False)
+    queued_media_mime = models.CharField(max_length=80, blank=True, default="")
+    delivery_batch_key = models.CharField(
+        max_length=64, blank=True, default="", db_index=True,
+    )
 
     class Meta:
         # O dashboard filtra sempre por (usuario, janela de data): os índices de
         # coluna única obrigavam o banco a escolher um e filtrar o resto na mão.
         indexes = [models.Index(fields=["usuario", "criada_em"])]
+
+
+class PublicacaoTentativa(models.Model):
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE,
+        related_name="tentativas_publicacao",
+    )
+    publicacao = models.ForeignKey(
+        Publicacao, on_delete=models.CASCADE, related_name="tentativas",
+    )
+    numero = models.PositiveSmallIntegerField()
+    stage = models.CharField(max_length=32, db_index=True)
+    classification = models.CharField(max_length=24, blank=True, default="")
+    result = models.CharField(max_length=32, blank=True, default="")
+    reason_code = models.CharField(max_length=64, blank=True, default="")
+    duration_ms = models.PositiveIntegerField(default=0)
+    next_retry_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["publicacao", "numero"], name="uniq_publication_attempt",
+            ),
+        ]
+
+
+class PublicacaoEvento(models.Model):
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE,
+        related_name="eventos_publicacao",
+    )
+    publicacao = models.ForeignKey(
+        Publicacao, on_delete=models.CASCADE, related_name="eventos_estado",
+    )
+    stage = models.CharField(max_length=32, db_index=True)
+    reason_code = models.CharField(max_length=64, blank=True, default="")
+    safe_detail = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
 
 class CliquePublicacao(models.Model):
@@ -628,6 +804,13 @@ class RelatorioSync(models.Model):
     erro = models.CharField(max_length=500, blank=True, default="")
     registros_criados = models.PositiveIntegerField(default=0)
     registros_atualizados = models.PositiveIntegerField(default=0)
+    prerequisite_code = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    schema_fingerprint = models.CharField(max_length=64, blank=True, default="")
+    linhas_vistas = models.PositiveIntegerField(default=0)
+    linhas_aceitas = models.PositiveIntegerField(default=0)
+    linhas_rejeitadas = models.PositiveIntegerField(default=0)
+    periodo_aplicado_inicio = models.DateField(null=True, blank=True)
+    periodo_aplicado_fim = models.DateField(null=True, blank=True)
     atualizado_em = models.DateTimeField(auto_now=True)
 
     @property
@@ -645,6 +828,31 @@ class RelatorioSync(models.Model):
 
     class Meta:
         unique_together = ("usuario", "marketplace")
+
+
+class WorkerHeartbeat(models.Model):
+    worker_id = models.CharField(max_length=120, unique=True)
+    worker_type = models.CharField(max_length=40, db_index=True)
+    state = models.CharField(max_length=24, default="idle", db_index=True)
+    task_type = models.CharField(max_length=40, blank=True, default="")
+    heartbeat_at = models.DateTimeField(default=timezone.now, db_index=True)
+    details = models.JSONField(default=dict, blank=True)
+
+
+class ResourceLease(models.Model):
+    resource_key = models.CharField(max_length=180, unique=True)
+    owner_token = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    owner_kind = models.CharField(max_length=40, blank=True, default="")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="resource_leases",
+    )
+    acquired_at = models.DateTimeField(null=True, blank=True)
+    heartbeat_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    consecutive_manual = models.PositiveSmallIntegerField(default=0)
+    manual_waiting_since = models.DateTimeField(null=True, blank=True)
+    scheduled_waiting_since = models.DateTimeField(null=True, blank=True)
 
 
 class EventoOperacional(models.Model):

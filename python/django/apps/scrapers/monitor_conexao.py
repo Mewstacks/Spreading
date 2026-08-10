@@ -16,7 +16,12 @@ e-mail não sai — foi assim que quedas passaram meses invisíveis.
 Hoje WhatsApp/ML são globais (single-tenant em transição). As funções já recebem o
 usuário p/ quando a Fase 3 isolar conexão por usuário (sessão WA + auth_{id}.json).
 """
+import logging
+
 from django.utils import timezone
+
+
+logger = logging.getLogger(__name__)
 
 
 def ml_conectado(user=None) -> bool:
@@ -39,7 +44,7 @@ def verificar_e_notificar() -> dict:
     """Checa todos os perfis verificados e dispara alertas. Retorna contadores."""
     from datetime import timedelta
     from django.conf import settings
-    from apps.accounts.models import Perfil
+    from apps.accounts.models import Membership, Perfil, WhatsAppConnection
     from apps.accounts.emails import enviar_alerta_conexao
     from apps.scrapers.conexoes import estado_amazon_relatorios, estado_ml, estado_whatsapp
 
@@ -48,21 +53,47 @@ def verificar_e_notificar() -> dict:
     enviados = 0
     checados = 0
 
-    perfis = (Perfil.objects.select_related("user")
-              .filter(user__is_active=True, email_verificado=True)
-              .exclude(user__email=""))
-    for perfil in perfis:
+    perfis = list(Perfil.objects.select_related("user")
+                  .filter(user__is_active=True, email_verificado=True)
+                  .exclude(user__email=""))
+    perfis_por_usuario = {perfil.user_id: perfil for perfil in perfis}
+    # WhatsApp e sessão ML pertencem à organização. Uma verificação por perfil
+    # duplicava sonda, evento e e-mail quando dois usuários compartilhavam o tenant.
+    for connection in WhatsAppConnection.objects.select_related("organization").filter(
+            organization__status="active"):
+        member_ids = list(Membership.objects.filter(
+            organization=connection.organization, is_active=True,
+            user__is_active=True,
+        ).order_by("role", "created_at").values_list("user_id", flat=True))
+        perfil = next((perfis_por_usuario.get(user_id) for user_id in member_ids
+                       if user_id in perfis_por_usuario), None)
+        if perfil is None:
+            continue
         checados += 1
         # Estado rico (não bool): o motivo entra no evento, e é ele que a Saúde
         # mostra. "WhatsApp caiu" sem dizer se foi o pareamento ou o serviço fora
         # do ar não é acionável.
-        wa = estado_whatsapp(perfil.user, session=perfil.sessao_whatsapp())
+        wa = estado_whatsapp(perfil.user, session=connection.instance_id)
         ml = estado_ml(perfil.user)
-        amazon = estado_amazon_relatorios(perfil.user)
         enviados += _processar(perfil, "WhatsApp", "wa", wa, agora, cooldown,
                                enviar_alerta_conexao)
         enviados += _processar(perfil, "Mercado Livre", "ml", ml, agora, cooldown,
                                enviar_alerta_conexao)
+        # Reconcilia DB ↔ manifest ↔ runtime com capability amarrada exatamente à
+        # organização/sessão. Falha de rede não altera a propriedade no banco.
+        try:
+            from apps.scrapers.whatsapp_client import reconciliar_sessao
+            reconciliar_sessao(connection.instance_id)
+        except Exception as exc:
+            logger.warning(
+                "Reconciliação WhatsApp indisponível para a instância %s: %s",
+                connection.instance_id, type(exc).__name__,
+            )
+
+    # Relatórios Amazon continuam por usuário: a sessão desse portal não é a
+    # conexão compartilhada do WhatsApp/ML.
+    for perfil in perfis:
+        amazon = estado_amazon_relatorios(perfil.user)
         # Só alertamos quem já usa Amazon: uma conta sem tag não pediu integração.
         if perfil.amazon_conectado():
             enviados += _processar(perfil, "Amazon Relatórios", "amazon_relatorio", amazon,
@@ -109,6 +140,7 @@ def _processar(perfil, nome_servico, campo, estado, agora, cooldown, enviar) -> 
                 level="error", usuario=perfil.user,
                 contexto={"servico": nome_servico, "repique": not primeira_vez,
                           "motivo": estado.motivo, "detalhe": estado.detalhe,
+                          "availability_code": estado.availability_code,
                           "fonte": estado.fonte},
             )
             if enviar(perfil.user, nome_servico, caiu=True):

@@ -298,12 +298,12 @@ def _avisar_sem_sessao_ml(user):
 
 class Command(BaseCommand):
     help = ("Loop de automação: scrape (full) / scrape_rapido (flash) / envio / "
-            "cupons / links (afiliação) / relatorios.")
+            "cupons / links (afiliação) / relatorios / manual.")
 
     def add_arguments(self, parser):
         parser.add_argument("--modo",
                             choices=("scrape", "scrape_rapido", "envio", "cupons",
-                                     "links", "relatorios"),
+                                     "links", "relatorios", "manual"),
                             required=True,
                             help="scrape = raspagem completa; scrape_rapido = feed flash; "
                                  "envio = envio pelas regras; cupons = manutenção "
@@ -325,8 +325,50 @@ class Command(BaseCommand):
             self._loop_cupons(opts)
         elif opts["modo"] == "links":
             self._loop_links(opts)
+        elif opts["modo"] == "manual":
+            self._loop_manual(opts)
         else:
             self._loop_relatorios(opts)
+
+    def _loop_manual(self, opts):
+        from apps.scrapers.manual_scraping import (
+            atualizar_diagnostico_fila, existe_job_pendente, processar_proximo_job,
+        )
+        from apps.scrapers.resource_control import (
+            leased_resource, pulse_worker, worker_activity, worker_identity,
+        )
+
+        poll = 15
+        worker_id = worker_identity("manual")
+        logger.info("MANUAL worker no ar; consumidor dedicado da fila do painel")
+        while True:
+            try:
+                _renovar_conexoes_db()
+                pulse_worker("manual", worker_id=worker_id, state="idle")
+                atualizar_diagnostico_fila()
+                if not existe_job_pendente():
+                    time.sleep(poll)
+                    continue
+                with leased_resource("django_chromium", owner_kind="manual") as (
+                    acquired, detail,
+                ):
+                    if not acquired:
+                        atualizar_diagnostico_fila(
+                            resource_owner=detail.get("owner_kind", "scheduled"),
+                        )
+                        time.sleep(poll)
+                        continue
+                    with worker_activity("manual", worker_id, "manual_scraping"):
+                        processar_proximo_job(
+                            worker_id, detail.get("lease_token", ""),
+                        )
+            except DatabaseError as exc:
+                logger.warning("Fila manual aguardando banco: %s", exc)
+                connections.close_all()
+                time.sleep(poll)
+            except Exception:
+                logger.exception("Falha no consumidor dedicado da fila manual")
+                time.sleep(poll)
 
     def _loop_cupons(self, opts):
         tick = max(1, opts["tick"])
@@ -347,18 +389,10 @@ class Command(BaseCommand):
             try:
                 st.write_state("cupons", fase="processando", erro="")
                 _renovar_conexoes_db()
-                from apps.scrapers.carga import operacao_pesada
-                with operacao_pesada() as acquired:
-                    if not acquired:
-                        proximo = timezone.now() + timedelta(seconds=poll)
-                        st.write_state(
-                            "cupons", fase="aguardando_capacidade", erro="",
-                            proximo_ciclo=proximo.isoformat(),
-                            ultima_msg="Aguardando outra tarefa pesada terminar.",
-                        )
-                        continue
-                    with _heartbeat_durante("cupons"):
-                        resultado = _rodar_cupons(lote=lote)
+                # HTTP, parsing e banco não seguram o slot global. Cada adaptador
+                # que realmente abre Playwright adquire o lease no ponto de uso.
+                with _heartbeat_durante("cupons"):
+                    resultado = _rodar_cupons(lote=lote)
                 falhas_banco = 0
                 proximo = timezone.now() + timedelta(minutes=tick)
                 falhas = resultado["falhos"] + resultado["links_falhos"]
@@ -427,22 +461,10 @@ class Command(BaseCommand):
             try:
                 st.write_state("links", fase="gerando", erro="")
                 _renovar_conexoes_db()
-                from apps.scrapers.carga import operacao_pesada
-                with operacao_pesada() as acquired:
-                    if not acquired:
-                        proximo = timezone.now() + timedelta(seconds=POLL)
-                        st.write_state("links", fase="aguardando_capacidade", erro="",
-                                       proximo_ciclo=proximo.isoformat(),
-                                       ultima_msg="Aguardando outra tarefa pesada terminar.")
-                        continue
-                    with _heartbeat_durante("links"):
-                        res = _rodar_links(lote=lote)
-                # A verificação roda FORA do operacao_pesada() e fora do `if` da
-                # geração. Fora do lock porque ela abre um browser só, curto, e
-                # segurar o advisory lock durante ela deixava scrape e scrapeflash
-                # famintos por dezenas de minutos. Fora do `if` porque é justamente
-                # quando NÃO há link novo para gerar que a fila de veredito precisa
-                # ser drenada — ver _rodar_verificacao_links.
+                # Geração e verificação adquirem o slot apenas enquanto o Chromium
+                # está vivo. As queries que selecionam os lotes ficam fora do lease.
+                with _heartbeat_durante("links"):
+                    res = _rodar_links(lote=lote)
                 st.write_state("links", fase="verificando", erro="")
                 with _heartbeat_durante("links"):
                     ver = _rodar_verificacao_links(limite=lote)
@@ -488,7 +510,7 @@ class Command(BaseCommand):
             try:
                 _renovar_conexoes_db()
                 from apps.scrapers.carga import operacao_pesada
-                with operacao_pesada() as acquired:
+                with operacao_pesada(owner_kind="scrape_rapido") as acquired:
                     if not acquired:
                         proximo = timezone.now() + timedelta(seconds=POLL)
                         st.write_state("scrape_rapido", fase="aguardando_capacidade", erro="",
@@ -523,39 +545,6 @@ class Command(BaseCommand):
             # Heartbeat também durante as horas de espera; sem isto o supervisor
             # considera o processo morto após 90s e pode iniciar workers duplicados.
             st.write_state("scrape")
-            # Jobs manuais independem do toggle da automação. O clique apenas enfileira
-            # no banco; este processo os executa sob o mesmo advisory lock dos ciclos
-            # automáticos, portanto fechar/recarregar a aba não interrompe o trabalho.
-            try:
-                from apps.scrapers.manual_scraping import (
-                    existe_job_pendente, processar_proximo_job,
-                )
-                if existe_job_pendente():
-                    _renovar_conexoes_db()
-                    from apps.scrapers.carga import operacao_pesada
-                    with operacao_pesada() as acquired:
-                        if acquired:
-                            st.write_state(
-                                "scrape", fase="raspagem_manual", erro="",
-                                ultima_msg="Executando raspagem solicitada no painel.",
-                            )
-                            with _heartbeat_durante("scrape"):
-                                processar_proximo_job()
-                            falhas_banco = 0
-                            continue
-                        st.write_state(
-                            "scrape", fase="aguardando_capacidade", erro="",
-                            ultima_msg="Raspagem manual aguardando outra tarefa pesada.",
-                        )
-            except DatabaseError as e:
-                falhas_banco += 1
-                _pausar_por_banco("scrape", e, falhas_banco)
-                time.sleep(POLL)
-                continue
-            except Exception:
-                # O executor persiste a falha no próprio job; esta guarda protege o
-                # loop para que um defeito no mecanismo de fila não mate o worker.
-                logger.exception("Falha ao processar fila de raspagem manual")
             if not st.is_enabled("scrape"):
                 st.write_state("scrape", fase="desligado", loja_atual=None,
                                ultima_msg="Desligado — ligue na tela Scraper.")
@@ -568,7 +557,7 @@ class Command(BaseCommand):
                 st.write_state("scrape", fase="raspando", ciclos=ciclos, erro="")
                 _renovar_conexoes_db()
                 from apps.scrapers.carga import operacao_pesada
-                with operacao_pesada() as acquired:
+                with operacao_pesada(owner_kind="scrape") as acquired:
                     if not acquired:
                         proximo = timezone.now() + timedelta(seconds=POLL)
                         st.write_state("scrape", fase="aguardando_capacidade", erro="",
@@ -604,7 +593,14 @@ class Command(BaseCommand):
                                proximo_ciclo=proximo.isoformat(), erro=ERRO_PUBLICO)
 
     def _loop_envio(self, opts):
+        from django.conf import settings
         from apps.scrapers.ofertas import processar_configs_de_envio
+
+        def _consumir_fila_v2():
+            if not settings.SEND_PIPELINE_V2_ENABLED:
+                return []
+            from apps.scrapers.send_pipeline import process_queued_publications
+            return process_queued_publications(limit=20)
 
         tick = max(1, opts["tick"])
         POLL = 15
@@ -626,6 +622,12 @@ class Command(BaseCommand):
                 # Só o timestamp: fase/erro/proximo_ciclo já vêm do fim do tick, e
                 # reescrevê-los aqui apagaria o erro do último ciclo na hora seguinte.
                 st.write_state("envio")
+                try:
+                    fila = _consumir_fila_v2()
+                    if fila:
+                        logger.info("Fila de envio v2: %s lote(s) processado(s)", len(fila))
+                except Exception:
+                    logger.exception("Falha ao consumir fila de envio v2")
                 time.sleep(POLL)
                 continue
             agora = timezone.now()
@@ -664,6 +666,7 @@ class Command(BaseCommand):
                             logger.info("Purga de eventos: %s linha(s) removida(s)", apagados)
                     except Exception as e:
                         logger.warning("Purga de eventos falhou: %s", e)
+                fila = _consumir_fila_v2()
                 res = processar_configs_de_envio()
                 falhas_banco = 0
                 enviados = sum(1 for r in res if r.get("sucesso"))
@@ -678,6 +681,7 @@ class Command(BaseCommand):
                     ultimo_ciclo_fim=timezone.now().isoformat(),
                     proximo_ciclo=(timezone.now() + timedelta(minutes=tick)).isoformat(),
                     vencidas=len(res), enviados=enviados, erro="",
+                    fila_v2_processada=len(fila),
                     ultima_msg=f"{enviados} enviada(s) de {len(res)} vencida(s) às {agora:%H:%M}.",
                 )
             except DatabaseError as e:
@@ -722,15 +726,11 @@ class Command(BaseCommand):
             try:
                 st.write_state("relatorios", fase="sincronizando", erro="")
                 _renovar_conexoes_db()
-                from apps.scrapers.carga import operacao_pesada
-                with operacao_pesada() as acquired:
-                    if not acquired:
-                        st.write_state("relatorios", fase="aguardando_capacidade", erro="",
-                                       ultima_msg="Aguardando outra tarefa pesada terminar.")
-                        time.sleep(POLL)
-                        continue
-                    with _heartbeat_durante("relatorios"):
-                        resultados = sync_due_reports()
+                # Cada adapter adquire, em ordem estável, o slot global de Chromium
+                # e a sessão exclusiva do portal. Um lock externo aqui causaria
+                # auto-contenção ao tentar adquirir `django_chromium` novamente.
+                with _heartbeat_durante("relatorios"):
+                    resultados = sync_due_reports()
                 falhas_banco = 0
                 if not resultados:
                     # Nada vencido: não é um ciclo, é silêncio. Não mexe no estado

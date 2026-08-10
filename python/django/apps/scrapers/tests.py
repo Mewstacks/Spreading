@@ -431,14 +431,15 @@ class EsperaDeReconexaoDoWhatsAppTests(SimpleTestCase):
         self.assertIsNone(erro)
         self.assertEqual(chamadas, 1)
 
-    def test_reconectando_que_volta_libera_o_envio(self):
-        """O caso central: a sessão volta durante a espera e a promoção sai."""
+    def test_reconectando_nao_bloqueia_a_thread_web(self):
+        """O request devolve transitório; o worker assíncrono fará a retomada."""
         erro, _ = self._canal([
             self._estado(False, "conectando", "WhatsApp reativando a conexão."),
             self._estado(False, "conectando"),
             self._estado(True),
         ])
-        self.assertIsNone(erro)
+        self.assertEqual(erro["classe"], "transitorio")
+        self.assertEqual(erro["etapa"], "transport_queued")
 
     def test_reconectando_que_nao_volta_ainda_e_transitorio(self):
         """Não conta falha da configuração: `pausar_apos_falhas` não pode desligar
@@ -460,9 +461,7 @@ class EsperaDeReconexaoDoWhatsAppTests(SimpleTestCase):
         # Uma leitura no gate; nenhuma volta de espera.
         self.assertEqual(chamadas, 1)
 
-    def test_sessao_inativa_religa_e_o_mesmo_clique_ja_envia(self):
-        """Antes, o clique que religava a sessão nunca era o que enviava: devolvia
-        erro e só a tentativa seguinte encontrava a sessão de pé."""
+    def test_sessao_inativa_religa_sem_bloquear_o_request(self):
         from apps.scrapers import ofertas
 
         with patch("apps.scrapers.ofertas.wa_session_de", return_value="s1"), \
@@ -479,7 +478,8 @@ class EsperaDeReconexaoDoWhatsAppTests(SimpleTestCase):
             erro = ofertas._canal_pronto_ou_erro("whatsapp", object())
 
         religar.assert_called_once()
-        self.assertIsNone(erro)
+        self.assertEqual(erro["classe"], "transitorio")
+        self.assertEqual(erro["etapa"], "transport_queued")
 
     def test_canal_que_nao_e_whatsapp_passa_direto(self):
         from apps.scrapers import ofertas
@@ -1487,6 +1487,42 @@ class WhatsAppErrorTaxonomyTests(SimpleTestCase):
         self.assertFalse(r["sucesso"])
         self.assertEqual(r["classe"], "transitorio")
 
+    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000")
+    def test_corpo_do_worker_e_redigido_e_limitado_a_campos_conhecidos(self):
+        response = Mock(status_code=503)
+        response.json.return_value = {
+            "sucesso": True,
+            "erro": "Bearer capability-secret cookie=session-secret",
+            "classe": "transitorio",
+            "base64": "A" * 400,
+            "payload": {"token": "opaque-secret"},
+        }
+        with self._post(return_value=response):
+            result = whatsapp_client.enviar_oferta(
+                "123@g.us", "mensagem", session="u",
+            )
+
+        serialized = json.dumps(result)
+        self.assertFalse(result["sucesso"])
+        self.assertNotIn("capability-secret", serialized)
+        self.assertNotIn("session-secret", serialized)
+        self.assertNotIn("opaque-secret", serialized)
+        self.assertNotIn("base64", result)
+        self.assertNotIn("payload", result)
+
+    @override_settings(WHATSAPP_API_URL="http://wa.internal:3000")
+    def test_excecao_de_transporte_nao_ecoa_segredo(self):
+        with self._post(side_effect=RuntimeError(
+            "https://wa.internal/send?token=secret cookie=session-secret"
+        )):
+            result = whatsapp_client.enviar_oferta(
+                "123@g.us", "mensagem", session="u",
+            )
+        serialized = json.dumps(result)
+        self.assertNotIn("token=secret", serialized)
+        self.assertNotIn("session-secret", serialized)
+        self.assertEqual(result["causa"], "RuntimeError")
+
 
 class EnvioResilienciaTests(TestCase):
     """Uma indisponibilidade transitória do WhatsApp não pode desligar a
@@ -1609,15 +1645,15 @@ class EnvioResilienciaTests(TestCase):
         self.assertEqual(self.cfg.falhas_consecutivas, 0)
         self.assertEqual(self.cfg.motivo_pausa, "")
 
-    def test_unclassified_failure_keeps_the_old_behaviour(self):
-        # Node antigo no ar, ou o throw minificado do bundle: na dúvida, conta.
+    def test_unclassified_failure_is_infrastructure_and_does_not_pause(self):
+        # Node antigo/throw minificado é incerto: não desliga uma regra válida.
         falha = {"sucesso": False, "motivo": "erro estranho"}
         for _ in range(self.cfg.pausar_apos_falhas):
             self.cfg.proximo_envio = None
             self.cfg.save(update_fields=["proximo_envio"])
             self._processar({"conectado": True}, envio=falha)
 
-        self.assertIsNotNone(self.cfg.pausada_ate)
+        self.assertIsNone(self.cfg.pausada_ate)
 
 
 class SelecionarEEnviarAbortTests(TestCase):
@@ -1986,8 +2022,11 @@ class TopPromocoesFilterTests(TestCase):
         self.assertEqual([p.nome for p in response.context["produtos"]], [nulo.nome])
 
     def test_catalogo_de_cupons_mostra_so_prontos_e_indica_fila(self):
+        from apps.accounts.models import MercadoLivreSession
         from apps.scrapers.coupon_products import atualizar_chave_cupom
-        from apps.scrapers.models import CupomPreparacao, ProdutoCupom
+        from apps.scrapers.models import (
+            CupomPreparacao, LinkAfiliadoCupomUsuario, ProdutoCupom,
+        )
 
         fonte = FonteIngestao.objects.create(
             slug="coupon-counter-source", marketplace="mercadolivre", nome="Cupons")
@@ -2002,6 +2041,15 @@ class TopPromocoesFilterTests(TestCase):
             titulo="Cupom aguardando", codigo="AGUARDA20",
             regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
                     "valor_desconto": 20}, estado="ativo",
+        )
+        MercadoLivreSession.objects.create(
+            organization=self.user.perfil.organization, key_version="v1",
+            wrapped_dek=b"wrapped", wrap_nonce=b"wrap", data_nonce=b"data",
+            ciphertext=b"cipher", status="active", lb_readiness="ready",
+        )
+        LinkAfiliadoCupomUsuario.objects.create(
+            usuario=self.user, cupom=pronto, url_origem=pronto.link or "https://example.com",
+            link_afiliado="https://meli.la/cupom-pronto", afiliado_ok=True,
         )
         CupomPreparacao.objects.create(
             cupom=pronto, usuario=None, status="pronto",
@@ -2023,9 +2071,12 @@ class TopPromocoesFilterTests(TestCase):
 
         self.assertEqual(response.context["cupons_coletados"], 2)
         self.assertEqual(response.context["cupons_prontos"], 1)
-        self.assertEqual(response.context["cupons_aguardando_preparo"], 1)
-        self.assertEqual([c.id for c in response.context["cupons_catalogo"]], [pronto.id])
-        self.assertNotIn(aguardando.id, [c.id for c in response.context["cupons_catalogo"]])
+        self.assertEqual(response.context["cupons_aguardando_preparo"], 0)
+        self.assertEqual(response.context["cupons_aguardando_link"], 1)
+        self.assertEqual(
+            {c.id for c in response.context["cupons_catalogo"]},
+            {pronto.id, aguardando.id},
+        )
 
     def test_coupon_without_validity_older_than_ttl_is_not_collected(self):
         fonte = FonteIngestao.objects.create(
@@ -2283,7 +2334,7 @@ class TopPromocoesFilterTests(TestCase):
         response = self.client.get(self.url)
 
         self.assertEqual([source.slug for source in response.context["fontes"]],
-                         ["mercadolivre-web"])
+                         ["amazon-public-web", "mercadolivre-web"])
 
     @patch("apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
            return_value=12)
@@ -2369,12 +2420,36 @@ class AttributionWorkflowTests(TestCase):
     def test_operational_log_sanitizes_sensitive_context(self):
         from apps.scrapers.eventos import log_event
 
-        log_event("sistema", "secret_test", "testing", usuario=self.user,
-                  contexto={"api_key": "super-secret", "safe": "ok"})
+        try:
+            raise RuntimeError(
+                "Bearer capability-secret cookie=session-secret "
+                "https://portal.example/report?token=query-secret"
+            )
+        except RuntimeError as exc:
+            log_event(
+                "sistema", "secret_test",
+                "Falha com password=message-secret",
+                usuario=self.user,
+                contexto={
+                    "api_key": "super-secret", "safe": "ok",
+                    "detail": "Authorization: context-secret",
+                },
+                exc=exc,
+            )
 
         event = EventoOperacional.objects.get(evento="secret_test")
         self.assertEqual(event.contexto["api_key"], "***")
         self.assertEqual(event.contexto["safe"], "ok")
+        serialized = json.dumps({
+            "message": event.mensagem,
+            "context": event.contexto,
+            "error": event.erro,
+        })
+        for secret in (
+            "message-secret", "context-secret", "capability-secret",
+            "session-secret", "query-secret",
+        ):
+            self.assertNotIn(secret, serialized)
 
     @patch("apps.scrapers.views.wa_conectado", create=True)
     def test_dashboard_is_the_authenticated_home(self, _wa):
@@ -2406,7 +2481,7 @@ class AttributionWorkflowTests(TestCase):
             response = self.client.get(reverse("home"))
 
         self.assertNotContains(response, "Traceback")
-        self.assertNotContains(response, "ML_AFFILIATE_REPORT_URL")
+        self.assertContains(response, "ML_AFFILIATE_REPORT_URL")
         self.assertNotContains(response, "getState")
         self.assertNotContains(response, "Sem botão")
         self.assertContains(response, "Falha temporária na leitura dos relatórios")
@@ -2438,8 +2513,13 @@ class AttributionWorkflowTests(TestCase):
         self.assertTrue(EventoOperacional.objects.filter(
             pipeline="relatorios", evento="sync_ok", usuario=self.user).exists())
 
+    @patch("apps.scrapers.relatorios.report_prerequisites", return_value={
+        "ok": True, "code": "ready", "url": "https://portal.example/report",
+        "instruction": "",
+    })
     @patch("apps.scrapers.relatorios.sync_marketplace")
-    def test_botao_sincronizar_agenda_e_nao_executa_no_request(self, sync_marketplace):
+    def test_botao_sincronizar_agenda_e_nao_executa_no_request(
+            self, sync_marketplace, _prerequisites):
         # O sync sobe um Chromium (Playwright, goto de 45s). Rodar isso dentro do
         # request punha um browser inteiro no processo do gunicorn, contra o timeout
         # de 120s. Agora a view só marca o registro como vencido e o worker executa.
@@ -2843,6 +2923,8 @@ class RankingAndCooldownTests(TestCase):
 
 
 class MonitorCatalogMaintenanceTests(SimpleTestCase):
+    @patch("apps.scrapers.manual_scraping.atualizar_diagnostico_fila", return_value=0)
+    @patch("apps.scrapers.manual_scraping.recuperar_jobs_abandonados", return_value=0)
     @patch("apps.scrapers.incidentes_saude.fechar_conexoes_restabelecidas",
            return_value=0)
     @patch("apps.scrapers.incidentes_saude.reconciliar_pendentes", return_value=0)
@@ -2851,7 +2933,7 @@ class MonitorCatalogMaintenanceTests(SimpleTestCase):
     @patch("apps.scrapers.management.commands.monitorar.verificar_e_notificar",
            return_value={"checados": 1, "alertas_enviados": 0})
     def test_monitor_expires_catalog_even_without_scrape(
-        self, _connections, expire, _reconcile, _close
+        self, _connections, expire, _reconcile, _close, _recover, _queue
     ):
         from apps.scrapers.management.commands.monitorar import Command
 
@@ -3429,6 +3511,27 @@ class ParserDeCupomDeCampanhaTests(TestCase):
         # Parou na trava (MAX_PAGINAS=200), sem varredura completa: nada é expirado.
         self.assertEqual(Cupom.objects.filter(campanha_id__startswith="inf-").count(), 200)
         self.assertEqual(Cupom.objects.get(campanha_id="de-outra-pagina").estado, "ativo")
+
+    def test_pagina_repetida_para_sem_expirar_catalogo_anterior(self):
+        """Se `?page=` for ignorado, a segunda página não pode rodar até 200."""
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        Cupom.objects.create(campanha_id="catalogo-anterior", titulo="Preservado",
+                             estado="ativo", valor_desconto=10.0, valor_minimo=0.0)
+        payload = {"appProps": {"pageProps": {"filteredCouponsData": {
+            "coupons": [{"campaignId": "repetido-1",
+                         "title": {"text": "Cupom repetido"},
+                         "action": {"type": "button"}}]}}}}
+        sess = self._http_falsa([payload, payload, payload])
+
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session",
+                   return_value=sess):
+            salvos = mapear_cupons()
+
+        self.assertEqual(salvos, 1)
+        self.assertLessEqual(sess.get.call_count, 2)
+        self.assertEqual(Cupom.objects.get(campanha_id="catalogo-anterior").estado,
+                         "ativo")
 
     def test_para_na_ultima_pagina_via_pagination_total(self):
         """O payload traz `pagination.total`: a varredura para nele (fim natural) sem
@@ -4145,11 +4248,14 @@ class ParserDeNumeroDeRelatorioTests(SimpleTestCase):
         self.assertEqual(_num("3,2%"), 3.2)
         self.assertEqual(_num("-15,00"), -15.0)
 
-    def test_celula_sem_numero_vira_zero(self):
-        from apps.scrapers.relatorios import _num
+    def test_vazio_e_invalido_nao_sao_confundidos_com_zero(self):
+        from apps.scrapers.relatorios import ReportCellInvalid, _num, _num_typed
 
-        for vazio in ("", None, "—", "n/d", "-"):
-            self.assertEqual(_num(vazio), 0.0, vazio)
+        for vazio in ("", None, "—", "-"):
+            self.assertEqual(_num_typed(vazio), ("empty", None), vazio)
+        with self.assertRaises(ReportCellInvalid):
+            _num("n/d")
+        self.assertEqual(_num("0"), 0.0)
 
 
 class _FakeLocator:
@@ -4211,10 +4317,14 @@ class ExtracaoDeRelatorioTests(TestCase):
             desde or date(2026, 7, 1), ate or date(2026, 7, 15))
 
     def test_le_a_tabela_em_formato_brasileiro(self):
-        linhas = self._extrair([["grupo-casa", "Fone JBL", "1.234", "12", "R$ 1.999,90", "R$ 199,99"]])
+        linhas = self._extrair([[
+            "grupo-casa", "Fone JBL", "1.234", "12", "12",
+            "R$ 1.999,90", "R$ 199,99",
+        ]])
 
         self.assertEqual(len(linhas), 1)
         self.assertEqual(linhas[0].cliques, 1234)
+        self.assertEqual(linhas[0].conversoes, 12)
         self.assertEqual(linhas[0].pedidos, 12)
         self.assertEqual(linhas[0].receita, 1999.90)
         self.assertEqual(linhas[0].comissao, 199.99)
@@ -4225,7 +4335,9 @@ class ExtracaoDeRelatorioTests(TestCase):
         # Achar a tabela e não entender número nenhum é parser errado, não conta
         # zerada. Reportar "ok" aqui é o que produzia R$ 0,00 com selo verde.
         with self.assertRaises(ReportSyncError):
-            self._extrair([["grupo", "Fone", "n/d", "n/d", "n/d", "n/d"]])
+            self._extrair([[
+                "grupo", "Fone", "n/d", "n/d", "n/d", "n/d", "n/d",
+            ]])
 
     def test_sessao_expirada_pede_acao(self):
         from datetime import date
@@ -4571,24 +4683,48 @@ class PublicacaoOrfaTests(TestCase):
             link_afiliado="https://mercadolivre.com/sec/abc",
         )
 
-    def _publicacao(self, status="pendente", idade_horas=0):
+    def _publicacao(self, status="pendente", idade_horas=0, transport_state=""):
         pub = Publicacao.objects.create(
             usuario=self.user, produto=self.produto, canal="whatsapp",
-            destino_id="grupo@g.us", status=status,
+            destino_id="grupo@g.us", status=status, transport_state=transport_state,
         )
         if idade_horas:
             Publicacao.objects.filter(pk=pub.pk).update(
                 criada_em=timezone.now() - timedelta(hours=idade_horas))
         return pub
 
-    def test_pendente_antiga_e_fechada_como_falha(self):
+    @override_settings(SEND_PIPELINE_V2_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
+    def test_pendente_antiga_pre_transporte_e_retomavel_quando_ha_fila(self):
+        # Retomar exige consumidor: a linha precisa estar na fila v2 E o rollout
+        # precisa estar ligado para a organização. Sem isso não há quem processe o
+        # reagendamento, e o desfecho correto é terminal (teste abaixo).
+        from apps.accounts.models import (
+            OrganizationFeatureOverride, ensure_personal_organization,
+        )
+        OrganizationFeatureOverride.objects.create(
+            organization=ensure_personal_organization(self.user),
+            feature="SEND_PIPELINE_V2_ENABLED", state="enabled",
+        )
+        pub = self._publicacao(idade_horas=2, transport_state="queued_v2")
+
+        self.assertEqual(reconciliar_publicacoes_orfas(), 1)
+
+        pub.refresh_from_db()
+        self.assertEqual(pub.status, "pendente")
+        self.assertEqual(pub.stage, "transport_queued")
+        self.assertIsNotNone(pub.next_retry_at)
+        self.assertIn("interrompido", pub.erro)
+
+    @override_settings(SEND_PIPELINE_V2_ENABLED=False)
+    def test_pendente_antiga_sem_fila_que_a_retome_e_fechada(self):
         pub = self._publicacao(idade_horas=2)
 
         self.assertEqual(reconciliar_publicacoes_orfas(), 1)
 
         pub.refresh_from_db()
         self.assertEqual(pub.status, "falhou")
-        self.assertIn("interrompido", pub.erro)
+        self.assertEqual(pub.stage, "cancelled")
+        self.assertIsNone(pub.next_retry_at)
 
     def test_pendente_recente_e_um_envio_em_curso_e_nao_e_tocada(self):
         pub = self._publicacao()
@@ -5543,7 +5679,7 @@ class CuponsAfiliadosMLTests(SimpleTestCase):
         site = por_codigo["SITEWIDE"]
         self.assertTrue(site.coupon_rules["is_mar_aberto"])
         self.assertIn("site inteiro", site.title)
-        self.assertTrue(site.external_id.endswith(":site"))
+        self.assertIn(":site:", site.external_id)
 
         ativo = por_codigo["ATIVO"]
         self.assertEqual(ativo.coupon_rules["valor_desconto"], 20)
@@ -5672,7 +5808,7 @@ class CasarCuponsContainerTests(TestCase):
             titulo=codigo, codigo=codigo, estado="ativo", link="https://x", regras=regras)
 
     def test_confirma_produto_presente_no_container_e_ignora_os_de_fora(self):
-        from apps.scrapers.models import ProdutoCupom
+        from apps.scrapers.models import CupomFonteObservacao, ProdutoCupom
         from apps.scrapers.scraper_mercadolivre.cupons_container import casar_cupons_container
         cont = self._cupom("a:CONT", "CONT20", is_mar_aberto=False, discount_num=20,
                            container_url="https://lista.mercadolivre.com.br/_Container_x",
@@ -5690,6 +5826,34 @@ class CasarCuponsContainerTests(TestCase):
         self.assertFalse(ProdutoCupom.objects.filter(produto=self.fora).exists())
         # Nenhum vínculo criado para o cupom site-wide.
         self.assertFalse(ProdutoCupom.objects.filter(cupom__codigo="SITE10").exists())
+        observacao = CupomFonteObservacao.objects.get(
+            cupom=cont, fonte__slug="ml-public-containers",
+        )
+        self.assertEqual(observacao.outcome, "accepted")
+        self.assertEqual(observacao.reason_code, "container_items_proven")
+        self.assertEqual(observacao.evidence["product_ids"], 1)
+        self.assertNotIn("url", observacao.evidence)
+
+    def test_container_vazio_nao_vira_sucesso_saudavel(self):
+        from apps.scrapers.models import CupomFonteObservacao
+        from apps.scrapers.scraper_mercadolivre.cupons_container import casar_cupons_container
+
+        cont = self._cupom(
+            "a:EMPTY", "EMPTY20", is_mar_aberto=False, discount_num=20,
+            container_url="https://lista.mercadolivre.com.br/_Container_empty",
+            container_name="empty",
+        )
+
+        self.assertEqual(casar_cupons_container(
+            coletor=lambda _url, _paginas: set(), max_paginas=1,
+        ), 0)
+
+        fonte = FonteIngestao.objects.get(slug="ml-public-containers")
+        observacao = CupomFonteObservacao.objects.get(cupom=cont, fonte=fonte)
+        self.assertEqual(fonte.status, "degraded")
+        self.assertEqual(observacao.health_status, "degraded")
+        self.assertEqual(observacao.outcome, "invalid")
+        self.assertEqual(observacao.reason_code, "container_empty_unproven")
 
     def test_sem_cupom_de_container_nao_faz_nada(self):
         from apps.scrapers.scraper_mercadolivre.cupons_container import casar_cupons_container
@@ -5833,6 +5997,38 @@ class EnvioCupomTests(TestCase):
         sender = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
         sender.enviar_oferta.return_value = resultado
         return sender
+
+    def test_codigo_sem_produto_comprovado_e_enviado_como_aviso(self):
+        from apps.scrapers.models import ProdutoCupom
+        from apps.scrapers.ofertas import enviar_cupom
+
+        ProdutoCupom.objects.filter(cupom=self.cupom).delete()
+        sender = self._sender({
+            "sucesso": True, "via": "whatsapp", "mensagem_id": "code-only-1",
+        })
+        with patch(
+            "apps.scrapers.ofertas.resolver_link_afiliado_cupom",
+            return_value={"sucesso": True, "link": "https://meli.la/codigo"},
+        ), patch(
+            "apps.scrapers.ofertas._preparar_itens_cupom",
+            side_effect=AssertionError("código não pode inventar associação a produto"),
+        ), patch(
+            "apps.scrapers.senders.registry.get_sender", return_value=sender,
+        ):
+            resultado = enviar_cupom(
+                self.cupom, "123@g.us", usuario=self.user,
+                imagem_b64_custom="aW1hZ2Vt",
+            )
+
+        self.assertTrue(resultado["sucesso"])
+        self.assertEqual(resultado["link"], "https://meli.la/codigo")
+        args, kwargs = sender.enviar_oferta.call_args
+        self.assertIn("SAVE20", args[1])
+        self.assertEqual(kwargs["imagem_b64"], "aW1hZ2Vt")
+        self.assertFalse(ProdutoCupom.objects.filter(cupom=self.cupom).exists())
+        self.assertEqual(
+            Publicacao.objects.get(cupom_normalizado=self.cupom).status, "enviado",
+        )
 
     @patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom",
            return_value={"sucesso": True, "link": "https://meli.la/afiliado"})
@@ -5993,6 +6189,11 @@ class EnvioCupomTests(TestCase):
         from apps.scrapers.models import CupomPreparacao
         from apps.scrapers.ofertas import enviar_cupom
 
+        # Este gate é exclusivo de ativação. Código digitável sem associação segue
+        # o fluxo de aviso de loja e não deve depender de ProdutoCupom.
+        self.cupom.codigo = ""
+        self.cupom.regras = {**self.cupom.regras, "modo_resgate": "ativacao"}
+        self.cupom.save(update_fields=["codigo", "regras"])
         CupomPreparacao.objects.filter(cupom=self.cupom).update(
             verificado_em=timezone.now() - timedelta(hours=CACHE_HORAS, minutes=1))
         resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
@@ -7170,7 +7371,40 @@ class AvisoCuponsEnvioTests(TestCase):
         self.assertEqual(publicacoes.first().status, "enviado")
         self.assertIn("ENVIO10", enviar.call_args.args[1])
 
-    def test_falha_de_transporte_nao_deixa_publicacao_pendente(self):
+    def test_link_banner_e_mensagem_usam_primeiro_cupom_realmente_aceito(self):
+        from apps.scrapers.ofertas import enviar_aviso_cupons
+
+        activation = CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id="aviso:ATIVACAO",
+            marketplace="amazon", titulo="Ativação inválida para aviso",
+            codigo="", regras={
+                "modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                "valor_desconto": 50,
+            }, estado="ativo", ultima_observacao=timezone.now(),
+        )
+        resolved = {"sucesso": True, "link": "https://meli.la/codigo-valido"}
+        with patch(
+            "apps.scrapers.ofertas._canal_pronto_ou_erro", return_value=None,
+        ), patch(
+            "apps.scrapers.ofertas.resolver_link_afiliado_cupom",
+            return_value=resolved,
+        ) as resolver, patch(
+            "apps.scrapers.banners.sortear_banner_b64", return_value=(None, None),
+        ), patch(
+            "apps.scrapers.senders.whatsapp.WhatsAppSender.enviar_oferta",
+            return_value={"sucesso": True, "via": "whatsapp", "mensagem_id": "wa2"},
+        ) as enviar:
+            result = enviar_aviso_cupons(
+                [activation, self.cupom], "900@g.us", usuario=self.user,
+            )
+
+        self.assertTrue(result["sucesso"])
+        resolver.assert_called_once_with(self.cupom, self.user)
+        sent_message = enviar.call_args.args[1]
+        self.assertIn("ENVIO10", sent_message)
+        self.assertNotIn("Ativação inválida", sent_message)
+
+    def test_falha_transitoria_agenda_retry_sem_duplicar_publicacao(self):
         from apps.scrapers.ofertas import ORIGEM_AVISO_CUPONS, enviar_aviso_cupons
 
         with self._transporte({"sucesso": False, "erro": "sem conexão",
@@ -7179,9 +7413,11 @@ class AvisoCuponsEnvioTests(TestCase):
                 [self.cupom], "900@g.us", usuario=self.user)
 
         self.assertFalse(resultado["sucesso"])
-        self.assertEqual(
-            Publicacao.objects.filter(origem=ORIGEM_AVISO_CUPONS, status="pendente").count(),
-            0)
+        publicacao = Publicacao.objects.get(origem=ORIGEM_AVISO_CUPONS)
+        self.assertEqual(publicacao.status, "pendente")
+        self.assertEqual(publicacao.stage, "transport_queued")
+        self.assertIsNotNone(publicacao.next_retry_at)
+        self.assertEqual(publicacao.attempt_count, 1)
 
     def test_sessao_do_ml_caida_e_transitoria_e_nao_freia_a_regra(self):
         # Se isto virasse falha permanente, cinco quedas de sessão seguidas
@@ -7297,8 +7533,8 @@ class ListagemPublicaDoCupomTests(SimpleTestCase):
         self.assertEqual(
             listagem_publica_ml(self._cupom(link="javascript:alert(1)")), "")
 
-    @override_settings(ML_CUPONS_ATIVACAO_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
-    def test_campanha_com_link_de_lista_vira_publicavel(self):
+    @patch("apps.accounts.feature_flags.enabled_for_user", return_value=True)
+    def test_campanha_com_link_de_lista_vira_publicavel(self, _enabled):
         from apps.scrapers.coupon_rules import ativacao_publicavel
 
         cupom = self._cupom(
