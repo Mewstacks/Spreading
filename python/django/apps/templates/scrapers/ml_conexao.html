@@ -484,6 +484,20 @@
   // Quando há deslocamento real, voltamos para down/move/up e preservamos arraste.
   let pointerGesture = null;
   const DRAG_THRESHOLD_PX = 4;
+  // Maior `seq` já entregue a um POST. Tudo acima disso ainda está só no buffer e
+  // pode ser fundido — ver push().
+  let enviandoAteSeq = 0;
+  // Espelham MAX_TEXTO_POR_EVENTO e MAX_HOLD_MS de ml_live_transport.py: passar do
+  // teto faria o servidor truncar o texto ou o clique.
+  const MAX_TEXTO_POR_EVENTO = 64;
+  const MAX_HOLD_MS = 120;
+  // Duplo clique: PointerEvent.detail é 0 por especificação em pointerdown/pointerup,
+  // então derivar clickCount dele resultava SEMPRE em 1 — não dava para selecionar
+  // uma palavra num campo do login. A contagem é feita aqui, com as mesmas regras que
+  // o navegador usa: mesmo ponto, em sequência rápida.
+  const DBLCLICK_MS = 400;
+  const DBLCLICK_PX = 8;
+  let ultimoClique = null;
   let qrEstavaVisivel = false;
 
   function getCookie(name) {
@@ -566,14 +580,21 @@
   }
   function push(event) {
     const previous = inputBuffer[inputBuffer.length - 1];
-    if (!sending && event.t === 'move' && previous && previous.t === 'move') {
+    // Só é seguro fundir com um evento que AINDA NÃO saiu. O que está no lote em voo
+    // pode voltar confirmado pelo ACK a qualquer instante, e o texto acrescentado
+    // depois iria embora junto com ele. A guarda antiga era `!sending`, que também
+    // proibia fundir o que foi digitado DURANTE o POST — justamente a rajada mais
+    // rápida do usuário. Cada tecla dessas virava um evento e uma chamada CDP
+    // separada no worker; agora elas voltam a caber num bloco só.
+    const fundivel = previous && previous.seq > enviandoAteSeq;
+    if (fundivel && event.t === 'move' && previous.t === 'move') {
       inputBuffer[inputBuffer.length - 1] = {...event, seq:previous.seq};
-    } else if (!sending && event.t === 'char' && previous && previous.t === 'char'
-               && previous.text.length + event.text.length <= 16) {
+    } else if (fundivel && event.t === 'char' && previous.t === 'char'
+               && previous.text.length + event.text.length <= MAX_TEXTO_POR_EVENTO) {
       // Teclas em rajada viram um evento só. O servidor aplica o bloco com
       // page.keyboard.insert_text na mesma ordem, e cada round-trip economizado é um
-      // caractere de atraso a menos para quem digita rápido. O teto de 16 é o mesmo
-      // que limpar_evento aceita no campo `text`.
+      // caractere de atraso a menos para quem digita rápido. O teto é o mesmo que
+      // limpar_evento aceita no campo `text` (MAX_TEXTO_POR_EVENTO).
       inputBuffer[inputBuffer.length - 1] = {...previous, text:previous.text + event.text};
     } else {
       inputBuffer.push({...event, seq:nextInputSeq++});
@@ -595,6 +616,10 @@
     sending = true;
     let entregou = false;
     const batch = inputBuffer.slice(0, 60);
+    // A partir daqui estes seq estão a caminho do servidor: push() não pode mais
+    // mexer neles. O que for digitado durante o POST entra depois desta marca e
+    // continua fundível.
+    enviandoAteSeq = batch[batch.length - 1].seq;
     try {
       const result = await post(`${PREFIX}/input/`, {session_id:sessionId, events:batch});
       if (!result.ok) throw new Error(result.erro || 'input_rejected');
@@ -639,19 +664,38 @@
       clientY:event.clientY,
       point:coords(event),
       button:BTN[event.button] || 'left',
-      clickCount:event.detail || 1,
       dragging:false,
+      // Início do toque: a duração vai junto com o clique para o Chromium reproduzir
+      // o gesto de verdade em vez de um pressionar instantâneo.
+      inicio:Date.now(),
     };
+  }
+  // Repete a regra do navegador para duplo/triplo clique, que os PointerEvents não
+  // entregam prontos (detail é sempre 0 neles).
+  function contarClique(point, button) {
+    const agora = Date.now();
+    const perto = ultimoClique
+      && ultimoClique.button === button
+      && agora - ultimoClique.at <= DBLCLICK_MS
+      && Math.abs(point.x - ultimoClique.x) <= DBLCLICK_PX
+      && Math.abs(point.y - ultimoClique.y) <= DBLCLICK_PX;
+    const count = perto ? Math.min(3, ultimoClique.count + 1) : 1;
+    ultimoClique = {x:point.x, y:point.y, button, at:agora, count};
+    return count;
   }
   function onPointerUp(event) {
     const point = coords(event);
     const gesture = pointerGesture && pointerGesture.pointerId === event.pointerId
       ? pointerGesture : null;
     if (gesture && !gesture.dragging) {
-      push({t:'click', ...point, button:gesture.button, clickCount:event.detail || gesture.clickCount});
+      push({t:'click', ...point, button:gesture.button,
+        clickCount:contarClique(point, gesture.button),
+        holdMs:Math.max(0, Math.min(MAX_HOLD_MS, Date.now() - gesture.inicio))});
     } else {
+      // Fim de arraste não é clique: não conta para o duplo clique e não leva hold.
+      ultimoClique = null;
       push({t:'up', ...point, button:gesture?.button || BTN[event.button] || 'left',
-        clickCount:event.detail || gesture?.clickCount || 1});
+        clickCount:1});
     }
     pointerGesture = null;
     flush();
@@ -672,7 +716,7 @@
       if (dx * dx + dy * dy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) return;
       gesture.dragging = true;
       lastMove = Date.now();
-      push({t:'down', ...gesture.point, button:gesture.button, clickCount:gesture.clickCount});
+      push({t:'down', ...gesture.point, button:gesture.button, clickCount:1});
       push({t:'move', ...coords(event), buttons:event.buttons || 1});
       // O início do arraste precisa chegar sem esperar o timer de hover.
       flush();
@@ -876,6 +920,10 @@
       sessionId = state.session_id;
       nextInputSeq = 1;
       inputBuffer = [];
+      // O seq recomeça do 1: sem zerar a marca do lote em voo, o primeiro evento da
+      // sessão nova nasceria "abaixo" dela e nunca mais seria fundido.
+      enviandoAteSeq = 0;
+      ultimoClique = null;
       lastDrawnSeq = 0;
       lastFrameAt = lastAliveAt = 0;
       liveBloqueadoAte = 0;

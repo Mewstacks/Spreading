@@ -12,8 +12,15 @@ from apps.scrapers.ml_live_transport import (
     BURST_WINDOW_S,
     CAPTURE_ACTIVE_INTERVAL_S,
     CAPTURE_BURST_INTERVAL_S,
+    CAPTURE_BURST_QUALITY,
     CAPTURE_IDLE_INTERVAL_S,
+    CAPTURE_INPUT_INTERVAL_S,
     CAPTURE_QUALITY,
+    INSPECAO_APOS_INPUT_S,
+    LOOP_BURST_MS,
+    LOOP_IDLE_MS,
+    MAX_HOLD_MS,
+    MAX_TEXTO_POR_EVENTO,
     ActivePage,
     InteractiveBrowserCapacityError,
     LiveTransport,
@@ -21,6 +28,9 @@ from apps.scrapers.ml_live_transport import (
     interactive_browser_slot,
     intervalo_de_captura,
     normalizar_viewport,
+    passo_do_loop_ms,
+    pode_inspecionar,
+    qualidade_de_captura,
 )
 
 
@@ -176,19 +186,33 @@ class TransporteEntradaTests(SimpleTestCase):
         click = self.runtime.input_queue.get_nowait()
         text = self.runtime.input_queue.get_nowait()
         self.assertEqual((click["x"], click["y"], click["button"]), (390, 0, "left"))
-        self.assertEqual(len(text["text"]), 16)
+        self.assertEqual(len(text["text"]), MAX_TEXTO_POR_EVENTO)
 
     def test_clique_atomico_e_validado_como_um_unico_evento(self):
         result = self.transport.enqueue(10, self.runtime.session_id, [
             {"seq": 1, "t": "click", "x": 123, "y": 456,
-             "button": "left", "clickCount": 1},
+             "button": "left", "clickCount": 1, "holdMs": 55},
         ])
         self.assertEqual(result["ack"], 1)
         event = self.runtime.input_queue.get_nowait()
         self.assertEqual(
             event,
             {"seq": 1, "t": "click", "x": 123, "y": 456,
-             "button": "left", "clickCount": 1},
+             "button": "left", "clickCount": 1, "holdMs": 55},
+        )
+
+    def test_duracao_do_toque_e_limitada_e_nunca_falta(self):
+        # Um cliente que mande hold absurdo (ou nenhum) não pode segurar o botão do
+        # mouse no Chromium por mais que MAX_HOLD_MS — é a thread do worker que fica
+        # parada ali dentro.
+        self.transport.enqueue(10, self.runtime.session_id, [
+            {"seq": 1, "t": "click", "x": 1, "y": 1, "holdMs": 99999},
+            {"seq": 2, "t": "click", "x": 2, "y": 2, "holdMs": -5},
+            {"seq": 3, "t": "click", "x": 3, "y": 3},
+        ])
+        eventos = [self.runtime.input_queue.get_nowait() for _ in range(3)]
+        self.assertEqual(
+            [e["holdMs"] for e in eventos], [MAX_HOLD_MS, 0, 0],
         )
 
     def test_fila_cheia_retorna_ultimo_ack_realmente_aceito(self):
@@ -212,10 +236,13 @@ class TransporteEntradaTests(SimpleTestCase):
         page = Mock()
         despachar_input(page, {
             "t": "click", "x": 120, "y": 240,
-            "button": "left", "clickCount": 1,
+            "button": "left", "clickCount": 1, "holdMs": 48,
         })
+        # `delay` reproduz o toque que o usuário realmente deu. Sem ele o Playwright
+        # solta o botão no mesmo instante em que aperta, e parte dos widgets de
+        # desafio ignora um gesto de 0ms.
         page.mouse.click.assert_called_once_with(
-            120, 240, button="left", click_count=1,
+            120, 240, button="left", click_count=1, delay=48,
         )
         page.mouse.down.assert_not_called()
         page.mouse.up.assert_not_called()
@@ -286,6 +313,59 @@ class CadenciaDeCapturaTests(SimpleTestCase):
         self.transport.enqueue(30, "sessao-errada", [{"seq": 1, "t": "char", "text": "a"}])
         self.assertEqual(self.runtime.last_input_at, 0.0)
 
+    def test_input_recem_aplicado_captura_no_piso_minimo(self):
+        # O quadro que interessa é o DESTE clique: esperar os 100ms da rajada é o
+        # atraso que fazia o usuário achar que o clique não pegou e clicar de novo.
+        self.runtime.last_input_at = 1000.0
+        self.assertEqual(
+            intervalo_de_captura(self.runtime, now=1000.01, active=True),
+            CAPTURE_INPUT_INTERVAL_S,
+        )
+        self.assertLess(CAPTURE_INPUT_INTERVAL_S, CAPTURE_BURST_INTERVAL_S)
+
+    def test_qualidade_cai_na_rajada_e_volta_com_a_tela_parada(self):
+        self.runtime.last_input_at = 1000.0
+        self.assertEqual(
+            qualidade_de_captura(self.runtime, now=1000.2, active=False),
+            CAPTURE_BURST_QUALITY,
+        )
+        self.assertEqual(
+            qualidade_de_captura(
+                self.runtime, now=1000.0 + BURST_WINDOW_S + 0.1, active=False,
+            ),
+            CAPTURE_QUALITY,
+        )
+        # O quadro nítido é o que fica na tela enquanto se lê um CAPTCHA; o quadro em
+        # movimento é substituído antes de alguém conseguir olhar.
+        self.assertGreater(CAPTURE_QUALITY, CAPTURE_BURST_QUALITY)
+
+    def test_passo_do_loop_acompanha_a_interacao(self):
+        self.runtime.last_input_at = 1000.0
+        self.assertEqual(
+            passo_do_loop_ms(self.runtime, now=1000.2), LOOP_BURST_MS,
+        )
+        self.assertEqual(
+            passo_do_loop_ms(self.runtime, now=1000.0 + BURST_WINDOW_S + 0.1),
+            LOOP_IDLE_MS,
+        )
+
+    def test_sessao_parada_nao_gira_o_loop_a_20hz(self):
+        # Sem input nenhum o worker não tem o que drenar: girar rápido só queimaria
+        # CPU de uma VM que divide 2 vCPU com o Chromium.
+        self.assertEqual(passo_do_loop_ms(self.runtime, now=5.0), LOOP_IDLE_MS)
+
+    def test_inspecao_cede_a_vez_enquanto_o_usuario_digita(self):
+        self.runtime.last_input_at = 1000.0
+        self.assertFalse(pode_inspecionar(self.runtime, now=1000.1))
+        self.assertTrue(
+            pode_inspecionar(self.runtime, now=1000.0 + INSPECAO_APOS_INPUT_S),
+        )
+
+    def test_sessao_sem_input_pode_inspecionar_desde_o_inicio(self):
+        # Senão o worker nunca detectaria desafio nem página de erro numa sessão em
+        # que o usuário ainda não tocou em nada.
+        self.assertTrue(pode_inspecionar(self.runtime, now=1.0))
+
 
 class CapturaEPopupTests(SimpleTestCase):
     def test_captura_publica_frame_numerado(self):
@@ -294,8 +374,9 @@ class CapturaEPopupTests(SimpleTestCase):
         page = Mock()
         page.screenshot.return_value = b"jpeg"
         self.assertTrue(transport.capture(runtime, page, active=True))
+        # `active` significa input recém-aplicado: quadro de rajada, qualidade leve.
         page.screenshot.assert_called_once_with(
-            type="jpeg", quality=CAPTURE_QUALITY, scale="css",
+            type="jpeg", quality=CAPTURE_BURST_QUALITY, scale="css",
         )
         event = next(transport.frames(1, runtime.session_id))
         self.assertEqual(event["event"], "frame")
@@ -504,6 +585,22 @@ class FingerprintDoLoginTests(SimpleTestCase):
         self.assertNotIn(
             "user_agent", opcoes_de_contexto(browser, normalizar_viewport(None)),
         )
+
+    def test_densidade_do_cliente_chega_ao_chromium(self):
+        # Fixar 1.0 no desktop foi medido e descartado: com scale="css" o screenshot
+        # e a vazão de captura são idênticos em 1x e 2x, então a única consequência
+        # seria mudar o devicePixelRatio que o anti-bot do ML lê. Este teste existe
+        # para que a ideia não volte sem medição nova.
+        from apps.scrapers.contexto_login import opcoes_de_contexto
+
+        browser = Mock()
+        browser.new_browser_cdp_session.side_effect = RuntimeError("sem CDP")
+        viewport = normalizar_viewport({
+            "viewport": {"width": 1440, "height": 900},
+            "device_pixel_ratio": 2,
+        })
+        opcoes = opcoes_de_contexto(browser, viewport)
+        self.assertEqual(opcoes["device_scale_factor"], 2.0)
 
 
 class ContratoHTTPLoginMLTests(TestCase):

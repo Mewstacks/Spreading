@@ -120,3 +120,22 @@ class TemplateLiveViewTests(TestCase):
         self.assertIn("push({t:'click'", self.html)
         self.assertIn("push({t:'down'", self.html)
         self.assertIn("gesture.dragging = true", self.html)
+
+    def test_clique_leva_a_duracao_real_do_toque(self):
+        # Um toque de 0ms não é um gesto que exista num usuário de verdade, e parte
+        # dos widgets de desafio o ignora.
+        self.assertIn("inicio:Date.now()", self.html)
+        self.assertIn("holdMs:", self.html)
+
+    def test_teclas_digitadas_durante_o_post_ainda_se_agrupam(self):
+        # A guarda antiga era `!sending`, que proibia fundir justamente a rajada mais
+        # rápida do usuário: cada tecla digitada durante o round-trip virava um evento
+        # e uma chamada CDP separada no worker.
+        self.assertIn("previous.seq > enviandoAteSeq", self.html)
+        self.assertNotIn("!sending && event.t === 'char'", self.html)
+
+    def test_duplo_clique_e_contado_no_cliente(self):
+        # PointerEvent.detail é 0 por especificação em pointerdown/pointerup: derivar
+        # clickCount dele dava sempre 1 e não havia como selecionar uma palavra.
+        self.assertIn("function contarClique(", self.html)
+        self.assertNotIn("clickCount:event.detail", self.html)

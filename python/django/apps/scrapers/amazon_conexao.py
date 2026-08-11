@@ -23,10 +23,11 @@ from django.core.cache import cache
 
 from apps.scrapers.erros_conexao import mensagem_de_erro, novo_codigo
 from apps.scrapers.ml_conexao import (
-    GOTO_TIMEOUT_MS, LOGIN_DEADLINE_S, LOOP_MS, MAX_EVENTOS_POR_POST,
+    GOTO_TIMEOUT_MS, LOGIN_DEADLINE_S, MAX_EVENTOS_POR_POST,
 )
 from apps.scrapers.ml_live_transport import (
     ActivePage, LiveTransport, despachar_input, interactive_browser_slot,
+    passo_do_loop_ms, pode_inspecionar,
 )
 from apps.scrapers.report_sessions import has_report_session, save_report_state
 from apps.accounts.tenant import organization_job_sem_transacao
@@ -142,8 +143,8 @@ def _worker(user):
                 _set(uid, fase="aguardando_login", erro="",
                      session_id=runtime.session_id, viewport=runtime.viewport)
                 deadline, logged = time.time() + LOGIN_DEADLINE_S, False
-                # O loop gira a 20Hz (LOOP_MS=50) para bombear frames e drenar input,
-                # mas nem o cache nem o DOM mudam nessa escala. Ler os dois a cada
+                # O loop gira rápido (passo_do_loop_ms) para bombear frames e drenar
+                # input, mas nem o cache nem o DOM mudam nessa escala. Ler os dois a cada
                 # volta custava, POR SEGUNDO, 20 idas ao cache e 20 consultas de
                 # seletor CSS via CDP — dentro do processo do gunicorn, segurando a
                 # GIL e derrubando a latência das outras 7 threads. O ML já tinha
@@ -173,7 +174,8 @@ def _worker(user):
                         houve_input = True
                     _transport.capture(runtime, current_page, active=houve_input)
 
-                    if state.get("salvar_agora"):
+                    validacao_manual = bool(state.get("salvar_agora"))
+                    if validacao_manual:
                         # O botão de salvar também valida a sessão na página que o
                         # sincronizador usará, sem depender da URL da landing.
                         _set(uid, fase="validando", salvar_agora=False)
@@ -194,7 +196,14 @@ def _worker(user):
                             _set(uid, fase="aguardando_login",
                                  aviso="Ainda não foi possível confirmar o login. "
                                        "Conclua a etapa aberta e tente de novo.")
-                    if agora >= proxima_checagem:
+                    # `pode_inspecionar` adia a checagem enquanto o usuário digita: o
+                    # `_logado` é uma consulta de seletor por CDP na mesma thread que
+                    # precisa aplicar a tecla e capturar a tela. O "já entrei" não
+                    # espera — a fase já foi para "validando" e adiar deixaria a tela
+                    # presa nela sem veredito.
+                    if agora >= proxima_checagem and (
+                        validacao_manual or pode_inspecionar(runtime)
+                    ):
                         proxima_checagem = agora + 1.0
                         if _logado(current_page):
                             logged = True
@@ -203,7 +212,7 @@ def _worker(user):
                                 "validation=conectado", uid,
                             )
                             break
-                    current_page.wait_for_timeout(LOOP_MS)
+                    current_page.wait_for_timeout(passo_do_loop_ms(runtime))
                 if logged:
                     _set(uid, fase="salvando")
                     # Só a leitura fica aqui. Gravar depois do bloco mantém o mesmo

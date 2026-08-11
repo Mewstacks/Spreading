@@ -40,6 +40,8 @@ from apps.scrapers.ml_live_transport import (
     LiveTransport,
     despachar_input as despachar_input_v2,
     interactive_browser_slot,
+    passo_do_loop_ms,
+    pode_inspecionar,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,7 +57,8 @@ LOGIN_URL = (
 RECARGAS_APOS_ERRO = 1           # o gateway do ML às vezes aceita na 2ª tentativa
 
 LOGIN_DEADLINE_S = 600           # tempo máx. esperando o usuário logar
-LOOP_MS = 50                     # granularidade do worker (bombeia CDP + drena input)
+# A granularidade do worker (bombeia CDP + drena input) não é mais fixa: vem de
+# passo_do_loop_ms, que a aperta enquanto o usuário mexe e a afrouxa quando não.
 GOTO_TIMEOUT_MS = 60000          # em prod (IP de datacenter) o gateway de login demora
 GOTO_TENTATIVAS = 2              # timeout na 1ª tenta de novo antes de desistir
 SNAPSHOT_INTERVAL_S = 2.5        # de quanto em quanto tempo olhamos os cookies
@@ -390,9 +393,17 @@ def _validar_linkbuilder_ao_vivo(user_id: int, active_page, runtime, context,
     ultimo_motivo = "o Link Builder não ficou disponível"
     last_beat = 0.0
     proxima_checagem_qr = 0.0
+    proxima_checagem_pagina = 0.0
     qr_deadline_estendido = False
+    ultima_leitura_estado = 0.0
+    estado = {}
     while time.time() < deadline:
-        estado = cache.get(_cache_key(user_id)) or {}
+        # Mesmo tratamento do laço principal: os comandos do usuário (cancelar,
+        # retentar) não mudam 20x/s, e agora que o passo do laço acompanha a
+        # digitação uma leitura por volta seria uma ida ao Redis a cada 10ms.
+        if time.time() - ultima_leitura_estado > 0.5:
+            estado = cache.get(_cache_key(user_id)) or {}
+            ultima_leitura_estado = time.time()
         if estado.get("cancelar"):
             if estado.get("fase") == "configurar_qr":
                 logger.info(
@@ -440,7 +451,7 @@ def _validar_linkbuilder_ao_vivo(user_id: int, active_page, runtime, context,
                             "aberta; tente verificar novamente."
                         ),
                     )
-            current_page.wait_for_timeout(LOOP_MS)
+            current_page.wait_for_timeout(passo_do_loop_ms(runtime))
             continue
 
         houve_input = False
@@ -454,45 +465,54 @@ def _validar_linkbuilder_ao_vivo(user_id: int, active_page, runtime, context,
         _transport.capture(runtime, current_page, active=houve_input)
 
         agora = time.time()
-        if agora >= proxima_checagem_qr:
+        # As duas inspeções abaixo custam locator/evaluate no Chromium. Elas cedem a
+        # vez enquanto o usuário interage (pode_inspecionar) porque esta tela também
+        # pode apresentar desafio, e ali o clique é que precisa da thread.
+        pausa_para_o_usuario = not pode_inspecionar(runtime)
+        if agora >= proxima_checagem_qr and not pausa_para_o_usuario:
             proxima_checagem_qr = agora + 1.0
             if pagina_exige_configuracao_qr(current_page):
                 if not qr_deadline_estendido:
                     deadline = agora + LOGIN_DEADLINE_S
                     qr_deadline_estendido = True
                 _marcar_configuracao_qr(user_id, "linkbuilder")
-                current_page.wait_for_timeout(LOOP_MS)
+                current_page.wait_for_timeout(passo_do_loop_ms(runtime))
                 continue
 
-        if _linkbuilder_pronto(current_page):
-            return "ready", "campo de URL e botão Gerar confirmados"
-        if _pagina_de_login(current_page):
-            ultimo_estado = "login_required"
-            ultimo_motivo = "o portal de afiliados pediu login"
-            _set_estado(
-                user_id, fase="aguardando_linkbuilder", aviso=(
-                    "O Link Builder pediu uma etapa adicional. Conclua o login "
-                    "ou a verificação nesta janela."
-                ),
-            )
-        elif _pagina_intersticial(current_page):
-            ultimo_estado = "temporarily_unavailable"
-            ultimo_motivo = "verificação de segurança interposta"
-            _set_estado(
-                user_id, fase="aguardando_linkbuilder", aviso=(
-                    "O Mercado Livre pediu uma verificação de segurança. "
-                    "Conclua a etapa nesta janela para validar o Link Builder."
-                ),
-            )
-        else:
-            ultimo_estado = "temporarily_unavailable"
-            ultimo_motivo = "os controles do Link Builder não apareceram"
-            _set_estado(user_id, fase="validando_linkbuilder")
+        # Os três testes de página rodavam a CADA volta — 60 chamadas CDP por segundo
+        # a 20Hz, e o ramo `else` ainda gravava no cache junto. Uma vez por segundo
+        # basta: é uma tela em que se espera o portal responder, não uma animação.
+        if agora >= proxima_checagem_pagina and not pausa_para_o_usuario:
+            proxima_checagem_pagina = agora + 1.0
+            if _linkbuilder_pronto(current_page):
+                return "ready", "campo de URL e botão Gerar confirmados"
+            if _pagina_de_login(current_page):
+                ultimo_estado = "login_required"
+                ultimo_motivo = "o portal de afiliados pediu login"
+                _set_estado(
+                    user_id, fase="aguardando_linkbuilder", aviso=(
+                        "O Link Builder pediu uma etapa adicional. Conclua o login "
+                        "ou a verificação nesta janela."
+                    ),
+                )
+            elif _pagina_intersticial(current_page):
+                ultimo_estado = "temporarily_unavailable"
+                ultimo_motivo = "verificação de segurança interposta"
+                _set_estado(
+                    user_id, fase="aguardando_linkbuilder", aviso=(
+                        "O Mercado Livre pediu uma verificação de segurança. "
+                        "Conclua a etapa nesta janela para validar o Link Builder."
+                    ),
+                )
+            else:
+                ultimo_estado = "temporarily_unavailable"
+                ultimo_motivo = "os controles do Link Builder não apareceram"
+                _set_estado(user_id, fase="validando_linkbuilder")
 
         if time.time() - last_beat > 8:
             _set_estado(user_id)
             last_beat = time.time()
-        current_page.wait_for_timeout(LOOP_MS)
+        current_page.wait_for_timeout(passo_do_loop_ms(runtime))
 
     return ultimo_estado, ultimo_motivo
 
@@ -617,7 +637,7 @@ def _worker(user_id: int):
                                 raise
                             _transport.capture(runtime, current_page, active=True)
                             last_error_check = 0.0
-                        current_page.wait_for_timeout(LOOP_MS)
+                        current_page.wait_for_timeout(passo_do_loop_ms(runtime))
                         continue
 
                     # Drena e aplica os eventos confirmados pelo protocolo sequencial.
@@ -635,7 +655,16 @@ def _worker(user_id: int):
                     # da tela de login. Antes disso passar batido, o worker seguia
                     # esperando um login que já havia sido recusado até o deadline de 10
                     # minutos, e o log não registrava nada.
-                    if agora - last_error_check > SNAPSHOT_INTERVAL_S:
+                    #
+                    # `pode_inspecionar` segura estes dois page.evaluate enquanto o
+                    # usuário está clicando/digitando: quando o tick de 2,5s caía no
+                    # meio de um CAPTCHA, o próprio diagnóstico era o que atrasava o
+                    # quadro. O relógio não é reiniciado, então a checagem acontece na
+                    # primeira volta silenciosa em vez de ser pulada.
+                    if (
+                        agora - last_error_check > SNAPSHOT_INTERVAL_S
+                        and pode_inspecionar(runtime)
+                    ):
                         last_error_check = agora
                         if pagina_exige_configuracao_qr(current_page):
                             if not qr_deadline_estendido:
@@ -647,7 +676,7 @@ def _worker(user_id: int):
                             pending_state = None
                             manual_validation = False
                             estado = _marcar_configuracao_qr(user_id, "login")
-                            current_page.wait_for_timeout(LOOP_MS)
+                            current_page.wait_for_timeout(passo_do_loop_ms(runtime))
                             continue
                         if _pagina_de_erro_do_ml(current_page):
                             logger.info(
@@ -693,11 +722,16 @@ def _worker(user_id: int):
                     # Com uma sonda EM VOO o snapshot é puro desperdício: o `submit`
                     # abaixo seria descartado de qualquer forma, e a mudança acumulada
                     # aparece no snapshot seguinte. Uma verificação manual ("já entrei")
-                    # não espera o intervalo.
+                    # não espera o intervalo NEM o silêncio: é um clique explícito do
+                    # usuário, e fazê-lo esperar seria justamente o oposto do que ele
+                    # pediu. O tick automático, esse, cede a vez para a digitação.
                     agora = time.monotonic()
                     if pending_validation is None and (
                         manual_validation
-                        or agora - ultima_leitura_storage >= SNAPSHOT_INTERVAL_S
+                        or (
+                            agora - ultima_leitura_storage >= SNAPSHOT_INTERVAL_S
+                            and pode_inspecionar(runtime, now=agora)
+                        )
                     ):
                         ultima_leitura_storage = agora
                         snapshot = context.storage_state()
@@ -748,7 +782,7 @@ def _worker(user_id: int):
                         last_beat = time.time()
 
                     # Bombeia eventos do Playwright, inclusive popup/nova aba.
-                    current_page.wait_for_timeout(LOOP_MS)
+                    current_page.wait_for_timeout(passo_do_loop_ms(runtime))
 
                 if logado:
                     prontidao_linkbuilder, motivo_linkbuilder = (

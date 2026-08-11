@@ -34,8 +34,16 @@ DESKTOP_HEIGHT = (700, 1000)
 # Qualidade 78 num viewport de 1280x800 dava ~150 KB por quadro: a 14 FPS são mais de
 # 2 MB/s por aba, mais do que a maioria das conexões entrega. O excesso não vira imagem
 # melhor, vira fila — o quadro chegava atrasado, o watchdog acusava queda e o aviso de
-# reconexão cobria o login. 64 mantém o texto do formulário nítido pela metade do peso.
-CAPTURE_QUALITY = 64
+# reconexão cobria o login.
+#
+# Duas qualidades, não uma. Quem lê um CAPTCHA ou confere o que digitou está com a tela
+# PARADA: é ali que a nitidez importa, e ali a captura acontece 1x/s — cabe pagar 70.
+# Enquanto o usuário mexe, cada quadro vive ~100ms e é substituído antes de alguém
+# conseguir olhar; 45 corta ~40% dos bytes e do tempo de encode do Chromium, que é
+# exatamente o que estava entre o clique e o pixel. A troca de qualidade muda o digest,
+# então o primeiro quadro depois que a tela para já sai nítido pelo caminho normal.
+CAPTURE_QUALITY = 70
+CAPTURE_BURST_QUALITY = 45
 # Três faixas de cadência, escolhidas pelo tempo desde o último input do usuário.
 # 250ms fixos (4 FPS) davam um eco de quase meio segundo por tecla e tornavam captcha
 # de arrastar impossível de resolver. A rajada de ~10 FPS existe SÓ enquanto o usuário
@@ -47,9 +55,20 @@ CAPTURE_ACTIVE_INTERVAL_S = 0.25
 CAPTURE_IDLE_INTERVAL_S = 1.0
 BURST_WINDOW_S = 1.5
 ACTIVE_WINDOW_S = 5.0
-# O gerador SSE acompanha a rajada; fora dela não faz sentido acordar 20x/s.
-STREAM_POLL_BURST_S = 0.02
-STREAM_POLL_IDLE_S = 0.05
+# Piso para a captura que segue um input RECÉM-APLICADO. Os 100ms da rajada existem
+# para conter CPU no rastro de uma interação; logo depois de aplicar o clique eles
+# viravam espera pura — até 100ms entre apertar e ver, no único instante em que o
+# usuário está olhando para aquilo. O custo do próprio screenshot já é o limitador
+# real; este piso só evita uma enxurrada de capturas durante um arraste.
+CAPTURE_INPUT_INTERVAL_S = 0.03
+# Passo do laço dos workers de login — ver passo_do_loop_ms.
+LOOP_BURST_MS = 10
+LOOP_IDLE_MS = 120
+# Silêncio mínimo antes de o worker voltar a gastar CDP com inspeção — ver
+# pode_inspecionar.
+INSPECAO_APOS_INPUT_S = 0.6
+# O gerador SSE não faz mais polling: ele dorme em ``LiveRuntime.frame_event`` e é
+# acordado pela própria captura. As constantes de intervalo saíram junto.
 # 4s, não 10s: o heartbeat é a única prova de vida quando a tela não muda (CAPTCHA
 # sendo lido, formulário parado). Com 10s ele mal cabia no watchdog de 12s do cliente,
 # que então acusava queda numa sessão perfeitamente saudável.
@@ -61,6 +80,13 @@ HEARTBEAT_INTERVAL_S = 4.0
 STREAM_STALE_MS = 12000
 MAX_EVENTOS_POR_POST = 60
 MAX_QUEUE_SIZE = 2000
+# Quantos caracteres o front pode agrupar num evento `char`. Era 16, escolhido quando
+# a fusão só acontecia entre dois POSTs; agora o cliente também funde o que é digitado
+# DURANTE um POST em voo, e 16 partia uma frase de senha em blocos que viravam
+# chamadas CDP separadas. 64 cabe numa senha inteira e continua sendo um teto barato.
+MAX_TEXTO_POR_EVENTO = 64
+# Teto da duração do toque repassada ao Chromium — ver despachar_input.
+MAX_HOLD_MS = 120
 
 # Os três live views (site ML, relatórios ML e Associados Amazon) vivem no mesmo
 # processo gunicorn. Eles não podem usar ResourceLease: a role web é tenant-only e
@@ -192,6 +218,11 @@ def limpar_evento(evento: dict, width: int, height: int) -> dict | None:
                 else "left"
             )
             clean["clickCount"] = _int_limited(evento.get("clickCount"), 1, 1, 3)
+            if kind == "click":
+                # Duração real do toque medida no cliente — ver despachar_input.
+                clean["holdMs"] = _int_limited(
+                    evento.get("holdMs"), 0, 0, MAX_HOLD_MS,
+                )
         elif kind == "wheel":
             try:
                 clean["dx"] = float(evento.get("dx", 0))
@@ -203,7 +234,7 @@ def limpar_evento(evento: dict, width: int, height: int) -> dict | None:
         return clean
 
     if kind == "char":
-        text = str(evento.get("text", ""))[:16]
+        text = str(evento.get("text", ""))[:MAX_TEXTO_POR_EVENTO]
         if not text:
             return None
         clean["text"] = text
@@ -238,6 +269,11 @@ class LiveRuntime:
     stream_state: str = "reconectando"
     closed: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
+    # Acordado por ``capture`` quando há quadro NOVO. O gerador SSE dormia num
+    # ``time.sleep`` fixo e só descobria o quadro na volta seguinte: até 50ms de
+    # atraso puro no fim do caminho, mais 20-50 acordadas/s de uma thread que na
+    # maior parte do tempo não tinha nada a fazer.
+    frame_event: threading.Event = field(default_factory=threading.Event)
 
     def public_state(self) -> dict:
         with self.lock:
@@ -271,23 +307,69 @@ class LiveRuntime:
             }
 
 
+def em_rajada(runtime: LiveRuntime, *, now: float) -> bool:
+    """True enquanto o usuário está interagindo agora (ou acabou de interagir)."""
+    return bool(runtime.last_input_at) and now - runtime.last_input_at <= BURST_WINDOW_S
+
+
+def passo_do_loop_ms(runtime: LiveRuntime, *, now: float | None = None) -> int:
+    """Quanto o worker do browser dorme entre uma volta e a próxima.
+
+    Era fixo em 50ms: um evento recém-chegado esperava 25ms em média sem ninguém
+    drenar a fila, e o worker acordava 20x/s pelos 10 minutos inteiros do deadline
+    mesmo com o usuário lendo um SMS. Os dois lados estavam errados na mesma
+    constante. Agora o passo segue a janela de rajada — mais rápido enquanto o
+    usuário mexe, e bem mais barato quando ele não mexe.
+
+    O ``wait_for_timeout`` também é o que bombeia os eventos do Playwright (popup,
+    aba nova), por isso continua existindo em vez de virar um ``queue.get``
+    bloqueante.
+    """
+    now = time.monotonic() if now is None else now
+    return LOOP_BURST_MS if em_rajada(runtime, now=now) else LOOP_IDLE_MS
+
+
+def pode_inspecionar(runtime: LiveRuntime, *, now: float | None = None) -> bool:
+    """False enquanto o usuário está clicando/digitando NESTE instante.
+
+    As inspeções periódicas do worker (``storage_state``, detecção de desafio de
+    QR, detecção da página de erro, controles do Link Builder) custam de um a três
+    round-trips CDP cada, na MESMA thread que precisa despachar o clique e tirar o
+    screenshot. Quando o tick delas caía no meio de uma digitação, o eco daquela
+    tecla dobrava. Nada que elas observam — cookie de login, texto da página —
+    muda em meio segundo, então adiar a volta é de graça.
+    """
+    now = time.monotonic() if now is None else now
+    if not runtime.last_input_at:
+        return True
+    return now - runtime.last_input_at >= INSPECAO_APOS_INPUT_S
+
+
 def intervalo_de_captura(runtime: LiveRuntime, *, now: float, active: bool) -> float:
     """Cadência da próxima captura, pelo tempo desde o último input do usuário.
 
-    ``active`` significa que o worker acabou de aplicar input nesta volta do loop e
-    força a rajada. A janela em ``last_input_at`` mantém a rajada por um instante
-    depois disso, porque o efeito de um clique (menu abrindo, campo validando, peça
-    de captcha voltando ao lugar) costuma continuar rendendo quadros por mais de um
-    tick — era aí que a tela parecia travar em degraus.
+    ``active`` significa que o worker acabou de aplicar input nesta volta do loop:
+    o quadro que interessa é o DESTE input, então a captura sai no piso mínimo. A
+    janela em ``last_input_at`` mantém a rajada por um instante depois disso, porque
+    o efeito de um clique (menu abrindo, campo validando, peça de captcha voltando
+    ao lugar) costuma continuar rendendo quadros por mais de um tick — era aí que a
+    tela parecia travar em degraus.
     """
     if active:
-        return CAPTURE_BURST_INTERVAL_S
+        return CAPTURE_INPUT_INTERVAL_S
     desde_input = now - runtime.last_input_at
     if runtime.last_input_at and desde_input <= BURST_WINDOW_S:
         return CAPTURE_BURST_INTERVAL_S
     if runtime.last_input_at and desde_input <= ACTIVE_WINDOW_S:
         return CAPTURE_ACTIVE_INTERVAL_S
     return CAPTURE_IDLE_INTERVAL_S
+
+
+def qualidade_de_captura(runtime: LiveRuntime, *, now: float, active: bool) -> int:
+    """Qualidade JPEG do próximo quadro — ver CAPTURE_QUALITY."""
+    if active or em_rajada(runtime, now=now):
+        return CAPTURE_BURST_QUALITY
+    return CAPTURE_QUALITY
 
 
 class LiveTransport:
@@ -304,6 +386,9 @@ class LiveTransport:
             previous = self._runtimes.get(user_id)
             if previous:
                 previous.closed = True
+                # Acorda o gerador SSE da sessão antiga: ele dorme no frame_event e
+                # sem isto seguraria a thread do gunicorn até o heartbeat vencer.
+                previous.frame_event.set()
             self._runtimes[user_id] = runtime
         return runtime
 
@@ -318,6 +403,7 @@ class LiveTransport:
             if current:
                 current.closed = True
                 current.stream_state = "interrompida"
+                current.frame_event.set()
             self._runtimes.pop(user_id, None)
 
     def status(self, user_id: int) -> dict:
@@ -393,7 +479,9 @@ class LiveTransport:
             return False
         try:
             raw = page.screenshot(
-                type="jpeg", quality=CAPTURE_QUALITY, scale="css",
+                type="jpeg",
+                quality=qualidade_de_captura(runtime, now=now, active=active),
+                scale="css",
             )
             if not isinstance(raw, (bytes, bytearray)):
                 return False
@@ -433,6 +521,8 @@ class LiveTransport:
                 runtime.first_frame_at = wall_now
                 first_frame = True
             runtime.stream_state = "ao_vivo"
+        # Fora do lock: o gerador SSE acorda e vai querer o mesmo lock para ler o seq.
+        runtime.frame_event.set()
         if first_frame:
             logger.info(
                 "ml_login_metric transport=%s user=%s first_frame_ms=%s",
@@ -463,6 +553,10 @@ class LiveTransport:
         last_seq = 0
         last_emit = time.monotonic()
         while not runtime.closed:
+            # Limpar ANTES de ler: se a captura sinalizar entre o clear e a leitura, o
+            # seq novo já aparece aqui; se sinalizar depois da leitura, o evento fica
+            # armado e o `wait` abaixo volta na hora. Nenhuma das ordens perde quadro.
+            runtime.frame_event.clear()
             data = ""
             with runtime.lock:
                 seq = runtime.frame_seq
@@ -471,18 +565,28 @@ class LiveTransport:
                 # também disputa. Agora só o inteiro do seq é lido no caso comum.
                 if seq > last_seq:
                     data = runtime.frame_data
-                em_rajada = (
-                    bool(runtime.last_input_at)
-                    and time.monotonic() - runtime.last_input_at <= BURST_WINDOW_S
-                )
             if data:
                 last_seq = seq
                 last_emit = time.monotonic()
                 yield {"event": "frame", "id": seq, "data": data}
-            elif time.monotonic() - last_emit >= HEARTBEAT_INTERVAL_S:
+                continue
+            restante = HEARTBEAT_INTERVAL_S - (time.monotonic() - last_emit)
+            if restante <= 0:
                 last_emit = time.monotonic()
                 yield {"event": "heartbeat", "data": str(last_seq)}
-            time.sleep(STREAM_POLL_BURST_S if em_rajada else STREAM_POLL_IDLE_S)
+                continue
+            # Dorme até a captura publicar um quadro ou o heartbeat vencer, em vez de
+            # acordar 20-50x/s para descobrir que nada mudou. O quadro sai do servidor
+            # no instante em que existe.
+            #
+            # O teto de 0,25s é a rede de segurança: `frame_event` é UM evento por
+            # sessão, e durante a janela em que um stream antigo ainda não percebeu
+            # que o cliente sumiu os dois generators competem pelo mesmo sinal — quem
+            # perder o wakeup esperaria o heartbeat inteiro, e 4s de imagem parada é
+            # exatamente o congelamento que este trabalho existe para eliminar. Com o
+            # teto o custo cai para 250ms, e no caso normal o wait continua voltando
+            # no instante da captura.
+            runtime.frame_event.wait(timeout=min(restante, 0.25))
 
 
 class ActivePage:
@@ -544,10 +648,19 @@ def despachar_input(page, event: dict) -> None:
             # round-trip inteiro; em desafios de selecionar imagens o site às vezes
             # descartava esse gesto artificialmente longo. Arrastes continuam usando
             # down/move/up e, portanto, não perdem a semântica de pressão contínua.
+            #
+            # ``holdMs`` é a duração que o usuário REALMENTE segurou o botão, medida
+            # no cliente e limitada a MAX_HOLD_MS. Sem ela o Playwright solta o botão
+            # no mesmo instante em que o aperta, e um toque de 0ms é um gesto que
+            # componente nenhum vê num usuário de verdade — parte dos widgets de
+            # desafio simplesmente ignora. Reproduzir o toque medido é mais fiel do
+            # que arbitrar uma constante, e o teto impede que uma sessão presa num
+            # botão segure a thread do worker.
             page.mouse.click(
                 event["x"], event["y"],
                 button=event.get("button", "left"),
                 click_count=event.get("clickCount", 1),
+                delay=event.get("holdMs", 0),
             )
         elif kind == "wheel":
             page.mouse.move(event["x"], event["y"])

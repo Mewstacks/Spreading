@@ -715,3 +715,70 @@ class EscopoAninhadoRestauraContextoTests(TestCase):
 
         self.assertEqual(atores[-2], "7")
         self.assertEqual(atores[-1], "")
+
+
+class ContextoDeOrganizacaoCacheadoTests(TestCase):
+    """Resolver o tenant custava três consultas em TODA request autenticada.
+
+    No live view das conexões cada clique e cada tecla é um POST próprio, e um POST
+    que nem toca no ORM estava pagando essas três idas ao Postgres antes de a view
+    começar — no mesmo processo que hospeda o Chromium do login. O cache só é
+    aceitável porque a invalidação é imediata: uma decisão de RBAC não pode ser
+    servida de uma foto velha.
+    """
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        self.user = get_user_model().objects.create_user("ctx-cache", password="test")
+        self.user.perfil.marcar_verificado()
+        self.organization = self.user.personal_organization
+
+    def _resolver(self):
+        from apps.accounts import organization_middleware
+
+        return organization_middleware._resolver(self.user)
+
+    def test_segunda_resolucao_nao_volta_ao_banco(self):
+        self._resolver()
+        with self.assertNumQueries(0):
+            organization, membership = self._resolver()
+        self.assertEqual(organization.pk, self.organization.pk)
+        self.assertEqual(membership.role, "owner")
+
+    def test_revogar_vinculo_vale_na_request_seguinte(self):
+        self._resolver()
+        membership = Membership.objects.get(
+            organization=self.organization, user=self.user,
+        )
+        membership.is_active = False
+        membership.save()
+        # Sem o signal, o acesso revogado continuaria valendo até o TTL vencer.
+        _organization, membership_apos = self._resolver()
+        self.assertIsNone(membership_apos)
+
+    def test_pk_reciclada_nao_herda_a_organizacao_anterior(self):
+        # O rollback de cada TestCase devolve a sequência: o usuário 1 de um teste
+        # não é o usuário 1 do seguinte. A entrada guarda o date_joined justamente
+        # para que uma PK reaproveitada não sirva a resolução da conta antiga.
+        from apps.accounts import organization_middleware
+
+        self._resolver()
+        outro = get_user_model().objects.create_user("ctx-outro", password="test")
+        # Mesma PK, conta diferente: é o cenário que o TestCase produz sozinho.
+        outro.pk = self.user.pk
+        _organization, _membership = organization_middleware._resolver(outro)
+        cached = organization_middleware.cache.get(
+            organization_middleware._cache_key(outro.pk),
+        )
+        self.assertEqual(cached[0], outro.date_joined)
+
+    def test_middleware_instala_organizacao_e_vinculo_na_request(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse("scraper-ml-conexao"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.wsgi_request.organization.pk, self.organization.pk)
+        self.assertEqual(
+            response.wsgi_request.organization_membership.role, "owner",
+        )

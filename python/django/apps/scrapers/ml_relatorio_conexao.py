@@ -23,10 +23,11 @@ from django.core.cache import cache
 
 from apps.scrapers.erros_conexao import mensagem_de_erro, novo_codigo
 from apps.scrapers.ml_conexao import (
-    GOTO_TIMEOUT_MS, LOGIN_DEADLINE_S, LOOP_MS, MAX_EVENTOS_POR_POST,
+    GOTO_TIMEOUT_MS, LOGIN_DEADLINE_S, MAX_EVENTOS_POR_POST,
 )
 from apps.scrapers.ml_live_transport import (
     ActivePage, LiveTransport, despachar_input, interactive_browser_slot,
+    passo_do_loop_ms, pode_inspecionar,
 )
 from apps.scrapers.report_sessions import has_report_session, save_report_state
 from apps.accounts.tenant import organization_job_sem_transacao
@@ -166,13 +167,13 @@ def _worker(user):
                     session_id=runtime.session_id, viewport=runtime.viewport,
                 )
                 deadline, logged = time.time() + LOGIN_DEADLINE_S, False
-                # O laço gira a 20Hz (LOOP_MS=50) para drenar input e publicar frames,
-                # mas nem o cache nem o DOM mudam nessa escala. Ler os dois a cada volta
-                # custava, POR SEGUNDO, 20 idas ao cache e 20 consultas de seletor via
-                # CDP dentro do processo do gunicorn, segurando a GIL. `ml_conexao` e
-                # `amazon_conexao` já desacoplavam isso; este worker nunca recebeu a
-                # correção e era o mais caro dos três. Meio segundo de latência num
-                # clique de cancelar ninguém percebe.
+                # O laço gira rápido (passo_do_loop_ms) para drenar input e publicar
+                # frames, mas nem o cache nem o DOM mudam nessa escala. Ler os dois a
+                # cada volta custava, POR SEGUNDO, 20 idas ao cache e 20 consultas de
+                # seletor via CDP dentro do processo do gunicorn, segurando a GIL.
+                # `ml_conexao` e `amazon_conexao` já desacoplavam isso; este worker
+                # nunca recebeu a correção e era o mais caro dos três. Meio segundo de
+                # latência num clique de cancelar ninguém percebe.
                 state = {}
                 proxima_leitura = 0.0
                 proxima_checagem = 0.0
@@ -220,7 +221,7 @@ def _worker(user):
                                 ) from exc
                             _transport.capture(runtime, current_page, active=True)
                             proxima_checagem = 0.0
-                        current_page.wait_for_timeout(LOOP_MS)
+                        current_page.wait_for_timeout(passo_do_loop_ms(runtime))
                         continue
 
                     had_input = False
@@ -253,8 +254,16 @@ def _worker(user):
                         _transport.capture(runtime, current_page, active=True)
                         proxima_checagem = 0.0  # navegou: confere já
 
-                    if agora < proxima_checagem:
-                        current_page.wait_for_timeout(LOOP_MS)
+                    # `pode_inspecionar` adia o bloco enquanto o usuário digita: o
+                    # `_logado` e o teste de desafio abaixo são chamadas CDP na mesma
+                    # thread que precisa aplicar a tecla e capturar a tela. Uma
+                    # verificação manual não espera: ela é um clique explícito, e a
+                    # fase já está em "validando" — adiá-la deixaria a tela parada
+                    # nesse estado sem nunca dar o veredito daquela tentativa.
+                    if agora < proxima_checagem or not (
+                        validate_now or pode_inspecionar(runtime)
+                    ):
+                        current_page.wait_for_timeout(passo_do_loop_ms(runtime))
                         continue
                     proxima_checagem = agora + 1.0
                     if pagina_exige_configuracao_qr(current_page):
@@ -262,7 +271,7 @@ def _worker(user):
                             deadline = agora + LOGIN_DEADLINE_S
                             qr_deadline_estendido = True
                         state = _marcar_configuracao_qr(uid)
-                        current_page.wait_for_timeout(LOOP_MS)
+                        current_page.wait_for_timeout(passo_do_loop_ms(runtime))
                         continue
                     authenticated = _logado(current_page)
                     if validate_now or authenticated:
@@ -282,7 +291,7 @@ def _worker(user):
                                 "aberta no Mercado Livre e verifique novamente."
                             ),
                         )
-                    current_page.wait_for_timeout(LOOP_MS)
+                    current_page.wait_for_timeout(passo_do_loop_ms(runtime))
                 if logged:
                     _set(uid, fase="salvando")
                     # Só a leitura fica aqui. Gravar depois do bloco mantém o mesmo

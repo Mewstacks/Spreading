@@ -134,6 +134,11 @@ def opcoes_de_contexto(browser, viewport: dict, *, permissions=None) -> dict:
     opcoes = {
         **opcoes_de_coerencia(browser),
         "viewport": {"width": viewport["width"], "height": viewport["height"]},
+        # Continua vindo do cliente. Medi a hipótese de fixar 1.0 no desktop (o
+        # transporte captura com scale="css", então o 2x nunca chega na tela do
+        # usuário): screenshot e vazão de captura deram IDÊNTICOS em 1x e 2x — o
+        # custo está no caminho CDP, não na rasterização. Sem ganho medido, não vale
+        # mexer no devicePixelRatio que o anti-bot do ML enxerga.
         "device_scale_factor": viewport["device_pixel_ratio"],
         "is_mobile": viewport["device_class"] == "mobile",
         "has_touch": viewport["pointer"] == "coarse",
