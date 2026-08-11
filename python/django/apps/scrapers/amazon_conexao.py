@@ -23,7 +23,7 @@ from django.core.cache import cache
 
 from apps.scrapers.erros_conexao import mensagem_de_erro, novo_codigo
 from apps.scrapers.ml_conexao import (
-    GOTO_TIMEOUT_MS, LOGIN_DEADLINE_S, MAX_EVENTOS_POR_POST,
+    GOTO_TENTATIVAS, GOTO_TIMEOUT_MS, LOGIN_DEADLINE_S, MAX_EVENTOS_POR_POST,
 )
 from apps.scrapers.ml_live_transport import (
     ActivePage, LiveTransport, despachar_input, interactive_browser_slot,

@@ -335,7 +335,8 @@ class Command(BaseCommand):
             atualizar_diagnostico_fila, existe_job_pendente, processar_proximo_job,
         )
         from apps.scrapers.resource_control import (
-            leased_resource, pulse_worker, worker_activity, worker_identity,
+            leased_resource, machine_resource_slot, pulse_worker, worker_activity,
+            worker_identity,
         )
 
         poll = 15
@@ -358,10 +359,21 @@ class Command(BaseCommand):
                         )
                         time.sleep(poll)
                         continue
-                    with worker_activity("manual", worker_id, "manual_scraping"):
-                        processar_proximo_job(
-                            worker_id, detail.get("lease_token", ""),
-                        )
+                    machine_busy = False
+                    with machine_resource_slot("django_chromium") as machine_acquired:
+                        if not machine_acquired:
+                            atualizar_diagnostico_fila(resource_owner="interactive")
+                            machine_busy = True
+                        else:
+                            with worker_activity("manual", worker_id, "manual_scraping"):
+                                processar_proximo_job(
+                                    worker_id, detail.get("lease_token", ""),
+                                )
+                # Dorme depois que os dois locks foram liberados. Dormir dentro do
+                # lease impediria os demais workers de usar o browser sem necessidade.
+                if machine_busy:
+                    time.sleep(poll)
+                    continue
             except DatabaseError as exc:
                 logger.warning("Fila manual aguardando banco: %s", exc)
                 connections.close_all()

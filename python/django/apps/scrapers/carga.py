@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from django.db import connections
 from django.conf import settings
 from apps.accounts.tenant import in_system_context
-from apps.scrapers.resource_control import leased_resource
+from apps.scrapers.resource_control import leased_resource, machine_resource_slot
 
 
 class BrowserResourceUnavailable(RuntimeError):
@@ -34,7 +34,18 @@ def operacao_pesada(*, resource_key="django_chromium", owner_kind="scheduled",
     with leased_resource(
         resource_key, owner_kind=owner_kind, organization=organization,
     ) as (acquired, _detail):
-        yield acquired
+        if not acquired:
+            yield False
+            return
+        # O lease acima coordena workers via Postgres. O lock local inclui também
+        # os logins interativos do processo web, cuja role RLS não pode acessar a
+        # tabela de leases. Só o slot global representa CPU/memória da VM; locks de
+        # sessão continuam exclusivamente no banco.
+        if resource_key != "django_chromium":
+            yield True
+            return
+        with machine_resource_slot(resource_key) as machine_acquired:
+            yield machine_acquired
 
 
 @contextmanager

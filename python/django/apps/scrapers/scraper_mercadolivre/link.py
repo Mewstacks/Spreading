@@ -21,6 +21,7 @@ from apps.scrapers.link_validacao import (
 )
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
 from apps.scrapers.carga import coordinated_ml_browser
+from apps.scrapers.resource_control import interesse_interativo_pendente
 from apps.scrapers.progresso import emitir_fase
 from apps.accounts.ml_sessions import has_storage_state
 from apps.accounts.tenant import executar_no_tenant
@@ -695,6 +696,17 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
         total_lote = len(pendentes)
         logger.info("Gerando links afiliados ML em lote para %s produtos", total_lote)
         for i, prod in enumerate(pendentes, 1):
+            # Alguém está esperando o navegador para logar AGORA. Um lote de 40
+            # itens segura o Chromium da máquina por minutos; sem esta saída o
+            # login interativo esgotava a espera e a tela abria e fechava sozinha.
+            # Sair aqui não perde trabalho: os itens já gerados estão salvos e os
+            # restantes voltam ao topo da fila no ciclo seguinte.
+            if i > 1 and interesse_interativo_pendente("django_chromium"):
+                logger.info(
+                    "Lote de links ML cedeu o navegador a um login interativo "
+                    "após %s de %s item(ns).", i - 1, total_lote,
+                )
+                break
             emitir_fase(f"Link {i}/{total_lote}", i / total_lote,
                         faixa or (0, 100))
             # Ofertas do feed têm campanha_id vazio: _montar_url_isca trata isso e só

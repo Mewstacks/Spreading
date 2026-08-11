@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import hashlib
 import json
@@ -14,6 +15,7 @@ from django.utils import timezone
 from apps.scrapers.coupon_rules import normalizar_regras_cupom, numero_br
 from apps.scrapers.sources.base import IngestedItem
 
+logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.awin.com"
 RESTRICTION_WORDS = (

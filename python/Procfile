@@ -6,24 +6,26 @@
 # e login nunca concluía. Carga é baixa (poucos usuários); --threads dá concorrência p/
 # o polling/SSE sem multiprocessar.
 web: gunicorn core.wsgi:application --chdir django --bind 0.0.0.0:8080 --workers 1 --threads 8 --timeout 120
-scrape: env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape --scrape-horas 3
-manual: env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo manual
-scrapeflash: env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape_rapido --tick 5
+# Evita a avalanche pós-deploy: antes todos os loops nasciam vencidos e importavam
+# Django/abriam rede/browser juntos, exatamente enquanto o usuário validava a versão.
+monitor: sleep 10 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar --tick 5
+envio: sleep 20 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo envio --tick 5
+manual: sleep 30 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo manual
 # Cupons têm janela segura de 3h e precisam continuar prontos mesmo quando a
 # raspagem geral está desligada. O pipeline isola fontes e roda a cada 15 minutos.
-cupons: env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo cupons --tick 15 --lote 40
-envio: env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo envio --tick 5
+cupons: sleep 45 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo cupons --tick 15 --lote 40
+scrapeflash: sleep 60 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape_rapido --tick 5
 # links: sem este processo nada gera link de afiliado e a tela de Promoções mostra
 # tudo como "pendente" -- cada raspagem so aumentava a pilha. Lote pequeno: cada link
 # custa ~5s no Link Builder e divide Chromium/CPU com a raspagem e o painel.
-links: env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo links --tick 5 --lote 40
+links: sleep 75 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo links --tick 5 --lote 40
 # sem --tick: a cadencia de cada sync e o proxima_execucao do proprio RelatorioSync
 # (6h). O worker so checa a cada 60s quem venceu -- e por isso o botao "Sincronizar"
 # da tela responde em ~1min em vez de esperar o tick de 6h.
-relatorios: env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo relatorios
+scrape: sleep 90 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape --scrape-horas 3
+relatorios: sleep 105 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo relatorios
 # watchdog de conexoes + projecao de incidentes. Processo PROPRIO e sem flag de
 # liga/desliga: antes isto era um passageiro do tick de envio, entao com o envio
 # desligado ninguem monitorava nada -- "conexao_voltou" nunca saia e os incidentes
 # de conexao ficavam abertos para sempre (Saude vermelha, dashboard verde).
-monitor: env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar --tick 5
-canais: env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar_canais --tick 60
+canais: sleep 120 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar_canais --tick 60

@@ -782,3 +782,10 @@ class ContextoDeOrganizacaoCacheadoTests(TestCase):
         self.assertEqual(
             response.wsgi_request.organization_membership.role, "owner",
         )
+        # Helpers executados pela view reutilizam o objeto que o middleware acabou
+        # de autorizar; não repetem Perfil + Organization + Membership.
+        from apps.accounts.models import organization_for_user
+
+        with self.assertNumQueries(0):
+            organization = organization_for_user(response.wsgi_request.user)
+        self.assertEqual(organization.pk, self.organization.pk)

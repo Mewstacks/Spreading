@@ -2,7 +2,9 @@
 
 import os
 import socket
+import tempfile
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -25,6 +27,123 @@ MANUAL_AGING_SECONDS = 10 * 60
 # local ao contexto de execução: não torna o lease reentrante entre threads,
 # processos, organizações ou requests diferentes.
 _held_resources = ContextVar("scraper_held_resources", default=None)
+_held_machine_resources = ContextVar(
+    "scraper_held_machine_resources", default=None,
+)
+
+
+# Quanto tempo um pedido interativo continua valendo depois de anunciado. É um
+# teto de segurança, não a espera em si: quem anuncia apaga o marcador ao sair, e
+# um processo morto no meio do login não pode calar os workers para sempre.
+INTERESSE_INTERATIVO_TTL_S = 120
+
+
+def _caminho_de_lock(resource_key: str, sufixo: str = "lock") -> str:
+    safe_key = "".join(
+        char if char.isalnum() or char in {"-", "_"} else "_"
+        for char in str(resource_key)
+    )[:100]
+    lock_dir = os.getenv("SPREADING_RESOURCE_LOCK_DIR", tempfile.gettempdir())
+    os.makedirs(lock_dir, exist_ok=True)
+    return os.path.join(lock_dir, f"spreading-{safe_key}.{sufixo}")
+
+
+@contextmanager
+def interesse_interativo(resource_key: str = "django_chromium"):
+    """Anuncia que uma PESSOA está esperando este recurso agora.
+
+    O flock sozinho não bastava: quem o segura é um lote (40 links a ~5s cada, ou
+    uma raspagem inteira), e o login interativo espera 15s e desiste — a tela abria
+    e fechava com "a automação está concluindo uma tarefa de navegador" durante os
+    minutos inteiros em que a lane de links roda. Nenhum dos dois lados estava
+    errado sozinho; faltava o worker saber que havia alguém na fila.
+
+    O marcador é um arquivo no mesmo diretório do lock, então cruza os nove
+    processos do Procfile sem depender do banco (a role web não lê a tabela de
+    leases) nem de cache (LocMem é por processo).
+    """
+    caminho = _caminho_de_lock(resource_key, "wanted")
+    try:
+        with open(caminho, "w") as marcador:
+            marcador.write(str(int(time.time())))
+    except OSError:
+        # Sinalizar é otimização, não pré-requisito: sem o marcador o login volta
+        # ao comportamento antigo (espera e, no limite, desiste).
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            os.unlink(caminho)
+        except OSError:
+            pass
+
+
+def interesse_interativo_pendente(resource_key: str = "django_chromium") -> bool:
+    """True enquanto um login interativo espera por este recurso.
+
+    Lotes longos consultam isto ENTRE itens para devolver o navegador. Terminar o
+    item corrente e sair é sempre seguro: cada lane é retomada no ciclo seguinte,
+    de onde parou.
+    """
+    try:
+        idade = time.time() - os.stat(_caminho_de_lock(resource_key, "wanted")).st_mtime
+    except OSError:
+        return False
+    return idade <= INTERESSE_INTERATIVO_TTL_S
+
+
+@contextmanager
+def machine_resource_slot(resource_key: str, *, wait_seconds: float = 0):
+    """Lock de processo para o recurso físico compartilhado nesta Fly Machine.
+
+    O lease PostgreSQL coordena os workers, mas a role web não pode ler a tabela
+    system-only de leases. Os logins interativos, portanto, ficavam invisíveis aos
+    workers e dois Chromiums podiam disputar a mesma VM. ``flock`` fecha exatamente
+    essa lacuna: todos os processos do Procfile compartilham o mesmo /tmp e o lock é
+    liberado pelo kernel inclusive após crash/restart.
+
+    ``wait_seconds`` só é usado pela experiência interativa. Workers falham rápido e
+    retomam no próximo tick; o login pode esperar brevemente o browser atual fechar,
+    sem abrir um segundo processo pesado enquanto isso.
+    """
+    held = _held_machine_resources.get() or set()
+    if resource_key in held:
+        yield True
+        return
+
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - produção é Linux; fallback para Windows.
+        yield True
+        return
+
+    handle = open(_caminho_de_lock(resource_key), "a+")
+    deadline = time.monotonic() + max(0.0, float(wait_seconds))
+    acquired = False
+    try:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.1)
+        if not acquired:
+            yield False
+            return
+        context_token = _held_machine_resources.set({*held, resource_key})
+        try:
+            yield True
+        finally:
+            _held_machine_resources.reset(context_token)
+    finally:
+        if acquired:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def worker_identity(worker_type: str) -> str:

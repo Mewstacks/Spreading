@@ -102,6 +102,13 @@ _interactive_browser_slots = threading.BoundedSemaphore(
 )
 
 
+# Quanto o login espera o navegador da máquina ficar livre. Um lote que acabou de
+# começar um item precisa terminá-lo antes de ver o pedido interativo; 45s cobrem
+# com folga o item mais caro (uma ida ao Link Builder, ~5s, ou uma navegação com
+# o gateway anti-bot da Fly no caminho) sem deixar a tela parada sem veredito.
+WAIT_NAVEGADOR_S = 45
+
+
 class InteractiveBrowserCapacityError(RuntimeError):
     """A VM web já está atendendo outro login interativo."""
 
@@ -115,7 +122,29 @@ def interactive_browser_slot():
             "Aguarde ele terminar ou cancele-o antes de tentar novamente."
         )
     try:
-        yield
+        # O semáforo acima enxerga os três live views do Gunicorn, mas não os
+        # processos de scrape/link/cupom do Procfile. O lock de máquina é a ponte
+        # entre os dois mundos. Esperar é melhor que abrir dois Chromiums e
+        # transformar o login inteiro numa fila de CPU de dezenas de segundos.
+        #
+        # `interesse_interativo` é o que torna a espera curta: sem ele o login
+        # disputava contra LOTES (40 links a ~5s, ou uma raspagem inteira) e os 15s
+        # originais expiravam sempre que uma lane pesada estava rodando — a tela
+        # abria e fechava sozinha durante minutos seguidos. Anunciado o pedido, o
+        # lote devolve o navegador no fim do item corrente.
+        from apps.scrapers.resource_control import (
+            interesse_interativo, machine_resource_slot,
+        )
+
+        with interesse_interativo("django_chromium"), machine_resource_slot(
+            "django_chromium", wait_seconds=WAIT_NAVEGADOR_S,
+        ) as machine_acquired:
+            if not machine_acquired:
+                raise InteractiveBrowserCapacityError(
+                    "A automação está concluindo uma tarefa de navegador. "
+                    "Aguarde alguns segundos e tente iniciar o login novamente."
+                )
+            yield
     finally:
         _interactive_browser_slots.release()
 

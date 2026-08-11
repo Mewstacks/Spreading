@@ -274,7 +274,65 @@ def _cupons_visiveis(usuario):
     ).filter(cupons_frescos_q())
 
 
-def afiliar_cupons(usuario, *, limite=80, faixa=None):
+def afiliar_cupons_de_codigo(usuario, cupons, *, limite=8):
+    """Pré-gera o link afiliado dos cupons de CÓDIGO do Mercado Livre.
+
+    Sem esta etapa o funil tinha um impasse fechado: ``coupon_readiness._codigo``
+    exige um ``LinkAfiliadoCupomUsuario`` verificado para marcar o cupom como
+    ``ready``, e a ÚNICA rotina que gravava essa linha era ``enviar_cupom`` — que a
+    tela só oferece quando o cupom já está ``ready``. Resultado observado em
+    produção: todo cupom de código do ML aparecia listado e permanentemente
+    "indisponível / aguardando link", sem nada no sistema capaz de promovê-lo.
+
+    O lote é pequeno de propósito: cada item abre o Link Builder (~5s) e divide o
+    Chromium com a raspagem e com os logins interativos. Uma sessão derrubada
+    interrompe o lote em vez de gastar as tentativas restantes contra a mesma
+    recusa.
+    """
+    from apps.scrapers.coupon_rules import codigo_publicavel
+    from apps.scrapers.models import LinkAfiliadoCupomUsuario
+    from apps.scrapers.ofertas import resolver_link_afiliado_cupom
+
+    candidatos = [
+        cupom for cupom in cupons
+        if str(cupom.marketplace or "").lower() == "mercadolivre"
+        and codigo_publicavel(cupom)
+    ]
+    if not candidatos:
+        return {"gerados": 0, "falhas": 0, "pendentes": 0}
+    ja_tem = set(LinkAfiliadoCupomUsuario.objects.filter(
+        usuario=usuario, cupom_id__in=[c.pk for c in candidatos], afiliado_ok=True,
+    ).exclude(link_afiliado="").values_list("cupom_id", flat=True))
+    pendentes = [c for c in candidatos if c.pk not in ja_tem]
+
+    gerados = falhas = 0
+    for cupom in pendentes[:max(0, limite)]:
+        try:
+            resolucao = resolver_link_afiliado_cupom(cupom, usuario)
+        except Exception:
+            falhas += 1
+            logger.exception("Link afiliado do cupom %s falhou para %s",
+                             cupom.pk, usuario.pk)
+            continue
+        if resolucao.get("sucesso"):
+            gerados += 1
+            continue
+        falhas += 1
+        if resolucao.get("precisa_login_ml"):
+            # A sessão caiu: as próximas tentativas dariam a mesma recusa e
+            # custariam um Chromium cada. O ciclo seguinte retoma.
+            logger.warning(
+                "Afiliação de cupons de código interrompida: sessão ML expirada "
+                "(usuário %s).", usuario.pk,
+            )
+            break
+    return {
+        "gerados": gerados, "falhas": falhas,
+        "pendentes": max(0, len(pendentes) - gerados),
+    }
+
+
+def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
     """Gera e verifica links dos produtos realmente ligados por ProdutoCupom."""
     from apps.scrapers.coupon_products import (
         ids_cupons_prontos, relacoes_preparadas_para_envio,
@@ -301,7 +359,14 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None):
         "prontos": 0,
         "por_marketplace": {},
     }
+    # Antes do early return de `produtos`: cupom de código não tem produto
+    # vinculado por construção, então ficava fora de todo o caminho de afiliação.
+    codigo = afiliar_cupons_de_codigo(usuario, cupons, limite=limite_codigo)
+    metricas["links_gerados"] += codigo["gerados"]
+    metricas["links_falhos"] += codigo["falhas"]
+    metricas["cupons_codigo_pendentes"] = codigo["pendentes"]
     if not produtos:
+        metricas["prontos"] = len(ids_cupons_prontos(usuario, cupons))
         return metricas
 
     agora = timezone.now()

@@ -133,6 +133,13 @@ class OrganizationContextMiddleware:
                     content_type="text/plain; charset=utf-8",
                 )
 
+            # O objeto User pertence exclusivamente a esta request. Guardar nele a
+            # organização que acabou de passar por Membership/RBAC evita que cada
+            # helper da mesma tela repita a resolução (Perfil + Organization +
+            # Membership). O dashboard fazia isso para ML, Link Builder e WhatsApp,
+            # multiplicando a latência intermitente do Postgres sem ganhar segurança.
+            user._spreading_authorized_organization = organization
+
             # Nem superuser recebe bypass silencioso no processo web. Suporte
             # cross-tenant exige comando/worker com role dedicada e trilha própria.
             request.tenant_system_access = False

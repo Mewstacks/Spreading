@@ -77,6 +77,45 @@ class TransporteAmazonTests(TestCase):
         self.assertEqual(resultado["ack"], 3)
 
 
+class AberturaDoLoginTests(TestCase):
+    """`_abrir_login` é a PRIMEIRA coisa que o worker faz depois de abrir o Chromium.
+
+    Ele citava `GOTO_TENTATIVAS` sem importar o nome: toda tentativa de conectar a
+    Amazon morria num NameError, o `except` do worker virava fase="erro" e o live
+    view fechava sozinho — o sintoma relatado ("a tela abre e fecha"). Nenhum teste
+    exercitava esta função, então o defeito era invisível para a suíte inteira.
+    """
+
+    class _PageQueNavega:
+        def __init__(self):
+            self.urls = []
+
+        def goto(self, url, **_kwargs):
+            self.urls.append(url)
+
+    class _PageQueEstoura:
+        def __init__(self):
+            self.tentativas = 0
+
+        def goto(self, _url, **_kwargs):
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+            self.tentativas += 1
+            raise PlaywrightTimeoutError("timeout")
+
+    def test_navegacao_bem_sucedida_abre_o_login_oficial(self):
+        page = self._PageQueNavega()
+        amazon_conexao._abrir_login(page)
+        self.assertEqual(page.urls, [amazon_conexao.LOGIN_URL])
+
+    def test_timeout_repetido_vira_erro_legivel_e_nao_nameerror(self):
+        page = self._PageQueEstoura()
+        with self.assertRaises(RuntimeError) as capturado:
+            amazon_conexao._abrir_login(page)
+        self.assertIn("Amazon demorou demais", str(capturado.exception))
+        self.assertEqual(page.tentativas, amazon_conexao.GOTO_TENTATIVAS)
+
+
 class TemplateLiveViewTests(TestCase):
     """Tela parada (CAPTCHA sendo lido) não pode acusar queda sozinha."""
 

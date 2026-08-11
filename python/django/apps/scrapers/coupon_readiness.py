@@ -12,7 +12,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from apps.accounts.feature_flags import feature_decision
-from apps.accounts.models import MercadoLivreSession, organization_for_user
+from apps.accounts.models import organization_for_user
 from apps.scrapers.coupon_products import mapa_relacoes_prontas
 from apps.scrapers.coupon_rules import (
     codigo_publicavel, cupom_publicavel, listagem_publica_ml, regras_do_cupom,
@@ -40,6 +40,42 @@ def _resultado(stage, category="", reason="", detail="", retry_at=None):
     }
 
 
+def conexao_ml(usuario):
+    """Veredito ÚNICO da conexão ML para uma projeção inteira.
+
+    Antes cada cupom lia ``MercadoLivreSession.status`` cru. Isso era uma SEGUNDA
+    fonte de verdade ao lado de ``conexoes.estado_ml``, que é a que as telas
+    renderizam — e as duas discordam por construção: a coluna guarda o veredito
+    bruto da última sonda, enquanto ``estado_ml`` aplica a política de acúmulo
+    (``PROBE_FALHAS_PARA_DESCONECTAR``) porque o ML responde 302→login a IP de
+    datacenter sem que a sessão tenha morrido. O resultado era o sintoma relatado:
+    tela de conexão verde e a esteira inteira parada em "aguardando conexão".
+
+    Resolvido UMA vez por projeção, não por cupom: a leitura antiga era também um
+    N+1 (uma consulta de sessão por cupom, ~3.100 por ciclo por usuário).
+    """
+    from apps.scrapers.conexoes import estado_ml, estado_ml_linkbuilder
+
+    site = estado_ml(usuario)
+    if not site.conectado:
+        ausente = site.detalhe == "sem_sessao"
+        return {
+            "ok": False,
+            "reason": "ml_session_missing" if ausente else "ml_session_expired",
+            "detail": site.motivo or "Reconecte a sessão do Mercado Livre.",
+        }
+    # Só `login_required` bloqueia: `stale`/`unknown` significam "ninguém abriu o
+    # portal ainda", e a própria geração do link revalida em segundos. Tratá-los
+    # como desconexão prenderia o funil num veredito que nada promove sozinho.
+    if estado_ml_linkbuilder(usuario).detalhe == "login_required":
+        return {
+            "ok": False,
+            "reason": "ml_linkbuilder_login_required",
+            "detail": "Reconecte o Link Builder do Mercado Livre.",
+        }
+    return {"ok": True, "reason": "", "detail": ""}
+
+
 def _preflight(cupom, usuario):
     agora = timezone.now()
     if cupom.validade and cupom.validade < agora:
@@ -60,7 +96,7 @@ def _preflight(cupom, usuario):
     return None
 
 
-def _codigo(cupom, usuario, organization):
+def _codigo(cupom, usuario, conexao):
     codigo = codigo_publicavel(cupom)
     if not codigo:
         return None
@@ -85,16 +121,9 @@ def _codigo(cupom, usuario, organization):
                               "Destino público inválido.")
         return _resultado("ready")
     if marketplace == "mercadolivre":
-        sessao = MercadoLivreSession.objects.filter(organization=organization).first()
-        if not sessao:
-            return _resultado("waiting_link", "no_session", "ml_session_missing",
-                              "Conecte a sessão de afiliados do Mercado Livre.")
-        if sessao.status in {"expired", "decrypt_error", "rotation_required"}:
-            return _resultado("waiting_link", "no_session", "ml_session_expired",
-                              "Reconecte a sessão do Mercado Livre.")
-        if sessao.lb_readiness == "login_required":
-            return _resultado("waiting_link", "no_session", "ml_linkbuilder_login_required",
-                              "Reconecte o Link Builder do Mercado Livre.")
+        if not conexao["ok"]:
+            return _resultado("waiting_link", "no_session", conexao["reason"],
+                              conexao["detail"])
         link = LinkAfiliadoCupomUsuario.objects.filter(
             usuario=usuario, cupom=cupom, afiliado_ok=True,
         ).exclude(link_afiliado="").first()
@@ -110,7 +139,7 @@ def _codigo(cupom, usuario, organization):
                       "O destino afiliado ainda não está disponível.")
 
 
-def _ativacao(cupom, usuario, preparadas, prontas, preparos):
+def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao):
     marketplace = str(cupom.marketplace or "").lower()
     if marketplace == "amazon":
         tag = str(getattr(getattr(usuario, "perfil", None), "afiliado_tag_amazon", "") or "")
@@ -124,24 +153,16 @@ def _ativacao(cupom, usuario, preparadas, prontas, preparos):
         if not enabled:
             return _resultado("discarded", "rejected", f"feature_{flag_reason}",
                               "Cupons de ativação não estão liberados para esta organização.")
-        regras = regras_do_cupom(cupom)
         if not str(cupom.external_id or "").startswith("campanha:"):
             return _resultado("discarded", "invalid", "campaign_missing",
                               "Campanha de ativação não identificada.")
         if not listagem_publica_ml(cupom):
             return _resultado("discarded", "invalid", "public_container_missing",
                               "Container público não comprovado.")
-        organization = organization_for_user(usuario)
-        session = MercadoLivreSession.objects.filter(organization=organization).first()
-        if not session:
+        if not conexao["ok"]:
             return _resultado(
-                "eligible", "no_session", "ml_session_missing",
-                "Container público comprovado; conecte o Mercado Livre para preparar o link.",
-            )
-        if session.status in {"expired", "decrypt_error", "rotation_required"}:
-            return _resultado(
-                "eligible", "no_session", "ml_session_expired",
-                "Container público comprovado; reconecte a sessão do Mercado Livre.",
+                "eligible", "no_session", conexao["reason"],
+                f"Container público comprovado. {conexao['detail']}",
             )
     if not cupom_publicavel(cupom, usuario=usuario):
         return _resultado("discarded", "invalid", "activation_evidence_incomplete",
@@ -229,6 +250,7 @@ def projetar_disponibilidade_cupons(usuario, channel="whatsapp"):
         # O primeiro registro é o mais novo; não deixe um retry antigo substituir
         # o diagnóstico corrente na compreensão do dicionário.
         preparos.setdefault(preparo.cupom_id, preparo)
+    conexao = conexao_ml(usuario)
     stages, reasons = {}, {}
     for cupom in cupons:
         use_mode = "code_notice" if codigo_publicavel(cupom) else "product_activation"
@@ -243,9 +265,9 @@ def projetar_disponibilidade_cupons(usuario, channel="whatsapp"):
         )
         if outcome is None:
             outcome = (
-                _codigo(cupom, usuario, organization)
+                _codigo(cupom, usuario, conexao)
                 if use_mode == "code_notice"
-                else _ativacao(cupom, usuario, preparadas, prontas, preparos)
+                else _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao)
             )
         with transaction.atomic():
             projection, created = CupomDisponibilidade.objects.select_for_update().get_or_create(

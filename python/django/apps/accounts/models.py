@@ -233,6 +233,13 @@ def organization_for_user(user) -> Organization | None:
     """Resolve o tenant ativo sem confiar em um id vindo do cliente."""
     if not user or not getattr(user, "is_authenticated", False):
         return None
+    # OrganizationContextMiddleware só instala este atributo depois de validar uma
+    # Membership ativa e o RBAC da request. Reusar o próprio objeto autorizado evita
+    # novas consultas dentro dos helpers chamados pela view; fora de uma request (ou
+    # antes do middleware) o caminho autoritativo abaixo continua inalterado.
+    authorized = getattr(user, "_spreading_authorized_organization", None)
+    if authorized is not None:
+        return authorized
     active = (
         Perfil.objects.select_related("active_organization")
         .filter(

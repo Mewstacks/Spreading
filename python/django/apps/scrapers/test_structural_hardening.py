@@ -195,6 +195,107 @@ class CouponSourceObservationTenantTests(TestCase):
 
 
 class BrowserResourceContractTests(TestCase):
+    def test_slot_da_maquina_inclui_processos_fora_do_contexto_atual(self):
+        import os
+        import tempfile
+        import threading
+
+        from apps.scrapers.resource_control import machine_resource_slot
+
+        ready = threading.Event()
+        release = threading.Event()
+        holder_result = []
+
+        with tempfile.TemporaryDirectory() as lock_dir, patch.dict(
+            os.environ, {"SPREADING_RESOURCE_LOCK_DIR": lock_dir},
+        ):
+            def hold_slot():
+                with machine_resource_slot("django_chromium") as acquired:
+                    holder_result.append(acquired)
+                    ready.set()
+                    release.wait(timeout=2)
+
+            thread = threading.Thread(target=hold_slot)
+            thread.start()
+            self.assertTrue(ready.wait(timeout=1))
+            with machine_resource_slot("django_chromium") as acquired:
+                self.assertFalse(acquired)
+            release.set()
+            thread.join(timeout=2)
+
+            self.assertEqual(holder_result, [True])
+            self.assertFalse(thread.is_alive())
+            with machine_resource_slot("django_chromium") as acquired:
+                self.assertTrue(acquired)
+                # Reentrância evita autoconflito em helpers aninhados do mesmo job.
+                with machine_resource_slot("django_chromium") as nested:
+                    self.assertTrue(nested)
+
+    def test_pedido_interativo_e_visivel_a_outro_processo_e_expira(self):
+        """O flock diz "ocupado"; ele não diz "tem gente esperando".
+
+        Sem este canal, o login interativo disputava contra LOTES inteiros (40
+        links a ~5s cada) e a espera estourava — a tela abria e fechava sozinha
+        enquanto a lane pesada rodava.
+        """
+        import os
+        import tempfile
+
+        from apps.scrapers import resource_control
+        from apps.scrapers.resource_control import (
+            interesse_interativo, interesse_interativo_pendente,
+        )
+
+        with tempfile.TemporaryDirectory() as lock_dir, patch.dict(
+            os.environ, {"SPREADING_RESOURCE_LOCK_DIR": lock_dir},
+        ):
+            self.assertFalse(interesse_interativo_pendente("django_chromium"))
+            with interesse_interativo("django_chromium"):
+                self.assertTrue(interesse_interativo_pendente("django_chromium"))
+                # Um marcador esquecido por um processo morto não pode calar os
+                # workers para sempre.
+                with patch.object(
+                    resource_control, "INTERESSE_INTERATIVO_TTL_S", -1,
+                ):
+                    self.assertFalse(
+                        interesse_interativo_pendente("django_chromium"))
+            self.assertFalse(interesse_interativo_pendente("django_chromium"))
+
+    def test_lote_de_links_devolve_o_navegador_a_um_login_esperando(self):
+        from apps.scrapers.scraper_mercadolivre import link as ml_link
+
+        produtos = [
+            Produto(
+                id=indice, marketplace="mercadolivre", nome=f"Item {indice}",
+                link_produto=f"https://produto.mercadolivre.com.br/MLB-{indice}",
+                preco_sem_desconto=100, preco_com_cupom=90,
+            )
+            for indice in range(1, 5)
+        ]
+        afiliados = []
+
+        @contextmanager
+        def _sem_browser(**_kwargs):
+            yield Mock(), Mock()
+
+        with patch.object(ml_link, "coordinated_ml_browser",
+                          lambda **_k: _sem_browser()), \
+                patch.object(ml_link, "iniciar_browser", _sem_browser), \
+                patch.object(ml_link, "_abrir_link_builder", Mock()), \
+                patch.object(ml_link, "_salvar_link_global", Mock()), \
+                patch.object(ml_link, "executar_no_tenant",
+                             lambda fn, *a, **k: None), \
+                patch.object(ml_link, "_afiliar_url_na_pagina",
+                             lambda _p, url: afiliados.append(url) or "https://meli.la/x"), \
+                patch.object(ml_link, "interesse_interativo_pendente",
+                             lambda _r: len(afiliados) >= 2):
+            gerados, _falhas = ml_link.gerar_links_em_lote(produtos)
+
+        # Cede DEPOIS de terminar o item corrente: dois gerados, dois devolvidos
+        # à fila — nada se perde, e o login não espera o lote inteiro.
+        self.assertEqual(gerados, 2)
+        self.assertEqual(len(afiliados), 2)
+
     def test_lease_aninhado_do_mesmo_recurso_reutiliza_token_sem_reaquisição(self):
         from apps.scrapers.resource_control import leased_resource
 
@@ -936,17 +1037,38 @@ class CouponReadinessReasonTests(TestCase):
             status="active", lb_readiness="ready",
         )
 
+    @staticmethod
+    @contextmanager
+    def _ml(conectado=True, detalhe="", linkbuilder="ready"):
+        """Instala o veredito de conexão que as TELAS renderizam.
+
+        A projeção não pode ter uma leitura própria do estado do ML: era daí que
+        vinha "tela verde, esteira parada em aguardando conexão".
+        """
+        from apps.scrapers.conexoes import Estado
+
+        site = Estado(conectado, "Mercado Livre", "banco",
+                      "" if conectado else "Reconecte sua conta.", detalhe, None)
+        builder = Estado(linkbuilder == "ready", "Link Builder", "banco", "",
+                         linkbuilder, None)
+        with patch("apps.scrapers.conexoes.estado_ml", return_value=site), \
+                patch("apps.scrapers.conexoes.estado_ml_linkbuilder",
+                      return_value=builder):
+            yield
+
     def test_codigo_sem_produto_e_visivel_mas_explica_sessao_e_link(self):
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
 
         coupon = self._code()
-        projetar_disponibilidade_cupons(self.user)
+        with self._ml(conectado=False, detalhe="sem_sessao"):
+            projetar_disponibilidade_cupons(self.user)
         projection = CupomDisponibilidade.objects.get(cupom=coupon, usuario=self.user)
         self.assertEqual((projection.stage, projection.category, projection.reason_code),
                          ("waiting_link", "no_session", "ml_session_missing"))
 
         self._ml_session()
-        projetar_disponibilidade_cupons(self.user)
+        with self._ml():
+            projetar_disponibilidade_cupons(self.user)
         projection.refresh_from_db()
         self.assertEqual(projection.reason_code, "affiliate_link_pending")
         LinkAfiliadoCupomUsuario.objects.create(
@@ -954,9 +1076,49 @@ class CouponReadinessReasonTests(TestCase):
             url_origem=coupon.link, link_afiliado="https://meli.la/coupon-ready",
             afiliado_ok=True,
         )
-        projetar_disponibilidade_cupons(self.user)
+        with self._ml():
+            projetar_disponibilidade_cupons(self.user)
         projection.refresh_from_db()
         self.assertEqual(projection.stage, "ready")
+
+    def test_estado_da_conexao_vem_da_mesma_fonte_que_as_telas(self):
+        """Sessão instável (mas viva) não pode parar a esteira inteira.
+
+        `MercadoLivreSession.status` guarda o veredito BRUTO da última sonda; o ML
+        responde 302→login a IP de datacenter sem que a sessão tenha morrido, e é
+        por isso que `conexoes.estado_ml` aplica a política de acúmulo antes de
+        declarar desconexão. Enquanto a projeção lia a coluna crua, a tela de
+        conexão ficava verde e todo o funil parava em "aguardando conexão".
+        """
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        coupon = self._code()
+        session = self._ml_session()
+        session.last_probe_result = "suspeito"
+        session.probe_failures = 1
+        session.save(update_fields=["last_probe_result", "probe_failures"])
+
+        with self._ml(conectado=True):
+            projetar_disponibilidade_cupons(self.user)
+        projection = CupomDisponibilidade.objects.get(cupom=coupon, usuario=self.user)
+        self.assertEqual(projection.reason_code, "affiliate_link_pending")
+
+        # E o inverso: veredito de desconexão da MESMA fonte para o funil.
+        with self._ml(conectado=False, detalhe="expirado"):
+            projetar_disponibilidade_cupons(self.user)
+        projection.refresh_from_db()
+        self.assertEqual((projection.stage, projection.reason_code),
+                         ("waiting_link", "ml_session_expired"))
+
+    def test_link_builder_pedindo_login_bloqueia_com_motivo_proprio(self):
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        coupon = self._code()
+        self._ml_session()
+        with self._ml(conectado=True, linkbuilder="login_required"):
+            projetar_disponibilidade_cupons(self.user)
+        projection = CupomDisponibilidade.objects.get(cupom=coupon, usuario=self.user)
+        self.assertEqual(projection.reason_code, "ml_linkbuilder_login_required")
 
     def test_not_found_so_muda_ausente_e_grava_transicao_uma_vez(self):
         from apps.scrapers.coupon_readiness import (
@@ -1138,11 +1300,15 @@ class CouponReadinessReasonTests(TestCase):
                     "valor_desconto": 15,
                     "container_url": "https://lista.mercadolivre.com.br/_Container_2"},
         )
-        projetar_disponibilidade_cupons(self.user)
+        with self._ml(conectado=False, detalhe="sem_sessao"):
+            projetar_disponibilidade_cupons(self.user)
         projection = CupomDisponibilidade.objects.get(cupom=coupon, usuario=self.user)
         self.assertEqual(projection.reason_code, "ml_session_missing")
 
         self._ml_session()
+        conectado = self._ml()
+        conectado.__enter__()
+        self.addCleanup(conectado.__exit__, None, None, None)
         projetar_disponibilidade_cupons(self.user)
         projection.refresh_from_db()
         self.assertEqual(projection.reason_code, "preparation_pending")
@@ -1191,6 +1357,62 @@ class CouponReadinessReasonTests(TestCase):
         projetar_disponibilidade_cupons(self.user)
         projection.refresh_from_db()
         self.assertEqual(projection.stage, "ready")
+
+    def test_cupom_de_codigo_do_ml_tem_quem_prepare_o_link(self):
+        """Impasse fechado: o cupom aparecia na tela e nunca ficava disponível.
+
+        `_codigo` só promove a `ready` com um LinkAfiliadoCupomUsuario verificado, e
+        a única rotina que gravava essa linha era `enviar_cupom` — que a tela só
+        oferece quando o cupom JÁ está `ready`. Nenhum worker fechava o ciclo, então
+        todo cupom de código do ML ficava permanentemente "aguardando link".
+        """
+        from apps.scrapers.coupon_pipeline import afiliar_cupons_de_codigo
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        coupon = self._code()
+        self._ml_session()
+
+        def _resolver(cupom, usuario):
+            LinkAfiliadoCupomUsuario.objects.create(
+                usuario=usuario, cupom=cupom, url_origem=cupom.link,
+                link_afiliado="https://meli.la/gerado", afiliado_ok=True,
+            )
+            return {"sucesso": True, "link": "https://meli.la/gerado"}
+
+        with patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom", _resolver):
+            resultado = afiliar_cupons_de_codigo(self.user, [coupon])
+        self.assertEqual(resultado["gerados"], 1)
+
+        with self._ml():
+            projetar_disponibilidade_cupons(self.user)
+        projection = CupomDisponibilidade.objects.get(cupom=coupon, usuario=self.user)
+        self.assertEqual(projection.stage, "ready")
+
+    def test_afiliacao_de_codigo_para_o_lote_quando_a_sessao_cai(self):
+        """Sessão morta não pode custar um Chromium por cupom restante."""
+        from apps.scrapers.coupon_pipeline import afiliar_cupons_de_codigo
+
+        cupons = [self._code()]
+        for indice in range(3):
+            cupons.append(CupomNormalizado.objects.create(
+                fonte=self.source, external_id=f"code:{indice}",
+                marketplace="mercadolivre", titulo=f"Código {indice}",
+                codigo=f"CODIGO{indice}0",
+                link="https://lista.mercadolivre.com.br/z",
+                regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                        "valor_desconto": 10},
+            ))
+        chamadas = []
+
+        def _resolver(cupom, _usuario):
+            chamadas.append(cupom.pk)
+            return {"sucesso": False, "motivo": "Sessão expirada.",
+                    "precisa_login_ml": True}
+
+        with patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom", _resolver):
+            resultado = afiliar_cupons_de_codigo(self.user, cupons)
+        self.assertEqual(len(chamadas), 1)
+        self.assertEqual(resultado["gerados"], 0)
 
     def test_tela_de_promocoes_nao_materializa_projecao(self):
         """A tela é somente leitura mesmo com a conta zerada.
