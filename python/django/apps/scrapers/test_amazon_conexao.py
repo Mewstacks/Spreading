@@ -113,3 +113,10 @@ class TemplateLiveViewTests(TestCase):
             "if (canvas.width === viewport.width && canvas.height === viewport.height) return;",
             self.html,
         )
+
+    def test_clique_simples_viaja_como_operacao_atomica(self):
+        # Um CAPTCHA de imagens não pode depender de dois POSTs sequenciais para
+        # completar down/up. O arraste continua explicitamente suportado.
+        self.assertIn("push({t:'click'", self.html)
+        self.assertIn("push({t:'down'", self.html)
+        self.assertIn("gesture.dragging = true", self.html)

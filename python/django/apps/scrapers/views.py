@@ -1190,7 +1190,7 @@ def ml_conexao_frames(request):
 def ml_conexao_input(request):
     """Recebe eventos de mouse/teclado do front e encaminha pro browser de login.
 
-    Body JSON: {"session_id":"...", "events":[{"seq":1,"t":"down",...}]}.
+    Body JSON: {"session_id":"...", "events":[{"seq":1,"t":"click",...}]}.
     A validação, ordenação, deduplicação e os limites ficam no transporte compartilhado."""
     import json
     from apps.scrapers import ml_conexao

@@ -2030,7 +2030,8 @@ class TopPromocoesFilterTests(TestCase):
         from apps.accounts.models import MercadoLivreSession
         from apps.scrapers.coupon_products import atualizar_chave_cupom
         from apps.scrapers.models import (
-            CupomPreparacao, LinkAfiliadoCupomUsuario, ProdutoCupom,
+            CupomDisponibilidade, CupomPreparacao,
+            LinkAfiliadoCupomUsuario, ProdutoCupom,
         )
 
         fonte = FonteIngestao.objects.create(
@@ -2070,6 +2071,20 @@ class TopPromocoesFilterTests(TestCase):
             cupom=pronto, produto=produto, status="confirmado",
             preco_original=100, preco_atual=80, preco_final=60,
             verificado_em=timezone.now(),
+        )
+        # A view é somente leitura: quem materializa esta projeção é o worker de
+        # cupons. O fixture precisa reproduzir esse contrato em vez de esperar que
+        # um GET escreva no banco (comportamento removido em 816ccee).
+        CupomDisponibilidade.objects.create(
+            organization=self.user.perfil.organization,
+            usuario=self.user, cupom=pronto,
+            use_mode="code_notice", stage="ready",
+        )
+        CupomDisponibilidade.objects.create(
+            organization=self.user.perfil.organization,
+            usuario=self.user, cupom=aguardando,
+            use_mode="code_notice", stage="waiting_link",
+            category="no_link", reason_code="affiliate_link_pending",
         )
 
         response = self.client.get(self.url, {"tipo": "cupom"})

@@ -179,13 +179,13 @@ def limpar_evento(evento: dict, width: int, height: int) -> dict | None:
     if clean["seq"] < 1:
         return None
 
-    if kind in {"move", "down", "up", "wheel"}:
+    if kind in {"move", "down", "up", "click", "wheel"}:
         try:
             clean["x"] = max(0, min(width, int(evento.get("x", 0))))
             clean["y"] = max(0, min(height, int(evento.get("y", 0))))
         except (TypeError, ValueError):
             return None
-        if kind in {"down", "up"}:
+        if kind in {"down", "up", "click"}:
             clean["button"] = (
                 evento.get("button")
                 if evento.get("button") in {"left", "right", "middle"}
@@ -538,11 +538,26 @@ def despachar_input(page, event: dict) -> None:
                 button=event.get("button", "left"),
                 click_count=event.get("clickCount", 1),
             )
+        elif kind == "click":
+            # Clique simples chega como uma operação atômica. Enviar ``down`` e
+            # ``up`` em dois POSTs serializados deixava o botão pressionado por um
+            # round-trip inteiro; em desafios de selecionar imagens o site às vezes
+            # descartava esse gesto artificialmente longo. Arrastes continuam usando
+            # down/move/up e, portanto, não perdem a semântica de pressão contínua.
+            page.mouse.click(
+                event["x"], event["y"],
+                button=event.get("button", "left"),
+                click_count=event.get("clickCount", 1),
+            )
         elif kind == "wheel":
             page.mouse.move(event["x"], event["y"])
             page.mouse.wheel(event.get("dx", 0), event.get("dy", 0))
         elif kind == "char" and event.get("text"):
-            page.keyboard.type(str(event["text"]), delay=0)
+            # ``type`` emite um par de eventos CDP para CADA caractere. O front já
+            # agrupa texto em blocos de até 16 caracteres; ``insert_text`` aplica o
+            # bloco inteiro em uma única operação e mantém a ordem com Enter,
+            # Backspace etc., que continuam passando pelo ramo ``key`` abaixo.
+            page.keyboard.insert_text(str(event["text"]))
         elif kind == "key" and event.get("key") in SPECIAL_KEYS:
             page.keyboard.press(event["key"])
     except Exception:

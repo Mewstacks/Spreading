@@ -478,6 +478,12 @@
   let decoding = false;
   let pendingFrame = null;
   let composing = false;
+  // Um toque/clique comum vira uma única operação remota. O transporte anterior
+  // fazia dois POSTs serializados (down, depois up), mantendo o mouse pressionado
+  // durante um round-trip inteiro — ruim especialmente no CAPTCHA de imagens.
+  // Quando há deslocamento real, voltamos para down/move/up e preservamos arraste.
+  let pointerGesture = null;
+  const DRAG_THRESHOLD_PX = 4;
   let qrEstavaVisivel = false;
 
   function getCookie(name) {
@@ -564,8 +570,8 @@
       inputBuffer[inputBuffer.length - 1] = {...event, seq:previous.seq};
     } else if (!sending && event.t === 'char' && previous && previous.t === 'char'
                && previous.text.length + event.text.length <= 16) {
-      // Teclas em rajada viram um evento só. O servidor aplica o texto com
-      // page.keyboard.type na mesma ordem, e cada round-trip economizado é um
+      // Teclas em rajada viram um evento só. O servidor aplica o bloco com
+      // page.keyboard.insert_text na mesma ordem, e cada round-trip economizado é um
       // caractere de atraso a menos para quem digita rápido. O teto de 16 é o mesmo
       // que limpar_evento aceita no campo `text`.
       inputBuffer[inputBuffer.length - 1] = {...previous, text:previous.text + event.text};
@@ -627,21 +633,51 @@
     event.preventDefault();
     try { canvas.setPointerCapture(event.pointerId); } catch (_) {}
     focusRemoteKeyboard();
-    const point = coords(event);
-    push({t:'down', ...point, button:BTN[event.button] || 'left', clickCount:event.detail || 1});
-    flush();
+    pointerGesture = {
+      pointerId:event.pointerId,
+      clientX:event.clientX,
+      clientY:event.clientY,
+      point:coords(event),
+      button:BTN[event.button] || 'left',
+      clickCount:event.detail || 1,
+      dragging:false,
+    };
   }
   function onPointerUp(event) {
     const point = coords(event);
-    push({t:'up', ...point, button:BTN[event.button] || 'left', clickCount:event.detail || 1});
+    const gesture = pointerGesture && pointerGesture.pointerId === event.pointerId
+      ? pointerGesture : null;
+    if (gesture && !gesture.dragging) {
+      push({t:'click', ...point, button:gesture.button, clickCount:event.detail || gesture.clickCount});
+    } else {
+      push({t:'up', ...point, button:gesture?.button || BTN[event.button] || 'left',
+        clickCount:event.detail || gesture?.clickCount || 1});
+    }
+    pointerGesture = null;
     flush();
   }
   function onPointerCancel(event) {
-    const point = coords(event);
-    push({t:'up', ...point, button:'left', clickCount:1});
-    flush();
+    if (pointerGesture?.dragging) {
+      push({t:'up', ...coords(event), button:pointerGesture.button, clickCount:1});
+      flush();
+    }
+    pointerGesture = null;
   }
   function onPointerMove(event) {
+    const gesture = pointerGesture && pointerGesture.pointerId === event.pointerId
+      ? pointerGesture : null;
+    if (gesture && !gesture.dragging) {
+      const dx = event.clientX - gesture.clientX;
+      const dy = event.clientY - gesture.clientY;
+      if (dx * dx + dy * dy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) return;
+      gesture.dragging = true;
+      lastMove = Date.now();
+      push({t:'down', ...gesture.point, button:gesture.button, clickCount:gesture.clickCount});
+      push({t:'move', ...coords(event), buttons:event.buttons || 1});
+      // O início do arraste precisa chegar sem esperar o timer de hover.
+      flush();
+      return;
+    }
     const now = Date.now();
     if (now - lastMove < 40) return;
     lastMove = now;
@@ -704,6 +740,7 @@
     kbd.removeEventListener('keydown', onKeyDown);
     kbd.removeEventListener('beforeinput', onBeforeInput);
     kbd.removeEventListener('compositionend', onCompositionEnd);
+    pointerGesture = null;
   }
 
   function queueFrame(data, seq) {

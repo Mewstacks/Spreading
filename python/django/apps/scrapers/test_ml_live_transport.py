@@ -178,6 +178,19 @@ class TransporteEntradaTests(SimpleTestCase):
         self.assertEqual((click["x"], click["y"], click["button"]), (390, 0, "left"))
         self.assertEqual(len(text["text"]), 16)
 
+    def test_clique_atomico_e_validado_como_um_unico_evento(self):
+        result = self.transport.enqueue(10, self.runtime.session_id, [
+            {"seq": 1, "t": "click", "x": 123, "y": 456,
+             "button": "left", "clickCount": 1},
+        ])
+        self.assertEqual(result["ack"], 1)
+        event = self.runtime.input_queue.get_nowait()
+        self.assertEqual(
+            event,
+            {"seq": 1, "t": "click", "x": 123, "y": 456,
+             "button": "left", "clickCount": 1},
+        )
+
     def test_fila_cheia_retorna_ultimo_ack_realmente_aceito(self):
         self.runtime.input_queue = queue.Queue(maxsize=1)
         result = self.transport.enqueue(10, self.runtime.session_id, [
@@ -189,11 +202,29 @@ class TransporteEntradaTests(SimpleTestCase):
 
     def test_log_nunca_contem_conteudo_digitado(self):
         page = Mock()
-        page.keyboard.type.side_effect = RuntimeError("falhou")
+        page.keyboard.insert_text.side_effect = RuntimeError("falhou")
         secret = "senha-que-nao-pode-aparecer"
         with self.assertLogs("apps.scrapers.ml_live_transport", level="DEBUG") as logs:
             despachar_input(page, {"t": "char", "text": secret})
         self.assertNotIn(secret, "\n".join(logs.output))
+
+    def test_clique_simples_e_despachado_atomicamente(self):
+        page = Mock()
+        despachar_input(page, {
+            "t": "click", "x": 120, "y": 240,
+            "button": "left", "clickCount": 1,
+        })
+        page.mouse.click.assert_called_once_with(
+            120, 240, button="left", click_count=1,
+        )
+        page.mouse.down.assert_not_called()
+        page.mouse.up.assert_not_called()
+
+    def test_texto_agrupado_usa_uma_unica_operacao(self):
+        page = Mock()
+        despachar_input(page, {"t": "char", "text": "captcha123"})
+        page.keyboard.insert_text.assert_called_once_with("captcha123")
+        page.keyboard.type.assert_not_called()
 
 
 class CadenciaDeCapturaTests(SimpleTestCase):
