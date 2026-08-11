@@ -24,6 +24,7 @@ from apps.scrapers.ml_live_transport import (
     ActivePage,
     InteractiveBrowserCapacityError,
     LiveTransport,
+    aguardar_atividade,
     despachar_input,
     interactive_browser_slot,
     intervalo_de_captura,
@@ -309,6 +310,25 @@ class CadenciaDeCapturaTests(SimpleTestCase):
         )
         self.assertGreater(self.runtime.last_input_at, 0.0)
 
+    def test_evento_aceito_desperta_worker_em_reposo(self):
+        page = Mock()
+        terminou = threading.Event()
+
+        def esperar():
+            aguardar_atividade(page, self.runtime)
+            terminou.set()
+
+        worker = threading.Thread(target=esperar)
+        worker.start()
+        self.assertFalse(terminou.wait(0.02))
+        self.transport.enqueue(
+            30, self.runtime.session_id,
+            [{"seq": 1, "t": "char", "text": "a"}],
+        )
+        self.assertTrue(terminou.wait(0.05))
+        worker.join(timeout=0.2)
+        page.wait_for_timeout.assert_called_once_with(1)
+
     def test_lote_todo_rejeitado_nao_abre_rajada(self):
         self.transport.enqueue(30, "sessao-errada", [{"seq": 1, "t": "char", "text": "a"}])
         self.assertEqual(self.runtime.last_input_at, 0.0)
@@ -319,6 +339,14 @@ class CadenciaDeCapturaTests(SimpleTestCase):
         self.runtime.last_input_at = 1000.0
         self.assertEqual(
             intervalo_de_captura(self.runtime, now=1000.01, active=True),
+            CAPTURE_INPUT_INTERVAL_S,
+        )
+
+    def test_feedback_pendente_mantem_piso_ate_captura_acontecer(self):
+        self.runtime.last_input_at = 1000.0
+        self.runtime.input_feedback_pending = True
+        self.assertEqual(
+            intervalo_de_captura(self.runtime, now=1000.08, active=False),
             CAPTURE_INPUT_INTERVAL_S,
         )
         self.assertLess(CAPTURE_INPUT_INTERVAL_S, CAPTURE_BURST_INTERVAL_S)

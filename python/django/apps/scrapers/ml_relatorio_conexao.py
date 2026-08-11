@@ -27,7 +27,8 @@ from apps.scrapers.ml_conexao import (
 )
 from apps.scrapers.ml_live_transport import (
     ActivePage, LiveTransport, despachar_input, interactive_browser_slot,
-    passo_do_loop_ms, pode_inspecionar,
+    aguardar_atividade,
+    pode_inspecionar,
 )
 from apps.scrapers.report_sessions import has_report_session, save_report_state
 from apps.accounts.tenant import organization_job_sem_transacao
@@ -61,6 +62,10 @@ def _set(user_id, **values):
     state.update(values)
     state["atualizado_em"] = time.time()
     cache.set(_key(user_id), state, timeout=LOGIN_DEADLINE_S + 120)
+    if any(values.get(command) for command in (
+        "retentar_qr", "cancelar", "salvar_agora", "validar_agora",
+    )):
+        _transport.wake(user_id)
     return state
 
 
@@ -167,8 +172,8 @@ def _worker(user):
                     session_id=runtime.session_id, viewport=runtime.viewport,
                 )
                 deadline, logged = time.time() + LOGIN_DEADLINE_S, False
-                # O laço gira rápido (passo_do_loop_ms) para drenar input e publicar
-                # frames, mas nem o cache nem o DOM mudam nessa escala. Ler os dois a
+                # O laço desperta no input para drenar a fila e publicar frames, mas
+                # nem o cache nem o DOM mudam nessa escala. Ler os dois a
                 # cada volta custava, POR SEGUNDO, 20 idas ao cache e 20 consultas de
                 # seletor via CDP dentro do processo do gunicorn, segurando a GIL.
                 # `ml_conexao` e `amazon_conexao` já desacoplavam isso; este worker
@@ -221,7 +226,7 @@ def _worker(user):
                                 ) from exc
                             _transport.capture(runtime, current_page, active=True)
                             proxima_checagem = 0.0
-                        current_page.wait_for_timeout(passo_do_loop_ms(runtime))
+                        aguardar_atividade(current_page, runtime)
                         continue
 
                     had_input = False
@@ -263,7 +268,7 @@ def _worker(user):
                     if agora < proxima_checagem or not (
                         validate_now or pode_inspecionar(runtime)
                     ):
-                        current_page.wait_for_timeout(passo_do_loop_ms(runtime))
+                        aguardar_atividade(current_page, runtime)
                         continue
                     proxima_checagem = agora + 1.0
                     if pagina_exige_configuracao_qr(current_page):
@@ -271,7 +276,7 @@ def _worker(user):
                             deadline = agora + LOGIN_DEADLINE_S
                             qr_deadline_estendido = True
                         state = _marcar_configuracao_qr(uid)
-                        current_page.wait_for_timeout(passo_do_loop_ms(runtime))
+                        aguardar_atividade(current_page, runtime)
                         continue
                     authenticated = _logado(current_page)
                     if validate_now or authenticated:
@@ -291,7 +296,7 @@ def _worker(user):
                                 "aberta no Mercado Livre e verifique novamente."
                             ),
                         )
-                    current_page.wait_for_timeout(passo_do_loop_ms(runtime))
+                    aguardar_atividade(current_page, runtime)
                 if logged:
                     _set(uid, fase="salvando")
                     # Só a leitura fica aqui. Gravar depois do bloco mantém o mesmo

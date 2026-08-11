@@ -38,9 +38,9 @@ from apps.scrapers.erros_conexao import mensagem_de_erro, novo_codigo
 from apps.scrapers.ml_live_transport import (
     ActivePage,
     LiveTransport,
+    aguardar_atividade,
     despachar_input as despachar_input_v2,
     interactive_browser_slot,
-    passo_do_loop_ms,
     pode_inspecionar,
 )
 
@@ -57,8 +57,8 @@ LOGIN_URL = (
 RECARGAS_APOS_ERRO = 1           # o gateway do ML às vezes aceita na 2ª tentativa
 
 LOGIN_DEADLINE_S = 600           # tempo máx. esperando o usuário logar
-# A granularidade do worker (bombeia CDP + drena input) não é mais fixa: vem de
-# passo_do_loop_ms, que a aperta enquanto o usuário mexe e a afrouxa quando não.
+# A granularidade do worker não é fixa: aguardar_atividade o desperta assim que
+# chega input e mantém um repouso maior quando o usuário não está interagindo.
 GOTO_TIMEOUT_MS = 60000          # em prod (IP de datacenter) o gateway de login demora
 GOTO_TENTATIVAS = 2              # timeout na 1ª tenta de novo antes de desistir
 SNAPSHOT_INTERVAL_S = 2.5        # de quanto em quanto tempo olhamos os cookies
@@ -82,6 +82,10 @@ def _set_estado(user_id: int, **campos):
     estado["atualizado_em"] = time.time()
     # TTL um pouco acima do deadline pra não sumir no meio do login.
     cache.set(_cache_key(user_id), estado, timeout=LOGIN_DEADLINE_S + 120)
+    if any(campos.get(comando) for comando in (
+        "retentar_qr", "cancelar", "salvar_agora", "validar_agora",
+    )):
+        _transport.wake(user_id)
     return estado
 
 
@@ -451,7 +455,7 @@ def _validar_linkbuilder_ao_vivo(user_id: int, active_page, runtime, context,
                             "aberta; tente verificar novamente."
                         ),
                     )
-            current_page.wait_for_timeout(passo_do_loop_ms(runtime))
+            aguardar_atividade(current_page, runtime)
             continue
 
         houve_input = False
@@ -475,8 +479,11 @@ def _validar_linkbuilder_ao_vivo(user_id: int, active_page, runtime, context,
                 if not qr_deadline_estendido:
                     deadline = agora + LOGIN_DEADLINE_S
                     qr_deadline_estendido = True
-                _marcar_configuracao_qr(user_id, "linkbuilder")
-                current_page.wait_for_timeout(passo_do_loop_ms(runtime))
+                # Atualiza também a cópia local. Sem isso, até o próximo poll de
+                # cache o laço ainda acreditava estar em ``validando_linkbuilder``
+                # e a inspeção seguinte podia sobrescrever a fase de QR recém-criada.
+                estado = _marcar_configuracao_qr(user_id, "linkbuilder")
+                aguardar_atividade(current_page, runtime)
                 continue
 
         # Os três testes de página rodavam a CADA volta — 60 chamadas CDP por segundo
@@ -512,7 +519,7 @@ def _validar_linkbuilder_ao_vivo(user_id: int, active_page, runtime, context,
         if time.time() - last_beat > 8:
             _set_estado(user_id)
             last_beat = time.time()
-        current_page.wait_for_timeout(passo_do_loop_ms(runtime))
+        aguardar_atividade(current_page, runtime)
 
     return ultimo_estado, ultimo_motivo
 
@@ -637,7 +644,7 @@ def _worker(user_id: int):
                                 raise
                             _transport.capture(runtime, current_page, active=True)
                             last_error_check = 0.0
-                        current_page.wait_for_timeout(passo_do_loop_ms(runtime))
+                        aguardar_atividade(current_page, runtime)
                         continue
 
                     # Drena e aplica os eventos confirmados pelo protocolo sequencial.
@@ -676,7 +683,7 @@ def _worker(user_id: int):
                             pending_state = None
                             manual_validation = False
                             estado = _marcar_configuracao_qr(user_id, "login")
-                            current_page.wait_for_timeout(passo_do_loop_ms(runtime))
+                            aguardar_atividade(current_page, runtime)
                             continue
                         if _pagina_de_erro_do_ml(current_page):
                             logger.info(
@@ -782,7 +789,7 @@ def _worker(user_id: int):
                         last_beat = time.time()
 
                     # Bombeia eventos do Playwright, inclusive popup/nova aba.
-                    current_page.wait_for_timeout(passo_do_loop_ms(runtime))
+                    aguardar_atividade(current_page, runtime)
 
                 if logado:
                     prontidao_linkbuilder, motivo_linkbuilder = (

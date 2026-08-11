@@ -274,6 +274,15 @@ class LiveRuntime:
     # atraso puro no fim do caminho, mais 20-50 acordadas/s de uma thread que na
     # maior parte do tempo não tinha nada a fazer.
     frame_event: threading.Event = field(default_factory=threading.Event)
+    # Acorda a thread dona do Playwright assim que um POST de input ou comando da UI
+    # entra. Sem esse sinal o primeiro clique/tecla depois de uma pausa aguardava o
+    # repouso inteiro do worker (até LOOP_IDLE_MS) antes de chegar ao Chromium.
+    input_event: threading.Event = field(default_factory=threading.Event)
+    # Continua verdadeiro até existir uma captura DEPOIS do input aplicado. Um input
+    # que chegava logo após outra captura falhava no piso de 30ms e, na volta seguinte,
+    # caía no intervalo normal de 100ms; esse caso criava o pior eco justamente nos
+    # cliques e teclas mais rápidos.
+    input_feedback_pending: bool = False
 
     def public_state(self) -> dict:
         with self.lock:
@@ -321,12 +330,26 @@ def passo_do_loop_ms(runtime: LiveRuntime, *, now: float | None = None) -> int:
     constante. Agora o passo segue a janela de rajada — mais rápido enquanto o
     usuário mexe, e bem mais barato quando ele não mexe.
 
-    O ``wait_for_timeout`` também é o que bombeia os eventos do Playwright (popup,
-    aba nova), por isso continua existindo em vez de virar um ``queue.get``
-    bloqueante.
+    Este valor é o teto da espera interrompível em ``aguardar_atividade``. Depois da
+    espera, uma chamada mínima ao Playwright bombeia eventos de popup/nova aba.
     """
     now = time.monotonic() if now is None else now
     return LOOP_BURST_MS if em_rajada(runtime, now=now) else LOOP_IDLE_MS
+
+
+def aguardar_atividade(page, runtime: LiveRuntime) -> bool:
+    """Espera sem impor latência ao próximo input e bombeia eventos do Playwright.
+
+    ``page.wait_for_timeout(LOOP_IDLE_MS)`` não pode ser interrompido pela thread do
+    request que recebe mouse/teclado. O Event preserva o repouso barato quando nada
+    acontece, mas devolve o controle no instante em que a fila ganha trabalho. A
+    chamada curta ao Playwright mantém callbacks de popup/nova aba sendo entregues.
+    """
+    recebeu_input = runtime.input_event.wait(passo_do_loop_ms(runtime) / 1000)
+    if recebeu_input:
+        runtime.input_event.clear()
+    page.wait_for_timeout(1)
+    return recebeu_input
 
 
 def pode_inspecionar(runtime: LiveRuntime, *, now: float | None = None) -> bool:
@@ -355,7 +378,7 @@ def intervalo_de_captura(runtime: LiveRuntime, *, now: float, active: bool) -> f
     ao lugar) costuma continuar rendendo quadros por mais de um tick — era aí que a
     tela parecia travar em degraus.
     """
-    if active:
+    if active or runtime.input_feedback_pending:
         return CAPTURE_INPUT_INTERVAL_S
     desde_input = now - runtime.last_input_at
     if runtime.last_input_at and desde_input <= BURST_WINDOW_S:
@@ -389,6 +412,7 @@ class LiveTransport:
                 # Acorda o gerador SSE da sessão antiga: ele dorme no frame_event e
                 # sem isto seguraria a thread do gunicorn até o heartbeat vencer.
                 previous.frame_event.set()
+                previous.input_event.set()
             self._runtimes[user_id] = runtime
         return runtime
 
@@ -404,11 +428,18 @@ class LiveTransport:
                 current.closed = True
                 current.stream_state = "interrompida"
                 current.frame_event.set()
+                current.input_event.set()
             self._runtimes.pop(user_id, None)
 
     def status(self, user_id: int) -> dict:
         runtime = self.get(user_id)
         return runtime.public_state() if runtime else {}
+
+    def wake(self, user_id: int) -> None:
+        """Desperta o worker para comandos de UI que não passam pela fila de input."""
+        runtime = self.get(user_id)
+        if runtime is not None and not runtime.closed:
+            runtime.input_event.set()
 
     def enqueue(self, user_id: int, session_id: str, eventos) -> dict:
         runtime = self.get(user_id)
@@ -469,10 +500,16 @@ class LiveTransport:
                 # Abre a janela de rajada: o usuário está interagindo agora e é neste
                 # instante que ele precisa ver o resultado do clique/tecla.
                 runtime.last_input_at = time.monotonic()
+                # Interrompe imediatamente o repouso da thread dona do Chromium.
+                runtime.input_event.set()
         return {"ok": True, "aceitos": accepted, "ack": ack}
 
     def capture(self, runtime: LiveRuntime, page, *, active: bool = False) -> bool:
         """Publica uma captura quando o intervalo de atividade permite."""
+        if active:
+            # Marcar ANTES de testar o intervalo é essencial: caso uma captura tenha
+            # acabado há menos de 30ms, a pendência sobrevive para a próxima volta.
+            runtime.input_feedback_pending = True
         now = time.monotonic()
         interval = intervalo_de_captura(runtime, now=now, active=active)
         if now - runtime.last_capture_at < interval:
@@ -508,6 +545,7 @@ class LiveTransport:
                 runtime.frame_at = wall_now
                 runtime.last_capture_at = now
                 runtime.stream_state = "ao_vivo"
+                runtime.input_feedback_pending = False
             return False
         data = base64.b64encode(raw).decode("ascii")
         first_frame = False
@@ -517,6 +555,7 @@ class LiveTransport:
             runtime.frame_data = data
             runtime.frame_at = wall_now
             runtime.last_capture_at = now
+            runtime.input_feedback_pending = False
             if not runtime.first_frame_at:
                 runtime.first_frame_at = wall_now
                 first_frame = True

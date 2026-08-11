@@ -27,7 +27,8 @@ from apps.scrapers.ml_conexao import (
 )
 from apps.scrapers.ml_live_transport import (
     ActivePage, LiveTransport, despachar_input, interactive_browser_slot,
-    passo_do_loop_ms, pode_inspecionar,
+    aguardar_atividade,
+    pode_inspecionar,
 )
 from apps.scrapers.report_sessions import has_report_session, save_report_state
 from apps.accounts.tenant import organization_job_sem_transacao
@@ -50,6 +51,8 @@ def _set(user_id, **values):
     state.update(values)
     state["atualizado_em"] = time.time()
     cache.set(_key(user_id), state, timeout=LOGIN_DEADLINE_S + 120)
+    if any(values.get(command) for command in ("cancelar", "salvar_agora")):
+        _transport.wake(user_id)
     return state
 
 
@@ -143,8 +146,8 @@ def _worker(user):
                 _set(uid, fase="aguardando_login", erro="",
                      session_id=runtime.session_id, viewport=runtime.viewport)
                 deadline, logged = time.time() + LOGIN_DEADLINE_S, False
-                # O loop gira rápido (passo_do_loop_ms) para bombear frames e drenar
-                # input, mas nem o cache nem o DOM mudam nessa escala. Ler os dois a cada
+                # O loop desperta no input para bombear frames e drenar a fila, mas
+                # nem o cache nem o DOM mudam nessa escala. Ler os dois a cada
                 # volta custava, POR SEGUNDO, 20 idas ao cache e 20 consultas de
                 # seletor CSS via CDP — dentro do processo do gunicorn, segurando a
                 # GIL e derrubando a latência das outras 7 threads. O ML já tinha
@@ -212,7 +215,7 @@ def _worker(user):
                                 "validation=conectado", uid,
                             )
                             break
-                    current_page.wait_for_timeout(passo_do_loop_ms(runtime))
+                    aguardar_atividade(current_page, runtime)
                 if logged:
                     _set(uid, fase="salvando")
                     # Só a leitura fica aqui. Gravar depois do bloco mantém o mesmo
