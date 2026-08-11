@@ -91,10 +91,21 @@ class TemplateLiveViewTests(TestCase):
         )
         self.html = template.read_text(encoding="utf-8")
 
-    def test_watchdog_tolera_mais_que_o_intervalo_de_heartbeat(self):
-        # 4000 era menor que os 10s de heartbeat do servidor: acusava queda sozinho.
-        self.assertIn("lastFrameAt > 12000", self.html)
-        self.assertNotIn("lastFrameAt > 4000", self.html)
+    def test_watchdog_conta_heartbeat_como_sinal_de_vida(self):
+        # Quadro novo não é a única prova de vida: uma tela parada só produz
+        # heartbeat, e medir a queda por `lastFrameAt` acusava interrupção com o
+        # transporte saudável — era o loop de "Reconectando…" que travava o login.
+        self.assertIn("lastAliveAt > 12000", self.html)
+        self.assertNotIn("Date.now() - lastFrameAt > 12000", self.html)
+        self.assertIn("lastAliveAt = Date.now();", self.html)
+
+    def test_aviso_de_stream_nunca_engole_clique_nem_tecla(self):
+        # O aviso cobria o canvas inteiro e interceptava ponteiro: quando a imagem
+        # engasgava, o formulário do site sumia atrás dele e o login ficava
+        # impossível de concluir.
+        overlay = self.html.split(".stream-overlay {", 1)[1].split("}", 1)[0]
+        self.assertIn("pointer-events:none", overlay)
+        self.assertNotIn("inset:0", overlay)
 
     def test_canvas_so_e_redimensionado_quando_muda(self):
         # Reatribuir width/height limpa o canvas — era a origem do "piscando".

@@ -13,6 +13,7 @@ from apps.scrapers.ml_live_transport import (
     CAPTURE_ACTIVE_INTERVAL_S,
     CAPTURE_BURST_INTERVAL_S,
     CAPTURE_IDLE_INTERVAL_S,
+    CAPTURE_QUALITY,
     ActivePage,
     InteractiveBrowserCapacityError,
     LiveTransport,
@@ -263,7 +264,7 @@ class CapturaEPopupTests(SimpleTestCase):
         page.screenshot.return_value = b"jpeg"
         self.assertTrue(transport.capture(runtime, page, active=True))
         page.screenshot.assert_called_once_with(
-            type="jpeg", quality=78, scale="css",
+            type="jpeg", quality=CAPTURE_QUALITY, scale="css",
         )
         event = next(transport.frames(1, runtime.session_id))
         self.assertEqual(event["event"], "frame")
@@ -290,6 +291,18 @@ class CapturaEPopupTests(SimpleTestCase):
         self.assertNotEqual(current["data"], "")
         first_stream.close()
         reconnected.close()
+        transport.finish(1, runtime)
+
+    def test_tela_identica_nao_vira_quadro_novo_mas_segue_viva(self):
+        transport = LiveTransport("dedupe")
+        runtime = transport.create(1)
+        page = Mock()
+        page.screenshot.return_value = b"mesma-tela"
+        transport.capture(runtime, page, active=True)
+        runtime.last_capture_at = 0
+        transport.capture(runtime, page, active=True)
+        self.assertEqual(runtime.frame_seq, 1)
+        self.assertEqual(runtime.public_state()["stream"]["estado"], "ao_vivo")
         transport.finish(1, runtime)
 
     def test_popup_vira_pagina_ativa_e_fecha_com_fallback(self):

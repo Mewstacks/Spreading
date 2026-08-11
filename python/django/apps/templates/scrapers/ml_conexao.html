@@ -145,13 +145,20 @@
   #live-canvas:focus-visible { box-shadow:inset 0 0 0 3px var(--accent); }
   #live-kbd { position:fixed; left:-200vw; top:0; width:2px; height:2px; opacity:0;
     border:0; padding:0; }
-  .stream-overlay { position:absolute; inset:0; display:none; place-items:center; padding:1rem;
-    background:color-mix(in srgb,var(--bg-inset) 84%,transparent); color:var(--text-2);
-    text-align:center; z-index:2; }
-  .stream-overlay.is-visible { display:grid; }
-  .stream-overlay-card { display:grid; justify-items:center; gap:.55rem; max-width:330px; }
-  .stream-overlay-card .lucide { color:var(--accent); }
-  .stream-overlay-card .hint { color:var(--muted); font-size:12.5px; }
+  /* Aviso de imagem parada. NUNCA cobre o canvas nem intercepta ponteiro: enquanto
+     ele era um `inset:0` opaco, uma queda de frames tapava o formulário do site e
+     engolia cliques e teclas — o login ficava impossível de concluir justamente
+     quando a imagem já estava voltando. */
+  .stream-overlay { position:absolute; left:50%; bottom:.75rem; transform:translateX(-50%);
+    display:none; max-width:min(92%,420px); padding:.5rem .8rem; pointer-events:none;
+    border:1px solid var(--border); border-radius:var(--r-md); z-index:2;
+    background:color-mix(in srgb,var(--surface) 92%,transparent); backdrop-filter:blur(8px);
+    box-shadow:var(--shadow-pop); color:var(--text-2); text-align:center; }
+  .stream-overlay.is-visible { display:block; }
+  .stream-overlay-card { display:flex; align-items:center; justify-content:center;
+    gap:.45rem; flex-wrap:wrap; font-size:12.5px; }
+  .stream-overlay-card .lucide { width:1rem; height:1rem; color:var(--accent); }
+  .stream-overlay-card .hint { color:var(--muted); font-size:12px; }
 
   .device-tip { display:flex; align-items:flex-start; gap:.55rem; padding:.65rem .8rem;
     border-radius:var(--r-md); background:var(--surface-2); border:1px solid var(--border);
@@ -262,8 +269,8 @@
     <div id="stream-overlay" class="stream-overlay" aria-hidden="true">
       <div class="stream-overlay-card">
         <i data-lucide="refresh-cw"></i>
-        <strong>Reconectando a imagem</strong>
-        <span class="hint">Seu login continua aberto. A tela volta automaticamente.</span>
+        <strong>Recuperando a imagem</strong>
+        <span class="hint">Pode continuar digitando: as teclas chegam ao site mesmo assim.</span>
       </div>
     </div>
   </div>
@@ -453,6 +460,17 @@
   let sessionId = '';
   let lastMove = 0;
   let lastFrameAt = 0;
+  // Último sinal de vida do stream: frame OU heartbeat. Quadro novo não é a única
+  // prova de que o transporte está de pé — uma tela parada (CAPTCHA sendo lido,
+  // campo de senha sem cursor piscando) só produz heartbeat, e usar `lastFrameAt`
+  // como watchdog acusava queda com a conexão perfeitamente saudável.
+  let lastAliveAt = 0;
+  let falhasInput = 0;
+  // Última abertura do EventSource. O servidor limita 6 streams/min por usuário
+  // (throttle_sse): reabrir a cada poll de 3s queimava a cota em 18s e deixava a
+  // tela sem imagem por 1 minuto inteiro.
+  let ultimaAbertura = 0;
+  const REABRIR_MIN_MS = 8000;
   let lastDrawnSeq = 0;
   // Fim do bloqueio imposto pelo throttle_sse: enquanto Date.now() for menor,
   // startLive não abre EventSource novo (reabrir antes só renova o bloqueio).
@@ -574,6 +592,7 @@
     try {
       const result = await post(`${PREFIX}/input/`, {session_id:sessionId, events:batch});
       if (!result.ok) throw new Error(result.erro || 'input_rejected');
+      falhasInput = 0;
       // ACK cumulativo: o servidor confirma uma faixa contínua e o que não entrou
       // continua no buffer para a próxima tentativa.
       const ack = Number(result.ack || 0);
@@ -582,7 +601,11 @@
       entregou = true;
       setStream('ao_vivo');
     } catch (_) {
-      setStream('interrompida');
+      // Um POST perdido é rotina numa VM que divide CPU com o Chromium do login.
+      // Anunciar 'interrompida' na primeira falha fazia o aviso aparecer no meio de
+      // uma digitação normal, com a imagem correndo ao lado.
+      falhasInput += 1;
+      if (falhasInput >= 3) setStream('interrompida');
       retryDelay = Math.min(2000, retryDelay * 2);
     } finally {
       sending = false;
@@ -693,7 +716,7 @@
     if (seq <= lastDrawnSeq) return;
     ctx.drawImage(fonte, 0, 0, canvas.width, canvas.height);
     lastDrawnSeq = seq;
-    lastFrameAt = Date.now();
+    lastFrameAt = lastAliveAt = Date.now();
     setStream('ao_vivo');
   }
   function bytesDoFrame(base64) {
@@ -734,13 +757,21 @@
     // Throttle do servidor estourou: reconectar antes da janela só renova o
     // bloqueio. O poll chama startLive de novo a cada 3s e reabre quando passar.
     if (Date.now() < liveBloqueadoAte) return;
+    // Mesma lógica na cadência normal: o poll de 3s tentava reabrir logo depois de
+    // cada 'done', o que estourava o teto de 6 streams/min e derrubava a imagem por
+    // um minuto — o loop de "Reconectando…" que travava o login.
+    if (Date.now() - ultimaAbertura < REABRIR_MIN_MS) return;
+    ultimaAbertura = Date.now();
     const query = `?session_id=${encodeURIComponent(sessionId)}`;
     framesES = new EventSource(`${PREFIX}/frames/${query}`);
     framesES.addEventListener('frame', event => queueFrame(event.data, event.lastEventId));
     // Keepalive: a tela parada (CAPTCHA sendo lido) não gera quadro novo. Sem isto o
     // watchdog acusava queda e o overlay tapava justamente o desafio.
+    // Heartbeat É sinal de vida, não um empate a ser desprezado: a tela parada não
+    // gera quadro novo e o servidor manda batida a cada 4s.
     framesES.addEventListener('heartbeat', () => {
-      if (Date.now() - lastFrameAt < 3500) setStream('ao_vivo');
+      lastAliveAt = Date.now();
+      if (lastFrameAt) setStream('ao_vivo');
     });
     framesES.addEventListener('done', event => {
       stopLive();
@@ -759,7 +790,7 @@
       // curam na reconexão; só escancarar a interrupção quando os frames já
       // pararam de verdade — senão o overlay piscava a cada soluço de rede.
       if (!lastFrameAt) setStream('reconectando');
-      else if (Date.now() - lastFrameAt > 12000) setStream('interrompida');
+      else if (Date.now() - lastAliveAt > 12000) setStream('interrompida');
     };
   }
   function stopLive() {
@@ -809,8 +840,10 @@
       nextInputSeq = 1;
       inputBuffer = [];
       lastDrawnSeq = 0;
-      lastFrameAt = 0;
+      lastFrameAt = lastAliveAt = 0;
       liveBloqueadoAte = 0;
+      ultimaAbertura = 0;
+      falhasInput = 0;
       stopLive();
     }
     if (state.viewport) setViewport(state.viewport);
@@ -818,7 +851,7 @@
     // servidor sobrescrever um stream que ACABOU de desenhar fazia o rótulo
     // oscilar com a imagem perfeitamente saudável; aqui ele só desempata quando
     // o cliente realmente está sem quadro.
-    if (state.stream && state.stream.estado && Date.now() - lastFrameAt > 12000) {
+    if (state.stream && state.stream.estado && Date.now() - lastAliveAt > 12000) {
       // 'reconectando' do servidor nunca rebaixa um 'interrompida' local: esse
       // rebaixamento, alternado com o watchdog a cada poll, fazia o badge piscar
       // sem parar. O servidor já deriva 'interrompida' pela idade do frame; esta
@@ -927,7 +960,10 @@
       const response = await fetch(`${PREFIX}/status/`);
       paint(await response.json());
     } catch (_) {
-      if (liveArea.style.display !== 'none') setStream('interrompida');
+      // Falha no /status/ não diz nada sobre a imagem: os frames vêm por outra
+      // conexão. Só avisa quando o próprio stream já está sem sinal.
+      if (liveArea.style.display !== 'none' && lastAliveAt
+          && Date.now() - lastAliveAt > 12000) setStream('interrompida');
     }
   }
 
@@ -995,7 +1031,7 @@
   function watchFrames(ligar) {
     if (ligar && !frameWatch) {
       frameWatch = setInterval(() => {
-        if (framesES && lastFrameAt && Date.now() - lastFrameAt > 12000) setStream('interrompida');
+        if (framesES && lastFrameAt && Date.now() - lastAliveAt > 12000) setStream('interrompida');
       }, 1000);
     } else if (!ligar && frameWatch) {
       clearInterval(frameWatch); frameWatch = null;

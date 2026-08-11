@@ -11,6 +11,7 @@ suas respectivas sessões.
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import queue
 import secrets
@@ -30,14 +31,18 @@ MOBILE_HEIGHT = (640, 932)
 DESKTOP_WIDTH = (1024, 1440)
 DESKTOP_HEIGHT = (700, 1000)
 
-CAPTURE_QUALITY = 78
+# Qualidade 78 num viewport de 1280x800 dava ~150 KB por quadro: a 14 FPS são mais de
+# 2 MB/s por aba, mais do que a maioria das conexões entrega. O excesso não vira imagem
+# melhor, vira fila — o quadro chegava atrasado, o watchdog acusava queda e o aviso de
+# reconexão cobria o login. 64 mantém o texto do formulário nítido pela metade do peso.
+CAPTURE_QUALITY = 64
 # Três faixas de cadência, escolhidas pelo tempo desde o último input do usuário.
 # 250ms fixos (4 FPS) davam um eco de quase meio segundo por tecla e tornavam captcha
-# de arrastar impossível de resolver. A rajada de ~14 FPS existe SÓ enquanto o usuário
+# de arrastar impossível de resolver. A rajada de ~10 FPS existe SÓ enquanto o usuário
 # está mexendo: o pico de CPU dura poucos segundos e no resto do tempo a captura fica
 # mais barata do que era antes, o que importa numa máquina que divide 2 vCPU com o
 # gunicorn e os workers de automação.
-CAPTURE_BURST_INTERVAL_S = 0.07
+CAPTURE_BURST_INTERVAL_S = 0.1
 CAPTURE_ACTIVE_INTERVAL_S = 0.25
 CAPTURE_IDLE_INTERVAL_S = 1.0
 BURST_WINDOW_S = 1.5
@@ -45,7 +50,10 @@ ACTIVE_WINDOW_S = 5.0
 # O gerador SSE acompanha a rajada; fora dela não faz sentido acordar 20x/s.
 STREAM_POLL_BURST_S = 0.02
 STREAM_POLL_IDLE_S = 0.05
-HEARTBEAT_INTERVAL_S = 10.0
+# 4s, não 10s: o heartbeat é a única prova de vida quando a tela não muda (CAPTCHA
+# sendo lido, formulário parado). Com 10s ele mal cabia no watchdog de 12s do cliente,
+# que então acusava queda numa sessão perfeitamente saudável.
+HEARTBEAT_INTERVAL_S = 4.0
 # Idade máxima do último frame antes do stream ser dado como interrompido. É o
 # mesmo limite do watchdog do cliente (ml_conexao.html, 12s): os dois lados
 # precisam concordar sobre o estado, senão o badge alterna sem parar entre
@@ -217,6 +225,7 @@ class LiveRuntime:
         default_factory=lambda: queue.Queue(maxsize=MAX_QUEUE_SIZE),
     )
     frame_data: str = ""
+    frame_hash: str = ""
     frame_seq: int = 0
     frame_at: float = 0.0
     first_frame_at: float = 0.0
@@ -388,7 +397,6 @@ class LiveTransport:
             )
             if not isinstance(raw, (bytes, bytearray)):
                 return False
-            data = base64.b64encode(raw).decode("ascii")
         except Exception:
             # Depois do primeiro frame, uma falha pontual de screenshot (anti-bot
             # do ML segurando a navegação, troca de aba) NÃO rebaixa o estado:
@@ -402,9 +410,22 @@ class LiveTransport:
             )
             return False
         wall_now = time.time()
+        digest = hashlib.blake2b(raw, digest_size=16).hexdigest()
+        # Tela idêntica à anterior não vira quadro novo. Reenviar os mesmos ~80 KB a
+        # cada volta (um formulário parado é o estado normal enquanto se lê o e-mail
+        # ou se espera o SMS) só ocupava a banda de que o próximo quadro REAL ia
+        # precisar. O `frame_at` continua avançando: a sessão está viva, não parada.
+        if digest == runtime.frame_hash and runtime.frame_seq:
+            with runtime.lock:
+                runtime.frame_at = wall_now
+                runtime.last_capture_at = now
+                runtime.stream_state = "ao_vivo"
+            return False
+        data = base64.b64encode(raw).decode("ascii")
         first_frame = False
         with runtime.lock:
             runtime.frame_seq += 1
+            runtime.frame_hash = digest
             runtime.frame_data = data
             runtime.frame_at = wall_now
             runtime.last_capture_at = now
