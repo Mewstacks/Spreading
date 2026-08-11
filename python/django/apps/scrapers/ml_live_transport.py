@@ -46,6 +46,11 @@ ACTIVE_WINDOW_S = 5.0
 STREAM_POLL_BURST_S = 0.02
 STREAM_POLL_IDLE_S = 0.05
 HEARTBEAT_INTERVAL_S = 10.0
+# Idade máxima do último frame antes do stream ser dado como interrompido. É o
+# mesmo limite do watchdog do cliente (ml_conexao.html, 12s): os dois lados
+# precisam concordar sobre o estado, senão o badge alterna sem parar entre
+# 'reconectando' (servidor) e 'interrompida' (cliente).
+STREAM_STALE_MS = 12000
 MAX_EVENTOS_POR_POST = 60
 MAX_QUEUE_SIZE = 2000
 
@@ -231,11 +236,19 @@ class LiveRuntime:
                 max(0, round((time.time() - self.frame_at) * 1000))
                 if self.frame_at else None
             )
+            # Quem decide se a imagem parou é a IDADE do último frame, não a última
+            # falha de screenshot. Sem esta derivação, uma sequência de capturas
+            # falhas (anti-bot do ML segurando a navegação) deixava o servidor em
+            # 'reconectando' enquanto o watchdog do cliente dizia 'interrompida' —
+            # e o poll aplicava um estado diferente a cada 3s, oscilando o badge.
+            estado = self.stream_state
+            if frame_age_ms is not None and frame_age_ms > STREAM_STALE_MS:
+                estado = "interrompida"
             return {
                 "session_id": self.session_id,
                 "viewport": dict(self.viewport),
                 "stream": {
-                    "estado": self.stream_state,
+                    "estado": estado,
                     "frame_seq": self.frame_seq,
                     "frame_at": self.frame_at,
                     "frame_age_ms": frame_age_ms,
@@ -377,7 +390,12 @@ class LiveTransport:
                 return False
             data = base64.b64encode(raw).decode("ascii")
         except Exception:
-            runtime.stream_state = "reconectando"
+            # Depois do primeiro frame, uma falha pontual de screenshot (anti-bot
+            # do ML segurando a navegação, troca de aba) NÃO rebaixa o estado:
+            # public_state marca 'interrompida' pela idade do frame. Sem esta
+            # guarda o estado oscilava ao_vivo/reconectando a cada falha.
+            if not runtime.frame_seq:
+                runtime.stream_state = "reconectando"
             logger.warning(
                 "Captura do login %s falhou (user=%s).",
                 self.name, runtime.user_id, exc_info=True,
@@ -458,7 +476,10 @@ class ActivePage:
     def _on_page(self, page):
         self._pages.append(page)
         self._active = page
-        self._runtime.stream_state = "reconectando"
+        # Popup antes do primeiro frame = ainda conectando; depois dele, a troca
+        # de aba não derruba o estado — a próxima captura já vem da aba nova.
+        if not self._runtime.frame_seq:
+            self._runtime.stream_state = "reconectando"
 
     def current(self):
         alive = []
@@ -473,7 +494,8 @@ class ActivePage:
         self._pages = alive
         if self._active not in alive and alive:
             self._active = alive[-1]
-            self._runtime.stream_state = "reconectando"
+            if not self._runtime.frame_seq:
+                self._runtime.stream_state = "reconectando"
         return self._active if alive else None
 
 

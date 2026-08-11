@@ -454,6 +454,9 @@
   let lastMove = 0;
   let lastFrameAt = 0;
   let lastDrawnSeq = 0;
+  // Fim do bloqueio imposto pelo throttle_sse: enquanto Date.now() for menor,
+  // startLive não abre EventSource novo (reabrir antes só renova o bloqueio).
+  let liveBloqueadoAte = 0;
   let decoding = false;
   let pendingFrame = null;
   let composing = false;
@@ -728,6 +731,9 @@
   function startLive() {
     attachInput();
     if (framesES || !sessionId) return;
+    // Throttle do servidor estourou: reconectar antes da janela só renova o
+    // bloqueio. O poll chama startLive de novo a cada 3s e reabre quando passar.
+    if (Date.now() < liveBloqueadoAte) return;
     const query = `?session_id=${encodeURIComponent(sessionId)}`;
     framesES = new EventSource(`${PREFIX}/frames/${query}`);
     framesES.addEventListener('frame', event => queueFrame(event.data, event.lastEventId));
@@ -736,9 +742,25 @@
     framesES.addEventListener('heartbeat', () => {
       if (Date.now() - lastFrameAt < 3500) setStream('ao_vivo');
     });
-    framesES.addEventListener('done', () => stopLive());
-    framesES.onopen = () => setStream('reconectando');
-    framesES.onerror = () => setStream('interrompida');
+    framesES.addEventListener('done', event => {
+      stopLive();
+      // O stream de erro do throttle_sse termina com 'done' carregando '[ERRO]…'.
+      if (typeof event.data === 'string' && event.data.indexOf('[ERRO]') === 0) {
+        liveBloqueadoAte = Date.now() + 60000;
+        setStream('interrompida');
+      }
+    });
+    // 'reconectando' só faz sentido antes do PRIMEIRO frame. Marcar a cada
+    // (re)abertura do EventSource derrubava o badge mesmo com a imagem fluindo —
+    // e, alternado com o watchdog e o poll, era o que fazia o rótulo piscar.
+    framesES.onopen = () => { if (!lastFrameAt) setStream('reconectando'); };
+    framesES.onerror = () => {
+      // O EventSource reconecta sozinho (retry: do servidor). Quedas curtas se
+      // curam na reconexão; só escancarar a interrupção quando os frames já
+      // pararam de verdade — senão o overlay piscava a cada soluço de rede.
+      if (!lastFrameAt) setStream('reconectando');
+      else if (Date.now() - lastFrameAt > 12000) setStream('interrompida');
+    };
   }
   function stopLive() {
     if (framesES) { framesES.close(); framesES = null; }
@@ -787,6 +809,8 @@
       nextInputSeq = 1;
       inputBuffer = [];
       lastDrawnSeq = 0;
+      lastFrameAt = 0;
+      liveBloqueadoAte = 0;
       stopLive();
     }
     if (state.viewport) setViewport(state.viewport);
@@ -795,7 +819,13 @@
     // oscilar com a imagem perfeitamente saudável; aqui ele só desempata quando
     // o cliente realmente está sem quadro.
     if (state.stream && state.stream.estado && Date.now() - lastFrameAt > 12000) {
-      setStream(state.stream.estado);
+      // 'reconectando' do servidor nunca rebaixa um 'interrompida' local: esse
+      // rebaixamento, alternado com o watchdog a cada poll, fazia o badge piscar
+      // sem parar. O servidor já deriva 'interrompida' pela idade do frame; esta
+      // guarda cobre qualquer resíduo.
+      if (!(streamAtual === 'interrompida' && state.stream.estado === 'reconectando')) {
+        setStream(state.stream.estado);
+      }
     }
 
     if (state.erro) {

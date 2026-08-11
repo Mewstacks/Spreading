@@ -114,7 +114,14 @@ def throttle_sse(max_por_min=10):
                           level="warning", usuario=request.user,
                           contexto={"view": view.__name__})
                 def _err():
+                    yield "retry: 30000\n\n"
                     yield "data: [ERRO] Muitas execuções seguidas. Aguarde ~1 minuto.\n\n"
+                    # As telas de login (ml_conexao.html) só escutam eventos
+                    # NOMEADOS ('frame', 'heartbeat', 'done'): sem este 'done'
+                    # o EventSource reconectava para sempre e renovava o próprio
+                    # bloqueio. As telas de raspagem leem as linhas 'data:' —
+                    # mantidas intactas acima e abaixo.
+                    yield "event: done\ndata: [ERRO] Muitas execuções seguidas. Aguarde ~1 minuto.\n\n"
                     yield "data: __DONE__\n\n"
                 resp = StreamingHttpResponse(_err(), content_type="text/event-stream")
                 resp["Cache-Control"] = "no-cache"
@@ -128,9 +135,9 @@ def throttle_sse(max_por_min=10):
 # O EventSource reconecta sozinho sempre que o stream cai. Sem um `retry:` explícito o
 # navegador tenta de novo em ~3s, e 6 tentativas cabem em menos de 20 segundos: o teto
 # de throttle_sse(6) estourava e a tela ficava SEM IMAGEM justamente quando o stream
-# estava instável — o pior momento possível. 10s por tentativa mantém as reconexões
-# dentro do orçamento do throttle.
-SSE_RETRY_MS = 10000
+# estava instável — o pior momento possível. 15s por tentativa dá 4 reconexões/minuto:
+# folga real sob o teto, com espaço para um reload da página sem estourar o throttle.
+SSE_RETRY_MS = 15000
 
 
 def _stream_login_sse(eventos):
