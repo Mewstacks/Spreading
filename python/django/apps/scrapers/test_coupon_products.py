@@ -328,6 +328,105 @@ class CouponPreparationTests(TestCase):
         self.assertEqual(_coletar_ml_remoto(cupom), 0)
         iniciar_browser.assert_not_called()
 
+    def _cupom_ml_de_container(self):
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML público"})
+        return self._coupon(
+            fonte=fonte, marketplace="mercadolivre", codigo="",
+            external_id="campanha:99",
+            link="https://lista.mercadolivre.com.br/_Container_teste",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 25,
+                    "modo_resgate": "ativacao",
+                    "container_url":
+                        "https://lista.mercadolivre.com.br/_Container_teste"},
+        )
+
+    @staticmethod
+    def _parede_de_login():
+        """O que o ML devolve hoje em `lista.`: 200, mas na URL de verificação."""
+        resposta = Mock(
+            text="<html>Para continuar, acesse sua conta</html>",
+            status_code=200,
+            url=("https://www.mercadolivre.com.br/gz/account-verification"
+                 "?go=https%3A%2F%2Flista.mercadolivre.com.br%2F_Container_teste"),
+        )
+        resposta.raise_for_status.return_value = None
+        return resposta
+
+    @patch("apps.scrapers.auxiliar.iniciar_browser")
+    @patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session")
+    @patch("apps.scrapers.ml_auth.storage_state", return_value={"cookies": []})
+    def test_parede_de_login_nao_vira_cupom_sem_produto(
+        self, _storage, http_session, iniciar_browser,
+    ):
+        """O incidente: 2232 cupons marcados "nenhum produto aplicável" e 6h de
+        espera, quando na verdade ninguém conseguiu abrir a listagem."""
+        from apps.scrapers.coupon_products import (
+            BACKOFF_SEM_SESSAO, ERRO_SESSAO_ML, preparar_cupom,
+        )
+
+        http_session.return_value.get.return_value = self._parede_de_login()
+        cupom = self._cupom_ml_de_container()
+
+        antes = timezone.now()
+        self.assertEqual(preparar_cupom(cupom, self.user, force=True), [])
+
+        preparo = CupomPreparacao.objects.get(cupom=cupom)
+        self.assertEqual(preparo.status, "erro")
+        self.assertEqual(preparo.erro, ERRO_SESSAO_ML)
+        # Espera curta: a sessão volta quando alguém reconecta, não em 6 horas.
+        self.assertLess(preparo.proxima_tentativa, antes + BACKOFF_SEM_SESSAO
+                        + timezone.timedelta(minutes=1))
+        # E o Chromium não é gasto contra a mesma porta fechada.
+        iniciar_browser.assert_not_called()
+
+    @patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session")
+    @patch("apps.scrapers.ml_auth.storage_state")
+    def test_sessao_de_outra_organizacao_destrava_a_listagem_compartilhada(
+        self, storage_state, http_session,
+    ):
+        """O catálogo público é preparado com a sessão de sistema; quando ela
+        expira, a esteira inteira parava mesmo com usuários conectados."""
+        from apps.scrapers.coupon_products import _coletar_ml_remoto
+
+        sistema, alternativa = {"cookies": ["sistema"]}, {"cookies": ["usuario"]}
+        storage_state.side_effect = lambda quem=None: (
+            alternativa if quem is not None else sistema
+        )
+        boa = Mock(
+            status_code=200,
+            url="https://lista.mercadolivre.com.br/_Container_teste",
+            text="<html>listagem com produtos</html>",
+        )
+        boa.raise_for_status.return_value = None
+        respostas = {
+            id(sistema): self._parede_de_login(),
+            id(alternativa): boa,
+        }
+        http_session.side_effect = lambda state: Mock(
+            get=Mock(return_value=respostas[id(state)]),
+        )
+        cupom = self._cupom_ml_de_container()
+
+        with patch(
+            "apps.scrapers.coupon_products._produtos_ml_do_html",
+            side_effect=lambda texto, limite=9: [{
+                "nome_produto": "Item da campanha",
+                "preco_original_sem_desconto": 100.0,
+                "preco_vitrine_atual": 80.0,
+                "link_produto": "https://produto.mercadolivre.com.br/MLB-1",
+                "imagem_url": "https://http2.mlstatic.com/item.jpg",
+            }] if texto else [],
+        ):
+            total = _coletar_ml_remoto(
+                cupom, usuario=None, credencial_alternativa=self.user,
+            )
+
+        self.assertEqual(total, 1)
+        self.assertTrue(ProdutoCupom.objects.filter(
+            cupom=cupom, status="confirmado").exists())
+
 
 class CouponMessageTests(SimpleTestCase):
     def _data(self):
@@ -882,6 +981,32 @@ class CasamentoDeContainerTests(TestCase):
 
         # O já casado vai para o fim; os nunca casados na frente.
         self.assertEqual(ordem[-1].id, antigo.id)
+
+    def test_parede_de_login_encerra_a_passada_sem_gastar_browser(self):
+        """Sem isto, cada container restante abria um Chromium para colher a
+        mesma tela de login — e era daí que vinha "capacidade de browser ocupada"."""
+        from apps.scrapers.scraper_mercadolivre.cupons_container import (
+            SessaoMLObrigatoriaError, casar_cupons_container,
+        )
+        from unittest.mock import Mock, patch
+
+        self._cupons(5)
+        parede = Mock(
+            status_code=200,
+            text="<html>acesse sua conta</html>",
+            url="https://www.mercadolivre.com.br/gz/account-verification?go=x",
+        )
+        with patch("apps.scrapers.scraper_mercadolivre.cupons_container.storage_state",
+                   return_value={"cookies": []}), \
+             patch("apps.scrapers.scraper_mercadolivre.cupons_container._ml_http_session",
+                   return_value=Mock(get=Mock(return_value=parede))), \
+             patch("apps.scrapers.auxiliar.iniciar_browser") as iniciar_browser:
+            with self.assertRaises(SessaoMLObrigatoriaError):
+                casar_cupons_container()
+        iniciar_browser.assert_not_called()
+        fonte = FonteIngestao.objects.get(slug="ml-public-containers")
+        self.assertEqual(fonte.status, "degraded")
+        self.assertIn("conexão do Mercado Livre", fonte.erro_publico)
 
     def test_extrai_ids_do_html_sem_browser(self):
         from apps.scrapers.scraper_mercadolivre.cupons_container import _ids_do_html

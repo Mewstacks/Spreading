@@ -19,7 +19,8 @@ from apps.accounts.models import (
     WhatsAppConnection, ensure_personal_organization, organization_for_user,
 )
 from apps.scrapers.models import (
-    CupomDisponibilidade, CupomFonteObservacao, CupomNormalizado, FonteIngestao,
+    CupomDisponibilidade, CupomFonteObservacao, CupomNormalizado, CupomPreparacao,
+    FonteIngestao,
     LinkAfiliadoCupomUsuario, LinkAfiliadoUsuario, Produto, ProdutoCupom,
     Publicacao, ResourceLease, WorkerHeartbeat,
 )
@@ -1109,6 +1110,37 @@ class CouponReadinessReasonTests(TestCase):
         projection.refresh_from_db()
         self.assertEqual((projection.stage, projection.reason_code),
                          ("waiting_link", "ml_session_expired"))
+
+    def test_sessao_do_catalogo_caida_pede_reconexao_em_vez_de_culpar_o_cupom(self):
+        """A esteira compartilhada usa a sessão de sistema. Quando ela cai, o
+        preparo não observa NADA — e a tela dizia "nenhum produto comprovado",
+        que manda procurar defeito no cupom em vez de reconectar o ML."""
+        from apps.scrapers.coupon_products import ERRO_SESSAO_ML
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        coupon = CupomNormalizado.objects.create(
+            fonte=self.source, external_id="campanha:77", marketplace="mercadolivre",
+            titulo="25% em selecionados", codigo="",
+            link="https://lista.mercadolivre.com.br/_Container_77",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 25,
+                    "container_url":
+                        "https://lista.mercadolivre.com.br/_Container_77"},
+        )
+        CupomPreparacao.objects.create(
+            cupom=coupon, usuario=None, status="erro", erro=ERRO_SESSAO_ML,
+            verificado_em=timezone.now(),
+        )
+        self._ml_session()
+        with self._ml(conectado=True):
+            projetar_disponibilidade_cupons(self.user)
+
+        projection = CupomDisponibilidade.objects.get(cupom=coupon, usuario=self.user)
+        self.assertEqual(
+            (projection.stage, projection.category, projection.reason_code),
+            ("eligible", "no_session", "ml_catalog_session_expired"),
+        )
+        self.assertIn("reconecte", projection.safe_detail.casefold())
 
     def test_link_builder_pedindo_login_bloqueia_com_motivo_proprio(self):
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons

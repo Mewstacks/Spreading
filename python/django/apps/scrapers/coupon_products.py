@@ -34,9 +34,27 @@ CACHE_HORAS = 3
 # Espera antes de reprocessar um cupom que não rendeu nenhum produto. Sem isto o
 # preparo vazio é reagendado imediatamente e consome o lote inteiro em repetição.
 BACKOFF_VAZIO = timedelta(hours=6)
+# Espera quando o ML barrou a leitura por falta de sessão. Curta de propósito: o
+# cupom NÃO foi julgado, e a sessão volta assim que alguém reconecta. Com o
+# BACKOFF_VAZIO de 6h, um catálogo inteiro reprovado por sessão morta continuaria
+# fora da tela por horas depois de a conexão voltar.
+BACKOFF_SEM_SESSAO = timedelta(minutes=20)
 MAX_CANDIDATOS = 36
 PREPARO_LOTE_POR_CICLO = 12
 _CENT = Decimal("0.01")
+
+# Mensagem estável do preparo bloqueado por sessão. É ela que a projeção lê para
+# dizer ao usuário "reconecte", em vez de "nenhum produto aplicável" — que era o
+# diagnóstico errado e mandava procurar defeito no cupom.
+ERRO_SESSAO_ML = "Mercado Livre exigiu sessão para abrir a lista deste cupom."
+
+
+class SessaoMLIndisponivelError(RuntimeError):
+    """O ML respondeu com parede de login/verificação ao ler a lista do cupom.
+
+    Não é "cupom sem produto": nada foi observado. Existe para separar as duas
+    coisas no preparo, no backoff e na mensagem que chega à tela.
+    """
 
 
 class _MLCardsHTMLParser(HTMLParser):
@@ -389,12 +407,20 @@ def _ordem_por_valor_do_cupom(relacao):
     return economia / atual, economia
 
 
-def _coletar_ml_remoto(cupom, usuario=None):
+def _coletar_ml_remoto(cupom, usuario=None, credencial_alternativa=None):
     """Materializa a listagem oficial do ML quando ela ainda nao esta no banco.
 
     `usuario` é o contexto do preparo (None em cupom global, que cai na
     organização de sistema — ver scrapers/ml_auth.py). O container do ML é SSR e
     só rende a listagem completa com sessão.
+
+    `credencial_alternativa` é o usuário cuja sessão pode LER a listagem quando a
+    do contexto não serve. O catálogo público do ML é preparado no contexto de
+    sistema (`usuario=None`), então uma única sessão expirada — a da organização
+    em ML_SYSTEM_ORGANIZATION_ID — parava a esteira de TODAS as organizações,
+    inclusive as que estavam com o ML conectado. A listagem lida é a mesma página
+    pública para qualquer conta; o que ela decide é apenas se o gateway do ML
+    entrega o HTML.
     """
     link = str((cupom.regras or {}).get("container_url") or cupom.link or "").strip()
     try:
@@ -407,7 +433,9 @@ def _coletar_ml_remoto(cupom, usuario=None):
                         or host.endswith(".mercadolivre.com.br")):
         return 0
     from apps.scrapers.auxiliar import iniciar_browser
-    from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
+    from apps.scrapers.ml_auth import (
+        avisar_sem_sessao, parede_de_login, storage_state,
+    )
     from apps.scrapers.scraper_mercadolivre.scraper import (
         _ml_http_session, listar_itens_por_cupom,
     )
@@ -429,14 +457,39 @@ def _coletar_ml_remoto(cupom, usuario=None):
     # preços. Isso prepara todos os cupons oficiais em segundos, em vez de manter um
     # Chromium aberto por vários minutos. Browser fica como fallback para challenge.
     resultado = None
-    try:
-        response = _ml_http_session(state).get(link, timeout=12)
-        response.raise_for_status()
-        rows = _produtos_ml_do_html(response.text, limite=9)
-        if rows:
-            resultado = {**payload, "produtos_aplicaveis": rows}
-    except Exception as exc:
-        logger.info("Container ML via HTTP falhou para %s: %s", cupom.pk, exc)
+    barrado = False
+
+    def _tentar_http(credencial):
+        """(linhas, barrado). `barrado` = o ML entregou parede em vez de listagem."""
+        try:
+            response = _ml_http_session(credencial).get(link, timeout=12)
+            if parede_de_login(response):
+                return None, True
+            response.raise_for_status()
+            return _produtos_ml_do_html(response.text, limite=9), False
+        except Exception as exc:
+            logger.info("Container ML via HTTP falhou para %s: %s", cupom.pk, exc)
+            return None, False
+
+    rows, barrado = _tentar_http(state)
+    # Uma sessão de OUTRA organização lê a mesma listagem pública. Só entra quando a
+    # do contexto não serviu — é recuperação de indisponibilidade, não preferência.
+    if not rows and credencial_alternativa is not None:
+        alternativa = storage_state(credencial_alternativa)
+        if alternativa is not None and alternativa is not state:
+            rows, barrado_alt = _tentar_http(alternativa)
+            if rows:
+                barrado = False
+                state = alternativa
+            else:
+                barrado = barrado and barrado_alt
+    if rows:
+        resultado = {**payload, "produtos_aplicaveis": rows}
+    # Parede de login não é challenge que o Chromium desfaz: ele bate na mesma
+    # porta, consome um slot de browser (que é escasso) e devolve o mesmo vazio. O
+    # preparo precisa saber que NADA foi observado, para não gravar "sem produto".
+    if resultado is None and barrado:
+        raise SessaoMLIndisponivelError(ERRO_SESSAO_ML)
     # Sem uma sessão válida o Chromium repete a mesma resposta pública/challenge e
     # pode consumir dezenas de segundos por cupom. O worker registra o preparo vazio
     # e volta no próximo ciclo; uma sessão conectada habilita novamente o fallback.
@@ -522,7 +575,13 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
         candidatos = _base_produtos(cupom, contexto)
         if (not candidatos and permitir_rede
                 and str(cupom.marketplace).lower() == "mercadolivre"):
-            _coletar_ml_remoto(cupom, usuario=contexto)
+            # `usuario` é quem tornou este cupom elegível no lote; no catálogo
+            # compartilhado `contexto` é None (sessão de sistema) e a dele é a
+            # única credencial alternativa disponível para ler a listagem.
+            _coletar_ml_remoto(
+                cupom, usuario=contexto,
+                credencial_alternativa=usuario if contexto is None else None,
+            )
             candidatos = _base_produtos(cupom, contexto)
 
         validos = []
@@ -562,6 +621,19 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
                 erro="" if validos else "Nenhum produto comprovadamente aplicavel.")
         validos.sort(key=_ordem_por_valor_do_cupom, reverse=True)
         return validos[:9]
+    except SessaoMLIndisponivelError:
+        # Nenhuma observação foi feita: NÃO toque nos ProdutoCupom já confirmados e
+        # não grave "vazio" — este cupom continua tão bom quanto era. Só registra
+        # por que ninguém conseguiu olhar, com espera curta.
+        logger.warning(
+            "Preparo do cupom %s adiado: o Mercado Livre exigiu sessão para abrir "
+            "a listagem.", cupom.pk,
+        )
+        CupomPreparacao.objects.filter(pk=preparo.pk).update(
+            status="erro", produtos_chave=chave, verificado_em=timezone.now(),
+            proxima_tentativa=timezone.now() + BACKOFF_SEM_SESSAO,
+            erro=ERRO_SESSAO_ML)
+        return []
     except Exception as exc:
         logger.exception("Preparacao do cupom %s falhou", cupom.pk)
         CupomPreparacao.objects.filter(pk=preparo.pk).update(

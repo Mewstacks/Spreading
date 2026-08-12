@@ -93,7 +93,26 @@ const confirmarMensagem = (mensagem, instancia, {
     };
 };
 
+// Desfecho de um `sendMessage` que RESOLVEU, com ou sem o modelo da mensagem.
+// Mora aqui, e não solto no meio do envio, porque já houve a regressão: sem ID
+// nativo — o caminho NORMAL do bundle atual, que devolve undefined quando o
+// Msg.get pela chave recém-criada não acha o modelo — o envio virava
+// `sucesso:false`/`resultado:'incerto'`, e toda mensagem entregue ao grupo
+// aparecia na tela como "a entrega não pôde ser confirmada".
+//
+// Resolver o sendMessage significa que o WA Web montou a mensagem e a despachou
+// no chat; nem o caminho com ID nativo espera o ACK. A diferença entre os dois
+// é rastreabilidade (`confirmacao`), não confiança na entrega.
+const desfechoDeEnvioAceito = (confirmacao) => ({
+    sucesso: true,
+    resultado: 'confirmado',
+    repetir: false,
+    mensagem_id: confirmacao?.mensagemId || null,
+    confirmacao: confirmacao?.confirmacao || 'aceita_sem_id',
+});
+
 module.exports = {
     extrairMensagemId, opcoesDeEnvio, erroFrameDestacado, erroContextoDestruido,
     erroReloadEmVoo, confirmarMensagem, repetirSeFrameDestacado,
+    desfechoDeEnvioAceito,
 };

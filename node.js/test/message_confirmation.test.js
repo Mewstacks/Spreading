@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
     extrairMensagemId, opcoesDeEnvio, erroFrameDestacado, erroContextoDestruido,
     erroReloadEmVoo, confirmarMensagem, repetirSeFrameDestacado,
+    desfechoDeEnvioAceito,
 } = require('../message_confirmation');
 
 test('extrai o Wid serializado normal do whatsapp-web.js', () => {
@@ -88,4 +89,27 @@ test('gera rastreio local quando o WA Web aceita mas omite o modelo da mensagem'
         confirmarMensagem(undefined, '1', { agora: () => 123, uuid: () => 'abc' }),
         { mensagemId: 'local-1-123-abc', confirmacao: 'aceita_sem_id' },
     );
+});
+
+test('envio sem ID nativo é sucesso — a mensagem chegou ao grupo', () => {
+    // O incidente: o bundle atual devolve undefined em TODO envio, e o desfecho
+    // 'incerto' fazia a tela acusar erro em mensagens entregues.
+    const desfecho = desfechoDeEnvioAceito(
+        confirmarMensagem(undefined, '1', { agora: () => 123, uuid: () => 'abc' }),
+    );
+    assert.equal(desfecho.sucesso, true);
+    assert.equal(desfecho.resultado, 'confirmado');
+    assert.equal(desfecho.repetir, false);
+    assert.equal(desfecho.confirmacao, 'aceita_sem_id');
+    assert.equal(desfecho.mensagem_id, 'local-1-123-abc');
+});
+
+test('envio com ID nativo mantém o mesmo desfecho e preserva o Wid', () => {
+    const desfecho = desfechoDeEnvioAceito(
+        confirmarMensagem({ id: { _serialized: 'true_123@g.us_ABC' } }, '1'),
+    );
+    assert.equal(desfecho.sucesso, true);
+    assert.equal(desfecho.resultado, 'confirmado');
+    assert.equal(desfecho.confirmacao, 'nativa');
+    assert.equal(desfecho.mensagem_id, 'true_123@g.us_ABC');
 });

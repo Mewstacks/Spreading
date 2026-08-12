@@ -165,7 +165,12 @@ def _ids_por_http(sessao, url, max_paginas):
     então um GET traz os mesmos links. Devolver None (e não conjunto vazio) permite
     ao chamador distinguir "não consegui" de "container legitimamente vazio" e só
     então pagar o Chromium.
+
+    Levanta `SessaoMLObrigatoriaError` quando o ML devolve parede de login: aí o
+    Chromium bate na MESMA porta, e insistir custa um slot de browser por cupom.
     """
+    from apps.scrapers.ml_auth import parede_de_login
+
     if sessao is None:
         return None
     ids = set()
@@ -176,6 +181,10 @@ def _ids_por_http(sessao, url, max_paginas):
         except Exception as e:
             logger.debug("Container %s por HTTP falhou: %s", url, e)
             return None if not ids else ids
+        if parede_de_login(resp):
+            raise SessaoMLObrigatoriaError(
+                "O Mercado Livre exigiu sessão para abrir a listagem do container."
+            )
         if resp.status_code != 200:
             return None if not ids else ids
         achados = _ids_do_html(resp.text)
@@ -252,6 +261,10 @@ def _registrar_saude_containers(resultados, agora):
     )
     aceitos = 0
     falhas = 0
+    sem_sessao = any(
+        motivo in ("ml_session_missing", "ml_session_expired")
+        for _cupom, _ids, _publico, motivo in resultados
+    )
     for cupom, ids, publico, motivo in resultados:
         comprovado = bool(ids)
         if comprovado:
@@ -291,6 +304,9 @@ def _registrar_saude_containers(resultados, agora):
         fonte.status = "degraded"
         fonte.falhas_consecutivas += 1
         fonte.erro_publico = (
+            # A causa muda a ação: sessão caída é "reconecte"; o resto é "aguarde".
+            "A conexão do Mercado Livre expirou; os containers não puderam ser lidos."
+            if sem_sessao else
             "Alguns containers não puderam ser comprovados; vínculos anteriores preservados."
         )
     fonte.save(update_fields=[
@@ -337,11 +353,29 @@ def casar_cupons_container(coletor=None, max_paginas=2, usuario=None,
     pendentes = []          # (cupom, url) que o HTTP não resolveu
     pares = []
     fim = time.monotonic() + orcamento_s
-    for cupom in cupons:
+    for indice, cupom in enumerate(cupons):
         if time.monotonic() >= fim:
             break
         url = (cupom.regras or {}).get("container_url")
-        ids = _ids_por_http(sessao, url, max_paginas)
+        try:
+            ids = _ids_por_http(sessao, url, max_paginas)
+        except SessaoMLObrigatoriaError:
+            # A parede vale para a sessão inteira, não para este container. Fechar
+            # a passada aqui preserva os vínculos já confirmados e evita abrir um
+            # Chromium por cupom restante para colher a mesma tela de login.
+            logger.warning(
+                "Casamento de container interrompido: o Mercado Livre exigiu "
+                "sessão (%s de %s cupons lidos).", indice, len(cupons),
+            )
+            _registrar_saude_containers(
+                [(item, achados, True, motivo) for item, achados, motivo in pares]
+                + [(restante, None, False, "ml_session_expired")
+                   for restante in cupons[indice:]],
+                agora,
+            )
+            if pares:
+                _confirmar_todos(pares, idx, agora)
+            raise
         if ids is None:
             pendentes.append((cupom, url))
         else:

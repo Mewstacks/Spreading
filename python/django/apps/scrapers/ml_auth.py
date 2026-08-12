@@ -66,6 +66,30 @@ def http_session(state) -> requests.Session:
     return session
 
 
+# Paredes que o ML devolve NO LUGAR do conteúdo, com HTTP 200, quando a sessão não
+# vale para aquela página. Duas famílias distintas e ambas fatais para a raspagem:
+#   /jms/…/lgz/login, /login, /registration → sessão morta (logout de fato);
+#   /gz/account-verification                → o gateway exige conta logada/validada.
+# Desde 2026-08 TODA página de `lista.mercadolivre.com.br` (inclusive uma busca
+# comum e sem cookie nenhum) cai na segunda — ou seja, ler container de cupom
+# passou a exigir sessão viva. Sem reconhecer a parede, o GET "deu 200" e o parser
+# só via zero produto: o pipeline registrava "nenhum produto aplicável" — a
+# resposta certa para a pergunta errada.
+_PAREDES_ML = (
+    "/gz/account-verification", "/lgz/login", "/login", "/registration", "loginhub",
+)
+
+
+def parede_de_login(resposta) -> bool:
+    """A resposta é uma parede de login/verificação em vez do conteúdo pedido?
+
+    Olha a URL FINAL (depois dos redirects), que é onde a parede aparece: o ML
+    responde 200 no destino, então status_code não distingue nada aqui.
+    """
+    url = str(getattr(resposta, "url", "") or "").casefold()
+    return any(marca in url for marca in _PAREDES_ML)
+
+
 def storage_state_para(usuario):
     """storage_state do Playwright da organização deste usuário, ou None."""
     from apps.accounts.ml_session_crypto import MLSessionCryptoError

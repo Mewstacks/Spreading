@@ -32,7 +32,8 @@ const {
     buildSessionPayload, buildGruposPayload, buildInativoPayload,
 } = require('./payloads');
 const {
-    confirmarMensagem, erroReloadEmVoo, opcoesDeEnvio, repetirSeFrameDestacado,
+    confirmarMensagem, desfechoDeEnvioAceito, erroReloadEmVoo, opcoesDeEnvio,
+    repetirSeFrameDestacado,
 } = require('./message_confirmation');
 const {
     TRANSITORIO, PERMANENTE, erroClassificado, classificarErro, erroStoreQuebrado,
@@ -2164,16 +2165,13 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         // Uma midia que sobe zera a suspeita: os stalls so contam quando SEGUIDOS.
         session.stallsSeguidos = 0;
         console.log(`[${session.id}] Envio confirmado: ${confirmacao.mensagemId} -> ${maskedIdentifier(chatId)}`);
-        const confirmada = confirmacao.confirmacao === 'nativa';
         return {
-            sucesso: confirmada,
+            // Ver desfechoDeEnvioAceito: sendMessage que resolve é entrega aceita,
+            // com ou sem ID nativo. A ausência do ID é telemetria (`confirmacao`).
+            ...desfechoDeEnvioAceito(confirmacao),
             via: 'local',
             tipo,
             instancia: session.id,
-            mensagem_id: confirmacao.mensagemId,
-            confirmacao: confirmacao.confirmacao,
-            resultado: confirmada ? 'confirmado' : 'incerto',
-            repetir: false,
             // Na variante "aceita_sem_id", enviada e undefined por definição.
             // ACK é telemetria opcional; jamais pode transformar um envio aceito
             // em erro depois que já chegou ao grupo.

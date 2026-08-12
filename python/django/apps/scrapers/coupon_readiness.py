@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from apps.accounts.feature_flags import feature_decision
 from apps.accounts.models import organization_for_user
-from apps.scrapers.coupon_products import mapa_relacoes_prontas
+from apps.scrapers.coupon_products import ERRO_SESSAO_ML, mapa_relacoes_prontas
 from apps.scrapers.coupon_rules import (
     codigo_publicavel, cupom_publicavel, listagem_publica_ml, regras_do_cupom,
 )
@@ -202,6 +202,16 @@ def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao):
         return _resultado("eligible", "waiting", "preparation_pending",
                           "Aguardando preparo de produtos e preços.")
     if preparo.status == "erro":
+        # Sessão do catálogo caída não é "falha no preparo": nada foi observado
+        # sobre este cupom, e a ação que destrava é reconectar o Mercado Livre.
+        # Sem separar os dois, a tela dizia "nova tentativa será feita" para um
+        # funil que não voltaria sozinho — e o dono não sabia o que fazer.
+        if preparo.erro == ERRO_SESSAO_ML:
+            return _resultado(
+                "eligible", "no_session", "ml_catalog_session_expired",
+                "A conexão do Mercado Livre expirou; reconecte para preparar este cupom.",
+                preparo.proxima_tentativa,
+            )
         return _resultado("eligible", "operational_failure", "preparation_failed",
                           "Falha operacional no preparo; nova tentativa será feita.",
                           preparo.proxima_tentativa)
