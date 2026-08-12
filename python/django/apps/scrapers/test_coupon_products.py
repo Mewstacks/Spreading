@@ -1061,6 +1061,24 @@ class CasamentoDeContainerTests(TestCase):
         casar_cupons_container(coletor=coletor, limite_cupons=10)
         self.assertEqual(len(chamadas), 10)
 
+    def test_container_url_invalida_nao_consume_browser(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_container import (
+            casar_cupons_container,
+        )
+
+        self._cupons(1)
+        cupom = CupomNormalizado.objects.get(external_id="campanha:0")
+        for invalida in ("-", "MLB5672", "https://example.com/_Container_1"):
+            cupom.regras = {**cupom.regras, "container_url": invalida}
+            cupom.save(update_fields=["regras"])
+            chamadas = []
+
+            casar_cupons_container(
+                coletor=lambda url, paginas: chamadas.append(url) or set(),
+            )
+
+            self.assertEqual(chamadas, [])
+
     def test_orcamento_de_tempo_interrompe(self):
         from apps.scrapers.scraper_mercadolivre.cupons_container import casar_cupons_container
         self._cupons(10)

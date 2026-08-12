@@ -16,6 +16,7 @@ import logging
 import re
 import time
 from collections import deque
+from urllib.parse import urlparse
 
 from django.db.models import Max, Q
 from django.utils import timezone
@@ -48,6 +49,25 @@ ORCAMENTO_S = 300
 _RE_HREF = re.compile(r'href="([^"]*MLB[^"]*)"', re.I)
 
 
+def _container_url_valida(url):
+    """Aceita somente listagens absolutas do Mercado Livre.
+
+    Registros legados chegaram a guardar ``-`` e até item ids ``MLB...`` como
+    ``container_url``. O cliente HTTP os rejeita, mas antes eles ainda caíam no
+    fallback de Chromium e consumiam o único slot global tentando navegar para
+    uma URL inválida.
+    """
+    try:
+        parsed = urlparse(str(url or "").strip())
+    except (TypeError, ValueError):
+        return False
+    host = (parsed.hostname or "").lower()
+    return (
+        parsed.scheme in {"http", "https"}
+        and (host == "mercadolivre.com.br" or host.endswith(".mercadolivre.com.br"))
+    )
+
+
 def _cupons_de_container(limite=LIMITE_CUPONS):
     """CupomNormalizado ativos, com container e que NÃO são site-wide.
 
@@ -61,7 +81,7 @@ def _cupons_de_container(limite=LIMITE_CUPONS):
         marketplace="mercadolivre", estado="ativo",
     ).filter(Q(validade__isnull=True) | Q(validade__gte=agora))
     elegiveis = [c for c in qs
-                 if (c.regras or {}).get("container_url")
+                 if _container_url_valida((c.regras or {}).get("container_url"))
                  and not (c.regras or {}).get("is_mar_aberto")]
     if not elegiveis:
         return []
