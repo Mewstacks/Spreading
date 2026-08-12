@@ -60,6 +60,10 @@ stop_app() {
       echo "$app/$machine_id já está $state."
       continue
     fi
+    if [[ "$state" != "started" ]]; then
+      echo "$app/$machine_id está em transição ($state); abortando a parada segura." >&2
+      return 1
+    fi
     echo "Parando $app/$machine_id (estado atual: $state)..."
     fly_for_app "$app" machine stop "$machine_id" --app "$app" \
       --timeout 120 --wait-timeout 3m
@@ -114,6 +118,14 @@ start_app() {
     if [[ "$state" == "started" ]]; then
       echo "$app/$machine_id já está iniciado."
       continue
+    fi
+    if [[ "$state" == "starting" || "$state" == "replacing" || "$state" == "created" ]]; then
+      echo "$app/$machine_id está em transição ($state); aguardando saúde sem reiniciar."
+      continue
+    fi
+    if [[ "$state" != "stopped" && "$state" != "suspended" ]]; then
+      echo "$app/$machine_id está em estado inesperado ($state); abortando." >&2
+      return 1
     fi
     echo "Iniciando $app/$machine_id (estado atual: $state)..."
     fly_for_app "$app" machine start "$machine_id" --app "$app"
