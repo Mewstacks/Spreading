@@ -111,6 +111,10 @@ def _coletar_adaptador(slug, resultado, *, owner=None, items=("coupons",), **kwa
                 if status == "degraded" else
                 "Coleta vazia; catálogo anterior preservado."
                 if status == "empty" else
+                # Contenção de capacidade não é "já está rodando": a fonte NÃO
+                # começou, está na fila do único navegador da máquina.
+                "Sem navegador disponível agora; a coleta será retomada."
+                if payload.get("reason_code") == "capacity_deferred" else
                 "Coleta já está em execução."
                 if status == "running" else
                 "Circuit breaker ativo; catálogo anterior preservado."
@@ -332,6 +336,21 @@ def afiliar_cupons_de_codigo(usuario, cupons, *, limite=8):
     }
 
 
+def _peso_do_cupom(cupom) -> int:
+    """Posição na fila de afiliação (menor = antes). Ver EvidenceStrength."""
+    from apps.scrapers.coupon_rules import (
+        FORCA_EVIDENCIA_ORDEM, codigo_publicavel, forca_evidencia,
+    )
+
+    if codigo_publicavel(cupom):
+        return 0
+    if str(cupom.marketplace or "").lower() != "mercadolivre":
+        # Amazon/Awin não usam container: a prova de associação é a própria fonte
+        # oficial, então entram logo depois dos códigos.
+        return 1
+    return 2 + FORCA_EVIDENCIA_ORDEM.get(forca_evidencia(cupom), 3)
+
+
 def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
     """Gera e verifica links dos produtos realmente ligados por ProdutoCupom."""
     from apps.scrapers.coupon_products import (
@@ -345,10 +364,17 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
         if cupom_publicavel(cupom, usuario=usuario)
     ]
     preparadas, _prontas = mapa_relacoes_prontas(usuario, cupons)
+    # PRIORIDADE DA FILA: cupom oficial de código, depois campanha com container
+    # publicado, depois segmentação estruturada, e só então o candidato sintético.
+    # Sem ordem, o `limite` era consumido pela ordem arbitrária do dicionário e as
+    # campanhas com associação comprovada podiam nunca chegar à geração de link.
+    ordem_dos_cupons = {
+        cupom.pk: _peso_do_cupom(cupom) for cupom in cupons
+    }
     produtos = {}
-    for relacoes in preparadas.values():
-        for relacao in relacoes:
-            produtos[relacao.produto_id] = relacao.produto
+    for cupom_id in sorted(preparadas, key=lambda pk: ordem_dos_cupons.get(pk, 9)):
+        for relacao in preparadas[cupom_id]:
+            produtos.setdefault(relacao.produto_id, relacao.produto)
 
     metricas = {
         "vinculados": len(produtos),
@@ -403,30 +429,42 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
         gerados = falhas = 0
         detalhe = {"candidatos": len(itens)}
         try:
-            gerados, falhas = get_marketplace(slug).prefetch_links(
+            marketplace = get_marketplace(slug)
+            gerados, falhas = marketplace.prefetch_links(
                 itens, usuario=usuario, faixa=faixa,
             )
-            if slug == "mercadolivre":
-                from apps.scrapers.scraper_mercadolivre.link import (
-                    verificar_links_pendentes,
-                )
-                verificacao = verificar_links_pendentes(
-                    usuario, limite=len(itens), produto_ids=[p.id for p in itens],
-                )
-                metricas["links_reprovados"] += verificacao["reprovados"]
-                metricas["links_transitorios"] += verificacao["transitorios"]
-                detalhe.update(verificacao)
+            # Cada loja verifica os PRÓPRIOS links (contrato em Marketplace):
+            # chamar o verificador do ML aqui reprovava item Amazon com o motivo
+            # do Mercado Livre.
+            verificacao = marketplace.verificar_links_pendentes(
+                usuario, limite=len(itens), produto_ids=[p.id for p in itens],
+            )
+            metricas["links_reprovados"] += verificacao.get("reprovados", 0)
+            metricas["links_transitorios"] += verificacao.get("transitorios", 0)
+            detalhe.update(verificacao)
         except Exception as exc:
             falhas += len(itens)
             detalhe["erro"] = "Falha operacional ao gerar ou verificar links."
             detalhe["causa"] = type(exc).__name__
-            from apps.scrapers.afiliado import registrar_falha
-            for produto in itens:
-                registrar_falha(
-                    usuario, produto,
-                    f"Falha operacional de afiliação ({type(exc).__name__}).",
+            from apps.scrapers.afiliado import causa_de_conta, registrar_falha
+            conta = causa_de_conta(exc)
+            if conta:
+                # Sessão caída, Link Builder recusado ou navegador ocupado: UM
+                # bloqueio de conta, não N falhas de produto. Gravar por item
+                # empurrava o catálogo inteiro para o backoff e, na oitava rodada,
+                # marcava como `nao_afiliavel` produtos que nunca tiveram defeito.
+                detalhe["reason_code"] = f"account_blocked:{conta}"
+                logger.warning(
+                    "Afiliação de cupons %s bloqueada por %s (usuário %s); "
+                    "nenhum produto penalizado.", slug, conta, usuario,
                 )
-            logger.exception("Afiliação de cupons %s falhou para %s", slug, usuario)
+            else:
+                for produto in itens:
+                    registrar_falha(
+                        usuario, produto,
+                        f"Falha operacional de afiliação ({type(exc).__name__}).",
+                    )
+                logger.exception("Afiliação de cupons %s falhou para %s", slug, usuario)
         after = set(LinkAfiliadoUsuario.objects.filter(
             usuario=usuario, produto_id__in=[p.id for p in itens],
             verificado_ok=True,

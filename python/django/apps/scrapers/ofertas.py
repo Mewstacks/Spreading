@@ -56,6 +56,22 @@ def _motivo_publico_transporte(resultado) -> str:
     return "Não foi possível confirmar o envio pelo canal selecionado."
 
 
+def _motivo_reprovacao_da_loja(marketplace, relatorio, confiar_desconto) -> str:
+    """Motivo escrito pela loja que realmente verificou o link.
+
+    `link_validacao.motivo_reprovacao` lê o relatório do Mercado Livre (chaves
+    `is_pagina_produto`, `preco_visivel`, ...). Aplicá-lo ao relatório da Amazon —
+    que traz apenas `ok`/`motivo` — devolvia "O link não abre uma página de produto
+    do Mercado Livre" para um item da Amazon: a mesma confusão de loja que o
+    verificador em lote produzia, agora no caminho do envio.
+    """
+    if getattr(marketplace, "slug", "") != "mercadolivre":
+        return str(relatorio.get("motivo") or "")[:280] or (
+            "O link não passou na verificação da loja.")
+    from apps.scrapers.link_validacao import motivo_reprovacao
+    return motivo_reprovacao(relatorio, confiar_desconto)
+
+
 def _canal_pronto_ou_erro(canal, usuario) -> dict | None:
     """Confere a conexão do canal ANTES de tentar enviar.
 
@@ -2422,13 +2438,19 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             # vivo é marcado como inválido e some da tela de envio; um que aprova
             # fixa a url_canonica, para não reverificar da próxima vez.
             from apps.scrapers.afiliado import registrar_aprovacao, registrar_reprovacao
-            from apps.scrapers.link_validacao import motivo_reprovacao
             if verificacao.get("ok"):
                 _executar_orm(registrar_aprovacao, usuario, produto, link,
                               url_canonica=link)
+            elif verificacao.get("transitorio"):
+                # Verificação inconclusiva (CAPTCHA, timeout, DOM ausente) não é
+                # veredito: persistir reprovação aqui gastava uma tentativa do item
+                # e, na oitava, o marcava `nao_afiliavel` por um problema que nunca
+                # foi dele. O link segue sem veredito e a lane tenta de novo.
+                return falhar("verificação inconclusiva; tente novamente em instantes",
+                              link=link, verificacao=verificacao)
             else:
                 _executar_orm(registrar_reprovacao, usuario, produto,
-                              motivo_reprovacao(verificacao, confiar))
+                              _motivo_reprovacao_da_loja(mp, verificacao, confiar))
                 return falhar("link reprovado na verificação",
                               link=link, verificacao=verificacao)
 

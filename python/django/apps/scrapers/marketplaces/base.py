@@ -80,6 +80,20 @@ class Marketplace(ABC):
         """
         return {"ok": True}
 
+    def verificar_links_pendentes(self, usuario, limite=20, produto_ids=None) -> dict:
+        """Dá veredito aos links DESTA loja que ainda não têm um.
+
+        Existe como método do adaptador — e não como uma função solta chamada pelo
+        worker — porque a regra de aprovação é de cada marketplace. O verificador do
+        Mercado Livre varria `LinkAfiliadoUsuario` sem recorte de loja e reprovava
+        link da Amazon com o motivo "não abre uma página de produto do Mercado
+        Livre": 47 links perfeitamente válidos foram invalidados assim em produção.
+        Cada implementação DEVE filtrar por `produto__marketplace=self.slug`.
+
+        Default: nada a verificar (loja sem veredito de destino próprio).
+        """
+        return {"aprovados": 0, "reprovados": 0, "transitorios": 0}
+
     def is_alive(self, produto):
         """
         Estado do anúncio: True (vivo) | False (confirmado morto) | None (incerto).

@@ -496,7 +496,9 @@ class AmazonMarketplaceReportingTests(TestCase):
                 patch.object(az, "buscar_por_termo", return_value=0):
             self.assertTrue(Amazon()._scrape_usuario(user))
 
-        coletar.assert_called_once_with(user)
+        # Uma única varredura, agora também instrumentada: as métricas de cobertura
+        # viajam junto para o relatório da fonte, sem repetir chamadas à API.
+        coletar.assert_called_once_with(user, metricas=None)
 
     def test_api_totalmente_fora_marca_conta_e_libera_fallback(self):
         from django.contrib.auth import get_user_model

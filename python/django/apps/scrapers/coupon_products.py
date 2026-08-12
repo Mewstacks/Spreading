@@ -926,6 +926,25 @@ def preparar_lote(
         )
     }
 
+    from apps.scrapers.coupon_rules import (
+        FORCA_EVIDENCIA_ORDEM, codigo_publicavel as _codigo_publicavel,
+        forca_evidencia,
+    )
+
+    def _peso_evidencia(cupom):
+        """Códigos oficiais primeiro; depois container, estruturado e sintético.
+
+        Um `synthetic_candidate` é uma URL que NÓS construímos como hipótese. Sem
+        esta ordem, milhares deles disputavam os 12 slots do lote (e o único
+        Chromium) em pé de igualdade com campanhas cujo container a fonte publicou —
+        gastando a capacidade nos candidatos com menos chance de render produto.
+        """
+        if _codigo_publicavel(cupom):
+            return -1
+        if str(cupom.marketplace or "").lower() != "mercadolivre":
+            return 0
+        return FORCA_EVIDENCIA_ORDEM.get(forca_evidencia(cupom), 3)
+
     def prioridade(cupom, usuario):
         """Evita que cupons já frescos ocupem sempre o começo do lote."""
         contexto = _usuario_do_preparo(cupom, usuario)
@@ -939,7 +958,8 @@ def preparar_lote(
         else:
             estado = 1  # preparação vencida, vazia ou com erro retomável
         validade = cupom.validade or timezone.datetime.max.replace(tzinfo=datetime_timezone.utc)
-        return (estado, 0 if cupom.relampago else 1, validade, cupom.id)
+        return (estado, _peso_evidencia(cupom), 0 if cupom.relampago else 1,
+                validade, cupom.id)
 
     usuarios = list(
         usuarios if usuarios is not None

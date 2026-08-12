@@ -28,14 +28,19 @@ class Amazon(Marketplace):
         candidatos = [p for p in perfis if not p.bloqueado and tag_amazon(p.user)]
         conectados = [p for p in candidatos if creds_de_usuario(p.user).completo()]
         fallback = [p for p in candidatos if not creds_de_usuario(p.user).completo()]
+        from apps.scrapers.scraper_amazon.ofertas_scraper import metricas_vazias
+
         inicio = timezone.now()
         falhas = 0
+        metricas = metricas_vazias()
         for perfil in conectados:
-            if not self._scrape_usuario(perfil.user):
+            if not self._scrape_usuario(perfil.user, metricas=metricas):
                 fallback.append(perfil)
                 falhas += 1
         if conectados:
-            self._reportar_fonte(inicio, len(conectados), falhas)
+            metricas["contas"] = len(conectados)
+            metricas["contas_com_falha"] = falhas
+            self._reportar_fonte(inicio, len(conectados), falhas, metricas=metricas)
         if fallback:
             self._scrape_publico([p.user for p in fallback], termos=termos)
         elif not conectados:
@@ -63,12 +68,17 @@ class Amazon(Marketplace):
                 "sua conta Amazon não está conectada (cadastre as credenciais na "
                 "tela Conta)")
 
+        from apps.scrapers.scraper_amazon.ofertas_scraper import metricas_vazias
+
         inicio = timezone.now()
-        ok = self._scrape_usuario(usuario)
+        metricas = metricas_vazias()
+        ok = self._scrape_usuario(usuario, metricas=metricas)
         # A tela de Fontes também precisa saber desta coleta. Sem isto o badge só
         # se movia no ciclo do worker: raspar pela tela funcionava e o painel
         # continuava dizendo "Atenção".
-        self._reportar_fonte(inicio, 1, 0 if ok else 1)
+        metricas["contas"] = 1
+        metricas["contas_com_falha"] = 0 if ok else 1
+        self._reportar_fonte(inicio, 1, 0 if ok else 1, metricas=metricas)
         if not ok:
             from apps.accounts.models import Perfil
             perfil = Perfil.objects.filter(user=usuario).first()
@@ -79,7 +89,7 @@ class Amazon(Marketplace):
             marketplace="amazon", owner=usuario, ultima_observacao__gte=inicio,
         ).count()
 
-    def _scrape_usuario(self, usuario) -> bool:
+    def _scrape_usuario(self, usuario, metricas=None) -> bool:
         from apps.scrapers.models import ConfiguracaoEnvio
         from apps.scrapers.scraper_amazon import ofertas_scraper as az
         from apps.scrapers.scraper_amazon.creators_api import (
@@ -92,7 +102,7 @@ class Amazon(Marketplace):
         try:
             # Uma coleta, dois destinos: ofertas e promoções liam as MESMAS páginas
             # da API separadamente e dobravam o consumo da cota do usuário.
-            itens = az.coletar_feed(usuario)
+            itens = az.coletar_feed(usuario, metricas=metricas)
             az.mapear_ofertas(usuario=usuario, itens=itens)
             az.mapear_cupons_codigo(usuario=usuario, itens=itens)
             for t in termos:
@@ -119,7 +129,7 @@ class Amazon(Marketplace):
         return True
 
     @staticmethod
-    def _reportar_fonte(inicio, contas, falhas):
+    def _reportar_fonte(inicio, contas, falhas, metricas=None):
         """Publica o resultado do ciclo na tela de Fontes.
 
         Nada escrevia nesta linha: a Creators API aparecia como `degraded`, com
@@ -133,7 +143,7 @@ class Amazon(Marketplace):
         com sucesso o dia inteiro sem o badge sair de "Atenção".
         """
         from django.utils import timezone
-        from apps.scrapers.models import FonteIngestao, Produto
+        from apps.scrapers.models import ExecucaoIngestao, FonteIngestao, Produto
 
         agora = timezone.now()
         total = Produto.objects.filter(
@@ -175,17 +185,45 @@ class Amazon(Marketplace):
             "ultima_tentativa", "ultimo_total", "status", "ultimo_sucesso",
             "falhas_consecutivas", "erro_publico",
         ])
+        if metricas is None:
+            return
+        # COBERTURA: quantas palavras-chave, páginas e chamadas sustentaram este
+        # número. "6 ofertas" pode ser o catálogo inteiro ou o teto da varredura —
+        # sem isto não há como saber qual, nem decidir se vale ampliar a taxonomia.
+        ExecucaoIngestao.objects.create(
+            fonte=fonte, status="ok" if total else "empty",
+            finalizada_em=agora, total_ofertas=total,
+            paginas_processadas=int(metricas.get("paginas") or 0),
+            metricas=metricas,
+            rejeicoes=dict(metricas.get("erros_por_tipo") or {}),
+            health_status=(
+                "degraded" if falhas else
+                "partial" if metricas.get("paginas_no_teto") else "ok"
+            ),
+        )
 
     @staticmethod
     def _scrape_publico(usuarios, termos=None):
+        """Catálogo PÚBLICO: coletado uma vez e compartilhado (`owner=None`).
+
+        Antes o mesmo resultado público era persistido uma vez POR USUÁRIO elegível:
+        N cópias idênticas da mesma oferta, N vezes o custo de escrita e um catálogo
+        que crescia com o número de contas em vez de com o número de ofertas. O que
+        de fato é privado por usuário é o LINK (tag de afiliado), e ele continua em
+        `LinkAfiliadoUsuario` — a coleta não precisa ser duplicada para isso.
+
+        `usuarios` permanece na assinatura porque é ele que diz se ALGUÉM está
+        elegível a esta coleta; nenhuma linha é escrita no escopo deles.
+        """
         from django.conf import settings
         if not getattr(settings, "AMAZON_PUBLIC_FALLBACK", True):
+            return
+        if not usuarios:
             return
         from apps.scrapers.sources import run_source
         from apps.scrapers.sources.persistence import persist_items
         resultado = run_source("amazon-public-web", terms=termos)
-        for usuario in usuarios:
-            persist_items(resultado.get("offers", []), owner=usuario)
+        persist_items(resultado.get("offers", []), owner=None)
 
     @staticmethod
     def _scrape_cupons_publicos(usuarios):
@@ -239,6 +277,38 @@ class Amazon(Marketplace):
                     "motivo": f"inconclusivo: {resultado.get('motivo')}",
                     "transitorio": True}
         return resultado
+
+    @staticmethod
+    def _avisar_tag_ausente(usuario, quantos):
+        """UM evento por conta e por janela, com a ação que destrava a fila.
+
+        Sem o cooldown seriam dezenas de eventos por dia por conta desconfigurada, e
+        a tela de Saúde afogaria justamente no aviso que precisa ser lido — mesmo
+        desenho de `_avisar_sem_sessao_ml` na lane de links do ML.
+        """
+        from django.core.cache import cache
+        from apps.scrapers.eventos import log_event
+
+        if usuario is None:
+            return
+        chave = f"amazon_tag_missing:{getattr(usuario, 'pk', '')}"
+        if cache.get(chave):
+            return
+        cache.set(chave, True, timeout=6 * 3600)
+        log_event(
+            "scraper", "amazon_tag_missing",
+            f"{quantos} oferta(s) da Amazon estão prontas, mas sem a tag de "
+            "afiliado nenhum link comissiona. Cadastre a tag na tela Conta.",
+            level="warning", usuario=usuario,
+            contexto={"servico": "Amazon", "produtos": quantos,
+                      "acao": "Cadastrar tag Amazon"},
+        )
+
+    def verificar_links_pendentes(self, usuario, limite=40, produto_ids=None):
+        from apps.scrapers.scraper_amazon.link import verificar_links_pendentes
+        return verificar_links_pendentes(
+            usuario, limite=limite, produto_ids=produto_ids,
+        )
 
     def is_alive(self, produto):
         """getItems(asin) com as creds do DONO do item: presente -> True; sumiu -> False."""
@@ -331,33 +401,66 @@ class Amazon(Marketplace):
         return pode_gerar_link(produto, usuario=usuario)
 
     def preparar_exibicao(self, produtos, usuario=None) -> None:
-        """Link em cache vale tanto quanto tag+ASIN — e resolve a página em 1 query.
+        """Prontidão da Amazon em 1 query, com o MESMO respeito ao veredito do ML.
 
-        O default da base pergunta item a item por `can_affiliate`, que na Amazon só
-        olha a tag do Perfil: um item JÁ afiliado (link gravado em LinkAfiliadoUsuario)
-        sumia da listagem se a tag fosse removida depois, mesmo com o link funcionando.
+        Duas regras convivem aqui, e a diferença entre elas não é inconsistência:
+
+        - Um veredito REPROVADO (`verificado_ok=False`) manda, sempre. Antes bastava
+          existir link em cache para o item aparecer enviável; um link reprovado
+          (produto fora do ar) continuava sendo oferecido e só falhava no clique.
+        - Na AUSÊNCIA de veredito, tag + ASIN bastam. O link da Amazon é
+          determinístico — `https://.../dp/{ASIN}?tag={tag}` é montado em memória no
+          próprio envio —, então a prova de atribuição existe antes de qualquer
+          linha no banco. É o contrário do Mercado Livre, onde a URL vem do Link
+          Builder e só a verificação de destino diz se ela abre o anúncio certo.
         """
-        from apps.scrapers.afiliado import situacao_dos_links
+        from apps.scrapers.afiliado import situacao_dos_links, tag_amazon
 
         situacao = situacao_dos_links(usuario, produtos)
         for p in produtos:
             info = situacao.get(p.id) or {}
+            verificado = info.get("verificado_ok") if info else None
             cacheado = bool(info.get("link_afiliado") or getattr(p, "link_afiliado", ""))
-            p.afiliado_pronto = cacheado or self.can_affiliate(p, usuario)
+            if verificado is False:
+                p.afiliado_pronto = False
+                p.afiliado_estado = "link_invalido"
+                p.afiliado_motivo = (info.get("verificacao_motivo")
+                                     or info.get("ultimo_erro") or "")
+                continue
+            p.afiliado_pronto = (
+                verificado is True or cacheado or self.can_affiliate(p, usuario)
+            )
             if p.afiliado_pronto:
                 p.afiliado_estado, p.afiliado_motivo = "pronto", ""
             elif info:
                 p.afiliado_estado = info["estado"]
                 p.afiliado_motivo = info["ultimo_erro"]
             else:
-                p.afiliado_estado, p.afiliado_motivo = "pendente", ""
+                # Sem tag cadastrada não há link possível — e isso é configuração da
+                # conta, não fila. A tela precisa oferecer a ação, não uma espera.
+                p.afiliado_estado, p.afiliado_motivo = (
+                    ("sem_tag", "Cadastre a tag de afiliado da Amazon na tela Conta.")
+                    if not tag_amazon(usuario) else ("pendente", "")
+                )
 
     def prefetch_links(self, produtos, usuario=None, faixa=None):
         # `faixa` não se aplica: o link Amazon é montado em memória (tag + ASIN), a
         # etapa é instantânea e não tem o que reportar numa barra.
         from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_para_produto
-        from apps.scrapers.afiliado import registrar_falha
+        from apps.scrapers.afiliado import registrar_falha, tag_amazon
         gerados = falhas = 0
+        if produtos and not tag_amazon(usuario):
+            # GATE DE CONTA: a tag é uma só e vale para o catálogo inteiro. Sem ela,
+            # cada produto ganhava uma "falha" própria — centenas de linhas em
+            # backoff por um campo que ninguém preencheu na tela Conta. Um aviso, e
+            # nenhuma tentativa gasta: quando a tag existir, a fila anda sozinha.
+            logger.info(
+                "Links Amazon pulados para %s: tag de afiliado não cadastrada "
+                "(%s produto(s) intactos).", getattr(usuario, "pk", None),
+                len(produtos),
+            )
+            self._avisar_tag_ausente(usuario, len(produtos))
+            return (0, 0)
         for p in produtos:
             try:
                 if gerar_link_afiliado_para_produto(p, usuario=usuario):

@@ -225,6 +225,76 @@ def listagem_publica_ml(cupom) -> str:
     return ""
 
 
+# EvidenceStrength — quão forte é a prova de que este cupom delimita um conjunto
+# real de produtos. Sem o conceito, uma URL que o próprio sistema INVENTOU pesava
+# o mesmo que um container que a fonte publicou, e candidatos fracos ocupavam o
+# preparo e o único slot de Chromium antes das campanhas comprovadas.
+EVIDENCIA_CONTAINER = "official_container"     # container observado na fonte
+EVIDENCIA_ESTRUTURADA = "structured_listing"   # loja/categoria fornecida pela campanha
+EVIDENCIA_SINTETICA = "synthetic_candidate"    # URL construída como hipótese
+EVIDENCIA_AUSENTE = ""
+
+# Ordem de atendimento: menor number = primeiro. Códigos oficiais não passam por
+# aqui (não dependem de container); entre as ativações, esta é a fila.
+FORCA_EVIDENCIA_ORDEM = {
+    EVIDENCIA_CONTAINER: 0,
+    EVIDENCIA_ESTRUTURADA: 1,
+    EVIDENCIA_SINTETICA: 2,
+    EVIDENCIA_AUSENTE: 3,
+}
+
+
+def _campanha_do_cupom(cupom) -> str:
+    external = str(getattr(cupom, "external_id", "") or "")
+    return external.split(":", 1)[1] if external.startswith("campanha:") else ""
+
+
+def forca_evidencia(cupom) -> str:
+    """Classifica a prova de escopo de um cupom de ativação do Mercado Livre.
+
+    O scraper de campanhas monta `link_produtos` por vários caminhos e todos
+    terminavam indistinguíveis no banco:
+
+      - `action.value` da própria campanha e `container.name` da segmentação são
+        dados que a FONTE publicou -> `official_container`;
+      - loja (`/loja/<slug>/`, `_CustId_<id>`) e categoria vêm da segmentação
+        estruturada da campanha -> `structured_listing`;
+      - `_Container_<campanha_id>`, o último `else` do scraper, é um palpite nosso
+        quando a campanha não disse nada -> `synthetic_candidate`.
+
+    Só as duas primeiras classes merecem consumir preparo e geração de link antes
+    de qualquer confirmação; a terceira precisa provar produto primeiro.
+    """
+    regras = regras_do_cupom(cupom)
+    if regras.get("container_url"):
+        return EVIDENCIA_CONTAINER
+    listagem = listagem_publica_ml(cupom)
+    if not listagem:
+        return EVIDENCIA_AUSENTE
+    campanha = _campanha_do_cupom(cupom)
+    if campanha and listagem.rstrip("/").casefold().endswith(
+            f"/_container_{campanha}".casefold()):
+        # O fallback que o scraper usa quando a campanha não trouxe segmentação
+        # nenhuma: a URL é o id da campanha, não um container observado.
+        return EVIDENCIA_SINTETICA
+    if "/_container_" in listagem.casefold():
+        return EVIDENCIA_CONTAINER
+    return EVIDENCIA_ESTRUTURADA
+
+
+def evidencia_confirmada(cupom) -> bool:
+    """True quando a hipótese já foi comprovada por produto associado.
+
+    É o portão que promove um `synthetic_candidate`: uma vez que exista
+    ProdutoCupom confirmado, a URL deixou de ser palpite — ela rendeu item real.
+    """
+    from apps.scrapers.models import ProdutoCupom
+
+    return ProdutoCupom.objects.filter(
+        cupom=cupom, status="confirmado",
+    ).exists()
+
+
 def _ativacao_ml_publicavel(cupom, regras, usuario=None) -> bool:
     """Cupom de ATIVAÇÃO do Mercado Livre (clique, não código digitável).
 

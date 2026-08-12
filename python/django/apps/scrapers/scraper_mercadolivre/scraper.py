@@ -603,23 +603,63 @@ def _categoria_dominante_por_campanha(campanha_ids):
     return {cid: max(mapa, key=mapa.get) for cid, mapa in contagem.items() if mapa}
 
 
-def projetar_catalogo_cupons(faixa=None):
+def _forca_evidencia_da_campanha(campanha_id, link, regras):
+    """EvidenceStrength da campanha, calculada no momento da projeção.
+
+    Reusa a classificação de `coupon_rules.forca_evidencia` sobre um objeto leve —
+    a projeção conhece exatamente os mesmos três dados que ela lê (campanha, link e
+    regras), e duplicar a regra aqui seria criar uma segunda definição de "prova".
+    """
+    from types import SimpleNamespace
+
+    from apps.scrapers.coupon_rules import forca_evidencia
+
+    return forca_evidencia(SimpleNamespace(
+        external_id=f"campanha:{campanha_id}",
+        link=link or "",
+        regras=regras,
+        codigo="",
+    ))
+
+
+def projetar_catalogo_cupons(faixa=None, desde=None):
     """Projeta campanhas personalizadas em dados internos (`CupomNormalizado`).
 
     O `code` dessa página é um token ligado à sessão, não um código divulgável.
     Portanto estes registros servem para auditoria/associação, mas não contam como
     publicados. A aba usa os códigos oficiais de afiliados preparados com produtos.
+
+    `desde` recorta a projeção às campanhas REALMENTE observadas nesta execução
+    (``Cupom.ultima_verificacao >= desde``, carimbado por `_persistir_campanhas_cupons`).
+    Sem ele, uma varredura que parou na página 3 ainda reescrevia as ~2.300 campanhas
+    preservadas de execuções anteriores: `update_or_create` toca `ultima_observacao`
+    (auto_now) e grava uma observação "healthy", então campanhas antigas passavam a
+    parecer recém-vistas e renovavam sozinhas a janela de frescor da tela.
+
+    A expiração continua olhando o catálogo INTEIRO de `Cupom`: quem saiu do ar
+    some da projeção mesmo numa execução parcial, porque quem decide isso é o
+    estado do `Cupom` (que a varredura completa mantém), não esta janela.
     """
     emitir_fase("Catalogando campanhas personalizadas do ML", 0.0, faixa)
     fonte, _ = FonteIngestao.objects.get_or_create(
         slug="mercadolivre-web", defaults={
             "marketplace": "mercadolivre", "nome": "Mercado Livre — páginas públicas"})
 
-    ativos = list(Cupom.objects.filter(estado="ativo"))
+    vigentes = list(Cupom.objects.filter(estado="ativo"))
     # Anti-wipe: sem cupom ativo, não desativa o catálogo (a coleta pode ter caído).
-    if not ativos:
+    if not vigentes:
         logger.warning("Nenhum cupom de campanha ativo; catálogo de cupons preservado")
         return 0
+    ativos = (
+        [c for c in vigentes
+         if c.ultima_verificacao and c.ultima_verificacao >= desde]
+        if desde is not None else vigentes
+    )
+    if desde is not None and len(ativos) != len(vigentes):
+        logger.info(
+            "Projeção de campanhas: %s de %s observada(s) nesta execução; as demais "
+            "ficam preservadas sem renovar a observação.", len(ativos), len(vigentes),
+        )
 
     # Categoria dominante dos produtos de cada campanha (UMA query) — fallback do
     # rótulo do anunciante quando o título é genérico. É o que diz "de que se trata".
@@ -686,6 +726,10 @@ def projetar_catalogo_cupons(faixa=None):
                 "estado": "ativo",
                 "regras": regras,
                 "evidencia": {"transport": "public-web", "association": "campaign",
+                              # EvidenceStrength: distingue container publicado
+                              # pela fonte de URL que o próprio scraper deduziu.
+                              "evidence_strength": _forca_evidencia_da_campanha(
+                                  c.campanha_id, c.link_original, regras),
                               "token_ativacao": c.codigo or ""},
             },
         )
@@ -700,9 +744,14 @@ def projetar_catalogo_cupons(faixa=None):
     # Sincroniza o catálogo com o estado do `Cupom`: campanhas que saíram do ar
     # deixam de aparecer. Só mexe nas projeções de campanha (external_id
     # "campanha:"), nunca nos cupons de checkout ("checkout:").
+    #
+    # A referência é o catálogo VIGENTE, não o subconjunto projetado agora: numa
+    # execução parcial, `externos_vistos` traz só o que esta passada observou, e
+    # usá-lo aqui expiraria de uma vez todas as campanhas que continuam no ar.
+    externos_vigentes = {f"campanha:{c.campanha_id}" for c in vigentes}
     obsoletos = (CupomNormalizado.objects
                  .filter(fonte=fonte, estado="ativo", external_id__startswith="campanha:")
-                 .exclude(external_id__in=externos_vistos))
+                 .exclude(external_id__in=externos_vigentes))
     n_obsoletos = obsoletos.update(estado="expirado")
     if n_obsoletos:
         logger.info("%s cupom(ns) de campanha expirado(s) no catálogo", n_obsoletos)

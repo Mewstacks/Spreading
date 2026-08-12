@@ -523,6 +523,25 @@ consultas agregadas que alimentam esta faixa.
   <div class="filter-meta">
     {# Total, não o tamanho da página: "20 resultado(s)" em toda página escondia a lista real. #}
     <span class="result-count"><strong>{% if tipo == 'cupom' %}{{ cupons_page.paginator.count }}{% else %}{{ page_obj.paginator.count }}{% endif %}</strong> resultado(s){% if tipo == 'cupom' %}{% if cupons_page.paginator.num_pages > 1 %} · página {{ cupons_page.number }} de {{ cupons_page.paginator.num_pages }}{% endif %}{% elif page_obj.paginator.num_pages > 1 %} · página {{ page_obj.number }} de {{ page_obj.paginator.num_pages }}{% endif %} · filtros salvos{% if tipo != 'cupom' and so_afiliados and pendentes_ocultos %} · {{ pendentes_ocultos }} sem link de afiliado ocultado(s){% endif %}</span>
+    {% comment %}
+      Prontos POR LOJA, do mesmo universo já filtrado e paginado. Sem isto, uma
+      loja com centenas de itens prontos podia parecer ausente só porque a outra
+      ocupava as primeiras posições do ranking.
+      `{# #}` NÃO serve aqui: ele só comenta uma linha, e o resto sai como texto
+      na tela — foi exatamente o que aconteceu na primeira versão desta seção.
+    {% endcomment %}
+    {% if tipo != 'cupom' and prontos_por_loja %}
+    <span class="filter-tags">
+      {% for loja in prontos_por_loja %}
+      <span class="tech-tag">{{ loja.nome }}: {{ loja.prontos }} {% if contagem_estrita %}pronto(s){% else %}na lista{% endif %}{% if loja.pendentes %} · {{ loja.pendentes }} aguardando link{% endif %}</span>
+      {% endfor %}
+    </span>
+    {% endif %}
+    {% if acao_amazon_tag %}
+    <span class="filter-tags">
+      <a class="tech-tag" href="{% url 'scraper-conta' %}">Cadastrar tag Amazon para liberar estas ofertas</a>
+    </span>
+    {% endif %}
     {% if filtros_ativos %}
     <span class="filter-tags">
       {% if busca %}<span class="tech-tag">busca: {{ busca }}</span>{% endif %}

@@ -44,13 +44,20 @@ TOUCH_INTERVALO_S = 10 * 60
 
 
 def _reativar_preparos_catalogo_ml() -> int:
-    """Antecipa somente a repescagem bloqueada pela credencial anterior."""
+    """Antecipa somente a repescagem bloqueada pela credencial anterior.
+
+    Vale para as duas filas que a sessão anterior travou: o preparo de produtos e os
+    links de afiliado. Em ambas, só volta quem parou por causa da CONTA — falha do
+    próprio item continua com seu backoff e seu motivo.
+    """
+    from apps.scrapers.afiliado import reabrir_bloqueios_de_conta
     from apps.scrapers.coupon_products import ERRO_SESSAO_ML
     from apps.scrapers.models import CupomPreparacao
 
-    return CupomPreparacao.objects.filter(erro=ERRO_SESSAO_ML).update(
+    total = CupomPreparacao.objects.filter(erro=ERRO_SESSAO_ML).update(
         proxima_tentativa=None,
     )
+    return total + reabrir_bloqueios_de_conta()
 
 
 def legacy_path(user) -> str:

@@ -518,6 +518,9 @@ def _executar_cupons(job, reporter):
     reporter.step("Validando conexão", 2)
     estado = estado_ml(job.solicitada_por)
     campanha = checkout = projetados = 0
+    # Marco da execução: só as campanhas carimbadas a partir daqui foram
+    # realmente observadas agora e podem renovar a projeção.
+    inicio_ciclo = timezone.now()
     if estado.conectado:
         reporter.step("Coletando campanhas", 5)
         try:
@@ -544,7 +547,9 @@ def _executar_cupons(job, reporter):
         reporter.step("Atualizando catálogo interno", 58)
         try:
             projetados = _db_retry(
-                lambda: projetar_catalogo_cupons(faixa=(58, 64)),
+                lambda: projetar_catalogo_cupons(
+                    faixa=(58, 64), desde=inicio_ciclo,
+                ),
             )
             reporter.count(campanhas_projetadas=projetados)
         except Exception as exc:

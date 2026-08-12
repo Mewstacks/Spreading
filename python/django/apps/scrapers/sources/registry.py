@@ -33,6 +33,15 @@ def _public_error(exc):
 
 @contextmanager
 def _ingestion_guard(slug, *, requires_chromium=False):
+    """Cede (adquiriu, motivo). O MOTIVO é o ponto: sem ele, ficar sem navegador
+    era registrado como "esta fonte já está executando".
+
+    São dois diagnósticos opostos. `already_running` significa que a fonte está
+    trabalhando — não há nada a fazer. `capacity_deferred` significa que ela nem
+    começou porque o único slot de Chromium estava com outra tarefa: é fila, e
+    aparecia no painel como se a coleta estivesse em curso, escondendo atraso por
+    capacidade justamente onde ele precisava ser visto.
+    """
     if connection.vendor == "postgresql":
         from apps.scrapers.resource_control import leased_resource
         if requires_chromium:
@@ -41,22 +50,22 @@ def _ingestion_guard(slug, *, requires_chromium=False):
                 "django_chromium", owner_kind="source_ingest",
             ) as (browser_acquired, _browser_detail):
                 if not browser_acquired:
-                    yield False
+                    yield False, "capacity_deferred"
                     return
                 with leased_resource(
                     f"source_ingest:{slug}", owner_kind="source_ingest",
                 ) as (source_acquired, _source_detail):
-                    yield source_acquired
+                    yield source_acquired, "" if source_acquired else "already_running"
         else:
             with leased_resource(
                 f"source_ingest:{slug}", owner_kind="source_ingest",
             ) as (acquired, _detail):
-                yield acquired
+                yield acquired, "" if acquired else "already_running"
         return
     lock_key = f"ingestion-lock:{slug}"
     acquired = cache.add(lock_key, "1", timeout=20 * 60)
     try:
-        yield acquired
+        yield acquired, "" if acquired else "already_running"
     finally:
         if acquired:
             cache.delete(lock_key)
@@ -80,9 +89,15 @@ def run_source(slug, **kwargs):
             return {"status": "blocked", "offers": [], "coupons": []}
     with _ingestion_guard(
         slug, requires_chromium=bool(getattr(adapter, "requires_chromium", False)),
-    ) as acquired:
+    ) as (acquired, motivo):
         if not acquired:
-            return {"status": "running", "offers": [], "coupons": []}
+            return {
+                "status": "running", "offers": [], "coupons": [],
+                # `reason_code` separa "já está rodando" de "sem navegador livre".
+                # O status continua "running" para não quebrar quem já o lê; quem
+                # precisa do diagnóstico correto lê o motivo.
+                "reason_code": motivo or "already_running",
+            }
         run = ExecucaoIngestao.objects.create(fonte=fonte)
         try:
             offers = list(adapter.discover_offers(**kwargs))

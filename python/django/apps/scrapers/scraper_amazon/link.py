@@ -118,6 +118,112 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
     }
 
 
+# Reprovação que fala do PRODUTO, não do link: o anúncio saiu do ar. É a única
+# reprovação legítima que a Amazon produz hoje, então é a única que o reparo
+# preserva — todo o resto em item Amazon veio do verificador errado.
+_MOTIVOS_LEGITIMOS = ("indisponív", "indisponiv")
+
+
+def link_coerente(link: str, produto, usuario=None) -> bool:
+    """True quando o link já é EXATAMENTE o que a Amazon exige para comissionar.
+
+    Verificação determinística e local (sem rede): a URL tem de carregar a tag do
+    usuário e apontar para o ASIN do próprio produto. É o mesmo par que
+    `gerar_link_afiliado_para_produto` monta — por isso serve tanto para aprovar
+    quanto para decidir que a URL guardada precisa ser refeita.
+    """
+    if not link or not link_tem_tag_afiliado(link, usuario=usuario):
+        return False
+    asin = _asin_de(produto).upper()
+    if not asin:
+        # Sem ASIN o link canônico é o `link_produto`; comparar host+path basta.
+        base = _url_canonica(produto)
+        return bool(base and link.startswith(base))
+    return asin in link.upper()
+
+
+def verificar_links_pendentes(usuario, limite=40, produto_ids=None,
+                              incluir_reprovados=False) -> dict:
+    """Dá veredito aos links Amazon sem abrir navegador nem tocar em outra loja.
+
+    A Amazon não precisa (e não deve) passar pelo verificador de destino do
+    Mercado Livre: o link comissionado é determinístico — URL canônica do ASIN mais
+    a tag do próprio usuário. Conferir isso é aritmética de string, não navegação.
+
+    `incluir_reprovados` reabre também as linhas já marcadas como reprovadas ou
+    terminais. É o modo do reparo: durante o período em que o verificador do ML
+    processava links Amazon, links perfeitos foram carimbados como inválidos e
+    alguns chegaram a `nao_afiliavel`. Reprovação legítima da própria Amazon
+    (anúncio indisponível) é preservada.
+    """
+    from django.db.models import Q
+    from django.utils import timezone
+
+    from apps.scrapers.models import LinkAfiliadoUsuario
+
+    resultado = {"aprovados": 0, "reprovados": 0, "transitorios": 0,
+                 "regerados": 0, "bloqueados": 0, "reason_code": ""}
+    if usuario is None:
+        return resultado
+
+    base = LinkAfiliadoUsuario.objects.filter(
+        usuario=usuario, produto__marketplace="amazon",
+    )
+    if produto_ids is not None:
+        base = base.filter(produto_id__in=list(produto_ids))
+
+    if not _tag(usuario):
+        # Problema de CONTA, não dos itens: contabiliza uma vez e sai sem gastar
+        # tentativa de nenhum produto. Antes, centenas de linhas acumulavam falha
+        # individual por uma tag que ninguém cadastrou.
+        resultado["bloqueados"] = base.filter(
+            Q(verificado_ok__isnull=True) | Q(verificado_ok=False),
+        ).count()
+        resultado["reason_code"] = "amazon_tag_missing"
+        return resultado
+
+    agora = timezone.now()
+    pendentes = base.filter(Q(verificado_ok__isnull=True) | Q(verificado_ok=False))
+    if not incluir_reprovados:
+        pendentes = pendentes.exclude(estado="nao_afiliavel").filter(
+            Q(proxima_tentativa__isnull=True) | Q(proxima_tentativa__lte=agora),
+        )
+    linhas = list(
+        pendentes.select_related("produto").order_by("id")[:max(1, int(limite))]
+    )
+    for linha in linhas:
+        motivo = (linha.verificacao_motivo or "").casefold()
+        if (linha.verificado_ok is False
+                and any(m in motivo for m in _MOTIVOS_LEGITIMOS)):
+            # Reprovação de produto indisponível continua valendo.
+            resultado["reprovados"] += 1
+            continue
+        if link_coerente(linha.link_afiliado, linha.produto, usuario=usuario):
+            _aprovar_local(linha)
+            resultado["aprovados"] += 1
+            continue
+        # URL ausente ou malformada: refaz a partir do ASIN e da tag atuais.
+        if gerar_link_afiliado_para_produto(linha.produto, usuario=usuario):
+            resultado["regerados"] += 1
+            resultado["aprovados"] += 1
+        else:
+            resultado["transitorios"] += 1
+    return resultado
+
+
+def _aprovar_local(linha) -> None:
+    """Carimba o veredito determinístico e limpa backoff/motivo herdados."""
+    from django.utils import timezone
+
+    from apps.scrapers.models import LinkAfiliadoUsuario
+
+    LinkAfiliadoUsuario.objects.filter(pk=linha.pk).update(
+        verificado_ok=True, verificado_em=timezone.now(),
+        url_canonica=linha.link_afiliado, verificacao_motivo="",
+        estado="pronto", ultimo_erro="", proxima_tentativa=None,
+    )
+
+
 def gerar_links_em_lote(produtos):
     """Pré-gera links (puro Python). Retorna (gerados, falhas)."""
     gerados = 0

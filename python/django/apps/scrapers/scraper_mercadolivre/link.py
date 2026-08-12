@@ -13,8 +13,8 @@ caminho_atual = os.path.dirname(os.path.abspath(__file__))
 caminho_django = os.path.dirname(os.path.dirname(os.path.dirname(caminho_atual)))
 sys.path.append(caminho_django)
 from apps.scrapers.afiliado import (
-    ids_com_link, registrar_aprovacao, registrar_falha, registrar_reprovacao,
-    salvar_cache,
+    ids_com_link_utilizavel, registrar_aprovacao, registrar_falha,
+    registrar_reprovacao, salvar_cache,
 )
 from apps.scrapers.link_validacao import (
     aprovado_por_relatorio, eh_pagina_produto, eh_vitrine_social, motivo_reprovacao,
@@ -667,7 +667,9 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
         _no_escopo = _executor_no_tenant(organization_id)
         if not _no_escopo(has_storage_state, usuario):
             raise LoginError(MSG_SEM_SESSAO)
-        prontos = _no_escopo(ids_com_link, usuario, produtos)
+        # "Já tem URL" NÃO é o critério: um link reprovado tem URL e precisa ser
+        # REGERADO, não pulado — ver ids_com_link_utilizavel.
+        prontos = _no_escopo(ids_com_link_utilizavel, usuario, produtos)
         pendentes = [p for p in produtos if p.id not in prontos]
     else:
         pendentes = [p for p in produtos if not p.link_afiliado]
@@ -960,6 +962,17 @@ def _confiar_desconto(produto) -> bool:
     return getattr(produto, "origem", "cupom") in ("oferta", "busca")
 
 
+def _e_do_mercado_livre(produto) -> bool:
+    """Guarda de loja: este módulo só pode julgar anúncio do Mercado Livre.
+
+    A regra de aprovação daqui abre a página e exige `/MLB-...`. Aplicada a um
+    produto de outra loja ela reprova SEMPRE — foi assim que 47 links Amazon
+    ficaram inválidos com o motivo "não abre uma página de produto do Mercado
+    Livre". A checagem é barata e fica no ponto de entrada de cada caminho.
+    """
+    return str(getattr(produto, "marketplace", "") or "mercadolivre") == "mercadolivre"
+
+
 def verificar_e_aprovar(usuario, produto, link_afiliado, url_isca="") -> str:
     """Roda a verificação de DESTINO e PERSISTE o veredito. Fonte única de aprovação.
 
@@ -969,6 +982,12 @@ def verificar_e_aprovar(usuario, produto, link_afiliado, url_isca="") -> str:
     verificado_ok=None para a próxima passada tentar de novo.
     """
     if not link_afiliado:
+        return "transitorio"
+    if not _e_do_mercado_livre(produto):
+        logger.warning(
+            "Verificação ML recusada para produto de outra loja (%s); nada alterado.",
+            getattr(produto, "marketplace", ""),
+        )
         return "transitorio"
     confiar = _confiar_desconto(produto)
     relatorio = verificar_link_afiliado(
@@ -1000,8 +1019,14 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
         agora = timezone.now()
         queryset = (
             LinkAfiliadoUsuario.objects
-            .filter(usuario=usuario)
-            .filter(Q(verificado_ok__isnull=True) | Q(verificado_ok=False))
+            # RECORTE DE LOJA — não remova. Sem ele esta fila puxava também os
+            # links da Amazon e os reprovava com o motivo do Mercado Livre.
+            .filter(usuario=usuario, produto__marketplace="mercadolivre")
+            # SOMENTE quem ainda não tem veredito. Link reprovado pertence à fila de
+            # GERAÇÃO (a URL precisa ser substituída antes de valer a pena olhar de
+            # novo); reabri-lo aqui era o ciclo que gastava Chromium reconfirmando,
+            # a cada backoff, a mesma reprovação da mesma URL.
+            .filter(verificado_ok__isnull=True)
             .filter(Q(proxima_tentativa__isnull=True) | Q(proxima_tentativa__lte=agora))
             .exclude(estado="nao_afiliavel")
             .exclude(link_afiliado="")

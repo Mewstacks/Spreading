@@ -200,28 +200,45 @@ def _rodar_links(lote=40):
 
     agora = timezone.now()
     gerados = falhas = pulados = 0
+    por_marketplace = {}
     for user in get_user_model().objects.filter(is_active=True):
+        # Amazon primeiro, e fora do gate do Mercado Livre: o link dela é montado em
+        # memória (tag + ASIN), não abre navegador nem depende de sessão do ML.
+        # Estar no mesmo `continue` do gate do ML fazia uma conta com a Amazon
+        # perfeitamente configurada não gerar link nenhum só porque o Mercado Livre
+        # estava desconectado.
+        g_amazon, f_amazon = _gerar_links_amazon(user, lote=lote, agora=agora)
+        gerados += g_amazon
+        falhas += f_amazon
+        if g_amazon or f_amazon:
+            destino = por_marketplace.setdefault("amazon", {"gerados": 0, "falhas": 0})
+            destino["gerados"] += g_amazon
+            destino["falhas"] += f_amazon
         if not ml_conectado(user):
             # Antes isto era um `continue` mudo: o usuário simplesmente nunca gerava
             # link e nada em lugar nenhum dizia por quê. Agora a Saúde mostra.
             pulados += 1
             _avisar_sem_sessao_ml(user)
             continue
-        ja_tem = LinkAfiliadoUsuario.objects.filter(
-            usuario=user, produto=OuterRef("pk")).exclude(link_afiliado="")
-        # Fora da fila: quem já tem link, quem é terminal (não afiliável / desistimos)
-        # e quem está de castigo no backoff. Sem isto, produtos que nunca afiliam
-        # ocupavam o lote de 40 a cada ciclo — os mais recentes primeiro — e nenhum
-        # outro produto chegava a ser tentado. A pilha de "pendente" não saía nunca.
+        # Fora da fila: quem já tem link utilizável (aprovado ou aguardando
+        # veredito), quem é terminal (não afiliável / desistimos) e quem está de
+        # castigo no backoff. Sem isto, produtos que nunca afiliam ocupavam o lote de
+        # 40 a cada ciclo — os mais recentes primeiro — e nenhum outro produto
+        # chegava a ser tentado. A pilha de "pendente" não saía nunca.
+        #
+        # O que NÃO está fora da fila: link reprovado com backoff vencido. Ele volta
+        # justamente para ter a URL substituída — antes, "tem URL" o excluía da
+        # geração e a verificação só reabria a mesma URL reprovada, para sempre.
         fora_da_fila = LinkAfiliadoUsuario.objects.filter(
             usuario=user, produto=OuterRef("pk")).filter(
                 Q(estado__in=["nao_afiliavel", "erro"])
-                | Q(proxima_tentativa__gt=agora))
+                | Q(proxima_tentativa__gt=agora)
+                | (~Q(link_afiliado="") & (Q(verificado_ok=True)
+                                           | Q(verificado_ok__isnull=True))))
         pendentes = list(
             Produto.objects.filter(marketplace="mercadolivre", preco_sem_desconto__gt=0)
             .exclude(estado__in=["indisponivel", "invalido", "expirado", "stale"])
             .filter(Q(owner__isnull=True) | Q(owner=user))
-            .exclude(Exists(ja_tem))
             .exclude(Exists(fora_da_fila))
             .order_by("-ultima_observacao")[:lote]
         )
@@ -239,9 +256,53 @@ def _rodar_links(lote=40):
             continue
         gerados += g
         falhas += f
+        destino = por_marketplace.setdefault(
+            "mercadolivre", {"gerados": 0, "falhas": 0})
+        destino["gerados"] += g
+        destino["falhas"] += f
         logger.info("Links ML p/ %s: %s gerado(s), %s falha(s) de %s pendente(s)",
                     user, g, f, len(pendentes))
-    return {"gerados": gerados, "falhas": falhas, "pulados": pulados}
+    return {"gerados": gerados, "falhas": falhas, "pulados": pulados,
+            "por_marketplace": por_marketplace}
+
+
+def _gerar_links_amazon(user, *, lote, agora):
+    """Lote de links Amazon de UM usuário. Sem navegador, sem sessão do ML.
+
+    A tag ausente é tratada como bloqueio de conta dentro de `prefetch_links`: ele
+    devolve (0, 0) e registra um único aviso, em vez de gravar uma falha por
+    produto.
+    """
+    from django.db.models import Exists, OuterRef, Q
+
+    from apps.scrapers.afiliado import tag_amazon
+    from apps.scrapers.marketplaces.registry import get_marketplace
+    from apps.scrapers.models import LinkAfiliadoUsuario, Produto
+
+    # Sem tag não há link possível: sair antes evita varrer o catálogo Amazon a
+    # cada tick para descobrir, no fim, que a conta não está configurada.
+    if not tag_amazon(user):
+        return (0, 0)
+
+    fora_da_fila = LinkAfiliadoUsuario.objects.filter(
+        usuario=user, produto=OuterRef("pk")).filter(
+            Q(estado__in=["nao_afiliavel", "erro"])
+            | Q(proxima_tentativa__gt=agora)
+            | (~Q(link_afiliado="") & Q(verificado_ok=True)))
+    pendentes = list(
+        Produto.objects.filter(marketplace="amazon", preco_sem_desconto__gt=0)
+        .exclude(estado__in=["indisponivel", "invalido", "expirado", "stale"])
+        .filter(Q(owner__isnull=True) | Q(owner=user))
+        .exclude(Exists(fora_da_fila))
+        .order_by("-ultima_observacao")[:lote]
+    )
+    if not pendentes:
+        return (0, 0)
+    try:
+        return get_marketplace("amazon").prefetch_links(pendentes, usuario=user)
+    except Exception as e:
+        logger.warning("Geração de links Amazon falhou para %s: %s", user, e)
+        return (0, 0)
 
 
 def _rodar_verificacao_links(limite=40):
@@ -258,23 +319,36 @@ def _rodar_verificacao_links(limite=40):
     (validar_sessao=False, e `verificar_link_afiliado` nem usa o usuário). Um
     usuário com a conta desconectada tem centenas de links esperando veredito, e
     exigir sessão aqui os manteria invisíveis sem motivo.
+
+    Uma lane POR LOJA, resolvida pelo registry: cada marketplace julga só os
+    próprios links. Chamar direto o verificador do ML era o que fazia link Amazon
+    ser reprovado por "não abre uma página de produto do Mercado Livre".
     """
     from django.contrib.auth import get_user_model
-    from apps.scrapers.scraper_mercadolivre.link import verificar_links_pendentes
+    from apps.scrapers.marketplaces.registry import MARKETPLACES
 
-    total = {"aprovados": 0, "reprovados": 0, "transitorios": 0}
+    total = {"aprovados": 0, "reprovados": 0, "transitorios": 0, "bloqueados": 0}
+    por_loja = {}
     for user in get_user_model().objects.filter(is_active=True):
-        try:
-            r = verificar_links_pendentes(user, limite=limite)
-        except Exception as e:
-            logger.warning("Verificação de destino ML falhou para %s: %s", user, e)
-            continue
-        for chave in total:
-            total[chave] += r.get(chave, 0)
+        for slug, mp in MARKETPLACES.items():
+            try:
+                r = mp.verificar_links_pendentes(user, limite=limite)
+            except Exception as e:
+                logger.warning("Verificação de destino %s falhou para %s: %s",
+                               slug, user, e)
+                continue
+            destino = por_loja.setdefault(slug, {})
+            for chave, valor in r.items():
+                if not isinstance(valor, int):
+                    continue
+                destino[chave] = destino.get(chave, 0) + valor
+                if chave in total:
+                    total[chave] += valor
     if any(total.values()):
-        logger.info("Verificação de destino ML: %s aprovado(s), %s reprovado(s), "
-                    "%s transitório(s)", total["aprovados"], total["reprovados"],
-                    total["transitorios"])
+        logger.info("Verificação de destino: %s aprovado(s), %s reprovado(s), "
+                    "%s transitório(s) — por loja: %s", total["aprovados"],
+                    total["reprovados"], total["transitorios"], por_loja)
+    total["por_marketplace"] = por_loja
     return total
 
 

@@ -22,6 +22,89 @@ class MercadoLivre(Marketplace):
 
         return mapear_ofertas(max_paginas=40, usuario=usuario) or 0
 
+    # Componentes do `mercadolivre-web`. A fonte agregada continua sendo a dona dos
+    # cupons (é o `fonte` de CupomNormalizado e a chave de `_FONTES_ML_ATIVACAO`),
+    # mas a SAÚDE de cada coletor passa a ter linha própria: agrupados, a falha de um
+    # deles tornava impossível saber qual estava obsoleto — o painel mostrava um
+    # único badge para feed de ofertas, vitrine de checkout e campanhas autenticadas.
+    COMPONENTES = {
+        "mercadolivre-ofertas": "Mercado Livre — feed de ofertas",
+        "mercadolivre-cupons-checkout": "Mercado Livre — vitrine de cupons",
+        "mercadolivre-campanhas": "Mercado Livre — campanhas autenticadas",
+    }
+
+    @staticmethod
+    def _componente(slug, nome):
+        from apps.scrapers.models import FonteIngestao
+
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug=slug, defaults={"marketplace": "mercadolivre", "nome": nome},
+        )
+        return fonte
+
+    @classmethod
+    def componente_habilitado(cls, slug) -> bool:
+        """Kill switch individual: desligar um coletor não derruba os outros."""
+        return cls._componente(slug, cls.COMPONENTES.get(slug, slug)).habilitada
+
+    @classmethod
+    def _reportar_componente(cls, slug, *, total, erro=""):
+        """Publica o resultado de UM coletor, sem contaminar os vizinhos."""
+        from django.utils import timezone
+
+        fonte = cls._componente(slug, cls.COMPONENTES.get(slug, slug))
+        agora = timezone.now()
+        fonte.ultima_tentativa = agora
+        fonte.ultimo_total = int(total or 0)
+        if erro:
+            fonte.status = "degraded"
+            fonte.falhas_consecutivas += 1
+            fonte.erro_publico = str(erro)[:255]
+        else:
+            fonte.status = "ok"
+            fonte.ultimo_sucesso = agora
+            fonte.falhas_consecutivas = 0
+            fonte.erro_publico = "" if total else (
+                "Coleta concluída sem itens novos; catálogo anterior preservado.")
+        fonte.save(update_fields=[
+            "ultima_tentativa", "ultimo_total", "status", "ultimo_sucesso",
+            "falhas_consecutivas", "erro_publico",
+        ])
+
+    @classmethod
+    def _coletar_componente(cls, slug, coletor, *, propagar=True):
+        """Roda um coletor e registra a saúde DELE, preservando o fluxo de erro.
+
+        `propagar=True` mantém exatamente o encaminhamento que já existia: quem
+        derrubava o ciclo continua derrubando, quem era isolado continua isolado.
+        A única novidade é que cada coletor passa a ter linha própria de saúde —
+        antes, os três compartilhavam o badge de `mercadolivre-web` e não havia como
+        saber qual deles estava obsoleto.
+
+        Componente desligado no admin (`FonteIngestao.habilitada=False`) devolve 0
+        sem executar: é o kill switch individual que o botão geral de raspagem não
+        oferecia.
+        """
+        if not cls.componente_habilitado(slug):
+            logger.info("Componente %s desabilitado; coleta pulada", slug)
+            cls._reportar_componente(
+                slug, total=0, erro="Coletor desligado na administração.",
+            )
+            return 0
+        try:
+            total = coletor() or 0
+        except Exception as exc:
+            cls._reportar_componente(
+                slug, total=0,
+                erro="Falha temporária na coleta; dados anteriores preservados.",
+            )
+            if propagar:
+                raise
+            logger.warning("Componente %s falhou isoladamente: %s", slug, exc)
+            return 0
+        cls._reportar_componente(slug, total=total)
+        return total
+
     def scrape_all(self, termos=None) -> None:
         from apps.scrapers.scraper_mercadolivre.ofertas_scraper import (
             mapear_ofertas, buscar_por_termo,
@@ -36,12 +119,19 @@ class MercadoLivre(Marketplace):
             slug="mercadolivre-web", defaults={
                 "marketplace": "mercadolivre", "nome": "Mercado Livre — páginas públicas"})
         run = ExecucaoIngestao.objects.create(fonte=fonte)
-        fonte.ultima_tentativa = timezone.now()
+        inicio_ciclo = timezone.now()
+        fonte.ultima_tentativa = inicio_ciclo
         fonte.save(update_fields=["ultima_tentativa"])
         parciais = []
         try:
-            ofertas = mapear_ofertas(max_paginas=40)
-            cupons_codigo = mapear_cupons_codigo()
+            ofertas = self._coletar_componente(
+                "mercadolivre-ofertas", lambda: mapear_ofertas(max_paginas=40),
+                propagar=True,
+            )
+            cupons_codigo = self._coletar_componente(
+                "mercadolivre-cupons-checkout", mapear_cupons_codigo,
+                propagar=True,
+            )
             # Cupons de campanha (tabela Cupom). Estava fora do loop automático: só
             # rodava no clique manual da tela de Scraper, então em produção a tabela
             # ficava vazia -- e link.py aborta a geração de link quando o produto tem
@@ -51,7 +141,9 @@ class MercadoLivre(Marketplace):
             # (__NORDIC_RENDERING_CTX__), que é a peça mais frágil daqui. Se ele
             # quebrar, as ofertas e os códigos ainda entram.
             try:
-                cupons_campanha = mapear_cupons()
+                cupons_campanha = self._coletar_componente(
+                    "mercadolivre-campanhas", mapear_cupons, propagar=True,
+                )
             except Exception as e:
                 parciais.append("cupons de campanha")
                 logger.warning("Raspagem de cupons de campanha ML falhou: %s", e)
@@ -63,7 +155,9 @@ class MercadoLivre(Marketplace):
             # (campanhas) para o catálogo, lendo o banco — vale mesmo quando a raspagem
             # deste ciclo veio vazia (anti-wipe preserva as campanhas anteriores).
             try:
-                projetar_catalogo_cupons()
+                # Só o que ESTA execução observou renova a projeção — ver a
+                # docstring de projetar_catalogo_cupons.
+                projetar_catalogo_cupons(desde=inicio_ciclo)
             except Exception as e:
                 parciais.append("projeção de cupons")
                 logger.warning("Projeção do catálogo de cupons ML falhou: %s", e)
@@ -202,6 +296,12 @@ class MercadoLivre(Marketplace):
         return verificar_link_afiliado(link, nome_esperado=nome_esperado,
                                        confiar_desconto=confiar_desconto,
                                        usuario=usuario)
+
+    def verificar_links_pendentes(self, usuario, limite=20, produto_ids=None):
+        from apps.scrapers.scraper_mercadolivre.link import verificar_links_pendentes
+        return verificar_links_pendentes(
+            usuario, limite=limite, produto_ids=produto_ids,
+        )
 
     def is_alive(self, produto):
         from apps.scrapers.ofertas import esta_vivo

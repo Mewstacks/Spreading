@@ -48,6 +48,44 @@ def ids_com_link(usuario, produtos) -> set:
     )
 
 
+def ids_com_link_utilizavel(usuario, produtos, agora=None) -> set:
+    """IDs que a fila de GERAÇÃO deve pular — uma query.
+
+    `ids_com_link` respondia "já tem URL", e era esse o defeito: um link reprovado
+    (`verificado_ok=False`) tem URL, então a geração o pulava para sempre; depois do
+    backoff a fila de verificação apenas reabria a MESMA URL reprovada e a reprovava
+    de novo. Em produção eram ~973 links ML presos nesse ciclo, sem nunca serem
+    regerados.
+
+    Pula quem:
+      - já está aprovado (`verificado_ok=True`);
+      - tem URL e ainda aguarda veredito (`verificado_ok=None`) — quem julga é a
+        lane de verificação, não a de geração;
+      - é terminal (`nao_afiliavel`/`erro`);
+      - está de castigo no backoff.
+
+    O que sobra — reprovado com backoff vencido — VOLTA para a geração e tem a URL
+    substituída antes de ser verificado outra vez.
+    """
+    if usuario is None or not produtos:
+        return set()
+    from django.db.models import Q
+    from apps.scrapers.models import LinkAfiliadoUsuario
+
+    agora = agora or timezone.now()
+    return set(
+        LinkAfiliadoUsuario.objects
+        .filter(usuario=usuario, produto__in=produtos)
+        .filter(
+            Q(estado__in=("nao_afiliavel", "erro"))
+            | Q(proxima_tentativa__gt=agora)
+            | (~Q(link_afiliado="") & (Q(verificado_ok=True)
+                                       | Q(verificado_ok__isnull=True)))
+        )
+        .values_list("produto_id", flat=True)
+    )
+
+
 def situacao_dos_links(usuario, produtos) -> dict:
     """{produto_id: {estado, ultimo_erro, tentativas, link_afiliado}} — UMA query.
 
@@ -202,6 +240,46 @@ def registrar_reprovacao(usuario, produto, motivo: str) -> None:
 # que não saía mesmo com o worker rodando.
 _BACKOFF_MIN = (5, 15, 60, 180, 360)
 MAX_TENTATIVAS_ERRO = 8
+
+
+# Causas que pertencem à CONTA (sessão do ML, Link Builder, tag ausente) ou à
+# CAPACIDADE da máquina (um único Chromium), nunca ao produto. Elas não podem virar
+# falha individual: um lote de 40 itens contra uma sessão caída gravava 40 falhas,
+# empurrava todo mundo para o backoff e, na oitava rodada, marcava produtos
+# perfeitamente afiliáveis como `nao_afiliavel`.
+_CAUSAS_DE_CONTA = (
+    "LoginError", "AuthError", "SessaoExpirada", "AntiBotError",
+    "BrowserResourceUnavailable", "MLSessionCryptoError",
+)
+
+
+def causa_de_conta(exc) -> str:
+    """Nome da causa quando a falha é da conta/capacidade; '' quando é do item."""
+    nome = type(exc).__name__ if isinstance(exc, BaseException) else str(exc or "")
+    return nome if nome in _CAUSAS_DE_CONTA else ""
+
+
+def reabrir_bloqueios_de_conta(organization=None) -> int:
+    """Devolve à fila as linhas travadas por um problema de conta já resolvido.
+
+    Reconectar a sessão não desfazia sozinho o estrago das rodadas anteriores: as
+    linhas continuavam em backoff (ou terminais) por uma causa que não era delas.
+    Reabre SOMENTE as que carregam uma assinatura de causa de conta — falha real do
+    produto ("O Programa de Afiliados não aceitou a URL deste produto") permanece
+    intacta, que é o ponto do reparo ser cirúrgico.
+    """
+    from django.db.models import Q
+    from apps.scrapers.models import LinkAfiliadoUsuario
+
+    condicao = Q()
+    for causa in _CAUSAS_DE_CONTA:
+        condicao |= Q(ultimo_erro__icontains=causa)
+    linhas = LinkAfiliadoUsuario.objects.filter(condicao).exclude(verificado_ok=True)
+    if organization is not None:
+        linhas = linhas.filter(organization=organization)
+    return linhas.update(
+        estado="pendente", proxima_tentativa=None, tentativas=0, ultimo_erro="",
+    )
 
 
 def registrar_falha(usuario, produto, motivo: str, *, terminal: bool = False) -> None:

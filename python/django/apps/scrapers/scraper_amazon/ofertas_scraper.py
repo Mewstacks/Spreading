@@ -24,6 +24,32 @@ from apps.scrapers.scraper_mercadolivre.ofertas_scraper import classificar_ofert
 logger = logging.getLogger(__name__)
 
 
+# PromotionKind — vocabulário único de "que tipo de promoção é esta".
+#
+# `dealDetails` da Creators API é um campo só para três coisas muito diferentes:
+# cupom de clipar (o comprador PRECISA ativar), oferta-relâmpago (desconto por tempo
+# limitado, nada a ativar) e desconto comum. Tratar tudo como cupom fazia a mensagem
+# mandar "ative o cupom" em item que não tem cupom nenhum — a promessa que a pessoa
+# não consegue cumprir na página. Só `coupon` carrega semântica de ativação.
+PROMOCAO_CUPOM = "coupon"
+PROMOCAO_RELAMPAGO = "lightning_deal"
+PROMOCAO_OFERTA = "deal"
+_RE_CUPOM = re.compile(r"coupon|cupom", re.I)
+_RE_RELAMPAGO = re.compile(r"lightning|rel[âa]mpago|flash", re.I)
+
+
+def classificar_promocao(rotulo: str) -> str:
+    """PromotionKind a partir do rótulo que a Amazon publica na promoção."""
+    texto = str(rotulo or "")
+    if not texto:
+        return ""
+    if _RE_CUPOM.search(texto):
+        return PROMOCAO_CUPOM
+    if _RE_RELAMPAGO.search(texto):
+        return PROMOCAO_RELAMPAGO
+    return PROMOCAO_OFERTA
+
+
 def _num(v):
     try:
         return float(v)
@@ -160,7 +186,8 @@ def _mapear_item(item: dict) -> dict | None:
     # `dealDetails` também representa lightning deals. Só tratamos como cupom
     # quando a fonte afirma explicitamente coupon/cupom; qualquer outra promoção é
     # exibida como desconto de preço, sem instruir o público a "ativar" algo falso.
-    cupom_confirmado = bool(re.search(r"coupon|cupom", rotulo_promo, re.I))
+    tipo_promocao = classificar_promocao(rotulo_promo) if tem_promocao else ""
+    cupom_confirmado = tipo_promocao == PROMOCAO_CUPOM
 
     # Prime/deliveryInfo não existe mais no catalog/v1. Aproxima "vendido pela Amazon"
     # (merchantInfo.name) como selo de confiança no lugar do antigo frete_full/Prime.
@@ -182,6 +209,7 @@ def _mapear_item(item: dict) -> dict | None:
         "tem_promocao": tem_promocao,
         "rotulo_promo": rotulo_promo,
         "cupom_confirmado": cupom_confirmado,
+        "tipo_promocao": tipo_promocao,
         "categoria": categoria,
         "macro_sugerida": macro_sugerida,
     }
@@ -199,6 +227,9 @@ def _upsert_produto(m: dict, origem: str, macro=None, owner=None) -> bool:
     evidencia = evidencia_com_cupom_preservado(
         {"promotion": {"present": m["tem_promocao"],
                        "label": m["rotulo_promo"],
+                       # PromotionKind explícito: quem lê a evidência não precisa
+                       # reinterpretar o rótulo para saber se há algo a ativar.
+                       "kind": m.get("tipo_promocao", ""),
                        "coupon_confirmed": m["cupom_confirmado"]}},
         Produto.objects.filter(**chave).values_list("evidencia", flat=True).first(),
     )
@@ -238,24 +269,69 @@ def _paginas_padrao() -> int:
     return max(1, int(getattr(settings, "AMAZON_FEED_PAGES", 5)))
 
 
-def _coletar(keyword, min_savings, max_paginas=None, creds=None):
+def metricas_vazias() -> dict:
+    """Contadores de COBERTURA de uma varredura da Creators API.
+
+    A Creators API não tem feed de ofertas: o que existe é uma varredura de N
+    palavras-chave × M páginas × 10 itens. Sem medir isso, "a Amazon achou 6 ofertas"
+    é indistinguível de "a varredura bateu no teto" ou de "a cota estourou no
+    terceiro termo" — e o passo seguinte (ampliar a taxonomia) viraria chute.
+    """
+    return {
+        "keywords": 0, "keywords_com_erro": 0, "chamadas": 0, "paginas": 0,
+        "itens_brutos": 0, "itens_mapeados": 0, "descartados": 0,
+        "paginas_no_teto": 0, "por_keyword": {}, "erros_por_tipo": {},
+        "max_paginas": 0,
+    }
+
+
+def _registrar_erro(metricas, exc):
+    if metricas is None:
+        return
+    chave = type(exc).__name__
+    texto = str(exc)
+    if "429" in texto or "throttl" in texto.lower():
+        chave = "Throttled429"
+    metricas["erros_por_tipo"][chave] = metricas["erros_por_tipo"].get(chave, 0) + 1
+
+
+def _coletar(keyword, min_savings, max_paginas=None, creds=None, metricas=None):
     """Coleta itens mapeados de uma busca (até max_paginas) com as creds dadas."""
     out = []
     max_paginas = _paginas_padrao() if max_paginas is None else max_paginas
+    if metricas is not None:
+        metricas["max_paginas"] = max(metricas["max_paginas"], max_paginas)
+    paginas_lidas = 0
     for p in range(1, max_paginas + 1):
+        if metricas is not None:
+            metricas["chamadas"] += 1
         itens = creators_api.search_items(
             keyword, min_savings_percent=min_savings, item_count=10, page=p, creds=creds
         )
         if not itens:
             break
+        paginas_lidas += 1
+        if metricas is not None:
+            metricas["paginas"] += 1
+            metricas["itens_brutos"] += len(itens)
         for it in itens:
             m = _mapear_item(it)
             if m:
                 out.append(m)
+            elif metricas is not None:
+                metricas["descartados"] += 1
+    if metricas is not None:
+        metricas["itens_mapeados"] += len(out)
+        metricas["por_keyword"][keyword] = len(out)
+        # Parou por ter acabado a página ou por ter batido no teto? Só o segundo
+        # caso significa que existe mais catálogo do que estamos vendo.
+        if paginas_lidas >= max_paginas:
+            metricas["paginas_no_teto"] += 1
     return out
 
 
-def _coletar_termos(termos, min_savings, *, creds, max_paginas=None, rotulo=""):
+def _coletar_termos(termos, min_savings, *, creds, max_paginas=None, rotulo="",
+                    metricas=None):
     """Coleta uma lista de buscas. Um termo quebrado não derruba os outros.
 
     Mas TODOS quebrados não podem virar "zero ofertas" silencioso: era assim que a
@@ -265,19 +341,26 @@ def _coletar_termos(termos, min_savings, *, creds, max_paginas=None, rotulo=""):
     """
     itens, falhas, ultimo_erro = [], 0, None
     termos = list(termos)
+    if metricas is not None:
+        metricas["keywords"] += len(termos)
     for i, termo in enumerate(termos, 1):
         if rotulo:
             emitir_progresso(f"[PROGRESSO] {rotulo} {i}/{len(termos)}: {termo}")
         try:
-            itens.extend(_coletar(termo, min_savings, max_paginas, creds=creds))
-        except (creators_api.AmazonNotEligible, creators_api.AmazonConfigError):
+            itens.extend(_coletar(termo, min_savings, max_paginas, creds=creds,
+                                  metricas=metricas))
+        except (creators_api.AmazonNotEligible, creators_api.AmazonConfigError) as exc:
             # Permanentes para o ciclo inteiro: repetir a mesma credencial recusada
             # em 12 keywords só multiplica a espera do throttle por 12.
+            _registrar_erro(metricas, exc)
             raise
         except Exception as exc:
             falhas += 1
             ultimo_erro = exc
+            _registrar_erro(metricas, exc)
             logger.warning("Busca Amazon '%s' falhou: %s", termo, exc)
+    if metricas is not None:
+        metricas["keywords_com_erro"] += falhas
     if termos and falhas == len(termos):
         raise creators_api.AmazonAPIError(
             f"Nenhuma das {falhas} buscas da Amazon respondeu; última falha: {ultimo_erro}"
@@ -285,7 +368,7 @@ def _coletar_termos(termos, min_savings, *, creds, max_paginas=None, rotulo=""):
     return itens
 
 
-def coletar_feed(usuario=None, creds=None):
+def coletar_feed(usuario=None, creds=None, metricas=None):
     """UMA varredura das keywords do feed, compartilhada por ofertas e promoções.
 
     `mapear_ofertas` e `mapear_cupons_codigo` pediam exatamente as mesmas páginas à
@@ -298,7 +381,8 @@ def coletar_feed(usuario=None, creds=None):
     keywords = getattr(settings, "AMAZON_FEED_KEYWORDS", []) or []
     logger.info("Amazon feed user=%s: %s keywords, min %s%% off",
                 getattr(usuario, "id", None), len(keywords), min_savings)
-    return _coletar_termos(keywords, min_savings, creds=creds, rotulo="Amazon ofertas")
+    return _coletar_termos(keywords, min_savings, creds=creds,
+                           rotulo="Amazon ofertas", metricas=metricas)
 
 
 def mapear_ofertas(usuario=None, itens=None):
@@ -346,15 +430,25 @@ def _tem_desconto_minimo(m, min_desconto) -> bool:
 
 def mapear_cupons_codigo(usuario=None, itens=None):
     """
-    Itens com PROMOÇÃO/cupom de clipar -> origem='cupom_codigo', owner=usuario.
-    Reaproveita a coleta do feed; só persiste quem tem promoção na OffersV2.
-    Amazon não usa código de checkout, então codigo_checkout fica vazio.
+    Itens com PROMOÇÃO na OffersV2 -> Produto, owner=usuario. Reaproveita a coleta
+    do feed. Amazon não usa código de checkout, então codigo_checkout fica vazio.
+
+    Só quem a fonte identifica como CUPOM recebe `origem='cupom_codigo'`, que é a
+    origem com semântica de ativação (e que exige comprovar o desconto na PDP antes
+    de publicar). Oferta-relâmpago e desconto comum entram como `origem='oferta'`:
+    são promoções de preço, e o de/por já vem confirmado pela própria API. Marcar
+    tudo como cupom fazia a plataforma pedir uma verificação de cupom para item que
+    não tem cupom — e, na mensagem, instruir a "ativar" algo inexistente.
     """
     itens = coletar_feed(usuario) if itens is None else itens
-    total = 0
+    total = cupons = 0
     for m in itens:
-        if m["tem_promocao"]:
-            _upsert_produto(m, origem="cupom_codigo", owner=usuario)
-            total += 1
-    logger.info("Amazon cupons/promocoes: %s upserts", total)
+        if not m["tem_promocao"]:
+            continue
+        origem = "cupom_codigo" if m.get("tipo_promocao") == PROMOCAO_CUPOM else "oferta"
+        cupons += origem == "cupom_codigo"
+        _upsert_produto(m, origem=origem, owner=usuario)
+        total += 1
+    logger.info("Amazon promoções: %s upsert(s), sendo %s cupom(ns) confirmado(s)",
+                total, cupons)
     return total

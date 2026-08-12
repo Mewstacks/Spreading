@@ -2080,6 +2080,7 @@ def top_promocoes(request):
     cupons_aguardando_verificacao = cupons_aguardando_conexao = 0
     cupons_fontes_sem_resultado = 0
     produtos, pendentes_ocultos, amazon_diagnostico = [], 0, ""
+    prontos_por_loja, pendentes_por_loja, contagem_estrita = {}, {}, True
     page_obj = Paginator([], POR_PAGINA).get_page(1)
     afiliacao, afiliacao_ultimo_erro, fontes_com_aviso = None, "", []
 
@@ -2340,18 +2341,41 @@ def top_promocoes(request):
         # Quando o filtro está DESLIGADO, porém, nada depende de `afiliado_pronto` fora
         # da página exibida — e preparar o catálogo inteiro só para renderizar 20 linhas
         # era trabalho jogado fora em cima da consulta mais pesada do sistema.
+        from apps.scrapers.vitrine import (
+            contar_por_marketplace, equilibrar_primeira_pagina,
+        )
+
         pendentes_ocultos = 0
         if so_afiliados:
             _preparar(candidatos)
             prontos = [p for p in candidatos if getattr(p, "afiliado_pronto", False)]
             pendentes_ocultos = len(candidatos) - len(prontos)
+            pendentes_por_loja = contar_por_marketplace(
+                [p for p in candidatos if not getattr(p, "afiliado_pronto", False)])
             candidatos = prontos
+            # Com o corte de afiliação resolvido, sabemos exatamente quais lojas têm
+            # item PRONTO — é a hora certa de garantir a presença de cada uma na
+            # primeira página. Só quando o usuário não escolheu uma loja: filtrar por
+            # loja é um pedido explícito de ver só aquela.
+            if not loja_selecionada:
+                candidatos = equilibrar_primeira_pagina(candidatos, POR_PAGINA)
             page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
             produtos = list(page_obj)
         else:
+            pendentes_por_loja = {}
             page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
             produtos = list(page_obj)
             _preparar(produtos)
+        # Contadores do MESMO universo que a tela pagina (mesma janela de frescor,
+        # mesmos filtros, mesmo corte de afiliação) — ver vitrine.contar_por_marketplace.
+        #
+        # Em "mostrar também os pendentes" a prontidão NÃO é resolvida para o
+        # catálogo inteiro (só para a página exibida), então aqui o número é de
+        # itens listados, não de prontos. O rótulo acompanha: prometer "pronto(s)"
+        # sobre uma contagem que não foi apurada é exatamente o tipo de indicador
+        # que não reconcilia com a tela.
+        prontos_por_loja = contar_por_marketplace(candidatos)
+        contagem_estrita = so_afiliados
 
         cupons_map = {
             c.campanha_id: c
@@ -2542,6 +2566,24 @@ def top_promocoes(request):
         "amazon_diagnostico": amazon_diagnostico,
         "so_afiliados": so_afiliados,
         "pendentes_ocultos": pendentes_ocultos,
+        # Funil por loja, calculado sobre a MESMA lista paginada — reconcilia com o
+        # que a tela mostra, ao contrário de uma contagem própria no banco.
+        # União das duas contagens: uma loja com itens só na fila também precisa
+        # aparecer — é justamente ela que o usuário procura quando "sumiu".
+        "prontos_por_loja": [
+            {
+                "slug": slug,
+                "nome": "Mercado Livre" if slug == "mercadolivre" else slug.title(),
+                "prontos": prontos_por_loja.get(slug, 0),
+                "pendentes": pendentes_por_loja.get(slug, 0),
+            }
+            for slug in sorted(set(prontos_por_loja) | set(pendentes_por_loja))
+        ],
+        "contagem_estrita": contagem_estrita,
+        "acao_amazon_tag": (
+            not (getattr(perfil, "afiliado_tag_amazon", "") or "").strip()
+            and bool(pendentes_por_loja.get("amazon"))
+        ),
         "qs_base_sem_afiliado": qs_base_sem_afiliado,
         "filtros_ativos": len(macros_selecionados) + len(categorias_selecionadas)
             + bool(loja_selecionada) + bool(busca) + bool(min_desconto)

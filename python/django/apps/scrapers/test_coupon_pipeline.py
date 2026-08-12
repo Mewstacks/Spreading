@@ -120,21 +120,24 @@ class CouponPipelineTests(TestCase):
                 )
             return len(items), 0
 
-        marketplace = SimpleNamespace(prefetch_links=generate)
-
         def verify(usuario, limite=20, produto_ids=None):
             LinkAfiliadoUsuario.objects.filter(
                 usuario=usuario, produto_id__in=produto_ids,
             ).update(verificado_ok=True, verificado_em=timezone.now())
             return {"aprovados": len(produto_ids), "reprovados": 0, "transitorios": 0}
 
+        # A verificação é pedida ao ADAPTADOR da loja, nunca ao verificador de um
+        # marketplace específico: é esse roteamento que impede link Amazon de ser
+        # julgado pela regra do Mercado Livre.
+        verifier = Mock(side_effect=verify)
+        marketplace = SimpleNamespace(
+            prefetch_links=generate, verificar_links_pendentes=verifier,
+        )
+
         with patch(
             "apps.scrapers.marketplaces.registry.get_marketplace",
             return_value=marketplace,
-        ), patch(
-            "apps.scrapers.scraper_mercadolivre.link.verificar_links_pendentes",
-            side_effect=verify,
-        ) as verifier:
+        ):
             result = afiliar_cupons(self.user, limite=10)
 
         self.assertEqual(result["vinculados"], 4)

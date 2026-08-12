@@ -131,7 +131,24 @@ def _coupon_candidates(config, limit):
         "cupom_normalizado_id", flat=True)
     query = query.exclude(id__in=sent_ids)
 
-    pool = list(query.order_by("-ultima_observacao")[:max(80, limit * 10)])
+    # POOL POR LOJA, e não os 80 mais recentes no geral. As campanhas do Mercado
+    # Livre chegam aos milhares e são sempre as mais recentes: uma amostragem global
+    # levava um pool inteiro de ML e nenhum cupom da Amazon chegava a ser pontuado —
+    # a loja sumia da seleção automática mesmo tendo cupom oficial pronto.
+    tamanho = max(80, limit * 10)
+    if config.marketplace:
+        pool = list(query.order_by("-ultima_observacao")[:tamanho])
+    else:
+        lojas = list(
+            query.values_list("marketplace", flat=True).distinct()
+        )
+        por_loja = max(1, tamanho // max(1, len(lojas))) if lojas else tamanho
+        pool = []
+        for loja in lojas:
+            pool.extend(
+                query.filter(marketplace=loja)
+                .order_by("-ultima_observacao")[:por_loja]
+            )
     from apps.scrapers.coupon_products import ids_cupons_prontos
     from apps.scrapers.coupon_rules import cupom_publicavel
     prontos = ids_cupons_prontos(config.owner, pool)

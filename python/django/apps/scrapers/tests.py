@@ -4250,24 +4250,79 @@ class VerificarLinksPendentesTests(TestCase):
         self.assertEqual(linha.estado, "pronto")
 
     @patch("apps.scrapers.scraper_mercadolivre.link._relatorio_na_pagina")
-    def test_link_reprovado_com_backoff_vencido_volta_a_verificacao(self, verify):
+    def test_link_reprovado_nao_e_reverificado_com_a_mesma_url(self, verify):
+        """Reprovado pertence à fila de GERAÇÃO, não à de verificação.
+
+        Reabrir a mesma URL reprovada a cada backoff era o ciclo que prendia ~973
+        links ML em produção: a geração pulava quem já tinha URL e a verificação só
+        reconfirmava a reprovação. O item só volta a valer um Chromium depois de ter
+        a URL substituída — ver ids_com_link_utilizavel.
+        """
         self.setUpBrowserFalso()
-        produto = self._produto("Link para reverificar")
+        produto = self._produto("Link para regerar")
         LinkAfiliadoUsuario.objects.create(
             usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",
             link_afiliado="https://meli.la/retry", verificado_ok=False,
             proxima_tentativa=timezone.now() - timezone.timedelta(minutes=1),
         )
-        verify.return_value = {
-            "ok": True,
-            "url_final": "https://produto.mercadolivre.com.br/MLB-2",
-        }
 
         resultado = ml_link.verificar_links_pendentes(self.user, limite=10)
 
-        self.assertEqual(resultado["aprovados"], 1)
+        self.assertEqual(resultado,
+                         {"aprovados": 0, "reprovados": 0, "transitorios": 0})
+        verify.assert_not_called()
+
+    def test_link_reprovado_com_backoff_vencido_volta_a_geracao(self):
+        from apps.scrapers.afiliado import ids_com_link_utilizavel
+
+        produto = self._produto("Link para regerar")
+        linha = LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",
+            link_afiliado="https://meli.la/retry", verificado_ok=False,
+            proxima_tentativa=timezone.now() - timezone.timedelta(minutes=1),
+        )
+        self.assertEqual(
+            ids_com_link_utilizavel(self.user, [produto]), set(),
+            "link reprovado com backoff vencido tem de voltar para a geração")
+
+        # Ainda dentro do backoff: fica fora da fila.
+        LinkAfiliadoUsuario.objects.filter(pk=linha.pk).update(
+            proxima_tentativa=timezone.now() + timezone.timedelta(minutes=30))
+        self.assertEqual(
+            ids_com_link_utilizavel(self.user, [produto]), {produto.id})
+
+        # Aprovado ou aguardando veredito: também fora da fila de geração.
+        for veredito in (True, None):
+            LinkAfiliadoUsuario.objects.filter(pk=linha.pk).update(
+                verificado_ok=veredito, proxima_tentativa=None)
+            self.assertEqual(
+                ids_com_link_utilizavel(self.user, [produto]), {produto.id})
+
+    def test_regeracao_substitui_a_url_reprovada(self):
+        """A geração troca a URL e devolve o item ao estado 'sem veredito'."""
+        produto = self._produto("Link regerado")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",
+            link_afiliado="https://meli.la/reprovado", verificado_ok=False,
+            verificacao_motivo="O link abre a vitrine do afiliado.",
+            tentativas=2,
+            proxima_tentativa=timezone.now() - timezone.timedelta(minutes=1),
+        )
+        self.setUpBrowserFalso()
+        with organization_context(self.user.personal_organization), \
+                patch("apps.scrapers.scraper_mercadolivre.link.has_storage_state",
+                      return_value=True), \
+                patch("apps.scrapers.scraper_mercadolivre.link._abrir_link_builder"), \
+                patch("apps.scrapers.scraper_mercadolivre.link._afiliar_url_na_pagina",
+                      return_value="https://meli.la/novo"):
+            gerados, falhas = ml_link.gerar_links_em_lote([produto], usuario=self.user)
+
+        self.assertEqual((gerados, falhas), (1, 0))
         linha = LinkAfiliadoUsuario.objects.get(usuario=self.user, produto=produto)
-        self.assertIs(linha.verificado_ok, True)
+        self.assertEqual(linha.link_afiliado, "https://meli.la/novo")
+        self.assertIsNone(linha.verificado_ok)
+        self.assertEqual(linha.verificacao_motivo, "")
+        self.assertIsNone(linha.proxima_tentativa)
 
     def test_link_reprovado_esgotado_vira_nao_afiliavel(self):
         from apps.scrapers.afiliado import (
@@ -4524,7 +4579,11 @@ class GeracaoDeLinksEmLoteTests(TestCase):
         enviados, kwargs = prefetch.call_args
         self.assertEqual([p.id for p in enviados[0]], [produto.id])
         self.assertEqual(kwargs["usuario"], self.user)
-        self.assertEqual(res, {"gerados": 1, "falhas": 0, "pulados": 0})
+        self.assertEqual(res["gerados"], 1)
+        self.assertEqual(res["falhas"], 0)
+        self.assertEqual(res["pulados"], 0)
+        self.assertEqual(res["por_marketplace"], {"mercadolivre": {"gerados": 1,
+                                                                  "falhas": 0}})
 
     @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
     @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links")
@@ -4548,8 +4607,10 @@ class GeracaoDeLinksEmLoteTests(TestCase):
         cache.clear()
         self._produto()
 
-        self.assertEqual(_rodar_links(lote=40),
-                         {"gerados": 0, "falhas": 0, "pulados": 1})
+        resultado = _rodar_links(lote=40)
+        self.assertEqual(
+            {chave: resultado[chave] for chave in ("gerados", "falhas", "pulados")},
+            {"gerados": 0, "falhas": 0, "pulados": 1})
         prefetch.assert_not_called()
 
     @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
@@ -4607,8 +4668,10 @@ class GeracaoDeLinksEmLoteTests(TestCase):
         # A sessão ML é de cada um: a do vizinho vencer não pode me impedir de gerar.
         self._produto()
 
-        self.assertEqual(_rodar_links(lote=40),
-                         {"gerados": 0, "falhas": 0, "pulados": 0})
+        resultado = _rodar_links(lote=40)
+        self.assertEqual(
+            {chave: resultado[chave] for chave in ("gerados", "falhas", "pulados")},
+            {"gerados": 0, "falhas": 0, "pulados": 0})
 
     @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
     @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links")
