@@ -1,0 +1,55 @@
+name: Fly nightly power schedule
+
+on:
+  schedule:
+    # GitHub cron usa UTC. America/Sao_Paulo é UTC-3 (sem horário de verão):
+    # 03:00 UTC = 00:00 BRT; 11:00 UTC = 08:00 BRT.
+    - cron: "0 3 * * *"
+    - cron: "0 11 * * *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Ação manual
+        required: true
+        type: choice
+        options:
+          - start
+          - stop
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fly-production-power
+  cancel-in-progress: false
+
+jobs:
+  power:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+      - name: Resolve scheduled action
+        id: action
+        env:
+          MANUAL_ACTION: ${{ inputs.action }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          if [[ -n "$MANUAL_ACTION" ]]; then
+            action="$MANUAL_ACTION"
+          elif [[ "$SCHEDULE" == "0 3 * * *" ]]; then
+            action="stop"
+          elif [[ "$SCHEDULE" == "0 11 * * *" ]]; then
+            action="start"
+          else
+            echo "Evento sem ação reconhecida: $SCHEDULE" >&2
+            exit 1
+          fi
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+      - name: Start or stop Fly production
+        env:
+          FLY_TOKEN_WEB: ${{ secrets.FLY_TOKEN_WEB }}
+          FLY_TOKEN_WA: ${{ secrets.FLY_TOKEN_WA }}
+          FLY_TOKEN_DB: ${{ secrets.FLY_TOKEN_DB }}
+        run: bash deploy/fly-nightly-power.sh "${{ steps.action.outputs.action }}"

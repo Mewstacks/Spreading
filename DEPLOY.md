@@ -29,6 +29,18 @@ em São Paulo do que em `ams`. Valores por mês:
 
 Não há homologação: foi destruída em 09/08/2026 para cortar custo.
 
+### Desligamento noturno
+
+A produção é parada diariamente à **00:00** e religada às **08:00**, no horário de
+São Paulo, pelo workflow `.github/workflows/fly-nightly-power.yml`. O desligamento
+ocorre na ordem `web -> WhatsApp -> Postgres`; a inicialização usa a ordem inversa
+e só avança quando os health checks da dependência estão passando.
+
+O workflow também aceita execução manual com `start` ou `stop`. Ele usa três
+deploy tokens restritos a um único app, armazenados nos secrets do repositório:
+`FLY_TOKEN_WEB`, `FLY_TOKEN_WA` e `FLY_TOKEN_DB`. Os tokens atuais expiram em um
+ano e devem ser rotacionados antes de agosto de 2027.
+
 **Antes de mexer em `[[vm]]`, saiba o preço.** Trocar os dois serviços para
 `performance-2x`/4gb leva a conta de ~US$63 para ~US$210/mês. O passo intermediário
 barato é `shared-cpu-4x` (+US$2,24/mês por VM), que dobra vCPU e cota de baseline.
