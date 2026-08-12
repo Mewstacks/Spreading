@@ -15,6 +15,7 @@ casamento é testável sem Playwright.
 import logging
 import re
 import time
+from collections import deque
 
 from django.db.models import Max, Q
 from django.utils import timezone
@@ -325,6 +326,39 @@ def _rodar(cupons, idx, agora, coletor, max_paginas, orcamento_s=ORCAMENTO_S):
     return _confirmar_todos(pares, idx, agora)
 
 
+def _credenciais_de_reserva(usuario):
+    """Contas cujas sessões podem substituir a do contexto quando ela é barrada.
+
+    Só no contexto COMPARTILHADO (`usuario=None`): num casamento de dono
+    conhecido, usar a sessão de outra organização não seria recuperação, seria
+    cruzar fronteira de tenant. Devolve usuários, não credenciais — decifrar
+    sessão de todo mundo antes de precisar é caro e quase sempre desnecessário.
+    """
+    if usuario is not None:
+        return []
+    from django.contrib.auth import get_user_model
+
+    return list(get_user_model().objects.filter(is_active=True))
+
+
+def _ler_com_reserva(sessao, state, url, max_paginas, reserva):
+    """(ids, sessao, state), trocando de credencial enquanto o ML devolver parede."""
+    while True:
+        try:
+            return _ids_por_http(sessao, url, max_paginas), sessao, state
+        except SessaoMLObrigatoriaError:
+            proximo = None
+            while reserva and proximo is None:
+                proximo = storage_state(reserva.popleft())
+            if proximo is None:
+                raise
+            logger.info(
+                "Casamento de container: a sessão em uso foi barrada; "
+                "alternando para outra conta conectada.",
+            )
+            state, sessao = proximo, _ml_http_session(proximo)
+
+
 def casar_cupons_container(coletor=None, max_paginas=2, usuario=None,
                            limite_cupons=LIMITE_CUPONS, orcamento_s=ORCAMENTO_S):
     """Confirma quais produtos rastreados participam de cada cupom de container.
@@ -348,6 +382,11 @@ def casar_cupons_container(coletor=None, max_paginas=2, usuario=None,
     state = storage_state(usuario)
     if state is None:
         avisar_sem_sessao("Casamento cupom-container", usuario)
+    # Reserva de credenciais para quando a do contexto for barrada. A listagem é a
+    # mesma página pública para qualquer conta; a sessão só decide se o gateway do
+    # ML entrega o HTML. Sem isto, a sessão de sistema expirada parava o casamento
+    # de TODAS as organizações — inclusive as que estavam com o ML conectado.
+    reserva = deque(_credenciais_de_reserva(usuario))
 
     sessao = _ml_http_session(state)
     pendentes = []          # (cupom, url) que o HTTP não resolveu
@@ -358,11 +397,14 @@ def casar_cupons_container(coletor=None, max_paginas=2, usuario=None,
             break
         url = (cupom.regras or {}).get("container_url")
         try:
-            ids = _ids_por_http(sessao, url, max_paginas)
+            ids, sessao, state = _ler_com_reserva(
+                sessao, state, url, max_paginas, reserva,
+            )
         except SessaoMLObrigatoriaError:
-            # A parede vale para a sessão inteira, não para este container. Fechar
-            # a passada aqui preserva os vínculos já confirmados e evita abrir um
-            # Chromium por cupom restante para colher a mesma tela de login.
+            # Nenhuma credencial passou. A parede vale para a sessão inteira, não
+            # para este container: fechar a passada aqui preserva os vínculos já
+            # confirmados e evita abrir um Chromium por cupom restante para colher
+            # a mesma tela de login.
             logger.warning(
                 "Casamento de container interrompido: o Mercado Livre exigiu "
                 "sessão (%s de %s cupons lidos).", indice, len(cupons),

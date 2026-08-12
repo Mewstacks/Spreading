@@ -1018,6 +1018,36 @@ class CasamentoDeContainerTests(TestCase):
         self.assertEqual(fonte.status, "degraded")
         self.assertIn("conexão do Mercado Livre", fonte.erro_publico)
 
+    def test_sessao_de_reserva_assume_quando_a_do_contexto_e_barrada(self):
+        """A sessão de sistema pode estar expirada enquanto outra conta está
+        conectada — foi exatamente o caso em produção."""
+        from apps.scrapers.scraper_mercadolivre.cupons_container import (
+            casar_cupons_container,
+        )
+        from unittest.mock import Mock, patch
+
+        get_user_model().objects.create_user("conta-conectada")
+        self._cupons(2)
+        parede = Mock(
+            status_code=200, text="<html>acesse sua conta</html>",
+            url="https://www.mercadolivre.com.br/gz/account-verification?go=x",
+        )
+        listagem = Mock(
+            status_code=200,
+            url="https://lista.mercadolivre.com.br/_Container_0",
+            text='<a href="https://produto.mercadolivre.com.br/MLB-123456-x">i</a>',
+        )
+        sessoes = {"morta": Mock(get=Mock(return_value=parede)),
+                   "viva": Mock(get=Mock(return_value=listagem))}
+        with patch("apps.scrapers.scraper_mercadolivre.cupons_container.storage_state",
+                   side_effect=lambda quem=None: "morta" if quem is None else "viva"), \
+             patch("apps.scrapers.scraper_mercadolivre.cupons_container._ml_http_session",
+                   side_effect=lambda state: sessoes[state]):
+            vinculos = casar_cupons_container()
+
+        self.assertGreater(vinculos, 0)
+        self.assertTrue(ProdutoCupom.objects.filter(status="confirmado").exists())
+
     def test_extrai_ids_do_html_sem_browser(self):
         from apps.scrapers.scraper_mercadolivre.cupons_container import _ids_do_html
         html = ('<a href="https://produto.mercadolivre.com.br/MLB-123456-x">a</a>'
