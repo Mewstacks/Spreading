@@ -303,6 +303,131 @@ class ContencaoDeCapacidadeTests(TestCase):
             LinkAfiliadoUsuario.objects.filter(usuario=user).count(), 1)
 
 
+class CapacidadeNaoEhAvariaTests(TestCase):
+    """Ficar sem navegador é fila, não defeito — e não pode virar alarme.
+
+    Em produção a lane de links gravava ~12 eventos `links_erro` por hora, cada um
+    com traceback, só porque a lane de cupons estava com o único Chromium da
+    máquina. Alarme que ninguém pode acionar afoga o log de Saúde e esconde o
+    atraso real por capacidade.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("capacidade")
+        _produto("mercadolivre")
+
+    def _rodar(self, excecao):
+        from apps.scrapers.management.commands.automacao import _rodar_links
+
+        with patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True), \
+                patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre."
+                      "prefetch_links", side_effect=excecao), \
+                patch("apps.scrapers.management.commands.automacao.log_event") as evento:
+            return _rodar_links(lote=10), evento
+
+    def test_navegador_ocupado_e_adiamento_sem_evento_de_erro(self):
+        from apps.scrapers.carga import BrowserResourceUnavailable
+
+        resultado, evento = self._rodar(
+            BrowserResourceUnavailable("Capacidade de browser ocupada"))
+
+        self.assertEqual(resultado["adiados"], 1)
+        self.assertEqual(resultado["falhas"], 0)
+        evento.assert_not_called()
+
+    def test_sessao_caida_continua_sendo_reportada(self):
+        """O silêncio vale só para capacidade: sessão morta exige ação humana."""
+        from apps.scrapers.scraper_mercadolivre.link import LoginError
+
+        resultado, evento = self._rodar(LoginError("sessão expirada"))
+
+        self.assertEqual(resultado["adiados"], 0)
+        evento.assert_called_once()
+        self.assertEqual(evento.call_args[0][1], "links_erro")
+
+    def test_capacidade_e_conta_sao_causas_distintas(self):
+        from apps.scrapers.afiliado import causa_de_capacidade, causa_de_conta
+        from apps.scrapers.carga import BrowserResourceUnavailable
+        from apps.scrapers.scraper_mercadolivre.link import LoginError
+
+        capacidade = BrowserResourceUnavailable("ocupado")
+        sessao = LoginError("caiu")
+        self.assertEqual(causa_de_capacidade(capacidade), "BrowserResourceUnavailable")
+        self.assertEqual(causa_de_capacidade(sessao), "")
+        # Ambas continuam impedindo penalidade por produto.
+        self.assertTrue(causa_de_conta(capacidade))
+        self.assertTrue(causa_de_conta(sessao))
+        self.assertEqual(causa_de_conta(ValueError("erro do item")), "")
+
+
+class ReaberturaDeBloqueiosTests(TestCase):
+    """As linhas envenenadas pelo bug antigo precisam de uma passada de limpeza."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("reabertura")
+
+    def _linha(self, nome, erro, **extra):
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", nome=nome, origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=80,
+            link_produto=f"https://produto.mercadolivre.com.br/MLB-{abs(hash(nome)) % 10**8}",
+        )
+        return LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto, ultimo_erro=erro,
+            tentativas=8, estado="erro", **extra)
+
+    def test_reabre_conta_e_capacidade_preservando_falha_do_produto(self):
+        from apps.scrapers.afiliado import reabrir_bloqueios_de_conta
+
+        sessao = self._linha("por sessão",
+                             "Falha operacional de afiliação (LoginError).")
+        navegador = self._linha(
+            "por navegador",
+            "Falha operacional de afiliação (BrowserResourceUnavailable).")
+        produto = self._linha(
+            "do produto",
+            "O Programa de Afiliados não aceitou a URL deste produto.")
+
+        self.assertEqual(reabrir_bloqueios_de_conta(), 2)
+
+        for linha in (sessao, navegador):
+            linha.refresh_from_db()
+            self.assertEqual(linha.estado, "pendente")
+            self.assertEqual(linha.tentativas, 0)
+            self.assertEqual(linha.ultimo_erro, "")
+            self.assertIsNone(linha.proxima_tentativa)
+        produto.refresh_from_db()
+        self.assertEqual(produto.estado, "erro")
+        self.assertEqual(produto.tentativas, 8)
+
+    def test_nao_desfaz_link_ja_aprovado(self):
+        from apps.scrapers.afiliado import reabrir_bloqueios_de_conta
+
+        aprovado = self._linha(
+            "aprovado apesar do erro antigo",
+            "Falha operacional de afiliação (LoginError).",
+            verificado_ok=True, link_afiliado="https://meli.la/ok")
+
+        self.assertEqual(reabrir_bloqueios_de_conta(), 0)
+        aprovado.refresh_from_db()
+        self.assertIs(aprovado.verificado_ok, True)
+
+    def test_comando_de_manutencao_reabre_e_relata(self):
+        self._linha("por sessão", "Falha operacional de afiliação (LoginError).")
+        saida = StringIO()
+        call_command("reabrir_bloqueios_de_conta", stdout=saida)
+        self.assertIn("1", saida.getvalue())
+
+    def test_comando_em_execucao_seca_nao_altera(self):
+        linha = self._linha("por sessão",
+                            "Falha operacional de afiliação (LoginError).")
+        saida = StringIO()
+        call_command("reabrir_bloqueios_de_conta", "--dry-run", stdout=saida)
+        linha.refresh_from_db()
+        self.assertEqual(linha.estado, "erro")
+        self.assertIn("seca", saida.getvalue().lower())
+
+
 class AmazonSendVerdictTests(TestCase):
     """O envio precisa usar o motivo da loja que verificou, e não o do ML."""
 

@@ -242,21 +242,42 @@ _BACKOFF_MIN = (5, 15, 60, 180, 360)
 MAX_TENTATIVAS_ERRO = 8
 
 
-# Causas que pertencem à CONTA (sessão do ML, Link Builder, tag ausente) ou à
-# CAPACIDADE da máquina (um único Chromium), nunca ao produto. Elas não podem virar
-# falha individual: um lote de 40 itens contra uma sessão caída gravava 40 falhas,
-# empurrava todo mundo para o backoff e, na oitava rodada, marcava produtos
-# perfeitamente afiliáveis como `nao_afiliavel`.
+# Causas que pertencem à CONTA (sessão do ML, Link Builder, tag ausente), nunca ao
+# produto. Não podem virar falha individual: um lote de 40 itens contra uma sessão
+# caída gravava 40 falhas, empurrava todo mundo para o backoff e, na oitava rodada,
+# marcava produtos perfeitamente afiliáveis como `nao_afiliavel`. Em produção
+# sobraram 878 linhas assim.
 _CAUSAS_DE_CONTA = (
     "LoginError", "AuthError", "SessaoExpirada", "AntiBotError",
-    "BrowserResourceUnavailable", "MLSessionCryptoError",
+    "MLSessionCryptoError",
 )
+
+# Causas de CAPACIDADE: a máquina tem um Chromium só, e quem chegou depois não
+# executou. Também não é falha de produto — mas tampouco é problema da conta, e
+# chamá-la de erro (com traceback no log) escondia atraso por capacidade atrás de
+# um alarme que ninguém pode acionar. São 650 linhas penalizadas assim em produção.
+_CAUSAS_DE_CAPACIDADE = ("BrowserResourceUnavailable",)
+
+
+def _nome_da_causa(exc) -> str:
+    return type(exc).__name__ if isinstance(exc, BaseException) else str(exc or "")
+
+
+def causa_de_capacidade(exc) -> str:
+    """Nome da causa quando o trabalho nem começou por falta de navegador."""
+    nome = _nome_da_causa(exc)
+    return nome if nome in _CAUSAS_DE_CAPACIDADE else ""
 
 
 def causa_de_conta(exc) -> str:
-    """Nome da causa quando a falha é da conta/capacidade; '' quando é do item."""
-    nome = type(exc).__name__ if isinstance(exc, BaseException) else str(exc or "")
-    return nome if nome in _CAUSAS_DE_CONTA else ""
+    """Nome da causa quando a falha é da conta (ou da capacidade); '' se é do item.
+
+    Capacidade continua entrando aqui porque a CONSEQUÊNCIA é a mesma — nenhum
+    produto pode ser penalizado. Quem precisa distinguir os dois para reportar
+    chama `causa_de_capacidade` primeiro.
+    """
+    nome = _nome_da_causa(exc)
+    return nome if nome in _CAUSAS_DE_CONTA + _CAUSAS_DE_CAPACIDADE else ""
 
 
 def reabrir_bloqueios_de_conta(organization=None) -> int:
@@ -272,7 +293,7 @@ def reabrir_bloqueios_de_conta(organization=None) -> int:
     from apps.scrapers.models import LinkAfiliadoUsuario
 
     condicao = Q()
-    for causa in _CAUSAS_DE_CONTA:
+    for causa in _CAUSAS_DE_CONTA + _CAUSAS_DE_CAPACIDADE:
         condicao |= Q(ultimo_erro__icontains=causa)
     linhas = LinkAfiliadoUsuario.objects.filter(condicao).exclude(verificado_ok=True)
     if organization is not None:

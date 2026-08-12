@@ -199,7 +199,7 @@ def _rodar_links(lote=40):
     from apps.scrapers.monitor_conexao import ml_conectado
 
     agora = timezone.now()
-    gerados = falhas = pulados = 0
+    gerados = falhas = pulados = adiados = 0
     por_marketplace = {}
     for user in get_user_model().objects.filter(is_active=True):
         # Amazon primeiro, e fora do gate do Mercado Livre: o link dela é montado em
@@ -247,6 +247,20 @@ def _rodar_links(lote=40):
         try:
             g, f = get_marketplace("mercadolivre").prefetch_links(pendentes, usuario=user)
         except Exception as e:
+            from apps.scrapers.afiliado import causa_de_capacidade
+
+            if causa_de_capacidade(e):
+                # A máquina tem UM Chromium: quando a lane de cupons está com ele,
+                # esta nem começa. Isso é fila, não avaria — logar como erro (com
+                # traceback) enchia a tela de Saúde de alarmes que ninguém pode
+                # acionar e escondia o atraso real por capacidade. O ciclo seguinte
+                # retoma exatamente de onde parou.
+                adiados += 1
+                logger.info(
+                    "Geração de links adiada para %s: navegador ocupado por outra "
+                    "tarefa; retoma no próximo ciclo.", user,
+                )
+                continue
             # Sessão expirada/queda do Link Builder é de UM usuário: não pode
             # impedir que os outros gerem os deles.
             logger.warning("Geração de links falhou para %s: %s", user, e)
@@ -263,7 +277,7 @@ def _rodar_links(lote=40):
         logger.info("Links ML p/ %s: %s gerado(s), %s falha(s) de %s pendente(s)",
                     user, g, f, len(pendentes))
     return {"gerados": gerados, "falhas": falhas, "pulados": pulados,
-            "por_marketplace": por_marketplace}
+            "adiados": adiados, "por_marketplace": por_marketplace}
 
 
 def _gerar_links_amazon(user, *, lote, agora):
