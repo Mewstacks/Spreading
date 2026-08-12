@@ -166,11 +166,33 @@ def registrar_reprovacao(usuario, produto, motivo: str) -> None:
     if usuario is None or produto is None:
         return
     from apps.scrapers.models import LinkAfiliadoUsuario
-    LinkAfiliadoUsuario.objects.filter(usuario=usuario, produto=produto).update(
-        verificado_ok=False, verificado_em=timezone.now(),
-        url_canonica="", verificacao_motivo=(motivo or "")[:300],
-        proxima_tentativa=None,
-    )
+
+    linha = LinkAfiliadoUsuario.objects.filter(
+        usuario=usuario, produto=produto,
+    ).first()
+    if linha is None:
+        return
+    agora = timezone.now()
+    linha.tentativas += 1
+    detalhe = (motivo or "")[:300]
+    linha.verificado_ok = False
+    linha.verificado_em = agora
+    linha.url_canonica = ""
+    linha.verificacao_motivo = detalhe
+    linha.ultimo_erro = detalhe
+    linha.ultima_tentativa = agora
+    if linha.tentativas >= MAX_TENTATIVAS_ERRO:
+        linha.estado = "nao_afiliavel"
+        linha.proxima_tentativa = None
+    else:
+        minutos = _BACKOFF_MIN[min(linha.tentativas - 1, len(_BACKOFF_MIN) - 1)]
+        linha.estado = "pronto"
+        linha.proxima_tentativa = agora + timedelta(minutes=minutos)
+    linha.save(update_fields=[
+        "tentativas", "ultimo_erro", "ultima_tentativa", "estado",
+        "verificado_ok", "verificado_em", "url_canonica",
+        "verificacao_motivo", "proxima_tentativa",
+    ])
 
 
 # Backoff entre tentativas de afiliar o mesmo produto. Antes não havia nenhum: o

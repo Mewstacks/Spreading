@@ -43,6 +43,16 @@ STATUS_UTILIZAVEIS = ("active", "suspect")
 TOUCH_INTERVALO_S = 10 * 60
 
 
+def _reativar_preparos_catalogo_ml() -> int:
+    """Antecipa somente a repescagem bloqueada pela credencial anterior."""
+    from apps.scrapers.coupon_products import ERRO_SESSAO_ML
+    from apps.scrapers.models import CupomPreparacao
+
+    return CupomPreparacao.objects.filter(erro=ERRO_SESSAO_ML).update(
+        proxima_tentativa=None,
+    )
+
+
 def legacy_path(user) -> str:
     if user is None or not getattr(user, "pk", None):
         return ""
@@ -127,13 +137,15 @@ def save_storage_state(user, storage_state: dict) -> MercadoLivreSession:
         connection_id=connection_id,
     )
     if existing is None:
-        return MercadoLivreSession.objects.create(
+        created = MercadoLivreSession.objects.create(
             organization=organization,
             connection_id=connection_id,
             status="active",
             rotated_at=timezone.now(),
             **encrypted,
         )
+        _reativar_preparos_catalogo_ml()
+        return created
     for field, value in encrypted.items():
         setattr(existing, field, value)
     existing.status = "active"
@@ -161,6 +173,7 @@ def save_storage_state(user, storage_state: dict) -> MercadoLivreSession:
         "lb_probe_reason", "lb_readiness", "lb_readiness_checked_at",
         "lb_readiness_reason",
     ])
+    _reativar_preparos_catalogo_ml()
     return existing
 
 

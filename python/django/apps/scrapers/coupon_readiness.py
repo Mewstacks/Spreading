@@ -13,7 +13,10 @@ from django.utils import timezone
 
 from apps.accounts.feature_flags import feature_decision
 from apps.accounts.models import organization_for_user
-from apps.scrapers.coupon_products import ERRO_SESSAO_ML, mapa_relacoes_prontas
+from apps.scrapers.coupon_products import (
+    ERRO_CONTAINER_EMPTY_PROVEN, ERRO_CONTAINER_FETCH_FAILED,
+    ERRO_MINIMUM_NOT_MET, ERRO_SESSAO_ML, mapa_relacoes_prontas,
+)
 from apps.scrapers.coupon_rules import (
     codigo_publicavel, cupom_publicavel, listagem_publica_ml, regras_do_cupom,
 )
@@ -212,10 +215,28 @@ def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao):
                 "A conexão do Mercado Livre expirou; reconecte para preparar este cupom.",
                 preparo.proxima_tentativa,
             )
+        if preparo.erro == ERRO_CONTAINER_FETCH_FAILED:
+            return _resultado(
+                "eligible", "operational_failure", "container_fetch_failed",
+                "A lista do container não respondeu; nova tentativa será feita.",
+                preparo.proxima_tentativa,
+            )
         return _resultado("eligible", "operational_failure", "preparation_failed",
                           "Falha operacional no preparo; nova tentativa será feita.",
                           preparo.proxima_tentativa)
     if preparo.status == "vazio":
+        if preparo.erro == ERRO_CONTAINER_EMPTY_PROVEN:
+            return _resultado(
+                "eligible", "waiting", "container_empty_proven",
+                "O container respondeu sem produtos aplicáveis nesta tentativa.",
+                preparo.proxima_tentativa,
+            )
+        if preparo.erro == ERRO_MINIMUM_NOT_MET:
+            return _resultado(
+                "eligible", "waiting", "minimum_not_met",
+                "Os itens encontrados exigem completar o valor mínimo no carrinho.",
+                preparo.proxima_tentativa,
+            )
         return _resultado("eligible", "waiting", "product_match_pending",
                           "Nenhum produto comprovado nesta tentativa.",
                           preparo.proxima_tentativa)
@@ -232,6 +253,7 @@ def projetar_disponibilidade_cupons(usuario, channel="whatsapp"):
     cupons = list(
         CupomNormalizado.objects.select_related("fonte", "programa", "integracao")
         .filter(Q(owner__isnull=True) | Q(owner=usuario))
+        .filter(estado="ativo")
         .filter(cupons_frescos_q(agora=agora))
         .order_by("-ultima_observacao")[:5000]
     )
@@ -310,7 +332,10 @@ def disponibilidade_resumo(usuario, channel="whatsapp"):
         return {"stages": {}, "reasons": {}, "total": 0}
     rows = CupomDisponibilidade.objects.filter(
         organization=organization, usuario=usuario, channel=channel,
-    ).values_list("stage", "reason_code")
+        cupom__estado="ativo",
+    ).filter(cupons_frescos_q(prefix="cupom__")).values_list(
+        "stage", "reason_code",
+    )
     stages, reasons, total = {}, {}, 0
     for stage, reason in rows:
         total += 1

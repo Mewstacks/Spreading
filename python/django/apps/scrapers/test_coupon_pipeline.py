@@ -2,8 +2,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
-from django.db import OperationalError
+from django.db import OperationalError, connection
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from apps.scrapers.models import (
@@ -156,6 +157,49 @@ class CouponPipelineTests(TestCase):
         )
 
         self.assertEqual(ids_cupons_prontos(self.user, [self.coupon]), set())
+
+    def test_afiliacao_nao_faz_queries_por_cupom(self):
+        from apps.scrapers.coupon_pipeline import afiliar_cupons
+        from apps.scrapers.coupon_products import chave_produtos_cupom
+
+        products = self._prepared_products()
+        for product in products:
+            LinkAfiliadoUsuario.objects.create(
+                usuario=self.user, produto=product, estado="pronto",
+                afiliado_ok=True, link_afiliado=f"https://meli.la/{product.id}",
+                verificado_ok=True,
+            )
+        codigo_vazio = {"gerados": 0, "falhas": 0, "pendentes": 0}
+        with patch(
+            "apps.scrapers.coupon_pipeline.afiliar_cupons_de_codigo",
+            return_value=codigo_vazio,
+        ):
+            with CaptureQueriesContext(connection) as poucas:
+                afiliar_cupons(self.user, limite=10)
+
+            for index in range(20):
+                coupon = CupomNormalizado.objects.create(
+                    fonte=self.source, external_id=f"pipeline-extra-{index}",
+                    marketplace="mercadolivre", titulo=f"Cupom {index}",
+                    codigo=f"EXTRA{index}", estado="ativo",
+                    regras={"modo_resgate": "codigo", "tipo_desconto": "fixo",
+                            "valor_desconto": 5, "site_wide": True},
+                )
+                ProdutoCupom.objects.create(
+                    produto=products[0], cupom=coupon, status="confirmado",
+                    verificado_em=timezone.now(), preco_original=100,
+                    preco_atual=80, preco_final=75,
+                )
+                CupomPreparacao.objects.create(
+                    cupom=coupon, usuario=None, status="pronto",
+                    produtos_chave=chave_produtos_cupom(coupon),
+                    verificado_em=timezone.now(),
+                )
+
+            with CaptureQueriesContext(connection) as muitas:
+                afiliar_cupons(self.user, limite=10)
+
+        self.assertLessEqual(len(muitas), len(poucas) + 1)
 
     def test_preparo_faz_rodizio_entre_fontes(self):
         from apps.scrapers.coupon_products import preparar_lote

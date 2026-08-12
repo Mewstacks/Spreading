@@ -24,6 +24,7 @@ qualquer momento -- o worker `cupons` continua de onde parou no próximo tick.
 """
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
+from django.db.models import Q
 
 from apps.accounts.tenant import system_context
 
@@ -43,12 +44,22 @@ class Command(BaseCommand):
 
     def handle(self, *args, **opts):
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+        from apps.scrapers.maintenance import cupons_frescos_q
         from apps.scrapers.models import CupomDisponibilidade
 
         # Cross-tenant por natureza: o catálogo de cupons do ML é pool compartilhado
         # e o backfill atende várias organizações numa passada. Sem system_context a
         # RLS devolve zero linha e o comando "termina" sem escrever nada.
         with system_context():
+            orfas = CupomDisponibilidade.objects.exclude(
+                Q(cupom__estado="ativo") & cupons_frescos_q(prefix="cupom__")
+            )
+            total_orfas = orfas.count()
+            if total_orfas:
+                orfas.delete()
+            self.stdout.write(
+                f"Projeções órfãs removidas: {total_orfas}."
+            )
             usuarios = self._alvos(opts["usuarios"])
             if not opts["todas"]:
                 com_linhas = set(

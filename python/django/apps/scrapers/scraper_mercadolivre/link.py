@@ -985,8 +985,8 @@ def verificar_e_aprovar(usuario, produto, link_afiliado, url_isca="") -> str:
 
 
 def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
-    """Verifica o destino dos links gerados mas ainda sem veredito (verificado_ok
-    IS NULL) e persiste o resultado. É o passo que torna um link enviável ANTES de
+    """Verifica o destino dos links gerados sem veredito ou com retry vencido e
+    persiste o resultado. É o passo que torna um link enviável ANTES de
     a promoção aparecer na tela de envio — antes disto, o veredito só era calculado
     no clique de enviar (a inconsistência que este módulo corrige).
     """
@@ -1000,8 +1000,10 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
         agora = timezone.now()
         queryset = (
             LinkAfiliadoUsuario.objects
-            .filter(usuario=usuario, verificado_ok__isnull=True)
+            .filter(usuario=usuario)
+            .filter(Q(verificado_ok__isnull=True) | Q(verificado_ok=False))
             .filter(Q(proxima_tentativa__isnull=True) | Q(proxima_tentativa__lte=agora))
+            .exclude(estado="nao_afiliavel")
             .exclude(link_afiliado="")
             .select_related("produto")
         )

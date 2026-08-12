@@ -4246,6 +4246,46 @@ class VerificarLinksPendentesTests(TestCase):
         linha = LinkAfiliadoUsuario.objects.get(usuario=self.user, produto=produto)
         self.assertIs(linha.verificado_ok, False)
         self.assertTrue(linha.verificacao_motivo)
+        self.assertGreater(linha.proxima_tentativa, timezone.now())
+        self.assertEqual(linha.estado, "pronto")
+
+    @patch("apps.scrapers.scraper_mercadolivre.link._relatorio_na_pagina")
+    def test_link_reprovado_com_backoff_vencido_volta_a_verificacao(self, verify):
+        self.setUpBrowserFalso()
+        produto = self._produto("Link para reverificar")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",
+            link_afiliado="https://meli.la/retry", verificado_ok=False,
+            proxima_tentativa=timezone.now() - timezone.timedelta(minutes=1),
+        )
+        verify.return_value = {
+            "ok": True,
+            "url_final": "https://produto.mercadolivre.com.br/MLB-2",
+        }
+
+        resultado = ml_link.verificar_links_pendentes(self.user, limite=10)
+
+        self.assertEqual(resultado["aprovados"], 1)
+        linha = LinkAfiliadoUsuario.objects.get(usuario=self.user, produto=produto)
+        self.assertIs(linha.verificado_ok, True)
+
+    def test_link_reprovado_esgotado_vira_nao_afiliavel(self):
+        from apps.scrapers.afiliado import (
+            MAX_TENTATIVAS_ERRO, registrar_reprovacao,
+        )
+
+        produto = self._produto("Link definitivamente inválido")
+        linha = LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",
+            link_afiliado="https://meli.la/terminal", verificado_ok=None,
+        )
+        for _ in range(MAX_TENTATIVAS_ERRO):
+            registrar_reprovacao(self.user, produto, "Destino não aprovado")
+
+        linha.refresh_from_db()
+        self.assertEqual(linha.estado, "nao_afiliavel")
+        self.assertIsNone(linha.proxima_tentativa)
+        self.assertEqual(linha.tentativas, MAX_TENTATIVAS_ERRO)
 
     @patch("apps.scrapers.scraper_mercadolivre.link._relatorio_na_pagina")
     def test_falha_de_rede_e_transitoria_nao_reprova(self, verify):
@@ -5764,10 +5804,10 @@ class MelhorCupomNormalizadoTests(TestCase):
         self._cupom("a:SITE20", "SITE20", is_mar_aberto=True, discount_num=20, min_compra=0)
         # Desconto maior, mas é de container e não tem match confirmado: NÃO pode entrar.
         self._cupom("a:CONT30", "CONT30", is_mar_aberto=False, discount_num=30, min_compra=0)
-        # Site-wide com mínimo acima do preço do item: fora.
+        # Site-wide com mínimo acima do item entra com condição de carrinho.
         self._cupom("a:MIN99", "MIN99", is_mar_aberto=True, discount_num=99, min_compra=500)
 
-        self.assertEqual(_melhor_cupom_normalizado(self.produto), "SITE20")
+        self.assertEqual(_melhor_cupom_normalizado(self.produto), "MIN99")
 
     def test_produtocupom_confirmado_libera_cupom_de_container(self):
         from apps.scrapers.models import ProdutoCupom
@@ -5798,7 +5838,7 @@ class MelhorCupomNormalizadoTests(TestCase):
         self.assertEqual(_melhor_cupom_normalizado(self.produto), "PCT20")
 
     def test_teto_e_compra_minima_usam_o_preco_de_vitrine(self):
-        from apps.scrapers.ofertas import _melhor_cupom_normalizado
+        from apps.scrapers.ofertas import _melhor_cupom_normalizado, montar_mensagem
 
         self._cupom(
             "a:PCT20", "PCT20", is_mar_aberto=True,
@@ -5813,7 +5853,11 @@ class MelhorCupomNormalizadoTests(TestCase):
             "a:MIN150", "MIN150", is_mar_aberto=True,
             tipo_desconto="fixo", valor_desconto=99, valor_minimo=150,
         )
-        self.assertEqual(_melhor_cupom_normalizado(self.produto), "FIXO15")
+        self.assertEqual(_melhor_cupom_normalizado(self.produto), "MIN150")
+
+        mensagem = montar_mensagem(self.produto, "https://meli.la/x", None)
+        self.assertIn("CUPOM: MIN150", mensagem)
+        self.assertIn("válido em compras acima de R$150", mensagem)
 
     def test_cupom_restrito_informa_a_condicao_na_mensagem(self):
         from apps.scrapers.ofertas import montar_mensagem

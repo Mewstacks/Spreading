@@ -31,6 +31,11 @@ from apps.scrapers.carga import (
 logger = logging.getLogger(__name__)
 
 CACHE_HORAS = 3
+# O preparo volta para a fila a cada 3h, mas uma relação comprovada continua
+# exibível enquanto o próprio produto estiver dentro da janela segura do catálogo.
+# Separar as duas janelas evita que o teto do lote vire, acidentalmente, um teto de
+# cupons visíveis.
+EXIBICAO_HORAS = 48
 # Espera antes de reprocessar um cupom que não rendeu nenhum produto. Sem isto o
 # preparo vazio é reagendado imediatamente e consome o lote inteiro em repetição.
 BACKOFF_VAZIO = timedelta(hours=6)
@@ -39,6 +44,7 @@ BACKOFF_VAZIO = timedelta(hours=6)
 # BACKOFF_VAZIO de 6h, um catálogo inteiro reprovado por sessão morta continuaria
 # fora da tela por horas depois de a conexão voltar.
 BACKOFF_SEM_SESSAO = timedelta(minutes=20)
+BACKOFF_TRANSPORTE = timedelta(minutes=20)
 MAX_CANDIDATOS = 36
 PREPARO_LOTE_POR_CICLO = 12
 _CENT = Decimal("0.01")
@@ -47,6 +53,9 @@ _CENT = Decimal("0.01")
 # dizer ao usuário "reconecte", em vez de "nenhum produto aplicável" — que era o
 # diagnóstico errado e mandava procurar defeito no cupom.
 ERRO_SESSAO_ML = "Mercado Livre exigiu sessão para abrir a lista deste cupom."
+ERRO_CONTAINER_FETCH_FAILED = "container_fetch_failed"
+ERRO_CONTAINER_EMPTY_PROVEN = "container_empty_proven"
+ERRO_MINIMUM_NOT_MET = "minimum_not_met"
 
 
 class SessaoMLIndisponivelError(RuntimeError):
@@ -55,6 +64,10 @@ class SessaoMLIndisponivelError(RuntimeError):
     Não é "cupom sem produto": nada foi observado. Existe para separar as duas
     coisas no preparo, no backoff e na mensagem que chega à tela.
     """
+
+
+class ContainerFetchFailedError(RuntimeError):
+    """A listagem não foi observada por falha transitória de transporte."""
 
 
 # Sessões que o ML barrou há pouco, por id de usuário (None = a de sistema). Um
@@ -384,8 +397,13 @@ def calcular_precos(cupom, produto):
     if original is None or original < atual or original > atual * 10:
         original = atual
     minimo = _decimal(regras.get("valor_minimo")) or Decimal("0")
-    if minimo and atual < minimo:
-        return None
+    minimo_nao_atingido = bool(minimo and atual < minimo)
+
+    # O mínimo do Mercado Livre é de carrinho, não de item. O produto continua
+    # sendo uma associação válida; só não podemos anunciar o abatimento como se
+    # uma unidade isolada já cumprisse a condição.
+    if minimo_nao_atingido:
+        return original, atual, atual
 
     ev = getattr(produto, "evidencia", {}) or {}
     final_explicito = _decimal(ev.get("coupon_final_price"))
@@ -448,7 +466,7 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=()):
     # transforme esse caminho em um navegador/SSRF para um host arbitrario.
     if not link or not (host == "mercadolivre.com.br"
                         or host.endswith(".mercadolivre.com.br")):
-        return 0
+        return {"total": 0, "veredito": "vazio_comprovado"}
     from apps.scrapers.auxiliar import iniciar_browser
     from apps.scrapers.ml_auth import (
         avisar_sem_sessao, parede_de_login, storage_state,
@@ -483,18 +501,21 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=()):
     # Chromium aberto por vários minutos. Browser fica como fallback para challenge.
     resultado = None
     barrado = False
+    houve_credencial = False
+    houve_resposta_http = False
+    houve_falha_transporte = False
 
     def _tentar_http(credencial):
-        """(linhas, barrado). `barrado` = o ML entregou parede em vez de listagem."""
+        """(linhas, barrado, falha_transporte)."""
         try:
             response = _ml_http_session(credencial).get(link, timeout=12)
             if parede_de_login(response):
-                return None, True
+                return None, True, False
             response.raise_for_status()
-            return _produtos_ml_do_html(response.text, limite=9), False
+            return _produtos_ml_do_html(response.text, limite=9), False, False
         except Exception as exc:
             logger.info("Container ML via HTTP falhou para %s: %s", cupom.pk, exc)
-            return None, False
+            return None, False, True
 
     # Percorre os candidatos até um passar pelo gateway. Uma sessão de OUTRA
     # organização é recuperação de indisponibilidade, não preferência: a primeira
@@ -511,8 +532,18 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=()):
         credencial = state if indice == 0 else storage_state(candidato)
         if credencial is None:
             continue
-        rows, parede = _tentar_http(credencial)
+        houve_credencial = True
+        rows, parede, falha_transporte = _tentar_http(credencial)
+        houve_falha_transporte = houve_falha_transporte or falha_transporte
+        houve_resposta_http = houve_resposta_http or not (parede or falha_transporte)
         if rows:
+            barrado = False
+            state = credencial
+            break
+        if not parede and not falha_transporte:
+            # Uma resposta HTTP real, ainda que sem cards, supera a parede vista
+            # numa credencial anterior. O browser pode agora confirmar o vazio com
+            # esta credencial em vez de classificar tudo como sessão expirada.
             barrado = False
             state = credencial
             break
@@ -526,11 +557,15 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=()):
     # preparo precisa saber que NADA foi observado, para não gravar "sem produto".
     if resultado is None and barrado:
         raise SessaoMLIndisponivelError(ERRO_SESSAO_ML)
-    # Sem uma sessão válida o Chromium repete a mesma resposta pública/challenge e
-    # pode consumir dezenas de segundos por cupom. O worker registra o preparo vazio
-    # e volta no próximo ciclo; uma sessão conectada habilita novamente o fallback.
-    if resultado is None and state is None:
-        return 0
+    # Nenhuma credencial utilizável significa que nada foi observado. Marcar vazio
+    # aqui era a mentira que prendia o cupom por seis horas.
+    if resultado is None and not houve_credencial:
+        raise SessaoMLIndisponivelError(ERRO_SESSAO_ML)
+    # Timeout/5xx em todas as tentativas também não prova catálogo vazio. Devolve
+    # um veredito operacional curto e preserva vínculos anteriores.
+    if (resultado is None and houve_falha_transporte
+            and not houve_resposta_http):
+        return {"total": 0, "veredito": "falha_transporte"}
     if resultado is None:
         with ml_site_browser_resource(
             usuario, owner_kind="coupon_products",
@@ -581,7 +616,10 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=()):
                       "evidencia": {"regra": "pagina_oficial", "url": link}},
         )
         total += 1
-    return total
+    return {
+        "total": total,
+        "veredito": "itens_provados" if total else "vazio_comprovado",
+    }
 
 
 def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
@@ -614,19 +652,22 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
 
     try:
         candidatos = _base_produtos(cupom, contexto)
+        coleta_ml = None
         if (not candidatos and permitir_rede
                 and str(cupom.marketplace).lower() == "mercadolivre"):
             # No catálogo compartilhado `contexto` é None (sessão de sistema).
             # `usuario` é só quem tornou este cupom elegível no lote — pode ser
             # justamente o dono da sessão morta, então ele entra na fila junto com
             # as demais credenciais oferecidas pelo chamador, nunca sozinho.
-            _coletar_ml_remoto(
+            coleta_ml = _coletar_ml_remoto(
                 cupom, usuario=contexto,
                 credenciais_alternativas=(
                     [usuario, *(credenciais_alternativas or ())]
                     if contexto is None else ()
                 ),
             )
+            if coleta_ml["veredito"] == "falha_transporte":
+                raise ContainerFetchFailedError(ERRO_CONTAINER_FETCH_FAILED)
             candidatos = _base_produtos(cupom, contexto)
 
         validos = []
@@ -640,13 +681,23 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
             if not precos:
                 continue
             original, atual, final = precos
+            from apps.scrapers.coupon_rules import regras_do_cupom
+            minimo = _decimal(regras_do_cupom(cupom).get("valor_minimo")) or Decimal("0")
+            minimo_nao_atingido = bool(minimo and atual < minimo)
+            evidencia = {
+                "regra": "associacao_comprovada", "produtos_chave": chave,
+            }
+            if minimo_nao_atingido:
+                evidencia.update({
+                    "minimum_not_met": True,
+                    "valor_minimo": str(minimo),
+                })
             relacao, _ = ProdutoCupom.objects.update_or_create(
                 produto=produto, cupom=cupom,
                 defaults={"status": "confirmado", "verificado_em": agora,
                           "preco_original": original, "preco_atual": atual,
                           "preco_final": final,
-                          "evidencia": {"regra": "associacao_comprovada",
-                                        "produtos_chave": chave}},
+                          "evidencia": evidencia},
             )
             validos.append(relacao)
             vistos.add(identidade)
@@ -663,7 +714,9 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
                 # irrelevante; com os milhares que a ativação do ML libera, os vazios
                 # girariam para sempre e nenhum cupom novo seria preparado.
                 proxima_tentativa=None if validos else agora + BACKOFF_VAZIO,
-                erro="" if validos else "Nenhum produto comprovadamente aplicavel.")
+                erro=("" if validos else ERRO_CONTAINER_EMPTY_PROVEN
+                      if coleta_ml and coleta_ml["veredito"] == "vazio_comprovado"
+                      else "Nenhum produto comprovadamente aplicavel."))
         validos.sort(key=_ordem_por_valor_do_cupom, reverse=True)
         return validos[:9]
     except SessaoMLIndisponivelError:
@@ -678,6 +731,17 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
             status="erro", produtos_chave=chave, verificado_em=timezone.now(),
             proxima_tentativa=timezone.now() + BACKOFF_SEM_SESSAO,
             erro=ERRO_SESSAO_ML)
+        return []
+    except ContainerFetchFailedError:
+        logger.warning(
+            "Preparo do cupom %s adiado por falha de transporte do container.",
+            cupom.pk,
+        )
+        CupomPreparacao.objects.filter(pk=preparo.pk).update(
+            status="erro", produtos_chave=chave, verificado_em=timezone.now(),
+            proxima_tentativa=timezone.now() + BACKOFF_TRANSPORTE,
+            erro=ERRO_CONTAINER_FETCH_FAILED,
+        )
         return []
     except Exception as exc:
         logger.exception("Preparacao do cupom %s falhou", cupom.pk)
@@ -698,7 +762,7 @@ def relacoes_preparadas_para_envio(cupom, usuario, limite=9):
     """
     contexto = _usuario_do_preparo(cupom, usuario)
     chave = chave_produtos_cupom(cupom)
-    fresco_desde = timezone.now() - timedelta(hours=CACHE_HORAS)
+    fresco_desde = timezone.now() - timedelta(hours=EXIBICAO_HORAS)
     preparo = CupomPreparacao.objects.filter(
         cupom=cupom, usuario=contexto, status="pronto", produtos_chave=chave,
         verificado_em__gte=fresco_desde,
@@ -766,7 +830,7 @@ def mapa_relacoes_prontas(usuario, cupons, limite=9):
         return {}, {}
     ids = [c.id for c in cupons]
     agora = timezone.now()
-    fresco_desde = agora - timedelta(hours=CACHE_HORAS)
+    fresco_desde = agora - timedelta(hours=EXIBICAO_HORAS)
 
     # `chave_produtos_cupom` e `_usuario_do_preparo` são puras (só hash de campos do
     # próprio objeto), então o casamento acontece em Python, sem ida ao banco.
@@ -806,11 +870,7 @@ def mapa_relacoes_prontas(usuario, cupons, limite=9):
     # Mesma ordenação de relacoes_preparadas_para_envio: maior desconto primeiro.
     preparadas = {}
     for cupom_id, relacoes in por_cupom.items():
-        relacoes.sort(key=lambda r: (
-            (r.preco_original - r.preco_final) / r.preco_original
-            if r.preco_original else Decimal("0"),
-            r.preco_original - r.preco_final,
-        ), reverse=True)
+        relacoes.sort(key=_ordem_por_valor_do_cupom, reverse=True)
         preparadas[cupom_id] = relacoes[:limite]
 
     if usuario is None:

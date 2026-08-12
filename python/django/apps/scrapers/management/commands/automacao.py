@@ -446,8 +446,9 @@ class Command(BaseCommand):
                 )
 
     def _loop_links(self, opts):
-        # Gate no MESMO flag "scrape" (igual à lane flash): afiliar é parte do
-        # pipeline de catálogo, e não faz sentido gerar link com a coleta desligada.
+        # Lane própria: pode drenar a fila mesmo quando a coleta geral está parada.
+        # Em instalações ainda sem escolha explícita, `is_enabled("links")` herda
+        # `scrape` para preservar o comportamento anterior ao deploy.
         tick = max(1, opts["tick"])
         lote = max(1, opts["lote"])
         POLL = 15
@@ -456,13 +457,16 @@ class Command(BaseCommand):
         proximo = timezone.now()
         falhas_banco = 0
         while True:
-            if not st.is_enabled("scrape"):
-                # A lane de links não tem flag própria; herda a da raspagem. O texto
-                # precisa dizer isso: "Desligado" sozinho não explicava por que a tela
-                # de Promoções estava cheia de "pendente" com o worker no ar.
+            if not st.is_enabled("links"):
+                herdando = st.links_herda_scrape()
                 st.write_state("links", fase="desligado",
-                               ultima_msg="Parado porque a Raspagem está desligada — "
-                                          "ligue na tela Scraper para voltar a gerar links.")
+                               ultima_msg=(
+                                   "Parado porque ainda herda a flag da Raspagem, que "
+                                   "está desligada; configure a lane Links para torná-la "
+                                   "independente."
+                                   if herdando else
+                                   "Geração de links desligada pela flag própria."
+                               ))
                 time.sleep(POLL)
                 continue
             if timezone.now() < proximo:

@@ -1934,6 +1934,9 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
             linha_cupom = f"🎟️ {m.bold(f'CUPOM: {esc(codigo)}')}"
 
     if linha_cupom:
+        aviso_minimo = _aviso_minimo_nao_atingido(cupom_escolhido, produto)
+        if aviso_minimo:
+            linha_cupom = f"{linha_cupom} — {esc(aviso_minimo)}"
         # Com cupom: cola embaixo do preço e separa o link com uma linha em branco.
         linhas.append(linha_cupom)
         # Cupom com restrição de público (primeira compra, app, cartão, pix) só pode
@@ -1956,6 +1959,22 @@ def _condicao_do_cupom(cupom) -> str:
     if hasattr(cupom, "regras"):
         escopo = str(regras_do_cupom(cupom).get("escopo") or "")
     return (escopo or "Consulte quem pode usar antes de comprar")[:220]
+
+
+def _aviso_minimo_nao_atingido(cupom, produto) -> str:
+    """Condição de carrinho para item que, sozinho, não alcança o mínimo."""
+    if cupom is None or produto is None or not hasattr(cupom, "regras"):
+        return ""
+    from apps.scrapers.coupon_rules import regras_do_cupom
+
+    try:
+        minimo = float(regras_do_cupom(cupom).get("valor_minimo") or 0)
+        atual = float(getattr(produto, "preco_com_cupom", 0) or 0)
+    except (TypeError, ValueError):
+        return ""
+    if minimo <= 0 or atual >= minimo:
+        return ""
+    return f"válido em compras acima de R${_preco_br(minimo)}"
 
 
 # Back-compat: chamadas antigas continuam funcionando (markup WhatsApp default).
@@ -2015,8 +2034,9 @@ def _melhor_cupom_normalizado_obj(produto):
     segura — ou ele vale para o site inteiro (regras.is_mar_aberto), ou existe um
     ProdutoCupom 'confirmado' ligando os dois. Cupom de container/categoria sem match
     confirmado NÃO entra: melhor não anunciar cupom do que colar um que o produto não
-    aceita no checkout. Respeita a compra mínima (regras.valor_minimo) e escolhe o de
-    maior desconto — convertido para R$ e já com o teto aplicado, senão um "R$ 50 OFF"
+    aceita no checkout. A compra mínima é condição de carrinho e segue no texto da
+    mensagem, sem apagar a associação do produto. Escolhe o de maior desconto —
+    convertido para R$ e já com o teto aplicado, senão um "R$ 50 OFF"
     ganhava de "20% OFF" mesmo num item de R$ 3.000.
 
     Aceita tanto cupom de CÓDIGO quanto de ATIVAÇÃO (`cupom_publicavel`). Exigir
@@ -2053,12 +2073,6 @@ def _melhor_cupom_normalizado_obj(produto):
         if not (regras.get("is_mar_aberto") or c.id in ids_confirmados):
             continue
         if not cupom_publicavel(c):
-            continue
-        try:
-            minimo = float(regras.get("valor_minimo") or 0)
-        except (TypeError, ValueError):
-            minimo = 0.0
-        if preco < minimo:
             continue
         desc = _desconto_em_reais(preco, regras.get("tipo_desconto"),
                                   regras.get("valor_desconto"),

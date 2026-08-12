@@ -9,6 +9,8 @@ Windows (dev) e no container (prod), sem Popen/taskkill.
 
   - "scrape": raspagem periódica (tela Scraper).
   - "envio":  envio pelas regras de ConfiguracaoEnvio (tela Envios).
+  - "links":  geração/verificação de links; instalações antigas herdam "scrape"
+    até a primeira configuração explícita.
 """
 import json
 import os
@@ -26,7 +28,7 @@ HEARTBEAT_STALE = 90
 _DIR = os.path.join(getattr(settings, "ML_AUTH_DIR", "") or settings.BASE_DIR, ".automacao")
 os.makedirs(_DIR, exist_ok=True)
 
-JOBS = ("scrape", "envio", "relatorios")
+JOBS = ("scrape", "envio", "links", "relatorios")
 
 
 def logfile(job: str) -> str:
@@ -41,13 +43,30 @@ def enabledfile(job: str) -> str:
     return os.path.join(_DIR, f"{job}.enabled")
 
 
+def configuredfile(job: str) -> str:
+    return os.path.join(_DIR, f"{job}.configured")
+
+
+def links_herda_scrape() -> bool:
+    """Compatibilidade até a lane receber sua primeira escolha explícita."""
+    return not os.path.exists(configuredfile("links"))
+
+
 # ── Flag liga/desliga ─────────────────────────────────────────
 def is_enabled(job: str) -> bool:
     """Ligado = arquivo-flag existe. Default DESLIGADO (nada roda até o usuário ligar)."""
+    if job == "links" and links_herda_scrape():
+        return os.path.exists(enabledfile("scrape"))
     return os.path.exists(enabledfile(job))
 
 
 def set_enabled(job: str, on: bool):
+    if job == "links":
+        # Um marcador separado distingue "a flag nova ainda não existe" de
+        # "alguém desligou links explicitamente". Sem ele, desligar removeria o
+        # arquivo e reativaria a herança imediatamente.
+        with open(configuredfile(job), "w") as f:
+            f.write(str(time.time()))
     if on:
         with open(enabledfile(job), "w") as f:
             f.write(str(time.time()))

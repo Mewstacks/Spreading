@@ -335,7 +335,7 @@ def afiliar_cupons_de_codigo(usuario, cupons, *, limite=8):
 def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
     """Gera e verifica links dos produtos realmente ligados por ProdutoCupom."""
     from apps.scrapers.coupon_products import (
-        ids_cupons_prontos, relacoes_preparadas_para_envio,
+        ids_cupons_prontos, mapa_relacoes_prontas,
     )
     from apps.scrapers.coupon_rules import cupom_publicavel
     from apps.scrapers.marketplaces.registry import get_marketplace
@@ -344,9 +344,10 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
         cupom for cupom in _cupons_visiveis(usuario)
         if cupom_publicavel(cupom, usuario=usuario)
     ]
+    preparadas, _prontas = mapa_relacoes_prontas(usuario, cupons)
     produtos = {}
-    for cupom in cupons:
-        for relacao in relacoes_preparadas_para_envio(cupom, usuario):
+    for relacoes in preparadas.values():
+        for relacao in relacoes:
             produtos[relacao.produto_id] = relacao.produto
 
     metricas = {

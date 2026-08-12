@@ -91,8 +91,18 @@ def _indexar_produtos():
 def _confirmar(cupom, ids_container, idx, agora):
     """Grava ProdutoCupom 'confirmado' para cada produto rastreado no container."""
     n = 0
+    external_id = str(cupom.external_id or "")
+    campanha = external_id.split(":", 1)[1] if external_id.startswith("campanha:") else ""
     for iid in ids_container & set(idx):
         for prod in idx[iid]:
+            # O vínculo de container é a prova de que este anúncio participa da
+            # campanha. Sem carimbar a campanha no produto, `_base_produtos`
+            # descartava exatamente a saída deste matcher para cupons de ativação.
+            # Só preenche o campo vazio: uma lane nunca rouba a identidade/proveniência
+            # já atribuída por outra campanha.
+            if campanha and not prod.campanha_id:
+                prod.campanha_id = campanha
+                prod.save(update_fields=["campanha_id"])
             ProdutoCupom.objects.update_or_create(
                 produto=prod, cupom=cupom,
                 defaults={

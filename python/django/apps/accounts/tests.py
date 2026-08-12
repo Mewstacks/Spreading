@@ -131,6 +131,30 @@ class MercadoLivreEncryptionTests(TestCase):
         self.assertNotIn(b"segredo-cookie", bytes(record.ciphertext))
         self.assertNotIn(b"ssid", bytes(record.ciphertext))
 
+    def test_reconexao_antecipa_preparo_bloqueado_por_sessao(self):
+        from apps.scrapers.coupon_products import ERRO_SESSAO_ML
+        from apps.scrapers.models import (
+            CupomNormalizado, CupomPreparacao, FonteIngestao,
+        )
+
+        fonte = FonteIngestao.objects.create(
+            slug="ml-reconnect-test", marketplace="mercadolivre", nome="ML",
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:reconnect",
+            marketplace="mercadolivre", titulo="Cupom", codigo="",
+        )
+        preparo = CupomPreparacao.objects.create(
+            cupom=cupom, status="erro", erro=ERRO_SESSAO_ML,
+            proxima_tentativa=timezone.now() + timedelta(hours=1),
+        )
+
+        save_storage_state(self.user, self.state)
+
+        preparo.refresh_from_db()
+        self.assertIsNone(preparo.proxima_tentativa)
+        self.assertEqual(preparo.erro, ERRO_SESSAO_ML)
+
     def test_ciphertext_tampering_is_detected_and_quarantined(self):
         record = save_storage_state(self.user, self.state)
         tampered = bytearray(record.ciphertext)

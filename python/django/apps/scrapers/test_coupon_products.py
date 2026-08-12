@@ -140,10 +140,9 @@ class CouponPreparationTests(TestCase):
         cupom.save(update_fields=["regras"])
         self.assertEqual(ids_cupons_prontos(self.user, [cupom]), set())
 
-    def test_preparacao_vencida_nao_aparece_como_pronta(self):
-        # Preparo "pronto" mas antigo (fora da janela de cache) não pode aparecer na
-        # tela: o envio o repreparia e poderia não achar mais produtos. A tela só
-        # promete o que o envio consegue montar agora.
+    def test_preparacao_vencida_para_cache_segue_exibivel_ate_48h(self):
+        # Três horas disparam re-preparo, mas não escondem uma relação cujo produto
+        # continua fresco. Só a janela de exibição de 48h fecha esse gate.
         from datetime import timedelta
 
         from django.utils import timezone
@@ -160,6 +159,11 @@ class CouponPreparationTests(TestCase):
 
         vencido = timezone.now() - timedelta(hours=CACHE_HORAS, minutes=1)
         CupomPreparacao.objects.filter(cupom=cupom).update(verificado_em=vencido)
+        self.assertEqual(ids_cupons_prontos(self.user, [cupom]), {cupom.id})
+
+        CupomPreparacao.objects.filter(cupom=cupom).update(
+            verificado_em=timezone.now() - timedelta(hours=49),
+        )
         self.assertEqual(ids_cupons_prontos(self.user, [cupom]), set())
 
     def test_calculo_decimal_respeita_minimo_teto_e_arredondamento(self):
@@ -183,7 +187,10 @@ class CouponPreparationTests(TestCase):
             codigo="MINIMO", external_id="minimo",
             regras={"tipo_desconto": "fixo", "valor_desconto": 10,
                     "valor_minimo": 101, "modo_resgate": "codigo"})
-        self.assertIsNone(calcular_precos(minimo, produto))
+        self.assertEqual(
+            calcular_precos(minimo, produto),
+            (Decimal("197.90"), Decimal("100.00"), Decimal("100.00")),
+        )
 
     def test_teto_do_payload_limita_o_desconto_anunciado(self):
         """10% num item de R$ 500 com "Limite de R$ 10" abatem R$ 10, não R$ 50."""
@@ -198,8 +205,8 @@ class CouponPreparationTests(TestCase):
                     "modo_resgate": "codigo"})
         self.assertEqual(calcular_precos(cupom, produto)[2], Decimal("490.00"))
 
-    def test_compra_minima_em_milhar_bloqueia_item_barato(self):
-        """R$ 2.000 de mínimo lidos como R$ 2,00 liberavam qualquer produto."""
+    def test_compra_minima_em_milhar_mantem_item_sem_aplicar_desconto(self):
+        """O item entra, mas não promete abatimento antes do carrinho atingir R$2 mil."""
         from apps.scrapers.coupon_products import calcular_precos
 
         produto = self._product(self.user, preco_sem_desconto=350,
@@ -208,6 +215,21 @@ class CouponPreparationTests(TestCase):
             codigo="APPLE250", external_id="minimo-milhar",
             regras={"tipo_desconto": "fixo", "valor_desconto": 250,
                     "valor_minimo": 2000.0, "modo_resgate": "codigo"})
+        self.assertEqual(
+            calcular_precos(cupom, produto),
+            (Decimal("350.00"), Decimal("300.00"), Decimal("300.00")),
+        )
+
+    def test_desconto_fixo_maior_que_preco_nunca_produz_final_invalido(self):
+        from apps.scrapers.coupon_products import calcular_precos
+
+        produto = self._product(self.user, preco_sem_desconto=100,
+                                preco_com_cupom=80)
+        cupom = self._coupon(
+            codigo="FIXO200", external_id="fixo-maior",
+            regras={"tipo_desconto": "fixo", "valor_desconto": 200,
+                    "valor_minimo": 0, "modo_resgate": "codigo"},
+        )
         self.assertIsNone(calcular_precos(cupom, produto))
 
     def test_preco_base_do_cupom_e_a_vitrine_e_nao_acumula_desconto(self):
@@ -325,7 +347,10 @@ class CouponPreparationTests(TestCase):
             },
         )
 
-        self.assertEqual(_coletar_ml_remoto(cupom), 0)
+        from apps.scrapers.coupon_products import SessaoMLIndisponivelError
+
+        with self.assertRaises(SessaoMLIndisponivelError):
+            _coletar_ml_remoto(cupom)
         iniciar_browser.assert_not_called()
 
     def _cupom_ml_de_container(self):
@@ -381,6 +406,48 @@ class CouponPreparationTests(TestCase):
         # E o Chromium não é gasto contra a mesma porta fechada.
         iniciar_browser.assert_not_called()
 
+    def test_falha_de_transporte_tem_motivo_e_backoff_curto(self):
+        from apps.scrapers.coupon_products import (
+            BACKOFF_TRANSPORTE, ERRO_CONTAINER_FETCH_FAILED, preparar_cupom,
+        )
+
+        cupom = self._cupom_ml_de_container()
+        antes = timezone.now()
+        with patch(
+            "apps.scrapers.coupon_products._coletar_ml_remoto",
+            return_value={"total": 0, "veredito": "falha_transporte"},
+        ):
+            self.assertEqual(preparar_cupom(cupom, self.user, force=True), [])
+
+        preparo = CupomPreparacao.objects.get(cupom=cupom)
+        self.assertEqual((preparo.status, preparo.erro),
+                         ("erro", ERRO_CONTAINER_FETCH_FAILED))
+        self.assertLess(
+            preparo.proxima_tentativa,
+            antes + BACKOFF_TRANSPORTE + timezone.timedelta(minutes=1),
+        )
+
+    def test_container_vazio_comprovado_mantem_backoff_longo(self):
+        from apps.scrapers.coupon_products import (
+            BACKOFF_VAZIO, ERRO_CONTAINER_EMPTY_PROVEN, preparar_cupom,
+        )
+
+        cupom = self._cupom_ml_de_container()
+        antes = timezone.now()
+        with patch(
+            "apps.scrapers.coupon_products._coletar_ml_remoto",
+            return_value={"total": 0, "veredito": "vazio_comprovado"},
+        ):
+            self.assertEqual(preparar_cupom(cupom, self.user, force=True), [])
+
+        preparo = CupomPreparacao.objects.get(cupom=cupom)
+        self.assertEqual((preparo.status, preparo.erro),
+                         ("vazio", ERRO_CONTAINER_EMPTY_PROVEN))
+        self.assertGreaterEqual(
+            preparo.proxima_tentativa,
+            antes + BACKOFF_VAZIO - timezone.timedelta(seconds=1),
+        )
+
     @patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session")
     @patch("apps.scrapers.ml_auth.storage_state")
     def test_sessao_de_outra_organizacao_destrava_a_listagem_compartilhada(
@@ -433,9 +500,37 @@ class CouponPreparationTests(TestCase):
                 credenciais_alternativas=[self.other, self.user],
             )
 
-        self.assertEqual(total, 1)
+        self.assertEqual(total, {"total": 1, "veredito": "itens_provados"})
         self.assertTrue(ProdutoCupom.objects.filter(
             cupom=cupom, status="confirmado").exists())
+
+    def test_container_carimba_campanha_e_chega_a_ready_sem_coleta_remota(self):
+        from apps.scrapers.coupon_products import ids_cupons_prontos, preparar_cupom
+        from apps.scrapers.scraper_mercadolivre.cupons_container import (
+            casar_cupons_container,
+        )
+
+        cupom = self._cupom_ml_de_container()
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Item do container", origem="oferta",
+            estado="ativo", campanha_id="", preco_sem_desconto=120,
+            preco_com_cupom=100,
+            link_produto="https://produto.mercadolivre.com.br/MLB-998877-item",
+            imagem_url="https://http2.mlstatic.com/item-ready.jpg",
+        )
+
+        casar_cupons_container(
+            coletor=lambda _url, _paginas: {"MLB998877"}, limite_cupons=10,
+        )
+        produto.refresh_from_db()
+        self.assertEqual(produto.campanha_id, "99")
+
+        relacoes = preparar_cupom(
+            cupom, self.user, force=True, permitir_rede=False,
+        )
+        self.assertEqual([r.produto_id for r in relacoes], [produto.id])
+        self._verified(self.user, produto)
+        self.assertEqual(ids_cupons_prontos(self.user, [cupom]), {cupom.id})
 
 
 class CouponMessageTests(SimpleTestCase):
@@ -1283,13 +1378,16 @@ class RevalidacaoDaColagemTests(TestCase):
         self.assertEqual(self.relacao.preco_final, Decimal("80.00"))
         self.assertEqual(self.produto.preco_com_cupom, 100.0)
 
-    def test_item_que_sai_das_regras_do_cupom_e_removido(self):
-        """Abaixo do valor mínimo não existe linha "De X por Y" verdadeira."""
+    def test_item_abaixo_do_minimo_e_mantido_sem_desconto(self):
+        """Mínimo é de carrinho: preserva o item e deixa final igual à vitrine."""
         mantidos, removidos = self._revalidar(
             {"preco": 40.0, "preco_de": 250.0, "bloqueio": "", "morto": False})
 
-        self.assertEqual(mantidos, [])
-        self.assertEqual(len(removidos), 1)
+        self.assertEqual(len(mantidos), 1)
+        self.assertEqual(removidos, [])
+        self.assertEqual(
+            mantidos[0]["relacao"].preco_final, Decimal("40.00"),
+        )
 
     def test_anuncio_morto_e_removido(self):
         mantidos, removidos = self._revalidar(

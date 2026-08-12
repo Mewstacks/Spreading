@@ -13,7 +13,7 @@ from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.db.models import (
     Case, F, ExpressionWrapper, Exists, FloatField, IntegerField, OuterRef, Q,
-    Count, Sum, When,
+    Count, Max, Sum, When,
 )
 from django.http import StreamingHttpResponse, HttpResponse, JsonResponse
 from django.shortcuts import render, redirect
@@ -2138,18 +2138,35 @@ def top_promocoes(request):
         # recomeçava do zero -- 500 em /scrapers/top/ e as 8 threads do gunicorn
         # presas em transações de escrita longas (o /healthz caía junto).
         readiness = disponibilidade_resumo(request.user)
+        from apps.accounts.models import organization_for_user
+        organization = organization_for_user(request.user)
+        channel = "whatsapp"
         projecoes = {
             row.cupom_id: row
             for row in CupomDisponibilidade.objects.filter(
-                usuario=request.user, cupom_id__in=[c.pk for c in cupons_lista],
+                organization=organization, usuario=request.user, channel=channel,
+                cupom_id__in=[c.pk for c in cupons_lista],
             )
         }
         cupons_publicaveis = []
         for cupom in cupons_lista:
             projecao = projecoes.get(cupom.pk)
-            cupom.disponibilidade = projecao
             if not projecao:
+                # A coleta e a projeção são workers independentes. Um cupom que
+                # chegou entre os ciclos não pode desaparecer: a view continua
+                # somente leitura e representa o intervalo como fila de preparo.
+                projecao = SimpleNamespace(
+                    stage="eligible", category="waiting",
+                    reason_code="preparation_pending",
+                    safe_detail="Cupom coletado; aguardando o próximo ciclo de preparo.",
+                    retry_at=None,
+                    get_stage_display=lambda: "Aguardando preparo",
+                )
+                cupom.disponibilidade = projecao
+                if cupom_publicavel(cupom, usuario=request.user):
+                    cupons_publicaveis.append(cupom)
                 continue
+            cupom.disponibilidade = projecao
             # Código validado pode ser listado sem produto. Ativação permanece oculta
             # até produto, preço e link estarem comprovados.
             if cupom.codigo_publico:
@@ -2179,10 +2196,14 @@ def top_promocoes(request):
                 if "session" in reason or "login_required" in reason or "disconnected" in reason
             )
             cupons_motivos = list(
-                CupomDisponibilidade.objects.filter(usuario=request.user)
+                CupomDisponibilidade.objects.filter(
+                    organization=organization, usuario=request.user,
+                    channel=channel,
+                    cupom_id__in=[c.pk for c in cupons_lista],
+                )
                 .exclude(reason_code="")
-                .values("reason_code", "safe_detail")
-                .annotate(total=Count("id"))
+                .values("reason_code")
+                .annotate(total=Count("id"), safe_detail=Max("safe_detail"))
                 .order_by("-total", "reason_code")[:12]
             )
             cupons_fontes_sem_resultado = FonteIngestao.objects.filter(
