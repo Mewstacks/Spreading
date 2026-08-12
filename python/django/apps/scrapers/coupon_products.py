@@ -57,6 +57,22 @@ class SessaoMLIndisponivelError(RuntimeError):
     """
 
 
+# Sessões que o ML barrou há pouco, por id de usuário (None = a de sistema). Um
+# lote de preparo tem centenas de cupons e todos tentariam a MESMA sessão morta:
+# sem esta memória curta, cada cupom paga um GET só para receber a mesma parede.
+_PAREDES_POR_CREDENCIAL: dict = {}
+MEMORIA_PAREDE = timedelta(minutes=10)
+
+
+def _parede_recente(chave, agora) -> bool:
+    quando = _PAREDES_POR_CREDENCIAL.get(chave)
+    return bool(quando and agora - quando < MEMORIA_PAREDE)
+
+
+def _marcar_parede(chave, agora) -> None:
+    _PAREDES_POR_CREDENCIAL[chave] = agora
+
+
 class _MLCardsHTMLParser(HTMLParser):
     """Extrai os cards SSR do container sem subir um navegador."""
 
@@ -407,20 +423,21 @@ def _ordem_por_valor_do_cupom(relacao):
     return economia / atual, economia
 
 
-def _coletar_ml_remoto(cupom, usuario=None, credencial_alternativa=None):
+def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=()):
     """Materializa a listagem oficial do ML quando ela ainda nao esta no banco.
 
     `usuario` é o contexto do preparo (None em cupom global, que cai na
     organização de sistema — ver scrapers/ml_auth.py). O container do ML é SSR e
     só rende a listagem completa com sessão.
 
-    `credencial_alternativa` é o usuário cuja sessão pode LER a listagem quando a
-    do contexto não serve. O catálogo público do ML é preparado no contexto de
-    sistema (`usuario=None`), então uma única sessão expirada — a da organização
-    em ML_SYSTEM_ORGANIZATION_ID — parava a esteira de TODAS as organizações,
-    inclusive as que estavam com o ML conectado. A listagem lida é a mesma página
-    pública para qualquer conta; o que ela decide é apenas se o gateway do ML
-    entrega o HTML.
+    `credenciais_alternativas` são os usuários cuja sessão pode LER a listagem
+    quando a do contexto não serve — TODOS eles, em ordem, porque o primeiro
+    candidato pode ser justamente o dono da sessão morta. O catálogo público do ML
+    é preparado no contexto de sistema (`usuario=None`), então uma única sessão
+    expirada — a da organização em ML_SYSTEM_ORGANIZATION_ID — parava a esteira de
+    TODAS as organizações, inclusive as que estavam com o ML conectado. A listagem
+    lida é a mesma página pública para qualquer conta; o que a sessão decide é
+    apenas se o gateway do ML entrega o HTML.
     """
     link = str((cupom.regras or {}).get("container_url") or cupom.link or "").strip()
     try:
@@ -443,6 +460,14 @@ def _coletar_ml_remoto(cupom, usuario=None, credencial_alternativa=None):
     state = storage_state(usuario)
     if state is None:
         avisar_sem_sessao(f"Coleta do container do cupom {cupom.pk}", usuario)
+    candidatos = [usuario]
+    for alternativo in credenciais_alternativas or ():
+        if alternativo is None:
+            continue
+        if any(getattr(alternativo, "id", None) == getattr(escolhido, "id", None)
+               for escolhido in candidatos):
+            continue
+        candidatos.append(alternativo)
 
     payload = {
         "campaignId": (str(cupom.external_id).split(":", 1)[1]
@@ -471,18 +496,29 @@ def _coletar_ml_remoto(cupom, usuario=None, credencial_alternativa=None):
             logger.info("Container ML via HTTP falhou para %s: %s", cupom.pk, exc)
             return None, False
 
-    rows, barrado = _tentar_http(state)
-    # Uma sessão de OUTRA organização lê a mesma listagem pública. Só entra quando a
-    # do contexto não serviu — é recuperação de indisponibilidade, não preferência.
-    if not rows and credencial_alternativa is not None:
-        alternativa = storage_state(credencial_alternativa)
-        if alternativa is not None and alternativa is not state:
-            rows, barrado_alt = _tentar_http(alternativa)
-            if rows:
-                barrado = False
-                state = alternativa
-            else:
-                barrado = barrado and barrado_alt
+    # Percorre os candidatos até um passar pelo gateway. Uma sessão de OUTRA
+    # organização é recuperação de indisponibilidade, não preferência: a primeira
+    # da fila é sempre a do contexto do preparo.
+    rows = None
+    agora = timezone.now()
+    for indice, candidato in enumerate(candidatos):
+        chave = getattr(candidato, "id", None)
+        if _parede_recente(chave, agora):
+            # Já barrou nesta janela. Um lote tem centenas de cupons: repetir o GET
+            # para colher a mesma parede custa um round-trip por cupom.
+            barrado = True
+            continue
+        credencial = state if indice == 0 else storage_state(candidato)
+        if credencial is None:
+            continue
+        rows, parede = _tentar_http(credencial)
+        if rows:
+            barrado = False
+            state = credencial
+            break
+        if parede:
+            _marcar_parede(chave, agora)
+            barrado = True
     if rows:
         resultado = {**payload, "produtos_aplicaveis": rows}
     # Parede de login não é challenge que o Chromium desfaz: ele bate na mesma
@@ -548,8 +584,13 @@ def _coletar_ml_remoto(cupom, usuario=None, credencial_alternativa=None):
     return total
 
 
-def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
-    """Prepara e devolve ProdutoCupom confirmados, ou [] sem fallback inseguro."""
+def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
+                   credenciais_alternativas=()):
+    """Prepara e devolve ProdutoCupom confirmados, ou [] sem fallback inseguro.
+
+    `credenciais_alternativas`: usuários cuja sessão do ML pode ler a listagem
+    pública quando a do contexto está barrada — ver `_coletar_ml_remoto`.
+    """
     from apps.scrapers.coupon_rules import cupom_publicavel
 
     contexto = _usuario_do_preparo(cupom, usuario)
@@ -575,12 +616,16 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True):
         candidatos = _base_produtos(cupom, contexto)
         if (not candidatos and permitir_rede
                 and str(cupom.marketplace).lower() == "mercadolivre"):
-            # `usuario` é quem tornou este cupom elegível no lote; no catálogo
-            # compartilhado `contexto` é None (sessão de sistema) e a dele é a
-            # única credencial alternativa disponível para ler a listagem.
+            # No catálogo compartilhado `contexto` é None (sessão de sistema).
+            # `usuario` é só quem tornou este cupom elegível no lote — pode ser
+            # justamente o dono da sessão morta, então ele entra na fila junto com
+            # as demais credenciais oferecidas pelo chamador, nunca sozinho.
             _coletar_ml_remoto(
                 cupom, usuario=contexto,
-                credencial_alternativa=usuario if contexto is None else None,
+                credenciais_alternativas=(
+                    [usuario, *(credenciais_alternativas or ())]
+                    if contexto is None else ()
+                ),
             )
             candidatos = _base_produtos(cupom, contexto)
 
@@ -898,6 +943,10 @@ def preparar_lote(
         por_fonte[fonte]["processados"] += 1
         if preparar_cupom(
             cupom, usuario=usuario, force=True, permitir_rede=permitir_rede,
+            # Ler a listagem pública do ML depende de UMA sessão viva, qualquer
+            # uma. Oferecer o lote inteiro de usuários evita que a esteira
+            # compartilhada pare porque a primeira credencial da fila expirou.
+            credenciais_alternativas=usuarios,
         ):
             prontos += 1
             por_fonte[fonte]["prontos"] += 1

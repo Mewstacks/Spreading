@@ -387,12 +387,21 @@ class CouponPreparationTests(TestCase):
         self, storage_state, http_session,
     ):
         """O catálogo público é preparado com a sessão de sistema; quando ela
-        expira, a esteira inteira parava mesmo com usuários conectados."""
-        from apps.scrapers.coupon_products import _coletar_ml_remoto
+        expira, a esteira inteira parava mesmo com usuários conectados.
 
+        E a fila de candidatos NÃO pode parar no primeiro: em produção o primeiro
+        usuário elegível era justamente o dono da sessão de sistema expirada.
+        """
+        from apps.scrapers.coupon_products import (
+            _PAREDES_POR_CREDENCIAL, _coletar_ml_remoto,
+        )
+
+        _PAREDES_POR_CREDENCIAL.clear()
+        self.addCleanup(_PAREDES_POR_CREDENCIAL.clear)
         sistema, alternativa = {"cookies": ["sistema"]}, {"cookies": ["usuario"]}
+        # `self.other` é o dono da sessão morta — a mesma do sistema.
         storage_state.side_effect = lambda quem=None: (
-            alternativa if quem is not None else sistema
+            alternativa if getattr(quem, "id", None) == self.user.id else sistema
         )
         boa = Mock(
             status_code=200,
@@ -420,7 +429,8 @@ class CouponPreparationTests(TestCase):
             }] if texto else [],
         ):
             total = _coletar_ml_remoto(
-                cupom, usuario=None, credencial_alternativa=self.user,
+                cupom, usuario=None,
+                credenciais_alternativas=[self.other, self.user],
             )
 
         self.assertEqual(total, 1)
