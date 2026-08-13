@@ -1080,40 +1080,38 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
     # DUAS FILAS, porque as perguntas são diferentes. Quem confia no desconto
     # (oferta/busca, com de/por confirmado na raspagem) só precisa saber se o link
     # leva a um destino de afiliado vivo — o caminho de sempre. Quem PRECISA provar
-    # o desconto (produto de cupom) não consegue prová-lo no destino: todo short
-    # link do Programa resolve para a vitrine `/social/` do afiliado, inclusive os
-    # que hoje passam. Ver `relatorio_de_link_com_cupom`, onde isso está medido.
+    # o desconto (produto de cupom) não consegue prová-lo ao vivo: todo short link
+    # do Programa resolve para a vitrine `/social/`, e a PDP não responde a GET do
+    # IP da Fly. A prova vem de `ProdutoCupom`, gravada na coleta a partir da
+    # listagem oficial do cupom. Ver `relatorio_de_link_com_cupom`.
     com_origem = [l for l in linhas if not _confiar_desconto(l.produto)]
     no_destino = [l for l in linhas if _confiar_desconto(l.produto)]
 
     if com_origem:
-        from apps.scrapers.ml_auth import storage_state
         from apps.scrapers.scraper_mercadolivre.link_http import (
             relatorio_de_link_com_cupom,
         )
-        from apps.scrapers.scraper_mercadolivre.scraper import _ml_http_session
 
-        # A PDP do ML não responde a GET anônimo (challenge por TLS/JA3 — ver o topo
-        # de link_http). O jar de cookies é o mesmo transporte que coupon_products já
-        # usa contra este host, e NÃO abre navegador. `storage_state` já resolve o
-        # tenant por dentro; nenhum Playwright está vivo nesta fila, então o ORM
-        # aqui é direto.
-        sessao = _ml_http_session(storage_state(usuario))
+        def _com_desconto_provado():
+            from apps.scrapers.models import ProdutoCupom
+
+            return set(ProdutoCupom.objects.filter(
+                produto_id__in=[l.produto_id for l in com_origem],
+                status="confirmado", preco_final__isnull=False,
+            ).values_list("produto_id", flat=True))
+
+        # UMA consulta para o lote: era o tipo de leitura que, por item, vira N+1
+        # invisível num laço de dezenas de links.
+        try:
+            provados = _no_tenant(_com_desconto_provado)
+        except ValueError:
+            provados = _com_desconto_provado()
         for linha in com_origem:
             produto = linha.produto
-            origem = _montar_url_isca(
-                getattr(produto, "link_produto", ""),
-                getattr(produto, "campanha_id", "") or "",
-            )
-            if not origem:
-                _no_tenant(registrar_reprovacao, usuario, produto,
-                           _motivo_url_recusada(getattr(produto, "link_produto", "")))
-                reprovados += 1
-                continue
             try:
                 relatorio = relatorio_de_link_com_cupom(
-                    linha.link_afiliado, origem,
-                    nome_esperado=getattr(produto, "nome", None), sessao=sessao,
+                    linha.link_afiliado,
+                    desconto_comprovado=linha.produto_id in provados,
                 )
             except Exception as e:
                 logger.warning("Verificação por origem falhou p/ produto %s: %s",

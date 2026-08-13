@@ -172,68 +172,57 @@ class CupomJulgadoPelaOrigemTests(SimpleTestCase):
     vitrine `/social/` do afiliado — inclusive os 10.807 links de oferta que o
     sistema aprovava. Exigir a PDP no destino reprovava 100% dos produtos de cupom
     (0 aprovados em 4.447), e era isso que prendia o catálogo inteiro.
+
+    A PDP também não responde a GET do IP da Fly (200 em
+    `/gz/account-verification` com sessão, sem sessão, com e sem campanha), então a
+    prova do desconto vem de `ProdutoCupom` — gravada na coleta a partir da
+    listagem oficial do cupom.
     """
 
-    def _sessao(self, por_url):
-        """Sessão falsa que devolve HTML diferente por URL pedida."""
+    def _sessao_para(self, url_final, corpo):
         class S:
-            def get(_self, url, **_kw):
-                return RespostaFalsa(url, por_url[url])
+            def get(_self, _url, **_kw):
+                return RespostaFalsa(url_final, corpo)
         return S()
 
-    def test_vitrine_no_destino_com_desconto_na_origem_aprova(self):
-        sessao = self._sessao({
-            SOCIAL: _pdp(nome="Vitrine do afiliado"),
-            URL_PDP: _pdp(nome="Smart TV 50 polegadas 4K", riscado=True),
-        })
+    def test_vitrine_no_destino_com_desconto_provado_aprova(self):
         r = link_http.relatorio_de_link_com_cupom(
-            SOCIAL, URL_PDP, nome_esperado="Smart TV 50 polegadas 4K", sessao=sessao)
+            SOCIAL, desconto_comprovado=True,
+            sessao=self._sessao_para(SOCIAL, _pdp(nome="Vitrine do afiliado")))
         self.assertTrue(r["ok"], r["erros"])
-        # A URL que o assinante abre é a do destino; a prova veio da origem.
         self.assertEqual(r["url_final"], SOCIAL)
-        self.assertEqual(r["url_origem"], URL_PDP)
+        self.assertTrue(r["is_landing_afiliado"])
         self.assertTrue(r["evidencia_origem"])
 
-    def test_origem_sem_desconto_reprova(self):
-        sessao = self._sessao({
-            SOCIAL: _pdp(nome="Vitrine do afiliado"),
-            URL_PDP: _pdp(nome="Smart TV 50 polegadas 4K", riscado=False),
-        })
+    def test_sem_desconto_provado_reprova(self):
         r = link_http.relatorio_de_link_com_cupom(
-            SOCIAL, URL_PDP, nome_esperado="Smart TV 50 polegadas 4K", sessao=sessao)
+            SOCIAL, desconto_comprovado=False,
+            sessao=self._sessao_para(SOCIAL, _pdp(nome="Vitrine do afiliado")))
         self.assertFalse(r["ok"])
-
-    def test_origem_de_outro_produto_reprova(self):
-        sessao = self._sessao({
-            SOCIAL: _pdp(nome="Vitrine do afiliado"),
-            URL_PDP: _pdp(nome="Liquidificador vermelho", riscado=True),
-        })
-        r = link_http.relatorio_de_link_com_cupom(
-            SOCIAL, URL_PDP, nome_esperado="Smart TV 50 polegadas 4K", sessao=sessao)
-        self.assertFalse(r["ok"])
+        self.assertTrue(any("não está comprovado" in e for e in r["erros"]))
 
     def test_challenge_no_destino_e_transitorio_nao_reprovacao(self):
         challenge = "https://www.mercadolivre.com.br/gz/account-verification?go=x"
-        sessao = self._sessao({SOCIAL: "", challenge: ""})
-
-        class S:
-            def get(_self, _url, **_kw):
-                return RespostaFalsa(challenge, "")
         r = link_http.relatorio_de_link_com_cupom(
-            SOCIAL, URL_PDP, nome_esperado="Smart TV", sessao=S())
+            SOCIAL, desconto_comprovado=True,
+            sessao=self._sessao_para(challenge, ""))
         self.assertFalse(r["ok"])
+        # "Falha ao abrir link" é o que `verificar_e_aprovar` trata como
+        # TRANSITÓRIO: challenge nunca pode virar reprovação.
         self.assertTrue(any("Falha ao abrir link" in e for e in r["erros"]))
 
-    def test_destino_que_nao_e_do_programa_reprova_sem_ler_a_origem(self):
+    def test_destino_que_nao_e_do_programa_reprova(self):
         alheio = "https://www.mercadolivre.com.br/ofertas"
-
-        class S:
-            def get(_self, url, **_kw):
-                if url != alheio:
-                    raise AssertionError("não deve ler a origem")
-                return RespostaFalsa(alheio, _pdp(nome="Ofertas do dia"))
         r = link_http.relatorio_de_link_com_cupom(
-            alheio, URL_PDP, nome_esperado="Smart TV", sessao=S())
+            alheio, desconto_comprovado=True,
+            sessao=self._sessao_para(alheio, _pdp(nome="Ofertas do dia")))
+        self.assertFalse(r["ok"])
+
+    def test_anuncio_morto_reprova_mesmo_com_desconto_provado(self):
+        corpo = _pdp(nome="Vitrine") + "<p>anúncio pausado</p>"
+        r = link_http.relatorio_de_link_com_cupom(
+            SOCIAL, desconto_comprovado=True,
+            sessao=self._sessao_para(SOCIAL, corpo))
         self.assertFalse(r["ok"])
 
 

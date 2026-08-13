@@ -350,64 +350,60 @@ def relatorio_por_http(link_afiliado: str, nome_esperado: str = None,
     return relatorio
 
 
-def relatorio_de_link_com_cupom(link_afiliado: str, url_origem: str,
-                                nome_esperado: str = None, sessao=None) -> dict:
-    """Relatório de um link cujo desconto precisa ser provado FORA do destino.
+def relatorio_de_link_com_cupom(link_afiliado: str, *, desconto_comprovado: bool,
+                                sessao=None) -> dict:
+    """Relatório de um link cujo desconto foi provado ANTES, na coleta.
 
-    MEDIDO EM PRODUÇÃO (13/08/2026): **todo** short link do Programa resolve para a
-    vitrine do afiliado, não para o anúncio — inclusive os 10.807 links de oferta
-    que o sistema aprova hoje::
+    Dois fatos medidos em produção (13/08/2026) definem esta função.
+
+    **1. Todo short link do Programa resolve para a vitrine do afiliado**, não para
+    o anúncio — inclusive os 10.807 links de oferta que o sistema já aprovava::
 
         https://meli.la/1EStDY1  (produto de cupom, reprovado)
         https://meli.la/15Grqae  (produto de oferta, APROVADO)
         ambos -> https://www.mercadolivre.com.br/social/<afiliado>?matt_word=…&ref=<opaco>
 
-    O item real viaja dentro do `ref` cifrado. Ou seja: exigir `is_pagina_produto`
-    NO DESTINO é uma condição que nenhum link do ML satisfaz. Quem passava só
-    passava porque `confiar_desconto=True` dispensa a prova; os produtos de cupom,
-    que precisam dela, eram reprovados 100% das vezes ("Caiu na vitrine /social/",
-    262 de 391 verificações em 3h) — e era isso, e não a coleta, que prendia o
-    catálogo inteiro em "aguardando link".
+    O item viaja dentro do `ref` cifrado. Exigir `is_pagina_produto` NO DESTINO é,
+    portanto, uma condição que nenhum link do ML satisfaz. Quem passava só passava
+    porque `confiar_desconto=True` dispensa a prova; os produtos de cupom, que
+    precisam dela, eram reprovados 100% das vezes ("Caiu na vitrine /social/", 262
+    de 391 verificações em 3h; 0 aprovados em 4.447) — era isso, e não a coleta,
+    que prendia o catálogo inteiro em "aguardando link".
 
-    Aqui as duas perguntas voltam a ser duas:
+    **2. A PDP não responde a GET do IP da Fly.** Sessão autenticada, sessão
+    anônima, com e sem `coupon_campaign_id`: as três voltam 200 em
+    `/gz/account-verification`. Ler o desconto ao vivo na página do produto não é
+    uma opção neste ambiente — é a mesma parede documentada no topo deste módulo.
 
-      1. o LINK leva a um destino de afiliado vivo?  → lido no short link;
-      2. o PRODUTO tem preço e cupom anunciados?     → lido na PDP DE ORIGEM,
-         que é justamente a página de onde o link foi gerado.
+    Sobra a evidência que JÁ temos, e que é de primeira mão: `preco_sem_desconto` e
+    `preco_com_cupom` vêm da própria listagem oficial do cupom no ML (ver
+    `coupon_products._coletar_ml_remoto`), e `calcular_precos` já os validou em
+    `ProdutoCupom.preco_final`. É o mesmo padrão de confiança que `oferta`/`busca`
+    têm desde sempre: o de/por confirmado na coleta vale, e a verificação de
+    destino responde só pelo destino.
 
-    A decisão continua sendo de `aprovado_por_relatorio` (fonte única): o relatório
-    devolvido descreve o produto observado na origem, com o destino já conferido.
+    Então aqui ficam as perguntas que este transporte CONSEGUE responder:
+      1. o link leva a um destino do Programa e está vivo?  → lido no short link;
+      2. o desconto está comprovado?                        → `desconto_comprovado`,
+         resolvido pelo chamador a partir de `ProdutoCupom`.
     """
-    destino = relatorio_por_http(link_afiliado, nome_esperado=None,
-                                 confiar_desconto=True, sessao=sessao)
-    destino_valido = bool(
-        destino.get("is_pagina_produto") or destino.get("is_landing_afiliado"))
-    erros_destino = list(destino.get("erros") or [])
-    if not destino_valido and not erros_destino:
-        # Sem erro de transporte e sem destino de afiliado: o link não serve.
-        erros_destino.append("O link não abre um destino do Programa de Afiliados.")
-    if erros_destino or not destino_valido:
-        # Transporte ruim ou destino inválido: nada a ganhar lendo a origem.
-        return {**destino, "ok": False, "erros": erros_destino,
-                "evidencia_origem": False}
-
-    origem = relatorio_por_http(url_origem, nome_esperado=nome_esperado,
-                                confiar_desconto=False, sessao=sessao)
-    # A origem responde pelo PRODUTO; o destino, pelo link. `url_final` fica a do
-    # destino porque é ela que o assinante abre.
-    relatorio = {
-        **origem,
-        "url_final": destino.get("url_final"),
-        "url_origem": origem.get("url_final"),
-        "is_landing_afiliado": destino.get("is_landing_afiliado", False),
-        "evidencia_origem": True,
-    }
-    relatorio["erros"] = [
-        e for e in (origem.get("erros") or [])
-        # Este motivo descrevia o destino, que aqui já foi aprovado à parte.
-        if "vitrine /social/" not in e
-    ]
-    relatorio["ok"] = aprovado_por_relatorio(relatorio, False)
+    relatorio = relatorio_por_http(link_afiliado, nome_esperado=None,
+                                   confiar_desconto=True, sessao=sessao)
+    relatorio["evidencia_origem"] = bool(desconto_comprovado)
+    if relatorio.get("erros"):
+        # Challenge/timeout no encurtador: TRANSITÓRIO, nunca reprovação.
+        relatorio["ok"] = False
+        return relatorio
+    if not desconto_comprovado:
+        relatorio["ok"] = False
+        relatorio["erros"] = [
+            "O desconto deste cupom não está comprovado para o produto."
+        ]
+        return relatorio
+    # `aprovado_por_relatorio` com confiar_desconto=True: destino de afiliado
+    # válido, anúncio vivo. O nome não é conferido porque a vitrine não traz o
+    # item — conferi-lo aqui reprovaria todo link do Programa.
+    relatorio["ok"] = aprovado_por_relatorio(relatorio, True)
     return relatorio
 
 
