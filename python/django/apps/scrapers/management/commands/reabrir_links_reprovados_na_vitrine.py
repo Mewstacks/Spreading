@@ -34,19 +34,28 @@ from django.db.models import Q
 from apps.accounts.tenant import system_job
 from apps.scrapers.models import LinkAfiliadoUsuario
 
-# O motivo exato que `link.py` gravava ao reprovar no destino.
-MOTIVO_VITRINE = "Caiu na vitrine /social/"
+# Motivos gravados por regras que já foram corrigidas na origem. Os dois descrevem
+# o mesmo tipo de erro: um veredito definitivo dado por uma condição que o link não
+# tinha como satisfazer no momento em que foi olhado.
+MOTIVOS_SUPERADOS = (
+    # Exigia a PDP no destino; nenhum short link do Programa entrega isso.
+    "Caiu na vitrine /social/",
+    # Reprovava quem ainda não tinha ProdutoCupom confirmado — prova que o worker
+    # de cupons reconstrói a cada ciclo. Virou espera, não veredito.
+    "O desconto deste cupom não está comprovado",
+)
 
 
 def _afetadas():
-    return LinkAfiliadoUsuario.objects.filter(
-        verificado_ok=False, produto__marketplace="mercadolivre",
-    ).filter(
+    condicao = Q()
+    for motivo in MOTIVOS_SUPERADOS:
         # `verificacao_motivo` é onde a reprovação de destino é registrada;
         # `ultimo_erro` cobre as linhas gravadas pelo caminho de geração.
-        Q(verificacao_motivo__icontains=MOTIVO_VITRINE)
-        | Q(ultimo_erro__icontains=MOTIVO_VITRINE)
-    ).exclude(link_afiliado="")
+        condicao |= Q(verificacao_motivo__icontains=motivo)
+        condicao |= Q(ultimo_erro__icontains=motivo)
+    return LinkAfiliadoUsuario.objects.filter(
+        verificado_ok=False, produto__marketplace="mercadolivre",
+    ).filter(condicao).exclude(link_afiliado="")
 
 
 class Command(BaseCommand):
