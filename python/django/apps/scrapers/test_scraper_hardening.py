@@ -739,3 +739,30 @@ class RaspagemCedeAoLoginInterativoTests(TestCase):
 
         # Só o primeiro termo é lido; o login não espera os outros dois.
         self.assertEqual(len(termos_lidos), 1)
+
+    def test_casamento_de_container_cede_o_navegador_a_um_login_esperando(self):
+        from apps.scrapers.scraper_mercadolivre.cupons_container import _coletar
+
+        cupons = [
+            Mock(regras={"container_url": f"https://lista.mercadolivre.com.br/_Container_{i}"})
+            for i in range(4)
+        ]
+        chamadas = []
+
+        def _coletor(url, _paginas):
+            chamadas.append(url)
+            return {f"MLB{len(chamadas)}"}
+
+        with patch(
+            "apps.scrapers.scraper_mercadolivre.cupons_container."
+            "interesse_interativo_pendente",
+            lambda _r: len(chamadas) >= 2,
+        ):
+            pares = _coletar(cupons, _coletor, max_paginas=2)
+
+        # Dois cupons resolvidos por navegação; os outros dois voltam com o
+        # mesmo motivo do orçamento de tempo esgotado — o chamador já sabe
+        # tratar isso sem reprovar nem descartar o cupom.
+        self.assertEqual(len(chamadas), 2)
+        motivos = [motivo for _cupom, _ids, motivo in pares]
+        self.assertEqual(motivos.count("container_budget_exhausted"), 2)
