@@ -355,14 +355,4 @@ class Migration(migrations.Migration):
                     name="uniq_link_produto_cupom_usuario")],
             },
         ),
-        migrations.RunPython(backfill_coupon_contracts, noop_reverse),
-        migrations.RunPython(install_relation_link_rls, uninstall_relation_link_rls),
-        migrations.AddConstraint(
-            model_name="configuracaoenvio",
-            constraint=models.CheckConstraint(
-                condition=(~models.Q(tipo="aviso_cupons")
-                           | ~models.Q(marketplace="") | models.Q(ativo=False)),
-                name="aviso_cupom_ativo_exige_marketplace",
-            ),
-        ),
     ]
