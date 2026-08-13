@@ -97,7 +97,14 @@ def backfill_coupon_contracts(apps, schema_editor):
                              "organization", "data_scope", "fonte"],
         )
     if authenticated_coupon_ids:
-        Observation.objects.filter(cupom_id__in=authenticated_coupon_ids).update(
+        # Preserve corroborating observations from independent sources.  Updating
+        # every observation attached to a migrated coupon collapses distinct
+        # provenance into the authenticated source and can violate the tenant
+        # uniqueness key when both sources observed the same canonical coupon.
+        Observation.objects.filter(
+            cupom_id__in=authenticated_coupon_ids,
+            fonte_id__in=legacy_ml_source_ids,
+        ).update(
             fonte_id=authenticated_source.pk,
             organization_id=ml_system_organization_id,
             precedence=30,

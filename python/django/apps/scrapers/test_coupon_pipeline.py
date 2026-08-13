@@ -1,3 +1,4 @@
+from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -7,8 +8,9 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
+from apps.accounts.models import Organization
 from apps.scrapers.models import (
-    Cupom, CupomNormalizado, CupomPreparacao, FonteIngestao,
+    Cupom, CupomFonteObservacao, CupomNormalizado, CupomPreparacao, FonteIngestao,
     LinkAfiliadoUsuario, Produto, ProdutoCupom,
 )
 
@@ -63,6 +65,54 @@ class CouponPersistenceRetryTests(TestCase):
         self.assertEqual(len(calls), 2)
         self.assertGreaterEqual(close.call_count, 2)
         self.assertTrue(Cupom.objects.filter(campanha_id="retry-1").exists())
+
+
+class CouponContractsMigrationTests(TestCase):
+    def test_backfill_preserva_observacao_de_fonte_independente(self):
+        organization = Organization.objects.create(
+            name="ML system", slug="ml-system-migration",
+        )
+        legacy_source = FonteIngestao.objects.get(slug="mercadolivre-web")
+        authenticated_source = FonteIngestao.objects.get(
+            slug="mercadolivre-campanhas"
+        )
+        corroborating_source = FonteIngestao.objects.create(
+            slug="ml-corroborating-test", marketplace="mercadolivre",
+            nome="ML corroboracao",
+        )
+        coupon = CupomNormalizado.objects.create(
+            fonte=legacy_source, external_id="campanha:migration-1",
+            marketplace="mercadolivre", titulo="Campanha autenticada",
+            evidencia={"association": "campaign"},
+        )
+        legacy_observation = CupomFonteObservacao.objects.create(
+            fonte=legacy_source, cupom=coupon, canonical_key="coupon:migration-1",
+            source_external_id="migration-1",
+        )
+        corroborating_observation = CupomFonteObservacao.objects.create(
+            fonte=corroborating_source, cupom=coupon,
+            canonical_key="coupon:migration-1", source_external_id="migration-1",
+        )
+
+        migration = import_module(
+            "apps.scrapers.migrations.0061_coupon_pipeline_contracts"
+        )
+        with override_settings(ML_SYSTEM_ORGANIZATION_ID=str(organization.pk)):
+            migration.backfill_coupon_contracts(
+                import_module("django.apps").apps,
+                SimpleNamespace(connection=connection),
+            )
+
+        coupon.refresh_from_db()
+        legacy_observation.refresh_from_db()
+        corroborating_observation.refresh_from_db()
+        self.assertEqual(coupon.fonte, authenticated_source)
+        self.assertEqual(coupon.organization, organization)
+        self.assertEqual(legacy_observation.fonte, authenticated_source)
+        self.assertEqual(legacy_observation.organization, organization)
+        self.assertEqual(corroborating_observation.fonte, corroborating_source)
+        self.assertIsNone(corroborating_observation.organization)
+        self.assertEqual(CupomFonteObservacao.objects.filter(cupom=coupon).count(), 2)
 
 
 class CouponPipelineTests(TestCase):
