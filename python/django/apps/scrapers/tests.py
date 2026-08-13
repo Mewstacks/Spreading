@@ -6565,6 +6565,33 @@ class EndpointsEnvioPostTests(TransactionTestCase):
         self.assertIn("O envio encontrou uma falha temporária", corpo)
         self.assertNotIn("Falha inesperada ao processar a solicitação", corpo)
 
+    @patch("apps.scrapers.ofertas.enviar_aviso_cupons")
+    def test_sse_de_aviso_avulso_encontra_cupons_prontos_da_organizacao(self, enviar):
+        enviar.return_value = {"sucesso": True, "cupons": 1, "via": "whatsapp"}
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-batch-sse-source", marketplace="mercadolivre", nome="Fonte")
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="batch-sse-coupon", marketplace="mercadolivre",
+            titulo="20% OFF", codigo="LOTE20",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20},
+            estado="ativo", ultima_observacao=timezone.now(),
+        )
+        CupomDisponibilidade.objects.create(
+            organization=self.user.perfil.active_organization,
+            usuario=self.user, cupom=cupom, channel="whatsapp",
+            use_mode="code_notice", stage="ready",
+        )
+
+        response = self.client.post(reverse("scraper-enviar-aviso-cupons"), {
+            "marketplace": "mercadolivre", "grupo": "123@g.us",
+            "grupo_nome": "Grupo", "canal": "whatsapp",
+        })
+        corpo = b"".join(response.streaming_content).decode()
+
+        self.assertIn("Aviso com 1 cupom(ns) enviado", corpo)
+        self.assertEqual([c.pk for c in enviar.call_args.args[0]], [cupom.pk])
+
     @patch("apps.scrapers.ofertas.enviar_oferta_de_produto",
            side_effect=RuntimeError("falha de teste"))
     def test_sse_de_envio_produto_nao_esconde_excecao_do_nucleo(self, _enviar):
@@ -7515,6 +7542,20 @@ class AvisoCuponsSelecaoTests(TestCase):
         escolhidos = selecionar_cupons_para_aviso(self.cfg, self.user)
 
         self.assertEqual([c.codigo for c in escolhidos], ["CODIGO10"])
+
+    def test_disparo_avulso_resolve_organizacao_pelo_usuario(self):
+        """O modal não tem ConfiguracaoEnvio salva, mas deve enxergar o funil."""
+        from apps.scrapers.ofertas import selecionar_cupons_para_aviso
+
+        self._cupom("AVULSO20")
+        avulso = SimpleNamespace(
+            marketplace="mercadolivre", grupo_id="900@g.us",
+            canal="whatsapp", horas_cooldown=24, incluir_restritos=True,
+        )
+
+        escolhidos = selecionar_cupons_para_aviso(avulso, self.user)
+
+        self.assertEqual([c.codigo for c in escolhidos], ["AVULSO20"])
 
     def test_ignora_cupom_de_ativacao_sem_codigo(self):
         from apps.scrapers.ofertas import selecionar_cupons_para_aviso

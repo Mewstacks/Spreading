@@ -1577,12 +1577,19 @@ def selecionar_cupons_para_aviso(configuracao, usuario, limite=LIMITE_CUPONS_AVI
     from apps.scrapers.coupon_rules import (
         codigo_publicavel, cupons_visiveis_q, score_cupom,
     )
+    from apps.accounts.models import organization_for_user
     from apps.scrapers.maintenance import cupons_frescos_q
     from apps.scrapers.models import CupomNormalizado
 
     agora = timezone.now()
     marketplace = str(getattr(configuracao, "marketplace", "") or "").strip().lower()
-    if not marketplace:
+    # O disparo avulso da tela usa um SimpleNamespace em vez de uma regra salva.
+    # Ele não possui ``organization``; usar esse atributo no filtro transformava a
+    # consulta em ``organization IS NULL`` e esvaziava o lote, pois a projeção de
+    # disponibilidade sempre pertence a uma organização. A autoridade aqui é o
+    # usuário autenticado, comum tanto ao disparo avulso quanto ao agendado.
+    organization = organization_for_user(usuario)
+    if not marketplace or organization is None:
         return []
 
     base = CupomNormalizado.objects.select_related("fonte", "programa", "integracao").filter(
@@ -1591,7 +1598,7 @@ def selecionar_cupons_para_aviso(configuracao, usuario, limite=LIMITE_CUPONS_AVI
         cupons_frescos_q(agora=agora),
         marketplace=marketplace, estado="ativo",
         disponibilidades__usuario=usuario,
-        disponibilidades__organization=getattr(configuracao, "organization", None),
+        disponibilidades__organization=organization,
         disponibilidades__channel=getattr(configuracao, "canal", "whatsapp"),
         disponibilidades__use_mode="code_notice",
         disponibilidades__stage="ready",
