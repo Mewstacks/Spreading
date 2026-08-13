@@ -11,6 +11,7 @@ import html
 import json
 import logging
 import re
+import time
 from collections import defaultdict, deque
 from datetime import timedelta, timezone as datetime_timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -267,10 +268,18 @@ def atualizar_chave_cupom(cupom, *, salvar=True) -> str:
 
 
 def _usuario_do_preparo(cupom, usuario):
-    # Somente cupons publicos do ML compartilham catalogo. Um cupom privado pode
-    # apontar para uma campanha particular e continua isolado pelo dono.
-    if (str(cupom.marketplace).lower() == "mercadolivre"
-            and getattr(cupom, "owner_id", None) is None):
+    # Fontes públicas preparam associação/preço uma vez. Tag e link continuam por
+    # usuário. Cupons privados ou organizacionais preservam seu contexto.
+    marketplace = str(cupom.marketplace).lower()
+    public_amazon_inventory = (
+        marketplace == "amazon"
+        and getattr(getattr(cupom, "fonte", None), "slug", "")
+        == "amazon-public-coupons"
+    )
+    if ((marketplace == "mercadolivre" or public_amazon_inventory)
+            and getattr(cupom, "owner_id", None) is None
+            and getattr(cupom, "audience_scope", "public")
+            in {"public", "organization"}):
         return None
     return usuario or getattr(cupom, "owner", None)
 
@@ -356,20 +365,6 @@ def _base_produtos(cupom, usuario):
     campanha = external.split(":", 1)[1] if external.startswith("campanha:") else ""
     programa_id = str(getattr(getattr(cupom, "programa", None), "external_id", "") or "")
 
-    # Cupom de ATIVAÇÃO do ML: a mensagem divulga o link do PRODUTO, e esse link só
-    # carrega `coupon_campaign_id` quando `produto.campanha_id` está preenchido (ver
-    # _montar_url_isca). Produtos casados apenas pelo container vêm do feed de
-    # ofertas com campanha_id VAZIO — divulgar um deles diria "ative o cupom" e a
-    # pessoa cairia numa página sem cupom nenhum. Exigimos a campanha no próprio
-    # produto, o que na prática restringe aos produtos coletados da página oficial
-    # do cupom (_coletar_ml_remoto), que já nascem com ela.
-    #
-    # Não vale para cupom de CÓDIGO: ali o desconto é digitado no checkout e não
-    # depende de o link carregar a campanha.
-    from apps.scrapers.coupon_rules import codigo_publicavel
-    exige_campanha_no_produto = bool(
-        campanha and mkt == "mercadolivre" and not codigo_publicavel(cupom))
-
     candidatos = []
     identidades = set()
     from apps.scrapers.product_identity import identidade_produto
@@ -390,13 +385,6 @@ def _base_produtos(cupom, usuario):
             yield produto, False
 
     for produto, confirmado in _fluxo():
-        # O filtro de campanha continua valendo INCLUSIVE para vínculo confirmado.
-        # Não é heurística de candidato: a mensagem de um cupom de ativação divulga
-        # o link do PRODUTO, e ele só carrega `coupon_campaign_id` quando o próprio
-        # produto tem a campanha (ver `_montar_url_isca`). Deixar passar um produto
-        # casado só pelo container mandaria o leitor para uma página sem cupom.
-        if exige_campanha_no_produto and produto.campanha_id != campanha:
-            continue
         provado = confirmado
         if not provado and campanha:
             provado = bool(produto.campanha_id == campanha)
@@ -464,7 +452,7 @@ def calcular_precos(cupom, produto):
             desconto = teto
         final = (atual - desconto).quantize(_CENT, rounding=ROUND_HALF_UP)
 
-    if final <= 0 or final >= atual:
+    if final <= 0 or (final >= atual and not minimo_nao_atingido):
         return None
     if (original - final) / original >= Decimal("0.90"):
         return None
@@ -688,6 +676,7 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
         ProdutoCupom.objects.update_or_create(
             produto=produto, cupom=cupom,
             defaults={"status": "confirmado", "verificado_em": timezone.now(),
+                      "activation_key": str(payload["campaignId"] or "")[:160],
                       "evidencia": {"regra": "pagina_oficial", "url": link}},
         )
         total += 1
@@ -698,7 +687,8 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
 
 
 def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
-                   credenciais_alternativas=(), permitir_browser=True):
+                   credenciais_alternativas=(), permitir_browser=True,
+                   source_run_id=""):
     """Prepara e devolve ProdutoCupom confirmados, ou [] sem fallback inseguro.
 
     `credenciais_alternativas`: usuários cuja sessão do ML pode ler a listagem
@@ -713,6 +703,22 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
     contexto = _usuario_do_preparo(cupom, usuario)
     chave = atualizar_chave_cupom(cupom)
     preparo, _ = CupomPreparacao.objects.get_or_create(cupom=cupom, usuario=contexto)
+    inicio_monotonic = time.monotonic()
+
+    def _registrar_preparo(*, status, reason_code="", detail="", retry_at=None,
+                           verified_at=None, **extra):
+        valores = {
+            "status": status, "reason_code": reason_code,
+            "safe_detail": str(detail or "")[:255],
+            "erro": str(detail or reason_code or "")[:500],
+            "proxima_tentativa": retry_at,
+            "verificado_em": verified_at or timezone.now(),
+            "duracao_ms": max(0, int((time.monotonic() - inicio_monotonic) * 1000)),
+            "tentativas": preparo.tentativas + 1,
+            "source_run_id": str(source_run_id or "")[:80],
+        }
+        valores.update(extra)
+        CupomPreparacao.objects.filter(pk=preparo.pk).update(**valores)
     fresco_desde = timezone.now() - timedelta(hours=CACHE_HORAS)
     if (not force and preparo.status == "pronto" and preparo.produtos_chave == chave
             and preparo.verificado_em and preparo.verificado_em >= fresco_desde):
@@ -723,10 +729,11 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
         return cached[:9]
 
     if not cupom_publicavel(cupom, usuario=usuario):
-        CupomPreparacao.objects.filter(pk=preparo.pk).update(
-            status="vazio", produtos_chave=chave, verificado_em=timezone.now(),
-            proxima_tentativa=timezone.now() + BACKOFF_VAZIO,
-            erro="Cupom sem código público ou ativação comprovada.")
+        _registrar_preparo(
+            status="vazio", reason_code="scope_unverified",
+            detail="Cupom sem código público ou ativação comprovada.",
+            retry_at=timezone.now() + BACKOFF_VAZIO, produtos_chave=chave,
+        )
         return []
 
     try:
@@ -752,6 +759,7 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
 
         validos = []
         vistos = set()
+        precos_nao_comprovados = 0
         agora = timezone.now()
         for produto in candidatos:
             identidade = _url_canonica(produto.link_produto) or f"id:{produto.id}"
@@ -759,6 +767,7 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
                 continue
             precos = calcular_precos(cupom, produto)
             if not precos:
+                precos_nao_comprovados += 1
                 continue
             original, atual, final = precos
             from apps.scrapers.coupon_rules import regras_do_cupom
@@ -775,6 +784,11 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
             relacao, _ = ProdutoCupom.objects.update_or_create(
                 produto=produto, cupom=cupom,
                 defaults={"status": "confirmado", "verificado_em": agora,
+                          "activation_key": (
+                              str(cupom.external_id).split(":", 1)[1][:160]
+                              if str(cupom.external_id or "").startswith("campanha:")
+                              else ""
+                          ),
                           "preco_original": original, "preco_atual": atual,
                           "preco_final": final,
                           "evidencia": evidencia},
@@ -785,18 +799,28 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
         with transaction.atomic():
             ProdutoCupom.objects.filter(cupom=cupom, status="confirmado").exclude(
                 id__in=ids).update(status="expirado")
-            CupomPreparacao.objects.filter(pk=preparo.pk).update(
+            if validos:
+                empty_reason = ""
+                empty_detail = ""
+            elif coleta_ml and coleta_ml["veredito"] == "vazio_comprovado":
+                empty_reason = ERRO_CONTAINER_EMPTY_PROVEN
+                empty_detail = ERRO_CONTAINER_EMPTY_PROVEN
+            elif precos_nao_comprovados:
+                empty_reason = "price_claim_unproven"
+                empty_detail = "A associação existe, mas o preço anunciado não foi comprovado."
+            else:
+                empty_reason = "association_missing"
+                empty_detail = "Nenhum produto comprovadamente aplicável."
+            _registrar_preparo(
                 status="pronto" if validos else "vazio", produtos_chave=chave,
-                verificado_em=agora,
+                verified_at=agora,
                 # Preparo vazio agendava proxima_tentativa=None, o que a prioridade
                 # de preparar_lote lê como "retomável" — o cupom voltava TODO ciclo e
                 # ocupava os 12 slots para dar vazio de novo. Com 22 cupons isso era
                 # irrelevante; com os milhares que a ativação do ML libera, os vazios
                 # girariam para sempre e nenhum cupom novo seria preparado.
-                proxima_tentativa=None if validos else agora + BACKOFF_VAZIO,
-                erro=("" if validos else ERRO_CONTAINER_EMPTY_PROVEN
-                      if coleta_ml and coleta_ml["veredito"] == "vazio_comprovado"
-                      else "Nenhum produto comprovadamente aplicavel."))
+                retry_at=None if validos else agora + BACKOFF_VAZIO,
+                reason_code=empty_reason, detail=empty_detail)
         validos.sort(key=_ordem_por_valor_do_cupom, reverse=True)
         return validos[:9]
     except SessaoMLIndisponivelError:
@@ -807,20 +831,21 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
             "Preparo do cupom %s adiado: o Mercado Livre exigiu sessão para abrir "
             "a listagem.", cupom.pk,
         )
-        CupomPreparacao.objects.filter(pk=preparo.pk).update(
-            status="erro", produtos_chave=chave, verificado_em=timezone.now(),
-            proxima_tentativa=timezone.now() + BACKOFF_SEM_SESSAO,
-            erro=ERRO_SESSAO_ML)
+        _registrar_preparo(
+            status="erro", reason_code="ml_session_required_for_preparation",
+            detail=ERRO_SESSAO_ML, produtos_chave=chave,
+            retry_at=timezone.now() + BACKOFF_SEM_SESSAO,
+        )
         return []
     except ContainerFetchFailedError:
         logger.warning(
             "Preparo do cupom %s adiado por falha de transporte do container.",
             cupom.pk,
         )
-        CupomPreparacao.objects.filter(pk=preparo.pk).update(
-            status="erro", produtos_chave=chave, verificado_em=timezone.now(),
-            proxima_tentativa=timezone.now() + BACKOFF_TRANSPORTE,
-            erro=ERRO_CONTAINER_FETCH_FAILED,
+        _registrar_preparo(
+            status="erro", reason_code=ERRO_CONTAINER_FETCH_FAILED,
+            detail=ERRO_CONTAINER_FETCH_FAILED, produtos_chave=chave,
+            retry_at=timezone.now() + BACKOFF_TRANSPORTE,
         )
         return []
     except BrowserNecessarioError:
@@ -839,18 +864,19 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
             "Preparo do cupom %s adiado: navegador ocupado por outra tarefa.",
             cupom.pk,
         )
-        CupomPreparacao.objects.filter(pk=preparo.pk).update(
-            status="pendente", produtos_chave=chave, verificado_em=timezone.now(),
-            proxima_tentativa=timezone.now() + BACKOFF_CAPACIDADE,
-            erro=ERRO_CAPACIDADE_BROWSER,
+        _registrar_preparo(
+            status="pendente", reason_code="capacity_deferred",
+            detail=ERRO_CAPACIDADE_BROWSER, produtos_chave=chave,
+            retry_at=timezone.now() + BACKOFF_CAPACIDADE,
         )
         return []
     except Exception as exc:
         logger.exception("Preparacao do cupom %s falhou", cupom.pk)
-        CupomPreparacao.objects.filter(pk=preparo.pk).update(
-            status="erro", produtos_chave=chave, verificado_em=timezone.now(),
-            proxima_tentativa=timezone.now() + timedelta(minutes=30),
-            erro=str(exc)[:500])
+        _registrar_preparo(
+            status="erro", reason_code="preparation_failed",
+            detail="Falha operacional no preparo.", produtos_chave=chave,
+            retry_at=timezone.now() + timedelta(minutes=30),
+        )
         return []
 
 
@@ -895,14 +921,32 @@ def relacoes_prontas_para_envio(cupom, usuario, limite=9):
     relacoes = relacoes_preparadas_para_envio(cupom, usuario, limite=limite)
     if not relacoes or usuario is None:
         return []
-    from apps.scrapers.models import LinkAfiliadoUsuario
-    ids_com_link = set(LinkAfiliadoUsuario.objects.filter(
-        usuario=usuario, produto_id__in=[relacao.produto_id for relacao in relacoes],
-        verificado_ok=True,
-    ).exclude(link_afiliado="").values_list("produto_id", flat=True))
+    from apps.scrapers.coupon_links import coupon_link_verified_and_fresh
+    from apps.scrapers.models import LinkAfiliadoProdutoCupomUsuario
+    relation_ids = {
+        row.relacao_id for row in LinkAfiliadoProdutoCupomUsuario.objects.filter(
+        usuario=usuario, relacao_id__in=[relacao.pk for relacao in relacoes],
+        ).exclude(link_afiliado="") if coupon_link_verified_and_fresh(row)
+    }
+    # Compatibilidade durante a migração: caches antigos por produto só podem
+    # provar uma relação ML quando a URL isca carrega a campanha desta relação.
+    legacy = {
+        row.produto_id: row for row in LinkAfiliadoUsuario.objects.filter(
+            usuario=usuario, produto_id__in=[relacao.produto_id for relacao in relacoes],
+        ).exclude(link_afiliado="")
+    }
+    marketplace = str(cupom.marketplace or "").lower()
+    for relation in relacoes:
+        row = legacy.get(relation.produto_id)
+        activation = str(relation.activation_key or "")
+        if coupon_link_verified_and_fresh(row) and (
+            marketplace != "mercadolivre" or not activation
+            or f"coupon_campaign_id={activation}" in str(row.url_isca or "")
+        ):
+            relation_ids.add(relation.pk)
     return [
         relacao for relacao in relacoes
-        if relacao.produto_id in ids_com_link
+        if relacao.pk in relation_ids
     ]
 
 
@@ -978,14 +1022,37 @@ def mapa_relacoes_prontas(usuario, cupons, limite=9):
     if usuario is None:
         return preparadas, {}
 
-    todos_produtos = {r.produto_id for rs in preparadas.values() for r in rs}
-    com_link = set(LinkAfiliadoUsuario.objects.filter(
-        usuario=usuario, produto_id__in=todos_produtos, verificado_ok=True,
-    ).exclude(link_afiliado="").values_list("produto_id", flat=True))
+    from apps.scrapers.coupon_links import coupon_link_verified_and_fresh
+    from apps.scrapers.models import LinkAfiliadoProdutoCupomUsuario
+    todas_relacoes = {r.pk for rs in preparadas.values() for r in rs}
+    com_link = {
+        row.relacao_id for row in LinkAfiliadoProdutoCupomUsuario.objects.filter(
+            usuario=usuario, relacao_id__in=todas_relacoes,
+        ).exclude(link_afiliado="") if coupon_link_verified_and_fresh(row)
+    }
+    produtos_relacoes = {
+        r.produto_id for rs in preparadas.values() for r in rs
+    }
+    legacy = {
+        row.produto_id: row for row in LinkAfiliadoUsuario.objects.filter(
+            usuario=usuario, produto_id__in=produtos_relacoes,
+        ).exclude(link_afiliado="")
+    }
+    marketplace_by_coupon = {c.pk: str(c.marketplace or "").lower() for c in cupons}
+    for coupon_id, relations in preparadas.items():
+        for relation in relations:
+            row = legacy.get(relation.produto_id)
+            activation = str(relation.activation_key or "")
+            if coupon_link_verified_and_fresh(row) and (
+                marketplace_by_coupon.get(coupon_id) != "mercadolivre"
+                or not activation
+                or f"coupon_campaign_id={activation}" in str(row.url_isca or "")
+            ):
+                com_link.add(relation.pk)
 
     prontas = {}
     for cupom_id, relacoes in preparadas.items():
-        utilizaveis = [r for r in relacoes if r.produto_id in com_link]
+        utilizaveis = [r for r in relacoes if r.pk in com_link]
         if utilizaveis:
             prontas[cupom_id] = utilizaveis
     return preparadas, prontas
@@ -1011,7 +1078,9 @@ def preparar_lote(
     lote pequeno, e quem conhece a cadência (o pipeline) escolhe o teto maior.
     """
     from django.contrib.auth import get_user_model
-    from apps.scrapers.coupon_rules import _FONTES_ML_ATIVACAO, cupom_publicavel
+    from apps.scrapers.coupon_rules import (
+        _FONTES_ML_ATIVACAO, coupon_mode_enabled, cupom_publicavel,
+    )
     from apps.scrapers.models import CupomNormalizado
 
     agora = timezone.now()
@@ -1032,6 +1101,12 @@ def preparar_lote(
             cupom_id__in=[cupom.id for cupom in cupons],
         )
     }
+    from apps.scrapers.models import ExecucaoIngestao
+    latest_run_by_source = {}
+    for source_id, run_id in ExecucaoIngestao.objects.filter(
+        fonte_id__in={cupom.fonte_id for cupom in cupons},
+    ).order_by("fonte_id", "-pk").values_list("fonte_id", "pk"):
+        latest_run_by_source.setdefault(source_id, str(run_id))
 
     from apps.scrapers.coupon_rules import (
         FORCA_EVIDENCIA_ORDEM, codigo_publicavel as _codigo_publicavel,
@@ -1072,17 +1147,31 @@ def preparar_lote(
         usuarios if usuarios is not None
         else get_user_model().objects.filter(is_active=True)
     )
+    from apps.accounts.models import organization_for_user
+    usuarios_por_organizacao = defaultdict(list)
+    for candidato in usuarios:
+        organization = organization_for_user(candidato)
+        if organization is not None:
+            usuarios_por_organizacao[str(organization.pk)].append(candidato)
     buckets = defaultdict(list)
     for cupom in cupons:
+        if not coupon_mode_enabled(cupom):
+            continue
         compartilhado = _usuario_do_preparo(cupom, None) is None
         if compartilhado:
             # O preparo de catálogo público é compartilhado, mas a habilitação de
             # ativação ML é por organização. Basta uma organização elegível para
             # materializar a prova; a projeção por usuário continua decidindo quem
             # pode vê-la/enviá-la.
-            elegivel = next(
-                (u for u in usuarios if cupom_publicavel(cupom, usuario=u)), None
+            candidatos_contexto = (
+                usuarios_por_organizacao.get(str(cupom.organization_id), [])
+                if getattr(cupom, "audience_scope", "public") == "organization"
+                else usuarios
             )
+            elegivel = next((
+                u for u in candidatos_contexto
+                if cupom_publicavel(cupom, usuario=u)
+            ), None)
             if not elegivel:
                 continue
             contextos = [elegivel]
@@ -1125,13 +1214,19 @@ def preparar_lote(
         nonlocal prontos
         fonte = getattr(getattr(cupom, "fonte", None), "slug", "") or "sem-fonte"
         por_fonte[fonte]["processados"] += 1
+        credenciais = (
+            usuarios_por_organizacao.get(str(cupom.organization_id), [])
+            if getattr(cupom, "audience_scope", "public") == "organization"
+            else usuarios
+        )
         if preparar_cupom(
             cupom, usuario=usuario, force=True, permitir_rede=permitir_rede,
             # Ler a listagem pública do ML depende de UMA sessão viva, qualquer
             # uma. Oferecer o lote inteiro de usuários evita que a esteira
             # compartilhada pare porque a primeira credencial da fila expirou.
-            credenciais_alternativas=usuarios,
+            credenciais_alternativas=credenciais,
             permitir_browser=permitir_browser,
+            source_run_id=latest_run_by_source.get(cupom.fonte_id, ""),
         ):
             prontos += 1
             por_fonte[fonte]["prontos"] += 1

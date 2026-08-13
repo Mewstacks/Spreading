@@ -191,6 +191,7 @@ class FluxoMercadoLivrePontaAPontaTests(TestCase):
         )
         ProdutoCupom.objects.create(
             produto=produto, cupom=cupom, status="confirmado",
+            activation_key="E2ECAMP",
             verificado_em=timezone.now(),
             evidencia={"regra": "container", "item_id": "MLB987654321"},
         )
@@ -215,11 +216,13 @@ class FluxoMercadoLivrePontaAPontaTests(TestCase):
         self.assertEqual(float(relacao.preco_final), 120.0)
 
         # LINK + VERIFICAÇÃO: Link Builder e verificação de destino simulados.
-        def _gerar(produtos, usuario=None, faixa=None):
+        def _gerar(produtos, usuario=None, faixa=None, activation_keys=None):
             from apps.scrapers.afiliado import salvar_cache
             for item in produtos:
+                activation = (activation_keys or {}).get(item.id, "")
                 salvar_cache(usuario, item, "https://meli.la/e2e",
-                             "https://produto.mercadolivre.com.br/MLB-987654321",
+                             "https://produto.mercadolivre.com.br/MLB-987654321"
+                             f"?coupon_campaign_id={activation}",
                              True)
             return (len(produtos), 0)
 

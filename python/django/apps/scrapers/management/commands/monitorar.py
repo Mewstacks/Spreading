@@ -119,7 +119,10 @@ class Command(BaseCommand):
         from apps.scrapers.incidentes_saude import (
             fechar_conexoes_restabelecidas, reconciliar_pendentes,
         )
-        from apps.scrapers.maintenance import expire_stale
+        from apps.scrapers.maintenance import (
+            diagnosticar_alertas_pipeline_cupons, expire_stale,
+            purgar_eventos_cupons_antigos,
+        )
 
         r = verificar_e_notificar()
         from apps.scrapers.manual_scraping import (
@@ -131,6 +134,19 @@ class Command(BaseCommand):
         # ter terminado com sucesso. Se a fonte parar, é justamente quando o
         # catálogo antigo precisa deixar de ser publicável.
         expirados = expire_stale()
+        from django.core.cache import cache
+        if cache.add("coupon-event-retention-v1", "1", timeout=24 * 60 * 60):
+            r["eventos_cupons_purgados"] = purgar_eventos_cupons_antigos(90)
+        r["alertas_cupons"] = diagnosticar_alertas_pipeline_cupons()
+        if any(r["alertas_cupons"].values()) and cache.add(
+                "coupon-pipeline-sla-alert-v1", "1", timeout=20 * 60):
+            logger.warning("ALERTA_PIPELINE_CUPONS: %s", r["alertas_cupons"])
+            from apps.scrapers.eventos import log_event
+            log_event(
+                "scraper", "coupon_pipeline_sla",
+                "O funil de cupons ultrapassou um ou mais SLAs operacionais.",
+                level="warning", contexto=r["alertas_cupons"],
+            )
         r["produtos_expirados"] = expirados["products"]
         r["cupons_expirados"] = expirados["coupons"]
         if expirados["products"] or expirados["coupons"]:

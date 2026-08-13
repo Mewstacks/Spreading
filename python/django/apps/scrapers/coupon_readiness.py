@@ -19,8 +19,10 @@ from apps.scrapers.coupon_products import (
     mapa_relacoes_prontas,
 )
 from apps.scrapers.coupon_rules import (
-    codigo_publicavel, cupom_publicavel, listagem_publica_ml, regras_do_cupom,
+    codigo_publicavel, coupon_mode_enabled, cupom_publicavel, forca_evidencia,
+    listagem_publica_ml, regras_do_cupom,
 )
+from apps.scrapers.coupon_links import coupon_link_verified_and_fresh
 from apps.scrapers.maintenance import cupons_frescos_q
 from apps.scrapers.models import (
     CupomDisponibilidade, CupomDisponibilidadeEvento, CupomFonteObservacao,
@@ -93,6 +95,12 @@ def _preflight(cupom, usuario):
     if cupom.owner_id and cupom.owner_id != usuario.pk:
         return _resultado("discarded", "rejected", "tenant_scope",
                           "Cupom pertence a outra organização.")
+    if getattr(cupom, "audience_scope", "public") == "organization":
+        organization = organization_for_user(usuario)
+        if not organization or (
+                cupom.organization_id and cupom.organization_id != organization.pk):
+            return _resultado("discarded", "rejected", "audience_restricted",
+                              "Cupom restrito a outra organização.")
     regras = regras_do_cupom(cupom)
     if regras.get("valor_desconto") in (None, "", 0):
         return _resultado("discarded", "invalid", "missing_discount",
@@ -104,6 +112,11 @@ def _codigo(cupom, usuario, conexao):
     codigo = codigo_publicavel(cupom)
     if not codigo:
         return None
+    if not coupon_mode_enabled(cupom, use_mode="code_notice"):
+        return _resultado(
+            "discarded", "rejected", "feature_disabled",
+            "Cupons de código estão pausados para este marketplace.",
+        )
     if cupom.programa and not (
             cupom.programa.habilitado and cupom.programa.status_vinculo == "joined"
             and cupom.programa.link_status == "online"):
@@ -125,16 +138,34 @@ def _codigo(cupom, usuario, conexao):
                               "Destino público inválido.")
         return _resultado("ready")
     if marketplace == "mercadolivre":
+        link = LinkAfiliadoCupomUsuario.objects.filter(
+            usuario=usuario, cupom=cupom,
+        ).exclude(link_afiliado="").first()
+        if coupon_link_verified_and_fresh(link):
+            return _resultado("ready")
+        if link and link.verificado_ok is None:
+            return _resultado(
+                "waiting_link", "no_link", "affiliate_link_unverified",
+                "Link afiliado gerado; aguardando verificação do destino.",
+                link.proxima_tentativa,
+            )
+        if link and link.verificado_ok is False:
+            return _resultado(
+                "waiting_link", "no_link", "affiliate_link_rejected",
+                link.verificacao_motivo or "O destino afiliado não foi aprovado.",
+                link.proxima_tentativa,
+            )
+        if link and link.verificado_em:
+            return _resultado(
+                "waiting_link", "no_link", "affiliate_link_expired",
+                "O link afiliado precisa ser reverificado.", link.proxima_tentativa,
+            )
         if not conexao["ok"]:
             return _resultado("waiting_link", "no_session", conexao["reason"],
                               conexao["detail"])
-        link = LinkAfiliadoCupomUsuario.objects.filter(
-            usuario=usuario, cupom=cupom, afiliado_ok=True,
-        ).exclude(link_afiliado="").first()
         if not link:
             return _resultado("waiting_link", "no_link", "affiliate_link_pending",
                               "Código válido; link afiliado ainda não foi preparado.")
-        return _resultado("ready")
     if marketplace == "awin":
         return _resultado("ready" if _url_publica(cupom.link) else "waiting_link",
                           "" if _url_publica(cupom.link) else "no_link",
@@ -145,6 +176,12 @@ def _codigo(cupom, usuario, conexao):
 
 def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao):
     marketplace = str(cupom.marketplace or "").lower()
+    if (marketplace != "mercadolivre"
+            and not coupon_mode_enabled(cupom, use_mode="product_activation")):
+        return _resultado(
+            "discarded", "rejected", "feature_disabled",
+            "Cupons de ativação estão pausados para este marketplace.",
+        )
     if marketplace == "amazon":
         tag = str(getattr(getattr(usuario, "perfil", None), "afiliado_tag_amazon", "") or "")
         if not tag:
@@ -163,24 +200,37 @@ def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao):
         if not listagem_publica_ml(cupom):
             return _resultado("discarded", "invalid", "public_container_missing",
                               "Container público não comprovado.")
-        if not conexao["ok"]:
-            return _resultado(
-                "eligible", "no_session", conexao["reason"],
-                f"Container público comprovado. {conexao['detail']}",
-            )
     if not cupom_publicavel(cupom, usuario=usuario):
         return _resultado("discarded", "invalid", "activation_evidence_incomplete",
                           "Evidência de ativação incompleta.")
 
     if cupom.pk in prontas:
         return _resultado("ready")
+    if marketplace == "mercadolivre" and not conexao["ok"]:
+        return _resultado(
+            "eligible", "no_session", conexao["reason"],
+            f"Container público comprovado. {conexao['detail']}",
+        )
     if cupom.pk in preparadas:
-        product_ids = [relation.produto_id for relation in preparadas[cupom.pk]]
-        links = list(LinkAfiliadoUsuario.objects.filter(
-            usuario=usuario, produto_id__in=product_ids,
+        relation_ids = [relation.pk for relation in preparadas[cupom.pk]]
+        from apps.scrapers.models import LinkAfiliadoProdutoCupomUsuario
+        links = list(LinkAfiliadoProdutoCupomUsuario.objects.filter(
+            usuario=usuario, relacao_id__in=relation_ids,
         ).only(
-            "link_afiliado", "verificado_ok", "estado", "proxima_tentativa",
+            "link_afiliado", "url_canonica", "verificado_ok", "verificado_em",
+            "estado", "proxima_tentativa",
         ))
+        if not links:
+            # Compatibilidade da janela de migração: diagnostica cache antigo por
+            # produto, mas só o promove a pronto através do gate estrito de
+            # ``mapa_relacoes_prontas``.
+            product_ids = [relation.produto_id for relation in preparadas[cupom.pk]]
+            links = list(LinkAfiliadoUsuario.objects.filter(
+                usuario=usuario, produto_id__in=product_ids,
+            ).only(
+                "link_afiliado", "url_canonica", "verificado_ok", "verificado_em",
+                "estado", "proxima_tentativa",
+            ))
         if any(link.link_afiliado and link.verificado_ok is None for link in links):
             return _resultado(
                 "waiting_link", "no_link", "link_verification_pending",
@@ -199,13 +249,20 @@ def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao):
                 "waiting_link", "no_link", "affiliate_link_rejected",
                 "Os links tentados não tiveram destino afiliado aprovado.", retry_at,
             )
+        if any(link.verificado_ok is True and not coupon_link_verified_and_fresh(link)
+               for link in links):
+            return _resultado(
+                "waiting_link", "no_link", "affiliate_link_expired",
+                "O link afiliado precisa ser reverificado.",
+            )
         return _resultado("prepared", "no_link", "affiliate_link_pending",
                           "Produtos e preços comprovados; geração do link ainda não iniciada.")
     preparo = preparos.get(cupom.pk)
     if not preparo:
         return _resultado("eligible", "waiting", "preparation_pending",
                           "Aguardando preparo de produtos e preços.")
-    if preparo.erro == ERRO_CAPACIDADE_BROWSER:
+    prep_reason = preparo.reason_code or preparo.erro
+    if prep_reason in {"capacity_deferred", ERRO_CAPACIDADE_BROWSER}:
         # FILA, não avaria: o preparo nem começou porque o único Chromium da
         # máquina estava com outra tarefa. Antes isto caía no `except Exception` do
         # preparo e chegava aqui como `preparation_failed` — 188 cupons em produção
@@ -220,13 +277,13 @@ def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao):
         # sobre este cupom, e a ação que destrava é reconectar o Mercado Livre.
         # Sem separar os dois, a tela dizia "nova tentativa será feita" para um
         # funil que não voltaria sozinho — e o dono não sabia o que fazer.
-        if preparo.erro == ERRO_SESSAO_ML:
+        if prep_reason in {"ml_session_required_for_preparation", ERRO_SESSAO_ML}:
             return _resultado(
                 "eligible", "no_session", "ml_catalog_session_expired",
                 "A conexão do Mercado Livre expirou; reconecte para preparar este cupom.",
                 preparo.proxima_tentativa,
             )
-        if preparo.erro == ERRO_CONTAINER_FETCH_FAILED:
+        if prep_reason == ERRO_CONTAINER_FETCH_FAILED:
             return _resultado(
                 "eligible", "operational_failure", "container_fetch_failed",
                 "A lista do container não respondeu; nova tentativa será feita.",
@@ -236,16 +293,22 @@ def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao):
                           "Falha operacional no preparo; nova tentativa será feita.",
                           preparo.proxima_tentativa)
     if preparo.status == "vazio":
-        if preparo.erro == ERRO_CONTAINER_EMPTY_PROVEN:
+        if prep_reason == ERRO_CONTAINER_EMPTY_PROVEN:
             return _resultado(
                 "eligible", "waiting", "container_empty_proven",
                 "O container respondeu sem produtos aplicáveis nesta tentativa.",
                 preparo.proxima_tentativa,
             )
-        if preparo.erro == ERRO_MINIMUM_NOT_MET:
+        if prep_reason == ERRO_MINIMUM_NOT_MET:
             return _resultado(
                 "eligible", "waiting", "minimum_not_met",
                 "Os itens encontrados exigem completar o valor mínimo no carrinho.",
+                preparo.proxima_tentativa,
+            )
+        if prep_reason == "price_claim_unproven":
+            return _resultado(
+                "eligible", "waiting", "price_claim_unproven",
+                "A associação existe, mas o preço anunciado não foi comprovado.",
                 preparo.proxima_tentativa,
             )
         return _resultado("eligible", "waiting", "product_match_pending",
@@ -263,7 +326,12 @@ def projetar_disponibilidade_cupons(usuario, channel="whatsapp"):
     agora = timezone.now()
     cupons = list(
         CupomNormalizado.objects.select_related("fonte", "programa", "integracao")
-        .filter(Q(owner__isnull=True) | Q(owner=usuario))
+        .filter(
+            Q(owner=usuario)
+            | Q(owner__isnull=True, audience_scope="public")
+            | Q(owner__isnull=True, audience_scope="organization",
+                organization=organization)
+        )
         .filter(estado="ativo")
         .filter(cupons_frescos_q(agora=agora))
         .order_by("-ultima_observacao")[:5000]
@@ -330,7 +398,19 @@ def projetar_disponibilidade_cupons(usuario, channel="whatsapp"):
                     organization=organization, disponibilidade=projection,
                     from_stage=previous, to_stage=projection.stage,
                     category=projection.category, reason_code=projection.reason_code,
+                    marketplace=cupom.marketplace,
+                    source=getattr(cupom.fonte, "slug", ""), use_mode=use_mode,
+                    evidence_strength=(forca_evidencia(cupom)
+                                       if use_mode == "product_activation" else "official_code"),
+                    attempt=getattr(preparos.get(cupom.pk), "tentativas", 0),
+                    duration_ms=getattr(preparos.get(cupom.pk), "duracao_ms", 0),
+                    source_run_id=getattr(preparos.get(cupom.pk), "source_run_id", ""),
                 )
+            else:
+                # ``updated_at`` representa a última reconciliação, não apenas a
+                # última mudança de estado. Sem este toque, um cupom estável em
+                # ready disparava falsamente o alerta de projeção atrasada.
+                projection.save(update_fields=["updated_at"])
         stages[outcome["stage"]] = stages.get(outcome["stage"], 0) + 1
         reason = outcome["reason_code"] or "none"
         reasons[reason] = reasons.get(reason, 0) + 1
@@ -355,8 +435,12 @@ def disponibilidade_resumo(usuario, channel="whatsapp"):
     return {"stages": stages, "reasons": reasons, "total": total}
 
 
-def marcar_ausentes_execucao_saudavel(fonte, seen_ids):
-    """Marca ``not_found`` apenas após inventário explicitamente saudável/completo."""
+def marcar_ausentes_execucao_saudavel(fonte, seen_ids, *, reconcile_catalog=False):
+    """Marca ``not_found`` após inventário saudável/completo.
+
+    Fontes declaradas como inventário autoritativo também retiram a linha do
+    catálogo ativo. Execuções parciais nunca chamam esta função.
+    """
     agora = timezone.now()
     with transaction.atomic():
         from apps.scrapers.sources.persistence import record_coupon_observation
@@ -396,6 +480,10 @@ def marcar_ausentes_execucao_saudavel(fonte, seen_ids):
                 coupon, source=fonte, health_status="healthy",
                 outcome=verdict[4], reason_code=verdict[2],
             )
+        if reconcile_catalog and absent_coupons:
+            CupomNormalizado.objects.filter(
+                pk__in=[coupon.pk for coupon in absent_coupons], estado="ativo",
+            ).update(estado="inativo")
         projections = list(
             CupomDisponibilidade.objects.select_for_update()
             .filter(cupom_id__in=[coupon.pk for coupon in absent_coupons])
@@ -427,6 +515,9 @@ def marcar_ausentes_execucao_saudavel(fonte, seen_ids):
                 to_stage=stage,
                 category=category,
                 reason_code=reason,
+                marketplace=projection.cupom.marketplace,
+                source=fonte.slug,
+                use_mode=projection.use_mode,
             ))
         if not changed:
             return 0

@@ -244,7 +244,7 @@ class Amazon(Marketplace):
             amazon_elegivel=elegivel, amazon_ultimo_erro=msg[:255]
         )
 
-    def build_affiliate_link(self, produto, usuario=None):
+    def build_affiliate_link(self, produto, usuario=None, activation_key=""):
         from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_para_produto
         return gerar_link_afiliado_para_produto(produto, usuario=usuario)
 
@@ -443,7 +443,7 @@ class Amazon(Marketplace):
                     if not tag_amazon(usuario) else ("pendente", "")
                 )
 
-    def prefetch_links(self, produtos, usuario=None, faixa=None):
+    def prefetch_links(self, produtos, usuario=None, faixa=None, activation_keys=None):
         # `faixa` não se aplica: o link Amazon é montado em memória (tag + ASIN), a
         # etapa é instantânea e não tem o que reportar numa barra.
         from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_para_produto

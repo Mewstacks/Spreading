@@ -67,6 +67,10 @@ def _materializar_ausencias_saudaveis(slug, payload, rows, *, owner=None):
 
     fonte = FonteIngestao.objects.get(slug=slug)
     seen_coupon_ids = [row.external_id for row in rows if row.kind == "coupon"]
+    if slug == "amazon-public-coupons":
+        return marcar_ausentes_execucao_saudavel(
+            fonte, seen_coupon_ids, reconcile_catalog=True,
+        )
     return marcar_ausentes_execucao_saudavel(fonte, seen_coupon_ids)
 
 
@@ -180,6 +184,14 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
 
     _coletar_adaptador("ml-cupons-afiliados", resultado)
 
+    if getattr(settings, "AMAZON_GENERAL_COUPONS_URL", ""):
+        _coletar_adaptador("amazon-general-coupons", resultado)
+    else:
+        _fonte(
+            resultado, "amazon-general-coupons", status="skipped",
+            motivo="Fonte oficial/licenciada de códigos gerais não configurada.",
+        )
+
     # A fonte é pública e existe independentemente de alguma conta já possuir tag.
     # O vínculo de afiliado continua por usuário na etapa de link/envio.
     payload = _coletar_adaptador("amazon-public-coupons", resultado, items=())
@@ -271,9 +283,14 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
 
 def _cupons_visiveis(usuario):
     from apps.scrapers.maintenance import cupons_frescos_q
+    from apps.accounts.models import organization_for_user
 
+    organization = organization_for_user(usuario)
     return CupomNormalizado.objects.select_related("fonte").filter(
-        Q(owner__isnull=True) | Q(owner=usuario),
+        Q(owner=usuario)
+        | Q(owner__isnull=True, audience_scope="public")
+        | Q(owner__isnull=True, audience_scope="organization",
+            organization=organization),
         estado="ativo",
     ).filter(cupons_frescos_q())
 
@@ -305,17 +322,36 @@ def afiliar_cupons_de_codigo(usuario, cupons, *, limite=8):
     if not candidatos:
         return {"gerados": 0, "falhas": 0, "pendentes": 0}
     from apps.scrapers.monitor_conexao import ml_conectado
-
-    if not ml_conectado(usuario):
-        # Mesmo portão que `_rodar_links` já aplica. Sem ele, cada conta
-        # desconectada ainda entrava na fila do Link Builder para colher a mesma
-        # recusa — em produção eram 3 das 4 contas gastando um lugar na disputa
-        # pelo único Chromium a cada ciclo, na frente de quem estava conectado.
-        return {"gerados": 0, "falhas": 0, "pendentes": len(candidatos)}
-    ja_tem = set(LinkAfiliadoCupomUsuario.objects.filter(
-        usuario=usuario, cupom_id__in=[c.pk for c in candidatos], afiliado_ok=True,
-    ).exclude(link_afiliado="").values_list("cupom_id", flat=True))
+    from apps.scrapers.coupon_links import coupon_link_verified_and_fresh
+    caches = {
+        link.cupom_id: link for link in LinkAfiliadoCupomUsuario.objects.filter(
+            usuario=usuario, cupom_id__in=[c.pk for c in candidatos],
+        )
+    }
+    ja_tem = {
+        coupon_id for coupon_id, link in caches.items()
+        if coupon_link_verified_and_fresh(link)
+    }
     pendentes = [c for c in candidatos if c.pk not in ja_tem]
+    total_pendentes = len(pendentes)
+    agora = timezone.now()
+    pendentes = [
+        c for c in pendentes
+        if not caches.get(c.pk) or not caches[c.pk].proxima_tentativa
+        or caches[c.pk].proxima_tentativa <= agora
+    ]
+
+    # Caches existentes são reverificados primeiro sem navegador. Apenas a geração
+    # de um link novo depende da sessão ML atual.
+    cache_link_ids = {
+        c.pk for c in pendentes if getattr(caches.get(c.pk), "link_afiliado", "")
+    }
+    com_cache = [c for c in pendentes if c.pk in cache_link_ids]
+    sem_cache = [c for c in pendentes if c.pk not in cache_link_ids]
+    if not ml_conectado(usuario):
+        pendentes = com_cache
+    else:
+        pendentes = com_cache + sem_cache
 
     gerados = falhas = 0
     for cupom in pendentes[:max(0, limite)]:
@@ -340,7 +376,7 @@ def afiliar_cupons_de_codigo(usuario, cupons, *, limite=8):
             break
     return {
         "gerados": gerados, "falhas": falhas,
-        "pendentes": max(0, len(pendentes) - gerados),
+        "pendentes": max(0, total_pendentes - gerados),
     }
 
 
@@ -364,14 +400,25 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
     from apps.scrapers.coupon_products import (
         ids_cupons_prontos, mapa_relacoes_prontas,
     )
-    from apps.scrapers.coupon_rules import cupom_publicavel
+    from apps.scrapers.coupon_rules import coupon_mode_enabled, cupom_publicavel
     from apps.scrapers.marketplaces.registry import get_marketplace
 
     cupons = [
         cupom for cupom in _cupons_visiveis(usuario)
         if cupom_publicavel(cupom, usuario=usuario)
+        and coupon_mode_enabled(cupom)
     ]
     preparadas, _prontas = mapa_relacoes_prontas(usuario, cupons)
+    from apps.scrapers.coupon_links import coupon_link_verified_and_fresh
+    from apps.scrapers.models import LinkAfiliadoProdutoCupomUsuario
+    agora = timezone.now()
+    relation_rows = {
+        row.relacao_id: row
+        for row in LinkAfiliadoProdutoCupomUsuario.objects.filter(
+            usuario=usuario,
+            relacao_id__in=[r.pk for rows in preparadas.values() for r in rows],
+        )
+    }
     # PRIORIDADE DA FILA: cupom oficial de código, depois campanha com container
     # publicado, depois segmentação estruturada, e só então o candidato sintético.
     # Sem ordem, o `limite` era consumido pela ordem arbitrária do dicionário e as
@@ -380,9 +427,23 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
         cupom.pk: _peso_do_cupom(cupom) for cupom in cupons
     }
     produtos = {}
+    relacao_por_produto = {}
     for cupom_id in sorted(preparadas, key=lambda pk: ordem_dos_cupons.get(pk, 9)):
         for relacao in preparadas[cupom_id]:
-            produtos.setdefault(relacao.produto_id, relacao.produto)
+            row = relation_rows.get(relacao.pk)
+            if coupon_link_verified_and_fresh(row):
+                continue
+            if row and (
+                row.estado == "nao_afiliavel"
+                or (row.proxima_tentativa and row.proxima_tentativa > agora)
+            ):
+                continue
+            # Um produto por ciclo: o cache intermediário legado é por produto.
+            # A relação seguinte avança no próximo ciclo sem sobrescrever duas
+            # campanhas antes que a primeira seja materializada.
+            if relacao.produto_id not in produtos:
+                produtos[relacao.produto_id] = relacao.produto
+                relacao_por_produto[relacao.produto_id] = relacao
 
     metricas = {
         "vinculados": len(produtos),
@@ -404,43 +465,39 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
         metricas["prontos"] = len(ids_cupons_prontos(usuario, cupons))
         return metricas
 
-    agora = timezone.now()
-    linhas = {
-        row.produto_id: row
-        for row in LinkAfiliadoUsuario.objects.filter(
-            usuario=usuario, produto_id__in=produtos,
-        )
-    }
-    candidatos = []
-    for produto_id, produto in produtos.items():
-        row = linhas.get(produto_id)
-        if row and row.verificado_ok is True and row.link_afiliado:
-            continue
-        if row and (
-            row.estado in ("nao_afiliavel", "erro")
-            or (row.proxima_tentativa and row.proxima_tentativa > agora)
-        ):
-            continue
-        candidatos.append(produto)
-        if len(candidatos) >= limite:
-            break
+    candidatos = list(produtos.values())[:limite]
 
     grupos = defaultdict(list)
     for produto in candidatos:
         grupos[produto.marketplace or "mercadolivre"].append(produto)
 
     for slug, itens in grupos.items():
-        before = set(LinkAfiliadoUsuario.objects.filter(
-            usuario=usuario, produto_id__in=[p.id for p in itens],
-            verificado_ok=True,
-        ).values_list("produto_id", flat=True))
+        target_relation_ids = [relacao_por_produto[p.id].pk for p in itens]
+        before = {
+            row.relacao_id for row in LinkAfiliadoProdutoCupomUsuario.objects.filter(
+                usuario=usuario, relacao_id__in=target_relation_ids,
+            ) if coupon_link_verified_and_fresh(row)
+        }
         gerados = falhas = 0
         detalhe = {"candidatos": len(itens)}
         try:
             marketplace = get_marketplace(slug)
-            gerados, falhas = marketplace.prefetch_links(
-                itens, usuario=usuario, faixa=faixa,
-            )
+            activation_keys = {
+                p.id: relacao_por_produto[p.id].activation_key for p in itens
+            }
+            try:
+                gerados, falhas = marketplace.prefetch_links(
+                    itens, usuario=usuario, faixa=faixa,
+                    activation_keys=activation_keys,
+                )
+            except TypeError as exc:
+                # Adaptadores de plugin anteriores ao contrato de campanha seguem
+                # funcionando enquanto migram a assinatura.
+                if "activation_keys" not in str(exc):
+                    raise
+                gerados, falhas = marketplace.prefetch_links(
+                    itens, usuario=usuario, faixa=faixa,
+                )
             # Cada loja verifica os PRÓPRIOS links (contrato em Marketplace):
             # chamar o verificador do ML aqui reprovava item Amazon com o motivo
             # do Mercado Livre.
@@ -450,6 +507,63 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
             metricas["links_reprovados"] += verificacao.get("reprovados", 0)
             metricas["links_transitorios"] += verificacao.get("transitorios", 0)
             detalhe.update(verificacao)
+            # O gerador/verificador existente usa um cache intermediário por
+            # produto. Copiamos somente quando a URL isca corresponde à campanha
+            # desta relação; o estado final passa a ser muitos-para-muitos.
+            all_rows = {
+                row.produto_id: row for row in LinkAfiliadoUsuario.objects.filter(
+                    usuario=usuario, produto_id__in=[p.id for p in itens],
+                ).exclude(link_afiliado="")
+            }
+            for product in itens:
+                relation = relacao_por_produto[product.id]
+                row = all_rows.get(product.id)
+                activation = str(relation.activation_key or "")
+                campaign_matches = bool(row) and not (
+                    activation and f"coupon_campaign_id={activation}"
+                    not in str(row.url_isca or "")
+                )
+                if not row or row.verificado_ok is not True or not campaign_matches:
+                    current = relation_rows.get(relation.pk)
+                    reason = (
+                        "O link gerado ainda não foi verificado."
+                        if row and row.verificado_ok is None else
+                        row.verificacao_motivo
+                        if row and row.verificado_ok is False else
+                        "O link gerado não corresponde à campanha desta relação."
+                        if row and not campaign_matches else
+                        "Aguardando geração do link afiliado."
+                    )
+                    LinkAfiliadoProdutoCupomUsuario.objects.update_or_create(
+                        usuario=usuario, relacao=relation,
+                        defaults={
+                            "url_isca": getattr(row, "url_isca", "") or "",
+                            "link_afiliado": getattr(row, "link_afiliado", "") or "",
+                            "estado": "pendente",
+                            "verificado_ok": getattr(row, "verificado_ok", None),
+                            "verificado_em": getattr(row, "verificado_em", None),
+                            "url_canonica": "",
+                            "verificacao_motivo": str(reason or "")[:300],
+                            "tentativas": (getattr(current, "tentativas", 0) or 0) + 1,
+                            "ultima_tentativa": agora,
+                            "proxima_tentativa": agora + timezone.timedelta(minutes=15),
+                        },
+                    )
+                    continue
+                LinkAfiliadoProdutoCupomUsuario.objects.update_or_create(
+                    usuario=usuario, relacao=relation,
+                    defaults={
+                        "url_isca": row.url_isca,
+                        "link_afiliado": row.link_afiliado,
+                        "estado": "pronto", "verificado_ok": True,
+                        "verificado_em": row.verificado_em,
+                        "url_canonica": row.url_canonica or row.link_afiliado,
+                        "verificacao_motivo": "",
+                        "tentativas": row.tentativas,
+                        "ultima_tentativa": row.ultima_tentativa,
+                        "proxima_tentativa": None,
+                    },
+                )
         except Exception as exc:
             falhas += len(itens)
             detalhe["erro"] = "Falha operacional ao gerar ou verificar links."
@@ -466,17 +580,41 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
                     "Afiliação de cupons %s bloqueada por %s (usuário %s); "
                     "nenhum produto penalizado.", slug, conta, usuario,
                 )
+                for produto in itens:
+                    relation = relacao_por_produto[produto.id]
+                    LinkAfiliadoProdutoCupomUsuario.objects.update_or_create(
+                        usuario=usuario, relacao=relation,
+                        defaults={
+                            "estado": "pendente", "verificado_ok": None,
+                            "verificacao_motivo": "Sessão necessária para gerar um novo link.",
+                            "ultima_tentativa": agora,
+                            "proxima_tentativa": agora + timezone.timedelta(minutes=15),
+                        },
+                    )
             else:
                 for produto in itens:
                     registrar_falha(
                         usuario, produto,
                         f"Falha operacional de afiliação ({type(exc).__name__}).",
                     )
+                    relation = relacao_por_produto[produto.id]
+                    current = relation_rows.get(relation.pk)
+                    LinkAfiliadoProdutoCupomUsuario.objects.update_or_create(
+                        usuario=usuario, relacao=relation,
+                        defaults={
+                            "estado": "erro", "verificado_ok": None,
+                            "verificacao_motivo": "Falha operacional ao gerar o link.",
+                            "tentativas": (getattr(current, "tentativas", 0) or 0) + 1,
+                            "ultima_tentativa": agora,
+                            "proxima_tentativa": agora + timezone.timedelta(minutes=30),
+                        },
+                    )
                 logger.exception("Afiliação de cupons %s falhou para %s", slug, usuario)
-        after = set(LinkAfiliadoUsuario.objects.filter(
-            usuario=usuario, produto_id__in=[p.id for p in itens],
-            verificado_ok=True,
-        ).values_list("produto_id", flat=True))
+        after = {
+            row.relacao_id for row in LinkAfiliadoProdutoCupomUsuario.objects.filter(
+                usuario=usuario, relacao_id__in=target_relation_ids,
+            ) if coupon_link_verified_and_fresh(row)
+        }
         verificados = len(after - before)
         metricas["links_gerados"] += gerados
         metricas["links_falhos"] += falhas
@@ -498,17 +636,13 @@ def executar_pipeline_cupons(
     usuarios = _usuarios_ativos(usuarios)
     resultado = coletar_cupons(usuarios=usuarios) if coletar else _metricas_vazias()
 
-    try:
-        from apps.scrapers.scraper_mercadolivre.cupons_container import (
-            casar_cupons_container,
-        )
-        resultado["associacoes_container"] = casar_cupons_container()
-    except Exception:
-        # A associação é uma etapa independente: os vínculos diretos de Amazon,
-        # Awin, feed e cupons privados continuam sendo preparados.
-        resultado["associacoes_container"] = 0
-        resultado["falhos"] += 1
-        logger.exception("Casamento de containers de cupons falhou")
+    # Associação e preparação agora compartilham a mesma fila justa e idempotente.
+    # O antigo ``casar_cupons_container`` abria o mesmo container imediatamente
+    # antes de ``preparar_lote`` e fazia HTTP/Chromium, sessão e capacidade serem
+    # consumidos duas vezes. A função legada continua disponível para diagnóstico
+    # e comandos manuais, mas o pipeline produtivo tem uma única autoridade.
+    resultado["associacoes_container"] = 0
+    resultado["associacao_modo"] = "preparation_queue"
 
     from apps.scrapers.coupon_products import (
         PREPARO_LOTE_HTTP_POR_CICLO, preparar_lote,
@@ -553,7 +687,12 @@ def executar_pipeline_cupons(
             resultado[key] += int(afiliacao.get(key, 0) or 0)
         try:
             from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
-            afiliacao["disponibilidade"] = projetar_disponibilidade_cupons(usuario)
+            por_canal = {
+                channel: projetar_disponibilidade_cupons(usuario, channel=channel)
+                for channel in ("whatsapp", "telegram")
+            }
+            afiliacao["disponibilidade"] = por_canal["whatsapp"]
+            afiliacao["disponibilidade_por_canal"] = por_canal
         except Exception:
             resultado["falhos"] += 1
             logger.exception(

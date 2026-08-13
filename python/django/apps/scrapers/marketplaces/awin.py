@@ -9,7 +9,7 @@ class Awin(Marketplace):
         # A sincronizacao e por IntegracaoAfiliado e ja roda no worker dedicado.
         return None
 
-    def build_affiliate_link(self, produto, usuario=None):
+    def build_affiliate_link(self, produto, usuario=None, activation_key=""):
         link = str(getattr(produto, "link_produto", "") or "").strip()
         if not link:
             return None
@@ -23,7 +23,7 @@ class Awin(Marketplace):
         return bool(getattr(produto, "owner_id", None) == getattr(usuario, "id", None)
                     and self.verify_affiliate_tag(getattr(produto, "link_produto", "")))
 
-    def prefetch_links(self, produtos, usuario=None, faixa=None):
+    def prefetch_links(self, produtos, usuario=None, faixa=None, activation_keys=None):
         """Valida e materializa o deep link Awin no cache uniforme por usuário."""
         from apps.scrapers.afiliado import registrar_falha, salvar_cache
 

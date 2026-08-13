@@ -116,18 +116,13 @@ def _confirmar(cupom, ids_container, idx, agora):
     campanha = external_id.split(":", 1)[1] if external_id.startswith("campanha:") else ""
     for iid in ids_container & set(idx):
         for prod in idx[iid]:
-            # O vínculo de container é a prova de que este anúncio participa da
-            # campanha. Sem carimbar a campanha no produto, `_base_produtos`
-            # descartava exatamente a saída deste matcher para cupons de ativação.
-            # Só preenche o campo vazio: uma lane nunca rouba a identidade/proveniência
-            # já atribuída por outra campanha.
-            if campanha and not prod.campanha_id:
-                prod.campanha_id = campanha
-                prod.save(update_fields=["campanha_id"])
+            # A campanha mora no vínculo. O Produto preserva a proveniência da sua
+            # lane e pode participar de várias campanhas ao mesmo tempo.
             ProdutoCupom.objects.update_or_create(
                 produto=prod, cupom=cupom,
                 defaults={
                     "status": "confirmado", "verificado_em": agora,
+                    "activation_key": campanha[:160],
                     "evidencia": {"regra": "container", "item_id": iid,
                                   "container": (cupom.regras or {}).get("container_name")},
                 },

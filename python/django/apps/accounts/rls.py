@@ -13,6 +13,7 @@ STRICT_TENANT_TABLES = (
     "scrapers_publicacao",
     "scrapers_cliquepublicacao",
     "scrapers_linkafiliadocupomusuario",
+    "scrapers_linkafiliadoprodutocupomusuario",
     "scrapers_receitaafiliado",
     "scrapers_relatoriosync",
     "scrapers_linkafiliadousuario",

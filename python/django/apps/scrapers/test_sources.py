@@ -1011,3 +1011,101 @@ class BotaoEnfileiraNoWorkerTests(TransactionTestCase):
             b"".join(resp.streaming_content)
 
         prefetch.assert_called_once()
+
+
+@override_settings(AMAZON_GENERAL_COUPONS_URL="https://feed.example/amazon-coupons.json")
+class AmazonGeneralCouponsSourceTests(TestCase):
+    def test_feed_oficial_valido_persiste_codigo_sitewide_sem_produto(self):
+        from unittest.mock import Mock
+        from apps.scrapers.sources.amazon_general_coupons import (
+            AmazonGeneralCouponsSource,
+        )
+
+        response = Mock()
+        response.json.return_value = {"coupons": [{
+            "id": "prime-week", "code": "PRIME20",
+            "title": "20% OFF em toda a Amazon",
+            "url": "https://www.amazon.com.br/",
+            "discount_type": "porcentagem", "discount": 20,
+            "minimum_purchase": 19, "valid_until": "2099-08-20",
+            "sitewide": True,
+        }]}
+        response.raise_for_status.return_value = None
+        source = AmazonGeneralCouponsSource()
+        with patch(
+            "apps.scrapers.sources.amazon_general_coupons.requests.get",
+            return_value=response,
+        ):
+            rows = list(source.discover_coupons())
+
+        self.assertEqual(len(rows), 1)
+        persist_items(rows)
+        coupon = CupomNormalizado.objects.get(external_id="prime-week")
+        self.assertEqual(
+            (coupon.redemption_mode, coupon.scope_type, coupon.audience_scope),
+            ("code", "sitewide", "public"),
+        )
+        self.assertFalse(ProdutoCupom.objects.filter(cupom=coupon).exists())
+
+    def test_feed_rejeita_destino_fora_da_amazon_e_codigo_invalido(self):
+        from unittest.mock import Mock
+        from apps.scrapers.sources.amazon_general_coupons import (
+            AmazonGeneralCouponsSource,
+        )
+
+        response = Mock()
+        response.json.return_value = {"coupons": [
+            {"code": "X", "url": "https://www.amazon.com.br/", "discount": 10,
+             "valid_until": "2099-08-20"},
+            {"code": "VALID10", "url": "https://evilamazon.com.br/", "discount": 10,
+             "valid_until": "2099-08-20"},
+        ]}
+        response.raise_for_status.return_value = None
+        source = AmazonGeneralCouponsSource()
+        with patch(
+            "apps.scrapers.sources.amazon_general_coupons.requests.get",
+            return_value=response,
+        ):
+            self.assertEqual(list(source.discover_coupons()), [])
+        self.assertEqual(source.last_metrics["rejections"], {"invalid_identity": 2})
+
+
+class OfficialCodeEnrichmentTests(TestCase):
+    def test_fonte_oficial_enriquece_mesmo_codigo_heuristico_sem_mudar_precedencia(self):
+        heuristic_source, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML web"},
+        )
+        heuristic = CupomNormalizado.objects.create(
+            fonte=heuristic_source, external_id="checkout:SEMTERMOS20",
+            marketplace="mercadolivre", titulo="Cupom SEMTERMOS20",
+            codigo="SEMTERMOS20", link="https://www.mercadolivre.com.br/",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "",
+                    "valor_desconto": None},
+            evidencia={"association": "ssr_code"},
+        )
+        official = IngestedItem(
+            external_id="official:SEMTERMOS20", marketplace="mercadolivre",
+            source="ml-cupons-afiliados", kind="coupon",
+            canonical_url="https://www.mercadolivre.com.br/",
+            title="SEMTERMOS20 — 20% OFF", coupon_code="SEMTERMOS20",
+            coupon_rules={"modo_resgate": "codigo",
+                          "tipo_desconto": "porcentagem",
+                          "valor_desconto": 20, "valor_minimo": 19,
+                          "is_mar_aberto": True},
+            valid_until=timezone.now() + timedelta(days=2),
+            observed_at=timezone.now(), evidence={"public": True},
+        )
+
+        persist_items([official])
+        heuristic.refresh_from_db()
+        self.assertEqual(heuristic.regras["valor_desconto"], 20.0)
+        self.assertEqual(heuristic.evidencia["enriched_by"]["source"],
+                         "ml-cupons-afiliados")
+        # A observação oficial continua com precedência superior; enriquecer não
+        # converte o registro heurístico na fonte vencedora.
+        self.assertEqual(
+            CupomNormalizado.objects.get(external_id="official:SEMTERMOS20")
+            .fonte.slug,
+            "ml-cupons-afiliados",
+        )

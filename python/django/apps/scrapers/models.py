@@ -363,7 +363,23 @@ class EventoRaspagem(models.Model):
 
 
 class CupomNormalizado(models.Model):
-    """Cupom independente de produto; só é publicável via ProdutoCupom confirmado."""
+    """Cupom independente de produto.
+
+    Códigos digitáveis podem ser publicados sem produto. Cupons de ativação só
+    ficam prontos depois de uma associação ``ProdutoCupom`` comprovada.
+    """
+    REDEMPTION_MODES = [
+        ("", "Legado/indefinido"), ("code", "Código"),
+        ("activation", "Ativação"),
+    ]
+    SCOPE_TYPES = [
+        ("", "Legado/indefinido"), ("sitewide", "Site inteiro"),
+        ("category", "Categoria"), ("container", "Container"),
+        ("product", "Produto"),
+    ]
+    AUDIENCE_SCOPES = [
+        ("public", "Público"), ("organization", "Organização"),
+    ]
     fonte = models.ForeignKey(FonteIngestao, on_delete=models.CASCADE,
                               related_name="cupons")
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
@@ -384,6 +400,18 @@ class CupomNormalizado(models.Model):
     external_id = models.CharField(max_length=160)
     marketplace = models.CharField(max_length=20, db_index=True)
     tipo_conteudo = models.CharField(max_length=20, default="voucher", db_index=True)
+    # Campos tipados espelham as regras históricas do JSON e tornam o funil
+    # consultável sem inferências diferentes em cada consumidor. O valor vazio
+    # é aceito apenas para compatibilidade durante o backfill de linhas legadas.
+    redemption_mode = models.CharField(
+        max_length=16, choices=REDEMPTION_MODES, blank=True, default="", db_index=True,
+    )
+    scope_type = models.CharField(
+        max_length=16, choices=SCOPE_TYPES, blank=True, default="", db_index=True,
+    )
+    audience_scope = models.CharField(
+        max_length=16, choices=AUDIENCE_SCOPES, default="public", db_index=True,
+    )
     anunciante_nome = models.CharField(max_length=180, blank=True, default="")
     titulo = models.CharField(max_length=255)
     codigo = models.CharField(max_length=120, blank=True, default="")
@@ -520,6 +548,13 @@ class CupomDisponibilidadeEvento(models.Model):
     to_stage = models.CharField(max_length=24)
     category = models.CharField(max_length=32, blank=True, default="")
     reason_code = models.CharField(max_length=64, blank=True, default="")
+    marketplace = models.CharField(max_length=20, blank=True, default="", db_index=True)
+    source = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    use_mode = models.CharField(max_length=24, blank=True, default="", db_index=True)
+    evidence_strength = models.CharField(max_length=32, blank=True, default="")
+    attempt = models.PositiveIntegerField(default=0)
+    duration_ms = models.PositiveIntegerField(default=0)
+    source_run_id = models.CharField(max_length=80, blank=True, default="", db_index=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
 
@@ -539,6 +574,9 @@ class ProdutoCupom(models.Model):
     status = models.CharField(max_length=20, choices=STATUS, default="provavel")
     verificado_em = models.DateTimeField(null=True, blank=True)
     evidencia = models.JSONField(default=dict, blank=True)
+    # A campanha pertence à associação, não ao Produto. Um mesmo anúncio pode
+    # participar de várias campanhas simultaneamente.
+    activation_key = models.CharField(max_length=160, blank=True, default="", db_index=True)
     # Snapshot monetario especifico deste cupom. O mesmo Produto pode participar de
     # campanhas diferentes; por isso o preco final nao pode morar apenas em Produto.
     preco_original = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
@@ -547,6 +585,44 @@ class ProdutoCupom(models.Model):
 
     class Meta:
         unique_together = ("produto", "cupom")
+
+
+class LinkAfiliadoProdutoCupomUsuario(models.Model):
+    """Link afiliado verificado para uma associação produto–cupom específica."""
+    usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="links_produto_cupom",
+    )
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, null=True, blank=True,
+        db_index=True, related_name="links_produto_cupom",
+    )
+    relacao = models.ForeignKey(
+        ProdutoCupom, on_delete=models.CASCADE, related_name="links_usuarios",
+    )
+    url_isca = models.URLField(max_length=1000, blank=True, default="")
+    link_afiliado = models.URLField(max_length=1500, blank=True, default="")
+    estado = models.CharField(
+        max_length=20,
+        choices=[("pendente", "Na fila"), ("pronto", "Pronto"),
+                 ("erro", "Falhou"), ("nao_afiliavel", "Não afiliável")],
+        default="pendente", db_index=True,
+    )
+    verificado_ok = models.BooleanField(null=True, blank=True, default=None,
+                                        db_index=True)
+    verificado_em = models.DateTimeField(null=True, blank=True, db_index=True)
+    url_canonica = models.URLField(max_length=1500, blank=True, default="")
+    verificacao_motivo = models.CharField(max_length=300, blank=True, default="")
+    tentativas = models.PositiveIntegerField(default=0)
+    ultima_tentativa = models.DateTimeField(null=True, blank=True)
+    proxima_tentativa = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["usuario", "relacao"], name="uniq_link_produto_cupom_usuario",
+            ),
+        ]
 
 
 class CupomPreparacao(models.Model):
@@ -570,6 +646,11 @@ class CupomPreparacao(models.Model):
     verificado_em = models.DateTimeField(null=True, blank=True, db_index=True)
     proxima_tentativa = models.DateTimeField(null=True, blank=True, db_index=True)
     erro = models.CharField(max_length=500, blank=True, default="")
+    reason_code = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    safe_detail = models.CharField(max_length=255, blank=True, default="")
+    tentativas = models.PositiveIntegerField(default=0)
+    duracao_ms = models.PositiveIntegerField(default=0)
+    source_run_id = models.CharField(max_length=80, blank=True, default="", db_index=True)
 
     class Meta:
         constraints = [
@@ -739,6 +820,21 @@ class LinkAfiliadoCupomUsuario(models.Model):
     url_origem = models.URLField(max_length=1000)
     link_afiliado = models.URLField(max_length=1500)
     afiliado_ok = models.BooleanField(default=False)
+    ESTADOS = [
+        ("pendente", "Na fila"), ("pronto", "Link gerado"),
+        ("nao_afiliavel", "Não afiliável"), ("erro", "Falhou"),
+    ]
+    estado = models.CharField(max_length=20, choices=ESTADOS, default="pendente",
+                              db_index=True)
+    verificado_ok = models.BooleanField(null=True, blank=True, default=None,
+                                        db_index=True)
+    verificado_em = models.DateTimeField(null=True, blank=True, db_index=True)
+    url_canonica = models.URLField(max_length=1500, blank=True, default="")
+    verificacao_motivo = models.CharField(max_length=300, blank=True, default="")
+    tentativas = models.PositiveIntegerField(default=0)
+    ultimo_erro = models.CharField(max_length=300, blank=True, default="")
+    ultima_tentativa = models.DateTimeField(null=True, blank=True)
+    proxima_tentativa = models.DateTimeField(null=True, blank=True, db_index=True)
     atualizado_em = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -1137,6 +1233,26 @@ class ConfiguracaoEnvio(models.Model):
     divulgacao_afiliado = models.CharField(max_length=180, blank=True, default="")
     template_a = models.TextField(blank=True, default="")
     template_b = models.TextField(blank=True, default="")
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(tipo="aviso_cupons")
+                    | ~models.Q(marketplace="")
+                    | models.Q(ativo=False)
+                ),
+                name="aviso_cupom_ativo_exige_marketplace",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.tipo == self.TIPO_AVISO_CUPONS and self.ativo and not self.marketplace:
+            from django.core.exceptions import ValidationError
+            raise ValidationError({
+                "marketplace": "Escolha Mercado Livre ou Amazon para o aviso de cupons.",
+            })
 
     def dentro_da_janela(self, agora) -> bool:
         """True se a hora local de `agora` está na janela de envio."""

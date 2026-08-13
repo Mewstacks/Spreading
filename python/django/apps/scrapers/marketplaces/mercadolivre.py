@@ -229,9 +229,11 @@ class MercadoLivre(Marketplace):
                                                  "cupons": cupons,
                                                  "componentes": parciais})
 
-    def build_affiliate_link(self, produto, usuario=None):
+    def build_affiliate_link(self, produto, usuario=None, activation_key=""):
         from apps.scrapers.scraper_mercadolivre.link import gerar_link_afiliado_para_produto
-        return gerar_link_afiliado_para_produto(produto, usuario=usuario)
+        return gerar_link_afiliado_para_produto(
+            produto, usuario=usuario, activation_key=activation_key,
+        )
 
     def verify_affiliate_tag(self, link, usuario=None):
         from apps.scrapers.scraper_mercadolivre.link import link_tem_tag_afiliado
@@ -315,7 +317,7 @@ class MercadoLivre(Marketplace):
         return buscar_por_termo(termo_busca, min_desconto=min_desconto, macro=macro,
                                 usuario=usuario)
 
-    def prefetch_links(self, produtos, usuario=None, faixa=None):
+    def prefetch_links(self, produtos, usuario=None, faixa=None, activation_keys=None):
         """Pré-gera links em lote (uma sessão Playwright). Retorna (gerados, falhas).
 
         O pool ML é compartilhado, mas a SESSÃO é por usuário: `usuario` diz qual
@@ -333,4 +335,7 @@ class MercadoLivre(Marketplace):
                 raise BrowserResourceUnavailable(
                     "Capacidade de browser ou sessão ML ocupada; links serão retomados."
                 )
-            return gerar_links_em_lote(produtos, usuario=usuario, faixa=faixa)
+            return gerar_links_em_lote(
+                produtos, usuario=usuario, faixa=faixa,
+                activation_keys=activation_keys,
+            )

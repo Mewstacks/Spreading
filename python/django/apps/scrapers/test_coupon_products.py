@@ -11,8 +11,8 @@ from django.utils import timezone
 
 from apps.scrapers.coupon_rules import cupom_publicavel
 from apps.scrapers.models import (
-    CupomNormalizado, CupomPreparacao, FonteIngestao, LinkAfiliadoUsuario, Produto,
-    ProdutoCupom,
+    CupomNormalizado, CupomPreparacao, FonteIngestao,
+    LinkAfiliadoProdutoCupomUsuario, LinkAfiliadoUsuario, Produto, ProdutoCupom,
 )
 
 
@@ -51,11 +51,26 @@ class CouponPreparationTests(TestCase):
         return Produto.objects.create(**values)
 
     def _verified(self, owner, product):
-        return LinkAfiliadoUsuario.objects.create(
+        link = LinkAfiliadoUsuario.objects.create(
             usuario=owner, produto=product, afiliado_ok=True, estado="pronto",
             link_afiliado=f"https://affiliate.example/{owner.id}/{product.id}",
             verificado_ok=True, verificado_em=timezone.now(),
         )
+        for relation in ProdutoCupom.objects.filter(produto=product, status="confirmado"):
+            url_isca = product.link_produto
+            if relation.activation_key:
+                separator = "&" if "?" in url_isca else "?"
+                url_isca += f"{separator}coupon_campaign_id={relation.activation_key}"
+            LinkAfiliadoProdutoCupomUsuario.objects.update_or_create(
+                usuario=owner, relacao=relation,
+                defaults={
+                    "url_isca": url_isca, "link_afiliado": link.link_afiliado,
+                    "estado": "pronto", "verificado_ok": True,
+                    "verificado_em": timezone.now(),
+                    "url_canonica": link.link_afiliado,
+                },
+            )
+        return link
 
     def test_tema_parecido_nao_cria_associacao_mas_codigo_no_item_cria(self):
         from apps.scrapers.coupon_products import preparar_cupom
@@ -685,7 +700,11 @@ class CouponPreparationTests(TestCase):
             coletor=lambda _url, _paginas: {"MLB998877"}, limite_cupons=10,
         )
         produto.refresh_from_db()
-        self.assertEqual(produto.campanha_id, "99")
+        self.assertEqual(produto.campanha_id, "")
+        self.assertEqual(
+            ProdutoCupom.objects.get(produto=produto, cupom=cupom).activation_key,
+            "99",
+        )
 
         relacoes = preparar_cupom(
             cupom, self.user, force=True, permitir_rede=False,
@@ -1116,11 +1135,8 @@ class CupomAtivacaoMercadoLivreTests(TestCase):
 
 
 @override_settings(ML_CUPONS_ATIVACAO_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
-class ProdutoDeCupomPrecisaCarregarACampanhaTests(TestCase):
-    """O link enviado é o do PRODUTO, e ele só carrega coupon_campaign_id quando
-    produto.campanha_id está preenchido. Produto casado só pelo container vem do
-    feed com campanha vazia: divulgá-lo diria "ative o cupom" e a pessoa cairia
-    numa página sem cupom nenhum."""
+class ProdutoCupomCarregaACampanhaTests(TestCase):
+    """A campanha pertence ao vínculo; produto pode participar de várias."""
 
     def setUp(self):
         self.user = get_user_model().objects.create_user("cupomml", password="test")
@@ -1146,13 +1162,14 @@ class ProdutoDeCupomPrecisaCarregarACampanhaTests(TestCase):
         certo = self._produto("111111", "777")
         self.assertIn(certo, _base_produtos(self.cupom, self.user))
 
-    def test_produto_casado_so_pelo_container_fica_de_fora(self):
+    def test_produto_casado_so_pelo_container_entra_pelo_vinculo(self):
         from apps.scrapers.coupon_products import _base_produtos
         do_feed = self._produto("222222", "")           # veio do /ofertas
         ProdutoCupom.objects.create(                    # casar_cupons_container
             produto=do_feed, cupom=self.cupom, status="confirmado",
+            activation_key="777",
             evidencia={"regra": "container"})
-        self.assertNotIn(do_feed, _base_produtos(self.cupom, self.user))
+        self.assertIn(do_feed, _base_produtos(self.cupom, self.user))
 
     def test_cupom_de_codigo_nao_exige_campanha_no_produto(self):
         """Com código digitável o desconto é aplicado no checkout: o link não
@@ -1372,11 +1389,11 @@ class MapaDeRelacoesEmLoteTests(TestCase):
     def test_numero_de_queries_nao_cresce_com_a_quantidade(self):
         from apps.scrapers.coupon_products import mapa_relacoes_prontas
         poucos = [self._cupom_pronto(f"1{i}") for i in range(2)]
-        with self.assertNumQueries(3):
+        with self.assertNumQueries(4):
             mapa_relacoes_prontas(self.user, poucos)
 
         muitos = poucos + [self._cupom_pronto(f"2{i}") for i in range(20)]
-        with self.assertNumQueries(3):
+        with self.assertNumQueries(4):
             mapa_relacoes_prontas(self.user, muitos)
 
     def test_paridade_com_a_versao_por_cupom(self):

@@ -259,8 +259,8 @@
           </div>
           <div>
             <label>Loja</label>
-            <select name="marketplace">
-              <option value="">Todas as lojas</option>
+            <select name="marketplace" id="sel-marketplace">
+              <option value="" id="marketplace-all">Todas as lojas</option>
               {% for mk in marketplaces %}<option value="{{ mk }}">{% if mk == "mercadolivre" %}Mercado Livre{% elif mk == "amazon" %}Amazon{% else %}{{ mk|title }}{% endif %}</option>{% endfor %}
             </select>
           </div>
@@ -408,6 +408,13 @@
     document.querySelectorAll('[data-so-ofertas]').forEach(el => {
       el.style.display = aviso ? 'none' : '';
     });
+    const marketplace = document.getElementById('sel-marketplace');
+    const allStores = document.getElementById('marketplace-all');
+    if (allStores) allStores.disabled = aviso;
+    if (aviso && marketplace && !marketplace.value) {
+      marketplace.value = 'mercadolivre';
+    }
+    if (marketplace) marketplace.required = aviso;
   }
   document.addEventListener('DOMContentLoaded', aplicarTipoRegra);
 

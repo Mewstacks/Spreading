@@ -48,7 +48,7 @@ def cupons_frescos_q(*, agora=None, max_age_hours=COUPON_MAX_AGE_HOURS,
 
 def expire_stale(max_age_hours=PRODUCT_MAX_AGE_HOURS):
     """Expiração gradual; não remove linhas nem histórico."""
-    from apps.scrapers.models import Produto, CupomNormalizado, ProdutoCupom
+    from apps.scrapers.models import CupomNormalizado, Produto, ProdutoCupom
     now = timezone.now()
     cutoff = now - timedelta(hours=max_age_hours)
     stale_products = Produto.objects.filter(
@@ -64,6 +64,70 @@ def expire_stale(max_age_hours=PRODUCT_MAX_AGE_HOURS):
     ProdutoCupom.objects.filter(cupom__estado="expirado").exclude(
         status="expirado").update(status="expirado")
     return {"products": stale_products, "coupons": expired_coupons}
+
+
+def purgar_eventos_cupons_antigos(dias=90):
+    from apps.scrapers.models import CupomDisponibilidadeEvento
+    cutoff = timezone.now() - timedelta(days=dias)
+    apagados, _ = CupomDisponibilidadeEvento.objects.filter(
+        created_at__lt=cutoff,
+    ).delete()
+    return apagados
+
+
+def diagnosticar_alertas_pipeline_cupons(*, agora=None):
+    """Contagens acionáveis do SLA do funil, sem alterar estado de negócio."""
+    from django.conf import settings
+    from django.db.models import F
+    from apps.scrapers.models import (
+        CupomDisponibilidade, CupomPreparacao, ExecucaoIngestao,
+    )
+
+    agora = agora or timezone.now()
+    cutoff_20m = agora - timedelta(minutes=20)
+    cutoff_browser = agora - timedelta(minutes=60)
+    link_cutoff = agora - timedelta(hours=max(
+        1, int(getattr(settings, "COUPON_AFFILIATE_LINK_TTL_HOURS", 168) or 168),
+    ))
+    active = Q(cupom__estado="ativo") & cupons_frescos_q(
+        agora=agora, prefix="cupom__",
+    )
+    projections = CupomDisponibilidade.objects.filter(active)
+    counts = {
+        "projection_stale": projections.filter(updated_at__lt=cutoff_20m).count(),
+        "code_not_ready_20m": projections.filter(
+            use_mode="code_notice", cupom__primeira_observacao__lt=cutoff_20m,
+        ).exclude(stage="ready").count(),
+        "prepared_verified_not_ready_20m": projections.filter(
+            use_mode="product_activation",
+            cupom__produtos__status="confirmado",
+            cupom__produtos__links_usuarios__usuario_id=F("usuario_id"),
+            cupom__produtos__links_usuarios__verificado_ok=True,
+            cupom__produtos__links_usuarios__verificado_em__gte=link_cutoff,
+            updated_at__lt=cutoff_20m,
+        ).exclude(stage="ready").distinct().count(),
+        "browser_wait_over_60m": CupomPreparacao.objects.filter(
+            reason_code="capacity_deferred", verificado_em__lt=cutoff_browser,
+        ).count(),
+    }
+    incomplete_sources = 0
+    source_ids = ExecucaoIngestao.objects.values_list("fonte_id", flat=True).distinct()
+    for source_id in source_ids:
+        recent = list(ExecucaoIngestao.objects.filter(
+            fonte_id=source_id,
+        ).order_by("-iniciada_em")[:2])
+        if len(recent) < 2 or not any(
+                "complete" in (run.metricas or {}) for run in recent):
+            continue
+        if all(
+            run.status not in {"ok", "empty"}
+            or run.health_status not in {"healthy", "healthy_empty", "ok"}
+            or not bool((run.metricas or {}).get("complete"))
+            for run in recent
+        ):
+            incomplete_sources += 1
+    counts["source_without_complete_two_cycles"] = incomplete_sources
+    return counts
 
 
 def purgar_eventos_antigos(dias=30):

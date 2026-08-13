@@ -103,10 +103,24 @@ ML_VERIFICACAO_THREADS = int(os.getenv("ML_VERIFICACAO_THREADS", "4"))
 # válidos são descartados como "feature_global_kill_switch". Para conter um
 # problema sem deploy, desligue com ML_CUPONS_ATIVACAO_ENABLED=0 no ambiente.
 ML_CUPONS_ATIVACAO_ENABLED = os.getenv("ML_CUPONS_ATIVACAO_ENABLED", "1") == "1"
+ML_COUPON_CODES_ENABLED = os.getenv("ML_COUPON_CODES_ENABLED", "1") == "1"
+AMAZON_COUPON_ACTIVATION_ENABLED = (
+    os.getenv("AMAZON_COUPON_ACTIVATION_ENABLED", "1") == "1"
+)
+AMAZON_COUPON_CODES_ENABLED = os.getenv("AMAZON_COUPON_CODES_ENABLED", "1") == "1"
 PILOT_ORGANIZATION_IDS = {
     value.strip() for value in os.getenv("PILOT_ORGANIZATION_IDS", "").split(",")
     if value.strip()
 }
+ML_CUPONS_ATIVACAO_PILOT_ORGANIZATION_IDS = {
+    value.strip()
+    for value in os.getenv("ML_CUPONS_ATIVACAO_PILOT_ORGANIZATION_IDS", "").split(",")
+    if value.strip()
+}
+COUPON_AFFILIATE_LINK_TTL_HOURS = max(
+    1, int(os.getenv("COUPON_AFFILIATE_LINK_TTL_HOURS", "168")),
+)
+AMAZON_GENERAL_COUPONS_URL = os.getenv("AMAZON_GENERAL_COUPONS_URL", "").strip()
 # Sem default: o antigo apontava pra landing de afiliados (não um relatório), então o
 # sync raspava uma página sem tabela e reportava "erro" pra sempre. Vazio = a tela diz
 # "sincronização automática indisponível", que é a verdade, em vez de erro recorrente.

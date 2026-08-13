@@ -535,6 +535,7 @@ class RLSPolicyTests(SimpleTestCase):
             "scrapers_eventoraspagem",
             "scrapers_cupomdisponibilidade",
             "scrapers_cupomdisponibilidadeevento",
+            "scrapers_linkafiliadoprodutocupomusuario",
             "scrapers_publicacaotentativa",
             "scrapers_publicacaoevento",
             "scrapers_relatoriosync",

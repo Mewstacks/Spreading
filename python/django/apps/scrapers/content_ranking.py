@@ -97,11 +97,12 @@ def _product_candidates(config, limit):
 
 def _coupon_candidates(config, limit):
     now = timezone.now()
+    from apps.scrapers.coupon_rules import cupons_visiveis_q
     from apps.scrapers.maintenance import cupons_frescos_q
 
     query = CupomNormalizado.objects.select_related(
         "fonte", "integracao", "programa").filter(estado="ativo").filter(
-        Q(owner__isnull=True) | Q(owner=config.owner),
+        cupons_visiveis_q(config.owner),
         Q(inicio__isnull=True) | Q(inicio__lte=now),
         cupons_frescos_q(agora=now),
     )

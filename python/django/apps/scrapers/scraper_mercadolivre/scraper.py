@@ -6,6 +6,7 @@ import logging
 from contextlib import contextmanager, ExitStack
 
 import requests
+from django.conf import settings
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError, SessaoExpirada, ua_aleatorio
 from apps.scrapers.carga import coordinated_ml_browser
@@ -642,8 +643,12 @@ def projetar_catalogo_cupons(faixa=None, desde=None):
     """
     emitir_fase("Catalogando campanhas personalizadas do ML", 0.0, faixa)
     fonte, _ = FonteIngestao.objects.get_or_create(
-        slug="mercadolivre-web", defaults={
-            "marketplace": "mercadolivre", "nome": "Mercado Livre — páginas públicas"})
+        slug="mercadolivre-campanhas", defaults={
+            "marketplace": "mercadolivre",
+            "nome": "Mercado Livre — campanhas autenticadas"})
+    # A coleta lê uma área autenticada. Até outra fonte pública confirmar a mesma
+    # campanha, ela pertence à organização cuja sessão de sistema a observou.
+    organization_id = getattr(settings, "ML_SYSTEM_ORGANIZATION_ID", "") or None
 
     vigentes = list(Cupom.objects.filter(estado="ativo"))
     # Anti-wipe: sem cupom ativo, não desativa o catálogo (a coleta pode ter caído).
@@ -707,6 +712,13 @@ def projetar_catalogo_cupons(faixa=None, desde=None):
             fonte=fonte, external_id=ext,
             defaults={
                 "marketplace": "mercadolivre",
+                "organization_id": organization_id,
+                "data_scope": "organization",
+                "audience_scope": "organization",
+                "redemption_mode": "activation",
+                "scope_type": "container" if (
+                    regras.get("container_url") or regras.get("container_name")
+                ) else "category" if regras.get("escopo") else "product",
                 "titulo": titulo[:255],
                 # `code`/`inputCode` desta API e um token opaco de ativacao, nao
                 # um codigo digitavel. Mantemos como evidencia e nunca o exibimos.
@@ -725,7 +737,7 @@ def projetar_catalogo_cupons(faixa=None, desde=None):
                 "confianca": "media",
                 "estado": "ativo",
                 "regras": regras,
-                "evidencia": {"transport": "public-web", "association": "campaign",
+                "evidencia": {"transport": "authenticated-web", "association": "campaign",
                               # EvidenceStrength: distingue container publicado
                               # pela fonte de URL que o próprio scraper deduziu.
                               "evidence_strength": _forca_evidencia_da_campanha(
@@ -738,7 +750,7 @@ def projetar_catalogo_cupons(faixa=None, desde=None):
         from apps.scrapers.sources.persistence import record_coupon_observation
         record_coupon_observation(
             cupom_normalizado, health_status="healthy", outcome="accepted",
-            evidence={"association": "campaign", "public": True},
+            evidence={"association": "campaign", "public": False},
         )
 
     # Sincroniza o catálogo com o estado do `Cupom`: campanhas que saíram do ar

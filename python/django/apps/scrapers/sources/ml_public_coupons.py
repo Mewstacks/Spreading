@@ -32,11 +32,12 @@ from django.conf import settings
 from django.utils import timezone
 
 from .base import IngestedItem, SourceAdapter
-from apps.scrapers.coupon_rules import normalizar_regras_cupom
+from apps.scrapers.coupon_rules import normalizar_regras_cupom, tem_restricao_publico
 from apps.scrapers.source_diagnostics import capture_public_text_diagnostic
 
 DEFAULT_URL = ("https://afiliadosmercadolivre.github.io/"
                "cupons-afiliadosmercadolivre/")
+DEFAULT_GENERAL_DESTINATION = "https://www.mercadolivre.com.br/"
 _HTTP_CACHE = {}
 
 
@@ -364,12 +365,41 @@ class MLPublicCouponsSource(SourceAdapter):
             raw_link = str(_campo(
                 c, "container_url", "url", "scope_url", default="",
             ) or "").strip()
+            # Um código digitável é aplicado no checkout e não precisa carregar
+            # ``coupon_campaign_id``. A fonte oficial publica vários códigos por
+            # categoria com ``-``/id de categoria no destino; descartá-los por não
+            # serem containers completos eliminava promoções válidas. Mantemos o
+            # escopo textual e usamos uma landing pública allowlisted, cuja versão
+            # afiliada ainda precisa passar pelo verificador por usuário.
             link = _safe_ml_container_url(raw_link)
-            if not is_site and not link:
+            if not link:
+                fallback = getattr(
+                    settings, "ML_GENERAL_COUPON_DESTINATION", "",
+                ) or DEFAULT_GENERAL_DESTINATION
+                link = fallback if str(fallback).startswith(
+                    "https://www.mercadolivre.com.br/"
+                ) else DEFAULT_GENERAL_DESTINATION
+
+            regras = normalizar_regras_cupom({
+                "tipo_desconto": "porcentagem",
+                "discount_num": _campo(c, "discount_num", "discount_value"),
+                "valor_desconto": valor,
+                "min_compra": _campo(c, "min_compra", "minimum_purchase"),
+                "desconto_max": _campo(c, "desconto_max", "max_discount"),
+                "acao": acao,
+                "container_url": _safe_ml_container_url(raw_link),
+                "container_name": container_name,
+                "is_mar_aberto": is_site,
+                "dia_inicio": dia_inicio,
+                "dia_fim": dia_fim,
+                "modo_resgate": "codigo",
+                "escopo": escopo,
+            }, external_id=external_id, codigo=nome)
+            if regras.get("valor_desconto") in (None, "", 0):
                 rejeitados += 1
                 aceitos -= 1
                 vistos.discard(external_id)
-                rejeicoes["invalid_container"] = rejeicoes.get("invalid_container", 0) + 1
+                rejeicoes["invalid_discount"] = rejeicoes.get("invalid_discount", 0) + 1
                 continue
 
             yield IngestedItem(
@@ -380,22 +410,11 @@ class MLPublicCouponsSource(SourceAdapter):
                 canonical_url=link[:1000],
                 title=titulo,
                 coupon_code=normalized_code[:120],
-                coupon_rules=normalizar_regras_cupom({
-                    "tipo_desconto": "porcentagem",
-                    "discount_num": _campo(c, "discount_num", "discount_value"),
-                    "valor_desconto": valor,
-                    "min_compra": _campo(c, "min_compra", "minimum_purchase"),
-                    "desconto_max": _campo(c, "desconto_max", "max_discount"),
-                    "acao": acao,
-                    "container_url": link,
-                    "container_name": container_name,
-                    "is_mar_aberto": is_site,
-                    "dia_inicio": dia_inicio,
-                    "dia_fim": dia_fim,
-                    "modo_resgate": "codigo",
-                    "escopo": escopo,
-                }, external_id=external_id, codigo=nome),
-                restricted=not is_site,
+                coupon_rules=regras,
+                restricted=tem_restricao_publico(
+                    " ".join(str(_campo(c, key, default="") or "")
+                             for key in ("acao", "descricao", "condicoes", "title"))
+                ),
                 flash=bool(_campo(c, "days_left", "dias_restantes") in (0, "0")),
                 starts_at=inicio,
                 valid_until=validade,

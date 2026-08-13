@@ -32,7 +32,8 @@ from apps.scrapers.management.commands.automacao import _rodar_links
 from apps.scrapers.marketplaces.registry import get_marketplace
 from apps.scrapers.monitor_conexao import wa_conectado
 from apps.scrapers.models import (
-    CliquePublicacao, ConfiguracaoEnvio, Cupom, CupomNormalizado, FonteIngestao,
+    CliquePublicacao, ConfiguracaoEnvio, Cupom, CupomDisponibilidade,
+    CupomNormalizado, FonteIngestao,
     HistoricoEnvio, LinkAfiliadoUsuario, Produto, EventoOperacional, Publicacao,
     ReceitaAfiliado, RelatorioSync,
 )
@@ -2986,6 +2987,10 @@ class RankingAndCooldownTests(TestCase):
 
 
 class MonitorCatalogMaintenanceTests(SimpleTestCase):
+    @patch("apps.scrapers.maintenance.diagnosticar_alertas_pipeline_cupons",
+           return_value={})
+    @patch("apps.scrapers.maintenance.purgar_eventos_cupons_antigos",
+           return_value=0)
     @patch("apps.scrapers.manual_scraping.atualizar_diagnostico_fila", return_value=0)
     @patch("apps.scrapers.manual_scraping.recuperar_jobs_abandonados", return_value=0)
     @patch("apps.scrapers.incidentes_saude.fechar_conexoes_restabelecidas",
@@ -2996,7 +3001,8 @@ class MonitorCatalogMaintenanceTests(SimpleTestCase):
     @patch("apps.scrapers.management.commands.monitorar.verificar_e_notificar",
            return_value={"checados": 1, "alertas_enviados": 0})
     def test_monitor_expires_catalog_even_without_scrape(
-        self, _connections, expire, _reconcile, _close, _recover, _queue
+        self, _connections, expire, _reconcile, _close, _recover, _queue,
+        _purge_coupon_events, _coupon_alerts,
     ):
         from apps.scrapers.management.commands.monitorar import Command
 
@@ -3768,9 +3774,9 @@ class ProjecaoCatalogoCuponsTests(TestCase):
         Cupom.objects.create(campanha_id="333", titulo="Cupom vencido",
                              estado="expirado", valor_desconto=5.0, valor_minimo=0.0)
         fonte, _ = FonteIngestao.objects.get_or_create(
-            slug="mercadolivre-web", defaults={
+            slug="mercadolivre-campanhas", defaults={
                 "marketplace": "mercadolivre",
-                "nome": "Mercado Livre — páginas públicas"})
+                "nome": "Mercado Livre — campanhas autenticadas"})
         # Projeção antiga de uma campanha que saiu do ar + cupom de checkout,
         # que a sincronização de campanhas nunca pode tocar.
         CupomNormalizado.objects.create(
@@ -6545,6 +6551,11 @@ class EndpointsEnvioPostTests(TransactionTestCase):
             titulo="Cupom SSE", codigo="SSE20",
             regras={"modo_resgate": "codigo"}, estado="ativo",
         )
+        CupomDisponibilidade.objects.create(
+            organization=self.user.perfil.active_organization,
+            usuario=self.user, cupom=cupom, channel="whatsapp",
+            use_mode="code_notice", stage="ready",
+        )
 
         response = self.client.post(reverse("scraper-enviar-cupom"), {
             "cupom": cupom.id, "grupo": "123@g.us", "canal": "whatsapp",
@@ -7484,11 +7495,16 @@ class AvisoCuponsSelecaoTests(TestCase):
         campos = {"tipo_desconto": "porcentagem", "valor_desconto": 20,
                   "valor_minimo": 50, "modo_resgate": "codigo"}
         campos.update(extra.pop("regras", {}))
-        return CupomNormalizado.objects.create(
+        coupon = CupomNormalizado.objects.create(
             fonte=self.fonte, external_id=f"aviso:{codigo}",
             marketplace=extra.pop("marketplace", "mercadolivre"),
             titulo=f"Cupom {codigo}", codigo=codigo, regras=campos,
             estado="ativo", ultima_observacao=timezone.now(), **extra)
+        CupomDisponibilidade.objects.create(
+            organization=self.cfg.organization, usuario=self.user, cupom=coupon,
+            channel=self.cfg.canal, use_mode="code_notice", stage="ready",
+        )
+        return coupon
 
     def test_pega_codigo_sem_exigir_produto_preparado(self):
         # O ponto do broadcast: ele NÃO passa pelo portão de associação
@@ -7527,6 +7543,15 @@ class AvisoCuponsSelecaoTests(TestCase):
         from apps.scrapers.ofertas import selecionar_cupons_para_aviso
 
         self._cupom("SOAMAZON", marketplace="amazon")
+        self.assertEqual(selecionar_cupons_para_aviso(self.cfg, self.user), [])
+
+    def test_nao_envia_codigo_que_ainda_nao_chegou_a_ready(self):
+        from apps.scrapers.ofertas import selecionar_cupons_para_aviso
+
+        coupon = self._cupom("AGUARDA10")
+        CupomDisponibilidade.objects.filter(cupom=coupon).update(
+            stage="waiting_link", reason_code="affiliate_link_pending",
+        )
         self.assertEqual(selecionar_cupons_para_aviso(self.cfg, self.user), [])
 
 

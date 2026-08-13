@@ -92,7 +92,15 @@ def _feature_decision(flag_name, organization):
         return False, "organization_disabled"
     if state == "enabled":
         return True, "organization_enabled"
-    allowlist = settings.PILOT_ORGANIZATION_IDS
+    # Allowlists são por recurso. A lista histórica continua valendo apenas para
+    # recursos de rollout explícito (hoje, envio v2). Funcionalidades básicas não
+    # podem herdar acidentalmente o piloto de outro recurso.
+    per_feature = getattr(settings, f"{flag_name}_PILOT_ORGANIZATION_IDS", None)
+    allowlist = (
+        per_feature if per_feature is not None
+        else settings.PILOT_ORGANIZATION_IDS if flag_name in _EXPLICIT_ROLLOUT_FLAGS
+        else set()
+    )
     if not allowlist:
         # Recursos com publicação/browser nunca abrem globalmente apenas porque a
         # allowlist ficou vazia. Exigem override explícito ou organização piloto.

@@ -31,7 +31,8 @@ from django.utils.dateparse import parse_datetime
 from apps.scrapers.auxiliar import iniciar_browser
 from apps.scrapers.carga import coordinated_ml_browser
 from apps.scrapers.coupon_rules import (
-    derivar_categoria_cupom, rotulo_anunciante, tem_restricao_publico,
+    classificar_contrato_cupom, derivar_categoria_cupom, rotulo_anunciante,
+    tem_restricao_publico,
 )
 from apps.scrapers.models import Produto, CupomCodigo, FonteIngestao, CupomNormalizado
 from apps.scrapers.progresso import emitir_fase, emitir_progresso
@@ -303,6 +304,13 @@ def _salvar_cupons_smart(cupons):
             "is_mar_aberto": False,
             "dia_inicio": "", "dia_fim": "",
         }
+        categoria = c["categoria"] or derivar_categoria_cupom(c["titulo"], regras)
+        contrato = classificar_contrato_cupom(
+            regras=regras, external_id=f"campanha:{c['campanha_id']}",
+            evidencia={"transport": "public-web", "association": "unverified",
+                       "total_items": c["total_itens"]},
+            categoria=categoria,
+        )
         cupom_obj, _ = CupomNormalizado.objects.update_or_create(
             fonte=fonte, external_id=f"campanha:{c['campanha_id']}",
             defaults={
@@ -310,7 +318,7 @@ def _salvar_cupons_smart(cupons):
                 "titulo": c["titulo"][:255],
                 # `code` do payload é token opaco de ativação, não código digitável.
                 "codigo": "",
-                "categoria": c["categoria"] or derivar_categoria_cupom(c["titulo"], regras),
+                "categoria": categoria,
                 "anunciante_nome": rotulo_anunciante(
                     c["titulo"], regras, categoria_fallback=c["categoria"]),
                 "link": c["container_url"][:1000],
@@ -321,6 +329,7 @@ def _salvar_cupons_smart(cupons):
                 "confianca": "media",
                 "estado": "ativo",
                 "regras": regras,
+                **contrato,
                 "evidencia": {"transport": "public-web", "association": "unverified",
                               "total_items": c["total_itens"]},
             },
@@ -468,14 +477,20 @@ def mapear_cupons_codigo(faixa=None, usuario=None):
                       "modo_resgate": "codigo", "escopo": "",
                       "container_url": "", "container_name": "",
                       "is_mar_aberto": False, "dia_inicio": "", "dia_fim": ""}
+        evidencia_cod = {"transport": "public-web", "association": "unverified"}
+        contrato = classificar_contrato_cupom(
+            regras=regras_cod, external_id=f"checkout:{cod}", codigo=cod,
+            evidencia=evidencia_cod,
+        )
         cupom_obj, _ = CupomNormalizado.objects.update_or_create(
             fonte=fonte, external_id=f"checkout:{cod}",
             defaults={"marketplace": "mercadolivre", "titulo": f"Cupom {cod}",
                       "codigo": cod, "link": "https://www.mercadolivre.com.br/ofertas/cupons",
                       "categoria": derivar_categoria_cupom(f"Cupom {cod}", regras_cod),
                       "regras": regras_cod,
+                      **contrato,
                       "confianca": "baixa", "estado": "ativo",
-                      "evidencia": {"transport": "public-web", "association": "unverified"}},
+                      "evidencia": evidencia_cod},
         )
         from apps.scrapers.sources.persistence import record_coupon_observation
         record_coupon_observation(

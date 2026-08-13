@@ -38,11 +38,12 @@ class Marketplace(ABC):
         return 0
 
     @abstractmethod
-    def build_affiliate_link(self, produto, usuario=None) -> dict | None:
+    def build_affiliate_link(self, produto, usuario=None, activation_key="") -> dict | None:
         """
         Gera (ou usa cache) o link de afiliado do produto. Retorna dict com pelo menos
         {'link_afiliado': str, 'afiliado_ok': bool, 'url_isca': str} ou None se falhar.
         `usuario` != None: link/tag DAQUELE usuário (multi-tenant); None = global (compat).
+        `activation_key` é a campanha da relação ProdutoCupom, quando houver.
         """
 
     @abstractmethod
@@ -110,7 +111,7 @@ class Marketplace(ABC):
         """
         return 0
 
-    def prefetch_links(self, produtos, usuario=None, faixa=None):
+    def prefetch_links(self, produtos, usuario=None, faixa=None, activation_keys=None):
         """Pré-gera links em lote. Default: loop sobre build_affiliate_link.
 
         `faixa` (ini, fim) é opcional e só interessa a quem reporta progresso numa
@@ -119,7 +120,9 @@ class Marketplace(ABC):
         gerados = falhas = 0
         for p in produtos:
             try:
-                if self.build_affiliate_link(p, usuario=usuario):
+                if self.build_affiliate_link(
+                        p, usuario=usuario,
+                        activation_key=(activation_keys or {}).get(p.id, "")):
                     gerados += 1
                 else:
                     falhas += 1

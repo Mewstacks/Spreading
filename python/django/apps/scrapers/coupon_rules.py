@@ -9,6 +9,9 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
+from django.db.models import Q
+from django.conf import settings
+
 
 _CODIGO_HUMANO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{2,39}$")
 _ESCOPO_GENERICO = {
@@ -125,11 +128,90 @@ def normalizar_regras_cupom(regras, *, external_id="", codigo="") -> dict:
 
 
 def regras_do_cupom(cupom) -> dict:
-    return normalizar_regras_cupom(
+    regras = normalizar_regras_cupom(
         getattr(cupom, "regras", None),
         external_id=getattr(cupom, "external_id", ""),
         codigo=getattr(cupom, "codigo", ""),
     )
+    modo_tipado = str(getattr(cupom, "redemption_mode", "") or "").lower()
+    if modo_tipado in {"code", "activation"}:
+        regras["modo_resgate"] = "codigo" if modo_tipado == "code" else "ativacao"
+    return regras
+
+
+def classificar_contrato_cupom(*, regras, external_id="", codigo="", evidencia=None,
+                               categoria="", owner=None, data_scope="public") -> dict:
+    """Materializa o contrato tipado mantendo compatibilidade com ``regras``.
+
+    Fontes e importadores usam esta função única; consumidores legados ainda
+    podem ler o JSON até o fim da migração.
+    """
+    normalizadas = normalizar_regras_cupom(
+        regras, external_id=external_id, codigo=codigo,
+    )
+    redemption_mode = (
+        "code" if normalizadas["modo_resgate"] == "codigo" else "activation"
+    )
+    evidence = evidencia if isinstance(evidencia, Mapping) else {}
+    if normalizadas.get("is_mar_aberto"):
+        scope_type = "sitewide"
+    elif normalizadas.get("container_url") or normalizadas.get("container_name"):
+        scope_type = "container"
+    elif evidence.get("asins") or evidence.get("product_ids"):
+        scope_type = "product"
+    elif normalizadas.get("escopo") or categoria:
+        scope_type = "category"
+    else:
+        scope_type = "sitewide" if redemption_mode == "code" else "product"
+    audience_scope = (
+        "organization" if owner is not None or data_scope == "organization" else "public"
+    )
+    return {
+        "redemption_mode": redemption_mode,
+        "scope_type": scope_type,
+        "audience_scope": audience_scope,
+    }
+
+
+def cupons_visiveis_q(usuario, *, prefix=""):
+    """Predicado único de isolamento do catálogo de cupons por audiência.
+
+    ``owner`` continua cobrindo importações privadas históricas. Cupons coletados
+    em área autenticada, porém, pertencem à organização e não podem escapar pelo
+    antigo atalho ``owner IS NULL``.
+    """
+    def campo(nome):
+        return f"{prefix}{nome}"
+    visiveis = Q(**{campo("owner"): usuario}) | Q(
+        **{campo("owner__isnull"): True, campo("audience_scope"): "public"}
+    )
+    if usuario is not None:
+        from apps.accounts.models import organization_for_user
+
+        organization = organization_for_user(usuario)
+        if organization is not None:
+            visiveis |= Q(**{
+                campo("owner__isnull"): True,
+                campo("audience_scope"): "organization",
+                campo("organization"): organization,
+            })
+    return visiveis
+
+
+def coupon_mode_enabled(cupom, *, use_mode=None) -> bool:
+    """Kill switch independente por loja e modo, sem apagar o catálogo."""
+    marketplace = str(getattr(cupom, "marketplace", "") or "").lower()
+    mode = use_mode or (
+        "code_notice" if regras_do_cupom(cupom)["modo_resgate"] == "codigo"
+        else "product_activation"
+    )
+    setting_name = {
+        ("mercadolivre", "code_notice"): "ML_COUPON_CODES_ENABLED",
+        ("mercadolivre", "product_activation"): "ML_CUPONS_ATIVACAO_ENABLED",
+        ("amazon", "code_notice"): "AMAZON_COUPON_CODES_ENABLED",
+        ("amazon", "product_activation"): "AMAZON_COUPON_ACTIVATION_ENABLED",
+    }.get((marketplace, mode))
+    return True if not setting_name else bool(getattr(settings, setting_name, True))
 
 
 def extrair_escopo_produtos(titulo, escopo="") -> str:
@@ -183,7 +265,9 @@ def codigo_publicavel(cupom) -> str:
     return codigo_humano(getattr(cupom, "codigo", ""))
 
 
-_FONTES_ML_ATIVACAO = ("mercadolivre-web", "ml-cupons-afiliados")
+_FONTES_ML_ATIVACAO = (
+    "mercadolivre-web", "mercadolivre-campanhas", "ml-cupons-afiliados",
+)
 
 # Subdomínio de LISTAGEM do ML. Por construção toda URL aqui é uma lista de anúncios
 # filtrada (`/_Container_<id>`, `/_CustId_<id>?coupon_campaign_id=<id>`) — pública e

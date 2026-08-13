@@ -877,8 +877,11 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
     chama preparar_cupom: esse caminho pode escrever no catálogo público e é
     reservado ao worker de preparação.
     """
+    from apps.scrapers.coupon_links import (
+        canonical_coupon_link, coupon_link_verified_and_fresh,
+    )
     from apps.scrapers.marketplaces.registry import get_marketplace
-    from apps.scrapers.afiliado import situacao_dos_links, salvar_cache
+    from apps.scrapers.models import LinkAfiliadoProdutoCupomUsuario
     from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
     from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
 
@@ -887,18 +890,29 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
     produtos = [r.produto for r in relacoes]
     mkt = str(getattr(cupom, "marketplace", "mercadolivre") or "mercadolivre").lower()
     mp = get_marketplace(mkt)
-    situacao = _executar_orm(situacao_dos_links, usuario, produtos)
+    def _links_relacao():
+        return {
+            row.relacao_id: row
+            for row in LinkAfiliadoProdutoCupomUsuario.objects.filter(
+                usuario=usuario, relacao_id__in=[r.pk for r in relacoes],
+            )
+        }
+    situacao = _executar_orm(_links_relacao)
 
     itens, bloqueio = [], None
     relacao_por_produto = {r.produto_id: r for r in relacoes}
     for p in produtos:
         if len(itens) >= limite:
             break
-        link = ((situacao.get(p.id) or {}).get("link_afiliado")
-                or getattr(p, "link_afiliado", "") or "")
+        relation = relacao_por_produto[p.id]
+        row = situacao.get(relation.pk)
+        link = canonical_coupon_link(row) if coupon_link_verified_and_fresh(row) else ""
         if not link and bloqueio is None:
             try:
-                info = mp.build_affiliate_link(p, usuario=usuario)
+                info = mp.build_affiliate_link(
+                    p, usuario=usuario,
+                    activation_key=getattr(relation, "activation_key", ""),
+                )
             except (LoginError, AuthError, SessaoExpirada) as exc:
                 logger.warning("Sessão/navegador ao afiliar produto %s do cupom %s: %s",
                                getattr(p, "id", "?"), getattr(cupom, "pk", "?"), exc)
@@ -922,8 +936,22 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
             if info and info.get("link_afiliado") and info.get("afiliado_ok") is not False:
                 link = info["link_afiliado"]
                 try:
-                    _executar_orm(salvar_cache, usuario, p, link,
-                                  info.get("url_isca", ""), True)
+                    def _salvar_relacao():
+                        LinkAfiliadoProdutoCupomUsuario.objects.update_or_create(
+                            usuario=usuario, relacao=relation,
+                            defaults={
+                                "url_isca": info.get("url_isca", ""),
+                                "link_afiliado": link, "estado": "pronto",
+                                "verificado_ok": info.get("verificado_ok"),
+                                "verificado_em": timezone.now()
+                                if info.get("verificado_ok") is not None else None,
+                                "url_canonica": info.get("url_canonica", "")
+                                if info.get("verificado_ok") else "",
+                                "verificacao_motivo": info.get("verificacao_motivo", ""),
+                                "ultima_tentativa": timezone.now(),
+                            },
+                        )
+                    _executar_orm(_salvar_relacao)
                 except Exception:
                     pass
         if link:
@@ -1025,10 +1053,11 @@ def resolver_link_afiliado_cupom(cupom, usuario):
         from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
         from apps.scrapers.afiliado import tag_amazon
         tag = _executar_orm(tag_amazon, usuario)
-        if not tag or not origem.startswith(("http://", "https://")):
+        if not tag or not origem.startswith("https://"):
             return {"sucesso": False, "motivo": "Cadastre sua tag Amazon para usar este cupom."}
         parts = urlsplit(origem)
-        if not (parts.hostname or "").lower().endswith("amazon.com.br"):
+        hostname = (parts.hostname or "").lower()
+        if not (hostname == "amazon.com.br" or hostname.endswith(".amazon.com.br")):
             return {"sucesso": False, "motivo": "O link informado não pertence à Amazon Brasil."}
         query = dict(parse_qsl(parts.query, keep_blank_values=True))
         query["tag"] = tag
@@ -1040,20 +1069,70 @@ def resolver_link_afiliado_cupom(cupom, usuario):
                 "motivo": "Esta loja ainda não oferece link afiliado para cupons."}
     def _cache_do_par():
         return LinkAfiliadoCupomUsuario.objects.filter(
-            usuario=usuario, cupom=cupom, afiliado_ok=True,
+            usuario=usuario, cupom=cupom,
         ).first()
     cache = _executar_orm(_cache_do_par)
+
+    def _registrar_falha_cache(reason, *, state="erro", retry_minutes=30):
+        def _save():
+            current = LinkAfiliadoCupomUsuario.objects.filter(
+                usuario=usuario, cupom=cupom,
+            ).first()
+            defaults = {
+                "url_origem": (getattr(current, "url_origem", "") or origem),
+                "link_afiliado": getattr(current, "link_afiliado", "") or "",
+                "afiliado_ok": False, "estado": state,
+                "verificado_ok": False if getattr(current, "link_afiliado", "") else None,
+                "verificacao_motivo": str(reason or "")[:300],
+                "ultimo_erro": str(reason or "")[:300],
+                "ultima_tentativa": timezone.now(),
+                "proxima_tentativa": timezone.now() + timedelta(minutes=retry_minutes),
+                "tentativas": (getattr(current, "tentativas", 0) or 0) + 1,
+            }
+            LinkAfiliadoCupomUsuario.objects.update_or_create(
+                usuario=usuario, cupom=cupom, defaults=defaults,
+            )
+        _executar_orm(_save)
     # O cache pertence ao par usuario+cupom. A URL de origem pode ser a pagina
     # do cupom ou um produto fallback comprovado; em ambos os casos o link salvo
     # já passou pela verificacao de comissionamento.
     if cache and cache.link_afiliado:
-        return {"sucesso": True, "link": cache.link_afiliado, "cache": True}
+        from apps.scrapers.coupon_links import (
+            canonical_coupon_link, coupon_link_verified_and_fresh,
+        )
+        if coupon_link_verified_and_fresh(cache):
+            return {"sucesso": True, "link": canonical_coupon_link(cache), "cache": True}
+        # Reverificar um link existente não abre navegador. Isto permite promover
+        # caches migrados/expirados mesmo quando a sessão do Link Builder caiu.
+        if get_marketplace(marketplace).verify_affiliate_tag(
+                cache.link_afiliado, usuario=usuario):
+            def _aprovar_cache():
+                LinkAfiliadoCupomUsuario.objects.filter(pk=cache.pk).update(
+                    estado="pronto", afiliado_ok=True, verificado_ok=True,
+                    verificado_em=timezone.now(), url_canonica=cache.link_afiliado,
+                    verificacao_motivo="", ultimo_erro="", proxima_tentativa=None,
+                    ultima_tentativa=timezone.now(), tentativas=F("tentativas") + 1,
+                )
+            _executar_orm(_aprovar_cache)
+            return {"sucesso": True, "link": cache.link_afiliado,
+                    "cache": True, "reverified": True}
+        _registrar_falha_cache(
+            "A atribuição do link afiliado não pôde ser confirmada.",
+            state="pendente", retry_minutes=15,
+        )
 
     def _gravar_cache(url_origem, link):
-        LinkAfiliadoCupomUsuario.objects.update_or_create(
+        saved, created = LinkAfiliadoCupomUsuario.objects.update_or_create(
             usuario=usuario, cupom=cupom,
             defaults={"url_origem": url_origem, "link_afiliado": link,
-                      "afiliado_ok": True},
+                      "afiliado_ok": True, "estado": "pronto",
+                      "verificado_ok": True, "verificado_em": timezone.now(),
+                      "url_canonica": link, "verificacao_motivo": "",
+                      "ultimo_erro": "", "ultima_tentativa": timezone.now(),
+                      "proxima_tentativa": None},
+        )
+        LinkAfiliadoCupomUsuario.objects.filter(pk=saved.pk).update(
+            tentativas=1 if created else F("tentativas") + 1,
         )
 
     erro_direto = ""
@@ -1070,6 +1149,10 @@ def resolver_link_afiliado_cupom(cupom, usuario):
             from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
             from apps.scrapers.auxiliar import SessaoExpirada
             if isinstance(exc, (LoginError, AuthError, SessaoExpirada)):
+                _registrar_falha_cache(
+                    "Sessão necessária para criar ou renovar o link afiliado.",
+                    state="pendente", retry_minutes=15,
+                )
                 logger.warning("Sessão ML expirada ao afiliar cupom %s: %s", cupom.pk, exc)
                 return {"sucesso": False,
                         "motivo": "Sessão do Mercado Livre expirada. Reconecte sua conta.",
@@ -1081,11 +1164,23 @@ def resolver_link_afiliado_cupom(cupom, usuario):
     if produto:
         mp = get_marketplace(marketplace)
         try:
-            info = mp.build_affiliate_link(produto, usuario=usuario)
+            def _relacao_fallback():
+                return cupom.produtos.filter(
+                    produto=produto, status="confirmado",
+                ).only("activation_key").first()
+            relation = _executar_orm(_relacao_fallback)
+            info = mp.build_affiliate_link(
+                produto, usuario=usuario,
+                activation_key=getattr(relation, "activation_key", ""),
+            )
         except Exception as exc:
             from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
             from apps.scrapers.auxiliar import SessaoExpirada
             if isinstance(exc, (LoginError, AuthError, SessaoExpirada)):
+                _registrar_falha_cache(
+                    "Sessão necessária para criar ou renovar o link afiliado.",
+                    state="pendente", retry_minutes=15,
+                )
                 logger.warning("Sessão ML expirada no fallback do cupom %s: %s", cupom.pk, exc)
                 return {"sucesso": False,
                         "motivo": "Sessão do Mercado Livre expirada. Reconecte sua conta.",
@@ -1098,8 +1193,11 @@ def resolver_link_afiliado_cupom(cupom, usuario):
                 _executar_orm(_gravar_cache, produto.link_produto, link)
                 return {"sucesso": True, "link": link, "produto": produto}
 
-    return {"sucesso": False, "motivo": erro_direto or
-            "Nenhum produto aplicável permitiu gerar um link afiliado para este cupom."}
+    failure = erro_direto or (
+        "Nenhum produto aplicável permitiu gerar um link afiliado para este cupom."
+    )
+    _registrar_falha_cache(failure)
+    return {"sucesso": False, "motivo": failure}
 
 
 def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nome="",
@@ -1476,7 +1574,9 @@ def selecionar_cupons_para_aviso(configuracao, usuario, limite=LIMITE_CUPONS_AVI
     neste item" quando X não vale ali — não tem o que proteger aqui. O que ele exige
     é o oposto: um código que a pessoa consiga digitar no checkout.
     """
-    from apps.scrapers.coupon_rules import codigo_publicavel, score_cupom
+    from apps.scrapers.coupon_rules import (
+        codigo_publicavel, cupons_visiveis_q, score_cupom,
+    )
     from apps.scrapers.maintenance import cupons_frescos_q
     from apps.scrapers.models import CupomNormalizado
 
@@ -1486,11 +1586,16 @@ def selecionar_cupons_para_aviso(configuracao, usuario, limite=LIMITE_CUPONS_AVI
         return []
 
     base = CupomNormalizado.objects.select_related("fonte", "programa", "integracao").filter(
-        Q(owner__isnull=True) | Q(owner=usuario),
+        cupons_visiveis_q(usuario),
         Q(inicio__isnull=True) | Q(inicio__lte=agora),
         cupons_frescos_q(agora=agora),
         marketplace=marketplace, estado="ativo",
-    ).exclude(codigo="")
+        disponibilidades__usuario=usuario,
+        disponibilidades__organization=getattr(configuracao, "organization", None),
+        disponibilidades__channel=getattr(configuracao, "canal", "whatsapp"),
+        disponibilidades__use_mode="code_notice",
+        disponibilidades__stage="ready",
+    ).exclude(codigo="").distinct()
     if not getattr(configuracao, "incluir_restritos", True):
         base = base.filter(restrito=False)
 
@@ -1927,7 +2032,7 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         mkt = getattr(produto, "marketplace", "mercadolivre")
         codigo = None
         if mkt in ("mercadolivre", ""):
-            do_catalogo = _melhor_cupom_normalizado_obj(produto)
+            do_catalogo = _melhor_cupom_normalizado_obj(produto, usuario=usuario)
             if do_catalogo is not None:
                 from apps.scrapers.coupon_rules import codigo_publicavel
                 codigo = codigo_publicavel(do_catalogo) or None
@@ -2043,7 +2148,7 @@ def _melhor_codigo(produto):
     return f"{melhor.codigo} — {melhor.descricao}" if melhor.descricao else melhor.codigo
 
 
-def _melhor_cupom_normalizado_obj(produto):
+def _melhor_cupom_normalizado_obj(produto, *, usuario=None):
     """Melhor CupomNormalizado (catálogo das fontes) VÁLIDO p/ este item ML, ou None.
 
     GATE DE CONFIANÇA: só entra na mensagem um cupom cuja aplicação a ESTE produto é
@@ -2066,7 +2171,7 @@ def _melhor_cupom_normalizado_obj(produto):
     """
     from apps.scrapers.models import CupomNormalizado, ProdutoCupom
     from apps.scrapers.coupon_rules import (
-        codigo_publicavel, cupom_publicavel, regras_do_cupom,
+        codigo_publicavel, cupom_publicavel, cupons_visiveis_q, regras_do_cupom,
     )
     from apps.scrapers.maintenance import cupons_frescos_q
     if getattr(produto, "marketplace", "mercadolivre") not in ("mercadolivre", ""):
@@ -2074,7 +2179,7 @@ def _melhor_cupom_normalizado_obj(produto):
     agora = timezone.now()
     base = CupomNormalizado.objects.filter(
         marketplace="mercadolivre", estado="ativo",
-    ).filter(cupons_frescos_q(agora=agora))
+    ).filter(cupons_visiveis_q(usuario)).filter(cupons_frescos_q(agora=agora))
 
     ids_confirmados = set()
     if getattr(produto, "pk", None):

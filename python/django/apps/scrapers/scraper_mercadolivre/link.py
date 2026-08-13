@@ -638,7 +638,7 @@ def _afiliar_url_na_pagina(page, link_base: str):
     return _validar_resultado_link(_esperar_resultado(page))
 
 
-def gerar_links_em_lote(produtos, usuario=None, faixa=None):
+def gerar_links_em_lote(produtos, usuario=None, faixa=None, activation_keys=None):
     """
     Pré-gera e persiste o link de afiliado de uma lista de Produtos numa ÚNICA
     sessão Playwright. Pula produtos que já têm link em cache.
@@ -669,8 +669,28 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
             raise LoginError(MSG_SEM_SESSAO)
         # "Já tem URL" NÃO é o critério: um link reprovado tem URL e precisa ser
         # REGERADO, não pulado — ver ids_com_link_utilizavel.
-        prontos = _no_escopo(ids_com_link_utilizavel, usuario, produtos)
-        pendentes = [p for p in produtos if p.id not in prontos]
+        activation_keys = activation_keys or {}
+        from apps.scrapers.models import LinkAfiliadoUsuario
+        caches = {
+            row.produto_id: row for row in _no_escopo(
+                lambda: list(LinkAfiliadoUsuario.objects.filter(
+                    usuario=usuario, produto__in=produtos,
+                ))
+            )
+        }
+        pendentes = []
+        for produto in produtos:
+            cache = caches.get(produto.id)
+            activation = str(activation_keys.get(produto.id, "") or "")
+            matches = (
+                not activation
+                or f"coupon_campaign_id={activation}" in str(
+                    getattr(cache, "url_isca", "") or ""
+                )
+            )
+            if not (cache and cache.verificado_ok is True
+                    and cache.link_afiliado and matches):
+                pendentes.append(produto)
     else:
         pendentes = [p for p in produtos if not p.link_afiliado]
     if not pendentes:
@@ -714,7 +734,10 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None):
             # Ofertas do feed têm campanha_id vazio: _montar_url_isca trata isso e só
             # injeta coupon_campaign_id quando há campanha. Só pulamos quando a URL
             # não é afiliável (catálogo/perfil) -> None.
-            url_isca = _montar_url_isca(prod.link_produto, prod.campanha_id)
+            camp_id = str((activation_keys or {}).get(
+                prod.id, prod.campanha_id,
+            ) or "")
+            url_isca = _montar_url_isca(prod.link_produto, camp_id)
             if not url_isca:
                 # Este era o ponto cego central: contava a falha e seguia, sem
                 # log nem registro. O produto ficava "pendente" para sempre e
@@ -1190,7 +1213,7 @@ def produto_vencedor_do_cupom(campanha_id: str):
     )
 
 
-def gerar_link_afiliado_para_produto(produto, usuario=None):
+def gerar_link_afiliado_para_produto(produto, usuario=None, activation_key=""):
     """
     Deep-link direto para o produto isca com coupon_campaign_id injetado na URL.
     Isso garante que o usuário caia exatamente no produto anunciado (não num
@@ -1214,7 +1237,9 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
     """
     from apps.scrapers.models import Cupom
 
-    camp_id = produto.campanha_id if hasattr(produto, "campanha_id") else produto["campanha_id"]
+    camp_id = str(activation_key or (
+        produto.campanha_id if hasattr(produto, "campanha_id") else produto["campanha_id"]
+    ) or "")
     url_produto = produto.link_produto if hasattr(produto, "link_produto") else produto["link_produto"]
 
     # Todo ORM daqui para baixo passa por _no_tenant. LinkAfiliadoUsuario e
@@ -1249,7 +1274,12 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
         from apps.scrapers.afiliado import link_cacheado, salvar_cache
 
         cacheado = _no_tenant(link_cacheado, usuario, produto)
-        if cacheado and cacheado.link_afiliado:
+        cache_matches_activation = bool(
+            cacheado and cacheado.link_afiliado and (
+                not camp_id or f"coupon_campaign_id={camp_id}" in str(cacheado.url_isca or "")
+            )
+        )
+        if cache_matches_activation:
             # O envio ainda passa pelo gate A3 e, quando solicitado, pela
             # revalidação da PDP em ofertas.py. Reaproveitar o cache aqui só
             # evita abrir o Link Builder novamente — e faz um link já pronto

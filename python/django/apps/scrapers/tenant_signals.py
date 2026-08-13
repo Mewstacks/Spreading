@@ -18,6 +18,7 @@ _USER_FIELD_MODELS = {
     models.HistoricoEnvio: "usuario",
     models.Publicacao: "usuario",
     models.LinkAfiliadoCupomUsuario: "usuario",
+    models.LinkAfiliadoProdutoCupomUsuario: "usuario",
     models.ReceitaAfiliado: "usuario",
     models.RelatorioSync: "usuario",
     models.EventoOperacional: "usuario",
@@ -50,8 +51,15 @@ def assign_organization(sender, instance, **kwargs):
                 raise ValidationError("Owner e organização não correspondem.")
             instance.organization = organization
 
-        if sender in {models.Produto, models.CupomNormalizado}:
+        if sender is models.Produto:
             instance.data_scope = "organization" if user is not None else "public"
+        elif sender is models.CupomNormalizado:
+            instance.data_scope = (
+                "organization"
+                if user is not None
+                or getattr(instance, "audience_scope", "public") == "organization"
+                else "public"
+            )
 
         _validate_current_scope(instance)
         return

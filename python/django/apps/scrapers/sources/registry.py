@@ -6,6 +6,7 @@ from django.utils import timezone
 
 from .amazon_public import AmazonPublicSource
 from .amazon_coupons import AmazonCouponsSource
+from .amazon_general_coupons import AmazonGeneralCouponsSource
 from .external_feed import LicensedFeedSource
 from .community import PromobitSource, PelandoSource
 from .ml_public_coupons import MLPublicCouponsSource
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 SOURCES = {
     AmazonPublicSource.slug: AmazonPublicSource(),
     AmazonCouponsSource.slug: AmazonCouponsSource(),
+    AmazonGeneralCouponsSource.slug: AmazonGeneralCouponsSource(),
     LicensedFeedSource.slug: LicensedFeedSource(),
     PromobitSource.slug: PromobitSource(),
     PelandoSource.slug: PelandoSource(),

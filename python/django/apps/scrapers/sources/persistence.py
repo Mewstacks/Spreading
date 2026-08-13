@@ -6,9 +6,13 @@ from django.utils import timezone
 _SOURCE_PRECEDENCE = {
     "ml-cupons-afiliados": 10,
     "mercadolivre-web": 20,
+    # A mesma campanha vista também na vitrine pública deve vencer a observação
+    # autenticada: é a confirmação que permite ampliar a audiência.
+    "mercadolivre-campanhas": 30,
     "ml-public-containers": 30,
     "licensed-affiliate-feed": 40,
     "amazon-public-coupons": 10,
+    "amazon-general-coupons": 10,
 }
 
 
@@ -99,6 +103,71 @@ def evidencia_com_cupom_preservado(evidencia, anterior):
     return {**evidencia, "promotion": promocao}
 
 
+def _enriquecer_codigos_heuristicos(cupom_oficial):
+    """Completa candidatos ML pelo mesmo código sem promover evidência fraca.
+
+    O registro oficial segue vencendo pela precedência da observação. O objetivo
+    aqui é tirar candidatos do limbo ``missing_discount`` e deixar explícita a
+    proveniência dos termos, sem transformar uma heurística isolada em prova.
+    """
+    if (cupom_oficial.marketplace != "mercadolivre"
+            or cupom_oficial.fonte.slug != "ml-cupons-afiliados"
+            or not str(cupom_oficial.codigo or "").strip()):
+        return 0
+    from apps.scrapers.coupon_rules import (
+        classificar_contrato_cupom, normalizar_regras_cupom,
+    )
+    from apps.scrapers.models import CupomNormalizado
+
+    oficiais = normalizar_regras_cupom(
+        cupom_oficial.regras, external_id=cupom_oficial.external_id,
+        codigo=cupom_oficial.codigo,
+    )
+    if not oficiais.get("tipo_desconto") or not oficiais.get("valor_desconto"):
+        return 0
+    atualizados = 0
+    candidatos = CupomNormalizado.objects.filter(
+        marketplace="mercadolivre", codigo__iexact=cupom_oficial.codigo,
+    ).exclude(pk=cupom_oficial.pk).select_related("fonte")
+    for candidato in candidatos:
+        regras = normalizar_regras_cupom(
+            candidato.regras, external_id=candidato.external_id,
+            codigo=candidato.codigo,
+        )
+        if regras.get("tipo_desconto") and regras.get("valor_desconto"):
+            continue
+        for campo in (
+            "tipo_desconto", "valor_desconto", "valor_minimo", "desconto_maximo",
+            "escopo", "dia_inicio", "dia_fim",
+        ):
+            if regras.get(campo) in (None, "", 0) and oficiais.get(campo) not in (None, ""):
+                regras[campo] = oficiais[campo]
+        evidencia = dict(candidato.evidencia or {})
+        evidencia["enriched_by"] = {
+            "source": cupom_oficial.fonte.slug,
+            "external_id": cupom_oficial.external_id,
+        }
+        contrato = classificar_contrato_cupom(
+            regras=regras, external_id=candidato.external_id,
+            codigo=candidato.codigo, evidencia=evidencia,
+            categoria=candidato.categoria, owner=candidato.owner,
+            data_scope=candidato.data_scope,
+        )
+        candidato.regras = regras
+        candidato.evidencia = evidencia
+        candidato.validade = candidato.validade or cupom_oficial.validade
+        candidato.inicio = candidato.inicio or cupom_oficial.inicio
+        candidato.restrito = candidato.restrito or cupom_oficial.restrito
+        for campo, valor in contrato.items():
+            setattr(candidato, campo, valor)
+        candidato.save(update_fields=[
+            "regras", "evidencia", "validade", "inicio", "restrito",
+            "redemption_mode", "scope_type", "audience_scope",
+        ])
+        atualizados += 1
+    return atualizados
+
+
 def persist_items(items, owner=None, integration=None, source_health="healthy"):
     """Idempotent upsert. Empty input deliberately performs no deletion."""
     from apps.scrapers.models import (
@@ -113,17 +182,26 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
             defaults={"marketplace": item.marketplace, "nome": item.source},
         )
         if item.kind == "coupon":
-            from apps.scrapers.coupon_rules import derivar_categoria_cupom
+            from apps.scrapers.coupon_rules import (
+                classificar_contrato_cupom, derivar_categoria_cupom,
+            )
             programa = None
             advertiser_id = str((item.evidence or {}).get("advertiser_id") or "")
             if integration and advertiser_id:
                 programa = ProgramaAfiliado.objects.filter(
                     integracao=integration, external_id=advertiser_id).first()
+            categoria = derivar_categoria_cupom(item.title, item.coupon_rules)
+            contrato = classificar_contrato_cupom(
+                regras=item.coupon_rules, external_id=item.external_id,
+                codigo=item.coupon_code, evidencia=item.evidence,
+                categoria=categoria, owner=owner,
+                data_scope="organization" if owner else "public",
+            )
             cupom_obj, _ = CupomNormalizado.objects.update_or_create(
                 fonte=fonte, external_id=item.external_id, owner=owner,
                 defaults={"marketplace": item.marketplace, "titulo": item.title,
                           "codigo": item.coupon_code, "regras": item.coupon_rules,
-                          "categoria": derivar_categoria_cupom(item.title, item.coupon_rules),
+                          "categoria": categoria, **contrato,
                           "integracao": integration, "programa": programa,
                           "tipo_conteudo": item.content_type,
                           "anunciante_nome": str((item.evidence or {}).get(
@@ -136,6 +214,7 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
             )
             from apps.scrapers.coupon_products import atualizar_chave_cupom
             atualizar_chave_cupom(cupom_obj)
+            _enriquecer_codigos_heuristicos(cupom_obj)
             evidence = item.evidence if isinstance(item.evidence, dict) else {}
             CupomFonteObservacao.objects.update_or_create(
                 organization_id=cupom_obj.organization_id,

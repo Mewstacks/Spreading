@@ -19,9 +19,11 @@ from apps.accounts.models import (
     WhatsAppConnection, ensure_personal_organization, organization_for_user,
 )
 from apps.scrapers.models import (
+    ConfiguracaoEnvio,
     CupomDisponibilidade, CupomFonteObservacao, CupomNormalizado, CupomPreparacao,
     FonteIngestao,
-    LinkAfiliadoCupomUsuario, LinkAfiliadoUsuario, Produto, ProdutoCupom,
+    LinkAfiliadoCupomUsuario, LinkAfiliadoProdutoCupomUsuario,
+    LinkAfiliadoUsuario, Produto, ProdutoCupom,
     Publicacao, ResourceLease, WorkerHeartbeat,
 )
 
@@ -1075,11 +1077,85 @@ class CouponReadinessReasonTests(TestCase):
         LinkAfiliadoCupomUsuario.objects.create(
             usuario=self.user, cupom=coupon,
             url_origem=coupon.link, link_afiliado="https://meli.la/coupon-ready",
-            afiliado_ok=True,
+            afiliado_ok=True, estado="pronto", verificado_ok=True,
+            verificado_em=timezone.now(), url_canonica="https://meli.la/coupon-ready",
         )
         with self._ml():
             projetar_disponibilidade_cupons(self.user)
         projection.refresh_from_db()
+        self.assertEqual(projection.stage, "ready")
+
+    def test_cache_verificado_continua_ready_sem_sessao_e_cache_vencido_nao(self):
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        coupon = self._code()
+        link = LinkAfiliadoCupomUsuario.objects.create(
+            usuario=self.user, cupom=coupon, url_origem=coupon.link,
+            link_afiliado="https://meli.la/cache", afiliado_ok=True,
+            estado="pronto", verificado_ok=True, verificado_em=timezone.now(),
+            url_canonica="https://meli.la/cache",
+        )
+        with self._ml(conectado=False, detalhe="sem_sessao"):
+            projetar_disponibilidade_cupons(self.user)
+        projection = CupomDisponibilidade.objects.get(cupom=coupon, usuario=self.user)
+        self.assertEqual(projection.stage, "ready")
+
+        link.verificado_em = timezone.now() - timedelta(days=8)
+        link.save(update_fields=["verificado_em"])
+        with self._ml(conectado=False, detalhe="sem_sessao"):
+            projetar_disponibilidade_cupons(self.user)
+        projection.refresh_from_db()
+        self.assertEqual(
+            (projection.stage, projection.reason_code),
+            ("waiting_link", "affiliate_link_expired"),
+        )
+
+    @override_settings(ML_CUPONS_ATIVACAO_ENABLED=True)
+    def test_ativacao_com_link_da_relacao_verificado_fica_ready_sem_sessao(self):
+        from apps.scrapers.coupon_products import atualizar_chave_cupom
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        source, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML web"},
+        )
+        coupon = CupomNormalizado.objects.create(
+            fonte=source, external_id="campanha:CACHE1", marketplace="mercadolivre",
+            titulo="15% em selecionados", redemption_mode="activation",
+            scope_type="container",
+            link="https://lista.mercadolivre.com.br/_Container_CACHE1",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 15,
+                    "container_url":
+                        "https://lista.mercadolivre.com.br/_Container_CACHE1"},
+        )
+        product = Produto.objects.create(
+            marketplace="mercadolivre", nome="Produto", origem="cupom",
+            preco_sem_desconto=100, preco_com_cupom=90,
+            link_produto="https://produto.mercadolivre.com.br/MLB-100000",
+            imagem_url="https://img.example/item.jpg", estado="ativo",
+        )
+        relation = ProdutoCupom.objects.create(
+            produto=product, cupom=coupon, status="confirmado",
+            activation_key="CACHE1", verificado_em=timezone.now(),
+            preco_original=100, preco_atual=90, preco_final=85,
+        )
+        CupomPreparacao.objects.create(
+            cupom=coupon, usuario=None, status="pronto",
+            produtos_chave=atualizar_chave_cupom(coupon),
+            verificado_em=timezone.now(),
+        )
+        LinkAfiliadoProdutoCupomUsuario.objects.create(
+            usuario=self.user, relacao=relation,
+            url_isca=(product.link_produto + "?coupon_campaign_id=CACHE1"),
+            link_afiliado="https://meli.la/relation-cache", estado="pronto",
+            verificado_ok=True, verificado_em=timezone.now(),
+            url_canonica="https://meli.la/relation-cache",
+        )
+
+        with self._ml(conectado=False, detalhe="sem_sessao"):
+            projetar_disponibilidade_cupons(self.user)
+        projection = CupomDisponibilidade.objects.get(cupom=coupon, usuario=self.user)
         self.assertEqual(projection.stage, "ready")
 
     def test_estado_da_conexao_vem_da_mesma_fonte_que_as_telas(self):
@@ -1408,6 +1484,8 @@ class CouponReadinessReasonTests(TestCase):
             LinkAfiliadoCupomUsuario.objects.create(
                 usuario=usuario, cupom=cupom, url_origem=cupom.link,
                 link_afiliado="https://meli.la/gerado", afiliado_ok=True,
+                estado="pronto", verificado_ok=True,
+                verificado_em=timezone.now(), url_canonica="https://meli.la/gerado",
             )
             return {"sucesso": True, "link": "https://meli.la/gerado"}
 
@@ -1627,8 +1705,24 @@ class MarketplaceParserResilienceTests(SimpleTestCase):
         self.assertEqual(source.last_metrics["accepted"], 0)
         self.assertEqual(source.last_metrics["rejected"], 2)
         self.assertEqual(source.last_metrics["rejections"], {
-            "invalid_end_date": 1, "invalid_container": 1,
+            "invalid_end_date": 1, "invalid_discount": 1,
         })
+
+    def test_ml_aceita_codigo_geral_oficial_sem_container(self):
+        from apps.scrapers.sources.ml_public_coupons import MLPublicCouponsSource
+
+        source = MLPublicCouponsSource()
+        source._cupons_brutos = lambda: [{
+            "nome": "CUPOMDASEMANA", "dia_fim": "31/12/2099",
+            "valor_desconto": "20%", "discount_num": 20,
+            "min_compra": 19, "desconto_max": 150,
+            "acao": "Construção e Indústria", "container_url": "-",
+        }]
+        coupons = list(source.discover_coupons())
+
+        self.assertEqual([coupon.coupon_code for coupon in coupons], ["CUPOMDASEMANA"])
+        self.assertEqual(coupons[0].canonical_url, "https://www.mercadolivre.com.br/")
+        self.assertEqual(coupons[0].coupon_rules["valor_minimo"], 19)
 
 
 class _FakeCardValue:
@@ -2003,3 +2097,47 @@ class DiagnosticRedactionTests(SimpleTestCase):
         for secret in ("token=secret", "bearer-secret", "session-secret", "hunter2"):
             self.assertNotIn(secret, value)
         self.assertIn("[redacted]", value)
+
+
+class CouponAudienceAndConfigurationTests(TestCase):
+    def setUp(self):
+        self.user_a = get_user_model().objects.create_user("coupon-org-a")
+        self.user_b = get_user_model().objects.create_user("coupon-org-b")
+        self.org_a = ensure_personal_organization(self.user_a)
+        self.org_b = ensure_personal_organization(self.user_b)
+        self.source = FonteIngestao.objects.create(
+            slug="scoped-coupons", marketplace="mercadolivre", nome="ML autenticado",
+        )
+
+    def test_cupom_organizacional_nao_aparece_para_outra_organizacao(self):
+        from apps.scrapers.coupon_rules import cupons_visiveis_q
+
+        coupon = CupomNormalizado.objects.create(
+            fonte=self.source, organization=self.org_a,
+            data_scope="organization", audience_scope="organization",
+            external_id="campanha:ORG-A", marketplace="mercadolivre",
+            titulo="Campanha privada", codigo="", redemption_mode="activation",
+            scope_type="container", regras={"modo_resgate": "ativacao"},
+        )
+        self.assertTrue(CupomNormalizado.objects.filter(
+            cupons_visiveis_q(self.user_a), pk=coupon.pk,
+        ).exists())
+        self.assertFalse(CupomNormalizado.objects.filter(
+            cupons_visiveis_q(self.user_b), pk=coupon.pk,
+        ).exists())
+
+    def test_aviso_ativo_exige_marketplace_especifico(self):
+        config = ConfiguracaoEnvio(
+            owner=self.user_a, organization=self.org_a,
+            grupo_id="grupo@g.us", tipo="aviso_cupons", marketplace="", ativo=True,
+        )
+        with self.assertRaises(ValidationError) as error:
+            config.full_clean()
+        self.assertIn("marketplace", error.exception.message_dict)
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            ConfiguracaoEnvio.objects.create(
+                owner=self.user_a, organization=self.org_a,
+                grupo_id="grupo@g.us", tipo="aviso_cupons",
+                marketplace="", ativo=True,
+            )

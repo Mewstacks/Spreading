@@ -738,7 +738,10 @@ def _url_manual_valida(marketplace, url):
 def cupom_manual_salvar(request, cupom_id=None):
     import uuid
     from apps.scrapers.awin import AwinError, gerar_deeplink, url_permitida
-    from apps.scrapers.coupon_rules import derivar_categoria_cupom, normalizar_regras_cupom
+    from apps.scrapers.coupon_rules import (
+        classificar_contrato_cupom, derivar_categoria_cupom,
+        normalizar_regras_cupom,
+    )
 
     coupon = None
     if cupom_id:
@@ -807,6 +810,15 @@ def cupom_manual_salvar(request, cupom_id=None):
         "relampago": bool(request.POST.get("relampago")), "estado": state,
         "confianca": "media", "evidencia": {"manual": True, "url_original": original_url},
     }
+    values.update(classificar_contrato_cupom(
+        regras=rules,
+        external_id=coupon.external_id if coupon else "manual",
+        codigo=code,
+        evidencia=values["evidencia"],
+        categoria=values["categoria"],
+        owner=request.user,
+        data_scope="organization",
+    ))
     if coupon:
         for field, value in values.items():
             setattr(coupon, field, value)
@@ -1400,20 +1412,32 @@ def configuracoes(request):
             if max_envios_dia < 1 or pausar_apos_falhas < 1:
                 messages.error(request, "Limites diários e de falhas devem ser positivos.")
                 return redirect("scraper-configuracoes")
+            tipo_regra = (
+                ConfiguracaoEnvio.TIPO_AVISO_CUPONS
+                if request.POST.get("tipo") == ConfiguracaoEnvio.TIPO_AVISO_CUPONS
+                else ConfiguracaoEnvio.TIPO_OFERTAS
+            )
+            marketplace_regra = (request.POST.get("marketplace") or "").strip()[:20]
+            if (tipo_regra == ConfiguracaoEnvio.TIPO_AVISO_CUPONS
+                    and marketplace_regra not in {"mercadolivre", "amazon"}):
+                messages.error(
+                    request,
+                    "Escolha Mercado Livre ou Amazon para o aviso de cupons. "
+                    "Crie duas regras para avisar as duas lojas.",
+                )
+                return redirect("scraper-configuracoes")
             campos = dict(
                 macro_categoria=request.POST.get("macro_categoria", "").strip()[:100],
                 termo_busca=termo_busca,
                 canal=canal,
-                marketplace=(request.POST.get("marketplace") or "").strip()[:20],
+                marketplace=marketplace_regra,
                 grupo_id=grupo_id,
                 grupo_nome=request.POST.get("grupo_nome", "").strip()[:255],
                 intervalo_minutos=intervalo,
                 janela_inicio=janela_inicio,
                 janela_fim=janela_fim,
                 dias_semana=_dias_semana_do_post(request),
-                tipo=(ConfiguracaoEnvio.TIPO_AVISO_CUPONS
-                      if request.POST.get("tipo") == ConfiguracaoEnvio.TIPO_AVISO_CUPONS
-                      else ConfiguracaoEnvio.TIPO_OFERTAS),
+                tipo=tipo_regra,
                 min_desconto_percent=desconto,
                 max_envios_dia=max_envios_dia,
                 pausar_apos_falhas=pausar_apos_falhas,
@@ -1744,12 +1768,19 @@ def enviar_cupom_stream(request):
             print("[ERRO] Nenhum destino informado (grupo/chat).")
             return
         from apps.scrapers.maintenance import cupons_frescos_q
+        from apps.scrapers.coupon_rules import cupons_visiveis_q
+        from apps.accounts.models import organization_for_user
+        organization = executar_no_tenant(organization_for_user, usuario)
         cupom = executar_no_tenant(
             lambda: CupomNormalizado.objects.filter(
-                Q(owner__isnull=True) | Q(owner=usuario), id=cupom_id, estado="ativo",
+                cupons_visiveis_q(usuario), id=cupom_id, estado="ativo",
+                disponibilidades__organization=organization,
+                disponibilidades__usuario=usuario,
+                disponibilidades__channel=canal,
+                disponibilidades__stage="ready",
             ).filter(cupons_frescos_q()).first())
         if not cupom:
-            print("[ERRO] Cupom não encontrado ou inativo.")
+            print("[ERRO] Cupom não encontrado, inativo ou ainda não disponível para envio.")
             return
         rotulo = codigo_publicavel(cupom) or "Ativar no link"
         print(f"Enviando cupom '{rotulo}' → {grupo_nome or grupo_id} ({canal})...")
@@ -2090,6 +2121,16 @@ def top_promocoes(request):
     perfil = getattr(request.user, "perfil", None)
     fontes_qs = FonteIngestao.objects.filter(habilitada=True).exclude(
         slug="manual-private").order_by("marketplace", "nome")
+    # Campanhas coletadas em area autenticada pertencem a organizacao cuja
+    # sessao as observou. Para as demais contas, esta fonte nao e aplicavel e
+    # nao deve aparecer como incidente operacional no painel.
+    from apps.accounts.models import organization_for_user
+    organization = organization_for_user(request.user)
+    ml_system_organization_id = str(
+        getattr(settings, "ML_SYSTEM_ORGANIZATION_ID", "") or ""
+    )
+    if not organization or str(organization.id) != ml_system_organization_id:
+        fontes_qs = fontes_qs.exclude(slug="mercadolivre-campanhas")
     # Fontes Amazon are account-specific. Do not present an adapter that cannot
     # run for this user as an operational incident.
     from apps.scrapers.scraper_amazon.creators_api import creds_de_usuario
@@ -2098,7 +2139,8 @@ def top_promocoes(request):
     fontes = list(fontes_qs)
 
     if aba_cupons:
-        cupons_visiveis = Q(owner__isnull=True) | Q(owner=request.user)
+        from apps.scrapers.coupon_rules import cupons_visiveis_q
+        cupons_visiveis = cupons_visiveis_q(request.user)
         from apps.scrapers.maintenance import cupons_frescos_q
         cupons_qs = CupomNormalizado.objects.select_related(
             "fonte", "integracao", "programa").filter(
@@ -2142,8 +2184,6 @@ def top_promocoes(request):
         # recomeçava do zero -- 500 em /scrapers/top/ e as 8 threads do gunicorn
         # presas em transações de escrita longas (o /healthz caía junto).
         readiness = disponibilidade_resumo(request.user)
-        from apps.accounts.models import organization_for_user
-        organization = organization_for_user(request.user)
         channel = "whatsapp"
         projecoes = {
             row.cupom_id: row
