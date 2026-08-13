@@ -2432,24 +2432,49 @@ def top_promocoes(request):
         # rodar guarda o último veredito para sempre. Sem esta derivação, "Atenção" tanto
         # significava "falhou agora" quanto "ninguém a executa há dias" — dois problemas
         # com soluções opostas. A coluna não muda; só a leitura da tela.
+        from apps.scrapers import automacao_state
+        from apps.scrapers.automacao_state import lane_da_fonte
+
         _limite_silencio = timezone.now() - timezone.timedelta(
             hours=HORAS_FONTE_SILENCIOSA)
-        fontes_com_aviso, _paradas = [], []
+        _lanes_ligadas = {}
+        fontes_com_aviso, _paradas, _desligadas = [], [], []
         for fonte in fontes:
             fonte.silenciosa = (
                 fonte.ultima_tentativa is None or fonte.ultima_tentativa < _limite_silencio)
-            fonte.status_exibicao = "silent" if fonte.silenciosa else fonte.status
+            # "Parada" e "desligada" pedem ações OPOSTAS, e a faixa dizia a mesma
+            # coisa para as duas. Em produção as três fontes da lane de raspagem
+            # apareciam como "Sem coleta há mais de 8h" — mandando procurar defeito
+            # numa coleta que ninguém tinha mandado rodar. Quem religa é a tela
+            # Scraper, e é isso que a faixa passa a dizer.
+            lane = lane_da_fonte(fonte.slug)
+            if lane and lane not in _lanes_ligadas:
+                _lanes_ligadas[lane] = automacao_state.is_enabled(lane)
+            fonte.lane_desligada = bool(
+                fonte.silenciosa and lane and not _lanes_ligadas.get(lane, True))
+            fonte.status_exibicao = (
+                "off" if fonte.lane_desligada
+                else "silent" if fonte.silenciosa else fonte.status)
             fonte.motivo_exibicao = (
+                "A raspagem está desligada; ligue na tela Scraper."
+                if fonte.lane_desligada else
                 f"Sem coleta há mais de {HORAS_FONTE_SILENCIOSA}h."
                 if fonte.silenciosa else (fonte.erro_publico or ""))
             # Só o que exige leitura desce para a lista abaixo da faixa. Fonte parada tem
             # sempre o mesmo motivo, então vai numa linha agregada: repetir a frase seis
             # vezes é ruído que esconde o aviso específico de quem falhou de verdade.
-            if fonte.silenciosa:
+            if fonte.lane_desligada:
+                _desligadas.append(fonte.nome)
+            elif fonte.silenciosa:
                 _paradas.append(fonte.nome)
             elif fonte.motivo_exibicao:
                 fontes_com_aviso.append(
                     {"nome": fonte.nome, "motivo": fonte.motivo_exibicao})
+        if _desligadas:
+            fontes_com_aviso.append({
+                "nome": "Raspagem desligada na tela Scraper:",
+                "motivo": ", ".join(_desligadas),
+            })
         if _paradas:
             fontes_com_aviso.append({
                 "nome": f"Sem coleta há mais de {HORAS_FONTE_SILENCIOSA}h:",

@@ -634,7 +634,16 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=()):
                     campos.pop(campo, None)
             for key, value in campos.items():
                 setattr(produto, key, value)
-            produto.save(update_fields=list(campos))
+            # `ultima_observacao` é auto_now, e auto_now NÃO grava quando o
+            # `update_fields` é restrito e não a inclui. Sem esta linha, abrir a
+            # página oficial do cupom e reconfirmar preço e disponibilidade não
+            # contava como observação: o produto envelhecia como se ninguém o
+            # tivesse visto, saía de `produtos_frescos_q` e depois virava `stale`
+            # em `expire_stale` — enquanto esta função continuava "atualizando" um
+            # item que `_base_produtos` já não enxergava. Era essa a maior parte de
+            # "Nenhum produto comprovadamente aplicável": em produção, 13 dos 17
+            # produtos provados de um mesmo cupom estavam fora da janela.
+            produto.save(update_fields=list(campos) + ["ultima_observacao"])
         else:
             produto = Produto.objects.create(marketplace="mercadolivre", **defaults)
         ProdutoCupom.objects.update_or_create(

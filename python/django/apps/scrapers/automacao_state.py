@@ -30,6 +30,24 @@ os.makedirs(_DIR, exist_ok=True)
 
 JOBS = ("scrape", "envio", "links", "relatorios")
 
+# Qual FLAG comanda cada fonte de ingestão. Existe para a tela poder separar
+# "a fonte quebrou" de "ninguém mandou esta lane rodar" — dois diagnósticos com
+# ações opostas que a faixa de Fontes mostrava com a mesma frase.
+#
+# Só entram aqui as fontes que dependem de flag. As demais (as de cupom, na lane
+# `cupons`) rodam sempre e não têm liga/desliga: ausência = sem lane.
+LANE_POR_FONTE = {
+    "mercadolivre-web": "scrape",
+    "mercadolivre-ofertas-flash": "scrape",
+    "amazon-public-web": "scrape",
+    "amazon-creators-api": "scrape",
+}
+
+
+def lane_da_fonte(slug: str):
+    """Lane que comanda esta fonte, ou None quando ela não depende de flag."""
+    return LANE_POR_FONTE.get(str(slug or ""))
+
 
 def logfile(job: str) -> str:
     return os.path.join(_DIR, f"{job}.log")

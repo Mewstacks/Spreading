@@ -2356,6 +2356,44 @@ class TopPromocoesFilterTests(TestCase):
         self.assertEqual([source.slug for source in response.context["fontes"]],
                          ["amazon-public-web", "mercadolivre-web"])
 
+    def test_lane_desligada_nao_e_apresentada_como_fonte_parada(self):
+        """"Parada" e "desligada" pedem ações opostas.
+
+        Em produção as três fontes da lane de raspagem apareciam como "Sem coleta
+        há mais de 8h" porque a flag estava desligada desde a véspera — a faixa
+        mandava procurar defeito numa coleta que ninguém tinha mandado rodar.
+        """
+        # A faixa de diagnóstico é de admin (ver `diagnostico` na view).
+        self.user.is_staff = True
+        self.user.save(update_fields=["is_staff"])
+        FonteIngestao.objects.filter(slug="mercadolivre-web").update(
+            status="ok", ultima_tentativa=timezone.now() - timedelta(days=2))
+
+        with patch("apps.scrapers.automacao_state.is_enabled", return_value=False):
+            response = self.client.get(self.url)
+
+        fonte = next(f for f in response.context["fontes"]
+                     if f.slug == "mercadolivre-web")
+        self.assertEqual(fonte.status_exibicao, "off")
+        self.assertIn("tela Scraper", fonte.motivo_exibicao)
+        self.assertTrue(any("Raspagem desligada" in aviso["nome"]
+                            for aviso in response.context["fontes_com_aviso"]))
+
+    def test_lane_ligada_com_fonte_muda_continua_parada(self):
+        """Com a lane ligada, silêncio longo volta a ser o defeito que é."""
+        self.user.is_staff = True
+        self.user.save(update_fields=["is_staff"])
+        FonteIngestao.objects.filter(slug="mercadolivre-web").update(
+            status="ok", ultima_tentativa=timezone.now() - timedelta(days=2))
+
+        with patch("apps.scrapers.automacao_state.is_enabled", return_value=True):
+            response = self.client.get(self.url)
+
+        fonte = next(f for f in response.context["fontes"]
+                     if f.slug == "mercadolivre-web")
+        self.assertEqual(fonte.status_exibicao, "silent")
+        self.assertIn("Sem coleta", fonte.motivo_exibicao)
+
     @patch("apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
            return_value=12)
     @patch("apps.scrapers.coupon_products.preparar_lote",

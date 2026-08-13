@@ -1,4 +1,5 @@
 import base64
+from datetime import timedelta
 from decimal import Decimal
 from io import BytesIO
 from types import SimpleNamespace
@@ -503,6 +504,69 @@ class CouponPreparationTests(TestCase):
         self.assertEqual(total, {"total": 1, "veredito": "itens_provados"})
         self.assertTrue(ProdutoCupom.objects.filter(
             cupom=cupom, status="confirmado").exists())
+
+    @patch("apps.scrapers.ml_auth.http_session")
+    @patch("apps.scrapers.ml_auth.storage_state", return_value={"cookies": []})
+    def test_reobservar_produto_existente_renova_a_janela_de_frescor(
+        self, _storage_state, http_session,
+    ):
+        """Reconfirmar preço na página oficial CONTA como observação.
+
+        `ultima_observacao` é auto_now, e auto_now não grava quando o
+        `update_fields` é restrito e não a inclui. O produto então envelhecia como
+        se ninguém o tivesse visto: saía de `produtos_frescos_q`, virava `stale` em
+        48h e sumia de `_base_produtos` — enquanto esta função seguia "atualizando"
+        um item que o preparo já não enxergava. Em produção, 13 dos 17 produtos
+        provados de um mesmo cupom estavam fora da janela por isto, e o preparo
+        concluía "Nenhum produto comprovadamente aplicável".
+        """
+        from apps.scrapers.coupon_products import (
+            _PAREDES_POR_CREDENCIAL, _coletar_ml_remoto,
+        )
+        from apps.scrapers.maintenance import produtos_frescos_q
+
+        # Memória de parede é de módulo: sem limpar, a credencial barrada por outro
+        # teste faz este pular o GET e levantar SessaoMLIndisponivelError.
+        _PAREDES_POR_CREDENCIAL.clear()
+        self.addCleanup(_PAREDES_POR_CREDENCIAL.clear)
+        link = "https://produto.mercadolivre.com.br/MLB-77"
+        antigo = Produto.objects.create(
+            marketplace="mercadolivre", nome="Item antigo", origem="cupom",
+            preco_sem_desconto=100.0, preco_com_cupom=90.0, link_produto=link,
+            imagem_url="https://http2.mlstatic.com/velho.jpg", estado="stale",
+        )
+        Produto.objects.filter(pk=antigo.pk).update(
+            ultima_observacao=timezone.now() - timedelta(days=30))
+        self.assertFalse(
+            Produto.objects.filter(produtos_frescos_q(), pk=antigo.pk).exists())
+
+        resposta = Mock(
+            status_code=200,
+            url="https://lista.mercadolivre.com.br/_Container_teste",
+            text="<html>listagem</html>",
+        )
+        resposta.raise_for_status.return_value = None
+        http_session.return_value = Mock(get=Mock(return_value=resposta))
+        cupom = self._cupom_ml_de_container()
+
+        with patch(
+            "apps.scrapers.coupon_products._produtos_ml_do_html",
+            return_value=[{
+                "nome_produto": "Item antigo",
+                "preco_original_sem_desconto": 100.0,
+                "preco_vitrine_atual": 70.0,
+                "link_produto": link,
+                "imagem_url": "https://http2.mlstatic.com/novo.jpg",
+            }],
+        ):
+            _coletar_ml_remoto(cupom, usuario=None)
+
+        antigo.refresh_from_db()
+        self.assertEqual(antigo.estado, "ativo")
+        self.assertEqual(antigo.preco_com_cupom, 70.0)
+        self.assertTrue(
+            Produto.objects.filter(produtos_frescos_q(), pk=antigo.pk).exists(),
+            "reobservação tem de devolver o produto à janela de frescor")
 
     def test_container_carimba_campanha_e_chega_a_ready_sem_coleta_remota(self):
         from apps.scrapers.coupon_products import ids_cupons_prontos, preparar_cupom

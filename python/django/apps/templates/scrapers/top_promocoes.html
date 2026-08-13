@@ -378,7 +378,7 @@ consultas agregadas que alimentam esta faixa.
       {% regroup fontes_ord by status_exibicao as fontes_grupos %}
       {% for g in fontes_grupos %}
       <span class="fonte-grupo">
-        <span class="fonte-grupo-label">{% if g.grouper == 'ok' %}Operacional{% elif g.grouper == 'degraded' %}Atenção{% elif g.grouper == 'blocked' %}Degradado{% elif g.grouper == 'silent' %}Parada{% else %}Desconectado{% endif %}</span>
+        <span class="fonte-grupo-label">{% if g.grouper == 'ok' %}Operacional{% elif g.grouper == 'degraded' %}Atenção{% elif g.grouper == 'blocked' %}Degradado{% elif g.grouper == 'off' %}Desligada{% elif g.grouper == 'silent' %}Parada{% else %}Desconectado{% endif %}</span>
         {% for f in g.list %}
         <span class="badge {% if f.status_exibicao == 'ok' %}badge-green{% elif f.status_exibicao == 'blocked' %}badge-red{% elif f.status_exibicao == 'degraded' %}badge-yellow{% else %}badge-muted{% endif %}"
               title="{{ f.motivo_exibicao|default:'Sem erro recente' }}"><span class="dot"></span>{{ f.nome }}</span>
