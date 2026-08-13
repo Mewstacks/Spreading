@@ -42,6 +42,21 @@ class CouponOperationalDashboardE2ETests(StaticLiveServerTestCase):
             reason_code="affiliate_link_pending",
             safe_detail="Código validado; link afiliado em preparação.",
         )
+        # Um cupom PRONTO para a tabela ter linha: desde a regra "na tela ⇒
+        # enviável", `waiting_link` só alimenta contador e motivos, não a lista.
+        pronto = CupomNormalizado.objects.create(
+            fonte=source, external_id="e2e-ready", marketplace="mercadolivre",
+            titulo="Cupom pronto", codigo="E2EOK10",
+            link="https://lista.mercadolivre.com.br/e2e-ok",
+            regras={
+                "modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                "valor_desconto": 10,
+            },
+        )
+        CupomDisponibilidade.objects.create(
+            organization=organization, usuario=self.user, cupom=pronto,
+            use_mode="code_notice", stage="ready",
+        )
 
     def _login(self, page):
         page.goto(f"{self.live_server_url}/accounts/login/")
@@ -65,18 +80,27 @@ class CouponOperationalDashboardE2ETests(StaticLiveServerTestCase):
                     try:
                         self._login(page)
                         page.goto(f"{self.live_server_url}/scrapers/top/?tipo=cupom")
-                        page.get_by_text("1 coletado(s)", exact=True).wait_for()
+                        page.get_by_text("2 coletado(s)", exact=True).wait_for()
                         page.get_by_text("1 aguardando link", exact=True).wait_for()
-                        self.assertTrue(page.get_by_text("E2E20", exact=True).is_visible())
+                        # O pronto é listado; o que aguarda link não pode ser
+                        # oferecido, porque a tela não conseguiria enviá-lo.
+                        self.assertTrue(
+                            page.get_by_text("E2EOK10", exact=True).is_visible())
+                        self.assertEqual(
+                            page.get_by_text("E2E20", exact=True).count(), 0)
 
                         page.get_by_text(
                             "Motivos de indisponibilidade", exact=False,
                         ).click()
+                        # `exact=False`: o motivo mora num <p> junto do total e do
+                        # reason_code. Antes esta asserção casava com o detalhe da
+                        # LINHA do cupom, que não existe mais — cupom sem link não
+                        # é listado desde a regra "na tela ⇒ enviável".
                         self.assertTrue(
                             page.get_by_text(
                                 "Código validado; link afiliado em preparação.",
-                                exact=True,
-                            ).is_visible()
+                                exact=False,
+                            ).first.is_visible()
                         )
                         dimensions = page.evaluate(
                             """() => ({

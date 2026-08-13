@@ -2093,10 +2093,15 @@ class TopPromocoesFilterTests(TestCase):
         self.assertEqual(response.context["cupons_prontos"], 1)
         self.assertEqual(response.context["cupons_aguardando_preparo"], 0)
         self.assertEqual(response.context["cupons_aguardando_link"], 1)
+        # REGRA DA TELA: só entra na lista o que pode ser enviado. O cupom em
+        # `waiting_link` aparecia aqui e oferecia um envio que o funil não
+        # sustentava — era o "aguardando link" que o usuário via na tela.
         self.assertEqual(
             {c.id for c in response.context["cupons_catalogo"]},
-            {pronto.id, aguardando.id},
+            {pronto.id},
         )
+        # Some da lista, mas não do conhecimento: vira contador.
+        self.assertEqual(response.context["cupons_em_preparo"], 1)
 
     def test_coupon_without_validity_older_than_ttl_is_not_collected(self):
         fonte = FonteIngestao.objects.create(

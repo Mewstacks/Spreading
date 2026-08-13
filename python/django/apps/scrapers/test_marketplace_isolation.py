@@ -446,3 +446,69 @@ class AmazonSendVerdictTests(TestCase):
             ml, {"ok": False, "erros": [], "nome_confere": None}, True,
         )
         self.assertIn("Mercado Livre", motivo_ml)
+
+
+class ReaberturaDeLinksReprovadosNaVitrineTests(TestCase):
+    """Passivo da regra que nenhum link do ML podia satisfazer.
+
+    Todo short link do Programa resolve para a vitrine `/social/` do afiliado — os
+    de oferta APROVADOS inclusive. Exigir a PDP no destino reprovava 100% dos
+    produtos de cupom (0 aprovados em 4.447 em produção). A regra foi corrigida na
+    origem; estas linhas precisam voltar para a fila, que de propósito não reabre
+    quem já tem veredito.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("vitrine")
+        self.produto = _produto("mercadolivre", origem="cupom")
+        self.outro = _produto(
+            "mercadolivre", origem="cupom",
+            link_produto="https://produto.mercadolivre.com.br/MLB-987654321",
+        )
+        self.afetado = LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=self.produto, afiliado_ok=True,
+            link_afiliado="https://meli.la/vitrine", verificado_ok=False,
+            estado="pronto", tentativas=3,
+            verificacao_motivo=(
+                "Caiu na vitrine /social/ (afiliado ok, mas não dá pra confirmar "
+                "o cupom do item)."),
+        )
+        self.legitimo = LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=self.outro, afiliado_ok=True,
+            link_afiliado="https://meli.la/pausado", verificado_ok=False,
+            estado="pronto", tentativas=1,
+            verificacao_motivo="O anúncio está pausado ou não existe mais.",
+        )
+
+    def _reabrir(self):
+        saida = StringIO()
+        call_command("reabrir_links_reprovados_na_vitrine", stdout=saida)
+        return saida.getvalue()
+
+    def test_reabre_verificacao_sem_pedir_link_novo(self):
+        saida = self._reabrir()
+
+        afetado = LinkAfiliadoUsuario.objects.get(pk=self.afetado.pk)
+        self.assertIsNone(afetado.verificado_ok)
+        self.assertEqual(afetado.estado, "pronto")
+        self.assertEqual(afetado.verificacao_motivo, "")
+        self.assertIsNone(afetado.proxima_tentativa)
+        # A URL está boa; só o veredito estava errado.
+        self.assertEqual(afetado.link_afiliado, "https://meli.la/vitrine")
+        self.assertIn("REABERTAS", saida)
+
+    def test_preserva_reprovacao_que_e_do_proprio_anuncio(self):
+        self._reabrir()
+
+        legitimo = LinkAfiliadoUsuario.objects.get(pk=self.legitimo.pk)
+        self.assertIs(legitimo.verificado_ok, False)
+        self.assertIn("pausado", legitimo.verificacao_motivo)
+
+    def test_dry_run_nao_escreve(self):
+        saida = StringIO()
+        call_command("reabrir_links_reprovados_na_vitrine", "--dry-run",
+                     stdout=saida)
+
+        self.afetado.refresh_from_db()
+        self.assertIs(self.afetado.verificado_ok, False)
+        self.assertIn("seca", saida.getvalue())

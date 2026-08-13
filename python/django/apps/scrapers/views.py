@@ -2079,6 +2079,9 @@ def top_promocoes(request):
     cupons_descartados = cupons_aguardando_preparo = cupons_aguardando_link = 0
     cupons_aguardando_verificacao = cupons_aguardando_conexao = 0
     cupons_fontes_sem_resultado = 0
+    # Contador para TODO usuário (não só admin): é o que explica uma lista curta
+    # sem oferecer um cupom que o envio ainda não consegue montar.
+    cupons_em_preparo = 0
     produtos, pendentes_ocultos, amazon_diagnostico = [], 0, ""
     prontos_por_loja, pendentes_por_loja, contagem_estrita = {}, {}, True
     page_obj = Paginator([], POR_PAGINA).get_page(1)
@@ -2164,17 +2167,23 @@ def top_promocoes(request):
                     get_stage_display=lambda: "Aguardando preparo",
                 )
                 cupom.disponibilidade = projecao
+                # Coletado entre os ciclos: ainda NÃO é enviável, então conta na
+                # fila em vez de entrar na lista.
                 if cupom_publicavel(cupom, usuario=request.user):
-                    cupons_publicaveis.append(cupom)
+                    cupons_em_preparo += 1
                 continue
             cupom.disponibilidade = projecao
-            # Código validado pode ser listado sem produto. Ativação permanece oculta
-            # até produto, preço e link estarem comprovados.
-            if cupom.codigo_publico:
-                if projecao.stage != "discarded":
-                    cupons_publicaveis.append(cupom)
-            elif projecao.stage == "ready":
+            # REGRA DA TELA: o que está listado tem de poder ser enviado.
+            #
+            # Cupom de código entrava aqui com qualquer `stage != "discarded"`, e
+            # era daí que vinham os "aguardando link" que a lista oferecia sem
+            # conseguir enviar. `ready` é o único estágio em que produto, preço e
+            # link afiliado estão comprovados — o mesmo corte que os cupons de
+            # ativação sempre tiveram. O resto vira contador, não item.
+            if projecao.stage == "ready":
                 cupons_publicaveis.append(cupom)
+            elif projecao.stage != "discarded":
+                cupons_em_preparo += 1
         if como_usar_selecionado == "codigo":
             cupons_publicaveis = [c for c in cupons_publicaveis if c.codigo_publico]
         elif como_usar_selecionado == "ativacao":
@@ -2583,6 +2592,7 @@ def top_promocoes(request):
         "cupons_aguardando_verificacao": cupons_aguardando_verificacao,
         "cupons_aguardando_conexao": cupons_aguardando_conexao,
         "cupons_fontes_sem_resultado": cupons_fontes_sem_resultado,
+        "cupons_em_preparo": cupons_em_preparo,
         "awin_programas": ProgramaAfiliado.objects.filter(
             integracao__owner=request.user, integracao__provedor="awin",
             integracao__status="conectada", habilitado=True,
