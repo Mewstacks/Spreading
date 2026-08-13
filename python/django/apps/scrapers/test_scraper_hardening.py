@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import timedelta
 from unittest.mock import Mock, patch
 
@@ -647,3 +648,94 @@ class SessaoMLExpiradaNaoPausaAutomacaoTests(TestCase):
         # Sem esta classe, cinco ticks seguidos desligavam a regra (`ativo=False`)
         # e religá-la exigia ação manual mesmo depois de reconectar o ML.
         self.assertEqual(resultado["classe"], TRANSITORIO)
+
+
+class RaspagemCedeAoLoginInterativoTests(TestCase):
+    """Regressão de produção (13/08/2026): religar a lane `scrape` derrubou o
+    login interativo do Mercado Livre — "A automação está concluindo uma tarefa
+    de navegador" em toda tentativa, porque a raspagem completa segura o
+    Chromium da máquina por dezenas de páginas sem nunca ceder. O mesmo padrão
+    de `gerar_links_em_lote` (ver `test_lote_de_links_devolve_o_navegador_a_um_
+    login_esperando`, acima) precisa valer aqui.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _browser_falso():
+        yield Mock(), Mock()
+
+    def test_mapear_ofertas_devolve_o_navegador_a_um_login_esperando(self):
+        from apps.scrapers.scraper_mercadolivre import ofertas_scraper
+
+        card = {
+            "link_produto": "https://produto.mercadolivre.com.br/MLB-1",
+            "nome": "Item", "preco_sem_desconto": 100, "preco_com_cupom": 80,
+            "imagem_url": "https://img/1.jpg",
+        }
+        paginas_pedidas = []
+
+        def _cards(_page):
+            paginas_pedidas.append(1)
+            return [dict(card)]
+
+        with patch.object(ofertas_scraper, "coordinated_ml_browser",
+                          lambda **_k: self._browser_falso()), \
+                patch.object(ofertas_scraper, "iniciar_browser",
+                             lambda **_k: self._browser_falso()), \
+                patch.object(ofertas_scraper, "storage_state", return_value=None), \
+                patch.object(ofertas_scraper, "pausa_humana", Mock()), \
+                patch.object(ofertas_scraper, "_coletar_cards", side_effect=_cards), \
+                patch.object(ofertas_scraper, "_salvar", return_value=2) as salvar, \
+                patch.object(
+                    ofertas_scraper, "interesse_interativo_pendente",
+                    lambda _r: len(paginas_pedidas) >= 2,
+                ):
+            ofertas_scraper.mapear_ofertas(max_paginas=40)
+
+        # Cede DEPOIS da página corrente: duas páginas lidas, o resto devolvido
+        # ao próximo ciclo — nada se perde, e o login não espera 40 páginas.
+        self.assertEqual(len(paginas_pedidas), 2)
+        self.assertEqual(len(salvar.call_args.args[0]), 2)
+
+    def test_buscar_por_termo_devolve_o_navegador_a_um_login_esperando(self):
+        from apps.scrapers.scraper_mercadolivre import ofertas_scraper
+
+        termos_lidos = []
+
+        def _cards(_page):
+            return [{
+                "link_produto": f"https://produto.mercadolivre.com.br/MLB-{len(termos_lidos)}",
+                "nome": "Item", "preco_sem_desconto": 100, "preco_com_cupom": 80,
+                "imagem_url": "https://img/1.jpg",
+            }]
+
+        def _goto(url, **_kw):
+            if "_Discount_" in url and url.count("Desde") == 0:
+                termos_lidos.append(url)
+
+        page = Mock()
+        page.goto = _goto
+
+        @contextmanager
+        def _browser_com_page():
+            yield page, Mock()
+
+        with patch.object(ofertas_scraper, "coordinated_ml_browser",
+                          lambda **_k: _browser_com_page()), \
+                patch.object(ofertas_scraper, "iniciar_browser",
+                             lambda **_k: _browser_com_page()), \
+                patch.object(ofertas_scraper, "storage_state", return_value=None), \
+                patch.object(ofertas_scraper, "pausa_humana", Mock()), \
+                patch.object(ofertas_scraper, "_coletar_cards", side_effect=_cards), \
+                patch.object(ofertas_scraper, "_salvar", return_value=1), \
+                patch.object(ofertas_scraper, "_reconectar_db", Mock()), \
+                patch.object(
+                    ofertas_scraper, "interesse_interativo_pendente",
+                    lambda _r: len(termos_lidos) >= 1,
+                ):
+            ofertas_scraper.buscar_por_termo(
+                "fone, robo aspirador, cafeteira", max_paginas=1,
+            )
+
+        # Só o primeiro termo é lido; o login não espera os outros dois.
+        self.assertEqual(len(termos_lidos), 1)

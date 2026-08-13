@@ -18,6 +18,7 @@ from apps.scrapers.carga import coordinated_ml_browser
 from apps.scrapers.ml_auth import storage_state
 from apps.scrapers.models import Produto
 from apps.scrapers.progresso import emitir_progresso
+from apps.scrapers.resource_control import interesse_interativo_pendente
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 logger = logging.getLogger(__name__)
@@ -528,6 +529,19 @@ def mapear_ofertas(max_paginas=40, substituir=True, usuario=None):
         owner_kind="ml_offers",
     ), iniciar_browser(storage_state=state, headless=True) as (page, context):
         for n in range(1, max_paginas + 1):
+            # Alguém está esperando o navegador para logar AGORA. A raspagem
+            # completa segura o Chromium da máquina por dezenas de páginas — sem
+            # esta saída o login interativo esgotava os 45s de espera toda vez
+            # que a lane `scrape` estava rodando, e a tela abria e fechava
+            # sozinha ("A automação está concluindo uma tarefa de navegador").
+            # Sair aqui não perde trabalho: o que já foi coletado é salvo, e a
+            # página seguinte é a primeira do próximo ciclo.
+            if n > 1 and interesse_interativo_pendente("django_chromium"):
+                logger.info(
+                    "Raspagem de ofertas ML cedeu o navegador a um login "
+                    "interativo após %s de %s página(s).", n - 1, max_paginas,
+                )
+                break
             emitir_progresso(f"[PROGRESSO] Ofertas página {n}/{max_paginas} ({n*100//max_paginas}%)")
             try:
                 page.goto(f"https://www.mercadolivre.com.br/ofertas?page={n}",
@@ -596,7 +610,15 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None,
         usuario=usuario, authenticated=state is not None,
         owner_kind="ml_search",
     ), iniciar_browser(storage_state=state, headless=True) as (page, context):
-        for termo in termos:
+        for indice_termo, termo in enumerate(termos):
+            # Mesmo motivo de mapear_ofertas: ceder ao login interativo em vez de
+            # segurar o Chromium até o fim de todos os termos configurados.
+            if indice_termo > 0 and interesse_interativo_pendente("django_chromium"):
+                logger.info(
+                    "Busca ML cedeu o navegador a um login interativo após "
+                    "%s de %s termo(s).", indice_termo, len(termos),
+                )
+                break
             slug = _slug_busca(termo)
             if not slug:
                 continue
