@@ -579,3 +579,43 @@ class LinkDeCupomSemProvaAindaTests(TestCase):
 
         self.assertEqual(resultado["aprovados"], 1)
         self.assertTrue(verificador.call_args.kwargs["desconto_comprovado"])
+
+    def test_motivo_de_reprovacao_nao_cobra_preco_de_pagina_nao_aberta(self):
+        """O relatório é de DESTINO; o desconto foi provado na coleta.
+
+        Julgar com `confiar_desconto=False` fazia `motivo_reprovacao` cobrar preço
+        e cupom de um relatório que nunca os coleta, e gravar "Não foi possível
+        confirmar o preço na página do produto" — motivo falso, sobre uma página
+        que a verificação nem abriu. Foram 80 linhas assim em produção.
+        """
+        from apps.scrapers.models import ProdutoCupom
+        from apps.scrapers.scraper_mercadolivre.link import (
+            verificar_links_pendentes,
+        )
+
+        cupom = CupomNormalizado.objects.create(
+            fonte=FonteIngestao.objects.create(
+                slug="motivo-src", marketplace="mercadolivre", nome="ML"),
+            external_id="campanha:7", marketplace="mercadolivre",
+            titulo="20% OFF", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20},
+        )
+        ProdutoCupom.objects.create(
+            produto=self.produto, cupom=cupom, status="confirmado",
+            preco_original=100, preco_atual=100, preco_final=80,
+        )
+        # Destino que não é do Programa: reprovação legítima, motivo honesto.
+        reprovado = {
+            "ok": False, "erros": [], "is_pagina_produto": False,
+            "is_landing_afiliado": False, "nome_confere": None,
+            "preco_visivel": None, "cupom_detectado": False,
+        }
+        with patch("apps.scrapers.scraper_mercadolivre.link_http."
+                   "relatorio_de_link_com_cupom", return_value=reprovado):
+            resultado = verificar_links_pendentes(self.user, limite=10)
+
+        self.assertEqual(resultado["reprovados"], 1)
+        linha = LinkAfiliadoUsuario.objects.get(pk=self.linha.pk)
+        self.assertNotIn("preço na página do produto", linha.verificacao_motivo)
+        self.assertIn("não abre uma página de produto", linha.verificacao_motivo)

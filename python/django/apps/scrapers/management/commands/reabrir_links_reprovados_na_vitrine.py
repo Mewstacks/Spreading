@@ -43,6 +43,11 @@ MOTIVOS_SUPERADOS = (
     # Reprovava quem ainda não tinha ProdutoCupom confirmado — prova que o worker
     # de cupons reconstrói a cada ciclo. Virou espera, não veredito.
     "O desconto deste cupom não está comprovado",
+    # Motivo FALSO gravado pela primeira versão da verificação por origem: cobrava
+    # preço e cupom de um relatório de destino, que nunca os coleta. Falava de uma
+    # página que a verificação nem abriu.
+    "Não foi possível confirmar o preço na página do produto",
+    "Não foi possível confirmar o desconto/cupom na página do produto",
 )
 
 

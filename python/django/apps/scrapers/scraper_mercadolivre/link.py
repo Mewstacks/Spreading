@@ -1130,7 +1130,12 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
                 _no_tenant(_adiar, linha)
                 transitorios += 1
                 continue
-            _julgar(linha, relatorio, False)
+            # `True` porque o relatório É de destino: o desconto foi provado na
+            # coleta, não nesta leitura. Passar `False` fazia `motivo_reprovacao`
+            # cobrar preço e cupom de um relatório que nunca os coletou, e gravar
+            # "Não foi possível confirmar o preço na página do produto" — motivo
+            # falso, sobre uma página que a verificação nem abriu.
+            _julgar(linha, relatorio, True)
 
     if no_destino:
         # UM browser para o lote inteiro. Abrir e fechar um Chromium por link custava
