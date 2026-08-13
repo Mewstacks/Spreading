@@ -549,18 +549,26 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
     houve_credencial = False
     houve_resposta_http = False
     houve_falha_transporte = False
+    listagem_inexistente = False
 
     def _tentar_http(credencial):
-        """(linhas, barrado, falha_transporte)."""
+        """(linhas, barrado, falha_transporte, inexistente)."""
         try:
             response = _ml_http_session(credencial).get(link, timeout=12)
             if parede_de_login(response):
-                return None, True, False
+                return None, True, False, False
+            if response.status_code in (404, 410):
+                # VEREDITO, não falha: a listagem não existe mais (vendedor saiu,
+                # container encerrado). Cair no `except` abaixo transformava isso em
+                # "falha de transporte" e, com a memória de parede de outro cupom
+                # ligada, em "o ML exigiu sessão" — um cupom morto voltando à fila a
+                # cada 20 min, para sempre, e ainda pedindo reconexão ao usuário.
+                return [], False, False, True
             response.raise_for_status()
-            return _produtos_ml_do_html(response.text, limite=9), False, False
+            return _produtos_ml_do_html(response.text, limite=9), False, False, False
         except Exception as exc:
             logger.info("Container ML via HTTP falhou para %s: %s", cupom.pk, exc)
-            return None, False, True
+            return None, False, True, False
 
     # Percorre os candidatos até um passar pelo gateway. Uma sessão de OUTRA
     # organização é recuperação de indisponibilidade, não preferência: a primeira
@@ -578,9 +586,15 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
         if credencial is None:
             continue
         houve_credencial = True
-        rows, parede, falha_transporte = _tentar_http(credencial)
+        rows, parede, falha_transporte, inexistente = _tentar_http(credencial)
         houve_falha_transporte = houve_falha_transporte or falha_transporte
         houve_resposta_http = houve_resposta_http or not (parede or falha_transporte)
+        if inexistente:
+            # 404/410 é resposta definitiva do ML e vale para qualquer credencial:
+            # não há por que tentar as outras nem subir Chromium.
+            listagem_inexistente = True
+            barrado = False
+            break
         if rows:
             barrado = False
             state = credencial
@@ -595,6 +609,8 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
         if parede:
             _marcar_parede(chave, agora)
             barrado = True
+    if listagem_inexistente:
+        return {"total": 0, "veredito": "vazio_comprovado"}
     if rows:
         resultado = {**payload, "produtos_aplicaveis": rows}
     # Parede de login não é challenge que o Chromium desfaz: ele bate na mesma

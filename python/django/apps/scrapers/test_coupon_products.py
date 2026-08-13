@@ -573,6 +573,38 @@ class CouponPreparationTests(TestCase):
 
     @patch("apps.scrapers.ml_auth.http_session")
     @patch("apps.scrapers.ml_auth.storage_state", return_value={"cookies": []})
+    def test_listagem_404_e_veredito_e_nao_pedido_de_reconexao(
+        self, _storage_state, http_session,
+    ):
+        """404 na listagem é o ML dizendo que ela não existe mais.
+
+        Caía no `except` genérico como "falha de transporte" e, com a memória de
+        parede de outro cupom ligada, virava `SessaoMLIndisponivelError` — em
+        produção, cupons mortos voltando à fila a cada 20 min para sempre e ainda
+        pedindo reconexão a um usuário que estava conectado.
+        """
+        from apps.scrapers.coupon_products import (
+            _PAREDES_POR_CREDENCIAL, _coletar_ml_remoto,
+        )
+
+        _PAREDES_POR_CREDENCIAL.clear()
+        self.addCleanup(_PAREDES_POR_CREDENCIAL.clear)
+        resposta = Mock(
+            status_code=404,
+            url="https://lista.mercadolivre.com.br/_CustId_1",
+            text="",
+        )
+        resposta.raise_for_status.side_effect = AssertionError(
+            "404 não deve chegar ao raise_for_status")
+        http_session.return_value = Mock(get=Mock(return_value=resposta))
+        cupom = self._cupom_ml_de_container()
+
+        resultado = _coletar_ml_remoto(cupom, usuario=None)
+
+        self.assertEqual(resultado, {"total": 0, "veredito": "vazio_comprovado"})
+
+    @patch("apps.scrapers.ml_auth.http_session")
+    @patch("apps.scrapers.ml_auth.storage_state", return_value={"cookies": []})
     def test_reobservar_produto_existente_renova_a_janela_de_frescor(
         self, _storage_state, http_session,
     ):
