@@ -530,13 +530,13 @@ def executar_pipeline_cupons(
     por_usuario = {}
     for usuario in usuarios:
         try:
-            # `limite_codigo` acompanha o lote: era 8 fixo por usuário/ciclo
-            # contra ~2.400 cupons de código do ML — uma fila que levaria semanas
-            # para virar, e que em produção tinha rendido 48 links no total.
-            afiliacao = afiliar_cupons(
-                usuario, limite=limite_links,
-                limite_codigo=max(8, limite_links // 2),
-            )
+            # `limite_codigo` fica DELIBERADAMENTE pequeno. A fila de ~2.400
+            # cupons de código pede mais, mas o Link Builder é a superfície mais
+            # frágil do sistema: subir este teto de 8 para 40 derrubou a sessão do
+            # ML em produção em menos de uma hora (`lb_readiness=login_required`,
+            # sessão `suspect`), e sessão caída para o funil INTEIRO — não só os
+            # códigos. Vazão aqui se ganha com ciclos, não com lote.
+            afiliacao = afiliar_cupons(usuario, limite=limite_links)
         except Exception as exc:
             logger.exception("Pipeline de cupons falhou para usuário %s", usuario.pk)
             afiliacao = {
