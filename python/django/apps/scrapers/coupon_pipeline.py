@@ -510,20 +510,33 @@ def executar_pipeline_cupons(
         resultado["falhos"] += 1
         logger.exception("Casamento de containers de cupons falhou")
 
-    from apps.scrapers.coupon_products import preparar_lote
+    from apps.scrapers.coupon_products import (
+        PREPARO_LOTE_HTTP_POR_CICLO, preparar_lote,
+    )
 
+    # O teto grande é da varredura por GET; o Chromium continua no teto pequeno.
+    # É aqui que a cadência é conhecida (o worker roda a cada 15 min), então é
+    # aqui que a escolha mora — `preparar_lote` sozinho não sabe disso.
     preparo = preparar_lote(
         limite=limite_preparo, usuarios=usuarios, detalhado=True,
         permitir_rede=permitir_rede_preparo,
+        limite_http=PREPARO_LOTE_HTTP_POR_CICLO,
     )
     resultado["preparados"] = preparo["processados"]
     resultado["preparos_prontos"] = preparo["prontos"]
     resultado["preparo_por_fonte"] = preparo.get("por_fonte", {})
+    resultado["preparos_adiados"] = preparo.get("adiados_sem_browser", 0)
 
     por_usuario = {}
     for usuario in usuarios:
         try:
-            afiliacao = afiliar_cupons(usuario, limite=limite_links)
+            # `limite_codigo` acompanha o lote: era 8 fixo por usuário/ciclo
+            # contra ~2.400 cupons de código do ML — uma fila que levaria semanas
+            # para virar, e que em produção tinha rendido 48 links no total.
+            afiliacao = afiliar_cupons(
+                usuario, limite=limite_links,
+                limite_codigo=max(8, limite_links // 2),
+            )
         except Exception as exc:
             logger.exception("Pipeline de cupons falhou para usuário %s", usuario.pk)
             afiliacao = {

@@ -50,6 +50,10 @@ BACKOFF_TRANSPORTE = timedelta(minutes=20)
 BACKOFF_CAPACIDADE = timedelta(minutes=3)
 MAX_CANDIDATOS = 36
 PREPARO_LOTE_POR_CICLO = 12
+# Teto da varredura por GET. Dimensionado pela demanda real: ~2.400 cupons ativos
+# com janela de preparo de 3h pedem ~800/h, e o ciclo de cupons roda a cada 15 min.
+# Um GET de container custa ~1s e não disputa o Chromium.
+PREPARO_LOTE_HTTP_POR_CICLO = 200
 _CENT = Decimal("0.01")
 
 # Mensagem estável do preparo bloqueado por sessão. É ela que a projeção lê para
@@ -74,6 +78,15 @@ class SessaoMLIndisponivelError(RuntimeError):
 
 class ContainerFetchFailedError(RuntimeError):
     """A listagem não foi observada por falha transitória de transporte."""
+
+
+class BrowserNecessarioError(RuntimeError):
+    """O container só sai com Chromium, e esta passada é a de HTTP em massa.
+
+    NÃO é veredito: nada foi observado e nada é gravado. Existe para o lote poder
+    varrer centenas de cupons por GET (que resolve a maioria dos containers) sem
+    que os poucos que exigem navegador consumam o teto do passo caro.
+    """
 
 
 # Sessões que o ML barrou há pouco, por id de usuário (None = a de sistema). Um
@@ -468,12 +481,17 @@ def _ordem_por_valor_do_cupom(relacao):
     return economia / atual, economia
 
 
-def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=()):
+def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
+                       permitir_browser=True):
     """Materializa a listagem oficial do ML quando ela ainda nao esta no banco.
 
     `usuario` é o contexto do preparo (None em cupom global, que cai na
     organização de sistema — ver scrapers/ml_auth.py). O container do ML é SSR e
     só rende a listagem completa com sessão.
+
+    `permitir_browser=False` corta o fallback de Chromium: a passada em massa do
+    lote resolve por GET (que é o que basta para a maioria dos containers) e
+    devolve o cupom à fila sem gastar o único navegador da máquina.
 
     `credenciais_alternativas` são os usuários cuja sessão pode LER a listagem
     quando a do contexto não serve — TODOS eles, em ordem, porque o primeiro
@@ -593,6 +611,11 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=()):
     if (resultado is None and houve_falha_transporte
             and not houve_resposta_http):
         return {"total": 0, "veredito": "falha_transporte"}
+    if resultado is None and not permitir_browser:
+        # Passada em massa: o GET não resolveu este container, e abrir Chromium
+        # aqui gastaria o recurso mais escasso da máquina no item menos provável.
+        # Volta para a fila do passo com navegador, sem gravar veredito nenhum.
+        raise BrowserNecessarioError(cupom.pk)
     if resultado is None:
         with ml_site_browser_resource(
             usuario, owner_kind="coupon_products",
@@ -659,11 +682,15 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=()):
 
 
 def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
-                   credenciais_alternativas=()):
+                   credenciais_alternativas=(), permitir_browser=True):
     """Prepara e devolve ProdutoCupom confirmados, ou [] sem fallback inseguro.
 
     `credenciais_alternativas`: usuários cuja sessão do ML pode ler a listagem
     pública quando a do contexto está barrada — ver `_coletar_ml_remoto`.
+
+    `permitir_browser=False` levanta `BrowserNecessarioError` em vez de abrir
+    Chromium, SEM gravar veredito: é a passada em massa por HTTP do lote, e o
+    cupom que precisa de navegador fica intacto para o passo caro.
     """
     from apps.scrapers.coupon_rules import cupom_publicavel
 
@@ -701,6 +728,7 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
                     [usuario, *(credenciais_alternativas or ())]
                     if contexto is None else ()
                 ),
+                permitir_browser=permitir_browser,
             )
             if coleta_ml["veredito"] == "falha_transporte":
                 raise ContainerFetchFailedError(ERRO_CONTAINER_FETCH_FAILED)
@@ -779,6 +807,10 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
             erro=ERRO_CONTAINER_FETCH_FAILED,
         )
         return []
+    except BrowserNecessarioError:
+        # Passada de HTTP em massa: nada foi observado e NADA é gravado. O passo
+        # com navegador, logo a seguir no mesmo ciclo, decide este cupom.
+        raise
     except BrowserResourceUnavailable:
         # FILA, NÃO AVARIA. A máquina tem UM Chromium; quando outra lane está com
         # ele, este preparo nem começou — nada foi observado sobre o cupom. Caindo
@@ -949,13 +981,18 @@ def ids_cupons_prontos(usuario, cupons):
 
 def preparar_lote(
     limite=PREPARO_LOTE_POR_CICLO, *, usuarios=None, detalhado=False,
-    permitir_rede=True,
+    permitir_rede=True, limite_http=None,
 ):
     """Prepara cupons ativos com round-robin por fonte, usuário e organização.
 
     O catálogo de uma fonte grande (notadamente campanhas/feeds) não pode consumir
     todo o ciclo. Cada bucket avança um item por rodada, mantendo a janela de três
     horas renovada também para cupons privados e integrações menores.
+
+    `limite` é o teto do passo com Chromium; `limite_http` é o da varredura por
+    GET, que é barata e resolve a maior parte dos containers. Sem `limite_http`
+    explícito os dois passos usam `limite` — quem pede um lote pequeno recebe um
+    lote pequeno, e quem conhece a cadência (o pipeline) escolhe o teto maior.
     """
     from django.contrib.auth import get_user_model
     from apps.scrapers.coupon_rules import _FONTES_ML_ATIVACAO, cupom_publicavel
@@ -1057,9 +1094,33 @@ def preparar_lote(
         )
         if items
     )
-    feitos = prontos = 0
+    feitos = prontos = adiados = 0
     por_fonte = defaultdict(lambda: {"processados": 0, "prontos": 0})
-    while filas and feitos < limite:
+    # DOIS ORÇAMENTOS, porque os dois passos custam ordens de grandeza diferentes.
+    # O container do ML é SSR: um GET autenticado resolve a maioria em ~1s, e é só
+    # o resto que precisa de Chromium — recurso único da máquina, disputado com a
+    # geração de links e com o login interativo. Com um orçamento só, o teto do
+    # passo caro (12) virava o teto de TUDO: 40 cupons por ciclo de 15 min contra
+    # ~2.400 cupons ativos que a janela de 3h manda repreparar.
+    orcamento_http = max(limite, int(limite_http or 0))
+    fila_do_browser = deque()
+
+    def _passar(cupom, usuario, *, permitir_browser):
+        nonlocal prontos
+        fonte = getattr(getattr(cupom, "fonte", None), "slug", "") or "sem-fonte"
+        por_fonte[fonte]["processados"] += 1
+        if preparar_cupom(
+            cupom, usuario=usuario, force=True, permitir_rede=permitir_rede,
+            # Ler a listagem pública do ML depende de UMA sessão viva, qualquer
+            # uma. Oferecer o lote inteiro de usuários evita que a esteira
+            # compartilhada pare porque a primeira credencial da fila expirou.
+            credenciais_alternativas=usuarios,
+            permitir_browser=permitir_browser,
+        ):
+            prontos += 1
+            por_fonte[fonte]["prontos"] += 1
+
+    while filas and feitos < orcamento_http:
         fila = filas.popleft()
         cupom, usuario = fila.popleft()
         if fila:
@@ -1072,21 +1133,25 @@ def preparar_lote(
                 continue
             if prep.proxima_tentativa and prep.proxima_tentativa > agora:
                 continue
-        fonte = getattr(getattr(cupom, "fonte", None), "slug", "") or "sem-fonte"
         feitos += 1
-        por_fonte[fonte]["processados"] += 1
-        if preparar_cupom(
-            cupom, usuario=usuario, force=True, permitir_rede=permitir_rede,
-            # Ler a listagem pública do ML depende de UMA sessão viva, qualquer
-            # uma. Oferecer o lote inteiro de usuários evita que a esteira
-            # compartilhada pare porque a primeira credencial da fila expirou.
-            credenciais_alternativas=usuarios,
-        ):
-            prontos += 1
-            por_fonte[fonte]["prontos"] += 1
+        try:
+            _passar(cupom, usuario, permitir_browser=False)
+        except BrowserNecessarioError:
+            # Nada foi observado nem gravado: só o passo caro decide este.
+            fila_do_browser.append((cupom, usuario))
+
+    # Passo caro, com o teto de sempre.
+    com_browser = 0
+    while fila_do_browser and com_browser < limite:
+        cupom, usuario = fila_do_browser.popleft()
+        com_browser += 1
+        _passar(cupom, usuario, permitir_browser=True)
+    adiados = len(fila_do_browser)
+
     resultado = {
         "processados": feitos,
         "prontos": prontos,
+        "adiados_sem_browser": adiados,
     }
     if detalhado:
         resultado["por_fonte"] = dict(por_fonte)

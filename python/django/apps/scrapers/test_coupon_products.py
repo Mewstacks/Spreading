@@ -284,7 +284,8 @@ class CouponPreparationTests(TestCase):
 
         resultado = preparar_lote(limite=1)
 
-        self.assertEqual(resultado, {"processados": 1, "prontos": 1})
+        self.assertEqual(resultado["processados"], 1)
+        self.assertEqual(resultado["prontos"], 1)
         self.assertEqual(
             CupomPreparacao.objects.get(cupom=publicavel, usuario=self.user).status,
             "pronto",
@@ -319,13 +320,78 @@ class CouponPreparationTests(TestCase):
         with patch("apps.scrapers.coupon_products.preparar_cupom", return_value=[object()]) as preparar:
             resultado = preparar_lote(limite=1)
 
-        self.assertEqual(resultado, {"processados": 1, "prontos": 1})
+        self.assertEqual(resultado["processados"], 1)
+        self.assertEqual(resultado["prontos"], 1)
         self.assertEqual(preparar.call_args.args[0].id, pendente.id)
 
     def test_limite_padrao_de_preparacao_e_doze(self):
         from apps.scrapers.coupon_products import PREPARO_LOTE_POR_CICLO
 
         self.assertEqual(PREPARO_LOTE_POR_CICLO, 12)
+
+    def test_varredura_http_tem_orcamento_proprio_e_so_o_caro_usa_o_limite(self):
+        """O teto do Chromium não pode ser o teto de tudo.
+
+        O container do ML é SSR: um GET resolve a maioria em ~1s. Com orçamento
+        único, os 12 slots do passo caro limitavam o ciclo inteiro a 40 cupons por
+        15 min contra ~2.400 ativos que a janela de 3h manda repreparar.
+        """
+        from apps.scrapers.coupon_products import (
+            BrowserNecessarioError, preparar_lote,
+        )
+
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-budget-tests", marketplace="mercadolivre", nome="Cupons ML",
+        )
+        for indice in range(8):
+            CupomNormalizado.objects.create(
+                fonte=fonte, external_id=f"orcamento-{indice}",
+                marketplace="mercadolivre", titulo=f"Cupom {indice}",
+                codigo=f"CUPOM{indice}0", estado="ativo",
+                regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                        "valor_desconto": 10},
+            )
+
+        chamadas = []
+
+        def _preparar(cupom, **kwargs):
+            chamadas.append(kwargs["permitir_browser"])
+            if not kwargs["permitir_browser"]:
+                raise BrowserNecessarioError(cupom.pk)
+            return [object()]
+
+        with patch("apps.scrapers.coupon_products.preparar_cupom", _preparar):
+            resultado = preparar_lote(limite=2, limite_http=8)
+
+        # Oito passaram pelo GET; só dois chegaram ao navegador.
+        self.assertEqual(chamadas.count(False), 8)
+        self.assertEqual(chamadas.count(True), 2)
+        self.assertEqual(resultado["processados"], 8)
+        self.assertEqual(resultado["prontos"], 2)
+        self.assertEqual(resultado["adiados_sem_browser"], 6)
+
+    def test_sem_limite_http_explicito_o_lote_pequeno_continua_pequeno(self):
+        """Quem pede um lote de 1 recebe 1 — o orçamento grande é escolha do
+        pipeline, que é quem conhece a cadência do worker."""
+        from apps.scrapers.coupon_products import preparar_lote
+
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-budget-default", marketplace="mercadolivre", nome="ML",
+        )
+        for indice in range(4):
+            CupomNormalizado.objects.create(
+                fonte=fonte, external_id=f"padrao-{indice}",
+                marketplace="mercadolivre", titulo=f"Cupom {indice}",
+                codigo=f"PADRAO{indice}0", estado="ativo",
+                regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                        "valor_desconto": 10},
+            )
+
+        with patch("apps.scrapers.coupon_products.preparar_cupom",
+                   return_value=[object()]):
+            resultado = preparar_lote(limite=1)
+
+        self.assertEqual(resultado["processados"], 1)
 
     @patch("apps.scrapers.auxiliar.iniciar_browser")
     @patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session")
