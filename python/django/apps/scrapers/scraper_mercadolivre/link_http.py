@@ -282,8 +282,13 @@ def preco_da_pdp(corpo: str) -> tuple[float, float]:
 
 
 def relatorio_por_http(link_afiliado: str, nome_esperado: str = None,
-                       confiar_desconto: bool = False) -> dict:
-    """Mesmo relatório de `verificar_link_afiliado`, obtido sem browser."""
+                       confiar_desconto: bool = False, sessao=None) -> dict:
+    """Mesmo relatório de `verificar_link_afiliado`, obtido sem browser.
+
+    `sessao` permite injetar o transporte AUTENTICADO (`ml_auth.http_session`). O
+    GET anônimo cai no interstitial contra a PDP — ver o topo deste módulo e
+    `coupon_products._coletar_ml_remoto`, que já lê o mesmo host com cookies.
+    """
     from apps.scrapers.scraper_mercadolivre.link import _nome_bate
 
     relatorio = {
@@ -296,7 +301,8 @@ def relatorio_por_http(link_afiliado: str, nome_esperado: str = None,
         return relatorio
 
     try:
-        resp = _get_ml(_sessao(), link_afiliado, timeout=_TIMEOUT)
+        resp = _get_ml(sessao if sessao is not None else _sessao(),
+                       link_afiliado, timeout=_TIMEOUT)
     except Exception as e:
         relatorio["erros"].append(f"Falha ao abrir link: {e}")
         return relatorio
@@ -341,6 +347,67 @@ def relatorio_por_http(link_afiliado: str, nome_esperado: str = None,
         relatorio["erros"].append(
             "Caiu na vitrine /social/ (afiliado ok, mas não dá pra confirmar o cupom do item)."
         )
+    return relatorio
+
+
+def relatorio_de_link_com_cupom(link_afiliado: str, url_origem: str,
+                                nome_esperado: str = None, sessao=None) -> dict:
+    """Relatório de um link cujo desconto precisa ser provado FORA do destino.
+
+    MEDIDO EM PRODUÇÃO (13/08/2026): **todo** short link do Programa resolve para a
+    vitrine do afiliado, não para o anúncio — inclusive os 10.807 links de oferta
+    que o sistema aprova hoje::
+
+        https://meli.la/1EStDY1  (produto de cupom, reprovado)
+        https://meli.la/15Grqae  (produto de oferta, APROVADO)
+        ambos -> https://www.mercadolivre.com.br/social/<afiliado>?matt_word=…&ref=<opaco>
+
+    O item real viaja dentro do `ref` cifrado. Ou seja: exigir `is_pagina_produto`
+    NO DESTINO é uma condição que nenhum link do ML satisfaz. Quem passava só
+    passava porque `confiar_desconto=True` dispensa a prova; os produtos de cupom,
+    que precisam dela, eram reprovados 100% das vezes ("Caiu na vitrine /social/",
+    262 de 391 verificações em 3h) — e era isso, e não a coleta, que prendia o
+    catálogo inteiro em "aguardando link".
+
+    Aqui as duas perguntas voltam a ser duas:
+
+      1. o LINK leva a um destino de afiliado vivo?  → lido no short link;
+      2. o PRODUTO tem preço e cupom anunciados?     → lido na PDP DE ORIGEM,
+         que é justamente a página de onde o link foi gerado.
+
+    A decisão continua sendo de `aprovado_por_relatorio` (fonte única): o relatório
+    devolvido descreve o produto observado na origem, com o destino já conferido.
+    """
+    destino = relatorio_por_http(link_afiliado, nome_esperado=None,
+                                 confiar_desconto=True, sessao=sessao)
+    destino_valido = bool(
+        destino.get("is_pagina_produto") or destino.get("is_landing_afiliado"))
+    erros_destino = list(destino.get("erros") or [])
+    if not destino_valido and not erros_destino:
+        # Sem erro de transporte e sem destino de afiliado: o link não serve.
+        erros_destino.append("O link não abre um destino do Programa de Afiliados.")
+    if erros_destino or not destino_valido:
+        # Transporte ruim ou destino inválido: nada a ganhar lendo a origem.
+        return {**destino, "ok": False, "erros": erros_destino,
+                "evidencia_origem": False}
+
+    origem = relatorio_por_http(url_origem, nome_esperado=nome_esperado,
+                                confiar_desconto=False, sessao=sessao)
+    # A origem responde pelo PRODUTO; o destino, pelo link. `url_final` fica a do
+    # destino porque é ela que o assinante abre.
+    relatorio = {
+        **origem,
+        "url_final": destino.get("url_final"),
+        "url_origem": origem.get("url_final"),
+        "is_landing_afiliado": destino.get("is_landing_afiliado", False),
+        "evidencia_origem": True,
+    }
+    relatorio["erros"] = [
+        e for e in (origem.get("erros") or [])
+        # Este motivo descrevia o destino, que aqui já foi aprovado à parte.
+        if "vitrine /social/" not in e
+    ]
+    relatorio["ok"] = aprovado_por_relatorio(relatorio, False)
     return relatorio
 
 

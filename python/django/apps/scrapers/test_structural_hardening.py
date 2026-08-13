@@ -1411,7 +1411,8 @@ class CouponReadinessReasonTests(TestCase):
             )
             return {"sucesso": True, "link": "https://meli.la/gerado"}
 
-        with patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom", _resolver):
+        with self._ml(), \
+                patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom", _resolver):
             resultado = afiliar_cupons_de_codigo(self.user, [coupon])
         self.assertEqual(resultado["gerados"], 1)
 
@@ -1441,10 +1442,59 @@ class CouponReadinessReasonTests(TestCase):
             return {"sucesso": False, "motivo": "Sessão expirada.",
                     "precisa_login_ml": True}
 
-        with patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom", _resolver):
+        # Conectado no início: é o caso que este teste cobre — a sessão cai DURANTE
+        # o lote. A conta já desconectada antes de começar tem portão próprio
+        # (`ml_conectado`), coberto no teste seguinte.
+        with patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True), \
+                patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom", _resolver):
             resultado = afiliar_cupons_de_codigo(self.user, cupons)
         self.assertEqual(len(chamadas), 1)
         self.assertEqual(resultado["gerados"], 0)
+
+    def test_navegador_ocupado_e_fila_e_nao_falha_de_preparo(self):
+        """Contenção de capacidade não pode virar avaria na tela.
+
+        `BrowserResourceUnavailable` caía no `except Exception` de `preparar_cupom`
+        e virava `status="erro"` + 30 min de castigo: em produção, 188 cupons
+        marcados como `preparation_failed` — a tela mandava procurar um defeito que
+        não existia, quando bastava esperar o Chromium.
+        """
+        from apps.scrapers.carga import BrowserResourceUnavailable
+        from apps.scrapers.coupon_products import (
+            ERRO_CAPACIDADE_BROWSER, preparar_cupom,
+        )
+        from apps.scrapers.models import CupomPreparacao
+
+        cupom = self._code()
+        with patch("apps.scrapers.coupon_products._base_produtos",
+                   side_effect=BrowserResourceUnavailable("ocupado")):
+            self.assertEqual(preparar_cupom(cupom, usuario=self.user), [])
+
+        preparo = CupomPreparacao.objects.get(cupom=cupom)
+        self.assertEqual(preparo.status, "pendente")
+        self.assertEqual(preparo.erro, ERRO_CAPACIDADE_BROWSER)
+        # Espera curta: nada foi julgado sobre o cupom.
+        self.assertLess(
+            preparo.proxima_tentativa - timezone.now(), timedelta(minutes=10))
+
+    def test_afiliacao_de_codigo_nem_comeca_sem_sessao_ml(self):
+        """Conta desconectada não entra na fila do Link Builder.
+
+        Eram 3 das 4 contas de produção gastando um lugar na disputa pelo único
+        Chromium a cada ciclo — na frente de quem estava conectado.
+        """
+        from apps.scrapers.coupon_pipeline import afiliar_cupons_de_codigo
+
+        cupons = [self._code()]
+
+        def _resolver(_cupom, _usuario):
+            raise AssertionError("não deve tentar gerar link sem sessão")
+
+        with patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=False), \
+                patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom", _resolver):
+            resultado = afiliar_cupons_de_codigo(self.user, cupons)
+        self.assertEqual(resultado["gerados"], 0)
+        self.assertEqual(resultado["pendentes"], 1)
 
     def test_tela_de_promocoes_nao_materializa_projecao(self):
         """A tela é somente leitura mesmo com a conta zerada.

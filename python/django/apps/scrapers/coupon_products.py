@@ -45,6 +45,9 @@ BACKOFF_VAZIO = timedelta(hours=6)
 # fora da tela por horas depois de a conexão voltar.
 BACKOFF_SEM_SESSAO = timedelta(minutes=20)
 BACKOFF_TRANSPORTE = timedelta(minutes=20)
+# Espera quando o único Chromium da máquina estava com outra tarefa. Curtíssima de
+# propósito: não houve julgamento nenhum sobre o cupom, só fila.
+BACKOFF_CAPACIDADE = timedelta(minutes=3)
 MAX_CANDIDATOS = 36
 PREPARO_LOTE_POR_CICLO = 12
 _CENT = Decimal("0.01")
@@ -56,6 +59,9 @@ ERRO_SESSAO_ML = "Mercado Livre exigiu sessão para abrir a lista deste cupom."
 ERRO_CONTAINER_FETCH_FAILED = "container_fetch_failed"
 ERRO_CONTAINER_EMPTY_PROVEN = "container_empty_proven"
 ERRO_MINIMUM_NOT_MET = "minimum_not_met"
+# Marcador de FILA, não de defeito: o preparo nem começou porque o Chromium estava
+# com outra tarefa. A projeção lê este valor para dizer "aguardando capacidade".
+ERRO_CAPACIDADE_BROWSER = "browser_capacity_deferred"
 
 
 class SessaoMLIndisponivelError(RuntimeError):
@@ -354,10 +360,31 @@ def _base_produtos(cupom, usuario):
     candidatos = []
     identidades = set()
     from apps.scrapers.product_identity import identidade_produto
-    for produto in qs.order_by("-ultima_observacao")[:500]:
+
+    # Quem JÁ tem vínculo confirmado entra primeiro e por consulta própria. Antes
+    # todo candidato saía de `qs.order_by("-ultima_observacao")[:500]` — uma janela
+    # de 500 sobre os 6.208 produtos ML ativos em produção —, então a prova gravada
+    # por `_coletar_ml_remoto`/`casar_cupons_container` sumia assim que o catálogo
+    # recebia 500 itens mais novos, e o preparo concluía "nenhum produto aplicável"
+    # sobre um cupom que tinha associação comprovada.
+    confirmados_qs = qs.filter(id__in=ids_confirmados).order_by("-ultima_observacao")
+    demais_qs = qs.exclude(id__in=ids_confirmados).order_by("-ultima_observacao")
+
+    def _fluxo():
+        for produto in confirmados_qs[:MAX_CANDIDATOS]:
+            yield produto, True
+        for produto in demais_qs[:500]:
+            yield produto, False
+
+    for produto, confirmado in _fluxo():
+        # O filtro de campanha continua valendo INCLUSIVE para vínculo confirmado.
+        # Não é heurística de candidato: a mensagem de um cupom de ativação divulga
+        # o link do PRODUTO, e ele só carrega `coupon_campaign_id` quando o próprio
+        # produto tem a campanha (ver `_montar_url_isca`). Deixar passar um produto
+        # casado só pelo container mandaria o leitor para uma página sem cupom.
         if exige_campanha_no_produto and produto.campanha_id != campanha:
             continue
-        provado = produto.id in ids_confirmados
+        provado = confirmado
         if not provado and campanha:
             provado = bool(produto.campanha_id == campanha)
         if not provado and _produto_direto(cupom, produto):
@@ -741,6 +768,24 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
             status="erro", produtos_chave=chave, verificado_em=timezone.now(),
             proxima_tentativa=timezone.now() + BACKOFF_TRANSPORTE,
             erro=ERRO_CONTAINER_FETCH_FAILED,
+        )
+        return []
+    except BrowserResourceUnavailable:
+        # FILA, NÃO AVARIA. A máquina tem UM Chromium; quando outra lane está com
+        # ele, este preparo nem começou — nada foi observado sobre o cupom. Caindo
+        # no `except Exception` abaixo isso virava `status="erro"` com 30 min de
+        # castigo e `preparation_failed` na tela: em produção eram 188 cupons
+        # penalizados por espera de capacidade, com a tela mandando procurar um
+        # defeito que não existe. Mesma leitura que `sources/registry` já dá a
+        # `capacity_deferred`: espera curta e o ciclo seguinte retoma.
+        logger.info(
+            "Preparo do cupom %s adiado: navegador ocupado por outra tarefa.",
+            cupom.pk,
+        )
+        CupomPreparacao.objects.filter(pk=preparo.pk).update(
+            status="pendente", produtos_chave=chave, verificado_em=timezone.now(),
+            proxima_tentativa=timezone.now() + BACKOFF_CAPACIDADE,
+            erro=ERRO_CAPACIDADE_BROWSER,
         )
         return []
     except Exception as exc:

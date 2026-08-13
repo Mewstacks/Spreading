@@ -1061,50 +1061,102 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
     def _no_tenant(fn, *args, **kwargs):
         return executar_no_tenant(fn, *args, organization_id=org_id, **kwargs)
 
-    # UM browser para o lote inteiro. Abrir e fechar um Chromium por link custava
-    # ~2s de processo antes de qualquer trabalho útil — num lote de 40, mais de um
-    # minuto só subindo e derrubando navegador.
-    #
-    # Com o Playwright vivo nesta thread, o ORM levanta SynchronousOnlyOperation:
-    # por isso as gravações vão por executar_no_tenant, que as desvia para a thread
-    # dedicada (a mesma solução que gerar_links_em_lote já usa).
-    from apps.scrapers.carga import BrowserResourceUnavailable, browser_resource
+    def _julgar(linha, relatorio, confiar):
+        nonlocal aprovados, reprovados, transitorios
+        if relatorio.get("ok"):
+            _no_tenant(registrar_aprovacao, usuario, linha.produto,
+                       linha.link_afiliado, url_canonica=linha.link_afiliado)
+            aprovados += 1
+        elif any("Falha ao abrir link" in str(e)
+                 for e in relatorio.get("erros", [])):
+            # Rede/timeout/challenge: o destino nunca foi visto.
+            _no_tenant(_adiar, linha)
+            transitorios += 1
+        else:
+            _no_tenant(registrar_reprovacao, usuario, linha.produto,
+                       motivo_reprovacao(relatorio, confiar))
+            reprovados += 1
 
-    with browser_resource(owner_kind="links_verify") as acquired:
-        if not acquired:
-            raise BrowserResourceUnavailable(
-                "Capacidade de browser ocupada; verificação será retomada."
+    # DUAS FILAS, porque as perguntas são diferentes. Quem confia no desconto
+    # (oferta/busca, com de/por confirmado na raspagem) só precisa saber se o link
+    # leva a um destino de afiliado vivo — o caminho de sempre. Quem PRECISA provar
+    # o desconto (produto de cupom) não consegue prová-lo no destino: todo short
+    # link do Programa resolve para a vitrine `/social/` do afiliado, inclusive os
+    # que hoje passam. Ver `relatorio_de_link_com_cupom`, onde isso está medido.
+    com_origem = [l for l in linhas if not _confiar_desconto(l.produto)]
+    no_destino = [l for l in linhas if _confiar_desconto(l.produto)]
+
+    if com_origem:
+        from apps.scrapers.ml_auth import storage_state
+        from apps.scrapers.scraper_mercadolivre.link_http import (
+            relatorio_de_link_com_cupom,
+        )
+        from apps.scrapers.scraper_mercadolivre.scraper import _ml_http_session
+
+        # A PDP do ML não responde a GET anônimo (challenge por TLS/JA3 — ver o topo
+        # de link_http). O jar de cookies é o mesmo transporte que coupon_products já
+        # usa contra este host, e NÃO abre navegador. `storage_state` já resolve o
+        # tenant por dentro; nenhum Playwright está vivo nesta fila, então o ORM
+        # aqui é direto.
+        sessao = _ml_http_session(storage_state(usuario))
+        for linha in com_origem:
+            produto = linha.produto
+            origem = _montar_url_isca(
+                getattr(produto, "link_produto", ""),
+                getattr(produto, "campanha_id", "") or "",
             )
-        with iniciar_browser(headless=True) as (page, _ctx):
-            for linha in linhas:
-                confiar = _confiar_desconto(linha.produto)
-                try:
-                    relatorio = _relatorio_na_pagina(
-                        page, linha.link_afiliado,
-                        nome_esperado=getattr(linha.produto, "nome", None),
-                        confiar_desconto=confiar)
-                except Exception as e:
-                    logger.warning("Verificação de destino falhou p/ produto %s: %s",
-                                   getattr(linha.produto, "id", None), e)
-                    _no_tenant(_adiar, linha)
-                    transitorios += 1
-                    continue
-                if relatorio.get("ok"):
-                    _no_tenant(registrar_aprovacao, usuario, linha.produto,
-                                       linha.link_afiliado,
-                                       url_canonica=linha.link_afiliado)
-                    aprovados += 1
-                elif any("Falha ao abrir link" in str(e)
-                         for e in relatorio.get("erros", [])):
-                    # Rede/timeout/challenge: o destino nunca foi visto.
-                    _no_tenant(_adiar, linha)
-                    transitorios += 1
-                else:
-                    _no_tenant(registrar_reprovacao, usuario, linha.produto,
-                                       motivo_reprovacao(relatorio, confiar))
-                    reprovados += 1
+            if not origem:
+                _no_tenant(registrar_reprovacao, usuario, produto,
+                           _motivo_url_recusada(getattr(produto, "link_produto", "")))
+                reprovados += 1
+                continue
+            try:
+                relatorio = relatorio_de_link_com_cupom(
+                    linha.link_afiliado, origem,
+                    nome_esperado=getattr(produto, "nome", None), sessao=sessao,
+                )
+            except Exception as e:
+                logger.warning("Verificação por origem falhou p/ produto %s: %s",
+                               getattr(produto, "id", None), e)
+                _no_tenant(_adiar, linha)
+                transitorios += 1
+                continue
+            _julgar(linha, relatorio, False)
+
+    if no_destino:
+        # UM browser para o lote inteiro. Abrir e fechar um Chromium por link custava
+        # ~2s de processo antes de qualquer trabalho útil — num lote de 40, mais de um
+        # minuto só subindo e derrubando navegador.
+        #
+        # Com o Playwright vivo nesta thread, o ORM levanta SynchronousOnlyOperation:
+        # por isso as gravações vão por executar_no_tenant, que as desvia para a thread
+        # dedicada (a mesma solução que gerar_links_em_lote já usa).
+        from apps.scrapers.carga import BrowserResourceUnavailable, browser_resource
+
+        with browser_resource(owner_kind="links_verify") as acquired:
+            if not acquired:
+                raise BrowserResourceUnavailable(
+                    "Capacidade de browser ocupada; verificação será retomada."
+                )
+            with iniciar_browser(headless=True) as (page, _ctx):
+                for linha in no_destino:
+                    try:
+                        relatorio = _relatorio_na_pagina(
+                            page, linha.link_afiliado,
+                            nome_esperado=getattr(linha.produto, "nome", None),
+                            confiar_desconto=True)
+                    except Exception as e:
+                        logger.warning(
+                            "Verificação de destino falhou p/ produto %s: %s",
+                            getattr(linha.produto, "id", None), e)
+                        _no_tenant(_adiar, linha)
+                        transitorios += 1
+                        continue
+                    _julgar(linha, relatorio, True)
     logger.info("Verificação de destino ML p/ %s: %s aprovado(s), %s reprovado(s), "
-                "%s transitório(s)", usuario, aprovados, reprovados, transitorios)
+                "%s transitório(s) — %s por origem, %s por destino",
+                usuario, aprovados, reprovados, transitorios,
+                len(com_origem), len(no_destino))
     return {"aprovados": aprovados, "reprovados": reprovados,
             "transitorios": transitorios}
 

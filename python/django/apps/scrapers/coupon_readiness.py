@@ -14,8 +14,9 @@ from django.utils import timezone
 from apps.accounts.feature_flags import feature_decision
 from apps.accounts.models import organization_for_user
 from apps.scrapers.coupon_products import (
-    ERRO_CONTAINER_EMPTY_PROVEN, ERRO_CONTAINER_FETCH_FAILED,
-    ERRO_MINIMUM_NOT_MET, ERRO_SESSAO_ML, mapa_relacoes_prontas,
+    ERRO_CAPACIDADE_BROWSER, ERRO_CONTAINER_EMPTY_PROVEN,
+    ERRO_CONTAINER_FETCH_FAILED, ERRO_MINIMUM_NOT_MET, ERRO_SESSAO_ML,
+    mapa_relacoes_prontas,
 )
 from apps.scrapers.coupon_rules import (
     codigo_publicavel, cupom_publicavel, listagem_publica_ml, regras_do_cupom,
@@ -204,6 +205,16 @@ def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao):
     if not preparo:
         return _resultado("eligible", "waiting", "preparation_pending",
                           "Aguardando preparo de produtos e preços.")
+    if preparo.erro == ERRO_CAPACIDADE_BROWSER:
+        # FILA, não avaria: o preparo nem começou porque o único Chromium da
+        # máquina estava com outra tarefa. Antes isto caía no `except Exception` do
+        # preparo e chegava aqui como `preparation_failed` — 188 cupons em produção
+        # com cara de defeito e 30 min de castigo por uma espera de capacidade.
+        return _resultado(
+            "eligible", "waiting", "browser_capacity_deferred",
+            "Aguardando capacidade de navegador; o próximo ciclo retoma.",
+            preparo.proxima_tentativa,
+        )
     if preparo.status == "erro":
         # Sessão do catálogo caída não é "falha no preparo": nada foi observado
         # sobre este cupom, e a ação que destrava é reconectar o Mercado Livre.

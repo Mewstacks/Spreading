@@ -304,6 +304,14 @@ def afiliar_cupons_de_codigo(usuario, cupons, *, limite=8):
     ]
     if not candidatos:
         return {"gerados": 0, "falhas": 0, "pendentes": 0}
+    from apps.scrapers.monitor_conexao import ml_conectado
+
+    if not ml_conectado(usuario):
+        # Mesmo portão que `_rodar_links` já aplica. Sem ele, cada conta
+        # desconectada ainda entrava na fila do Link Builder para colher a mesma
+        # recusa — em produção eram 3 das 4 contas gastando um lugar na disputa
+        # pelo único Chromium a cada ciclo, na frente de quem estava conectado.
+        return {"gerados": 0, "falhas": 0, "pendentes": len(candidatos)}
     ja_tem = set(LinkAfiliadoCupomUsuario.objects.filter(
         usuario=usuario, cupom_id__in=[c.pk for c in candidatos], afiliado_ok=True,
     ).exclude(link_afiliado="").values_list("cupom_id", flat=True))

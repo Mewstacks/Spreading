@@ -231,11 +231,17 @@ class FluxoMercadoLivrePontaAPontaTests(TestCase):
         def _recurso_livre(*a, **kw):
             yield True
 
+        # Produto de cupom é julgado pela PDP DE ORIGEM (o short link do Programa
+        # resolve para a vitrine /social/ do afiliado, nunca para o anúncio — ver
+        # link_http.relatorio_de_link_com_cupom). Os dois transportes ficam
+        # simulados para o teste não depender de qual fila o produto cai.
         with patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre."
                    "prefetch_links", side_effect=_gerar), \
                 patch("apps.scrapers.scraper_mercadolivre.link.iniciar_browser",
                       _browser_falso), \
                 patch("apps.scrapers.carga.browser_resource", _recurso_livre), \
+                patch("apps.scrapers.scraper_mercadolivre.link_http."
+                      "relatorio_de_link_com_cupom", return_value={"ok": True}), \
                 patch("apps.scrapers.scraper_mercadolivre.link._relatorio_na_pagina",
                       return_value={"ok": True}):
             metricas = afiliar_cupons(self.user, limite=10)
