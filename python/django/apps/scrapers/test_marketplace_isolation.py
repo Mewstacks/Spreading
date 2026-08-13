@@ -15,7 +15,9 @@ from django.core.management import call_command
 from django.test import TestCase
 
 from apps.accounts.models import Perfil
-from apps.scrapers.models import LinkAfiliadoUsuario, Produto
+from apps.scrapers.models import (
+    CupomNormalizado, FonteIngestao, LinkAfiliadoUsuario, Produto,
+)
 
 
 def _produto(marketplace, **extra):
@@ -512,3 +514,68 @@ class ReaberturaDeLinksReprovadosNaVitrineTests(TestCase):
         self.afetado.refresh_from_db()
         self.assertIs(self.afetado.verificado_ok, False)
         self.assertIn("seca", saida.getvalue())
+
+
+class LinkDeCupomSemProvaAindaTests(TestCase):
+    """Sem prova AINDA não é prova contrária.
+
+    O vínculo produto-cupom é reconstruído pelo worker de cupons a cada ciclo.
+    Reprovar o link enquanto ele não chega o mandaria para a fila de GERAÇÃO — que
+    de propósito não reabre link com veredito — e recriaria o impasse "aguardando
+    link" que esta mudança desfaz.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("sem-prova")
+        self.produto = _produto("mercadolivre", origem="cupom")
+        self.linha = LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=self.produto, afiliado_ok=True,
+            link_afiliado="https://meli.la/sem-prova", verificado_ok=None,
+            estado="pronto",
+        )
+
+    def test_adia_em_vez_de_reprovar_e_nem_abre_o_encurtador(self):
+        from apps.scrapers.scraper_mercadolivre.link import (
+            verificar_links_pendentes,
+        )
+
+        def _nao_deve_abrir(*_a, **_k):
+            raise AssertionError("não deve abrir o encurtador sem a prova")
+
+        with patch("apps.scrapers.scraper_mercadolivre.link_http."
+                   "relatorio_de_link_com_cupom", _nao_deve_abrir):
+            resultado = verificar_links_pendentes(self.user, limite=10)
+
+        self.assertEqual(resultado["transitorios"], 1)
+        self.assertEqual(resultado["reprovados"], 0)
+        linha = LinkAfiliadoUsuario.objects.get(pk=self.linha.pk)
+        self.assertIsNone(linha.verificado_ok)
+        self.assertIsNotNone(linha.proxima_tentativa)
+        self.assertIn("preparo", linha.verificacao_motivo)
+
+    def test_com_prova_aprova_pelo_destino_do_programa(self):
+        from apps.scrapers.models import ProdutoCupom
+        from apps.scrapers.scraper_mercadolivre.link import (
+            verificar_links_pendentes,
+        )
+
+        cupom = CupomNormalizado.objects.create(
+            fonte=FonteIngestao.objects.create(
+                slug="prova-src", marketplace="mercadolivre", nome="ML"),
+            external_id="campanha:9", marketplace="mercadolivre",
+            titulo="20% OFF", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20},
+        )
+        ProdutoCupom.objects.create(
+            produto=self.produto, cupom=cupom, status="confirmado",
+            preco_original=100, preco_atual=100, preco_final=80,
+        )
+
+        with patch("apps.scrapers.scraper_mercadolivre.link_http."
+                   "relatorio_de_link_com_cupom",
+                   return_value={"ok": True, "erros": []}) as verificador:
+            resultado = verificar_links_pendentes(self.user, limite=10)
+
+        self.assertEqual(resultado["aprovados"], 1)
+        self.assertTrue(verificador.call_args.kwargs["desconto_comprovado"])

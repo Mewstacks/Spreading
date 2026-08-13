@@ -1108,10 +1108,21 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
             provados = _com_desconto_provado()
         for linha in com_origem:
             produto = linha.produto
+            if linha.produto_id not in provados:
+                # SEM PROVA AINDA ≠ PROVA CONTRÁRIA. O vínculo é reconstruído pelo
+                # worker de cupons a cada ciclo; reprovar aqui mandaria o link para
+                # a fila de geração — que não o reabre — e recriaria exatamente o
+                # impasse que esta mudança desfaz. Nem abre o encurtador: sem a
+                # prova o veredito não sairia de qualquer jeito.
+                _no_tenant(
+                    _adiar, linha,
+                    "Aguardando o preparo confirmar produto e desconto do cupom.",
+                )
+                transitorios += 1
+                continue
             try:
                 relatorio = relatorio_de_link_com_cupom(
-                    linha.link_afiliado,
-                    desconto_comprovado=linha.produto_id in provados,
+                    linha.link_afiliado, desconto_comprovado=True,
                 )
             except Exception as e:
                 logger.warning("Verificação por origem falhou p/ produto %s: %s",
