@@ -22,7 +22,9 @@ primary_region = "gru"
   # O watchdog mede bloqueio do event loop, não duração de uma operação async.
   # Um bootstrap frio recebe a mesma janela da inicialização normal.
   QR_BOOTSTRAP_TIMEOUT_MS = "90000"
-  QR_BOOTSTRAP_MAX_ATTEMPTS = "2"
+  # QR_BOOTSTRAP_MAX_ATTEMPTS saiu daqui: o pin "2" era anterior ao default 4 do
+  # index.js (desistir em 2 fazia a tela cair em "não foi possível gerar um QR
+  # novo" cedo demais; cada tentativa recicla só o Chromium, custo baixo).
   QR_BOOTSTRAP_RETRY_MS = "2000"
   # GROUP_SYNC_TIMEOUT_MS e SEND_TIMEOUT_MS saíram daqui de propósito: os dois
   # sobrepunham o código com valores que o próprio código já descartava.
