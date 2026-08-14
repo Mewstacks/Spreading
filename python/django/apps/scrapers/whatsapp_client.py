@@ -496,7 +496,28 @@ def enviar_oferta(grupoid: str, mensagem: str, imagem_base64: str = None,
     except (requests.Timeout, requests.ConnectionError) as e:
         # Os dois piores casos nunca chegam classificados: o Node não responde
         # (worker reiniciando/deploy) ou demora mais que o timeout. Ambos somem
-        # sozinhos — e eram justamente estes que desligavam a automação.
+        # sozinhos — mas um Timeout pode acontecer com a mensagem JÁ despachada
+        # pelo Chromium. Classificar como transitório simples re-seleciona o
+        # produto num tick futuro (Publicacao nova ⇒ Idempotency-Key nova, o
+        # ledger do Node nunca deduplica) e a oferta sai DUAS vezes no grupo.
+        # O ledger sabe em que fase o envio parou; pergunte antes de rotular.
+        consulta = consultar_operacao(session, idempotency_key)
+        fase = consulta.get("fase") if consulta.get("encontrado") else None
+        if fase == "confirmed":
+            resultado = consulta.get("resultado") or {}
+            if resultado.get("sucesso") and resultado.get("mensagem_id"):
+                # O Node concluiu o envio depois do nosso prazo de leitura.
+                return resultado
+        if fase in ("transport_started", "uncertain"):
+            return {"sucesso": False, "resultado": "incerto", "repetir": False,
+                    "erro": "O envio foi iniciado, mas a confirmação não chegou "
+                            "a tempo; confirme no grupo antes de repetir.",
+                    "causa": type(e).__name__,
+                    "classe": TRANSITORIO, "etapa": "http",
+                    "duracao_ms": _SEND_HTTP_TIMEOUT_S * 1000,
+                    "falha_infra": True}
+        # 'selected'/'preflight_failed'/ausente (ou ledger inalcançável): o
+        # sendMessage não chegou a começar — repetir continua seguro.
         return {"sucesso": False,
                 "erro": "O serviço WhatsApp não respondeu dentro do prazo.",
                 "causa": type(e).__name__,
