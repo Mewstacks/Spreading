@@ -18,6 +18,9 @@ jobs:
           cache: pip
           cache-dependency-path: python/requirements.txt
       - run: pip install -r requirements.txt
+      # test_hardening_ui_e2e lança Chromium de verdade; sem este passo o runner
+      # não tem o browser e o job cai com "Executable doesn't exist".
+      - run: python -m playwright install --with-deps chromium
       - run: python django/manage.py check
       - run: python django/manage.py makemigrations --check --dry-run
       - run: python django/manage.py test apps.scrapers apps.accounts
