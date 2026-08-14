@@ -1869,6 +1869,24 @@ const initializeSession = (session) => {
 
 const sessoesOcupandoSlot = () => Array.from(sessions.values()).filter(ocupaSlot).length;
 
+// Sessões criadas sem organização (restauro sob demanda antigo, rota de grupos
+// sem repassar a capability) nunca passam no verifyManifest do purge: o reset
+// cai em falha_reset ("Não foi possível descartar a sessão antiga") num loop
+// que nem o retry resolve — caso real, instância 4 em produção, 14/08/2026. A
+// capability já provou a organização; adotar o vínculo aqui destrava purge,
+// logout e reset sem afrouxar a checagem cruzada entre organizações.
+const adotarOrganizacao = (session, organizationId) => {
+    const organization = String(organizationId || '');
+    if (!organization || session.organizationId === organization) return session;
+    if (session.organizationId) return null; // organização DIFERENTE: mismatch real
+    const binding = sessionManifest.bindManifest(
+        session.authPath, organization, session.id,
+    );
+    if (!binding.ok) return null;
+    session.organizationId = organization;
+    return session;
+};
+
 const ensureSession = (instanceId, organizationId = '') => {
     const normalizedId = sanitizeInstanceId(instanceId);
     const organization = String(organizationId || '');
@@ -1897,6 +1915,19 @@ const ensureSession = (instanceId, organizationId = '') => {
         initializeSession(session);
     }
     const session = sessions.get(normalizedId);
+    if (organization && !session.organizationId) {
+        adotarOrganizacao(session, organization);
+        if (session.organizationId === organization && !session.initialized
+            && session.fase === 'inconsistente') {
+            // O init anterior recusou a sessão sem organização e a deixou
+            // quarentenada; com o vínculo provado, o init roda de verdade.
+            session.fase = 'iniciando';
+            session.progresso = 0;
+            session.faseMsg = 'Iniciando serviço…';
+            session.unavailableReason = null;
+            initializeSession(session);
+        }
+    }
     if (organization && session.organizationId !== organization) {
         const inconsistent = createSessionState(normalizedId, organization);
         inconsistent.fase = 'inconsistente';
@@ -2585,6 +2616,15 @@ app.post('/api/sessoes/reset',
         });
     }
     let session = findSession(instanceId, false);
+    // Sessão órfã no Map (restaurada sem organização): sem adotar o vínculo, o
+    // purgeAuth abaixo reprova o manifesto recém-gravado e o reset entra em
+    // loop de falha_reset — era exatamente o "Tente novamente" que não resolvia.
+    if (session && !adotarOrganizacao(session, organizationId)) {
+        return res.status(409).json({
+            sucesso: false, causa: 'organization_mismatch',
+            mensagem: 'A sessão não pertence a esta organização.',
+        });
+    }
     if (!session) {
         // Placeholder deliberadamente não inicializado: primeiro apaga qualquer
         // LocalAuth órfão; só depois cria o Chromium que produzirá o QR.
@@ -2627,16 +2667,25 @@ app.post('/api/sessoes/logout',
     capabilityAuth('logout', resolveInstanceId, { singleUse: true }), async (req, res) => {
     const instanceId = sanitizeInstanceId(req.body?.instance || req.body?.session || req.body?.userId);
     const organizationId = String(req.capability.organization_id);
-    const verified = sessionManifest.verifyManifest(
+    // bindManifest, não verifyManifest: um perfil pareado antes do manifesto
+    // existir ('orphan') deve poder ser despareado pelo dono — a capability já
+    // provou a organização. Mismatch real de organização continua 409.
+    const binding = sessionManifest.bindManifest(
         authPathDe(instanceId), organizationId, instanceId,
     );
-    if (!verified.ok) {
+    if (!binding.ok) {
         return res.status(409).json({
-            sucesso: false, causa: verified.status,
+            sucesso: false, causa: binding.status,
             mensagem: 'Logout recusado: vínculo da sessão inconsistente.',
         });
     }
     const session = findSession(instanceId, false);
+    if (session && !adotarOrganizacao(session, organizationId)) {
+        return res.status(409).json({
+            sucesso: false, causa: 'organization_mismatch',
+            mensagem: 'Logout recusado: vínculo da sessão inconsistente.',
+        });
+    }
 
     // Sem sessao viva no Map, ainda assim limpar o volume: o usuario quer desparear.
     if (!session) {
@@ -2681,22 +2730,27 @@ app.post('/api/sessoes/logout',
 // pareada no volume: a aba Envios chama /api/grupos no load para todo usuario,
 // inclusive quem so usa Telegram, e um ensureSession incondicional queimaria um
 // dos MAX_WHATSAPP_SESSIONS slots com um Chromium que ninguem pediu.
-const resolveSessionParaGrupos = (instanceId) => {
+const resolveSessionParaGrupos = (instanceId, organizationId = '') => {
     const normalizedId = sanitizeInstanceId(instanceId);
     const session = findSession(normalizedId);
-    if (session) return session;
+    if (session) {
+        // A capability desta rota prova a organização; sem adotar aqui, uma
+        // sessão órfã seguiria sem vínculo e reprovaria o purge do reset.
+        if (organizationId) adotarOrganizacao(session, organizationId);
+        return session;
+    }
     if (!hasStoredAuth(normalizedId)) return null;
     // Sessao pareada some do Map em restart/deploy/watchdog. Antes, so a aba
     // WhatsApp a ressuscitava — por isso a aba Envios acusava "desconectado"
     // com a credencial intacta no volume.
     console.log(`[${normalizedId}] Sessao pareada ausente do Map; restaurando sob demanda.`);
-    return ensureSession(normalizedId);
+    return ensureSession(normalizedId, organizationId);
 };
 
 app.get(['/api/grupos', '/api/grupos/:instance'],
     capabilityAuth('groups', resolveInstanceId), async (req, res) => {
     const instanceId = resolveInstanceId(req);
-    const session = resolveSessionParaGrupos(instanceId);
+    const session = resolveSessionParaGrupos(instanceId, req.capability.organization_id);
     if (!session) return res.json(buildInativoPayload(sanitizeInstanceId(instanceId)));
 
     // Nao insiste se os retries automaticos ja esgotaram, e nao atropela um
@@ -2713,7 +2767,7 @@ app.get(['/api/grupos', '/api/grupos/:instance'],
 app.post(['/api/grupos/refresh', '/api/grupos/refresh/:instance'],
     capabilityAuth('groups', resolveInstanceId), async (req, res) => {
     const instanceId = resolveInstanceId(req);
-    const session = resolveSessionParaGrupos(instanceId);
+    const session = resolveSessionParaGrupos(instanceId, req.capability.organization_id);
     if (!session) {
         return res.json({ sucesso: false, ...buildInativoPayload(sanitizeInstanceId(instanceId)) });
     }
@@ -2739,7 +2793,7 @@ app.post(['/api/diagnostico', '/api/diagnostico/:instance'],
     capabilityAuth('status', resolveInstanceId), async (req, res) => {
     const instanceId = resolveInstanceId(req);
     const chatId = String(req.body?.grupoid || '').trim();
-    const session = resolveSessionParaGrupos(instanceId);
+    const session = resolveSessionParaGrupos(instanceId, req.capability.organization_id);
     if (!session || !session.isConnected || !session.client) {
         return res.status(503).json({ sucesso: false, causa: 'whatsapp_desconectado',
             escopo: chatId || instanceId, mensagem: 'WhatsApp não está conectado.', classe: TRANSITORIO });
