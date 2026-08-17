@@ -423,11 +423,13 @@ class Command(BaseCommand):
             atualizar_diagnostico_fila, existe_job_pendente, processar_proximo_job,
         )
         from apps.scrapers.resource_control import (
-            leased_resource, machine_resource_slot, pulse_worker, worker_activity,
+            leased_resource, limpar_interesse_manual, machine_resource_slot,
+            pulse_worker, sinalizar_interesse_manual, worker_activity,
             worker_identity,
         )
 
-        poll = 15
+        idle_poll = 5
+        queue_poll = 2
         worker_id = worker_identity("manual")
         logger.info("MANUAL worker no ar; consumidor dedicado da fila do painel")
         while True:
@@ -436,8 +438,12 @@ class Command(BaseCommand):
                 pulse_worker("manual", worker_id=worker_id, state="idle")
                 atualizar_diagnostico_fila()
                 if not existe_job_pendente():
-                    time.sleep(poll)
+                    limpar_interesse_manual("django_chromium")
+                    time.sleep(idle_poll)
                     continue
+                # Renova a preferência enquanto o holder automático termina o item
+                # corrente. Os lotes consultam este marcador entre páginas/itens.
+                sinalizar_interesse_manual("django_chromium")
                 with leased_resource("django_chromium", owner_kind="manual") as (
                     acquired, detail,
                 ):
@@ -445,8 +451,11 @@ class Command(BaseCommand):
                         atualizar_diagnostico_fila(
                             resource_owner=detail.get("owner_kind", "scheduled"),
                         )
-                        time.sleep(poll)
+                        time.sleep(queue_poll)
                         continue
+                    # Não deixe o job ceder para o próprio pedido. A partir daqui
+                    # o lease + flock já reservam o navegador para esta execução.
+                    limpar_interesse_manual("django_chromium")
                     machine_busy = False
                     with machine_resource_slot("django_chromium") as machine_acquired:
                         if not machine_acquired:
@@ -460,17 +469,20 @@ class Command(BaseCommand):
                 # Dorme depois que os dois locks foram liberados. Dormir dentro do
                 # lease impediria os demais workers de usar o browser sem necessidade.
                 if machine_busy:
-                    time.sleep(poll)
+                    sinalizar_interesse_manual("django_chromium")
+                    time.sleep(queue_poll)
                     continue
             except DatabaseError as exc:
                 logger.warning("Fila manual aguardando banco: %s", exc)
                 connections.close_all()
-                time.sleep(poll)
+                time.sleep(idle_poll)
             except Exception:
                 logger.exception("Falha no consumidor dedicado da fila manual")
-                time.sleep(poll)
+                time.sleep(idle_poll)
 
     def _loop_cupons(self, opts):
+        from apps.scrapers.manual_scraping import existe_job_pendente
+
         tick = max(1, opts["tick"])
         lote = max(1, opts["lote"])
         poll = 15
@@ -487,8 +499,22 @@ class Command(BaseCommand):
                 continue
             agora = timezone.now()
             try:
-                st.write_state("cupons", fase="processando", erro="")
+                # O ciclo automático também percorre/prepara milhares de cupons.
+                # Mesmo quando ainda está na parte HTTP/SQL (antes de pedir o
+                # Chromium), ele compete com a ação do painel e alonga sua etapa
+                # final. A fila manual é durável no banco, então esta verificação
+                # funciona inclusive logo após um deploy, antes de o consumidor
+                # manual recuperar uma execução interrompida.
                 _renovar_conexoes_db()
+                if existe_job_pendente():
+                    proximo = timezone.now() + timedelta(seconds=poll)
+                    st.write_state(
+                        "cupons", fase="aguardando_manual",
+                        proximo_ciclo=proximo.isoformat(),
+                        ultima_msg="Ciclo automático cedido à geração manual de cupons.",
+                    )
+                    continue
+                st.write_state("cupons", fase="processando", erro="")
                 # HTTP, parsing e banco não seguram o slot global. Cada adaptador
                 # que realmente abre Playwright adquire o lease no ponto de uso.
                 with _heartbeat_durante("cupons"):

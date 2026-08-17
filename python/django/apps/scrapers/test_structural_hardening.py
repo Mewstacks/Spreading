@@ -264,6 +264,26 @@ class BrowserResourceContractTests(TestCase):
                         interesse_interativo_pendente("django_chromium"))
             self.assertFalse(interesse_interativo_pendente("django_chromium"))
 
+    def test_pedido_manual_tambem_faz_lote_automatico_ceder(self):
+        import os
+        import tempfile
+
+        from apps.scrapers import resource_control
+        from apps.scrapers.resource_control import (
+            interesse_interativo_pendente, limpar_interesse_manual,
+            sinalizar_interesse_manual,
+        )
+
+        with tempfile.TemporaryDirectory() as lock_dir, patch.dict(
+            os.environ, {"SPREADING_RESOURCE_LOCK_DIR": lock_dir},
+        ):
+            self.assertTrue(sinalizar_interesse_manual("django_chromium"))
+            self.assertTrue(interesse_interativo_pendente("django_chromium"))
+            with patch.object(resource_control, "INTERESSE_MANUAL_TTL_S", -1):
+                self.assertFalse(interesse_interativo_pendente("django_chromium"))
+            limpar_interesse_manual("django_chromium")
+            self.assertFalse(interesse_interativo_pendente("django_chromium"))
+
     def test_lote_de_links_devolve_o_navegador_a_um_login_esperando(self):
         from apps.scrapers.scraper_mercadolivre import link as ml_link
 
@@ -585,6 +605,27 @@ class ManualQueueOperationalStateTests(TestCase):
         token, detail = acquire("aged", owner_kind="scheduled")
         self.assertIsNone(token)
         self.assertEqual(detail["owner_kind"], "manual_aged")
+
+    def test_job_manual_na_fila_nao_perde_corrida_para_novo_ciclo_automatico(self):
+        from apps.scrapers.resource_control import acquire, release
+
+        self._job(self.user_a, self.org_a)
+        # Mesmo depois de duas execuções manuais, este clique já está esperando:
+        # a regra 2:1 não pode criar um abraço mortal em que o automático cede ao
+        # queued e o manual cede ao automático ao mesmo tempo.
+        ResourceLease.objects.create(
+            resource_key="django_chromium", consecutive_manual=2,
+            scheduled_waiting_since=timezone.now() - timedelta(seconds=10),
+        )
+        token, detail = acquire("django_chromium", owner_kind="scrape_rapido")
+
+        self.assertIsNone(token)
+        self.assertEqual(detail["owner_kind"], "manual_queued")
+
+        token, detail = acquire("django_chromium", owner_kind="manual")
+        self.assertTrue(token)
+        self.assertEqual(detail["owner_kind"], "manual")
+        self.assertTrue(release("django_chromium", token))
 
     def test_lease_expirado_nao_e_roubado_de_job_ainda_vivo(self):
         from apps.scrapers.resource_control import acquire

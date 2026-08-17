@@ -3831,6 +3831,34 @@ class ProjecaoCatalogoCuponsTests(TestCase):
         self.assertEqual(CupomNormalizado.objects.get(
             external_id="campanha:111").estado, "ativo")
 
+    def test_projeta_catalogo_grande_em_lotes_com_observacoes_e_chaves(self):
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+        from apps.scrapers.models import CupomFonteObservacao
+        from apps.scrapers.scraper_mercadolivre.scraper import projetar_catalogo_cupons
+
+        Cupom.objects.bulk_create([
+            Cupom(
+                campanha_id=f"LOTE-{i}", titulo=f"Cupom {i}", estado="ativo",
+                tipo_desconto="percentual", valor_desconto=10,
+                ultima_verificacao=timezone.now(),
+            )
+            for i in range(120)
+        ])
+
+        with CaptureQueriesContext(connection) as queries:
+            self.assertEqual(projetar_catalogo_cupons(), 120)
+
+        self.assertLess(len(queries), 35)
+        projetados = CupomNormalizado.objects.filter(
+            external_id__startswith="campanha:LOTE-",
+        )
+        self.assertEqual(projetados.count(), 120)
+        self.assertFalse(projetados.filter(produtos_chave="").exists())
+        self.assertEqual(CupomFonteObservacao.objects.filter(
+            source_external_id__startswith="campanha:LOTE-",
+        ).count(), 120)
+
 
 class DescartesDaRaspagemTests(SimpleTestCase):
     """Os motivos de descarte moravam em `continue` mudos e num logger.debug que o

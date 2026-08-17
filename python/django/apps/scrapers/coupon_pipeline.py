@@ -630,7 +630,7 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
 
 def executar_pipeline_cupons(
     *, usuarios=None, coletar=True, limite_preparo=12, limite_links=80,
-    permitir_rede_preparo=True,
+    permitir_rede_preparo=True, limite_http_preparo=None,
 ):
     """Executa um ciclo completo sem permitir que uma fonte derrube as demais."""
     usuarios = _usuarios_ativos(usuarios)
@@ -654,7 +654,10 @@ def executar_pipeline_cupons(
     preparo = preparar_lote(
         limite=limite_preparo, usuarios=usuarios, detalhado=True,
         permitir_rede=permitir_rede_preparo,
-        limite_http=PREPARO_LOTE_HTTP_POR_CICLO,
+        limite_http=(
+            PREPARO_LOTE_HTTP_POR_CICLO
+            if limite_http_preparo is None else max(0, int(limite_http_preparo))
+        ),
     )
     resultado["preparados"] = preparo["processados"]
     resultado["preparos_prontos"] = preparo["prontos"]

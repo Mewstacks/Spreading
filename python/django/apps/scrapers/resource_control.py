@@ -37,6 +37,13 @@ _held_machine_resources = ContextVar(
 # um processo morto no meio do login não pode calar os workers para sempre.
 INTERESSE_INTERATIVO_TTL_S = 120
 
+# Pedidos de raspagem feitos pelo painel também precisam interromper lotes longos.
+# O worker manual renova este marcador enquanto disputa o lease e o remove ANTES
+# de executar o próprio job, para que as rotinas internas não cedam para si mesmas.
+# Um processo morto deixa no máximo um atraso curto: depois do TTL o marcador deixa
+# de valer sem depender de cleanup ou do banco.
+INTERESSE_MANUAL_TTL_S = 60
+
 
 def _caminho_de_lock(resource_key: str, sufixo: str = "lock") -> str:
     safe_key = "".join(
@@ -80,13 +87,47 @@ def interesse_interativo(resource_key: str = "django_chromium"):
             pass
 
 
-def interesse_interativo_pendente(resource_key: str = "django_chromium") -> bool:
-    """True enquanto um login interativo espera por este recurso.
+def sinalizar_interesse_manual(resource_key: str = "django_chromium") -> bool:
+    """Publica/renova a prioridade de uma raspagem iniciada por uma pessoa."""
+    caminho = _caminho_de_lock(resource_key, "manual-wanted")
+    try:
+        with open(caminho, "w") as marcador:
+            marcador.write(str(int(time.time())))
+        return True
+    except OSError:
+        # O marcador acelera a cessão cooperativa. O lease PostgreSQL continua
+        # sendo a autoridade mesmo quando o filesystem temporário falha.
+        return False
 
-    Lotes longos consultam isto ENTRE itens para devolver o navegador. Terminar o
-    item corrente e sair é sempre seguro: cada lane é retomada no ciclo seguinte,
-    de onde parou.
+
+def limpar_interesse_manual(resource_key: str = "django_chromium") -> None:
+    """Remove a prioridade manual assim que o worker conquistou o recurso."""
+    try:
+        os.unlink(_caminho_de_lock(resource_key, "manual-wanted"))
+    except OSError:
+        pass
+
+
+def interesse_manual_pendente(resource_key: str = "django_chromium") -> bool:
+    """True para um pedido manual recentemente renovado por web/worker."""
+    try:
+        idade = time.time() - os.stat(
+            _caminho_de_lock(resource_key, "manual-wanted")
+        ).st_mtime
+    except OSError:
+        return False
+    return idade <= INTERESSE_MANUAL_TTL_S
+
+
+def interesse_interativo_pendente(resource_key: str = "django_chromium") -> bool:
+    """True enquanto uma ação humana espera por este recurso.
+
+    Mantém o nome público por compatibilidade, mas inclui tanto login ao vivo quanto
+    raspagem sob demanda. Lotes longos consultam isto ENTRE itens/páginas para
+    devolver o navegador; cada lane automática retoma no ciclo seguinte.
     """
+    if interesse_manual_pendente(resource_key):
+        return True
     try:
         idade = time.time() - os.stat(_caminho_de_lock(resource_key, "wanted")).st_mtime
     except OSError:
@@ -229,12 +270,30 @@ def acquire(resource_key, *, owner_kind="scheduled", organization=None):
                 "expires_at": lease.expires_at,
             }
 
+        # Uma ação explícita no painel não deve perder a corrida para outro ciclo
+        # automático no pequeno intervalo entre o holder anterior fechar o browser
+        # e o worker manual repetir a aquisição. A fila durável é a fonte de verdade:
+        # se o marcador de arquivo expirar ou o processo web morrer, a prioridade
+        # continua somente enquanto existir de fato um job queued.
+        manual_job_queued = (
+            resource_key == "django_chromium"
+            and ExecucaoRaspagem.objects.filter(status="queued").exists()
+        )
+        if owner_kind != "manual" and manual_job_queued:
+            if lease.scheduled_waiting_since is None:
+                lease.scheduled_waiting_since = now
+                lease.save(update_fields=["scheduled_waiting_since"])
+            return None, {
+                "resource": resource_key,
+                "owner_kind": "manual_queued",
+            }
+
         aged_manual = bool(
             lease.manual_waiting_since
             and (now - lease.manual_waiting_since).total_seconds() >= MANUAL_AGING_SECONDS
         )
-        if owner_kind == "manual" and lease.consecutive_manual >= 2 \
-                and lease.scheduled_waiting_since:
+        if owner_kind == "manual" and not manual_job_queued \
+                and lease.consecutive_manual >= 2 and lease.scheduled_waiting_since:
             if lease.manual_waiting_since is None:
                 lease.manual_waiting_since = now
                 lease.save(update_fields=["manual_waiting_since"])

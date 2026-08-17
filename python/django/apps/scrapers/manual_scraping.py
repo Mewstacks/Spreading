@@ -134,14 +134,24 @@ def criar_execucao(*, organization, usuario, tipo: str):
                 mensagem="Execução criada; aguardando heartbeat do worker manual.",
                 progresso=0,
             )
-            return job, True
+            criada = True
     except IntegrityError:
         ativo = ExecucaoRaspagem.objects.filter(
             organization=organization, status__in=ACTIVE,
         ).order_by("-criada_em").first()
         if ativo is None:
             raise
-        return ativo, False
+        job, criada = ativo, False
+
+    # Só publique depois do commit REAL: além de impedir que um rollback interrompa
+    # a automação sem existir job, isto mantém transações externas (inclusive os
+    # TestCase do Django) isoladas do marcador compartilhado em /tmp.
+    def sinalizar_depois_do_commit():
+        from apps.scrapers.resource_control import sinalizar_interesse_manual
+        sinalizar_interesse_manual("django_chromium")
+
+    transaction.on_commit(sinalizar_depois_do_commit)
+    return job, criada
 
 
 def serializar_execucao(execucao: ExecucaoRaspagem, *, after=0) -> dict:
@@ -546,11 +556,12 @@ def _executar_cupons(job, reporter):
 
         reporter.step("Atualizando catálogo interno", 58)
         try:
-            projetados = _db_retry(
-                lambda: projetar_catalogo_cupons(
-                    faixa=(58, 64), desde=inicio_ciclo,
-                ),
-            )
+            with usar_reporter(reporter.emit):
+                projetados = _db_retry(
+                    lambda: projetar_catalogo_cupons(
+                        faixa=(58, 64), desde=inicio_ciclo,
+                    ),
+                )
             reporter.count(campanhas_projetadas=projetados)
         except Exception as exc:
             warnings.append(_erro_publico(classificar_erro(exc))[0])
@@ -570,6 +581,10 @@ def _executar_cupons(job, reporter):
             usuarios=[job.solicitada_por],
             coletar=True,
             limite_preparo=40,
+            # A ação do painel precisa terminar. O ciclo automático mantém a
+            # varredura HTTP grande (200); aqui, repetir 200 candidatos consumiu
+            # ~3min em produção e não preparou nenhum item nesta execução.
+            limite_http_preparo=40,
             limite_links=80,
             permitir_rede_preparo=estado.conectado,
         ))

@@ -16,7 +16,8 @@ from apps.scrapers.coupon_rules import (
 from apps.scrapers.scraper_mercadolivre.categorias_pagina import mapear_domain_ids
 from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
 from apps.scrapers.models import (
-    Cupom, CupomNormalizado, FonteIngestao, Produto, normalizar_busca,
+    Cupom, CupomFonteObservacao, CupomNormalizado, FonteIngestao, Produto,
+    normalizar_busca,
 )
 from apps.scrapers.progresso import emitir_progresso, emitir_fase
 from django.db import DatabaseError, OperationalError, connections, transaction
@@ -671,11 +672,20 @@ def projetar_catalogo_cupons(faixa=None, desde=None):
     dominante_por_campanha = _categoria_dominante_por_campanha(
         [c.campanha_id for c in ativos])
 
+    external_ids = [f"campanha:{c.campanha_id}" for c in ativos]
+    existentes = {
+        row.external_id: row
+        for row in CupomNormalizado.objects.filter(
+            fonte=fonte, owner__isnull=True, external_id__in=external_ids,
+        )
+    }
+    agora = timezone.now()
+    criar = []
+    atualizar = []
+    projetados = []
     externos_vistos = set()
     for i, c in enumerate(ativos, 1):
-        # São milhares de update_or_create: sem um pulso aqui a barra congelava na
-        # última linha da etapa anterior por minutos.
-        if faixa and (i % 50 == 0 or i == 1):
+        if faixa and (i % 250 == 0 or i == 1):
             emitir_fase(f"Catalogando campanhas {i}/{len(ativos)}", i / len(ativos), faixa)
         ext = f"campanha:{c.campanha_id}"
         externos_vistos.add(ext)
@@ -703,55 +713,126 @@ def projetar_catalogo_cupons(faixa=None, desde=None):
         # (cupons_codigo_scraper). As duas gravam o MESMO external_id, e esta projeção
         # roda depois — sem preservar, ela zerava o container_url recém-descoberto e o
         # casamento cupom-produto (casar_cupons_container) nunca acontecia.
-        anterior = CupomNormalizado.objects.filter(
-            fonte=fonte, external_id=ext).values_list("regras", flat=True).first() or {}
+        anterior_obj = existentes.get(ext)
+        anterior = (anterior_obj.regras if anterior_obj else {}) or {}
         for campo in ("container_url", "container_name"):
             if not regras[campo] and anterior.get(campo):
                 regras[campo] = anterior[campo]
-        cupom_normalizado, _ = CupomNormalizado.objects.update_or_create(
-            fonte=fonte, external_id=ext,
-            defaults={
-                "marketplace": "mercadolivre",
-                "organization_id": organization_id,
-                "data_scope": "organization",
-                "audience_scope": "organization",
-                "redemption_mode": "activation",
-                "scope_type": "container" if (
-                    regras.get("container_url") or regras.get("container_name")
-                ) else "category" if regras.get("escopo") else "product",
-                "titulo": titulo[:255],
-                # `code`/`inputCode` desta API e um token opaco de ativacao, nao
-                # um codigo digitavel. Mantemos como evidencia e nunca o exibimos.
-                "codigo": "",
-                # Campanha nao traz escopo; deriva categoria p/ o filtro nao ficar vazio.
-                "categoria": derivar_categoria_cupom(titulo, regras),
-                # 'Sobre o que e' derivado do titulo (ou da categoria dominante dos
-                # produtos): a coluna Loja parava em "Mercado Livre" p/ todo cupom de
-                # link e nao dava p/ saber do que se tratava.
-                "anunciante_nome": rotulo_anunciante(
-                    titulo, regras,
-                    categoria_fallback=dominante_por_campanha.get(c.campanha_id, "")),
-                "link": c.link_original or "https://www.mercadolivre.com.br/cupons",
-                "validade": c.validade,
-                "restrito": c.restrito,
-                "confianca": "media",
-                "estado": "ativo",
-                "regras": regras,
-                "evidencia": {"transport": "authenticated-web", "association": "campaign",
-                              # EvidenceStrength: distingue container publicado
-                              # pela fonte de URL que o próprio scraper deduziu.
-                              "evidence_strength": _forca_evidencia_da_campanha(
-                                  c.campanha_id, c.link_original, regras),
-                              "token_ativacao": c.codigo or ""},
+        cupom_normalizado = anterior_obj or CupomNormalizado(
+            fonte=fonte, external_id=ext, owner_id=None,
+            primeira_observacao=agora,
+        )
+        valores = {
+            "marketplace": "mercadolivre",
+            "organization_id": organization_id,
+            "data_scope": "organization",
+            "audience_scope": "organization",
+            "redemption_mode": "activation",
+            "scope_type": "container" if (
+                regras.get("container_url") or regras.get("container_name")
+            ) else "category" if regras.get("escopo") else "product",
+            "titulo": titulo[:255],
+            # `code`/`inputCode` desta API e um token opaco de ativacao, nao
+            # um codigo digitavel. Mantemos como evidencia e nunca o exibimos.
+            "codigo": "",
+            "categoria": derivar_categoria_cupom(titulo, regras),
+            "anunciante_nome": rotulo_anunciante(
+                titulo, regras,
+                categoria_fallback=dominante_por_campanha.get(c.campanha_id, "")),
+            "link": c.link_original or "https://www.mercadolivre.com.br/cupons",
+            "validade": c.validade,
+            "restrito": c.restrito,
+            "confianca": "media",
+            "estado": "ativo",
+            "regras": regras,
+            "evidencia": {
+                "transport": "authenticated-web", "association": "campaign",
+                "evidence_strength": _forca_evidencia_da_campanha(
+                    c.campanha_id, c.link_original, regras),
+                "token_ativacao": c.codigo or "",
             },
-        )
+            "ultima_observacao": agora,
+        }
+        for campo, valor in valores.items():
+            setattr(cupom_normalizado, campo, valor)
         from apps.scrapers.coupon_products import atualizar_chave_cupom
-        atualizar_chave_cupom(cupom_normalizado)
-        from apps.scrapers.sources.persistence import record_coupon_observation
-        record_coupon_observation(
-            cupom_normalizado, health_status="healthy", outcome="accepted",
-            evidence={"association": "campaign", "public": False},
+        atualizar_chave_cupom(cupom_normalizado, salvar=False)
+        projetados.append(cupom_normalizado)
+        (atualizar if anterior_obj else criar).append(cupom_normalizado)
+
+    # A produção possui milhares de campanhas. O antigo update_or_create + chave +
+    # observação fazia 6–8 round-trips por linha (mais de 15 mil queries) e levou a
+    # etapa para perto do timeout de 45min. O estado calculado acima é independente
+    # por campanha, então pode ser persistido com poucas operações em lote.
+    campos_atualizacao = [
+        "marketplace", "organization", "data_scope", "audience_scope",
+        "redemption_mode", "scope_type", "titulo", "codigo", "categoria",
+        "anunciante_nome", "link", "validade", "restrito", "confianca",
+        "estado", "regras", "evidencia", "produtos_chave", "ultima_observacao",
+    ]
+    with transaction.atomic():
+        # ``bulk_update`` gera um CASE por campo e por linha. Em produção, lotes de
+        # 500 viravam instruções com dezenas de milhares de WHENs e o PostgreSQL
+        # levava minutos apenas planejando/executando cada bloco. Com 100 linhas a
+        # quantidade de comparações por instrução cai quadraticamente, sem voltar
+        # ao custo de um round-trip por campanha.
+        batch_size = 100
+        if criar:
+            CupomNormalizado.objects.bulk_create(criar, batch_size=batch_size)
+        if atualizar:
+            CupomNormalizado.objects.bulk_update(
+                atualizar, campos_atualizacao, batch_size=batch_size,
+            )
+
+        from apps.scrapers.sources.persistence import (
+            _SOURCE_PRECEDENCE, _model_coupon_canonical_key,
         )
+        chaves = {
+            (_model_coupon_canonical_key(cupom), cupom.external_id): cupom
+            for cupom in projetados
+        }
+        observacoes_existentes = {
+            (obs.canonical_key, obs.source_external_id): obs
+            for obs in CupomFonteObservacao.objects.filter(
+                fonte=fonte,
+                organization_id=organization_id,
+                source_external_id__in=external_ids,
+            )
+        }
+        observacoes_criar = []
+        observacoes_atualizar = []
+        for chave, cupom in chaves.items():
+            observacao = observacoes_existentes.get(chave)
+            if observacao is None:
+                observacao = CupomFonteObservacao(
+                    organization_id=organization_id,
+                    fonte=fonte,
+                    canonical_key=chave[0],
+                    source_external_id=chave[1],
+                )
+                observacoes_criar.append(observacao)
+            else:
+                observacoes_atualizar.append(observacao)
+            observacao.cupom = cupom
+            observacao.precedence = _SOURCE_PRECEDENCE.get(fonte.slug, 100)
+            observacao.health_status = "healthy"
+            observacao.outcome = "accepted"
+            observacao.reason_code = ""
+            observacao.evidence = {
+                "association": "campaign", "product_ids": 0, "public": False,
+            }
+            observacao.observed_at = agora
+        if observacoes_criar:
+            CupomFonteObservacao.objects.bulk_create(
+                observacoes_criar, batch_size=batch_size,
+            )
+        if observacoes_atualizar:
+            CupomFonteObservacao.objects.bulk_update(
+                observacoes_atualizar,
+                ["cupom", "precedence", "health_status", "outcome", "reason_code",
+                 "evidence", "observed_at"],
+                batch_size=batch_size,
+            )
 
     # Sincroniza o catálogo com o estado do `Cupom`: campanhas que saíram do ar
     # deixam de aparecer. Só mexe nas projeções de campanha (external_id

@@ -105,6 +105,25 @@ class ManualScrapingQueueTests(TransactionTestCase):
         values.update(overrides)
         return ExecucaoRaspagem.objects.create(**values)
 
+    def test_commit_do_clique_publica_prioridade_para_o_holder_atual(self):
+        import os
+        import tempfile
+
+        from apps.scrapers.resource_control import (
+            interesse_manual_pendente, limpar_interesse_manual,
+        )
+
+        with tempfile.TemporaryDirectory() as lock_dir, patch.dict(
+            os.environ, {"SPREADING_RESOURCE_LOCK_DIR": lock_dir},
+        ):
+            job, created = criar_execucao(
+                organization=self.organization, usuario=self.user, tipo="cupons",
+            )
+            self.assertTrue(created)
+            self.assertEqual(job.status, "queued")
+            self.assertTrue(interesse_manual_pendente("django_chromium"))
+            limpar_interesse_manual("django_chromium")
+
     def test_retry_de_banco_reabre_fora_de_atomic(self):
         calls = []
 
@@ -435,3 +454,4 @@ class ManualScrapingQueueTests(TransactionTestCase):
             nivel="warning", mensagem__startswith="Mercado Livre desconectado",
         ).exists())
         self.assertFalse(_pipeline.call_args.kwargs["permitir_rede_preparo"])
+        self.assertEqual(_pipeline.call_args.kwargs["limite_http_preparo"], 40)
