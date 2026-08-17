@@ -8089,3 +8089,70 @@ class EscopoDeTenantNasChecagensDeConexaoTests(TestCase):
         self.assertFalse(envio.get("precisa_login_ml"), envio.get("motivo"))
         self.assertNotIn("Reconecte", envio.get("motivo") or "")
         self.assertNotIn("desconectado", (envio.get("motivo") or "").lower())
+
+
+class PermissaoEnvioNoPainelTests(TestCase):
+    """Conceder a permissão lê o Perfil de OUTRO usuário — e a RLS esconde isso.
+
+    O processo web não tem bypass: `user.perfil` de um terceiro levanta
+    RelatedObjectDoesNotExist e a tela devolvia 500. A policy aceita
+    `user_id = app.actor_id`, então o painel trabalha no escopo do alvo.
+    """
+
+    def setUp(self):
+        User = get_user_model()
+        self.admin = User.objects.create_user(
+            "envio-admin", password="test", is_staff=True, is_superuser=True)
+        self.alvo = User.objects.create_user("envio-alvo", password="test")
+        self.client.force_login(self.admin)
+
+    @contextmanager
+    def _perfil_sob_rls(self):
+        """Emula a policy: o Perfil só existe dentro do actor_context do dono.
+
+        Em SQLite não há RLS — sem esta emulação o teste passaria com e sem a
+        correção, que foi exatamente o que deixou o 500 chegar em produção.
+        """
+        from apps.accounts.models import Perfil
+        from apps.accounts.tenant import current_actor_id
+        from apps.scrapers import views_admin
+
+        User = get_user_model()
+        gerente = Perfil.objects
+        nao_existe = User.perfil.RelatedObjectDoesNotExist
+
+        class _SobPolicy:
+            def __getattr__(_self, nome):
+                visivel = gerente if current_actor_id() else gerente.none()
+                return getattr(visivel, nome)
+
+        def _descriptor(usuario):
+            if current_actor_id() != str(usuario.pk):
+                raise nao_existe("User has no perfil.")
+            return gerente.get(user=usuario)
+
+        with patch.object(views_admin, "Perfil", SimpleNamespace(objects=_SobPolicy())), \
+                patch.object(User, "perfil", property(_descriptor)):
+            yield
+
+    def test_concede_permissao_com_a_policy_valendo(self):
+        with self._perfil_sob_rls():
+            resposta = self.client.post(
+                reverse("superadmin-permissao-envio", args=[self.alvo.pk]))
+
+        self.assertEqual(resposta.status_code, 302)
+        self.alvo.refresh_from_db()
+        self.assertTrue(self.alvo.perfil.pode_ligar_envio)
+
+    def test_tela_mostra_a_permissao_ja_concedida(self):
+        perfil = self.alvo.perfil
+        perfil.pode_ligar_envio = True
+        perfil.save(update_fields=["pode_ligar_envio"])
+
+        with self._perfil_sob_rls(), \
+                patch("apps.scrapers.conexoes.estados_do_usuario", return_value=[]):
+            resposta = self.client.get(
+                reverse("superadmin-usuario", args=[self.alvo.pk]))
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertContains(resposta, "Revogar controle do envio automático")

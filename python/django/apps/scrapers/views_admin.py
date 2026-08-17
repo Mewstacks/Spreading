@@ -18,6 +18,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
+from apps.accounts.models import Perfil
 from apps.scrapers import automacao_state as st
 from apps.scrapers.fly_infra import snapshot as fly_snapshot
 from apps.scrapers.models import (
@@ -159,6 +160,22 @@ def superadmin_criar_usuario(request):
     return redirect("superadmin-usuario", user_id=user.id)
 
 
+def _perfil_no_escopo_do_alvo(user, fn):
+    """Roda `fn(perfil)` com a RLS enxergando o Perfil de OUTRO usuário.
+
+    O processo web não tem bypass de RLS (Fase 0): `user.perfil` de um terceiro é
+    invisível e o descriptor levanta RelatedObjectDoesNotExist — era o 500 desta
+    tela. A policy de accounts_perfil aceita `user_id = app.actor_id`, então
+    instalamos o contexto assinado do próprio alvo em vez de furar o isolamento.
+    Devolve None quando a conta realmente não tem perfil.
+    """
+    from apps.accounts.tenant import actor_context
+
+    with actor_context(user):
+        perfil = Perfil.objects.filter(user=user).first()
+        return fn(perfil)
+
+
 @superadmin_required
 def superadmin_usuario_detalhe(request, user_id):
     from apps.scrapers.conexoes import estados_do_usuario
@@ -166,8 +183,14 @@ def superadmin_usuario_detalhe(request, user_id):
     user = get_object_or_404(User.objects.select_related("perfil"), pk=user_id)
     # Uma conta só: aqui cabe sondar ao vivo (na listagem seria uma ida à rede por
     # linha). É esta tela que responde "a conexão dele está de pé AGORA?".
-    return render(request, "scrapers/superadmin/usuario_detalhe.html",
-                  {"u": _uso_usuario(user), "conexoes": estados_do_usuario(user)})
+    return render(request, "scrapers/superadmin/usuario_detalhe.html", {
+        "u": _uso_usuario(user),
+        "conexoes": estados_do_usuario(user),
+        # Lido no escopo do alvo: sem isso o botão mostraria "Permitir" para
+        # sempre, inclusive depois de a permissão já ter sido concedida.
+        "pode_ligar_envio": _perfil_no_escopo_do_alvo(
+            user, lambda p: bool(p and p.pode_ligar_envio)),
+    })
 
 
 @superadmin_required
@@ -410,15 +433,27 @@ def superadmin_permissao_envio(request, user_id):
     sem raspagem, login do ML nem o diagnóstico técnico de admin.
     """
     user = get_object_or_404(User, pk=user_id)
-    perfil = user.perfil
-    perfil.pode_ligar_envio = not perfil.pode_ligar_envio
-    perfil.save(update_fields=["pode_ligar_envio"])
-    messages.success(
-        request,
-        f"{user.get_username()} "
-        + ("agora pode ligar o envio automático."
-           if perfil.pode_ligar_envio else "não controla mais o envio automático."),
-    )
+
+    def _alternar(perfil):
+        if perfil is None:
+            return None
+        perfil.pode_ligar_envio = not perfil.pode_ligar_envio
+        perfil.save(update_fields=["pode_ligar_envio"])
+        return perfil.pode_ligar_envio
+
+    concedido = _perfil_no_escopo_do_alvo(user, _alternar)
+    if concedido is None:
+        messages.error(
+            request,
+            f"{user.get_username()} não tem perfil; a permissão não pôde ser alterada.",
+        )
+    else:
+        messages.success(
+            request,
+            f"{user.get_username()} "
+            + ("agora pode ligar o envio automático."
+               if concedido else "não controla mais o envio automático."),
+        )
     return redirect("superadmin-usuario", user_id=user_id)
 
 

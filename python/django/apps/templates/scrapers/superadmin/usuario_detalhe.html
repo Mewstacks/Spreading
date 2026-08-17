@@ -121,7 +121,7 @@
     </form>
     <form method="post" action="{% url 'superadmin-permissao-envio' u.user.id %}">
       {% csrf_token %}
-      {% if u.perfil.pode_ligar_envio %}
+      {% if pode_ligar_envio %}
         <button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="power-off"></i> Revogar controle do envio automático</button>
         <span class="admin-note">pode ligar/desligar o worker de envio (global)</span>
       {% else %}
