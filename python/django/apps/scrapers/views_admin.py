@@ -403,6 +403,27 @@ def superadmin_suspender(request, user_id):
 
 @superadmin_required
 @require_POST
+def superadmin_permissao_envio(request, user_id):
+    """Concede/revoga o botão do envio automático a um usuário não-staff.
+
+    Alternativa estreita a marcar is_staff: libera só o toggle do worker `envio`,
+    sem raspagem, login do ML nem o diagnóstico técnico de admin.
+    """
+    user = get_object_or_404(User, pk=user_id)
+    perfil = user.perfil
+    perfil.pode_ligar_envio = not perfil.pode_ligar_envio
+    perfil.save(update_fields=["pode_ligar_envio"])
+    messages.success(
+        request,
+        f"{user.get_username()} "
+        + ("agora pode ligar o envio automático."
+           if perfil.pode_ligar_envio else "não controla mais o envio automático."),
+    )
+    return redirect("superadmin-usuario", user_id=user_id)
+
+
+@superadmin_required
+@require_POST
 def superadmin_cotas(request, user_id):
     user = get_object_or_404(User, pk=user_id)
     perfil = user.perfil

@@ -120,7 +120,7 @@
     </div>
     <p class="auto-desc">Quando ligado, processa as regras ativas no horário e limite de cada grupo — funciona de forma independente da raspagem.</p>
   </div>
-  {% if request.user.is_staff %}<label class="switch" title="Controle operacional global">
+  {% if pode_ligar_envio %}<label class="switch" title="Controle operacional global">
     <input type="checkbox" id="auto-toggle" onchange="toggleAuto(this)">
     <span class="track"></span>
   </label>{% endif %}

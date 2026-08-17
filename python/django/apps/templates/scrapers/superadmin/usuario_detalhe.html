@@ -119,6 +119,16 @@
       {% csrf_token %}
       <button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="venetian-mask"></i> Impersonar</button>
     </form>
+    <form method="post" action="{% url 'superadmin-permissao-envio' u.user.id %}">
+      {% csrf_token %}
+      {% if u.perfil.pode_ligar_envio %}
+        <button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="power-off"></i> Revogar controle do envio automático</button>
+        <span class="admin-note">pode ligar/desligar o worker de envio (global)</span>
+      {% else %}
+        <button class="btn btn-sm btn-ghost" type="submit"><i data-lucide="power"></i> Permitir ligar o envio automático</button>
+        <span class="admin-note">libera só esse botão — o worker é global e afeta todas as organizações</span>
+      {% endif %}
+    </form>
     <form method="post" action="{% url 'superadmin-suspender' u.user.id %}">
       {% csrf_token %}
       {% if u.bloqueado %}

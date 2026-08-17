@@ -92,6 +92,26 @@ class AutomationStatusSecurityTests(TestCase):
         self.assertFalse(data["rodando"])
         self.assertFalse(data["saudavel"])
 
+    def test_usuario_comum_nao_liga_worker(self):
+        for tipo in ("envio", "scrape"):
+            with self.subTest(tipo=tipo):
+                response = self.client.post(
+                    reverse("scraper-automacao"), {"tipo": tipo, "acao": "start"})
+                self.assertEqual(response.status_code, 403)
+
+    @patch("apps.scrapers.automacao_state.spawn_worker")
+    @patch("apps.scrapers.automacao_state.is_running", return_value=True)
+    def test_permissao_delegada_liga_so_o_envio(self, _running, _spawn):
+        # Delegação estreita: o botão do envio abre, a raspagem continua só p/ staff.
+        self.user.perfil.pode_ligar_envio = True
+        self.user.perfil.save(update_fields=["pode_ligar_envio"])
+
+        ok = self.client.post(reverse("scraper-automacao"), {"tipo": "envio", "acao": "start"})
+        self.assertEqual(ok.status_code, 200)
+
+        negado = self.client.post(reverse("scraper-automacao"), {"tipo": "scrape", "acao": "start"})
+        self.assertEqual(negado.status_code, 403)
+
     @patch("apps.scrapers.maintenance.purgar_eventos_antigos", return_value=0)
     @patch("apps.scrapers.maintenance.reconciliar_publicacoes_orfas", return_value=0)
     @patch("apps.scrapers.ofertas.processar_configs_de_envio", return_value=[])

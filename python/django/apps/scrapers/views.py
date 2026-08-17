@@ -55,6 +55,20 @@ def staff_required(view):
     return _wrapped
 
 
+def pode_ligar_envio(user) -> bool:
+    """Quem pode ligar/desligar o worker de envio: staff ou delegado pelo superadmin.
+
+    Só vale para o loop `envio`; a raspagem segue exclusiva de is_staff. Ver o
+    comentário de Perfil.pode_ligar_envio para o porquê da delegação existir.
+    """
+    if not getattr(user, "is_authenticated", False):
+        return False
+    if user.is_staff:
+        return True
+    perfil = getattr(user, "perfil", None)
+    return bool(perfil and perfil.pode_ligar_envio)
+
+
 def superadmin_required(view):
     """Restringe a view ao superadmin (is_superuser).
 
@@ -1525,6 +1539,7 @@ def configuracoes(request):
         "marketplaces": list(MARKETPLACES.keys()),
         "canais": list(SENDERS.keys()),
         "perfil": request.user.perfil,
+        "pode_ligar_envio": pode_ligar_envio(request.user),
         "awin_programas": ProgramaAfiliado.objects.filter(
             integracao__owner=request.user, integracao__status="conectada",
             habilitado=True, status_vinculo="joined", link_status="online").order_by("nome"),
@@ -2810,8 +2825,14 @@ def automacao_control(request):
     # ligar/desligar afeta todo mundo, então é controle de infra (staff). O usuário
     # comum liga/desliga o PRÓPRIO envio pelo flag `ativo` de cada regra, sem derrubar
     # o worker dos demais. GET (status) segue liberado para o polling do front.
-    if request.method == "POST" and not request.user.is_staff:
-        raise PermissionDenied("Apenas administradores controlam os workers de automação.")
+    # Exceção estreita: o superadmin pode delegar o botão do ENVIO a um usuário
+    # (Perfil.pode_ligar_envio). A raspagem continua exclusiva de is_staff — quem tem
+    # só a delegação e manda tipo=scrape leva 403 como antes.
+    if request.method == "POST":
+        autorizado = (pode_ligar_envio(request.user) if tipo == "envio"
+                      else request.user.is_staff)
+        if not autorizado:
+            raise PermissionDenied("Apenas administradores controlam os workers de automação.")
 
     if request.method != "POST":
         habilitada = st.is_enabled(tipo)

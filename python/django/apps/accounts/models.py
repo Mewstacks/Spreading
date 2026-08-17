@@ -371,6 +371,14 @@ class Perfil(models.Model):
     bloqueado_em = models.DateTimeField(null=True, blank=True)
     bloqueado_motivo = models.CharField(max_length=255, blank=True, default="")
 
+    # ── Permissão delegada: ligar/desligar o worker de envio ──
+    # O worker `envio` é um loop GLOBAL, compartilhado por todos os tenants — por
+    # isso o controle nasce restrito a is_staff. Este flag delega SÓ esse botão
+    # (tipo=envio) a uma pessoa de confiança, sem abrir raspagem, login do ML nem o
+    # diagnóstico técnico que vêm junto com is_staff. Concedido pelo superadmin no
+    # painel; ligar continua afetando as regras ativas de todas as organizações.
+    pode_ligar_envio = models.BooleanField(default=False)
+
     # ── Cotas por usuário (0 = cai no default global de settings) ──
     # Evita que um usuário sozinho estoure a máquina compartilhada (WA ~3-4 sessões/2GB).
     max_wa_sessions = models.PositiveIntegerField(default=0)

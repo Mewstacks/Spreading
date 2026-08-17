@@ -12,6 +12,7 @@ urlpatterns = [
     path("painel-admin/usuario/<int:user_id>/", views_admin.superadmin_usuario_detalhe, name="superadmin-usuario"),
     path("painel-admin/usuario/<int:user_id>/suspender/", views_admin.superadmin_suspender, name="superadmin-suspender"),
     path("painel-admin/usuario/<int:user_id>/cotas/", views_admin.superadmin_cotas, name="superadmin-cotas"),
+    path("painel-admin/usuario/<int:user_id>/permissao-envio/", views_admin.superadmin_permissao_envio, name="superadmin-permissao-envio"),
     path("painel-admin/usuario/<int:user_id>/impersonar/", views_admin.superadmin_impersonar, name="superadmin-impersonar"),
     path("painel-admin/parar-impersonar/", views_admin.superadmin_parar_impersonar, name="superadmin-parar-impersonar"),
 
