@@ -47,6 +47,7 @@ const sendLedger = require('./idempotency_ledger');
 const { redactSensitive, installConsoleRedaction } = require('./safe_logging');
 installConsoleRedaction(console);
 const { runtimePronto } = require('./session_readiness');
+const { criarPortao } = require('./bootstrap_gate');
 const {
     criarPrazo, restante, expirou, timeoutDaEtapa, timeoutDePreflight, timeoutComEnvioIniciado,
 } = require('./send_deadline');
@@ -945,6 +946,7 @@ const destroySessionRuntime = async (session, reason, removeFromMap = false) => 
     session.preparationTimer = null;
     limparKeepalive(session);
     limparLogoutRecovery(session);
+    liberarPortaoBootstrap(session);
     if (session.client) await encerrarClienteChromium(session, session.client, reason);
     session.client = null;
     session.initialized = false;
@@ -1409,6 +1411,7 @@ const recycleSession = async (session, reason, purgeAuth = false, msgOverride = 
     limparKeepalive(session);
     if (session.initTimer) clearTimeout(session.initTimer);
     session.initTimer = null;
+    liberarPortaoBootstrap(session);
     await encerrarClienteChromium(session, client, reason);
     if (session.qrBootstrapAtivo) {
         await scheduleQrBootstrapRetry(session, reason);
@@ -1493,6 +1496,25 @@ const limparCachesChromium = async (dir) => {
     await Promise.all(perfis.flatMap((entry) => CACHES_DO_PERFIL.map(
         (cache) => removerArvore(path.join(raiz, entry.name, cache))
     )));
+};
+
+// Um Chromium subindo o WhatsApp Web de cada vez — ver bootstrap_gate.js para a
+// medição que justifica o portão. O teto cobre o maior orçamento de bootstrap com
+// folga: quando ele dispara, o timeout da própria sessão já reciclou tudo.
+const portaoBootstrap = criarPortao({
+    tetoMs: Math.max(QR_BOOTSTRAP_TIMEOUT_MS, SESSION_INIT_TIMEOUT_MS) + 30000,
+    aoEstourarTeto: (id) => console.error(
+        `[${id}] Portao de bootstrap liberado pelo teto; a vez passa para a fila.`
+    ),
+});
+
+// Chamado em TODO ponto onde a fase pesada termina — QR na tela, sessão pronta,
+// falha, reciclagem. Idempotente: sobra de liberação não adianta a vez de ninguém.
+const liberarPortaoBootstrap = (session) => {
+    const liberar = session.liberarPortao;
+    if (!liberar) return;
+    session.liberarPortao = null;
+    liberar();
 };
 
 const initializeSession = (session) => {
@@ -1610,7 +1632,6 @@ const initializeSession = (session) => {
         // Timer de ciclo de vida: nao pode segurar o event loop aberto sozinho.
         if (session.initTimer.unref) session.initTimer.unref();
     };
-    armInitializationTimeout('inicializacao');
 
     client.on('qr', (qr) => {
         if (session.client !== client) return;
@@ -1622,6 +1643,7 @@ const initializeSession = (session) => {
         }
         if (session.initTimer) clearTimeout(session.initTimer);
         session.initTimer = null;
+        liberarPortaoBootstrap(session);
         limparLogoutRecovery(session);
         session.ultimoQR = qr;
         session.fase = 'qr';
@@ -1685,6 +1707,7 @@ const initializeSession = (session) => {
         if (session.client !== client) return;
         if (session.initTimer) clearTimeout(session.initTimer);
         session.initTimer = null;
+        liberarPortaoBootstrap(session);
         session.fase = session.qrBootstrapAtivo ? 'reiniciando_qr' : 'falha_auth';
         session.faseMsg = session.qrBootstrapAtivo
             ? 'O leitor falhou antes da autenticação. Preparando outro QR…'
@@ -1711,6 +1734,7 @@ const initializeSession = (session) => {
         if (session.client !== client) return; // pode ter reciclado durante a espera
         if (session.initTimer) clearTimeout(session.initTimer);
         session.initTimer = null;
+        liberarPortaoBootstrap(session);
         session.initFailures = 0;
         session.qrBootstrapAtivo = false;
         session.qrBootstrapAttempts = 0;
@@ -1756,6 +1780,7 @@ const initializeSession = (session) => {
         const faseAnterior = session.fase;
         if (session.initTimer) clearTimeout(session.initTimer);
         session.initTimer = null;
+        liberarPortaoBootstrap(session);
         session.isConnected = false;
         session.preparando = false;
         session.readyReceived = false;
@@ -1845,10 +1870,40 @@ const initializeSession = (session) => {
         scheduleReconnect(session, reason);
     });
 
-    limpezaPerfil.then(() => client.initialize()).catch((error) => {
+    // A ordem aqui é o conserto: pegar a vez no portão, SÓ ENTÃO armar o
+    // orçamento de bootstrap e subir o Chromium. Armar antes faria a sessão da
+    // fila gastar os 90s dela esperando — chegaria ao Chromium já condenada.
+    limpezaPerfil
+        .then(() => {
+            // Espera com a tela dizendo a verdade. "Preparando o leitor" durante
+            // uma fila invisível é exatamente o que fazia o QR parecer travado.
+            if (portaoBootstrap.estado().dono) {
+                session.faseMsg = 'Aguardando o navegador liberar — sua vez é a seguir…';
+            }
+            return portaoBootstrap.adquirir(session.id);
+        })
+        .then((liberar) => {
+            // Reciclou/encerrou enquanto esperava: devolve a vez e sai sem subir
+            // Chromium nenhum. Sem isto a fila entregaria a vez a um fantasma.
+            if (session.client !== client) {
+                liberar();
+                return undefined;
+            }
+            session.liberarPortao = liberar;
+            const espera = portaoBootstrap.estado();
+            if (espera.fila.length) {
+                console.log(
+                    `[${session.id}] Bootstrap iniciado; ${espera.fila.length} sessao(oes) na fila do navegador.`
+                );
+            }
+            armInitializationTimeout('inicializacao');
+            return client.initialize();
+        })
+        .catch((error) => {
         if (session.client !== client) return;
         if (session.initTimer) clearTimeout(session.initTimer);
         session.initTimer = null;
+        liberarPortaoBootstrap(session);
         session.fase = session.qrBootstrapAtivo ? 'reiniciando_qr' : 'falha_auth';
         session.faseMsg = session.qrBootstrapAtivo
             ? 'O leitor de QR falhou ao iniciar. Preparando nova tentativa…'
