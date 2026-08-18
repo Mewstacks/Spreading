@@ -49,6 +49,22 @@ class DecidirAcaoTests(SimpleTestCase):
         )
 
 
+class GestoParaEstadoTests(SimpleTestCase):
+    """Máquina parada precisa de /start; máquina em transição não precisa de nada."""
+
+    def test_parada_pede_start(self):
+        for estado in ("stopped", "suspended", "STOPPED"):
+            self.assertEqual(wa_supervisor.gesto_para_estado(estado), "start")
+
+    def test_em_transicao_aguarda(self):
+        for estado in ("starting", "stopping", "created", "replacing"):
+            self.assertEqual(wa_supervisor.gesto_para_estado(estado), "aguardar")
+
+    def test_viva_ou_desconhecida_pede_restart(self):
+        for estado in ("started", "", "coisa-nova"):
+            self.assertEqual(wa_supervisor.gesto_para_estado(estado), "restart")
+
+
 @override_settings(**_SETTINGS)
 class VerificarTests(SimpleTestCase):
     """O wrapper stateful: contador e cooldown no cache (falso, locmem), sonda e
@@ -110,6 +126,47 @@ class VerificarTests(SimpleTestCase):
             with patch.object(wa_supervisor, "_sonda_saudavel") as sonda:
                 self.assertEqual(wa_supervisor.verificar(), "desligado")
         sonda.assert_not_called()
+
+    def test_maquina_parada_e_ligada_em_vez_de_reiniciada(self):
+        """O bug de 18/08: com a VM em 'stopped' o /restart devolvia 409 e o
+        worker ficava caído para sempre."""
+        listar = MagicMock(return_value=[{"id": "mach-123", "estado": "stopped"}])
+        with patch.object(wa_supervisor, "_sonda_saudavel", return_value=False), \
+             patch.object(wa_supervisor.fly_infra, "_listar_maquinas", listar), \
+             patch.object(wa_supervisor.fly_infra, "iniciar_maquina") as iniciar, \
+             patch.object(wa_supervisor.fly_infra, "reiniciar_maquina") as reiniciar, \
+             patch.object(wa_supervisor, "log_event"):
+            acoes = [wa_supervisor.verificar() for _ in range(3)]
+        self.assertEqual(acoes, ["aguardar", "aguardar", "reiniciado"])
+        iniciar.assert_called_once_with("spreading-wa", "mach-123")
+        reiniciar.assert_not_called()
+
+    def test_maquina_subindo_nao_leva_gesto(self):
+        listar = MagicMock(return_value=[{"id": "mach-123", "estado": "starting"}])
+        with patch.object(wa_supervisor, "_sonda_saudavel", return_value=False), \
+             patch.object(wa_supervisor.fly_infra, "_listar_maquinas", listar), \
+             patch.object(wa_supervisor.fly_infra, "iniciar_maquina") as iniciar, \
+             patch.object(wa_supervisor.fly_infra, "reiniciar_maquina") as reiniciar, \
+             patch.object(wa_supervisor, "log_event"):
+            acoes = [wa_supervisor.verificar() for _ in range(3)]
+        self.assertEqual(acoes[-1], "aguardar")
+        iniciar.assert_not_called()
+        reiniciar.assert_not_called()
+
+    def test_tentativa_que_falha_tambem_arma_cooldown(self):
+        """Sem isto o vigia volta em 15s e mata o worker no meio do boot — foi
+        assim que um 409 virou 8h de WhatsApp fora do ar."""
+        listar = MagicMock(return_value=[{"id": "mach-123", "estado": "started"}])
+        reiniciar = MagicMock(side_effect=RuntimeError("409 Conflict"))
+        with patch.object(wa_supervisor, "_sonda_saudavel", return_value=False), \
+             patch.object(wa_supervisor.fly_infra, "_listar_maquinas", listar), \
+             patch.object(wa_supervisor.fly_infra, "reiniciar_maquina", reiniciar), \
+             patch.object(wa_supervisor, "log_event"):
+            acoes = [wa_supervisor.verificar() for _ in range(9)]
+        self.assertEqual(acoes[2], "erro")
+        # As 6 passadas seguintes ficam presas no cooldown: UMA tentativa só.
+        self.assertEqual(reiniciar.call_count, 1)
+        self.assertEqual(acoes[3:], ["aguardar"] * 6)
 
     def test_falha_da_api_fly_nao_derruba_o_monitor(self):
         listar = MagicMock(side_effect=RuntimeError("API Fly fora"))

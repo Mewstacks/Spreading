@@ -46,6 +46,22 @@ def _listar_maquinas(app: str) -> list[dict]:
     return maquinas
 
 
+def iniciar_maquina(app: str, machine_id: str) -> None:
+    """Liga uma máquina PARADA (POST .../machines/{id}/start).
+
+    Máquina em 'stopped' não aceita /restart — a API devolve 409 Conflict. O
+    vigia precisa das duas portas: /restart p/ a VM viva e travada, /start p/ a
+    que já caiu. Levanta requests.HTTPError se a API recusar.
+    """
+    url = f"{settings.FLY_API_HOST}/v1/apps/{app}/machines/{machine_id}/start"
+    resp = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {settings.FLY_API_TOKEN}"},
+        timeout=_TIMEOUT,
+    )
+    resp.raise_for_status()
+
+
 def reiniciar_maquina(app: str, machine_id: str) -> None:
     """Reinicia uma máquina Fly (POST .../machines/{id}/restart).
 
