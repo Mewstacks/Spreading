@@ -1,8 +1,9 @@
 import re
+import time
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
-from django.db import connection, transaction
+from django.db import OperationalError, connection, transaction
 
 from apps.accounts.rls import (
     ALL_TENANT_TABLES,
@@ -11,6 +12,20 @@ from apps.accounts.rls import (
     SYSTEM_ONLY_TABLES,
     policy_statements,
 )
+
+
+# O --enable roda no release_command de TODO deploy, com o release ANTERIOR ainda
+# servindo tráfego. Cada ALTER TABLE pede AccessExclusiveLock e o lote inteiro vive
+# numa transação só, então basta uma transação do app tocar duas dessas tabelas na
+# ordem inversa para fechar o ciclo: em 18/08 dois deploys seguidos morreram com
+# "deadlock detected" entre scrapers_produtocupom e scrapers_produto. Ordenar as
+# tabelas não resolve — quem escolhe a ordem do outro lado é o tráfego. A saída é o
+# DDL desistir rápido e tentar de novo: com lock_timeout ele nunca fica na fila
+# atrás de uma transação viva (o que congelaria o app inteiro atrás dele), e tanto o
+# timeout quanto o deadlock viram uma tentativa perdida em vez de um deploy abortado.
+_LOCK_TIMEOUT = "3s"
+_TENTATIVAS = 8
+_ESPERA_S = 5
 
 
 class Command(BaseCommand):
@@ -45,7 +60,40 @@ class Command(BaseCommand):
             if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", role):
                 raise CommandError(f"Nome de role inválido: {role!r}")
 
+        for tentativa in range(1, _TENTATIVAS + 1):
+            try:
+                self._aplicar(options, system_role, migration_role)
+                break
+            except OperationalError as e:
+                # Deadlock e lock_timeout são a MESMA situação vista de dois
+                # ângulos: uma transação viva estava no caminho. Qualquer outro
+                # OperationalError (conexão caída, permissão) sobe e aborta.
+                texto = str(e).lower()
+                if not ("deadlock" in texto or "lock timeout" in texto
+                        or "canceling statement due to lock" in texto):
+                    raise
+                if tentativa == _TENTATIVAS:
+                    raise CommandError(
+                        f"RLS não aplicado: {_TENTATIVAS} tentativas disputaram lock "
+                        f"com o tráfego vivo. Último erro: {e}"
+                    ) from e
+                self.stdout.write(
+                    f"Lock disputado com o tráfego (tentativa {tentativa}/{_TENTATIVAS}); "
+                    f"nova tentativa em {_ESPERA_S}s."
+                )
+                time.sleep(_ESPERA_S)
+
+        self.stdout.write(self.style.SUCCESS(
+            f"RLS {'habilitado e forçado' if options['enable'] else 'desabilitado'} "
+            f"em {len(ALL_TENANT_TABLES)} tabelas."
+        ))
+
+    def _aplicar(self, options, system_role, migration_role):
+        """Uma passada do DDL. Tudo ou nada — se levantar, a transação reverte
+        inteira e a tentativa seguinte recomeça do zero."""
         with transaction.atomic(), connection.cursor() as cursor:
+            # SET LOCAL: vale só nesta transação, não vaza para a conexão.
+            cursor.execute(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'")
             cursor.execute(
                 "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
                 [[system_role, migration_role]],
@@ -80,10 +128,6 @@ class Command(BaseCommand):
                     cursor.execute(
                         f'ALTER TABLE "{table}" DISABLE ROW LEVEL SECURITY'
                     )
-        self.stdout.write(self.style.SUCCESS(
-            f"RLS {'habilitado e forçado' if options['enable'] else 'desabilitado'} "
-            f"em {len(ALL_TENANT_TABLES)} tabelas."
-        ))
 
     def _install_signed_context(self, cursor, *, system_role, migration_role):
         """Instala o verificador HMAC sem conceder acesso ao segredo."""
