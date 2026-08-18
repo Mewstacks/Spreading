@@ -13,10 +13,22 @@ primary_region = "gru"
   PORT = "3000"
   WA_CAPABILITY_ISSUER = "spreading-web"
   WA_CAPABILITY_AUDIENCE = "spreading-wa"
-  # 2, não 4: cada sessão é um Chromium rodando o WhatsApp Web inteiro. Com 4 o
-  # worker aceitava mais sessões do que a VM consegue escalonar, e a fome de CPU
-  # derrubava TODAS elas juntas. Subir este número exige subir o [[vm]] junto.
-  MAX_WHATSAPP_SESSIONS = "2"
+  # 1, não 2. Cada sessão é um Chromium rodando o WhatsApp Web inteiro, e esta VM
+  # comporta UM. Medido em 18/08/2026, mesmo script e mesmo pin de bundle:
+  #
+  #   VM ociosa, 1 Chromium ........... QR em 37s
+  #   2 bootstraps simultâneos ........ nenhum QR em 150s
+  #   1 conectado + 1 bootstrap ....... nenhum QR em 150s
+  #
+  # A terceira linha é a que decide este número. O portão de bootstrap
+  # (bootstrap_gate.js) serializa bootstraps ENTRE SI e acabou com o espiral de
+  # reciclagem, mas uma sessão já conectada não está no portão: o Chromium dela
+  # consome CPU o tempo todo, e com ele de pé nenhum QR nasce. Prometer 2 slots
+  # aqui era prometer o que o hardware não entrega — a segunda sessão ficava
+  # eternamente em "preparando o leitor" em vez de receber um "sem capacidade"
+  # honesto. O aviso de sempre continua valendo ao contrário: subir este número
+  # exige subir o [[vm]] junto (o passo barato é shared-cpu-4x/4gb, +US$2,24/mês).
+  MAX_WHATSAPP_SESSIONS = "1"
   SESSION_START_STAGGER_MS = "12000"
   SESSION_INIT_TIMEOUT_MS = "90000"
   # O watchdog mede bloqueio do event loop, não duração de uma operação async.
@@ -70,10 +82,13 @@ primary_region = "gru"
 # deste shared-cpu-2x/4gb. Se os picos voltarem a travar, o passo barato é
 # shared-cpu-4x/4gb (US$36,80): dobra vCPU e cota de baseline por +US$2,24/mês.
 #
-# Memória: cada WhatsApp conectado = 1 Chromium. Medido com as 2 sessões de
-# MAX_WHATSAPP_SESSIONS ativas: 1,77GB em uso, 2,2GB livres. NÃO desça de 4gb — 3gb
-# deixaria ~1,2GB de folga para os picos de Chromium, que é o cenário do travamento de
-# 08/08, e economizaria só US$8,08/mês. Suba os dois juntos para aceitar mais números.
+# Memória: cada WhatsApp conectado = 1 Chromium. Medido com as 2 sessões da época de
+# MAX_WHATSAPP_SESSIONS=2: 1,77GB em uso, 2,2GB livres. Com o teto em 1 sessão
+# (18/08/2026) sobra bem mais: 1,17GB em uso e 2,4GB livres com o Chromium de pé.
+# Os 4gb passaram a ser folga, não necessidade — mas a memória NUNCA foi o gargalo
+# aqui (o que estoura é a cota de baseline de CPU), então descer para 2gb economiza
+# ~US$16/mês sem resolver nada e tira a margem dos picos de Chromium, que é o
+# cenário do travamento de 08/08. Suba os dois juntos para aceitar mais números.
 [[vm]]
   size = "shared-cpu-2x"
   memory = "4gb"
