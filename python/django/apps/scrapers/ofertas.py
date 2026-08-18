@@ -6,7 +6,7 @@ import requests
 from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
-from django.db import transaction
+from django.db import DatabaseError, transaction
 from django.db.models import F, FloatField, ExpressionWrapper, Count, Q
 from apps.scrapers.models import Produto, Cupom, HistoricoEnvio, Publicacao
 from apps.scrapers.precos import stats as _stats_preco
@@ -2456,6 +2456,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         return {"sucesso": False, "motivo": str(motivo), **extra}
 
     from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
+    from apps.scrapers.carga import BrowserResourceUnavailable
     from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
 
     # O trabalho roda aninhado para que QUALQUER exceção inesperada (a Publicacao já
@@ -2464,6 +2465,27 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
     def _executar():
         try:
             info = mp.build_affiliate_link(produto, usuario=usuario)
+        except BrowserResourceUnavailable as e:
+            # Fila de navegador, não erro de envio. Precisa de um `except` PRÓPRIO
+            # porque a classe é RuntimeError (carga.py), não BrowserError — sem ele
+            # a exceção subia por `enviar_oferta_de_produto` ->
+            # `processar_configs_de_envio` -> `_loop_envio` e derrubava o tick
+            # INTEIRO: as configurações seguintes, de TODOS os usuários e não só do
+            # dono deste produto, não eram avaliadas, e esta nem chegava a chamar
+            # `agendar_proximo`. Em produção o rastro terminava sempre em
+            # `carga.coordinated_ml_browser`.
+            #
+            # TRANSITÓRIO pelo mesmo motivo da sessão expirada: a vaga volta no
+            # próximo ciclo e não há nada errado com a regra de envio. Punir a regra
+            # aqui a desligaria sozinha depois de cinco disputas de navegador.
+            logger.info(
+                "Envio adiado para o produto %s: navegador ocupado por outra tarefa.",
+                produto.pk,
+            )
+            return falhar(
+                "Navegador ocupado por outra tarefa; o envio será retomado.",
+                classe=TRANSITORIO, _erro_tecnico=str(e),
+            )
         except (LoginError, AuthError, SessaoExpirada) as e:
             # Sessão do ML caída: sem link de afiliado NENHUM produto sai. Motivo claro
             # + flag p/ a UI oferecer a reconexão e o chamador parar de retentar.
@@ -2951,28 +2973,56 @@ def processar_configs_de_envio():
                 "Config %s pulada: WhatsApp do dono não está conectado.", cfg.id)
             continue
 
-        if getattr(cfg, "tipo", "") == ConfiguracaoEnvio.TIPO_AVISO_CUPONS:
-            r = enviar_aviso_cupons(
-                selecionar_cupons_para_aviso(cfg, cfg.owner), cfg.grupo_id,
-                canal=getattr(cfg, "canal", "whatsapp"), usuario=cfg.owner,
-                destino_nome=cfg.grupo_nome, configuracao=cfg,
-                enqueue_only=_send_pipeline_v2_enabled(cfg.owner),
+        # CERCA DE TENANT. Este laço percorre as regras de TODOS os donos, então
+        # uma exceção que escape daqui não atrasa um envio: cancela o ciclo inteiro
+        # e todos os outros clientes ficam sem oferta naquele tick. Foi exatamente
+        # isso que aconteceu com `BrowserResourceUnavailable` (ver o `except`
+        # próprio em `_executar`). A correção pontual daquela classe resolve o caso
+        # conhecido; esta cerca resolve a categoria, inclusive para o erro que
+        # ainda não aconteceu. O custo é um `continue` no lugar de um tick perdido.
+        try:
+            if getattr(cfg, "tipo", "") == ConfiguracaoEnvio.TIPO_AVISO_CUPONS:
+                r = enviar_aviso_cupons(
+                    selecionar_cupons_para_aviso(cfg, cfg.owner), cfg.grupo_id,
+                    canal=getattr(cfg, "canal", "whatsapp"), usuario=cfg.owner,
+                    destino_nome=cfg.grupo_nome, configuracao=cfg,
+                    enqueue_only=_send_pipeline_v2_enabled(cfg.owner),
+                )
+            else:
+                macros = [cfg.macro_categoria] if cfg.macro_categoria else None  # vazio = qualquer (inclui ofertas)
+                r = selecionar_e_enviar(
+                    macros, cfg.grupo_id,
+                    min_desconto_percent=cfg.min_desconto_percent,
+                    horas_cooldown=cfg.horas_cooldown,
+                    verificar=True,
+                    termo=cfg.termo_busca,
+                    canal=getattr(cfg, "canal", "whatsapp"),
+                    marketplace=getattr(cfg, "marketplace", "") or None,
+                    usuario=cfg.owner,
+                    configuracao=cfg,
+                    destino_nome=cfg.grupo_nome,
+                    enqueue_only=_send_pipeline_v2_enabled(cfg.owner),
+                )
+        except DatabaseError:
+            # Banco fora é problema do processo inteiro, não desta regra: o loop de
+            # envio tem tratamento próprio (pausa progressiva) e precisa vê-lo.
+            raise
+        except Exception as exc:
+            logger.exception("Config %s falhou no tick de envio", cfg.id)
+            log_event(
+                "publicacao", "config_erro",
+                f"A regra de envio {cfg.id} falhou neste ciclo: {exc}",
+                level="error", usuario=cfg.owner,
+                contexto={"configuracao": cfg.id, "destino": cfg.grupo_id},
+                exc=exc,
             )
-        else:
-            macros = [cfg.macro_categoria] if cfg.macro_categoria else None  # vazio = qualquer (inclui ofertas)
-            r = selecionar_e_enviar(
-                macros, cfg.grupo_id,
-                min_desconto_percent=cfg.min_desconto_percent,
-                horas_cooldown=cfg.horas_cooldown,
-                verificar=True,
-                termo=cfg.termo_busca,
-                canal=getattr(cfg, "canal", "whatsapp"),
-                marketplace=getattr(cfg, "marketplace", "") or None,
-                usuario=cfg.owner,
-                configuracao=cfg,
-                destino_nome=cfg.grupo_nome,
-                enqueue_only=_send_pipeline_v2_enabled(cfg.owner),
-            )
+            # Reagenda como falha transitória: a regra tenta de novo no próximo
+            # vencimento em vez de martelar este tick, e não conta falha permanente.
+            r = {
+                "sucesso": False,
+                "motivo": "Falha temporária ao processar esta regra de envio.",
+                "classe": TRANSITORIO,
+            }
         # Reagenda sempre (sucesso ou não) p/ não ficar martelando o mesmo tick;
         # jitter ±1-10min deixa o ritmo humano. ultimo_envio só em sucesso (display).
         cfg.agendar_proximo(agora)

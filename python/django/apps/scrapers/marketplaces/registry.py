@@ -2,13 +2,13 @@
 from apps.scrapers.marketplaces.mercadolivre import MercadoLivre
 from apps.scrapers.marketplaces.amazon import Amazon
 from apps.scrapers.marketplaces.awin import Awin
+from apps.scrapers.marketplaces.shopee import Shopee
 
 MARKETPLACES = {
     MercadoLivre.slug: MercadoLivre(),
     Amazon.slug: Amazon(),
     Awin.slug: Awin(),
-    # FUTURO:
-    # Shopee.slug: Shopee(),
+    Shopee.slug: Shopee(),
 }
 
 

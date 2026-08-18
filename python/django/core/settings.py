@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 
 import logging
 import os
+import sys
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
@@ -459,6 +460,13 @@ AMAZON_PUBLIC_FALLBACK = os.getenv("AMAZON_PUBLIC_FALLBACK", "1") == "1"
 AFFILIATE_FEED_URL = os.getenv("AFFILIATE_FEED_URL", "")
 AFFILIATE_FEED_TOKEN = os.getenv("AFFILIATE_FEED_TOKEN", "")
 AWIN_INTEGRATION_ENABLED = os.getenv("AWIN_INTEGRATION_ENABLED", "1") == "1"
+# Shopee: ligada por padrão porque não consome navegador nem custa infraestrutura —
+# uma organização sem credencial conectada simplesmente não coleta nada. Os valores
+# abaixo são o fallback de desenvolvimento; em produção cada organização assina com
+# a própria credencial, guardada cifrada em IntegracaoAfiliado.
+SHOPEE_INTEGRATION_ENABLED = os.getenv("SHOPEE_INTEGRATION_ENABLED", "1") == "1"
+SHOPEE_APP_ID = os.getenv("SHOPEE_APP_ID", "")
+SHOPEE_APP_SECRET = os.getenv("SHOPEE_APP_SECRET", "")
 # Palavras-chave de categorias amplas que alimentam o "feed" de ofertas Amazon
 # (a Creators API não expõe um feed de ofertas; varremos buscas com min savings).
 AMAZON_FEED_KEYWORDS = [
@@ -731,6 +739,14 @@ LOGGING = {
 }
 
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+# A suíte exercita de propósito os caminhos de erro — sessão caída, fonte
+# bloqueada, envio recusado — e cada `logger.error` desses virava evento no Sentry.
+# Rodar os testes com um `.env` de desenvolvimento preenchido gastava cota e sujava
+# a triagem com falhas encenadas. O DSN continua sendo lido normalmente fora do
+# `manage.py test`.
+RUNNING_TESTS = "test" in sys.argv[1:2] or bool(os.getenv("PYTEST_CURRENT_TEST"))
+if RUNNING_TESTS:
+    SENTRY_DSN = ""
 if SENTRY_DSN:
     try:
         import sentry_sdk

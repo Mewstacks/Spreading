@@ -135,15 +135,68 @@ def interesse_interativo_pendente(resource_key: str = "django_chromium") -> bool
     return idade <= INTERESSE_INTERATIVO_TTL_S
 
 
+try:  # POSIX (produção: Linux na Fly).
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - avaliado por plataforma, não por teste.
+    _fcntl = None
+try:  # Windows (desenvolvimento).
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - idem.
+    _msvcrt = None
+
+
+def _tentar_travar(handle) -> bool:
+    """Tenta o lock exclusivo NÃO bloqueante. True = conseguiu.
+
+    Existe com implementação por plataforma porque o fallback anterior — ``yield
+    True`` quando ``fcntl`` não existia — desligava a exclusão mútua inteira no
+    Windows. O efeito prático era que a máquina de desenvolvimento nunca reproduzia
+    contenção de navegador, que é justamente a causa raiz dos incidentes de
+    produção: dois Chromiums subiam felizes localmente e o mesmo código enfileirava
+    (ou estourava) na Fly. Validar local só vale se local puder falhar igual.
+    """
+    if _fcntl is not None:
+        try:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            return True
+        except (BlockingIOError, OSError):
+            return False
+    if _msvcrt is not None:
+        # msvcrt trava FAIXA DE BYTES a partir da posição atual, não o arquivo:
+        # sem o seek, um handle aberto em "a+" travaria o fim do arquivo, que é um
+        # offset diferente por processo — ou seja, ninguém disputaria nada.
+        handle.seek(0)
+        try:
+            _msvcrt.locking(handle.fileno(), _msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+    # Plataforma sem nenhum dos dois: falha FECHADA. Conceder o slot aqui seria
+    # repetir o bug que este módulo existe para evitar.
+    return False
+
+
+def _destravar(handle) -> None:
+    if _fcntl is not None:
+        _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+        return
+    if _msvcrt is not None:
+        handle.seek(0)
+        try:
+            _msvcrt.locking(handle.fileno(), _msvcrt.LK_UNLCK, 1)
+        except OSError:  # já liberado pelo fim do processo
+            pass
+
+
 @contextmanager
 def machine_resource_slot(resource_key: str, *, wait_seconds: float = 0):
     """Lock de processo para o recurso físico compartilhado nesta Fly Machine.
 
     O lease PostgreSQL coordena os workers, mas a role web não pode ler a tabela
     system-only de leases. Os logins interativos, portanto, ficavam invisíveis aos
-    workers e dois Chromiums podiam disputar a mesma VM. ``flock`` fecha exatamente
-    essa lacuna: todos os processos do Procfile compartilham o mesmo /tmp e o lock é
-    liberado pelo kernel inclusive após crash/restart.
+    workers e dois Chromiums podiam disputar a mesma VM. O lock de arquivo fecha
+    exatamente essa lacuna: todos os processos do Procfile compartilham o mesmo
+    diretório temporário e o lock é liberado pelo sistema inclusive após crash.
 
     ``wait_seconds`` só é usado pela experiência interativa. Workers falham rápido e
     retomam no próximo tick; o login pode esperar brevemente o browser atual fechar,
@@ -154,25 +207,17 @@ def machine_resource_slot(resource_key: str, *, wait_seconds: float = 0):
         yield True
         return
 
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover - produção é Linux; fallback para Windows.
-        yield True
-        return
-
     handle = open(_caminho_de_lock(resource_key), "a+")
     deadline = time.monotonic() + max(0.0, float(wait_seconds))
     acquired = False
     try:
         while True:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if _tentar_travar(handle):
                 acquired = True
                 break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.1)
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
         if not acquired:
             yield False
             return
@@ -183,7 +228,7 @@ def machine_resource_slot(resource_key: str, *, wait_seconds: float = 0):
             _held_machine_resources.reset(context_token)
     finally:
         if acquired:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _destravar(handle)
         handle.close()
 
 

@@ -270,6 +270,30 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
             ),
         )
 
+    # Shopee: por organização, porque a assinatura é da credencial de cada conta.
+    # Diferente de TODAS as outras fontes de cupom, esta não pede navegador — é o
+    # que permite rodar o lote inteiro sem competir com o Link Builder do Mercado
+    # Livre, que é o gargalo do funil. Uma conta que falha não contamina as outras.
+    if not getattr(settings, "SHOPEE_INTEGRATION_ENABLED", False):
+        _fonte(
+            resultado, "shopee-campaigns", status="skipped",
+            motivo="Integração Shopee desabilitada.",
+        )
+    else:
+        integracoes_shopee = list(IntegracaoAfiliado.objects.filter(
+            owner__in=usuarios, provedor="shopee", habilitada=True,
+            status__in=("conectada", "degradada"),
+        ).select_related("owner"))
+        for integracao in integracoes_shopee:
+            _coletar_adaptador(
+                "shopee-campaigns", resultado, owner=integracao.owner,
+            )
+        if not integracoes_shopee:
+            _fonte(
+                resultado, "shopee-campaigns", status="skipped",
+                motivo="Nenhuma conta Shopee conectada.",
+            )
+
     privados = CupomNormalizado.objects.filter(
         owner__in=usuarios, fonte__slug="manual-private", estado="ativo",
     ).count()

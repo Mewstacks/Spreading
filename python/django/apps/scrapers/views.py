@@ -587,7 +587,11 @@ def configurar_conta(request):
     from apps.scrapers.conexoes import estado_amazon_relatorios, estado_ml_relatorios
     awin_integracao = IntegracaoAfiliado.objects.filter(
         owner=request.user, provedor="awin").first()
+    shopee_integracao = IntegracaoAfiliado.objects.filter(
+        owner=request.user, provedor="shopee").first()
     return render(request, "scrapers/conta.html", {
+        "shopee_enabled": getattr(settings, "SHOPEE_INTEGRATION_ENABLED", False),
+        "shopee_integracao": shopee_integracao,
         "perfil": perfil,
         "tem_secret": bool(perfil and perfil.amazon_credential_secret),
         "ml_sessao_ok": _tem_sessao_ml(request.user),
@@ -718,6 +722,96 @@ def awin_desconectar(request):
         CupomNormalizado.objects.filter(owner=request.user, integracao=integracao).update(
             estado="inativo")
     messages.success(request, "Awin desconectada. O histórico foi preservado.")
+    return redirect("scraper-conta")
+
+
+# ── Shopee ───────────────────────────────────────────────────────────────────
+# Conexão por credencial, sem login remoto e sem navegador: a Shopee tem API
+# oficial, então conectar é colar AppId e Secret do painel de afiliados. As
+# credenciais moram em IntegracaoAfiliado (Secret no campo cifrado `token`), o mesmo
+# contrato da Awin — nada de campo novo no Perfil, que é o caminho legado de ML e
+# Amazon e não escala para uma loja por linha.
+
+@require_POST
+def shopee_conectar(request):
+    if not getattr(settings, "SHOPEE_INTEGRATION_ENABLED", False):
+        return JsonResponse({"erro": "Integração Shopee indisponível."}, status=404)
+    from apps.scrapers.shopee import ShopeeError, validar_credenciais
+
+    app_id = (request.POST.get("app_id") or "").strip()
+    secret = (request.POST.get("app_secret") or "").strip()
+    if not app_id or not secret:
+        messages.error(request, "Informe o App ID e o Secret do painel de afiliados.")
+        return redirect("scraper-conta")
+    try:
+        # Valida ANTES de gravar. Credencial errada tem de falhar com a pessoa
+        # olhando a tela, e não seis horas depois num worker silencioso.
+        validar_credenciais(app_id, secret)
+    except ShopeeError as exc:
+        messages.error(request, exc.public_message)
+        return redirect("scraper-conta")
+
+    integracao, _ = IntegracaoAfiliado.objects.get_or_create(
+        owner=request.user, provedor="shopee")
+    integracao.identificador_conta = app_id[:120]
+    integracao.nome_conta = f"Shopee {app_id[:6]}…"
+    integracao.token = secret
+    integracao.habilitada = True
+    integracao.status = "conectada"
+    integracao.erro_publico = ""
+    integracao.falhas_consecutivas = 0
+    integracao.ultimo_sucesso = timezone.now()
+    integracao.save(update_fields=[
+        "identificador_conta", "nome_conta", "token", "habilitada", "status",
+        "erro_publico", "falhas_consecutivas", "ultimo_sucesso"])
+    messages.success(
+        request,
+        "Shopee conectada. As ofertas e campanhas entram no próximo ciclo de coleta.",
+    )
+    return redirect("scraper-conta")
+
+
+@require_POST
+def shopee_sincronizar(request):
+    from apps.scrapers.shopee import ShopeeError
+    from apps.scrapers.sources import run_source
+
+    integracao = IntegracaoAfiliado.objects.filter(
+        owner=request.user, provedor="shopee", habilitada=True).first()
+    if not integracao:
+        messages.error(request, "Shopee não conectada.")
+        return redirect("scraper-conta")
+    try:
+        campanhas = run_source("shopee-campaigns", owner=request.user)
+        ofertas = run_source("shopee-offers", owner=request.user)
+    except ShopeeError as exc:
+        messages.error(request, exc.public_message)
+        return redirect("scraper-conta")
+    messages.success(
+        request,
+        f"Shopee sincronizada: {len(ofertas.get('offers') or [])} oferta(s) e "
+        f"{len(campanhas.get('coupons') or [])} campanha(s).",
+    )
+    return redirect("scraper-conta")
+
+
+@require_POST
+def shopee_desconectar(request):
+    integracao = IntegracaoAfiliado.objects.filter(
+        owner=request.user, provedor="shopee").first()
+    if integracao:
+        integracao.token = ""
+        integracao.habilitada = False
+        integracao.status = "desativada"
+        integracao.proxima_sincronizacao = None
+        integracao.erro_publico = ""
+        integracao.save(update_fields=[
+            "token", "habilitada", "status", "proxima_sincronizacao", "erro_publico"])
+        # Inativa, não apaga: o histórico de envio continua explicável depois que a
+        # conta sai, e reconectar não recria linhas duplicadas.
+        CupomNormalizado.objects.filter(owner=request.user, integracao=integracao).update(
+            estado="inativo")
+    messages.success(request, "Shopee desconectada. O histórico foi preservado.")
     return redirect("scraper-conta")
 
 

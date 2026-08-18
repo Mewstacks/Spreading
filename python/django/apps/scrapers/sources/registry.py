@@ -10,6 +10,7 @@ from .amazon_general_coupons import AmazonGeneralCouponsSource
 from .external_feed import LicensedFeedSource
 from .community import PromobitSource, PelandoSource
 from .ml_public_coupons import MLPublicCouponsSource
+from .shopee import ShopeeCampaignsSource, ShopeeOffersSource
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,8 @@ SOURCES = {
     PromobitSource.slug: PromobitSource(),
     PelandoSource.slug: PelandoSource(),
     MLPublicCouponsSource.slug: MLPublicCouponsSource(),
+    ShopeeOffersSource.slug: ShopeeOffersSource(),
+    ShopeeCampaignsSource.slug: ShopeeCampaignsSource(),
 }
 
 
