@@ -6,6 +6,11 @@ on:
     # 03:00 UTC = 00:00 BRT; 11:00 UTC = 08:00 BRT.
     - cron: "0 3 * * *"
     - cron: "0 11 * * *"
+    # Segunda tentativa de religar. À noite não sobra nada de pé — sem web não
+    # há vigia externo — então uma falha do start das 08:00 deixa a produção
+    # fora do ar até alguém perceber, que foi o que aconteceu em 16, 17 e 18/08.
+    # Ligar máquina já ligada é no-op, então a repetição não custa nada.
+    - cron: "30 11 * * *"
   workflow_dispatch:
     inputs:
       action:
@@ -40,7 +45,7 @@ jobs:
             action="$MANUAL_ACTION"
           elif [[ "$SCHEDULE" == "0 3 * * *" ]]; then
             action="stop"
-          elif [[ "$SCHEDULE" == "0 11 * * *" ]]; then
+          elif [[ "$SCHEDULE" == "0 11 * * *" || "$SCHEDULE" == "30 11 * * *" ]]; then
             action="start"
           else
             echo "Evento sem ação reconhecida: $SCHEDULE" >&2

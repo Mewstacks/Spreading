@@ -6,7 +6,11 @@ set -euo pipefail
 # secrets. Nenhum token é gravado neste repositório.
 
 readonly ACTION="${1:-}"
-readonly CHECK_ATTEMPTS=60
+# 5 minutos por app. O boot mais lento (worker WhatsApp) leva ~60s; máquina que
+# não ficou sã em 5min não fica em 10. O teto importa porque agora as três
+# esperas podem acontecer na mesma execução, e a soma tem de caber no
+# timeout-minutes do workflow.
+readonly CHECK_ATTEMPTS=30
 readonly CHECK_INTERVAL_SECONDS=10
 
 if [[ "$ACTION" != "start" && "$ACTION" != "stop" ]]; then
@@ -75,13 +79,40 @@ stop_app() {
   fi
 }
 
+# Quais checks REPRESENTAM a dependência. Lista vazia = exigir todos.
+#
+# O spreading-db é a exceção e a razão desta função existir: o postgres-flex
+# publica três checks e só o `pg` mede o que os consumidores precisam
+# (conexões, locks, disco). O `vm` é o agente da máquina e o `role` só é
+# reescrito no boot — em 16, 17 e 18/08 o `vm` ficou em critical
+# ("connect: connection refused") com o Postgres servindo normalmente, e como a
+# regra antiga exigia TODOS os checks, o start noturno morria aqui e o WhatsApp
+# passava o dia inteiro fora do ar. Estado da máquina já é conferido à parte.
+checks_required_for() {
+  case "$1" in
+    spreading-db) printf '%s' '["pg"]' ;;
+    *) printf '%s' '[]' ;;
+  esac
+}
+
 checks_are_passing() {
   local app="$1"
-  fly_for_app "$app" checks list --app "$app" --json | jq -e '
-    length > 0
-    and ([.[] | .[]] | length > 0)
-    and all(.[] | .[]; .status == "passing")
-  ' >/dev/null
+  local required
+  required="$(checks_required_for "$app")"
+  fly_for_app "$app" checks list --app "$app" --json \
+    | jq -e --argjson req "$required" '
+      [.[] | .[]] as $todos
+      | ($todos | length) > 0
+      and (
+        if ($req | length) == 0
+        then all($todos[]; .status == "passing")
+        # Exige presença E passagem: check exigido que sumiu não pode virar
+        # "saudável por omissão".
+        else all($req[]; . as $nome
+                 | any($todos[]; .name == $nome and .status == "passing"))
+        end
+      )
+    ' >/dev/null
 }
 
 wait_until_healthy() {
@@ -152,8 +183,16 @@ if [[ "$ACTION" == "stop" ]]; then
   stop_app spreading-wa
   stop_app spreading-db
 else
-  # Dependências sobem antes dos consumidores. Cada etapa espera health checks.
-  start_app spreading-db
-  start_app spreading-wa
-  start_app spreading-web
+  # Dependências sobem antes dos consumidores, e cada etapa espera health checks
+  # — mas a espera é uma PRECAUÇÃO, não um portão. Uma dependência que demora (ou
+  # cujo check está mentindo) não pode deixar o resto da produção desligada: o
+  # WhatsApp parado é uma falha pior do que subir com o banco ainda assentando,
+  # porque nada mais no sistema consegue levantá-lo depois (à noite não há web
+  # rodando, e portanto não há vigia externo). Cada etapa é tentada; o job só
+  # reporta o fracasso no fim, com tudo o que deu para ligar já ligado.
+  falhas=0
+  start_app spreading-db || { echo "spreading-db não confirmou saúde; seguindo assim mesmo." >&2; falhas=1; }
+  start_app spreading-wa || { echo "spreading-wa não confirmou saúde." >&2; falhas=1; }
+  start_app spreading-web || { echo "spreading-web não confirmou saúde." >&2; falhas=1; }
+  exit "$falhas"
 fi
