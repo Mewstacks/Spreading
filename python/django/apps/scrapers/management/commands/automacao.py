@@ -255,6 +255,22 @@ def _rodar_links(lote=40):
                 # traceback) enchia a tela de Saúde de alarmes que ninguém pode
                 # acionar e escondia o atraso real por capacidade. O ciclo seguinte
                 # retoma exatamente de onde parou.
+                #
+                # MEDIDO EM 19/08: esta lane perde o navegador em TODO ciclo, para
+                # todos os usuários. Sem ela nenhum link de afiliado nasce, nenhum
+                # cupom fica pronto, e o funil inteiro fica atrás de uma vaga —
+                # `code_not_ready_20m` subiu de 196 para 288 justamente assim.
+                #
+                # A saída ÓBVIA não funciona: chamar `sinalizar_interesse_manual`
+                # daqui faz esta lane ceder para si mesma. O marcador é global
+                # (`django_chromium`), e o próprio lote de links consulta
+                # `interesse_interativo_pendente` entre itens — ele veria o interesse
+                # que acabou de anunciar e devolveria o navegador. Três testes de
+                # cessão cooperativa reprovaram a tentativa, e estavam certos.
+                #
+                # A prioridade real exige um sinal que saiba QUEM pediu, para que
+                # apenas as outras lanes cedam. É mudança no contrato de
+                # `resource_control`, não um remendo aqui.
                 adiados += 1
                 logger.info(
                     "Geração de links adiada para %s: navegador ocupado por outra "
@@ -348,6 +364,18 @@ def _rodar_verificacao_links(limite=40):
             try:
                 r = mp.verificar_links_pendentes(user, limite=limite)
             except Exception as e:
+                from apps.scrapers.afiliado import causa_de_capacidade
+
+                if causa_de_capacidade(e):
+                    # Fila, não avaria — mesma situação da geração de links acima, e
+                    # com a mesma consequência: sem veredito de destino o link não é
+                    # aprovado, e sem link aprovado o cupom não fica pronto. Fica em
+                    # INFO para não alarmar sobre algo que ninguém pode acionar.
+                    logger.info(
+                        "Verificação de destino %s adiada para %s: navegador ocupado; "
+                        "retoma no próximo ciclo.", slug, user,
+                    )
+                    continue
                 logger.warning("Verificação de destino %s falhou para %s: %s",
                                slug, user, e)
                 continue
