@@ -118,8 +118,19 @@ def diagnosticar_alertas_pipeline_cupons(*, agora=None):
             reason_code="capacity_deferred", verificado_em__lt=cutoff_browser,
         ).count(),
     }
+    # Fontes que NUNCA podem se declarar completas por construção (vitrine curada,
+    # prévia de canal). Cobrar completude delas transforma este contador em ruído
+    # permanente — o mesmo defeito que fazia `projection_stale` disparar sempre.
+    from apps.scrapers.sources.registry import SOURCES
+
+    parciais = {
+        slug for slug, adaptador in SOURCES.items()
+        if not getattr(adaptador, "inventario_completo", True)
+    }
     incomplete_sources = 0
-    source_ids = ExecucaoIngestao.objects.values_list("fonte_id", flat=True).distinct()
+    source_ids = ExecucaoIngestao.objects.exclude(
+        fonte__slug__in=parciais,
+    ).values_list("fonte_id", flat=True).distinct()
     for source_id in source_ids:
         recent = list(ExecucaoIngestao.objects.filter(
             fonte_id=source_id,

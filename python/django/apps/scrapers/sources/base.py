@@ -65,6 +65,18 @@ class SourceAdapter:
     slug = ""
     marketplace = ""
     name = ""
+    # A fonte é capaz de afirmar "vi o inventário inteiro"?
+    #
+    # A página oficial de cupons de uma loja é: ou lista todos, ou está quebrada.
+    # Uma vitrine curada de terceiro (Promobit) e a prévia das 20 mensagens mais
+    # recentes de um canal NÃO são — mostram um recorte por construção, e ausência
+    # ali nunca prova que o item acabou.
+    #
+    # Não é detalhe de relatório: `maintenance.diagnosticar_alertas_pipeline_cupons`
+    # acusa fonte que passa dois ciclos sem se declarar completa, e uma fonte
+    # inerentemente parcial dispararia esse alerta para sempre — ruído permanente no
+    # lugar exato onde o operador precisa enxergar problema de verdade.
+    inventario_completo = True
 
     def discover_offers(self, **kwargs) -> Iterable[IngestedItem]:
         return []

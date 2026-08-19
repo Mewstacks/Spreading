@@ -232,3 +232,39 @@ class RegistroDeFontesTests(TestCase):
     def test_esqueleto_antigo_do_promobit_continua_desabilitado(self):
         """O stub histórico não pode voltar a rodar por engano junto do novo."""
         self.assertFalse(SOURCES["promobit-community"].healthcheck()["ok"])
+
+
+class InventarioParcialTests(TestCase):
+    """Fonte que nunca vê o inventário inteiro não pode ser cobrada por isso.
+
+    `maintenance.diagnosticar_alertas_pipeline_cupons` acusa fonte que passa dois
+    ciclos sem se declarar completa. Promobit e Telegram são recortes por
+    construção — sem esta marcação eles disparavam o alerta para sempre, que é o
+    mesmo defeito de `projection_stale` contando cupom saudável: ruído permanente no
+    lugar onde o operador precisa ver problema de verdade. Medido em produção como
+    `source_without_complete_two_cycles: 2` logo após o deploy das duas fontes.
+    """
+
+    def test_fontes_de_recorte_se_declaram_parciais(self):
+        self.assertFalse(SOURCES["promobit-cupons"].inventario_completo)
+        self.assertFalse(SOURCES["telegram-publico"].inventario_completo)
+
+    def test_fonte_oficial_continua_cobrada_por_completude(self):
+        """A página oficial ou lista tudo, ou está quebrada — e isso tem de aparecer."""
+        self.assertTrue(SOURCES["ml-cupons-afiliados"].inventario_completo)
+
+    def test_alerta_ignora_as_parciais(self):
+        from apps.scrapers.maintenance import diagnosticar_alertas_pipeline_cupons
+        from apps.scrapers.models import ExecucaoIngestao, FonteIngestao
+
+        fonte = FonteIngestao.objects.create(
+            slug="promobit-cupons", marketplace="multiloja",
+            nome="Promobit", status="ok",
+        )
+        for _ in range(2):
+            ExecucaoIngestao.objects.create(
+                fonte=fonte, status="ok", health_status="healthy",
+                metricas={"complete": False},
+            )
+        contas = diagnosticar_alertas_pipeline_cupons()
+        self.assertEqual(contas["source_without_complete_two_cycles"], 0)

@@ -119,6 +119,8 @@ class PromobitSource(SourceAdapter):
     marketplace = "multiloja"
     name = "Promobit — cupons por loja (schema.org)"
     requires_chromium = False
+    # Vitrine curada / prévia recente: recorte por construção, nunca inventário.
+    inventario_completo = False
 
     def __init__(self):
         self.last_metrics = {}
