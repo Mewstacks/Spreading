@@ -377,14 +377,56 @@ class SourcePipelineTests(TestCase):
                 return {"sucesso": False, "erro": "offline"}
 
         from apps.scrapers.management.commands.monitorar_canais import Command
-        with self.assertRaises(RuntimeError):
+        # A reescrita agora devolve também os pares (origem, afiliada) que o portão de
+        # verificação consome. O portão é liberado de propósito aqui: o que este teste
+        # mede é o cursor diante de uma FALHA DE ENVIO, não a conferência do destino.
+        alvo = "https://www.amazon.com.br/dp/B012345678"
+        with patch("apps.scrapers.canais.validacao.mensagem_liberada",
+                   return_value=(True, "aprovado", "")), \
+                self.assertRaises(RuntimeError):
             Command()._processar_canal(
                 Client(), channel,
                 __import__("apps.scrapers.models", fromlist=["EnvioCanal"]).EnvioCanal,
-                lambda text, user: (text, ["hash"]), lambda name: Sender(),
+                lambda text, user: (text, ["hash"], [(alvo, f"{alvo}?tag=x")]),
+                lambda name: Sender(),
                 lambda text: [("url", "amazon")])
         channel.refresh_from_db()
         self.assertEqual(channel.ultimo_id, 0)
+
+    def test_curated_channel_does_not_send_when_destination_is_rejected(self):
+        """Oferta reprovada no destino não sai — é a reputação de quem assina."""
+        channel = CanalMonitorado.objects.create(
+            owner=self.user, handle="@fonte", destino_grupo_id="destino", ultimo_id=0)
+
+        class Message:
+            id = 11
+            message = "Oferta https://www.amazon.com.br/dp/B012345678"
+
+        class Client:
+            def iter_messages(self, *args, **kwargs):
+                return [Message()]
+
+        enviadas = []
+
+        class Sender:
+            def enviar_oferta(self, *args, **kwargs):
+                enviadas.append(kwargs)
+                return {"sucesso": True}
+
+        from apps.scrapers.management.commands.monitorar_canais import Command
+        alvo = "https://www.amazon.com.br/dp/B012345678"
+        with patch("apps.scrapers.canais.validacao.mensagem_liberada",
+                   return_value=(False, "reprovado", "Produto indisponível")):
+            Command()._processar_canal(
+                Client(), channel,
+                __import__("apps.scrapers.models", fromlist=["EnvioCanal"]).EnvioCanal,
+                lambda text, user: (text, ["hash"], [(alvo, f"{alvo}?tag=x")]),
+                lambda name: Sender(),
+                lambda text: [("url", "amazon")])
+        self.assertEqual(enviadas, [], "Mensagem reprovada não pode ser enviada.")
+        channel.refresh_from_db()
+        # Reprovada é definitiva: o cursor avança para não reprocessar para sempre.
+        self.assertEqual(channel.ultimo_id, 11)
 
     @override_settings(AFFILIATE_FEED_URL="")
     @patch("apps.scrapers.coupon_products.preparar_lote",
