@@ -629,6 +629,9 @@ ALERTA_CONEXAO_COOLDOWN_H = int(os.getenv("ALERTA_CONEXAO_COOLDOWN_H", "6"))
 # problema espera alguém abrir a tela de Saúde — o modo de falha de 16, 17 e 18/08.
 # ALERTA_TELEGRAM_CHAT_ID usa o TELEGRAM_BOT_TOKEN que já existe; ALERTA_EMAILS é
 # lista separada por vírgula. Vazio nos dois = canal desligado (padrão em dev).
+# Leitura de cupom em canal por IA. Cada mensagem é lida uma vez (cache por hash)
+# e só mensagem com sinal de cupom é enviada — o custo é de leitura, não de volume.
+CUPOM_LLM_ATIVO = os.getenv("CUPOM_LLM_ATIVO", "1") == "1"
 ALERTA_TELEGRAM_CHAT_ID = os.getenv("ALERTA_TELEGRAM_CHAT_ID", "")
 ALERTA_EMAILS = os.getenv("ALERTA_EMAILS", "")
 # Silêncio por chave de incidente. Alerta que toca demais é alerta que se ignora.

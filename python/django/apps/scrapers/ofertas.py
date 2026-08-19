@@ -690,6 +690,22 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
     return "\n".join(linhas)
 
 
+def _escopo_curto(texto: str, limite: int = 60) -> str:
+    """Escopo em uma linha, do tamanho que cabe numa mensagem de WhatsApp.
+
+    O escopo pode vir da fonte como frase inteira ("Válido em produtos das Lojas
+    Oficiais participantes, exceto..."). No aviso em lote há vários cupons na mesma
+    mensagem, e um parágrafo por cupom afogaria a lista. Corta na palavra, não no
+    meio dela, e nunca inventa: se não couber, termina em reticências para que quem
+    lê saiba que há condição além do que está escrito.
+    """
+    limpo = " ".join(str(texto or "").split())
+    if len(limpo) <= limite:
+        return limpo
+    corte = limpo[:limite].rsplit(" ", 1)[0].rstrip(",;.")
+    return f"{corte}…"
+
+
 def _sigla_loja(marketplace) -> str:
     """Rótulo curto da loja no cabeçalho do aviso: 'ML', 'AMAZON', ..."""
     m = str(marketplace or "").strip().lower()
@@ -763,14 +779,27 @@ def montar_mensagem_aviso_cupons(cupons, marketplace, link="", markup=None) -> s
     m = markup or WhatsAppMarkup()
     esc = m.escape
 
+    from apps.scrapers.coupon_rules import escopo_produtos_cupom, regras_do_cupom
+
     blocos = []
     for cupom in cupons or []:
         codigo = codigo_publicavel(cupom)
         desconto = linha_desconto_cupom(cupom)
         if not codigo or not desconto:
             continue
-        blocos.append(f"➡️ {m.italic(esc(desconto))}\n"
-                      f"🎟 cupom: {m.bold(esc(codigo))}")
+        bloco = [f"➡️ {m.italic(esc(desconto))}"]
+        # A REGRA VAI JUNTO DO CÓDIGO. Um aviso lista vários cupons e cada um tem o
+        # seu limite: "Tecnologia", "entregas Full", "Lojas Oficiais", "todo site".
+        # Sem a linha, quem lê tenta o cupom de Tecnologia numa camiseta, não
+        # funciona, e a culpa cai em quem publicou. A mensagem de cupom único já
+        # trazia isso ("Válido para:"); o aviso em lote é que mostrava só o desconto.
+        escopo = escopo_produtos_cupom(cupom) or str(
+            regras_do_cupom(cupom).get("escopo") or ""
+        ).strip()
+        if escopo:
+            bloco.append(f"🏷️ {m.italic(esc(_escopo_curto(escopo)))}")
+        bloco.append(f"🎟 cupom: {m.bold(esc(codigo))}")
+        blocos.append("\n".join(bloco))
     if not blocos:
         return ""
 

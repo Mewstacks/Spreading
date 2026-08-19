@@ -108,6 +108,24 @@ def _preflight(cupom, usuario):
     return None
 
 
+def _tem_link_de_aviso(usuario, marketplace) -> bool:
+    """O usuário já tem ALGUM link de cupom aprovado e fresco nesta loja?
+
+    O aviso de cupons publica uma lista de códigos sob um link só. Basta que exista
+    um link válido do usuário nessa loja para a mensagem poder sair; qual cupom o
+    originou é indiferente para quem lê e para a atribuição.
+
+    A consulta é barata e limitada: só linhas já aprovadas, ordenadas pela
+    verificação mais recente, e para no primeiro que passa no TTL.
+    """
+    from apps.scrapers.coupon_links import coupon_link_verified_and_fresh
+
+    candidatos = LinkAfiliadoCupomUsuario.objects.filter(
+        usuario=usuario, cupom__marketplace=marketplace, verificado_ok=True,
+    ).exclude(link_afiliado="").order_by("-verificado_em")[:5]
+    return any(coupon_link_verified_and_fresh(linha) for linha in candidatos)
+
+
 def _codigo(cupom, usuario, conexao):
     codigo = codigo_publicavel(cupom)
     if not codigo:
@@ -142,6 +160,21 @@ def _codigo(cupom, usuario, conexao):
             usuario=usuario, cupom=cupom,
         ).exclude(link_afiliado="").first()
         if coupon_link_verified_and_fresh(link):
+            return _resultado("ready")
+        # A mensagem de aviso leva UM link para a lista inteira de códigos — é o
+        # formato ("Ative em algum produto do link") e é o que `enviar_aviso_cupons`
+        # monta: resolve o link do PRIMEIRO cupom do lote e anuncia todos os códigos
+        # sob ele. Exigir link próprio por cupom cobrava do Link Builder um trabalho
+        # que a mensagem nunca usa — e cada um custa uma vaga do único Chromium.
+        #
+        # Era o gargalo medido em produção: `code_not_ready_20m` na casa das
+        # centenas e `browser_wait_over_60m` acumulando, enquanto o envio precisava
+        # de um link só. O custo cai de (cupons × usuários) para (usuários).
+        #
+        # A atribuição não muda: o clique sai pelo link do usuário e a comissão
+        # segue o clique, não o código digitado no checkout — que é exatamente o que
+        # já acontece com os outros códigos do mesmo aviso.
+        if _tem_link_de_aviso(usuario, marketplace):
             return _resultado("ready")
         if link and link.verificado_ok is None:
             return _resultado(

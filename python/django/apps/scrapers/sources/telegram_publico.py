@@ -31,6 +31,8 @@ import requests
 from django.utils import timezone
 
 from apps.scrapers.canais.seeds import CANAIS_SUGERIDOS
+from apps.scrapers.coupon_rules import normalizar_regras_cupom
+from apps.scrapers.cupom_extractor import extrair, parece_ter_cupom
 from .base import IngestedItem, SourceAdapter, normalizar_dinheiro
 
 logger = logging.getLogger(__name__)
@@ -131,13 +133,45 @@ def resolver(url: str, sessao=None) -> str:
         return ""
 
 
+_PERCENTUAL_CITADO = re.compile(r"(\d{1,2})\s*%")
+
+
+def _percentual_citado(texto: str) -> float:
+    """Percentual escrito na mensagem. 0 quando não há número confiável.
+
+    100% não existe em cupom de varejo — é erro de leitura ou promessa falsa —, e
+    valor sem número nenhum deixa o cupom sem o que anunciar.
+    """
+    achado = _PERCENTUAL_CITADO.search(texto or "")
+    if not achado:
+        return 0.0
+    valor = int(achado.group(1))
+    return float(valor) if 0 < valor < 100 else 0.0
+
+
+# Palavras que aparecem logo depois de "cupom" e NÃO são código. Medido: a regex
+# lia "cupom Mercado Livre" e emitia o código `MERCADO`, que ninguém digita em
+# checkout nenhum. Um código inventado é pior que nenhum — ele vai para o grupo com
+# a assinatura do influenciador e não funciona.
+_NAO_E_CODIGO = {
+    "MERCADO", "LIVRE", "AMAZON", "SHOPEE", "MAGALU", "AMERICANAS", "CUPOM",
+    "CUPONS", "DESCONTO", "DESCONTOS", "OFERTA", "OFERTAS", "PROMO", "PROMOCAO",
+    "PROMOCOES", "EXCLUSIVO", "VALIDO", "APENAS", "SOMENTE", "PRIMEIRA",
+    "COMPRA", "FRETE", "GRATIS", "LIMITADO", "ATIVE", "CLIQUE", "LINK", "AQUI",
+    "HOJE", "AGORA", "NOVO", "NOVOS", "MELHOR", "MELHORES", "SELECIONADOS",
+}
+
+
 def _codigo_cupom(texto: str) -> str:
     achado = _CUPOM.search(texto or "")
     if not achado:
         return ""
     codigo = achado.group(1).strip().upper()
-    # Palavra comum grudada em "cupom" (ex.: "cupom disponivel") não é código.
-    if codigo.isalpha() and len(codigo) < 6:
+    if codigo in _NAO_E_CODIGO:
+        return ""
+    # Só letras exige tamanho: palavra curta depois de "cupom" é quase sempre
+    # continuação da frase, não código.
+    if codigo.isalpha() and len(codigo) < 8:
         return ""
     return codigo
 
@@ -260,8 +294,91 @@ class TelegramPublicoSource(SourceAdapter):
             "complete": False,
         }
 
-    def discover_coupons(self, **kwargs):
-        return []
+    def discover_coupons(self, canais=None, **kwargs):
+        """Códigos citados nas mensagens — o que estes canais realmente carregam.
+
+        A medição de 19/08/2026 foi clara: dos 78 links publicados por seis canais,
+        NENHUM era página de produto (todos caem na vitrine de afiliado de quem
+        postou), mas 26 mensagens citavam um código de cupom no texto. O valor
+        destes canais não está no link, está no código.
+
+        Código visto aqui é ALEGAÇÃO e entra como tal, com a precedência mais fraca
+        de todas. Ele vale por corroborar o que uma fonte oficial já viu e por
+        apontar código que nos escapou — e a prova de que o mecanismo funciona já
+        existe: os 10 cupons de ML do Promobit bateram 10/10 com a página oficial de
+        afiliados, mesmo código e mesmo percentual.
+
+        Sem percentual no texto o cupom não é emitido: `_preflight` o descartaria
+        adiante por `missing_discount`, e sujar o funil com código sem valor só
+        atrapalha quem lê o diagnóstico.
+        """
+        handles = self._canais(canais)
+        agora = timezone.now()
+        vistos = set()
+        lidos = falhas = sem_valor = 0
+
+        for handle in handles[:12]:
+            try:
+                corpo = self._baixar(handle)
+            except requests.RequestException as exc:
+                falhas += 1
+                logger.info("Canal @%s indisponível (%s).", handle, type(exc).__name__)
+                continue
+            if not corpo:
+                falhas += 1
+                continue
+            lidos += 1
+            for post, texto in self._mensagens(corpo):
+                if not parece_ter_cupom(texto):
+                    continue
+                # A loja do link acompanha a leitura como dica: quando a mensagem não
+                # nomeia a loja, o domínio do link resolve. Código anunciado na loja
+                # errada é o cupom que "não funciona" na mão de quem publicou.
+                loja_do_link = ""
+                for bruto in _URL.findall(texto):
+                    loja_do_link = _marketplace(bruto)
+                    if loja_do_link:
+                        break
+                achados = extrair(texto, loja_padrao=loja_do_link)
+                if not achados:
+                    sem_valor += 1
+                    continue
+                for cupom in achados:
+                    chave = f"telegram:{cupom['loja']}:{cupom['codigo']}"
+                    if chave in vistos:
+                        continue
+                    vistos.add(chave)
+                    regras = normalizar_regras_cupom({
+                        "tipo_desconto": cupom["tipo"],
+                        "valor_desconto": cupom["valor"],
+                        "valor_minimo": cupom["minimo"],
+                        "modo_resgate": "codigo",
+                        "escopo": cupom["escopo"],
+                    }, external_id=chave, codigo=cupom["codigo"])
+                    yield IngestedItem(
+                        external_id=chave[:160], marketplace=cupom["loja"],
+                        source=self.slug, kind="coupon", canonical_url="",
+                        title=f"Cupom {cupom['codigo']}"[:255],
+                        coupon_code=cupom["codigo"][:120], coupon_rules=regras,
+                        content_type="voucher", observed_at=agora,
+                        evidence={
+                            "transport": "telegram-preview-llm",
+                            "canal": handle,
+                            "post": post,
+                            "confianca_origem": "comunidade",
+                            "teto_desconto": cupom["teto"],
+                            "trecho": texto[:300],
+                        },
+                    )
+        self.last_health_status = "healthy" if lidos else "degraded"
+        self.last_metrics = {
+            "canais_lidos": lidos,
+            "canais_falhos": falhas,
+            "cupons": len(vistos),
+            "sem_cupom_legivel": sem_valor,
+            # Nunca completo: a prévia mostra só as mensagens recentes.
+            "complete": False,
+        }
 
     def healthcheck(self):
         return {"ok": True, "status": "ok"}
