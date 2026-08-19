@@ -184,6 +184,13 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
 
     _coletar_adaptador("ml-cupons-afiliados", resultado)
 
+    # Segunda e terceira fontes públicas, ambas por HTTP puro: rodam mesmo com o
+    # Chromium ocupado e existem justamente para o Mercado Livre deixar de depender
+    # de um único site de terceiro. Entram com precedência baixa (ver
+    # `_SOURCE_PRECEDENCE`): corroboram e descobrem, não decidem sozinhas.
+    _coletar_adaptador("promobit-cupons", resultado)
+    _coletar_adaptador("telegram-publico", resultado, items=("offers",))
+
     if getattr(settings, "AMAZON_GENERAL_COUPONS_URL", ""):
         _coletar_adaptador("amazon-general-coupons", resultado)
     else:

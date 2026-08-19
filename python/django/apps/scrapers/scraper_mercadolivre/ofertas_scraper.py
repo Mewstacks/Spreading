@@ -51,16 +51,22 @@ def _upsert_resiliente(**kwargs):
                 chave: valor for chave, valor in kwargs.items()
                 if chave not in {"defaults", "create_defaults"}
             }
-            candidatos = Produto.objects.filter(**lookup).order_by(
+            candidatos = list(Produto.objects.filter(**lookup).order_by(
                 "-ultima_observacao", "-pk"
-            )
-            total = candidatos.count()
-            produto = candidatos.first()
+            ))
+            total = len(candidatos)
+            produto = candidatos[0] if candidatos else None
             if produto is None:  # corrida: as duplicatas sumiram entre GET e SELECT
                 return Produto.objects.update_or_create(**kwargs)
             for campo, valor in (kwargs.get("defaults") or {}).items():
                 setattr(produto, campo, valor() if callable(valor) else valor)
             produto.save()
+            # O histórico de preço NÃO se perde aqui: `PrecoHistorico` é chaveado por
+            # (marketplace, chave-normalizada), não pelo id do Produto — justamente
+            # porque o Produto é recriado a cada raspagem. Ou seja, duplicata suja o
+            # log e desperdiça trabalho, mas não parte a série que alimenta o portão
+            # de desconto falso. Registrado aqui porque a leitura oposta é intuitiva
+            # e levaria alguém a "consolidar" um FK que não existe.
             logger.warning(
                 "Produto duplicado no upsert; observação mais recente atualizada "
                 "(id=%s, candidatos=%s).",

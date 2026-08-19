@@ -2,13 +2,6 @@
 # Secret: WA_CAPABILITY_PUBLIC_KEYS_JSON (somente chaves públicas Ed25519).
 app = "spreading-wa"
 primary_region = "gru"
-
-[build]
-  dockerfile = "Dockerfile"
-
-[[restart]]
-  policy = "always"
-
 # ESTA LINHA É O QUE MANTÉM A SESSÃO DE PÉ ENTRE PARADAS.
 #
 # O index.js tem fechamento gracioso (`shutdown`) que faz `client.destroy()` em cada
@@ -27,6 +20,12 @@ primary_region = "gru"
 # 90s cobre o teardown com folga e só é gasto quando a máquina está realmente
 # parando. Uma parada limpa é muito mais barata que um pareamento manual por celular.
 kill_timeout = "90s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[[restart]]
+  policy = "always"
 
 [env]
   PORT = "3000"

@@ -4,18 +4,17 @@
 # (login web do ML NÃO precisa de secret: roda no Chromium local — ver ml_conexao.py)
 app = "spreading-web"
 primary_region = "gru"
+# Mesmo motivo do spreading-wa, em escala menor: o default da Fly são 5s entre o
+# sinal e o SIGKILL, e esta máquina roda gunicorn com --timeout 120, mais nove
+# workers de loop, um Chromium de raspagem e as sessões do ML gravando em /data.
+# Cortar tudo em 5s interrompe requisição em voo e escrita de sessão pela metade.
+kill_timeout = "30s"
 
 [build]
   dockerfile = "Dockerfile"
 
 [[restart]]
   policy = "always"
-
-# Mesmo motivo do spreading-wa, em escala menor: o default da Fly são 5s entre o
-# sinal e o SIGKILL, e esta máquina roda gunicorn com --timeout 120, mais nove
-# workers de loop, um Chromium de raspagem e as sessões do ML gravando em /data.
-# Cortar tudo em 5s interrompe requisição em voo e escrita de sessão pela metade.
-kill_timeout = "30s"
 
 [env]
   DJANGO_DEBUG = "0"
