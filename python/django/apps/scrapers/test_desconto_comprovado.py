@@ -149,3 +149,62 @@ class OrdenacaoTests(TestCase):
 
         inflado = self._produto("SóInflado", de=1000.0, por=200.0, sufixo="9")
         self.assertFalse(_desconto_comprovado(inflado, inflado.preco_com_cupom))
+
+
+class MinimoElegibilidadeTests(TestCase):
+    """Preço no fundo do histórico é oferta, mesmo com pouco desconto de vitrine.
+
+    É o critério que o mercado usa: o CamelCamelCamel define "good deal" como até 5%
+    acima da melhor mínima já vista, e a moderação do Promobit tira o veredito do
+    histórico de preços, não do percentual anunciado. Antes, o mesmo preço de lista
+    fictício que promovia item ruim escondia item bom — agora por baixo.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user("minimo", password="x")
+        ensure_personal_organization(cls.user)
+
+    def _produto(self, de, por, sufixo):
+        return Produto.objects.create(
+            owner=self.user, marketplace="mercadolivre", nome=f"Item {sufixo}",
+            origem="oferta", preco_sem_desconto=de, preco_com_cupom=por,
+            estado="ativo",
+            link_produto=f"https://produto.mercadolivre.com.br/MLB-{sufixo}-x",
+        )
+
+    def _com_historico(self, produto, *precos):
+        for preco in precos:
+            PrecoHistorico.objects.create(
+                marketplace="mercadolivre", chave=chave_produto(produto), preco=preco,
+            )
+        from apps.scrapers.precos import stats
+        return stats(produto, dias=30)
+
+    def test_pouco_desconto_mas_na_minima_passa(self):
+        from apps.scrapers.ofertas import _passa_no_minimo
+
+        produto = self._produto(de=820.0, por=810.0, sufixo="m1")  # ~1,2% de vitrine
+        historico = self._com_historico(produto, 799.0, 850.0, 900.0)
+        # 810 cabe em 5% da mínima observada (799 × 1,05 = 838,95).
+        self.assertTrue(_passa_no_minimo(produto, 810.0, historico, 15.0))
+
+    def test_pouco_desconto_e_longe_da_minima_nao_passa(self):
+        from apps.scrapers.ofertas import _passa_no_minimo
+
+        produto = self._produto(de=1000.0, por=950.0, sufixo="m2")  # 5% de vitrine
+        historico = self._com_historico(produto, 700.0, 720.0, 740.0)
+        self.assertFalse(_passa_no_minimo(produto, 950.0, historico, 15.0))
+
+    def test_desconto_aparente_alto_continua_passando(self):
+        """O caminho antigo não foi substituído; ganhou uma alternativa."""
+        from apps.scrapers.ofertas import _passa_no_minimo
+
+        produto = self._produto(de=1000.0, por=500.0, sufixo="m3")
+        self.assertTrue(_passa_no_minimo(produto, 500.0, None, 15.0))
+
+    def test_sem_historico_e_sem_desconto_nao_passa(self):
+        from apps.scrapers.ofertas import _passa_no_minimo
+
+        produto = self._produto(de=100.0, por=98.0, sufixo="m4")
+        self.assertFalse(_passa_no_minimo(produto, 98.0, None, 15.0))

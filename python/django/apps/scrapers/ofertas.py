@@ -370,12 +370,23 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
             (F("preco_sem_desconto") - F("preco_com_cupom")) * 100.0
             / F("preco_sem_desconto"), output_field=FloatField()),
     ).filter(
-        desconto_percent__gte=min_desconto_percent,
+        # Piso ampliado de propósito. O corte final não é mais só o percentual
+        # aparente: item no fundo do próprio histórico é oferta mesmo com pouco
+        # desconto de vitrine, e era descartado aqui antes de ser avaliado. Quem
+        # decide agora é `_passa_no_minimo`, dentro do laço. O piso continua
+        # existindo para não trazer o catálogo inteiro à memória.
+        desconto_percent__gte=min(PISO_DESCONTO_BRUTO, min_desconto_percent),
         desconto_percent__lt=90, preco_com_cupom__gt=0,
     )
     from apps.scrapers.product_identity import deduplicar_por_produto
+    # Teto de candidatos. Baixar o piso de desconto no SQL (para deixar entrar item
+    # barato com pouca vitrine) aumenta o conjunto que vem para a memória, e cada
+    # candidato custa uma consulta de histórico no laço abaixo. Sem teto, o custo do
+    # tick cresce com o catálogo — numa VM cuja cota de CPU já é o gargalo.
+    # A ordem é por observação mais recente, então o corte tira o mais velho, que é
+    # também o mais provável de já ter sido enviado ou de ter preço vencido.
     elegiveis = deduplicar_por_produto(
-        elegiveis_qs.order_by("-ultima_observacao", "-id")
+        elegiveis_qs.order_by("-ultima_observacao", "-id")[:TETO_CANDIDATOS]
     )
     cupons = {
         c.campanha_id: c for c in Cupom.objects.filter(
@@ -409,6 +420,13 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
             continue
         anterior = recentes.get(produto.id)
         if anterior and produto.preco_com_cupom > anterior * .95:
+            continue
+        # O histórico sobe para cá porque agora ele decide ELEGIBILIDADE, não só
+        # pontuação: item colado na própria mínima entra mesmo com desconto de
+        # vitrine baixo, e antes era descartado no SQL sem chance de ser avaliado.
+        historico = _stats_preco(produto, dias=30)
+        if not _passa_no_minimo(produto, produto.preco_com_cupom, historico,
+                                min_desconto_percent):
             continue
         # O percentual só entra na nota quando NÓS já observamos o item mais caro.
         #
@@ -448,13 +466,18 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
         if getattr(produto, "relampago", False):
             score *= 1.4
             motivos.append("oferta relâmpago")
-        historico = _stats_preco(produto, dias=30)
         if historico and historico["n"] >= 3:
             if produto.preco_com_cupom >= historico["mediana"] * .98:
                 continue
             if produto.preco_com_cupom <= historico["minimo"] * 1.02:
                 score *= 1.6
                 motivos.append("mínima de 30 dias")
+        elif _no_fundo_do_historico(produto, produto.preco_com_cupom, historico):
+            # Poucas observações ainda não sustentam a mediana, mas já dizem que o
+            # preço está no fundo do que vimos. Vale menos que a mínima confirmada
+            # por 3+ pontos, e vale mais que um percentual de vitrine sem prova.
+            score *= 1.25
+            motivos.append("perto da mínima observada")
         produto.desconto_comprovado = comprovado
         perf = desempenho.get(produto.id)
         if perf and perf["posts"]:
@@ -1965,6 +1988,58 @@ def anotacao_preco_publicado():
         Coalesce(NullIf(F("preco_efetivo"), Value(0.0)), F("preco_com_cupom")),
         output_field=FloatField(),
     )
+
+
+# Quanto acima da mínima observada um preço ainda conta como "oferta". 5% é o número
+# que o CamelCamelCamel publica como definição de good deal ("5% higher than the best
+# price ever seen"), e é o mesmo raciocínio que a moderação do Promobit descreve:
+# o veredito sai do histórico, não do percentual de vitrine.
+FOLGA_MINIMA_HISTORICA = 1.05
+
+# Piso bruto do SQL. Não é o critério — é só o que evita carregar catálogo inteiro
+# para a memória. Item sem desconto nenhum não tem o que ser avaliado.
+PISO_DESCONTO_BRUTO = 5.0
+
+# Quantos candidatos o ranking avalia por vez. Cada um custa uma consulta de
+# histórico, então isto é o que mantém o custo do tick constante em vez de
+# proporcional ao catálogo. Folgado de propósito: o envio escolhe 1 ou 2 itens, e
+# 400 candidatos ordenados por observação recente cobrem qualquer nicho com sobra.
+TETO_CANDIDATOS = 400
+
+
+def _no_fundo_do_historico(produto, preco_final: float, historico) -> bool:
+    """O preço está colado na mínima que nós mesmos observamos em 30 dias?
+
+    É o critério que o mercado usa e que faltava aqui. Um TV cuja mínima histórica é
+    R$ 799 não vira oferta por estar "40% OFF" de um preço de lista inventado — e um
+    item a R$ 810 É oferta mesmo anunciando 8% de desconto. O percentual de vitrine
+    responde "quanto a loja diz que baixou"; a mínima responde "isso é barato".
+    """
+    if not historico or preco_final <= 0:
+        return False
+    minimo = historico.get("minimo") or 0
+    if minimo <= 0:
+        return False
+    return preco_final <= minimo * FOLGA_MINIMA_HISTORICA
+
+
+def _passa_no_minimo(produto, preco_final, historico, min_desconto_percent) -> bool:
+    """Elegível por desconto aparente OU por estar no fundo do histórico.
+
+    Os dois caminhos existem porque medem coisas diferentes, e usar só o primeiro
+    descartava a melhor oferta real: o mesmo preço de lista fictício que inflava
+    item ruim também escondia item bom, agora por baixo. Basta um dos dois.
+    """
+    # `desconto_percent` é anotação do queryset da seleção. Fora dali (teste, ou
+    # qualquer chamador futuro) o objeto não tem o atributo, e cair com AttributeError
+    # transformaria uma regra de negócio em erro de infraestrutura. Recalcula.
+    aparente = getattr(produto, "desconto_percent", None)
+    if aparente is None:
+        lista = float(getattr(produto, "preco_sem_desconto", 0) or 0)
+        aparente = ((lista - preco_final) / lista * 100.0) if lista > 0 else 0.0
+    if aparente >= min_desconto_percent:
+        return True
+    return _no_fundo_do_historico(produto, preco_final, historico)
 
 
 def _desconto_comprovado(produto, preco_final: float) -> bool:
