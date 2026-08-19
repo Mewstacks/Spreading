@@ -148,6 +148,27 @@ class ExtracaoTests(TestCase):
                 patch("apps.scrapers.llm._json_resposta", return_value=SAIDA_MODELO):
             self.assertEqual(len(extrair(MENSAGEM_REAL)), 2)
 
+    def test_resposta_truncada_salva_os_cupons_inteiros(self):
+        """Erro real de produção: `Unterminated string` no meio da lista.
+
+        A mensagem que estourou o orçamento foi justamente a mais valiosa — o
+        "LISTÃO" com sete cupons. Perder a mensagem inteira por causa do último
+        objeto cortado é o pior resultado possível.
+        """
+        truncada = (
+            '{"cupons":[{"codigo":"TODOOSITE1308","loja":"mercadolivre",'
+            '"tipo":"porcentagem","valor":10,"minimo":0,"teto":20,"escopo":"todo site"},'
+            '{"codigo":"CASA1508","loja":"mercadolivre","tipo":"fixo","valor":50,'
+            '"minimo":399,"teto":0,"escopo":""},'
+            '{"codigo":"CORTADO","loja":"mercadoliv'
+        )
+        with patch("apps.scrapers.llm._cliente"), \
+                patch("apps.scrapers.llm._texto_resposta", return_value=truncada), \
+                patch("apps.scrapers.llm._json_resposta", return_value=None):
+            achados = extrair(MENSAGEM_REAL)
+        self.assertEqual([c["codigo"] for c in achados],
+                         ["TODOOSITE1308", "CASA1508"])
+
     @override_settings(ANTHROPIC_API_KEY="")
     def test_sem_chave_nao_chama_nada(self):
         with patch("apps.scrapers.llm._cliente") as cliente:

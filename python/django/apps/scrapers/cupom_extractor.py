@@ -148,6 +148,33 @@ def _limpar(bruto, loja_padrao="") -> list[dict]:
     return limpos
 
 
+_OBJETO_FECHADO = re.compile(r"\{[^{}]*\}")
+
+
+def _resgatar_parcial(texto: str) -> dict:
+    """Cupons inteiros de uma resposta que foi cortada no meio.
+
+    Existe por causa de um erro visto em produção: `Unterminated string`. Quando o
+    modelo é interrompido, tudo o que ele já tinha fechado continua correto — e o
+    que ficou pela metade não é meio-cupom, é lixo que `_limpar` recusa de qualquer
+    jeito. Varrer os objetos `{...}` completos recupera a maior parte da mensagem em
+    vez de descartá-la inteira. Não é o caminho normal: o orçamento de tokens é que
+    tem de caber. É a rede de segurança para quando não couber.
+    """
+    achados = []
+    for bruto in _OBJETO_FECHADO.findall(texto or ""):
+        try:
+            item = json.loads(bruto)
+        except ValueError:
+            continue
+        if isinstance(item, dict) and item.get("codigo"):
+            achados.append(item)
+    if achados:
+        logger.info("Resposta da IA veio truncada; %s cupom(ns) inteiro(s) "
+                    "recuperado(s).", len(achados))
+    return {"cupons": achados}
+
+
 def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
     """Cupons de uma mensagem. Lista vazia quando não há, não dá, ou falha.
 
@@ -173,12 +200,27 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
 
         resposta = _cliente(timeout).messages.create(
             model=getattr(settings, "LLM_MODELO", _MODELO_PADRAO),
-            max_tokens=900,
+            # 2500, não 900. Em produção o primeiro erro real foi
+            # `JSONDecodeError: Unterminated string` — a resposta era CORTADA no
+            # meio do JSON. A mensagem que estourou é justamente a mais valiosa: o
+            # "LISTÃO" do @cupombr, com sete cupons, cada um com código, escopo,
+            # mínimo e teto. Orçamento apertado descartava exatamente a mensagem
+            # que mais rende. Sete cupons cabem com folga aqui, e o custo só é
+            # pago pelo que o modelo realmente escreve.
+            max_tokens=2500,
             thinking={"type": "disabled"},
             messages=[{"role": "user",
                        "content": _PROMPT.format(mensagem=texto[:2500])}],
         )
-        cupons = _limpar(_json_resposta(_texto_resposta(resposta)), loja_padrao)
+        texto_resposta = _texto_resposta(resposta)
+        dados = _json_resposta(texto_resposta)
+        if dados is None:
+            # Resposta truncada ou ilegível. Recupera os cupons COMPLETOS que já
+            # vieram antes do corte em vez de perder a mensagem inteira: numa lista
+            # de sete, salvar seis é melhor que salvar zero, e cada objeto fechado
+            # é um cupom inteiro — não há meio-cupom válido.
+            dados = _resgatar_parcial(texto_resposta)
+        cupons = _limpar(dados, loja_padrao)
     except Exception as exc:
         logger.warning("Extração de cupom por IA falhou (%s: %s).",
                        type(exc).__name__, exc)
