@@ -31,7 +31,16 @@ TG_HTML = """
     Bom dia, pessoal! Sem link nenhum aqui.
   </div>
 </div>
+<div class="tgme_widget_message" data-post="canalteste/379">
+  <div class="tgme_widget_message_text js-message_text">
+    Confira minha vitrine<br/>https://www.mercadolivre.com.br/social/lojinha
+  </div>
+</div>
 """
+
+# O encurtador do exemplo aponta para um anúncio de verdade. Nos testes ele é
+# resolvido sem rede — o que se mede aqui é a REGRA, não a internet.
+DESTINO_CURTO = "https://produto.mercadolivre.com.br/MLB-123456-camiseta"
 
 PROMOBIT_HTML = """
 <script type="application/ld+json">
@@ -54,9 +63,11 @@ PROMOBIT_HTML = """
 
 
 class TelegramPublicoTests(TestCase):
-    def _coletar(self, corpo=TG_HTML, canais=("canalteste",)):
+    def _coletar(self, corpo=TG_HTML, canais=("canalteste",), destino=DESTINO_CURTO):
         fonte = TelegramPublicoSource()
-        with patch.object(TelegramPublicoSource, "_baixar", return_value=corpo):
+        with patch.object(TelegramPublicoSource, "_baixar", return_value=corpo), \
+                patch("apps.scrapers.sources.telegram_publico.resolver",
+                      return_value=destino):
             return fonte, list(fonte.discover_offers(canais=list(canais)))
 
     def test_extrai_link_e_reconhece_a_loja(self):
@@ -81,6 +92,38 @@ class TelegramPublicoTests(TestCase):
     def test_mensagem_sem_link_de_loja_e_ignorada(self):
         _, itens = self._coletar()
         self.assertEqual(len(itens), 2)
+
+    def test_vitrine_de_afiliado_e_descartada(self):
+        """O achado que mais importa desta fonte.
+
+        Medido em 18/08/2026 nos canais reais: de 44 links, ZERO era página de
+        produto. Os canais publicam `meli.la` que resolve para `/social/<perfil>` —
+        a vitrine de afiliado de quem postou, com a atribuição DELES. Sem este
+        portão a fonte enchia o catálogo de linhas que o Programa de Afiliados
+        recusa e que nunca virariam envio.
+        """
+        fonte, itens = self._coletar()
+        urls = [i.canonical_url for i in itens]
+        self.assertFalse([u for u in urls if "/social/" in u])
+        self.assertGreaterEqual(fonte.last_metrics["descartados"]["nao_e_produto"], 1)
+
+    def test_encurtador_que_cai_em_vitrine_e_descartado(self):
+        fonte, itens = self._coletar(
+            destino="https://www.mercadolivre.com.br/social/achadosoriginais")
+        # Sobra só o link direto da Amazon, que já é página de produto.
+        self.assertEqual([i.marketplace for i in itens], ["amazon"])
+        self.assertGreaterEqual(fonte.last_metrics["descartados"]["nao_e_produto"], 2)
+
+    def test_encurtador_que_nao_resolve_e_descartado(self):
+        """Não conferiu, não publica. Perder oferta é melhor que publicar às cegas."""
+        fonte, itens = self._coletar(destino="")
+        self.assertEqual([i.marketplace for i in itens], ["amazon"])
+        self.assertEqual(fonte.last_metrics["descartados"]["nao_resolveu"], 1)
+
+    def test_encurtador_resolvido_entra_com_a_url_final(self):
+        _, itens = self._coletar()
+        ml = next(i for i in itens if i.marketplace == "mercadolivre")
+        self.assertEqual(ml.canonical_url, DESTINO_CURTO)
 
     def test_coleta_nunca_se_declara_completa(self):
         """A prévia só mostra as recentes; ausência aqui não expira catálogo."""

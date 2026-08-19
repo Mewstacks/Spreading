@@ -410,8 +410,26 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
         anterior = recentes.get(produto.id)
         if anterior and produto.preco_com_cupom > anterior * .95:
             continue
-        score = produto.desconto_percent * 2 + produto.economia_rs / 20
-        motivos = [f"{produto.desconto_percent:.0f}% de desconto"]
+        # O percentual só entra na nota quando NÓS já observamos o item mais caro.
+        #
+        # Antes a nota começava em `desconto_percent * 2`, e esse percentual vem do
+        # preço de vitrine — que a docstring de `PrecoHistorico` classifica como
+        # frequentemente fictício no ML. O efeito era que um "de" inflado COMPRAVA o
+        # primeiro lugar: 80% inventado (nota 160) passava na frente de 28% real e
+        # comprovado (nota 62), e era o inflado que ia para o grupo.
+        #
+        # Penalizar não resolvia: o número falso não tem teto, então qualquer fator
+        # multiplicativo continua perdendo para um "de" grande o bastante. A regra
+        # certa é não pontuar o que não foi verificado. Sem prova, a nota se apoia só
+        # na economia em reais — que também vem do "de" mas é limitada pelo preço
+        # real do item — e o desconto deixa de ser argumento.
+        comprovado = _desconto_comprovado(produto, produto.preco_com_cupom)
+        if comprovado:
+            score = produto.desconto_percent * 2 + produto.economia_rs / 20
+            motivos = [f"{produto.desconto_percent:.0f}% de desconto comprovado"]
+        else:
+            score = produto.economia_rs / 20
+            motivos = ["desconto ainda não comprovado pelo histórico"]
         if produto.confianca == "alta":
             score *= 1.15
             motivos.append("fonte de alta confiança")
@@ -437,6 +455,7 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
             if produto.preco_com_cupom <= historico["minimo"] * 1.02:
                 score *= 1.6
                 motivos.append("mínima de 30 dias")
+        produto.desconto_comprovado = comprovado
         perf = desempenho.get(produto.id)
         if perf and perf["posts"]:
             score += min(60, perf["clicks"] / perf["posts"] * 12)
@@ -1948,6 +1967,38 @@ def anotacao_preco_publicado():
     )
 
 
+def _desconto_comprovado(produto, preco_final: float) -> bool:
+    """Nós já vimos este item custar mais caro?
+
+    É a diferença entre "a loja diz que estava R$ 500" e "nós observamos R$ 500".
+    Só a segunda sustenta um preço riscado numa mensagem assinada pelo usuário.
+
+    A prova vem do nosso próprio `PrecoHistorico`, que é chaveado por
+    (marketplace, chave-normalizada) e sobrevive ao Produto ser recriado a cada
+    raspagem. Janela de 90 dias, e não os 30 do filtro de seleção, porque aqui a
+    pergunta é outra: não é "está barato agora?", é "este preço mais alto existiu?".
+
+    Uma observação já basta. Exigir três — como faz o filtro de mediana da seleção —
+    protegeria o mesmo item duas vezes e deixaria a maioria das ofertas do dia sem
+    nenhuma proteção, que é justamente o buraco que este portão fecha. O que não
+    basta é observação no mesmo patamar do preço atual: 2% de folga evita tratar
+    ruído de arredondamento como se fosse queda.
+    """
+    if preco_final <= 0:
+        return False
+    try:
+        historico = _stats_preco(produto, dias=90)
+    except Exception:
+        # Sem conseguir consultar, o desconto fica NÃO comprovado. Falha fechada:
+        # a mensagem perde o "DE" e não afirma nada que não foi verificado.
+        logger.warning("Histórico indisponível para o produto %s; desconto não "
+                       "comprovado.", getattr(produto, "pk", "?"))
+        return False
+    if not historico or not historico.get("n"):
+        return False
+    return historico["mediana"] > preco_final * 1.02
+
+
 def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
                     usuario=None, configuracao=None, variante="A") -> str:
     """
@@ -2013,7 +2064,23 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     # Guarda final: desconto >= 90% (ou "De:" <= "Por:") indica preço corrompido
     # (ex.: savingBasis em escala errada). Em vez de imprimir "100% OFF" absurdo,
     # esconde a parte "DE" e mostra só o "POR".
-    desconto_valido = 0 < desconto_percent < 90 and produto.preco_sem_desconto > preco_final
+    desconto_coerente = (
+        0 < desconto_percent < 90 and produto.preco_sem_desconto > preco_final
+    )
+    # E o portão que faltava: coerente não é o mesmo que COMPROVADO.
+    #
+    # O "DE" vem do preço de vitrine da loja, e a docstring de `PrecoHistorico` diz
+    # o que ele vale: "o preço 'de' do ML costuma ser fictício". A revalidação de
+    # envio (`preco_ao_vivo.revalidar`) reconfirma o preço ATUAL e nunca o "DE".
+    # O filtro de mediana, alguns blocos acima em `selecionar_item_para_grupo`, só
+    # roda com 3+ observações — ou seja, produto novo (a maioria das ofertas do dia)
+    # passava sem nenhuma prova e a mensagem afirmava um desconto que ninguém
+    # verificou. Riscar um preço que talvez nunca tenha existido é o falso positivo
+    # mais caro do produto: quem assina a mensagem é o influenciador.
+    #
+    # Regra: sem prova nossa de que o item já custou mais, a mensagem mostra só o
+    # POR. A oferta continua saindo — o que sai é a afirmação não comprovada.
+    desconto_valido = desconto_coerente and _desconto_comprovado(produto, preco_final)
     por = _preco_br(preco_final)
     if desconto_valido:
         de = _preco_br(produto.preco_sem_desconto)

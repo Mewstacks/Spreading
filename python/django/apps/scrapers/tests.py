@@ -5656,7 +5656,14 @@ class InstrumentacaoTests(TestCase):
 
         eventos = EventoOperacional.objects.filter(evento="conexao_caiu")
         self.assertEqual(eventos.count(), 2)
-        self.assertTrue(eventos.order_by("-criado_em").first().contexto["repique"])
+        # Desempate por `-id`. Os dois eventos nascem no mesmo teste e `criado_em` é
+        # `auto_now_add`: quando caem no mesmo tique do relógio, ordenar só por
+        # `-criado_em` devolve linha arbitrária, e o teste passa ou falha conforme o
+        # que rodou antes dele na suíte — foi assim que ele quebrou ao ganharmos um
+        # passo a mais dentro de `log_event`. O "mais recente" que este teste quer
+        # dizer é o último inserido, e isso o id garante.
+        ultimo = eventos.order_by("-criado_em", "-id").first()
+        self.assertTrue(ultimo.contexto["repique"])
 
     def test_reconexao_vira_evento(self):
         from apps.scrapers.monitor_conexao import _processar

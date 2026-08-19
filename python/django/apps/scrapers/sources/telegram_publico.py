@@ -65,6 +65,25 @@ _LOJAS = (
     ("shopee", ("shopee.com.br", "s.shopee.com.br", "shope.ee")),
 )
 
+# Encurtadores: o destino real só se conhece seguindo o redirect.
+_ENCURTADORES = ("meli.la", "amzn.to", "amzn.eu", "shope.ee", "s.shopee.com.br")
+
+# Páginas que NÃO são produto. Medido em 18/08/2026: os canais de oferta publicam,
+# em massa, links `meli.la` que caem em `/social/<perfil>` — a vitrine de afiliado
+# de quem postou, não um anúncio. Numa amostra de 12 links de dois canais grandes,
+# ZERO era página de produto. Sem este filtro a fonte enchia o catálogo de linhas
+# que o Programa de Afiliados recusa (`link._montar_url_isca` já barra `/social/`)
+# e que nunca virariam envio — falso positivo em volume industrial.
+_NAO_E_PRODUTO = ("/social/", "/perfil/", "/usuario/", "/noindex/", "/pagina/",
+                  "/lista/", "/ofertas", "/promocoes")
+
+# Marcas de página de produto por loja.
+_E_PRODUTO = {
+    "mercadolivre": ("/mlb-", "/p/mlb", "produto.mercadolivre", "item_id=mlb"),
+    "amazon": ("/dp/", "/gp/product/"),
+    "shopee": ("-i.", "/product/"),
+}
+
 
 def _marketplace(url: str) -> str:
     texto = str(url or "").lower()
@@ -76,6 +95,40 @@ def _marketplace(url: str) -> str:
 
 def _texto_limpo(bruto: str) -> str:
     return html.unescape(_TAG.sub("", _QUEBRA.sub("\n", bruto))).strip()
+
+
+def e_pagina_de_produto(url: str, slug: str) -> bool:
+    """A URL aponta para um ANÚNCIO, não para uma vitrine?
+
+    Este é o portão que separa oferta de ruído. Vitrine de afiliado, perfil e
+    listagem não têm preço, não têm estoque e o Programa de Afiliados nem aceita —
+    publicar uma delas é mandar o grupo para uma página que não é a oferta prometida.
+    """
+    texto = str(url or "").lower()
+    if any(marca in texto for marca in _NAO_E_PRODUTO):
+        return False
+    return any(marca in texto for marca in _E_PRODUTO.get(slug, ()))
+
+
+def resolver(url: str, sessao=None) -> str:
+    """Segue o redirect de um encurtador e devolve a URL final.
+
+    Encurtador é opaco por definição: `meli.la/2QxaZLw` pode ser um anúncio ou a
+    vitrine de quem postou, e só o destino conta. Falha de rede devolve string vazia,
+    que o chamador trata como "não sei" e descarta — melhor perder uma oferta do que
+    publicar uma que não se pôde conferir.
+    """
+    cliente = sessao or requests
+    try:
+        resposta = cliente.get(
+            url, timeout=_TIMEOUT, headers={"User-Agent": _UA},
+            allow_redirects=True, stream=True,
+        )
+        final = str(resposta.url or "")
+        resposta.close()
+        return final
+    except requests.RequestException:
+        return ""
 
 
 def _codigo_cupom(texto: str) -> str:
@@ -130,6 +183,9 @@ class TelegramPublicoSource(SourceAdapter):
         agora = timezone.now()
         vistos = set()
         lidos = falhas = 0
+        # Contadores de descarte: sem eles, uma fonte que rejeita tudo fica idêntica
+        # a uma fonte sem novidade. A diferença é o que diz se o parser quebrou.
+        descartados = {"nao_e_produto": 0, "nao_resolveu": 0}
 
         for handle in handles[:12]:
             try:
@@ -150,10 +206,22 @@ class TelegramPublicoSource(SourceAdapter):
                 if achado_preco:
                     preco_alegado = normalizar_dinheiro(achado_preco.group(1))
                 codigo = _codigo_cupom(texto)
-                for url in _URL.findall(texto):
-                    url = url.rstrip(").,;")
-                    slug = _marketplace(url)
+                for bruto in _URL.findall(texto):
+                    bruto = bruto.rstrip(").,;")
+                    slug = _marketplace(bruto)
                     if not slug:
+                        continue
+                    # Encurtador é opaco: resolve antes de julgar. Sem isto, todo
+                    # `meli.la` entrava como se fosse anúncio.
+                    url = bruto
+                    if any(d in bruto.lower() for d in _ENCURTADORES):
+                        url = resolver(bruto)
+                        if not url:
+                            descartados["nao_resolveu"] += 1
+                            continue
+                        slug = _marketplace(url) or slug
+                    if not e_pagina_de_produto(url, slug):
+                        descartados["nao_e_produto"] += 1
                         continue
                     chave = f"tg:{slug}:{url}"
                     if chave in vistos:
@@ -186,6 +254,7 @@ class TelegramPublicoSource(SourceAdapter):
             "canais_lidos": lidos,
             "canais_falhos": falhas,
             "itens": len(vistos),
+            "descartados": dict(descartados),
             # Nunca "completo": a prévia mostra só as mensagens recentes, então
             # ausência aqui não prova que a oferta sumiu e não pode expirar catálogo.
             "complete": False,
