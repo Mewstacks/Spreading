@@ -12,8 +12,15 @@ monitor: sleep 10 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py mo
 envio: sleep 20 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo envio --tick 5
 manual: sleep 30 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo manual
 # Cupons têm janela segura de 3h e precisam continuar prontos mesmo quando a
-# raspagem geral está desligada. O pipeline isola fontes e roda a cada 15 minutos.
-cupons: sleep 45 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo cupons --tick 15 --lote 40
+# raspagem geral está desligada. O pipeline isola fontes e roda a cada 5 minutos.
+#
+# Era 15. Baixou porque promoção relâmpago não espera: um cupom com janela de duas
+# horas nascia e morria entre dois ciclos. O que tornou isso possível sem afogar a
+# máquina foi tirar o Link Builder do caminho de cada cupom de código — a
+# readiness passou a aceitar UM link por usuário, que é o que a mensagem de aviso
+# realmente usa (ver `coupon_readiness._tem_link_de_aviso`). Antes disso, ciclo
+# mais curto só engordaria a fila do Chromium mais rápido.
+cupons: sleep 45 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo cupons --tick 5 --lote 40
 scrapeflash: sleep 60 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape_rapido --tick 5
 # links: sem este processo nada gera link de afiliado e a tela de Promoções mostra
 # tudo como "pendente" -- cada raspagem so aumentava a pilha. Lote pequeno: cada link

@@ -189,7 +189,7 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
     # de um único site de terceiro. Entram com precedência baixa (ver
     # `_SOURCE_PRECEDENCE`): corroboram e descobrem, não decidem sozinhas.
     _coletar_adaptador("promobit-cupons", resultado)
-    _coletar_adaptador("telegram-publico", resultado, items=("offers",))
+    _coletar_adaptador("telegram-publico", resultado, items=("offers", "coupons"))
 
     if getattr(settings, "AMAZON_GENERAL_COUPONS_URL", ""):
         _coletar_adaptador("amazon-general-coupons", resultado)
