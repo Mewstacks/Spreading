@@ -172,4 +172,37 @@
   {% endif %}
 </div>
 {% endif %}
+
+{% if shopee_enabled %}
+<div class="section section-lined" id="shopee">
+  <div class="section-head">
+    <h2><i data-lucide="shopping-bag" style="color:var(--accent);"></i> Shopee</h2>
+    <span class="hint">API oficial de afiliados</span>
+    <span class="head-actions">
+      {% if shopee_integracao.status == 'conectada' %}<span class="badge badge-green"><span class="dot"></span>Conectada</span>
+      {% elif shopee_integracao.status == 'reconectar' %}<span class="badge badge-red"><span class="dot"></span>Reconectar</span>
+      {% elif shopee_integracao %}<span class="badge badge-muted"><span class="dot"></span>{{ shopee_integracao.get_status_display }}</span>
+      {% else %}<span class="badge badge-red"><span class="dot"></span>Não conectada</span>{% endif %}
+    </span>
+  </div>
+  {% if shopee_integracao and shopee_integracao.status == 'conectada' %}
+    <p class="muted" style="font-size:13px;margin:0 0 .8rem;">App ID <strong>{{ shopee_integracao.identificador_conta }}</strong> · última sincronização {{ shopee_integracao.ultimo_sucesso|default:"ainda não concluída" }}.</p>
+    {% if shopee_integracao.erro_publico %}<div class="alert alert-warn" style="margin-top:0;"><i data-lucide="alert-triangle"></i><div>{{ shopee_integracao.erro_publico }}</div></div>{% endif %}
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;">
+      <form method="post" action="{% url 'scraper-shopee-sincronizar' %}">{% csrf_token %}<button class="btn btn-ghost btn-sm"><i data-lucide="refresh-cw"></i> Sincronizar agora</button></form>
+      <form method="post" action="{% url 'scraper-shopee-desconectar' %}" onsubmit="return confirm('Desconectar a Shopee? O histórico será preservado.')">{% csrf_token %}<button class="btn btn-danger btn-sm"><i data-lucide="unlink"></i> Desconectar</button></form>
+    </div>
+  {% else %}
+    <p class="muted" style="font-size:13px;line-height:1.55;margin:0 0 .9rem;max-width:56ch;">Pegue o <strong>App ID</strong> e o <strong>Secret</strong> em <a class="link" href="https://affiliate.shopee.com.br/open_api" target="_blank" rel="noopener">Open API</a>, no painel de afiliados da Shopee. O Spreading nunca solicita sua senha, e o Secret é guardado criptografado.</p>
+    <form method="post" action="{% url 'scraper-shopee-conectar' %}" style="max-width:420px;">{% csrf_token %}
+      <label>App ID</label>
+      <input name="app_id" type="text" inputmode="numeric" autocomplete="off" required placeholder="Ex.: 15xxxxxxxxx">
+      <label style="margin-top:.7rem;">Secret</label>
+      <input name="app_secret" type="password" autocomplete="new-password" required placeholder="Cole o Secret">
+      <span class="help">Validamos a credencial na hora; se a Shopee recusar, nada é gravado.</span>
+      <div class="form-actions"><button class="btn btn-accent" type="submit"><i data-lucide="plug"></i> Validar e conectar</button></div>
+    </form>
+  {% endif %}
+</div>
+{% endif %}
 {% endblock %}

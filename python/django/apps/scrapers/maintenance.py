@@ -94,7 +94,15 @@ def diagnosticar_alertas_pipeline_cupons(*, agora=None):
     )
     projections = CupomDisponibilidade.objects.filter(active)
     counts = {
-        "projection_stale": projections.filter(updated_at__lt=cutoff_20m).count(),
+        # Só conta projeção que AINDA DEVE MUDAR. `updated_at` é auto_now, então um
+        # cupom que chegou a `ready` (ou foi descartado com veredito) para de ser
+        # escrito — e sem esta exclusão ele aparecia como "parado" 20 minutos depois,
+        # justamente por estar saudável. Em produção isso inflava o número para a
+        # casa dos dez mil e o alerta disparava em todo ciclo, escondendo os três
+        # contadores vizinhos, que são reais. Alerta que sempre toca não é alerta.
+        "projection_stale": projections.exclude(
+            stage__in=("ready", "discarded"),
+        ).filter(updated_at__lt=cutoff_20m).count(),
         "code_not_ready_20m": projections.filter(
             use_mode="code_notice", cupom__primeira_observacao__lt=cutoff_20m,
         ).exclude(stage="ready").count(),

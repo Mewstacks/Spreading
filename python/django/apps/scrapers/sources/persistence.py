@@ -13,6 +13,12 @@ _SOURCE_PRECEDENCE = {
     "licensed-affiliate-feed": 40,
     "amazon-public-coupons": 10,
     "amazon-general-coupons": 10,
+    # Menor é mais forte. Estas duas ficam no fim de propósito: são ALEGAÇÃO de
+    # terceiro, não observação nossa. Servem para corroborar o que outra fonte já
+    # viu e para achar cupom que nos escapou — não para, sozinhas, mandar um
+    # influenciador anunciar um código ao grupo dele.
+    "promobit-cupons": 80,
+    "telegram-publico": 90,
 }
 
 

@@ -184,6 +184,13 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
 
     _coletar_adaptador("ml-cupons-afiliados", resultado)
 
+    # Segunda e terceira fontes públicas, ambas por HTTP puro: rodam mesmo com o
+    # Chromium ocupado e existem justamente para o Mercado Livre deixar de depender
+    # de um único site de terceiro. Entram com precedência baixa (ver
+    # `_SOURCE_PRECEDENCE`): corroboram e descobrem, não decidem sozinhas.
+    _coletar_adaptador("promobit-cupons", resultado)
+    _coletar_adaptador("telegram-publico", resultado, items=("offers",))
+
     if getattr(settings, "AMAZON_GENERAL_COUPONS_URL", ""):
         _coletar_adaptador("amazon-general-coupons", resultado)
     else:
@@ -269,6 +276,30 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
                 if not total else ""
             ),
         )
+
+    # Shopee: por organização, porque a assinatura é da credencial de cada conta.
+    # Diferente de TODAS as outras fontes de cupom, esta não pede navegador — é o
+    # que permite rodar o lote inteiro sem competir com o Link Builder do Mercado
+    # Livre, que é o gargalo do funil. Uma conta que falha não contamina as outras.
+    if not getattr(settings, "SHOPEE_INTEGRATION_ENABLED", False):
+        _fonte(
+            resultado, "shopee-campaigns", status="skipped",
+            motivo="Integração Shopee desabilitada.",
+        )
+    else:
+        integracoes_shopee = list(IntegracaoAfiliado.objects.filter(
+            owner__in=usuarios, provedor="shopee", habilitada=True,
+            status__in=("conectada", "degradada"),
+        ).select_related("owner"))
+        for integracao in integracoes_shopee:
+            _coletar_adaptador(
+                "shopee-campaigns", resultado, owner=integracao.owner,
+            )
+        if not integracoes_shopee:
+            _fonte(
+                resultado, "shopee-campaigns", status="skipped",
+                motivo="Nenhuma conta Shopee conectada.",
+            )
 
     privados = CupomNormalizado.objects.filter(
         owner__in=usuarios, fonte__slug="manual-private", estado="ativo",

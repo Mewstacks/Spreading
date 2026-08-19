@@ -1,0 +1,52 @@
+# Postgres LOCAL para desenvolvimento e teste. NÃO toca em produção.
+#
+# Por que existe: a suíte roda em SQLite por padrão, e SQLite não exercita três
+# coisas que só falham em produção — o lease de recursos em `sources/registry.py`
+# (que tem um caminho para PostgreSQL e outro para o resto), as políticas de RLS por
+# tenant, e as constraints parciais (`UniqueConstraint` com `condition`). Ou seja,
+# "passou local" não significava "passa em produção" exatamente nos assuntos que
+# mais derrubaram o sistema.
+#
+# Produção continua sendo o Postgres não gerenciado da Fly (app `spreading-db`), e
+# nada aqui aponta para ele. Este arquivo sobe um banco descartável na sua máquina;
+# apagar o volume `spreading_pg_local` não afeta cliente nenhum.
+#
+# Uso:
+#   docker compose up -d db
+#   # em python/.env (ou no shell):
+#   DATABASE_URL=postgres://spreading:spreading@localhost:55432/spreading
+#   SYSTEM_DATABASE_URL=postgres://spreading:spreading@localhost:55432/spreading
+#   MIGRATION_DATABASE_URL=postgres://spreading:spreading@localhost:55432/spreading
+#   venv/Scripts/python.exe django/manage.py migrate
+#   venv/Scripts/python.exe django/manage.py test apps.scrapers apps.accounts
+#
+# A porta é 55432, não 5432, de propósito: se você já tiver um Postgres na porta
+# padrão, este não briga com ele nem se conecta ao errado sem avisar.
+
+services:
+  db:
+    # Mesma linhagem do postgres-flex da Fly. Fixar a major evita que uma diferença
+    # de versão vire "funciona local, quebra no deploy".
+    image: postgres:16-alpine
+    container_name: spreading-pg-local
+    environment:
+      POSTGRES_USER: spreading
+      POSTGRES_PASSWORD: spreading
+      POSTGRES_DB: spreading
+      # Mesmo collation da produção, senão ordenação e índices divergem.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "55432:5432"
+    volumes:
+      - spreading_pg_local:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spreading -d spreading"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    # O teste do Django cria e derruba bancos o tempo todo; sem isto o container
+    # reinicia sozinho a cada `manage.py test` mais longo.
+    restart: unless-stopped
+
+volumes:
+  spreading_pg_local:

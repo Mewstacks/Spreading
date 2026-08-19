@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 
 import logging
 import os
+import sys
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
@@ -459,6 +460,13 @@ AMAZON_PUBLIC_FALLBACK = os.getenv("AMAZON_PUBLIC_FALLBACK", "1") == "1"
 AFFILIATE_FEED_URL = os.getenv("AFFILIATE_FEED_URL", "")
 AFFILIATE_FEED_TOKEN = os.getenv("AFFILIATE_FEED_TOKEN", "")
 AWIN_INTEGRATION_ENABLED = os.getenv("AWIN_INTEGRATION_ENABLED", "1") == "1"
+# Shopee: ligada por padrão porque não consome navegador nem custa infraestrutura —
+# uma organização sem credencial conectada simplesmente não coleta nada. Os valores
+# abaixo são o fallback de desenvolvimento; em produção cada organização assina com
+# a própria credencial, guardada cifrada em IntegracaoAfiliado.
+SHOPEE_INTEGRATION_ENABLED = os.getenv("SHOPEE_INTEGRATION_ENABLED", "1") == "1"
+SHOPEE_APP_ID = os.getenv("SHOPEE_APP_ID", "")
+SHOPEE_APP_SECRET = os.getenv("SHOPEE_APP_SECRET", "")
 # Palavras-chave de categorias amplas que alimentam o "feed" de ofertas Amazon
 # (a Creators API não expõe um feed de ofertas; varremos buscas com min savings).
 AMAZON_FEED_KEYWORDS = [
@@ -617,6 +625,14 @@ else:
 
 # Cooldown (horas) entre alertas repetidos de conexão caída p/ não floodar e-mail.
 ALERTA_CONEXAO_COOLDOWN_H = int(os.getenv("ALERTA_CONEXAO_COOLDOWN_H", "6"))
+# Canal de operação: para onde vai um incidente `error` quando ele ABRE. Sem isto o
+# problema espera alguém abrir a tela de Saúde — o modo de falha de 16, 17 e 18/08.
+# ALERTA_TELEGRAM_CHAT_ID usa o TELEGRAM_BOT_TOKEN que já existe; ALERTA_EMAILS é
+# lista separada por vírgula. Vazio nos dois = canal desligado (padrão em dev).
+ALERTA_TELEGRAM_CHAT_ID = os.getenv("ALERTA_TELEGRAM_CHAT_ID", "")
+ALERTA_EMAILS = os.getenv("ALERTA_EMAILS", "")
+# Silêncio por chave de incidente. Alerta que toca demais é alerta que se ignora.
+ALERTA_SILENCIO_MIN = int(os.getenv("ALERTA_SILENCIO_MIN", "60"))
 # (ML_AUTH_STALE_DIAS saiu: a idade do arquivo deixou de ser critério de sessão viva
 # quando conexoes.py passou a perguntar ao próprio ML, e o único leitor da variável
 # já era código morto.)
@@ -731,6 +747,14 @@ LOGGING = {
 }
 
 SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+# A suíte exercita de propósito os caminhos de erro — sessão caída, fonte
+# bloqueada, envio recusado — e cada `logger.error` desses virava evento no Sentry.
+# Rodar os testes com um `.env` de desenvolvimento preenchido gastava cota e sujava
+# a triagem com falhas encenadas. O DSN continua sendo lido normalmente fora do
+# `manage.py test`.
+RUNNING_TESTS = "test" in sys.argv[1:2] or bool(os.getenv("PYTEST_CURRENT_TEST"))
+if RUNNING_TESTS:
+    SENTRY_DSN = ""
 if SENTRY_DSN:
     try:
         import sentry_sdk

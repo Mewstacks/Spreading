@@ -326,10 +326,21 @@ class CouponPipelineTests(TestCase):
         }
         result = coletar_cupons(usuarios=[self.user])
 
-        self.assertEqual(result["falhos"], 2)
+        # Contador derivado, não número mágico: com um literal, ADICIONAR uma fonte
+        # quebrava este teste sem que nada tivesse regredido. O que ele mede é que o
+        # ciclo termina apesar das falhas, não quantas fontes existem hoje.
+        com_erro = [
+            slug for slug, dados in result["fontes"].items()
+            if dados["status"] == "error"
+        ]
+        self.assertEqual(result["falhos"], len(com_erro))
+        self.assertGreaterEqual(len(com_erro), 2)
         self.assertEqual(
             result["fontes"]["ml-cupons-afiliados"]["status"], "error",
         )
         self.assertEqual(
             result["fontes"]["amazon-public-coupons"]["status"], "error",
         )
+        # E o ciclo chegou ao fim: fontes que não passam por `run_source` continuam
+        # sendo reportadas depois das que falharam.
+        self.assertIn("manual-private", result["fontes"])

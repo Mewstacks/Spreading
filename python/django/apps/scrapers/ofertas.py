@@ -6,7 +6,7 @@ import requests
 from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
-from django.db import transaction
+from django.db import DatabaseError, transaction
 from django.db.models import F, FloatField, ExpressionWrapper, Count, Q
 from apps.scrapers.models import Produto, Cupom, HistoricoEnvio, Publicacao
 from apps.scrapers.precos import stats as _stats_preco
@@ -370,12 +370,23 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
             (F("preco_sem_desconto") - F("preco_com_cupom")) * 100.0
             / F("preco_sem_desconto"), output_field=FloatField()),
     ).filter(
-        desconto_percent__gte=min_desconto_percent,
+        # Piso ampliado de propósito. O corte final não é mais só o percentual
+        # aparente: item no fundo do próprio histórico é oferta mesmo com pouco
+        # desconto de vitrine, e era descartado aqui antes de ser avaliado. Quem
+        # decide agora é `_passa_no_minimo`, dentro do laço. O piso continua
+        # existindo para não trazer o catálogo inteiro à memória.
+        desconto_percent__gte=min(PISO_DESCONTO_BRUTO, min_desconto_percent),
         desconto_percent__lt=90, preco_com_cupom__gt=0,
     )
     from apps.scrapers.product_identity import deduplicar_por_produto
+    # Teto de candidatos. Baixar o piso de desconto no SQL (para deixar entrar item
+    # barato com pouca vitrine) aumenta o conjunto que vem para a memória, e cada
+    # candidato custa uma consulta de histórico no laço abaixo. Sem teto, o custo do
+    # tick cresce com o catálogo — numa VM cuja cota de CPU já é o gargalo.
+    # A ordem é por observação mais recente, então o corte tira o mais velho, que é
+    # também o mais provável de já ter sido enviado ou de ter preço vencido.
     elegiveis = deduplicar_por_produto(
-        elegiveis_qs.order_by("-ultima_observacao", "-id")
+        elegiveis_qs.order_by("-ultima_observacao", "-id")[:TETO_CANDIDATOS]
     )
     cupons = {
         c.campanha_id: c for c in Cupom.objects.filter(
@@ -410,8 +421,33 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
         anterior = recentes.get(produto.id)
         if anterior and produto.preco_com_cupom > anterior * .95:
             continue
-        score = produto.desconto_percent * 2 + produto.economia_rs / 20
-        motivos = [f"{produto.desconto_percent:.0f}% de desconto"]
+        # O histórico sobe para cá porque agora ele decide ELEGIBILIDADE, não só
+        # pontuação: item colado na própria mínima entra mesmo com desconto de
+        # vitrine baixo, e antes era descartado no SQL sem chance de ser avaliado.
+        historico = _stats_preco(produto, dias=30)
+        if not _passa_no_minimo(produto, produto.preco_com_cupom, historico,
+                                min_desconto_percent):
+            continue
+        # O percentual só entra na nota quando NÓS já observamos o item mais caro.
+        #
+        # Antes a nota começava em `desconto_percent * 2`, e esse percentual vem do
+        # preço de vitrine — que a docstring de `PrecoHistorico` classifica como
+        # frequentemente fictício no ML. O efeito era que um "de" inflado COMPRAVA o
+        # primeiro lugar: 80% inventado (nota 160) passava na frente de 28% real e
+        # comprovado (nota 62), e era o inflado que ia para o grupo.
+        #
+        # Penalizar não resolvia: o número falso não tem teto, então qualquer fator
+        # multiplicativo continua perdendo para um "de" grande o bastante. A regra
+        # certa é não pontuar o que não foi verificado. Sem prova, a nota se apoia só
+        # na economia em reais — que também vem do "de" mas é limitada pelo preço
+        # real do item — e o desconto deixa de ser argumento.
+        comprovado = _desconto_comprovado(produto, produto.preco_com_cupom)
+        if comprovado:
+            score = produto.desconto_percent * 2 + produto.economia_rs / 20
+            motivos = [f"{produto.desconto_percent:.0f}% de desconto comprovado"]
+        else:
+            score = produto.economia_rs / 20
+            motivos = ["desconto ainda não comprovado pelo histórico"]
         if produto.confianca == "alta":
             score *= 1.15
             motivos.append("fonte de alta confiança")
@@ -430,13 +466,19 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
         if getattr(produto, "relampago", False):
             score *= 1.4
             motivos.append("oferta relâmpago")
-        historico = _stats_preco(produto, dias=30)
         if historico and historico["n"] >= 3:
             if produto.preco_com_cupom >= historico["mediana"] * .98:
                 continue
             if produto.preco_com_cupom <= historico["minimo"] * 1.02:
                 score *= 1.6
                 motivos.append("mínima de 30 dias")
+        elif _no_fundo_do_historico(produto, produto.preco_com_cupom, historico):
+            # Poucas observações ainda não sustentam a mediana, mas já dizem que o
+            # preço está no fundo do que vimos. Vale menos que a mínima confirmada
+            # por 3+ pontos, e vale mais que um percentual de vitrine sem prova.
+            score *= 1.25
+            motivos.append("perto da mínima observada")
+        produto.desconto_comprovado = comprovado
         perf = desempenho.get(produto.id)
         if perf and perf["posts"]:
             score += min(60, perf["clicks"] / perf["posts"] * 12)
@@ -1948,6 +1990,90 @@ def anotacao_preco_publicado():
     )
 
 
+# Quanto acima da mínima observada um preço ainda conta como "oferta". 5% é o número
+# que o CamelCamelCamel publica como definição de good deal ("5% higher than the best
+# price ever seen"), e é o mesmo raciocínio que a moderação do Promobit descreve:
+# o veredito sai do histórico, não do percentual de vitrine.
+FOLGA_MINIMA_HISTORICA = 1.05
+
+# Piso bruto do SQL. Não é o critério — é só o que evita carregar catálogo inteiro
+# para a memória. Item sem desconto nenhum não tem o que ser avaliado.
+PISO_DESCONTO_BRUTO = 5.0
+
+# Quantos candidatos o ranking avalia por vez. Cada um custa uma consulta de
+# histórico, então isto é o que mantém o custo do tick constante em vez de
+# proporcional ao catálogo. Folgado de propósito: o envio escolhe 1 ou 2 itens, e
+# 400 candidatos ordenados por observação recente cobrem qualquer nicho com sobra.
+TETO_CANDIDATOS = 400
+
+
+def _no_fundo_do_historico(produto, preco_final: float, historico) -> bool:
+    """O preço está colado na mínima que nós mesmos observamos em 30 dias?
+
+    É o critério que o mercado usa e que faltava aqui. Um TV cuja mínima histórica é
+    R$ 799 não vira oferta por estar "40% OFF" de um preço de lista inventado — e um
+    item a R$ 810 É oferta mesmo anunciando 8% de desconto. O percentual de vitrine
+    responde "quanto a loja diz que baixou"; a mínima responde "isso é barato".
+    """
+    if not historico or preco_final <= 0:
+        return False
+    minimo = historico.get("minimo") or 0
+    if minimo <= 0:
+        return False
+    return preco_final <= minimo * FOLGA_MINIMA_HISTORICA
+
+
+def _passa_no_minimo(produto, preco_final, historico, min_desconto_percent) -> bool:
+    """Elegível por desconto aparente OU por estar no fundo do histórico.
+
+    Os dois caminhos existem porque medem coisas diferentes, e usar só o primeiro
+    descartava a melhor oferta real: o mesmo preço de lista fictício que inflava
+    item ruim também escondia item bom, agora por baixo. Basta um dos dois.
+    """
+    # `desconto_percent` é anotação do queryset da seleção. Fora dali (teste, ou
+    # qualquer chamador futuro) o objeto não tem o atributo, e cair com AttributeError
+    # transformaria uma regra de negócio em erro de infraestrutura. Recalcula.
+    aparente = getattr(produto, "desconto_percent", None)
+    if aparente is None:
+        lista = float(getattr(produto, "preco_sem_desconto", 0) or 0)
+        aparente = ((lista - preco_final) / lista * 100.0) if lista > 0 else 0.0
+    if aparente >= min_desconto_percent:
+        return True
+    return _no_fundo_do_historico(produto, preco_final, historico)
+
+
+def _desconto_comprovado(produto, preco_final: float) -> bool:
+    """Nós já vimos este item custar mais caro?
+
+    É a diferença entre "a loja diz que estava R$ 500" e "nós observamos R$ 500".
+    Só a segunda sustenta um preço riscado numa mensagem assinada pelo usuário.
+
+    A prova vem do nosso próprio `PrecoHistorico`, que é chaveado por
+    (marketplace, chave-normalizada) e sobrevive ao Produto ser recriado a cada
+    raspagem. Janela de 90 dias, e não os 30 do filtro de seleção, porque aqui a
+    pergunta é outra: não é "está barato agora?", é "este preço mais alto existiu?".
+
+    Uma observação já basta. Exigir três — como faz o filtro de mediana da seleção —
+    protegeria o mesmo item duas vezes e deixaria a maioria das ofertas do dia sem
+    nenhuma proteção, que é justamente o buraco que este portão fecha. O que não
+    basta é observação no mesmo patamar do preço atual: 2% de folga evita tratar
+    ruído de arredondamento como se fosse queda.
+    """
+    if preco_final <= 0:
+        return False
+    try:
+        historico = _stats_preco(produto, dias=90)
+    except Exception:
+        # Sem conseguir consultar, o desconto fica NÃO comprovado. Falha fechada:
+        # a mensagem perde o "DE" e não afirma nada que não foi verificado.
+        logger.warning("Histórico indisponível para o produto %s; desconto não "
+                       "comprovado.", getattr(produto, "pk", "?"))
+        return False
+    if not historico or not historico.get("n"):
+        return False
+    return historico["mediana"] > preco_final * 1.02
+
+
 def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
                     usuario=None, configuracao=None, variante="A") -> str:
     """
@@ -2013,7 +2139,23 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     # Guarda final: desconto >= 90% (ou "De:" <= "Por:") indica preço corrompido
     # (ex.: savingBasis em escala errada). Em vez de imprimir "100% OFF" absurdo,
     # esconde a parte "DE" e mostra só o "POR".
-    desconto_valido = 0 < desconto_percent < 90 and produto.preco_sem_desconto > preco_final
+    desconto_coerente = (
+        0 < desconto_percent < 90 and produto.preco_sem_desconto > preco_final
+    )
+    # E o portão que faltava: coerente não é o mesmo que COMPROVADO.
+    #
+    # O "DE" vem do preço de vitrine da loja, e a docstring de `PrecoHistorico` diz
+    # o que ele vale: "o preço 'de' do ML costuma ser fictício". A revalidação de
+    # envio (`preco_ao_vivo.revalidar`) reconfirma o preço ATUAL e nunca o "DE".
+    # O filtro de mediana, alguns blocos acima em `selecionar_item_para_grupo`, só
+    # roda com 3+ observações — ou seja, produto novo (a maioria das ofertas do dia)
+    # passava sem nenhuma prova e a mensagem afirmava um desconto que ninguém
+    # verificou. Riscar um preço que talvez nunca tenha existido é o falso positivo
+    # mais caro do produto: quem assina a mensagem é o influenciador.
+    #
+    # Regra: sem prova nossa de que o item já custou mais, a mensagem mostra só o
+    # POR. A oferta continua saindo — o que sai é a afirmação não comprovada.
+    desconto_valido = desconto_coerente and _desconto_comprovado(produto, preco_final)
     por = _preco_br(preco_final)
     if desconto_valido:
         de = _preco_br(produto.preco_sem_desconto)
@@ -2456,6 +2598,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         return {"sucesso": False, "motivo": str(motivo), **extra}
 
     from apps.scrapers.auxiliar import BrowserError, SessaoExpirada
+    from apps.scrapers.carga import BrowserResourceUnavailable
     from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
 
     # O trabalho roda aninhado para que QUALQUER exceção inesperada (a Publicacao já
@@ -2464,6 +2607,27 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
     def _executar():
         try:
             info = mp.build_affiliate_link(produto, usuario=usuario)
+        except BrowserResourceUnavailable as e:
+            # Fila de navegador, não erro de envio. Precisa de um `except` PRÓPRIO
+            # porque a classe é RuntimeError (carga.py), não BrowserError — sem ele
+            # a exceção subia por `enviar_oferta_de_produto` ->
+            # `processar_configs_de_envio` -> `_loop_envio` e derrubava o tick
+            # INTEIRO: as configurações seguintes, de TODOS os usuários e não só do
+            # dono deste produto, não eram avaliadas, e esta nem chegava a chamar
+            # `agendar_proximo`. Em produção o rastro terminava sempre em
+            # `carga.coordinated_ml_browser`.
+            #
+            # TRANSITÓRIO pelo mesmo motivo da sessão expirada: a vaga volta no
+            # próximo ciclo e não há nada errado com a regra de envio. Punir a regra
+            # aqui a desligaria sozinha depois de cinco disputas de navegador.
+            logger.info(
+                "Envio adiado para o produto %s: navegador ocupado por outra tarefa.",
+                produto.pk,
+            )
+            return falhar(
+                "Navegador ocupado por outra tarefa; o envio será retomado.",
+                classe=TRANSITORIO, _erro_tecnico=str(e),
+            )
         except (LoginError, AuthError, SessaoExpirada) as e:
             # Sessão do ML caída: sem link de afiliado NENHUM produto sai. Motivo claro
             # + flag p/ a UI oferecer a reconexão e o chamador parar de retentar.
@@ -2951,28 +3115,56 @@ def processar_configs_de_envio():
                 "Config %s pulada: WhatsApp do dono não está conectado.", cfg.id)
             continue
 
-        if getattr(cfg, "tipo", "") == ConfiguracaoEnvio.TIPO_AVISO_CUPONS:
-            r = enviar_aviso_cupons(
-                selecionar_cupons_para_aviso(cfg, cfg.owner), cfg.grupo_id,
-                canal=getattr(cfg, "canal", "whatsapp"), usuario=cfg.owner,
-                destino_nome=cfg.grupo_nome, configuracao=cfg,
-                enqueue_only=_send_pipeline_v2_enabled(cfg.owner),
+        # CERCA DE TENANT. Este laço percorre as regras de TODOS os donos, então
+        # uma exceção que escape daqui não atrasa um envio: cancela o ciclo inteiro
+        # e todos os outros clientes ficam sem oferta naquele tick. Foi exatamente
+        # isso que aconteceu com `BrowserResourceUnavailable` (ver o `except`
+        # próprio em `_executar`). A correção pontual daquela classe resolve o caso
+        # conhecido; esta cerca resolve a categoria, inclusive para o erro que
+        # ainda não aconteceu. O custo é um `continue` no lugar de um tick perdido.
+        try:
+            if getattr(cfg, "tipo", "") == ConfiguracaoEnvio.TIPO_AVISO_CUPONS:
+                r = enviar_aviso_cupons(
+                    selecionar_cupons_para_aviso(cfg, cfg.owner), cfg.grupo_id,
+                    canal=getattr(cfg, "canal", "whatsapp"), usuario=cfg.owner,
+                    destino_nome=cfg.grupo_nome, configuracao=cfg,
+                    enqueue_only=_send_pipeline_v2_enabled(cfg.owner),
+                )
+            else:
+                macros = [cfg.macro_categoria] if cfg.macro_categoria else None  # vazio = qualquer (inclui ofertas)
+                r = selecionar_e_enviar(
+                    macros, cfg.grupo_id,
+                    min_desconto_percent=cfg.min_desconto_percent,
+                    horas_cooldown=cfg.horas_cooldown,
+                    verificar=True,
+                    termo=cfg.termo_busca,
+                    canal=getattr(cfg, "canal", "whatsapp"),
+                    marketplace=getattr(cfg, "marketplace", "") or None,
+                    usuario=cfg.owner,
+                    configuracao=cfg,
+                    destino_nome=cfg.grupo_nome,
+                    enqueue_only=_send_pipeline_v2_enabled(cfg.owner),
+                )
+        except DatabaseError:
+            # Banco fora é problema do processo inteiro, não desta regra: o loop de
+            # envio tem tratamento próprio (pausa progressiva) e precisa vê-lo.
+            raise
+        except Exception as exc:
+            logger.exception("Config %s falhou no tick de envio", cfg.id)
+            log_event(
+                "publicacao", "config_erro",
+                f"A regra de envio {cfg.id} falhou neste ciclo: {exc}",
+                level="error", usuario=cfg.owner,
+                contexto={"configuracao": cfg.id, "destino": cfg.grupo_id},
+                exc=exc,
             )
-        else:
-            macros = [cfg.macro_categoria] if cfg.macro_categoria else None  # vazio = qualquer (inclui ofertas)
-            r = selecionar_e_enviar(
-                macros, cfg.grupo_id,
-                min_desconto_percent=cfg.min_desconto_percent,
-                horas_cooldown=cfg.horas_cooldown,
-                verificar=True,
-                termo=cfg.termo_busca,
-                canal=getattr(cfg, "canal", "whatsapp"),
-                marketplace=getattr(cfg, "marketplace", "") or None,
-                usuario=cfg.owner,
-                configuracao=cfg,
-                destino_nome=cfg.grupo_nome,
-                enqueue_only=_send_pipeline_v2_enabled(cfg.owner),
-            )
+            # Reagenda como falha transitória: a regra tenta de novo no próximo
+            # vencimento em vez de martelar este tick, e não conta falha permanente.
+            r = {
+                "sucesso": False,
+                "motivo": "Falha temporária ao processar esta regra de envio.",
+                "classe": TRANSITORIO,
+            }
         # Reagenda sempre (sucesso ou não) p/ não ficar martelando o mesmo tick;
         # jitter ±1-10min deixa o ritmo humano. ultimo_envio só em sucesso (display).
         cfg.agendar_proximo(agora)

@@ -1,16 +1,23 @@
-name: Fly nightly power schedule
+name: Fly production power
+
+# O DESLIGAMENTO NOTURNO FOI REMOVIDO. Ele parava as três apps às 00:00 BRT e
+# tentava religar às 08:00, economizando cerca de um terço da fatura de máquinas
+# (~US$12/mês sobre ~US$38 de infra). O preço era alto demais:
+#
+#   - 8 horas por dia sem coletar cupom, sem enviar e sem verificar link;
+#   - a sessão de WhatsApp atravessava o ciclo e às vezes não voltava;
+#   - o religamento falhou em 16, 17 e 18/08/2026, e como à noite não sobra nada
+#     de pé (sem web não há vigia externo), a produção ficou fora do ar o dia
+#     inteiro até alguém perceber. Três interrupções totais em três dias.
+#
+# Para um produto vendido por assinatura isso é inaceitável: o assinante paga o
+# mês inteiro e recebe dois terços dele. Economia de custo agora vem de consolidar
+# processos e tirar trabalho do navegador, não de desligar a operação.
+#
+# O acionamento manual continua aqui de propósito: é o botão de parada de
+# emergência e o de religar quando algo ficou preso.
 
 on:
-  schedule:
-    # GitHub cron usa UTC. America/Sao_Paulo é UTC-3 (sem horário de verão):
-    # 03:00 UTC = 00:00 BRT; 11:00 UTC = 08:00 BRT.
-    - cron: "0 3 * * *"
-    - cron: "0 11 * * *"
-    # Segunda tentativa de religar. À noite não sobra nada de pé — sem web não
-    # há vigia externo — então uma falha do start das 08:00 deixa a produção
-    # fora do ar até alguém perceber, que foi o que aconteceu em 16, 17 e 18/08.
-    # Ligar máquina já ligada é no-op, então a repetição não custa nada.
-    - cron: "30 11 * * *"
   workflow_dispatch:
     inputs:
       action:
@@ -35,23 +42,19 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
-      - name: Resolve scheduled action
+      - name: Resolve action
         id: action
         env:
           MANUAL_ACTION: ${{ inputs.action }}
-          SCHEDULE: ${{ github.event.schedule }}
         run: |
-          if [[ -n "$MANUAL_ACTION" ]]; then
-            action="$MANUAL_ACTION"
-          elif [[ "$SCHEDULE" == "0 3 * * *" ]]; then
-            action="stop"
-          elif [[ "$SCHEDULE" == "0 11 * * *" || "$SCHEDULE" == "30 11 * * *" ]]; then
-            action="start"
-          else
-            echo "Evento sem ação reconhecida: $SCHEDULE" >&2
+          # Sem gatilho agendado, a única origem é o acionamento manual. O ramo
+          # que traduzia `github.event.schedule` saiu junto com o cron: manter um
+          # mapa de horários que nunca dispara é convite para religá-lo sem querer.
+          if [[ -z "$MANUAL_ACTION" ]]; then
+            echo "Nenhuma ação informada; este workflow é só manual." >&2
             exit 1
           fi
-          echo "action=$action" >> "$GITHUB_OUTPUT"
+          echo "action=$MANUAL_ACTION" >> "$GITHUB_OUTPUT"
       - name: Start or stop Fly production
         env:
           FLY_TOKEN_WEB: ${{ secrets.FLY_TOKEN_WEB }}

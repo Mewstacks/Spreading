@@ -1,0 +1,234 @@
+"""Promobit e Telegram público: as duas fontes que tiram o ML de fonte única.
+
+O eixo de todos estes testes é o mesmo: **alegação de terceiro não pode virar preço**.
+Um "de R$ 500 por R$ 99" escrito por um canal desconhecido, se entrasse como preço de
+referência, produziria um desconto falso com a assinatura de quem publica. Por isso
+várias asserções aqui verificam o que a fonte NÃO faz.
+"""
+from unittest.mock import patch
+
+import requests
+from django.test import TestCase
+
+from apps.scrapers.sources.promobit import PromobitSource
+from apps.scrapers.sources.registry import SOURCES
+from apps.scrapers.sources.telegram_publico import TelegramPublicoSource
+
+TG_HTML = """
+<div class="tgme_widget_message" data-post="canalteste/376">
+  <div class="tgme_widget_message_text js-message_text">
+    🔥 Camiseta Tommy (Cupom MELIMODA)<br/>💰 R$ 113,00<br/>
+    🔗 https://meli.la/21M8WPs?matt_word=ABC
+  </div>
+</div>
+<div class="tgme_widget_message" data-post="canalteste/377">
+  <div class="tgme_widget_message_text js-message_text">
+    Fone bom<br/>R$ 89,90<br/>https://www.amazon.com.br/dp/B0ABCDEFGH
+  </div>
+</div>
+<div class="tgme_widget_message" data-post="canalteste/378">
+  <div class="tgme_widget_message_text js-message_text">
+    Bom dia, pessoal! Sem link nenhum aqui.
+  </div>
+</div>
+<div class="tgme_widget_message" data-post="canalteste/379">
+  <div class="tgme_widget_message_text js-message_text">
+    Confira minha vitrine<br/>https://www.mercadolivre.com.br/social/lojinha
+  </div>
+</div>
+"""
+
+# O encurtador do exemplo aponta para um anúncio de verdade. Nos testes ele é
+# resolvido sem rede — o que se mede aqui é a REGRA, não a internet.
+DESTINO_CURTO = "https://produto.mercadolivre.com.br/MLB-123456-camiseta"
+
+PROMOBIT_HTML = """
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"ItemList","itemListElement":[
+ {"@type":"Offer","name":"Cupom LISTA25 - Amazon",
+  "description":"Cupom Amazon concede desconto de 25% em mercado",
+  "discountCode":"LISTA25",
+  "url":"https://www.promobit.com.br/Redirect/cupom/68473"},
+ {"@type":"Offer","name":"Cupom sem codigo",
+  "description":"desconto de 10%","url":"https://www.promobit.com.br/x"},
+ {"@type":"Offer","name":"Cupom SEMVALOR - Amazon",
+  "description":"Cupom para usar hoje","discountCode":"SEMVALOR"},
+ {"@type":"Offer","name":"Cupom TUDO100","description":"desconto de 100%",
+  "discountCode":"TUDO100"},
+ {"@type":"Offer","name":"Cupom Resgate no produto - Amazon",
+  "description":"desconto de 30%","discountCode":"Resgate no produto"}
+]}
+</script>
+"""
+
+
+class TelegramPublicoTests(TestCase):
+    def _coletar(self, corpo=TG_HTML, canais=("canalteste",), destino=DESTINO_CURTO):
+        fonte = TelegramPublicoSource()
+        with patch.object(TelegramPublicoSource, "_baixar", return_value=corpo), \
+                patch("apps.scrapers.sources.telegram_publico.resolver",
+                      return_value=destino):
+            return fonte, list(fonte.discover_offers(canais=list(canais)))
+
+    def test_extrai_link_e_reconhece_a_loja(self):
+        _, itens = self._coletar()
+        lojas = sorted(i.marketplace for i in itens)
+        self.assertEqual(lojas, ["amazon", "mercadolivre"])
+
+    def test_preco_do_texto_nunca_vira_preco_do_produto(self):
+        """O ponto central: R$ 113,00 escrito pelo canal é alegação, não preço."""
+        _, itens = self._coletar()
+        for item in itens:
+            self.assertEqual(item.current_price, 0.0)
+            self.assertEqual(item.reference_price, 0.0)
+        alegados = sorted(i.evidence["preco_alegado"] for i in itens)
+        self.assertEqual(alegados, [89.90, 113.00])
+
+    def test_cupom_citado_entra_como_evidencia(self):
+        _, itens = self._coletar()
+        ml = next(i for i in itens if i.marketplace == "mercadolivre")
+        self.assertEqual(ml.evidence["cupom_citado"], "MELIMODA")
+
+    def test_mensagem_sem_link_de_loja_e_ignorada(self):
+        _, itens = self._coletar()
+        self.assertEqual(len(itens), 2)
+
+    def test_vitrine_de_afiliado_e_descartada(self):
+        """O achado que mais importa desta fonte.
+
+        Medido em 18/08/2026 nos canais reais: de 44 links, ZERO era página de
+        produto. Os canais publicam `meli.la` que resolve para `/social/<perfil>` —
+        a vitrine de afiliado de quem postou, com a atribuição DELES. Sem este
+        portão a fonte enchia o catálogo de linhas que o Programa de Afiliados
+        recusa e que nunca virariam envio.
+        """
+        fonte, itens = self._coletar()
+        urls = [i.canonical_url for i in itens]
+        self.assertFalse([u for u in urls if "/social/" in u])
+        self.assertGreaterEqual(fonte.last_metrics["descartados"]["nao_e_produto"], 1)
+
+    def test_encurtador_que_cai_em_vitrine_e_descartado(self):
+        fonte, itens = self._coletar(
+            destino="https://www.mercadolivre.com.br/social/achadosoriginais")
+        # Sobra só o link direto da Amazon, que já é página de produto.
+        self.assertEqual([i.marketplace for i in itens], ["amazon"])
+        self.assertGreaterEqual(fonte.last_metrics["descartados"]["nao_e_produto"], 2)
+
+    def test_encurtador_que_nao_resolve_e_descartado(self):
+        """Não conferiu, não publica. Perder oferta é melhor que publicar às cegas."""
+        fonte, itens = self._coletar(destino="")
+        self.assertEqual([i.marketplace for i in itens], ["amazon"])
+        self.assertEqual(fonte.last_metrics["descartados"]["nao_resolveu"], 1)
+
+    def test_encurtador_resolvido_entra_com_a_url_final(self):
+        _, itens = self._coletar()
+        ml = next(i for i in itens if i.marketplace == "mercadolivre")
+        self.assertEqual(ml.canonical_url, DESTINO_CURTO)
+
+    def test_coleta_nunca_se_declara_completa(self):
+        """A prévia só mostra as recentes; ausência aqui não expira catálogo."""
+        fonte, _ = self._coletar()
+        self.assertFalse(fonte.last_metrics["complete"])
+
+    def test_handle_invalido_e_recusado_sem_requisicao(self):
+        fonte = TelegramPublicoSource()
+        with patch("apps.scrapers.sources.telegram_publico.requests.get") as get:
+            self.assertEqual(fonte._baixar("../etc/passwd"), "")
+        get.assert_not_called()
+
+    def test_canal_fora_do_ar_nao_derruba_a_coleta(self):
+        fonte = TelegramPublicoSource()
+        with patch.object(TelegramPublicoSource, "_baixar",
+                          side_effect=requests.ConnectionError("offline")):
+            itens = list(fonte.discover_offers(canais=["canalteste"]))
+        self.assertEqual(itens, [])
+        self.assertEqual(fonte.last_metrics["canais_falhos"], 1)
+        self.assertEqual(fonte.last_health_status, "degraded")
+
+    def test_nao_pede_navegador(self):
+        self.assertFalse(getattr(TelegramPublicoSource, "requires_chromium", False))
+
+
+class PromobitTests(TestCase):
+    def _coletar(self, corpo=PROMOBIT_HTML, lojas=("amazon",)):
+        fonte = PromobitSource()
+        with patch.object(PromobitSource, "_baixar", return_value=corpo):
+            return fonte, list(fonte.discover_coupons(lojas=list(lojas)))
+
+    def test_le_o_cupom_do_schema_org(self):
+        _, itens = self._coletar()
+        codigos = sorted(i.coupon_code for i in itens)
+        self.assertEqual(codigos, ["LISTA25"])
+        item = itens[0]
+        self.assertEqual(item.marketplace, "amazon")
+        self.assertEqual(item.coupon_rules["valor_desconto"], 25.0)
+        self.assertEqual(item.coupon_rules["modo_resgate"], "codigo")
+
+    def test_cupom_sem_codigo_e_descartado(self):
+        """Sem código digitável, o clique (e a comissão) iria para o Promobit."""
+        _, itens = self._coletar()
+        self.assertNotIn("", [i.coupon_code for i in itens])
+
+    def test_cupom_sem_valor_comprovado_e_descartado(self):
+        _, itens = self._coletar()
+        self.assertNotIn("SEMVALOR", [i.coupon_code for i in itens])
+
+    def test_desconto_de_cem_por_cento_e_recusado(self):
+        """100% não existe em varejo; é erro de parse ou promessa falsa."""
+        _, itens = self._coletar()
+        self.assertNotIn("TUDO100", [i.coupon_code for i in itens])
+
+    def test_frase_no_lugar_do_codigo_e_recusada(self):
+        """Caso real da fonte: `discountCode` vinha como "Resgate no produto".
+
+        Publicar isso manda o grupo digitar uma frase no checkout e não funcionar —
+        exatamente o tipo de cupom que queima a confiança de quem assina a mensagem.
+        """
+        _, itens = self._coletar()
+        codigos = [i.coupon_code for i in itens]
+        self.assertNotIn("RESGATE NO PRODUTO", codigos)
+        for codigo in codigos:
+            self.assertNotIn(" ", codigo)
+
+    def test_nao_publica_a_url_de_redirect_do_promobit(self):
+        _, itens = self._coletar()
+        for item in itens:
+            self.assertNotIn("promobit.com.br", item.canonical_url)
+
+    def test_marca_a_origem_como_comunidade(self):
+        _, itens = self._coletar()
+        self.assertEqual(itens[0].evidence["confianca_origem"], "comunidade")
+
+    def test_slug_invalido_e_recusado_sem_requisicao(self):
+        fonte = PromobitSource()
+        with patch("apps.scrapers.sources.promobit.requests.get") as get:
+            self.assertEqual(fonte._baixar("../admin"), "")
+        get.assert_not_called()
+
+    def test_coleta_nunca_se_declara_completa(self):
+        fonte, _ = self._coletar()
+        self.assertFalse(fonte.last_metrics["complete"])
+
+    def test_loja_fora_do_conjunto_afiliavel_nao_e_consultada(self):
+        fonte = PromobitSource()
+        with patch.object(PromobitSource, "_baixar", return_value="") as baixar:
+            list(fonte.discover_coupons(lojas=["magazine-luiza"]))
+        baixar.assert_not_called()
+
+
+class RegistroDeFontesTests(TestCase):
+    def test_as_duas_fontes_estao_registradas(self):
+        self.assertIn("promobit-cupons", SOURCES)
+        self.assertIn("telegram-publico", SOURCES)
+
+    def test_precedencia_baixa_para_alegacao_de_terceiro(self):
+        """Comunidade corrobora; não decide sozinha contra uma fonte oficial."""
+        from apps.scrapers.sources.persistence import _SOURCE_PRECEDENCE
+
+        oficial = _SOURCE_PRECEDENCE["ml-cupons-afiliados"]
+        for slug in ("promobit-cupons", "telegram-publico"):
+            self.assertGreater(_SOURCE_PRECEDENCE[slug], oficial, slug)
+
+    def test_esqueleto_antigo_do_promobit_continua_desabilitado(self):
+        """O stub histórico não pode voltar a rodar por engano junto do novo."""
+        self.assertFalse(SOURCES["promobit-community"].healthcheck()["ok"])

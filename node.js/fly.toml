@@ -2,6 +2,24 @@
 # Secret: WA_CAPABILITY_PUBLIC_KEYS_JSON (somente chaves públicas Ed25519).
 app = "spreading-wa"
 primary_region = "gru"
+# ESTA LINHA É O QUE MANTÉM A SESSÃO DE PÉ ENTRE PARADAS.
+#
+# O index.js tem fechamento gracioso (`shutdown`) que faz `client.destroy()` em cada
+# sessão antes de sair, e o comentário de lá diz por quê: fechar o Chromium
+# corretamente "evita locks corrompidos que fariam a sessão sumir". Só que ele nunca
+# teve tempo de terminar. Sem `kill_timeout`, a Fly usa o default de CINCO SEGUNDOS
+# entre o sinal e o SIGKILL, e derrubar um Chromium com o WhatsApp Web inteiro
+# carregado não cabe nisso.
+#
+# O sintoma que isso produz é exatamente "a sessão cai sozinha": o LevelDB de
+# .wwebjs_auth é morto no meio de uma escrita, o restore do boot seguinte não
+# consegue ler a credencial, e o worker cai em "Sessão não encontrada ou expirada"
+# com um QR novo que ninguém está olhando. Em 18/08/2026 a instância 1 passou 12
+# minutos gerando QR até ser destruída por ociosidade.
+#
+# 90s cobre o teardown com folga e só é gasto quando a máquina está realmente
+# parando. Uma parada limpa é muito mais barata que um pareamento manual por celular.
+kill_timeout = "90s"
 
 [build]
   dockerfile = "Dockerfile"

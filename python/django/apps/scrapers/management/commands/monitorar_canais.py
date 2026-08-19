@@ -62,12 +62,15 @@ class Command(BaseCommand):
 
     def _varrer(self, client):
         from apps.scrapers.models import CanalMonitorado, EnvioCanal
-        from apps.scrapers.canais.relink import reescrever_mensagem, extrair_urls
+        from apps.scrapers.canais.relink import (
+            extrair_urls, reescrever_mensagem_detalhada,
+        )
         from apps.scrapers.senders.registry import get_sender
 
         for canal in CanalMonitorado.objects.filter(ativo=True).select_related("owner"):
             try:
-                self._processar_canal(client, canal, EnvioCanal, reescrever_mensagem,
+                self._processar_canal(client, canal, EnvioCanal,
+                                      reescrever_mensagem_detalhada,
                                       get_sender, extrair_urls)
             except Exception as e:
                 logger.warning("Falha no canal %s: %s", canal.handle, e)
@@ -76,6 +79,7 @@ class Command(BaseCommand):
                          get_sender, extrair_urls):
         from django.db.models import Q
         from django.utils import timezone
+        from apps.scrapers.canais.validacao import INCERTO, mensagem_liberada
         from apps.scrapers.models import Publicacao
         from apps.scrapers.eventos import log_event
 
@@ -84,15 +88,46 @@ class Command(BaseCommand):
         # reverse=True: da mais antiga p/ a mais nova entre as não vistas (min_id).
         for msg in client.iter_messages(canal.handle, min_id=canal.ultimo_id,
                                         reverse=True, limit=50):
-            maior_id = max(maior_id, msg.id)
             texto = msg.message or ""
             if not texto:
+                maior_id = max(maior_id, msg.id)
                 continue
-            novo_texto, chaves = reescrever_mensagem(texto, canal.owner)
+            novo_texto, chaves, pares = reescrever_mensagem(texto, canal.owner)
             if extrair_urls(texto) and not chaves:
                 raise RuntimeError("Mensagem contém oferta, mas nenhum link afiliado foi gerado")
             if not chaves:
+                maior_id = max(maior_id, msg.id)
                 continue  # nenhuma URL de produto re-linkada
+
+            # PORTÃO DE REPUTAÇÃO. O texto é de um estranho e a assinatura é do
+            # usuário: nada sai sem que o destino tenha sido aberto e aprovado agora.
+            liberada, veredito, motivo_verificacao = mensagem_liberada(
+                pares, usuario=canal.owner,
+            )
+            if not liberada:
+                if veredito == INCERTO:
+                    # Incerto NÃO avança `ultimo_id`: a mensagem volta no próximo
+                    # ciclo, quando o destino talvez responda. Avançar aqui perderia
+                    # ofertas boas sempre que o marketplace apertasse o anti-bot.
+                    logger.info(
+                        "Canal %s: mensagem %s adiada — %s",
+                        canal.handle, msg.id, motivo_verificacao,
+                    )
+                    break
+                logger.info(
+                    "Canal %s: mensagem %s descartada — %s",
+                    canal.handle, msg.id, motivo_verificacao,
+                )
+                log_event(
+                    "publicacao", "canal_oferta_reprovada",
+                    f"Oferta de @{canal.handle} não passou na conferência: "
+                    f"{motivo_verificacao}",
+                    level="info", usuario=canal.owner,
+                    contexto={"canal": canal.handle, "mensagem": msg.id},
+                )
+                maior_id = max(maior_id, msg.id)
+                continue
+            maior_id = max(maior_id, msg.id)
             # Dedup: já divulgou alguma dessas ofertas p/ este dono?
             ja = set(EnvioCanal.objects.filter(owner=canal.owner, chave__in=chaves)
                      .values_list("chave", flat=True))

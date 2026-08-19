@@ -60,11 +60,18 @@ def gerar_link_afiliado(url, marketplace, usuario):
     return None
 
 
-def reescrever_mensagem(texto, usuario):
-    """Troca cada URL de produto pela afiliada do usuário.
-    Retorna (novo_texto, chaves_enviadas) — chaves = hashes das URLs re-linkadas."""
+def reescrever_mensagem_detalhada(texto, usuario):
+    """Como ``reescrever_mensagem``, mas devolve também os pares de URL.
+
+    Os pares ``(url_origem, url_afiliado)`` existem porque a mensagem precisa ser
+    CONFERIDA antes de sair (ver ``canais/validacao.py``): sem a URL de origem não dá
+    para saber de que loja é o link, e sem a afiliada não dá para abrir o destino
+    exatamente como o grupo vai abrir. As chaves de dedup continuam saindo da URL de
+    origem, que é estável — a afiliada muda a cada geração.
+    """
     novo = texto or ""
     chaves = []
+    pares = []
     for url, mkt in extrair_urls(texto):
         try:
             af = gerar_link_afiliado(url, mkt, usuario)
@@ -74,4 +81,12 @@ def reescrever_mensagem(texto, usuario):
         if af:
             novo = novo.replace(url, af)
             chaves.append(hash_url(url))
+            pares.append((url, af))
+    return novo, chaves, pares
+
+
+def reescrever_mensagem(texto, usuario):
+    """Troca cada URL de produto pela afiliada do usuário.
+    Retorna (novo_texto, chaves_enviadas) — chaves = hashes das URLs re-linkadas."""
+    novo, chaves, _ = reescrever_mensagem_detalhada(texto, usuario)
     return novo, chaves

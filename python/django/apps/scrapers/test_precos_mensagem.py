@@ -30,7 +30,19 @@ class PrecoPublicavelTests(TestCase):
             "evidencia": {"promotion": {"present": True, "coupon_confirmed": True}},
         }
         base.update(campos)
-        return Produto.objects.create(**base)
+        produto = Produto.objects.create(**base)
+        # Observação NOSSA de que o item já custou o preço de lista. Sem ela o "DE"
+        # não aparece — ver `_desconto_comprovado`: a mensagem não risca um preço
+        # que nunca observamos. Estes testes medem QUAL número é anunciado, não a
+        # prova, então a prova entra na fixture.
+        from apps.scrapers.models import PrecoHistorico
+        from apps.scrapers.precos import chave_produto
+
+        PrecoHistorico.objects.create(
+            marketplace=produto.marketplace, chave=chave_produto(produto),
+            preco=float(base["preco_sem_desconto"]),
+        )
+        return produto
 
     def test_usa_preco_efetivo_quando_menor_que_a_vitrine(self):
         produto = self._produto()
@@ -124,6 +136,16 @@ class MensagemDeProdutoDeCupomMLTests(TestCase):
         )
         cupom = Cupom(campanha_id="99", titulo="20% OFF",
                       tipo_desconto="porcentagem", valor_desconto=20)
+        # Prova de que o item já custou a vitrine. Sem observação nossa o "DE" não
+        # é impresso (`_desconto_comprovado`), e o que este teste mede é QUAL preço
+        # a campanha do ML anuncia — não a existência da prova.
+        from apps.scrapers.models import PrecoHistorico
+        from apps.scrapers.precos import chave_produto
+
+        PrecoHistorico.objects.create(
+            marketplace=produto.marketplace, chave=chave_produto(produto),
+            preco=250.0,
+        )
 
         texto = montar_mensagem(produto, "https://meli.la/abc", cupom)
 
