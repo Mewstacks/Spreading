@@ -625,6 +625,14 @@ else:
 
 # Cooldown (horas) entre alertas repetidos de conexão caída p/ não floodar e-mail.
 ALERTA_CONEXAO_COOLDOWN_H = int(os.getenv("ALERTA_CONEXAO_COOLDOWN_H", "6"))
+# Canal de operação: para onde vai um incidente `error` quando ele ABRE. Sem isto o
+# problema espera alguém abrir a tela de Saúde — o modo de falha de 16, 17 e 18/08.
+# ALERTA_TELEGRAM_CHAT_ID usa o TELEGRAM_BOT_TOKEN que já existe; ALERTA_EMAILS é
+# lista separada por vírgula. Vazio nos dois = canal desligado (padrão em dev).
+ALERTA_TELEGRAM_CHAT_ID = os.getenv("ALERTA_TELEGRAM_CHAT_ID", "")
+ALERTA_EMAILS = os.getenv("ALERTA_EMAILS", "")
+# Silêncio por chave de incidente. Alerta que toca demais é alerta que se ignora.
+ALERTA_SILENCIO_MIN = int(os.getenv("ALERTA_SILENCIO_MIN", "60"))
 # (ML_AUTH_STALE_DIAS saiu: a idade do arquivo deixou de ser critério de sessão viva
 # quando conexoes.py passou a perguntar ao próprio ML, e o único leitor da variável
 # já era código morto.)

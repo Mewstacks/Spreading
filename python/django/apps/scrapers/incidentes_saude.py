@@ -97,7 +97,12 @@ def processar_evento(evento):
                   "ultima_mensagem": evento.mensagem, "contexto": evento.contexto or {},
                   "evento_origem": evento},
     )
+    reaberto = False
     if not criado:
+        # Lido ANTES do update: depois de gravar, `status` já é "aberto" e não dá mais
+        # para distinguir "reabriu um incidente resolvido" — informação nova, que
+        # merece alerta — de "somou a um que já estava aberto".
+        reaberto = incidente.status == "concluido"
         incidente.ocorrencias += 1
         incidente.ultima_ocorrencia = evento.criado_em
         incidente.ultima_mensagem = evento.mensagem
@@ -109,6 +114,10 @@ def processar_evento(evento):
         incidente.confirmacao = ""
         incidente.save(update_fields=["ocorrencias", "ultima_ocorrencia", "ultima_mensagem", "contexto",
             "evento_origem", "level", "status", "confirmado_em", "confirmacao"])
+    # Detectar não é avisar. Sem esta linha o incidente espera alguém abrir a tela de
+    # Saúde — que é exatamente como a produção passou três dias fora do ar em agosto.
+    from apps.scrapers.alertas import notificar_incidente
+    notificar_incidente(incidente, criado=criado, reaberto=reaberto)
     return incidente
 
 

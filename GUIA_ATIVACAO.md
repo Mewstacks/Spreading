@@ -101,11 +101,42 @@ ligar o próximo — canal do Telegram muda de dono e de qualidade sem aviso.
 
 ---
 
+## 4. Alerta de incidente — faça este primeiro (5 minutos)
+
+Sem isto, um problema em produção espera alguém abrir a tela de Saúde. Foi assim que
+a produção passou 16, 17 e 18/08 fora do ar.
+
+Quando um incidente de nível `error` **abre** (ou reabre depois de resolvido), o
+sistema manda uma mensagem. Ocorrência repetida do mesmo problema não repete o aviso,
+e cada chave fica em silêncio por `ALERTA_SILENCIO_MIN` minutos.
+
+**Por Telegram** (usa o `TELEGRAM_BOT_TOKEN` que você já tem):
+
+1. Fale com o seu bot no Telegram e mande qualquer mensagem
+2. Pegue o `chat_id` em `https://api.telegram.org/bot<SEU_TOKEN>/getUpdates`
+3. Publique:
+
+```bash
+fly secrets set --app spreading-web ALERTA_TELEGRAM_CHAT_ID=SEU_CHAT_ID
+```
+
+**Ou por e-mail** (o SMTP já está configurado):
+
+```bash
+fly secrets set --app spreading-web ALERTA_EMAILS=voce@dominio.com,socio@dominio.com
+```
+
+Pode usar os dois ao mesmo tempo. Sem nenhum dos dois, o canal fica desligado e os
+incidentes continuam só na tela de Saúde — que é o comportamento de hoje.
+
+---
+
 ## Ordem sugerida
 
-1. **Shopee** — resultado imediato, risco zero
-2. **Awin** — maior ganho de cupom por hora investida
-3. **Telegram** — mais volume, mas é o que exige mais acompanhamento
+1. **Alerta de incidente** — 5 minutos, e é o que impede a próxima queda silenciosa
+2. **Shopee** — resultado imediato, risco zero
+3. **Awin** — maior ganho de cupom por hora investida
+4. **Telegram (canais)** — mais volume, mas é o que exige mais acompanhamento
 
 ---
 
