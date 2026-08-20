@@ -41,6 +41,27 @@ CARD_DE_VITRINE = """
 """
 
 
+def _projetar(usuario, channel="whatsapp"):
+    """Marca como `ready` toda projeção de aviso do catálogo ativo.
+
+    `selecionar_cupons_para_aviso` só enxerga cupom com projeção pronta, e a
+    projeção real depende de sessão do ML e link de cupom verificado — condições
+    de ambiente, não a regra sob teste. Fixá-las aqui é o que faz o teste falhar
+    por causa da regra, e não por ausência de dado.
+    """
+    from apps.accounts.models import organization_for_user
+    from apps.scrapers.models import CupomDisponibilidade, CupomNormalizado
+
+    organization = organization_for_user(usuario)
+    for cupom in CupomNormalizado.objects.filter(estado="ativo").exclude(codigo=""):
+        CupomDisponibilidade.objects.update_or_create(
+            organization=organization, usuario=usuario, cupom=cupom,
+            channel=channel, use_mode="code_notice",
+            defaults={"stage": "ready", "category": "", "reason_code": "",
+                      "safe_detail": "", "retry_at": None},
+        )
+
+
 def _editor():
     """Stub do schema_editor: `_system_context` só precisa da conexão.
 
@@ -528,9 +549,12 @@ class AvisoDeCuponsTests(TestCase):
             horas_cooldown=24, incluir_restritos=True,
         )
 
+        _projetar(self.usuario)
         escolhidos = selecionar_cupons_para_aviso(configuracao, self.usuario)
 
         self.assertNotIn(aberto.id, [c.id for c in escolhidos])
+        # A linha estreita do mesmo código continua elegível e leva o escopo certo.
+        self.assertIn("MELIPROMO", [c.codigo for c in escolhidos])
 
 
 class CupomDeComunidadeTests(TestCase):
@@ -593,3 +617,51 @@ class CupomDeComunidadeTests(TestCase):
 
         self.assertFalse(cupom_de_comunidade(cupom))
         self.assertIsNone(_preflight(cupom, self.usuario))
+
+
+class AvisoSemCodigoRepetidoTests(TestCase):
+    """O mesmo código chega por três fontes; a mensagem deve trazê-lo uma vez."""
+
+    def setUp(self):
+        self.usuario = get_user_model().objects.create_user("dono", password="x")
+        self.oficial, _ = FonteIngestao.objects.get_or_create(
+            slug="ml-cupons-afiliados",
+            defaults={"marketplace": "mercadolivre", "nome": "Cupons afiliados"})
+        self.promobit, _ = FonteIngestao.objects.get_or_create(
+            slug="promobit-cupons",
+            defaults={"marketplace": "mercadolivre", "nome": "Promobit"})
+        self.telegram, _ = FonteIngestao.objects.get_or_create(
+            slug="telegram-publico",
+            defaults={"marketplace": "mercadolivre", "nome": "Telegram"})
+
+    def _cupom(self, fonte, *, validade=None):
+        return CupomNormalizado.objects.create(
+            fonte=fonte, external_id=f"{fonte.slug}:CUPOMDOML",
+            marketplace="mercadolivre", titulo="Cupom CUPOMDOML",
+            codigo="CUPOMDOML", link="https://www.mercadolivre.com.br/",
+            redemption_mode="code", estado="ativo", validade=validade,
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 25.0,
+                    "valor_minimo": 29.0, "desconto_maximo": 500.0,
+                    "modo_resgate": "codigo", "escopo": "Sellers"},
+        )
+
+    def test_uma_linha_por_codigo_e_a_oficial_vence(self):
+        from types import SimpleNamespace
+
+        from apps.scrapers.ofertas import selecionar_cupons_para_aviso
+        oficial = self._cupom(self.oficial, validade=timezone.now()
+                              + timezone.timedelta(days=10))
+        self._cupom(self.promobit)
+        self._cupom(self.telegram)
+        configuracao = SimpleNamespace(
+            marketplace="mercadolivre", canal="whatsapp", grupo_id="g@g.us",
+            horas_cooldown=24, incluir_restritos=True,
+        )
+
+        _projetar(self.usuario)
+        escolhidos = selecionar_cupons_para_aviso(configuracao, self.usuario)
+
+        codigos = [c.codigo for c in escolhidos]
+        self.assertEqual(codigos.count("CUPOMDOML"), 1)
+        if escolhidos:
+            self.assertEqual(escolhidos[0].id, oficial.id)

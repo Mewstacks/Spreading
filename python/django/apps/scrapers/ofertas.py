@@ -1729,8 +1729,22 @@ def selecionar_cupons_para_aviso(configuracao, usuario, limite=LIMITE_CUPONS_AVI
                 cupom.integracao.habilitada and cupom.integracao.status == "conectada"):
             continue
         candidatos.append(cupom)
-    candidatos.sort(key=score_cupom, reverse=True)
-    return candidatos[:limite]
+    # Um código, um bloco. O mesmo código chega por até três fontes ao mesmo tempo
+    # (oficial, Promobit, Telegram) e cada uma é uma linha própria do catálogo:
+    # sem deduplicar, a mensagem repetia "cupom: CUPOMDOML" três vezes, cada uma
+    # com os termos da fonte que a gerou. Entre as cópias vence a que NÃO é de
+    # comunidade — é ela que traz validade e escopo publicados pela loja.
+    from apps.scrapers.coupon_rules import cupom_de_comunidade
+
+    candidatos.sort(key=lambda c: (cupom_de_comunidade(c), -score_cupom(c)))
+    unicos, vistos = [], set()
+    for cupom in candidatos:
+        codigo = str(cupom.codigo or "").strip().upper()
+        if codigo in vistos:
+            continue
+        vistos.add(codigo)
+        unicos.append(cupom)
+    return unicos[:limite]
 
 
 def enviar_aviso_cupons(cupons, grupo_id, *, canal="whatsapp", usuario=None,
