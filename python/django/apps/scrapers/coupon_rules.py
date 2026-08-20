@@ -309,7 +309,64 @@ def listagem_publica_ml(cupom) -> str:
     return ""
 
 
-def escopo_delimitado(cupom) -> bool:
+def codigos_com_escopo_contestado(cupons) -> set:
+    """Códigos que aparecem no catálogo como site inteiro E como recorte.
+
+    Recebe cupons já carregados para que quem varre o catálogo em laço não pague
+    uma consulta por item. Ver `site_wide_confiavel` para o porquê.
+    """
+    site, estreito = set(), set()
+    for cupom in cupons:
+        codigo = _texto(getattr(cupom, "codigo", "")).upper()
+        if not codigo:
+            continue
+        alvo = site if regras_do_cupom(cupom).get("is_mar_aberto") else estreito
+        alvo.add(codigo)
+    return site & estreito
+
+
+def site_wide_confiavel(cupom, *, codigos_contestados=None) -> bool:
+    """A alegação "vale para o site inteiro" desta linha merece crédito?
+
+    `is_mar_aberto` vem da fonte e NUNCA foi verificado por nós — e é a única
+    coisa que o sistema exigia para carimbar um código em qualquer produto. Em
+    20/08/2026 isso pôs o MELIPROMO em 45 das 73 publicações de 24h.
+
+    A própria fonte desmentia a alegação: a página oficial de afiliados publicou
+    duas linhas para o mesmo código — uma com ``is_mar_aberto: true`` e outra com
+    escopo ``Vehicle Parts & Accessories``. O checkout do ML confirmou a segunda
+    ("este cupom ainda pode ser usado em produtos selecionados"). Como
+    `persist_items` nunca apaga, a linha antiga continuou ativa e valendo até o
+    fim da validade.
+
+    Regra: um código que também existe com escopo estreito perde o passe livre e
+    passa a precisar da mesma prova que todos os outros — associação confirmada
+    por listagem. Cupom site inteiro sem contradição segue como estava.
+
+    `codigos_contestados` (de `codigos_com_escopo_contestado`) evita a consulta
+    por cupom em quem já tem o catálogo em memória.
+    """
+    brutas = getattr(cupom, "regras", None)
+    legado = isinstance(brutas, Mapping) and brutas.get("site_wide") is True
+    if not (regras_do_cupom(cupom).get("is_mar_aberto") or legado):
+        return False
+    codigo = _texto(getattr(cupom, "codigo", "")).upper()
+    if not codigo:
+        # Cupom de ativação não tem código digitável para contradizer.
+        return True
+    if codigos_contestados is not None:
+        return codigo not in codigos_contestados
+    from apps.scrapers.models import CupomNormalizado
+
+    return not CupomNormalizado.objects.filter(
+        marketplace=getattr(cupom, "marketplace", ""), estado="ativo",
+        codigo__iexact=codigo,
+    ).exclude(pk=getattr(cupom, "pk", None)).exclude(
+        regras__is_mar_aberto=True,
+    ).exists()
+
+
+def escopo_delimitado(cupom, *, codigos_contestados=None) -> bool:
     """O cupom recorta um conjunto de produtos que dá para verificar?
 
     Existe porque "cupom com código publicável" não é a mesma coisa que "cupom que
@@ -321,7 +378,7 @@ def escopo_delimitado(cupom) -> bool:
 
     Delimita o escopo quem tem:
 
-    * ``is_mar_aberto`` — vale para o site inteiro, então qualquer item serve;
+    * site inteiro NÃO contestado (`site_wide_confiavel`) — qualquer item serve;
     * uma listagem pública (``listagem_publica_ml``/``container_url``), que é o
       conjunto de produtos participantes e pode ser aberta por qualquer pessoa;
     * ids explícitos de produto na evidência (ASIN, item id, product id).
@@ -331,9 +388,9 @@ def escopo_delimitado(cupom) -> bool:
     e tratá-la como "a lista do cupom" fabrica associação — ver
     `coupon_products._coletar_ml_remoto`.
     """
+    # Prova verificável primeiro: uma listagem ou ids valem mesmo quando a fonte
+    # também alegou site inteiro — a alegação é que é frágil, não o container.
     regras = regras_do_cupom(cupom)
-    if regras.get("is_mar_aberto"):
-        return True
     if _texto(regras.get("container_url")):
         return True
     evidencia = getattr(cupom, "evidencia", None)
@@ -342,9 +399,9 @@ def escopo_delimitado(cupom) -> bool:
             if evidencia.get(chave):
                 return True
     marketplace = str(getattr(cupom, "marketplace", "") or "").casefold()
-    if marketplace == "mercadolivre":
-        return bool(listagem_publica_ml(cupom))
-    return False
+    if marketplace == "mercadolivre" and listagem_publica_ml(cupom):
+        return True
+    return site_wide_confiavel(cupom, codigos_contestados=codigos_contestados)
 
 
 # EvidenceStrength — quão forte é a prova de que este cupom delimita um conjunto

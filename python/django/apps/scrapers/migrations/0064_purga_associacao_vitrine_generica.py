@@ -1,21 +1,29 @@
-"""Apaga as associações cupom–produto colhidas numa vitrine genérica do ML.
+"""Expira as associações cupom–produto que nunca foram provadas.
 
-`coupon_products._coletar_ml_remoto` aceitava qualquer URL `*.mercadolivre.com.br`
-como "a lista de produtos deste cupom". Dois endereços caíam aí sem ser lista de
-nada: `https://www.mercadolivre.com.br/ofertas/cupons`, gravado em todo código
-raspado da vitrine, e `https://www.mercadolivre.com.br/`, usado como destino de
-reserva quando a fonte oficial não publica um container. As duas páginas respondem
-200 com dezenas de cards, e cada card virava um `ProdutoCupom` "confirmado".
+Duas origens, medidas em produção em 20/08/2026, quando 45 das 73 publicações de
+24 horas saíram com o mesmo código:
 
-O efeito em produção: um cupom de 25% restrito a `Vehicle Parts & Accessories`
-apareceu anunciado num tablet e num jogo de panelas, porque esses itens estavam na
-vitrine no momento da coleta. O código foi corrigido, mas as relações já gravadas
-continuariam sendo publicadas até o cupom expirar — por isso a limpeza.
+1. **Alegação de site inteiro desmentida pela própria fonte.** A página oficial de
+   afiliados publicou o MELIPROMO duas vezes: uma linha com ``is_mar_aberto: true``
+   e outra com escopo ``Vehicle Parts & Accessories``. `persist_items` nunca apaga,
+   então as duas ficaram ativas. `coupon_products._site_inteiro` acreditou na
+   primeira e gravou 32 vínculos "confirmados" — parafusadeira, whey, monitor,
+   panelas — e a mensagem passou a anunciar o código em qualquer oferta. O
+   checkout do ML dizia a verdade: "este cupom ainda pode ser usado em produtos
+   selecionados".
 
-Critério: apaga somente `regra="pagina_oficial"` cuja `url` NÃO é uma listagem
-(`lista.mercadolivre.com.br`). Associação de container (`regra="container"`) e as
-listagens legítimas ficam intactas. O preparo de cada cupom afetado é reagendado
-para que o pipeline reavalie o escopo com o código novo.
+2. **Vitrine genérica lida como lista do cupom.** `_coletar_ml_remoto` aceitava
+   qualquer URL ``*.mercadolivre.com.br`` como a listagem do cupom, inclusive
+   ``/ofertas/cupons`` e a home. Ambas devolvem dezenas de cards, e cada card
+   virava um vínculo confirmado.
+
+Aqui os vínculos viram ``expirado`` — o mesmo estado que `preparar_cupom` usa
+quando um produto deixa de ser aplicável. Nada é apagado: se a associação for
+legítima, a próxima preparação a reconfirma. As preparações afetadas são
+reagendadas para que isso aconteça no primeiro ciclo depois do deploy, em vez de
+esperar a validade do cupom.
+
+Associação de container (``regra="container"``) e listagens reais não são tocadas.
 """
 from urllib.parse import urlsplit
 
@@ -34,24 +42,57 @@ def _e_listagem(url) -> bool:
     return (partes.hostname or "").casefold().rstrip(".") == HOST_LISTAGEM
 
 
-def purgar(apps, schema_editor):
+def _codigos_contestados(CupomNormalizado):
+    """Códigos que existem como site inteiro E como recorte, ambos ativos."""
+    site, estreito = set(), set()
+    for cupom in CupomNormalizado.objects.filter(estado="ativo").only(
+            "id", "codigo", "regras"):
+        codigo = str(cupom.codigo or "").strip().upper()
+        if not codigo:
+            continue
+        regras = cupom.regras or {}
+        aberto = bool(regras.get("is_mar_aberto") or regras.get("site_wide") is True)
+        (site if aberto else estreito).add(codigo)
+    return site & estreito
+
+
+def expirar(apps, schema_editor):
+    CupomNormalizado = apps.get_model("scrapers", "CupomNormalizado")
     ProdutoCupom = apps.get_model("scrapers", "ProdutoCupom")
     CupomPreparacao = apps.get_model("scrapers", "CupomPreparacao")
 
-    suspeitas = ProdutoCupom.objects.filter(evidencia__regra="pagina_oficial")
-    condenadas = [
-        relacao.id for relacao in suspeitas.only("id", "evidencia").iterator()
-        if not _e_listagem((relacao.evidencia or {}).get("url"))
-    ]
+    contestados = _codigos_contestados(CupomNormalizado)
+    cupons_contestados = set()
+    if contestados:
+        for cupom in CupomNormalizado.objects.filter(estado="ativo").only(
+                "id", "codigo", "regras"):
+            regras = cupom.regras or {}
+            if not (regras.get("is_mar_aberto") or regras.get("site_wide") is True):
+                continue
+            if str(cupom.codigo or "").strip().upper() in contestados:
+                cupons_contestados.add(cupom.id)
+
+    condenadas = set(
+        ProdutoCupom.objects.filter(
+            status="confirmado", cupom_id__in=cupons_contestados,
+        ).values_list("id", flat=True)
+    ) if cupons_contestados else set()
+
+    for relacao in ProdutoCupom.objects.filter(
+            status="confirmado", evidencia__regra="pagina_oficial",
+    ).only("id", "evidencia").iterator(chunk_size=2000):
+        if not _e_listagem((relacao.evidencia or {}).get("url")):
+            condenadas.add(relacao.id)
+
     if not condenadas:
         return
     cupons = set(
         ProdutoCupom.objects.filter(id__in=condenadas)
         .values_list("cupom_id", flat=True)
     )
-    ProdutoCupom.objects.filter(id__in=condenadas).delete()
+    ProdutoCupom.objects.filter(id__in=condenadas).update(status="expirado")
     # `verificado_em=None` tira o preparo da janela de cache de 3h; sem isso o
-    # cupom continuaria "pronto" com as relações que acabaram de ser apagadas.
+    # cupom continuaria "pronto" apoiado nos vínculos que acabaram de cair.
     CupomPreparacao.objects.filter(cupom_id__in=cupons).update(
         status="vazio", verificado_em=None, proxima_tentativa=None,
         reason_code="scope_undelimited", produtos_chave="",
@@ -63,5 +104,5 @@ class Migration(migrations.Migration):
     dependencies = [("scrapers", "0063_coupon_pipeline_constraints")]
 
     operations = [
-        migrations.RunPython(purgar, migrations.RunPython.noop, elidable=True),
+        migrations.RunPython(expirar, migrations.RunPython.noop, elidable=True),
     ]

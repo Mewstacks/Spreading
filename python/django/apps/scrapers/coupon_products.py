@@ -290,9 +290,21 @@ def _usuario_do_preparo(cupom, usuario):
 
 
 def _site_inteiro(cupom):
+    """Este cupom prova TODO produto do catálogo de uma vez?
+
+    É o portão mais caro do sistema: quem passa aqui recebe um `ProdutoCupom`
+    "confirmado" para cada item ativo, e a mensagem passa a anunciar o código em
+    qualquer oferta. Em 20/08/2026 um único cupom marcado site inteiro pela fonte
+    — MELIPROMO, desmentido pela própria fonte na linha seguinte — gerou 32
+    vínculos e apareceu em 45 das 73 publicações do dia.
+
+    Por isso a alegação da fonte passa antes por `site_wide_confiavel`.
+    """
+    from apps.scrapers.coupon_rules import site_wide_confiavel
+
     regras = getattr(cupom, "regras", {}) or {}
     if regras.get("is_mar_aberto") or regras.get("site_wide") is True:
-        return True
+        return site_wide_confiavel(cupom)
     escopo = str(regras.get("escopo") or "").strip().casefold()
     return escopo in {"site inteiro", "todo o site", "todos os produtos", "loja inteira"}
 

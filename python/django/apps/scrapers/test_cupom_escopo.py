@@ -253,22 +253,26 @@ class EscopoDelimitadoUnitTests(SimpleTestCase):
 
         sem_lista = _Cupom({"modo_resgate": "codigo"},
                            link="https://www.mercadolivre.com.br/ofertas/cupons")
-        self.assertFalse(escopo_delimitado(sem_lista))
+        self.assertFalse(escopo_delimitado(sem_lista, codigos_contestados=set()))
 
+        # `codigos_contestados` explícito mantém o teste sem banco: a checagem de
+        # contradição só consulta quando o chamador não trouxe o conjunto pronto.
         site_inteiro = _Cupom({"modo_resgate": "codigo", "is_mar_aberto": True})
-        self.assertTrue(escopo_delimitado(site_inteiro))
+        self.assertTrue(escopo_delimitado(site_inteiro, codigos_contestados=set()))
+        self.assertFalse(
+            escopo_delimitado(site_inteiro, codigos_contestados={"ABC10"}))
 
         com_container = _Cupom({
             "modo_resgate": "codigo",
             "container_url": "https://lista.mercadolivre.com.br/_Container_x"})
-        self.assertTrue(escopo_delimitado(com_container))
+        self.assertTrue(escopo_delimitado(com_container, codigos_contestados=set()))
 
         com_listagem = _Cupom({"modo_resgate": "codigo"},
                               link="https://lista.mercadolivre.com.br/_Container_y")
-        self.assertTrue(escopo_delimitado(com_listagem))
+        self.assertTrue(escopo_delimitado(com_listagem, codigos_contestados=set()))
 
         com_ids = _Cupom({"modo_resgate": "codigo"}, evidencia={"asins": ["B0ABC"]})
-        self.assertTrue(escopo_delimitado(com_ids))
+        self.assertTrue(escopo_delimitado(com_ids, codigos_contestados=set()))
 
 
 class PurgaDaVitrineTests(TestCase):
@@ -317,10 +321,118 @@ class PurgaDaVitrineTests(TestCase):
             codigo="CONT",
             url="https://lista.mercadolivre.com.br/_Container_x", regra="container")
 
-        migracao.purgar(registro, None)
+        migracao.expirar(registro, None)
 
-        vivos = set(ProdutoCupom.objects.values_list("id", flat=True))
+        vivos = set(ProdutoCupom.objects.filter(
+            status="confirmado").values_list("id", flat=True))
         self.assertNotIn(vitrine.id, vivos)
         self.assertNotIn(home.id, vivos)
         self.assertIn(listagem.id, vivos)
         self.assertIn(container.id, vivos)
+
+
+class SiteInteiroContestadoTests(TestCase):
+    """O caso real: a fonte publicou o MESMO código como site inteiro e como recorte.
+
+    Em produção, 20/08/2026: `afiliados:MELIPROMO:site:...` com
+    ``is_mar_aberto=True`` e `afiliados:MELIPROMO:geral:...` com escopo
+    ``Vehicle Parts & Accessories``, as duas linhas ativas ao mesmo tempo. A
+    primeira valia como passe livre e pôs o código em 45 das 73 publicações de 24h.
+    """
+
+    def setUp(self):
+        self.usuario = get_user_model().objects.create_user("dono", password="x")
+        self.fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="ml-cupons-afiliados",
+            defaults={"marketplace": "mercadolivre", "nome": "Cupons afiliados"})
+        self.produto = Produto.objects.create(
+            marketplace="mercadolivre",
+            nome="Conjunto de Panelas Brinox Ceramic Life Smart Plus 8 Peças",
+            link_produto="https://www.mercadolivre.com.br/panelas/p/MLB333",
+            imagem_url="https://http2.mlstatic.com/p.jpg",
+            preco_sem_desconto=1099.0, preco_com_cupom=569.04, preco_efetivo=569.04,
+            estado="ativo", origem="oferta", fonte="mercadolivre-web",
+            macro_categoria="Casa", ultima_verificacao=timezone.now(),
+        )
+
+    def _linha(self, sufixo, *, site, escopo):
+        return CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id=f"afiliados:MELIPROMO:{sufixo}",
+            marketplace="mercadolivre", titulo=f"MELIPROMO — 25% OFF ({escopo})",
+            codigo="MELIPROMO", link="https://www.mercadolivre.com.br/",
+            redemption_mode="code", estado="ativo",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 25.0,
+                    "valor_minimo": 19.0, "desconto_maximo": 100.0,
+                    "modo_resgate": "codigo", "escopo": escopo,
+                    "container_url": "", "container_name": "",
+                    "is_mar_aberto": site},
+            evidencia={"fonte": "afiliados-github"},
+        )
+
+    def test_gemeo_estreito_derruba_o_passe_livre(self):
+        from apps.scrapers.coupon_rules import site_wide_confiavel
+        from apps.scrapers.ofertas import (
+            _melhor_cupom_normalizado_obj, montar_mensagem,
+        )
+        aberto = self._linha("site", site=True, escopo="site inteiro")
+        self._linha("geral", site=False, escopo="Vehicle Parts & Accessories")
+
+        self.assertFalse(site_wide_confiavel(aberto))
+        self.assertIsNone(
+            _melhor_cupom_normalizado_obj(self.produto, usuario=self.usuario))
+        mensagem = montar_mensagem(
+            self.produto, "https://meli.la/122qTzh", None, usuario=self.usuario)
+        self.assertNotIn("MELIPROMO", mensagem)
+
+    def test_sem_gemeo_o_site_inteiro_continua_valendo(self):
+        from apps.scrapers.coupon_rules import site_wide_confiavel
+        from apps.scrapers.ofertas import _melhor_cupom_normalizado_obj
+        aberto = self._linha("site", site=True, escopo="site inteiro")
+
+        self.assertTrue(site_wide_confiavel(aberto))
+        escolhido = _melhor_cupom_normalizado_obj(self.produto, usuario=self.usuario)
+        self.assertEqual(getattr(escolhido, "id", None), aberto.id)
+
+    def test_contestado_nao_prova_o_catalogo_inteiro(self):
+        from apps.scrapers.coupon_products import _site_inteiro, _base_produtos
+        aberto = self._linha("site", site=True, escopo="site inteiro")
+        self._linha("geral", site=False, escopo="Vehicle Parts & Accessories")
+
+        self.assertFalse(_site_inteiro(aberto))
+        self.assertEqual(_base_produtos(aberto, None), [])
+
+    def test_nao_contestado_continua_provando_o_catalogo(self):
+        from apps.scrapers.coupon_products import _site_inteiro, _base_produtos
+        aberto = self._linha("site", site=True, escopo="site inteiro")
+
+        self.assertTrue(_site_inteiro(aberto))
+        self.assertEqual(
+            [p.id for p in _base_produtos(aberto, None)], [self.produto.id])
+
+    def test_migracao_expira_os_vinculos_do_contestado(self):
+        from importlib import import_module
+
+        from django.apps import apps as registro
+
+        migracao = import_module(
+            "apps.scrapers.migrations.0064_purga_associacao_vitrine_generica")
+        aberto = self._linha("site", site=True, escopo="site inteiro")
+        estreito = self._linha(
+            "geral", site=False, escopo="Vehicle Parts & Accessories")
+        massa = ProdutoCupom.objects.create(
+            produto=self.produto, cupom=aberto, status="confirmado",
+            verificado_em=timezone.now(),
+            evidencia={"regra": "associacao_comprovada"},
+        )
+        legitima = ProdutoCupom.objects.create(
+            produto=self.produto, cupom=estreito, status="confirmado",
+            verificado_em=timezone.now(),
+            evidencia={"regra": "container", "item_id": "MLB333"},
+        )
+
+        migracao.expirar(registro, None)
+
+        massa.refresh_from_db()
+        legitima.refresh_from_db()
+        self.assertEqual(massa.status, "expirado")
+        self.assertEqual(legitima.status, "confirmado")

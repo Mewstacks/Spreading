@@ -839,8 +839,12 @@ def _produto_para_cupom(cupom):
         if produto:
             return produto
 
+    from apps.scrapers.coupon_rules import site_wide_confiavel
+
     regras = regras_do_cupom(cupom)
-    if regras.get("is_mar_aberto"):
+    # Só cupom site inteiro NÃO desmentido pela própria fonte pode pegar um item
+    # qualquer do catálogo como vitrine. Ver `site_wide_confiavel`.
+    if site_wide_confiavel(cupom):
         minimo = regras.get("valor_minimo") or 0
         return ativos.filter(preco_sem_desconto__gte=minimo).order_by(
             "-ultima_observacao").first()
@@ -904,9 +908,11 @@ def produtos_do_cupom(cupom, limite=9, macro=None):
         external_id = str(getattr(cupom, "external_id", "") or "")
         if external_id.startswith("campanha:"):
             qs = ativos.filter(campanha_id=external_id.split(":", 1)[1])
-        elif regras_do_cupom(cupom).get("is_mar_aberto"):
-            minimo = regras_do_cupom(cupom).get("valor_minimo") or 0
-            qs = ativos.filter(preco_sem_desconto__gte=minimo)
+        else:
+            from apps.scrapers.coupon_rules import site_wide_confiavel
+            if site_wide_confiavel(cupom):
+                minimo = regras_do_cupom(cupom).get("valor_minimo") or 0
+                qs = ativos.filter(preco_sem_desconto__gte=minimo)
     itens = list(_por_desconto(qs)[:limite]) if qs is not None else []
     if itens:
         return itens
@@ -2381,8 +2387,9 @@ def _melhor_cupom_normalizado_obj(produto, *, usuario=None):
     """
     from apps.scrapers.models import CupomNormalizado, ProdutoCupom
     from apps.scrapers.coupon_rules import (
-        codigo_publicavel, cupom_publicavel, cupons_visiveis_q,
-        escopo_delimitado, regras_do_cupom,
+        codigo_publicavel, codigos_com_escopo_contestado, cupom_publicavel,
+        cupons_visiveis_q, escopo_delimitado, regras_do_cupom,
+        site_wide_confiavel,
     )
     from apps.scrapers.maintenance import cupons_frescos_q
     if getattr(produto, "marketplace", "mercadolivre") not in ("mercadolivre", ""):
@@ -2400,18 +2407,21 @@ def _melhor_cupom_normalizado_obj(produto, *, usuario=None):
 
     preco = getattr(produto, "preco_com_cupom", 0) or 0
     melhor, melhor_chave = None, None
+    # Uma passada pelo catálogo já carregado: evita uma consulta por cupom dentro
+    # do laço só para descobrir se a alegação de site inteiro é contestada.
+    contestados = codigos_com_escopo_contestado(base)
     for c in base:
         regras = regras_do_cupom(c)
-        if not (regras.get("is_mar_aberto") or c.id in ids_confirmados):
+        site_inteiro = site_wide_confiavel(c, codigos_contestados=contestados)
+        if not (site_inteiro or c.id in ids_confirmados):
             continue
         # Segundo portão, e o que faltava: um `ProdutoCupom` confirmado só vale
         # como prova se o cupom delimita algum conjunto de produtos. Quando ele
         # não delimita, a "prova" foi colhida numa vitrine genérica do ML e liga o
-        # código a qualquer item que estivesse na página naquele minuto — o defeito
-        # que colou um cupom de acessórios automotivos num tablet. As relações
-        # fabricadas assim são apagadas pela migração 0064; esta guarda impede que
+        # código a qualquer item que estivesse na página naquele minuto. As relações
+        # fabricadas assim são expiradas pela migração 0064; esta guarda impede que
         # qualquer caminho novo volte a publicá-las.
-        if not (regras.get("is_mar_aberto") or escopo_delimitado(c)):
+        if not escopo_delimitado(c, codigos_contestados=contestados):
             continue
         if not cupom_publicavel(c):
             continue
