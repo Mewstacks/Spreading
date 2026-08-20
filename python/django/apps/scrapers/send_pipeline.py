@@ -5,6 +5,7 @@ import hashlib
 import base64
 import binascii
 import io
+import logging
 import random
 import uuid
 from datetime import timedelta
@@ -14,6 +15,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.scrapers.models import Publicacao, PublicacaoEvento, PublicacaoTentativa
+
+logger = logging.getLogger(__name__)
 
 
 STAGES = (
@@ -32,6 +35,16 @@ _NEXT = {
     "transport_queued": {"transport_started", "permanent_failed", "cancelled"},
     "transport_started": {"confirmation_pending", "confirmed", "permanent_failed", "uncertain"},
     "confirmation_pending": {"confirmed", "uncertain"},
+    # "incerto" é o desfecho quando o worker estoura o próprio orçamento de 55s no
+    # `sendMessage`. Ele diz "não sei", não "não foi" — e o ledger do Node muitas
+    # vezes sabe, porque `confirmarMensagem` conclui depois que a nossa leitura já
+    # desistiu. Sem esta aresta o registro ficava congelado: em produção, 13 de 129
+    # tentativas em dois dias em limbo permanente, sem ninguém para desempatar.
+    #
+    # A aresta é de mão única e só sobe com PROVA (ledger em `confirmed` com id de
+    # mensagem). "incerto" nunca vira "falhou" por aqui, e nada é reenviado: o veto
+    # a repetir continua sendo o que impede a oferta de sair duas vezes no grupo.
+    "uncertain": {"confirmed"},
 }
 
 
@@ -72,9 +85,14 @@ def transition(publicacao, stage, *, reason_code="", safe_detail="", **updates):
         current = Publicacao.objects.select_for_update().get(pk=publicacao.pk)
         if current.stage == stage:
             return current
-        if current.stage in TERMINALS or current.stage == "confirmed":
+        permitido = _NEXT.get(current.stage, set())
+        # `confirmed` é final sem exceção. Os demais terminais também são, a menos
+        # que exista uma aresta declarada saindo deles — hoje só `uncertain ->
+        # confirmed`, a reconciliação pelo ledger.
+        if current.stage == "confirmed" or (
+                current.stage in TERMINALS and stage not in permitido):
             raise ValueError(f"Publicação terminal em {current.stage}")
-        if stage not in _NEXT.get(current.stage, set()):
+        if stage not in permitido:
             raise ValueError(f"Transição inválida: {current.stage} -> {stage}")
         current.stage = stage
         for field, value in updates.items():
@@ -458,3 +476,67 @@ def finish_transport(publicacao, attempt, result, *, duration_ms=0, random_fn=No
         "next_retry_at",
     ])
     return current
+
+
+# Janela de reconciliação. O ledger do Node guarda a operação por tempo limitado e
+# uma publicação antiga já foi lida por quem acompanha o grupo: reabrir o assunto
+# depois disso não muda decisão nenhuma.
+RECONCILIACAO_JANELA = timedelta(hours=6)
+
+
+def reconciliar_incertos(limit=20, agora=None, consulta=None):
+    """Pergunta ao ledger do worker o que houve com os envios 'incerto'.
+
+    O worker WhatsApp tem orçamento próprio de 55s para o `sendMessage`. Quando ele
+    estoura, devolve "incerto" — que quer dizer "não sei", não "não foi". A
+    confirmação nativa costuma chegar logo depois, e o ledger do Node registra;
+    ninguém consultava. Em produção, 13 de 129 tentativas em dois dias ficaram em
+    limbo permanente, e quem publica não tinha como saber se a oferta chegou.
+
+    Aqui NADA é reenviado. A função só troca "não sei" por "chegou" quando o ledger
+    apresenta a prova (fase ``confirmed`` com id de mensagem). Sem prova, a linha
+    fica exatamente como está — o veto a repetir continua sendo o que impede a
+    mesma oferta de sair duas vezes no grupo.
+    """
+    from apps.scrapers import whatsapp_client
+    from apps.scrapers.ofertas import wa_session_de
+
+    consultar = consulta or whatsapp_client.consultar_operacao
+    agora = agora or timezone.now()
+    alvos = Publicacao.objects.filter(
+        stage="uncertain", status="incerto",
+        criada_em__gte=agora - RECONCILIACAO_JANELA,
+    ).exclude(operation_key=None).exclude(operation_key="").select_related(
+        "usuario",
+    ).order_by("-criada_em")[:max(1, int(limit))]
+
+    confirmadas = consultadas = 0
+    for publicacao in alvos:
+        consultadas += 1
+        try:
+            resposta = consultar(
+                wa_session_de(publicacao.usuario), publicacao.operation_key)
+        except Exception:
+            logger.debug("Ledger não respondeu sobre a publicação %s",
+                         publicacao.pk, exc_info=True)
+            continue
+        if not resposta.get("encontrado") or resposta.get("fase") != "confirmed":
+            continue
+        resultado = resposta.get("resultado") or {}
+        if not (resultado.get("sucesso") and resultado.get("mensagem_id")):
+            continue
+        try:
+            transition(
+                publicacao, "confirmed", reason_code="ledger_reconciled",
+                safe_detail="O worker confirmou a entrega depois do nosso prazo.",
+                status="enviado", enviada_em=publicacao.enviada_em or agora,
+                transport_state="confirmed", erro="",
+            )
+        except ValueError:
+            # Outro caminho já resolveu esta linha entre a consulta e o update.
+            continue
+        confirmadas += 1
+    if confirmadas:
+        logger.info("Reconciliação de envios: %s de %s incerto(s) confirmado(s) "
+                    "pelo ledger.", confirmadas, consultadas)
+    return {"consultadas": consultadas, "confirmadas": confirmadas}

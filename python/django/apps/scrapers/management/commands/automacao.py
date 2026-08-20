@@ -824,6 +824,16 @@ class Command(BaseCommand):
                             logger.info("Purga de eventos: %s linha(s) removida(s)", apagados)
                     except Exception as e:
                         logger.warning("Purga de eventos falhou: %s", e)
+                # Antes de escolher a próxima oferta, fecha as pendências do ciclo
+                # anterior: um envio que ficou "incerto" no orçamento do worker
+                # muitas vezes já foi confirmado pelo ledger logo depois. Nada é
+                # reenviado aqui — só o registro é corrigido. Try próprio porque
+                # nenhuma reconciliação vale um tick de envio.
+                try:
+                    from apps.scrapers.send_pipeline import reconciliar_incertos
+                    reconciliar_incertos()
+                except Exception as e:
+                    logger.warning("Reconciliação de envios incertos falhou: %s", e)
                 fila = _consumir_fila_v2()
                 res = processar_configs_de_envio()
                 falhas_banco = 0
