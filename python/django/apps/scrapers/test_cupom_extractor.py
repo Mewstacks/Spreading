@@ -154,6 +154,11 @@ class ExtracaoTests(TestCase):
         A mensagem que estourou o orçamento foi justamente a mais valiosa — o
         "LISTÃO" com sete cupons. Perder a mensagem inteira por causa do último
         objeto cortado é o pior resultado possível.
+
+        O parser de verdade roda aqui. A versão anterior deste teste mandava
+        `_json_resposta` devolver `None` — valor que a função real nunca produz,
+        porque ela LEVANTA. O teste passava verde sobre um ramo que produção nunca
+        alcançava, e todo resgate ficava por conta de um `if` morto.
         """
         truncada = (
             '{"cupons":[{"codigo":"TODOOSITE1308","loja":"mercadolivre",'
@@ -163,11 +168,27 @@ class ExtracaoTests(TestCase):
             '{"codigo":"CORTADO","loja":"mercadoliv'
         )
         with patch("apps.scrapers.llm._cliente"), \
-                patch("apps.scrapers.llm._texto_resposta", return_value=truncada), \
-                patch("apps.scrapers.llm._json_resposta", return_value=None):
+                patch("apps.scrapers.llm._texto_resposta", return_value=truncada):
             achados = extrair(MENSAGEM_REAL)
         self.assertEqual([c["codigo"] for c in achados],
                          ["TODOOSITE1308", "CASA1508"])
+
+    def test_prosa_depois_do_json_nao_descarta_a_mensagem(self):
+        """`JSONDecodeError: Extra data`, visto em produção em 20/08/2026.
+
+        O modelo fechou o JSON e continuou escrevendo. `json.loads` recusa o texto
+        inteiro, e sem o resgate os cupons dessa mensagem — que estavam completos e
+        corretos — iam para o lixo junto com a explicação que sobrou.
+        """
+        com_prosa = (
+            '{"cupons":[{"codigo":"CASA1508","loja":"mercadolivre","tipo":"fixo",'
+            '"valor":50,"minimo":399,"teto":0,"escopo":""}]}\n\n'
+            "Observação: o segundo código da mensagem não é um cupom."
+        )
+        with patch("apps.scrapers.llm._cliente"), \
+                patch("apps.scrapers.llm._texto_resposta", return_value=com_prosa):
+            achados = extrair(MENSAGEM_REAL)
+        self.assertEqual([c["codigo"] for c in achados], ["CASA1508"])
 
     @override_settings(ANTHROPIC_API_KEY="")
     def test_sem_chave_nao_chama_nada(self):

@@ -584,10 +584,13 @@ def mapear_ofertas(max_paginas=40, substituir=True, usuario=None):
             # cursor guarda a próxima página, de onde o ciclo seguinte retoma.
             if n > pagina_inicial and interesse_pendente(
                     "django_chromium", exceto="ml_offers"):
+                # A lane flash não guarda cursor (ver acima): dizer "retoma na
+                # página N" para ela seria o log prometendo o que o código não faz.
                 logger.info(
                     "Raspagem de ofertas ML cedeu o navegador após %s de %s "
-                    "página(s); retoma na página %s.",
-                    n - pagina_inicial, max_paginas, n,
+                    "página(s); %s.", n - pagina_inicial, max_paginas,
+                    f"retoma na página {n}" if substituir
+                    else "o próximo ciclo recomeça do topo",
                 )
                 proxima_pagina = n
                 break

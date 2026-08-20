@@ -96,7 +96,9 @@ def _rodar_scrape():
     lojas = list(MARKETPLACES.items())
     # Agnóstico de loja: cada marketplace raspa suas fontes. Habilitar Amazon/Shopee
     # depois não precisa editar este loop — basta registrar a loja no registry.
-    falhas = []
+    from apps.scrapers.carga import BrowserResourceUnavailable
+
+    falhas, adiadas = [], []
     for i, (slug, mp) in enumerate(lojas):
         msg = f"[{timezone.now():%H:%M}] SCRAPE: {slug}..."
         logger.info(msg)
@@ -107,6 +109,17 @@ def _rodar_scrape():
         inicio_loja = timezone.now()
         try:
             mp.scrape_all(termos=termos)
+        except BrowserResourceUnavailable:
+            # Perder a disputa pelo navegador NÃO é fonte quebrada. O ciclo deixou
+            # de segurar o Chromium durante as lojas que nem o usam (Amazon, Awin e
+            # Shopee falam HTTP), então agora a lane pode chegar aqui e encontrar o
+            # navegador ocupado — o que antes era impossível por construção.
+            # Rebaixar a loja aqui inventaria um incidente `error` e marcaria as
+            # fontes como degradadas por uma disputa de capacidade que se resolve
+            # sozinha no próximo ciclo.
+            logger.info("Coleta da loja %s adiada: navegador ocupado por outra "
+                        "tarefa; retoma no próximo ciclo.", slug)
+            adiadas.append(slug)
         except Exception as e:
             logger.exception("Scrape '%s' falhou", slug)
             # Por loja: uma fonte quebrada (seletor mudou, bloqueio) não derruba o
@@ -128,17 +141,23 @@ def _rodar_scrape():
                 status="degraded", ultima_tentativa=timezone.now(),
                 erro_publico="Falha temporária na coleta; dados anteriores preservados.")
             st.write_state("scrape", erro=ERRO_PUBLICO)
-    sucessos = len(lojas) - len(falhas)
+    sucessos = len(lojas) - len(falhas) - len(adiadas)
     if sucessos:
         from apps.scrapers.maintenance import expire_stale
         expire_stale()
-    if not sucessos:
+    if not sucessos and falhas:
+        # Só quando houve FALHA de verdade. Um ciclo inteiro adiado por capacidade
+        # não é "todas as fontes falharam" — dizer isso encheria a tela de Saúde de
+        # incidente vermelho toda vez que o navegador estivesse ocupado.
         raise RuntimeError(f"Todas as fontes falharam: {', '.join(falhas)}")
     if falhas:
         logger.warning("SCRAPE concluído parcialmente; falharam: %s", ", ".join(falhas))
+    elif adiadas:
+        logger.info("[%s] SCRAPE concluído; %s adiada(s) por navegador ocupado: %s",
+                    timezone.now().strftime("%H:%M"), len(adiadas), ", ".join(adiadas))
     else:
         logger.info("[%s] SCRAPE concluido", timezone.now().strftime("%H:%M"))
-    return {"sucessos": sucessos, "falhas": falhas}
+    return {"sucessos": sucessos, "falhas": falhas, "adiadas": adiadas}
 
 
 def _rodar_scrape_rapido(paginas=8):
@@ -728,7 +747,18 @@ class Command(BaseCommand):
                 st.write_state("scrape", fase="raspando", ciclos=ciclos, erro="")
                 _renovar_conexoes_db()
                 from apps.scrapers.carga import operacao_pesada
-                with operacao_pesada(owner_kind="scrape") as acquired:
+                # `scrape_cycle`, e NÃO `django_chromium`. O que este lease precisa
+                # garantir é uma passada completa por vez; o navegador é só uma das
+                # etapas dela. Segurando o Chromium do começo ao fim, o ciclo o
+                # mantinha reservado também durante Amazon, Awin e Shopee — três
+                # lojas que falam HTTP e não abrem navegador nenhum. Medido em
+                # produção em 20/08/2026: às 16:29 e 16:31 a esteira de links foi
+                # adiada por "navegador ocupado" enquanto o ciclo raspava
+                # exatamente essas lojas. Quem abre Chromium (o Mercado Livre) já
+                # pede `django_chromium` por dentro, no ponto exato em que abre.
+                with operacao_pesada(
+                    resource_key="scrape_cycle", owner_kind="scrape",
+                ) as acquired:
                     if not acquired:
                         proximo = timezone.now() + timedelta(seconds=POLL)
                         st.write_state("scrape", fase="aguardando_capacidade", erro="",
@@ -747,23 +777,31 @@ class Command(BaseCommand):
                 # se ela só voltasse daqui a três horas, o cursor andaria duas
                 # páginas por ciclo e o fundo do feed levaria dias para ser lido.
                 # Retomar em minutos mantém a cobertura E a cessão.
-                retomando = _resta_varredura()
+                pagina_retomada = _resta_varredura()
+                adiadas = list(resultado.get("adiadas") or ())
+                retomando = bool(pagina_retomada or adiadas)
                 proximo = fim + (
                     timedelta(minutes=RETOMADA_MINUTOS) if retomando
                     else timedelta(minutes=30) if degradado
                     else timedelta(seconds=scrape_seg))
                 erro = ("Falha parcial: " + ", ".join(resultado["falhas"])
                         if degradado else "")
+                if retomando:
+                    detalhe = ", ".join(filter(None, [
+                        f"parou na página {pagina_retomada}" if pagina_retomada else "",
+                        f"{', '.join(adiadas)} adiada(s)" if adiadas else "",
+                    ]))
+                    resumo = (f"Ciclo {ciclos} cedeu o navegador ({detalhe}); "
+                              f"retoma em {RETOMADA_MINUTOS} min.")
+                elif degradado:
+                    resumo = f"Ciclo {ciclos} parcial; nova tentativa em 30 min."
+                else:
+                    resumo = f"Ciclo {ciclos} concluído às {fim:%H:%M}."
                 st.write_state(
                     "scrape", fase="degradado" if degradado else "aguardando", loja_atual=None,
                     ultimo_ciclo_fim=fim.isoformat(), proximo_ciclo=proximo.isoformat(),
                     ciclos=ciclos, erro=erro,
-                    ultima_msg=(
-                        f"Ciclo {ciclos} cedeu o navegador na página {retomando}; "
-                        f"retoma em {RETOMADA_MINUTOS} min." if retomando
-                        else f"Ciclo {ciclos} parcial; nova tentativa em 30 min."
-                        if degradado
-                        else f"Ciclo {ciclos} concluído às {fim:%H:%M}."),
+                    ultima_msg=resumo,
                 )
             except DatabaseError as e:
                 falhas_banco += 1
