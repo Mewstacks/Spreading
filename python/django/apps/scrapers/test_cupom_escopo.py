@@ -478,3 +478,118 @@ class MigracaoAbreContextoDeSistemaTests(TestCase):
             finally:
                 origem._system_context = real
             self.assertEqual(len(chamadas), 1, f"{nome} não abriu o contexto")
+
+
+class AvisoDeCuponsTests(TestCase):
+    """O aviso em lote promete ESCOPO, então também não pode repetir a alegação.
+
+    `selecionar_cupons_para_aviso` não passa pelo portão de associação — e não
+    deve mesmo, porque a mensagem não promete produto nenhum. Mas cada bloco sai
+    com "🏷️ <onde vale>", e para o código desmentido essa linha diria "site
+    inteiro" no grupo.
+    """
+
+    def setUp(self):
+        self.usuario = get_user_model().objects.create_user("dono", password="x")
+        self.fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="ml-cupons-afiliados",
+            defaults={"marketplace": "mercadolivre", "nome": "Cupons afiliados"})
+
+    def _linha(self, sufixo, *, site, escopo):
+        return CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id=f"afiliados:MELIPROMO:{sufixo}",
+            marketplace="mercadolivre", titulo=f"MELIPROMO — 25% OFF ({escopo})",
+            codigo="MELIPROMO", link="https://www.mercadolivre.com.br/",
+            redemption_mode="code", estado="ativo",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 25.0,
+                    "valor_minimo": 19.0, "desconto_maximo": 100.0,
+                    "modo_resgate": "codigo", "escopo": escopo,
+                    "is_mar_aberto": site},
+        )
+
+    def test_mensagem_do_aviso_declara_o_escopo(self):
+        from apps.scrapers.ofertas import montar_mensagem_aviso_cupons
+        estreito = self._linha(
+            "geral", site=False, escopo="Vehicle Parts & Accessories")
+
+        texto = montar_mensagem_aviso_cupons([estreito], "mercadolivre")
+
+        self.assertIn("MELIPROMO", texto)
+        self.assertIn("Vehicle Parts & Accessories", texto)
+
+    def test_linha_site_inteiro_desmentida_sai_da_selecao(self):
+        from types import SimpleNamespace
+
+        from apps.scrapers.ofertas import selecionar_cupons_para_aviso
+        aberto = self._linha("site", site=True, escopo="site inteiro")
+        self._linha("geral", site=False, escopo="Vehicle Parts & Accessories")
+        configuracao = SimpleNamespace(
+            marketplace="mercadolivre", canal="whatsapp", grupo_id="g@g.us",
+            horas_cooldown=24, incluir_restritos=True,
+        )
+
+        escolhidos = selecionar_cupons_para_aviso(configuracao, self.usuario)
+
+        self.assertNotIn(aberto.id, [c.id for c in escolhidos])
+
+
+class CupomDeComunidadeTests(TestCase):
+    """Cupom lido de canal/agregador corrobora fonte oficial; sozinho, não anuncia.
+
+    Em produção, 20/08/2026, o aviso em lote levaria `TODOSITE100` ao grupo:
+    extraído por IA de uma mensagem do Telegram, `validade=None`, anunciado como
+    "todo site" e sem nenhuma fonte oficial que o tivesse visto.
+    """
+
+    def setUp(self):
+        self.usuario = get_user_model().objects.create_user("dono", password="x")
+        self.comunidade, _ = FonteIngestao.objects.get_or_create(
+            slug="telegram-publico",
+            defaults={"marketplace": "mercadolivre", "nome": "Telegram público"})
+        self.oficial, _ = FonteIngestao.objects.get_or_create(
+            slug="ml-cupons-afiliados",
+            defaults={"marketplace": "mercadolivre", "nome": "Cupons afiliados"})
+
+    def _cupom(self, fonte, codigo, *, sufixo=""):
+        return CupomNormalizado.objects.create(
+            fonte=fonte, external_id=f"{fonte.slug}:{codigo}{sufixo}",
+            marketplace="mercadolivre", titulo=f"Cupom {codigo}", codigo=codigo,
+            link="https://www.mercadolivre.com.br/", redemption_mode="code",
+            estado="ativo",
+            regras={"tipo_desconto": "fixo", "valor_desconto": 100.0,
+                    "valor_minimo": 999.0, "modo_resgate": "codigo",
+                    "escopo": "todo site", "is_mar_aberto": False},
+            evidencia={"confianca_origem": "comunidade"}
+            if fonte is self.comunidade else {},
+        )
+
+    def test_so_comunidade_fica_aguardando(self):
+        from apps.scrapers.coupon_readiness import _preflight
+        from apps.scrapers.coupon_rules import (
+            comunidade_corroborada, cupom_de_comunidade,
+        )
+        cupom = self._cupom(self.comunidade, "TODOSITE100")
+
+        self.assertTrue(cupom_de_comunidade(cupom))
+        self.assertFalse(comunidade_corroborada(cupom))
+        resultado = _preflight(cupom, self.usuario)
+        self.assertIsNotNone(resultado)
+        self.assertEqual(resultado["reason_code"], "community_uncorroborated")
+        self.assertEqual(resultado["stage"], "collected")
+
+    def test_corroborado_por_fonte_oficial_passa(self):
+        from apps.scrapers.coupon_readiness import _preflight
+        from apps.scrapers.coupon_rules import comunidade_corroborada
+        cupom = self._cupom(self.comunidade, "TODOSITE100")
+        self._cupom(self.oficial, "TODOSITE100", sufixo=":oficial")
+
+        self.assertTrue(comunidade_corroborada(cupom))
+        self.assertIsNone(_preflight(cupom, self.usuario))
+
+    def test_fonte_oficial_nunca_precisa_de_corroboracao(self):
+        from apps.scrapers.coupon_readiness import _preflight
+        from apps.scrapers.coupon_rules import cupom_de_comunidade
+        cupom = self._cupom(self.oficial, "MELHORNOML")
+
+        self.assertFalse(cupom_de_comunidade(cupom))
+        self.assertIsNone(_preflight(cupom, self.usuario))

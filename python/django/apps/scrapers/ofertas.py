@@ -1652,7 +1652,8 @@ def selecionar_cupons_para_aviso(configuracao, usuario, limite=LIMITE_CUPONS_AVI
     é o oposto: um código que a pessoa consiga digitar no checkout.
     """
     from apps.scrapers.coupon_rules import (
-        codigo_publicavel, cupons_visiveis_q, score_cupom,
+        codigo_publicavel, codigos_com_escopo_contestado, cupons_visiveis_q,
+        regras_do_cupom, score_cupom,
     )
     from apps.accounts.models import organization_for_user
     from apps.scrapers.maintenance import cupons_frescos_q
@@ -1693,11 +1694,30 @@ def selecionar_cupons_para_aviso(configuracao, usuario, limite=LIMITE_CUPONS_AVI
              | Q(status__in=("pendente", "incerto"), criada_em__gte=desde)
              ).values_list("cupom_normalizado_id", flat=True))
 
+    # O aviso não promete produto, mas promete ESCOPO: cada bloco sai com a linha
+    # "🏷️ <onde vale>". Quando a fonte publica o mesmo código duas vezes — uma como
+    # site inteiro e outra com recorte — anunciar a primeira é escrever no grupo que
+    # o cupom vale em tudo, que é justamente o que o checkout desmente. A linha
+    # estreita do mesmo código continua elegível e leva o escopo verdadeiro.
+    #
+    # A contradição é procurada no catálogo ATIVO inteiro da loja, não só no lote
+    # elegível: a linha estreita pode não ter projeção de disponibilidade e ainda
+    # assim é ela que desmente a alegação de site inteiro.
+    lote = list(base.order_by("-ultima_observacao")[:200])
+    contestados = codigos_com_escopo_contestado(
+        CupomNormalizado.objects.filter(
+            marketplace=marketplace, estado="ativo",
+        ).exclude(codigo="").only("id", "codigo", "regras", "external_id")
+    )
+
     candidatos = []
-    for cupom in base.order_by("-ultima_observacao")[:200]:
+    for cupom in lote:
         if cupom.id in ja_anunciados:
             continue
         if not codigo_publicavel(cupom):
+            continue
+        if (regras_do_cupom(cupom).get("is_mar_aberto")
+                and str(cupom.codigo or "").strip().upper() in contestados):
             continue
         if not linha_desconto_cupom(cupom):
             continue

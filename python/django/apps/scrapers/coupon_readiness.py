@@ -105,6 +105,16 @@ def _preflight(cupom, usuario):
     if regras.get("valor_desconto") in (None, "", 0):
         return _resultado("discarded", "invalid", "missing_discount",
                           "A fonte não comprovou o valor do desconto.")
+    # Cupom de comunidade é alegação de terceiro — inclusive a leitura por IA de
+    # uma mensagem de canal. Ele soma evidência quando confirma o que uma fonte
+    # oficial já publicou; sozinho, não manda ninguém anunciar um código.
+    from apps.scrapers.coupon_rules import comunidade_corroborada, cupom_de_comunidade
+
+    if cupom_de_comunidade(cupom) and not comunidade_corroborada(cupom):
+        return _resultado(
+            "collected", "waiting", "community_uncorroborated",
+            "Cupom visto só em fonte de comunidade; aguardando confirmação oficial.",
+        )
     return None
 
 

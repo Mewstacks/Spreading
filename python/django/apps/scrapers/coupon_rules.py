@@ -366,6 +366,49 @@ def site_wide_confiavel(cupom, *, codigos_contestados=None) -> bool:
     ).exists()
 
 
+# Fontes cuja saída é ALEGAÇÃO de terceiro, não observação nossa. O adaptador do
+# Promobit já dizia isto na própria docstring: cupom de comunidade "soma evidência
+# e corrobora o que outra fonte já viu, mas não deveria, sozinho, mandar um
+# influenciador anunciar um código para o grupo dele". Faltava o portão.
+FONTES_COMUNIDADE = frozenset({
+    "promobit-cupons", "telegram-publico", "promobit-community", "pelando-community",
+})
+
+
+def cupom_de_comunidade(cupom) -> bool:
+    slug = str(getattr(getattr(cupom, "fonte", None), "slug", "") or "")
+    if slug in FONTES_COMUNIDADE:
+        return True
+    evidencia = getattr(cupom, "evidencia", None)
+    if isinstance(evidencia, Mapping):
+        return str(evidencia.get("confianca_origem") or "").casefold() == "comunidade"
+    return False
+
+
+def comunidade_corroborada(cupom) -> bool:
+    """Outra fonte, fora da comunidade, publicou este mesmo código?
+
+    É a condição que o próprio projeto escreveu e nunca aplicou. Em produção,
+    20/08/2026, o aviso em lote levaria ao grupo o código `TODOSITE100` —
+    extraído por IA de uma mensagem de canal do Telegram, sem validade nenhuma e
+    anunciado como "todo site". Nenhuma fonte oficial o tinha visto.
+
+    Corroborar é barato: o mesmo código, na mesma loja, vindo de uma fonte que não
+    é de comunidade.
+    """
+    codigo = _texto(getattr(cupom, "codigo", "")).upper()
+    if not codigo:
+        return False
+    from apps.scrapers.models import CupomNormalizado
+
+    return CupomNormalizado.objects.filter(
+        marketplace=getattr(cupom, "marketplace", ""), estado="ativo",
+        codigo__iexact=codigo,
+    ).exclude(pk=getattr(cupom, "pk", None)).exclude(
+        fonte__slug__in=FONTES_COMUNIDADE,
+    ).exists()
+
+
 def escopo_delimitado(cupom, *, codigos_contestados=None) -> bool:
     """O cupom recorta um conjunto de produtos que dá para verificar?
 
