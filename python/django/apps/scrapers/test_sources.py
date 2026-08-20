@@ -449,8 +449,87 @@ class SourcePipelineTests(TestCase):
         with patch.object(marketplaces, "MARKETPLACES", {
                 "mercadolivre": Good(), "amazon": Bad()}):
             result = _rodar_scrape()
-        self.assertEqual(result, {"sucessos": 1, "falhas": ["amazon"]})
+        self.assertEqual(
+            result, {"sucessos": 1, "falhas": ["amazon"], "adiadas": []})
         expire.assert_called_once()
+
+    @override_settings(AFFILIATE_FEED_URL="")
+    @patch("apps.scrapers.coupon_products.preparar_lote",
+           return_value={"processados": 0, "prontos": 0})
+    @patch("apps.scrapers.scraper_mercadolivre.cupons_container.casar_cupons_container",
+           return_value=0)
+    @patch("apps.scrapers.maintenance.expire_stale")
+    @patch("apps.scrapers.management.commands.automacao.st.write_state")
+    def test_loja_adiada_por_navegador_ocupado_nao_e_fonte_quebrada(
+        self, _state, expire, _containers, _preparo
+    ):
+        """Disputa de capacidade não pode virar incidente de fonte.
+
+        O ciclo deixou de reservar o Chromium durante as lojas que só falam HTTP,
+        então a loja que ABRE navegador pode agora encontrá-lo ocupado — situação
+        impossível enquanto o lease do ciclo inteiro era o próprio `django_chromium`.
+        Se isso caísse no `except Exception` genérico, cada disputa marcaria as
+        fontes do Mercado Livre como `degraded` e gravaria um evento `error`: alarme
+        falso sobre uma fila que se resolve sozinha no ciclo seguinte.
+        """
+        from apps.scrapers.carga import BrowserResourceUnavailable
+        from apps.scrapers.management.commands.automacao import _rodar_scrape
+        from apps.scrapers.marketplaces import registry as marketplaces
+        from apps.scrapers.models import EventoOperacional, FonteIngestao
+
+        class Http:
+            def scrape_all(self, **kwargs):
+                return None
+
+        class SemNavegador:
+            def scrape_all(self, **kwargs):
+                raise BrowserResourceUnavailable("capacidade ocupada")
+
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML público"},
+        )
+        FonteIngestao.objects.filter(pk=fonte.pk).update(
+            marketplace="mercadolivre", habilitada=True, status="ok")
+        with patch.object(marketplaces, "MARKETPLACES", {
+                "mercadolivre": SemNavegador(), "amazon": Http()}):
+            result = _rodar_scrape()
+
+        self.assertEqual(result["adiadas"], ["mercadolivre"])
+        self.assertEqual(result["falhas"], [])
+        # Adiada não conta como sucesso: quem só foi adiado não coletou nada.
+        self.assertEqual(result["sucessos"], 1)
+        self.assertEqual(
+            FonteIngestao.objects.get(slug="mercadolivre-web").status, "ok")
+        self.assertFalse(
+            EventoOperacional.objects.filter(evento="fonte_falhou").exists())
+
+    @override_settings(AFFILIATE_FEED_URL="")
+    @patch("apps.scrapers.coupon_products.preparar_lote",
+           return_value={"processados": 0, "prontos": 0})
+    @patch("apps.scrapers.scraper_mercadolivre.cupons_container.casar_cupons_container",
+           return_value=0)
+    @patch("apps.scrapers.maintenance.expire_stale")
+    @patch("apps.scrapers.management.commands.automacao.st.write_state")
+    def test_ciclo_inteiro_adiado_nao_grita_que_tudo_falhou(
+        self, _state, expire, _containers, _preparo
+    ):
+        from apps.scrapers.carga import BrowserResourceUnavailable
+        from apps.scrapers.management.commands.automacao import _rodar_scrape
+        from apps.scrapers.marketplaces import registry as marketplaces
+
+        class SemNavegador:
+            def scrape_all(self, **kwargs):
+                raise BrowserResourceUnavailable("capacidade ocupada")
+
+        with patch.object(marketplaces, "MARKETPLACES", {
+                "mercadolivre": SemNavegador(), "amazon": SemNavegador()}):
+            result = _rodar_scrape()  # não levanta
+
+        self.assertEqual(result["sucessos"], 0)
+        self.assertEqual(sorted(result["adiadas"]), ["amazon", "mercadolivre"])
+        # Nada foi coletado: não há o que expirar por idade neste ciclo.
+        expire.assert_not_called()
 
 
 class CouponPagePayloadTests(TestCase):

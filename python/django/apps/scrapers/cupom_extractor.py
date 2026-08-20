@@ -213,7 +213,16 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
                        "content": _PROMPT.format(mensagem=texto[:2500])}],
         )
         texto_resposta = _texto_resposta(resposta)
-        dados = _json_resposta(texto_resposta)
+        try:
+            dados = _json_resposta(texto_resposta)
+        except ValueError:
+            # `_json_resposta` LEVANTA; nunca devolve None. Enquanto o resgate
+            # dependeu de `dados is None`, ele era inalcançável: toda resposta
+            # ilegível caía no `except` de baixo e a mensagem inteira era perdida.
+            # Em produção, em 20/08/2026: `JSONDecodeError: Extra data: line 3
+            # column 1 (char 15)` — prosa depois do JSON — descartou os cupons de
+            # uma mensagem que o resgate teria salvado inteira.
+            dados = None
         if dados is None:
             # Resposta truncada ou ilegível. Recupera os cupons COMPLETOS que já
             # vieram antes do corte em vez de perder a mensagem inteira: numa lista
