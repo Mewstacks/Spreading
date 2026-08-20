@@ -5980,7 +5980,12 @@ class MelhorCupomNormalizadoTests(TestCase):
         from apps.scrapers.models import ProdutoCupom
         from apps.scrapers.ofertas import _melhor_cupom_normalizado
         self._cupom("a:SITE20", "SITE20", is_mar_aberto=True, discount_num=20, min_compra=0)
-        conf = self._cupom("a:CONF40", "CONF40", is_mar_aberto=False, discount_num=40, min_compra=0)
+        # Cupom de container de verdade: tem a listagem pública que delimita quais
+        # produtos participam. Sem ela, "confirmado" não prova nada — foi assim que
+        # um cupom de acessórios automotivos saiu colado num tablet.
+        conf = self._cupom(
+            "a:CONF40", "CONF40", is_mar_aberto=False, discount_num=40, min_compra=0,
+            container_url="https://lista.mercadolivre.com.br/_Container_conf40")
         ProdutoCupom.objects.create(produto=self.produto, cupom=conf, status="confirmado")
 
         # Confirmado e de maior desconto -> vence o site-wide.

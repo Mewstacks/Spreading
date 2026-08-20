@@ -2238,6 +2238,14 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
             linha_cupom = f"{linha_cupom} — {esc(aviso_minimo)}"
         # Com cupom: cola embaixo do preço e separa o link com uma linha em branco.
         linhas.append(linha_cupom)
+        # Cupom que vale para um recorte (categoria, marca, container) sai com o
+        # recorte escrito. A fonte oficial entrega esse texto — "Vehicle Parts &
+        # Accessories" no cupom que gerou a reclamação — e a mensagem o descartava,
+        # anunciando um código nu. Quem recebe não tem como saber que o desconto é
+        # de um departamento só, e a oferta "não funciona" no checkout.
+        escopo = _escopo_do_cupom(cupom_escolhido)
+        if escopo:
+            linhas.append(f"📌 {m.bold('Vale em:')} {esc(escopo)}")
         # Cupom com restrição de público (primeira compra, app, cartão, pix) só pode
         # ser anunciado junto da condição — sem isso a mensagem promete a quem não
         # tem direito e a oferta "não funciona" no checkout.
@@ -2247,6 +2255,21 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         linhas.append("")
     linhas.append(f"🔗 {esc(link_afiliado)}")
     return "\n".join(linhas)
+
+
+def _escopo_do_cupom(cupom) -> str:
+    """Recorte de produtos do cupom p/ a mensagem; '' quando vale para tudo.
+
+    Cupom de site inteiro não ganha linha nenhuma: dizer "vale em todos os
+    produtos" só ocupa espaço. Os demais saem com o texto que a fonte publicou.
+    """
+    if cupom is None or not hasattr(cupom, "regras"):
+        return ""
+    from apps.scrapers.coupon_rules import escopo_produtos_cupom, regras_do_cupom
+
+    if regras_do_cupom(cupom).get("is_mar_aberto"):
+        return ""
+    return escopo_produtos_cupom(cupom)[:120]
 
 
 def _condicao_do_cupom(cupom) -> str:
@@ -2316,8 +2339,17 @@ def _melhor_codigo(produto):
     from apps.scrapers.models import CupomCodigo
     # Códigos descobertos por regex na página do ML não possuem vínculo comprovado
     # com o produto. Permanecem no catálogo, mas nunca entram automaticamente.
-    candidatos = [c for c in CupomCodigo.objects.filter(ativo=True, automatico=False)
-                  if c.aplica_em(produto)]
+    #
+    # `valor_desconto > 0` não é refinamento de ranking, é portão: a coluna nasce
+    # em 0.0 e o scraper antigo gravava a linha sem preencher desconto nenhum. Um
+    # código desses tem `categorias` vazio (vale para todas), `valor_minimo` 0 e
+    # `validade` nula — ou seja, `aplica_em` diz sim para QUALQUER produto — e o
+    # `max()` abaixo, comparando zeros, elegia sempre o mesmo. Resultado: um código
+    # órfão carimbado em todas as ofertas do dia, sem desconto nenhum para
+    # prometer.
+    candidatos = [c for c in CupomCodigo.objects.filter(
+        ativo=True, automatico=False, valor_desconto__gt=0)
+        if c.aplica_em(produto)]
     if not candidatos:
         return None
 
@@ -2349,7 +2381,8 @@ def _melhor_cupom_normalizado_obj(produto, *, usuario=None):
     """
     from apps.scrapers.models import CupomNormalizado, ProdutoCupom
     from apps.scrapers.coupon_rules import (
-        codigo_publicavel, cupom_publicavel, cupons_visiveis_q, regras_do_cupom,
+        codigo_publicavel, cupom_publicavel, cupons_visiveis_q,
+        escopo_delimitado, regras_do_cupom,
     )
     from apps.scrapers.maintenance import cupons_frescos_q
     if getattr(produto, "marketplace", "mercadolivre") not in ("mercadolivre", ""):
@@ -2370,6 +2403,15 @@ def _melhor_cupom_normalizado_obj(produto, *, usuario=None):
     for c in base:
         regras = regras_do_cupom(c)
         if not (regras.get("is_mar_aberto") or c.id in ids_confirmados):
+            continue
+        # Segundo portão, e o que faltava: um `ProdutoCupom` confirmado só vale
+        # como prova se o cupom delimita algum conjunto de produtos. Quando ele
+        # não delimita, a "prova" foi colhida numa vitrine genérica do ML e liga o
+        # código a qualquer item que estivesse na página naquele minuto — o defeito
+        # que colou um cupom de acessórios automotivos num tablet. As relações
+        # fabricadas assim são apagadas pela migração 0064; esta guarda impede que
+        # qualquer caminho novo volte a publicá-las.
+        if not (regras.get("is_mar_aberto") or escopo_delimitado(c)):
             continue
         if not cupom_publicavel(c):
             continue

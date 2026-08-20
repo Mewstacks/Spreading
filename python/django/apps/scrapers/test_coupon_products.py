@@ -422,10 +422,10 @@ class CouponPreparationTests(TestCase):
         http_session.return_value.get.return_value = resposta
         cupom = self._coupon(
             marketplace="mercadolivre",
-            link="https://www.mercadolivre.com.br/ofertas/cupons/teste",
+            link="https://lista.mercadolivre.com.br/_Container_teste",
             regras={
                 "container_url":
-                    "https://www.mercadolivre.com.br/ofertas/cupons/teste",
+                    "https://lista.mercadolivre.com.br/_Container_teste",
             },
         )
 

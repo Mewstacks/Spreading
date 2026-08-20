@@ -309,6 +309,44 @@ def listagem_publica_ml(cupom) -> str:
     return ""
 
 
+def escopo_delimitado(cupom) -> bool:
+    """O cupom recorta um conjunto de produtos que dá para verificar?
+
+    Existe porque "cupom com código publicável" não é a mesma coisa que "cupom que
+    vale para este item". Um cupom de CÓDIGO passava direto: `codigo_publicavel`
+    olha só o formato do código, e nenhum portão adiante perguntava a que produtos
+    o desconto se aplica. Foi assim que o MELIPROMO — 25% em ``Vehicle Parts &
+    Accessories``, segundo a própria página oficial de afiliados — saiu anunciado
+    num tablet e num jogo de panelas.
+
+    Delimita o escopo quem tem:
+
+    * ``is_mar_aberto`` — vale para o site inteiro, então qualquer item serve;
+    * uma listagem pública (``listagem_publica_ml``/``container_url``), que é o
+      conjunto de produtos participantes e pode ser aberta por qualquer pessoa;
+    * ids explícitos de produto na evidência (ASIN, item id, product id).
+
+    NÃO delimita: um código lido da vitrine sem nenhuma lista associada. Para
+    esses, `cupom.link` é uma página genérica de loja (``/ofertas/cupons``, a home)
+    e tratá-la como "a lista do cupom" fabrica associação — ver
+    `coupon_products._coletar_ml_remoto`.
+    """
+    regras = regras_do_cupom(cupom)
+    if regras.get("is_mar_aberto"):
+        return True
+    if _texto(regras.get("container_url")):
+        return True
+    evidencia = getattr(cupom, "evidencia", None)
+    if isinstance(evidencia, Mapping):
+        for chave in ("product_ids", "asins", "item_ids"):
+            if evidencia.get(chave):
+                return True
+    marketplace = str(getattr(cupom, "marketplace", "") or "").casefold()
+    if marketplace == "mercadolivre":
+        return bool(listagem_publica_ml(cupom))
+    return False
+
+
 # EvidenceStrength — quão forte é a prova de que este cupom delimita um conjunto
 # real de produtos. Sem o conceito, uma URL que o próprio sistema INVENTOU pesava
 # o mesmo que um container que a fonte publicou, e candidatos fracos ocupavam o

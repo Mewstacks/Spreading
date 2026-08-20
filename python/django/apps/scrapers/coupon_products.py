@@ -63,6 +63,11 @@ _CENT = Decimal("0.01")
 ERRO_SESSAO_ML = "Mercado Livre exigiu sessão para abrir a lista deste cupom."
 ERRO_CONTAINER_FETCH_FAILED = "container_fetch_failed"
 ERRO_CONTAINER_EMPTY_PROVEN = "container_empty_proven"
+# O cupom existe e o código é publicável, mas a fonte nunca disse A QUE PRODUTOS
+# ele se aplica. Não é "container vazio" (lista aberta e sem item): é lista
+# nenhuma. Separar os dois importa porque o vazio comprovado é veredito sobre o
+# cupom e este aqui é ausência de dado sobre o escopo.
+ERRO_ESCOPO_INDEFINIDO = "scope_undelimited"
 ERRO_MINIMUM_NOT_MET = "minimum_not_met"
 # Marcador de FILA, não de defeito: o preparo nem começou porque o Chromium estava
 # com outra tarefa. A projeção lê este valor para dizer "aguardando capacidade".
@@ -490,16 +495,23 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
     lida é a mesma página pública para qualquer conta; o que a sessão decide é
     apenas se o gateway do ML entrega o HTML.
     """
-    link = str((cupom.regras or {}).get("container_url") or cupom.link or "").strip()
-    try:
-        host = (urlsplit(link).hostname or "").casefold().rstrip(".")
-    except ValueError:
-        host = ""
-    # A coleta abre um navegador autenticado. Nunca permita que um cupom manual
-    # transforme esse caminho em um navegador/SSRF para um host arbitrario.
-    if not link or not (host == "mercadolivre.com.br"
-                        or host.endswith(".mercadolivre.com.br")):
-        return {"total": 0, "veredito": "vazio_comprovado"}
+    # A LISTAGEM, não qualquer página do ML. O teste anterior era só de host
+    # (`*.mercadolivre.com.br`), e é por isso que este passo fabricava associação:
+    # um código raspado da vitrine é gravado com `link=/ofertas/cupons` e a home
+    # entra como `link` de todo cupom cuja fonte não publicou container. Ambas
+    # respondem 200 com dezenas de `poly-card` — perfume, notebook, whey — e cada
+    # card virava um `ProdutoCupom` "confirmado" logo abaixo. Foi assim que um
+    # cupom de acessórios automotivos saiu colado num tablet.
+    #
+    # `listagem_publica_ml` é o mesmo recorte que `ativacao_publicavel` já exige:
+    # `lista.mercadolivre.com.br`, que é uma lista de participantes e não uma
+    # vitrine da loja inteira. Continua barrando host arbitrário (SSRF), agora
+    # também barrando o ML genérico.
+    from apps.scrapers.coupon_rules import listagem_publica_ml
+
+    link = listagem_publica_ml(cupom)
+    if not link:
+        return {"total": 0, "veredito": "escopo_indefinido"}
     from apps.scrapers.auxiliar import iniciar_browser
     from apps.scrapers.ml_auth import (
         avisar_sem_sessao, parede_de_login, storage_state,
@@ -802,6 +814,11 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
             if validos:
                 empty_reason = ""
                 empty_detail = ""
+            elif coleta_ml and coleta_ml["veredito"] == "escopo_indefinido":
+                empty_reason = ERRO_ESCOPO_INDEFINIDO
+                empty_detail = ("A fonte não publicou a lista de produtos deste "
+                                "cupom; sem ela não há como provar que o desconto "
+                                "vale para um item.")
             elif coleta_ml and coleta_ml["veredito"] == "vazio_comprovado":
                 empty_reason = ERRO_CONTAINER_EMPTY_PROVEN
                 empty_detail = ERRO_CONTAINER_EMPTY_PROVEN
@@ -1110,7 +1127,7 @@ def preparar_lote(
 
     from apps.scrapers.coupon_rules import (
         FORCA_EVIDENCIA_ORDEM, codigo_publicavel as _codigo_publicavel,
-        forca_evidencia,
+        escopo_delimitado, forca_evidencia,
     )
 
     def _peso_evidencia(cupom):
@@ -1122,7 +1139,11 @@ def preparar_lote(
         gastando a capacidade nos candidatos com menos chance de render produto.
         """
         if _codigo_publicavel(cupom):
-            return -1
+            # Ter código digitável não diz a que produtos o desconto se aplica.
+            # Um código raspado da vitrine, sem lista nenhuma, encabeçava o lote a
+            # cada ciclo e voltava vazio — agora ele vai para o fim da fila, atrás
+            # das campanhas cujo escopo a fonte publicou.
+            return -1 if escopo_delimitado(cupom) else 3
         if str(cupom.marketplace or "").lower() != "mercadolivre":
             return 0
         return FORCA_EVIDENCIA_ORDEM.get(forca_evidencia(cupom), 3)
