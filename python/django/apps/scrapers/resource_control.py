@@ -1,6 +1,8 @@
 """Leases PostgreSQL observáveis para recursos que não podem compartilhar sessão/browser."""
 
+import atexit
 import os
+import shutil
 import socket
 import tempfile
 import threading
@@ -10,12 +12,15 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import timedelta
 
+from django.conf import settings
 from django.db import close_old_connections, transaction
 from django.utils import timezone
 
 from apps.accounts.tenant import system_context
 from apps.scrapers.models import ExecucaoRaspagem, ResourceLease, WorkerHeartbeat
 
+
+_DIR_DE_TESTE = None
 
 LEASE_TTL_SECONDS = 90
 HEARTBEAT_SECONDS = 15
@@ -44,15 +49,74 @@ INTERESSE_INTERATIVO_TTL_S = 120
 # de valer sem depender de cleanup ou do banco.
 INTERESSE_MANUAL_TTL_S = 60
 
+# Esteira AUTOMÁTICA que ficou sem navegador. Até aqui só uma PESSOA conseguia
+# interromper um lote longo, e o resultado medido em produção em 20/08/2026 foi que
+# a varredura de 40 páginas (~93s por página, ~62min por ciclo) segurava o Chromium
+# da máquina inteira e todas as outras esteiras perdiam a vez ciclo após ciclo:
+#
+#   "Geração de links adiada para <conta>: navegador ocupado por outra tarefa"
+#   "Verificação de destino adiada: navegador ocupado"
+#   "Envio adiado para o produto <id>: navegador ocupado por outra tarefa"
+#
+# Sem link de afiliado nenhum cupom fica pronto, e sem cupom pronto o envio não tem
+# o que publicar — `projection_stale` em 9004 e `0 enviada(s)` por tick. O gargalo
+# nunca foi a duração de um job, foi a ausência de um jeito de dizer "estou na fila".
+#
+# TTL maior que o do pedido manual porque uma esteira automática não fica olhando a
+# tela: ela pede, perde o ciclo e só volta no próximo (5 a 15 minutos). Curto demais
+# e o marcador expira antes de quem o escreveu ter chance de ser atendido.
+INTERESSE_DE_ESTEIRA_TTL_S = 180
+
+# Esteiras cujo pedido NÃO interrompe um lote em andamento. `scrape` e
+# `scrape_rapido` são justamente os lotes longos: deixá-las sinalizar faria uma
+# ceder para a outra em looping e nenhuma das duas terminaria uma passada.
+ESTEIRAS_SEM_PRIORIDADE = frozenset({"scrape", "scrape_rapido", "ml_offers", "ml_search"})
+
+
+def _chave_segura(valor, limite: int = 100) -> str:
+    return "".join(
+        char if char.isalnum() or char in {"-", "_"} else "_"
+        for char in str(valor)
+    )[:limite]
+
+
+def _diretorio_padrao() -> str:
+    """Onde os marcadores moram quando ninguém aponta um diretório.
+
+    Em produção é o /tmp da máquina, de propósito: o marcador precisa cruzar os dez
+    processos do honcho, e é justamente por isso que ele NÃO pode ser o /tmp da
+    máquina durante os testes. A suíte lia o mesmo diretório que um worker de
+    desenvolvimento escreve, então um arquivo real deixado por uma raspagem manual
+    fazia `casar_cupons_container` ceder o navegador no primeiro cupom e o teste
+    falhar com `1 != 10` — vermelho vindo do estado da máquina, não do código.
+    Um portão que às vezes mente ensina a ignorar vermelho.
+
+    O diretório de teste inclui o PID porque `manage.py test --parallel` roda vários
+    processos: um diretório comum faria o flock de um worker barrar o do outro.
+    """
+    global _DIR_DE_TESTE
+    if not getattr(settings, "RUNNING_TESTS", False):
+        return tempfile.gettempdir()
+    if _DIR_DE_TESTE is None:
+        _DIR_DE_TESTE = os.path.join(
+            tempfile.gettempdir(), f"spreading-testes-{os.getpid()}",
+        )
+        # Só o diretório que ESTE módulo inventou é apagado na saída. Um caminho
+        # dado por quem chama continua sendo responsabilidade de quem o deu.
+        atexit.register(shutil.rmtree, _DIR_DE_TESTE, True)
+    return _DIR_DE_TESTE
+
+
+def _diretorio_de_lock() -> str:
+    lock_dir = os.getenv("SPREADING_RESOURCE_LOCK_DIR") or _diretorio_padrao()
+    os.makedirs(lock_dir, exist_ok=True)
+    return lock_dir
+
 
 def _caminho_de_lock(resource_key: str, sufixo: str = "lock") -> str:
-    safe_key = "".join(
-        char if char.isalnum() or char in {"-", "_"} else "_"
-        for char in str(resource_key)
-    )[:100]
-    lock_dir = os.getenv("SPREADING_RESOURCE_LOCK_DIR", tempfile.gettempdir())
-    os.makedirs(lock_dir, exist_ok=True)
-    return os.path.join(lock_dir, f"spreading-{safe_key}.{sufixo}")
+    return os.path.join(
+        _diretorio_de_lock(), f"spreading-{_chave_segura(resource_key)}.{sufixo}",
+    )
 
 
 @contextmanager
@@ -133,6 +197,81 @@ def interesse_interativo_pendente(resource_key: str = "django_chromium") -> bool
     except OSError:
         return False
     return idade <= INTERESSE_INTERATIVO_TTL_S
+
+
+_PREFIXO_ESTEIRA = "esteira-"
+
+
+def _sufixo_de_esteira(esteira: str) -> str:
+    return _PREFIXO_ESTEIRA + _chave_segura(esteira, 40)
+
+
+def sinalizar_interesse_de_esteira(esteira: str,
+                                   resource_key: str = "django_chromium") -> bool:
+    """Publica que uma esteira automática ficou sem o recurso e está na fila.
+
+    Chamado no ponto em que a aquisição FALHA, não antes: só quem realmente perdeu a
+    vez tem direito de interromper quem está com o recurso. Esteiras da lista
+    `ESTEIRAS_SEM_PRIORIDADE` são ignoradas — elas são os lotes longos, e dar-lhes
+    prioridade faria as duas varreduras cederem uma para a outra sem fim.
+    """
+    if str(esteira) in ESTEIRAS_SEM_PRIORIDADE:
+        return False
+    try:
+        with open(_caminho_de_lock(resource_key, _sufixo_de_esteira(esteira)), "w") as m:
+            m.write(str(int(time.time())))
+        return True
+    except OSError:
+        # Sinalizar é otimização: sem o marcador a esteira volta ao comportamento
+        # antigo (espera o próximo ciclo). O lease continua sendo a autoridade.
+        return False
+
+
+def limpar_interesse_de_esteira(esteira: str,
+                                resource_key: str = "django_chromium") -> None:
+    """Remove o pedido assim que a esteira conquista o recurso."""
+    try:
+        os.unlink(_caminho_de_lock(resource_key, _sufixo_de_esteira(esteira)))
+    except OSError:
+        pass
+
+
+def esteiras_na_fila(resource_key: str = "django_chromium", *, exceto=None) -> list:
+    """Esteiras automáticas com pedido ainda válido, fora a que está perguntando."""
+    diretorio = _diretorio_de_lock()
+    prefixo = f"spreading-{_chave_segura(resource_key)}.{_PREFIXO_ESTEIRA}"
+    propria = _chave_segura(exceto, 40) if exceto is not None else None
+    try:
+        nomes = os.listdir(diretorio)
+    except OSError:
+        return []
+    agora, na_fila = time.time(), []
+    for nome in nomes:
+        if not nome.startswith(prefixo):
+            continue
+        esteira = nome[len(prefixo):]
+        if esteira == propria:
+            continue
+        try:
+            idade = agora - os.stat(os.path.join(diretorio, nome)).st_mtime
+        except OSError:
+            # Sumiu entre o listdir e o stat: a esteira foi atendida. Não é fila.
+            continue
+        if idade <= INTERESSE_DE_ESTEIRA_TTL_S:
+            na_fila.append(esteira)
+    return na_fila
+
+
+def interesse_pendente(resource_key: str = "django_chromium", *, exceto=None) -> bool:
+    """True quando ALGUÉM espera por este recurso — pessoa ou outra esteira.
+
+    É o predicado que os lotes longos consultam entre itens. `exceto` é o nome da
+    própria esteira: sem ele, um lote cederia para o próprio pedido e nunca sairia
+    do lugar.
+    """
+    if interesse_interativo_pendente(resource_key):
+        return True
+    return bool(esteiras_na_fila(resource_key, exceto=exceto))
 
 
 try:  # POSIX (produção: Linux na Fly).

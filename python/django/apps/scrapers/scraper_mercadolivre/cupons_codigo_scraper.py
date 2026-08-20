@@ -37,7 +37,7 @@ from apps.scrapers.coupon_rules import (
 from apps.scrapers.models import Produto, CupomCodigo, FonteIngestao, CupomNormalizado
 from apps.scrapers.progresso import emitir_fase, emitir_progresso
 from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
-from apps.scrapers.resource_control import interesse_interativo_pendente
+from apps.scrapers.resource_control import interesse_pendente
 from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _coletar_cards, _salvar
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
@@ -382,7 +382,8 @@ def mapear_cupons_codigo(faixa=None, usuario=None):
         for n in range(1, 6):  # algumas páginas
             # Mesmo motivo de mapear_ofertas: ceder o Chromium a um login
             # interativo em vez de segurá-lo até o fim das páginas.
-            if n > 1 and interesse_interativo_pendente("django_chromium"):
+            if n > 1 and interesse_pendente(
+                    "django_chromium", exceto="ml_checkout_coupons"):
                 logger.info(
                     "Raspagem de cupons de código cedeu o navegador a um "
                     "login interativo após %s de 5 página(s).", n - 1,

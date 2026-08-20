@@ -21,7 +21,7 @@ from apps.scrapers.link_validacao import (
 )
 from apps.scrapers.auxiliar import iniciar_browser, BrowserError
 from apps.scrapers.carga import coordinated_ml_browser
-from apps.scrapers.resource_control import interesse_interativo_pendente
+from apps.scrapers.resource_control import interesse_pendente
 from apps.scrapers.progresso import emitir_fase
 from apps.accounts.ml_sessions import has_storage_state
 from apps.accounts.tenant import executar_no_tenant
@@ -723,7 +723,8 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None, activation_keys=None
             # login interativo esgotava a espera e a tela abria e fechava sozinha.
             # Sair aqui não perde trabalho: os itens já gerados estão salvos e os
             # restantes voltam ao topo da fila no ciclo seguinte.
-            if i > 1 and interesse_interativo_pendente("django_chromium"):
+            if i > 1 and interesse_pendente(
+                    "django_chromium", exceto="ml_links_batch"):
                 logger.info(
                     "Lote de links ML cedeu o navegador a um login interativo "
                     "após %s de %s item(ns).", i - 1, total_lote,

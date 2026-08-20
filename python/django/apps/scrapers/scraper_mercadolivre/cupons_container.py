@@ -29,7 +29,7 @@ from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
 from apps.scrapers.models import (
     CupomNormalizado, FonteIngestao, Produto, ProdutoCupom,
 )
-from apps.scrapers.resource_control import interesse_interativo_pendente
+from apps.scrapers.resource_control import interesse_pendente
 from .link import _extrair_item_id
 from .scraper import _ml_http_session
 
@@ -248,7 +248,8 @@ def _coletar(cupons, coletor, max_paginas, orcamento_s=ORCAMENTO_S):
         # segurou o Chromium da máquina por minutos seguidos e todo login
         # interativo falhou nesse intervalo. Cede DEPOIS do item corrente; os
         # restantes voltam com o mesmo motivo do orçamento esgotado.
-        if i > 0 and interesse_interativo_pendente("django_chromium"):
+        if i > 0 and interesse_pendente(
+                "django_chromium", exceto="coupon_container"):
             logger.info(
                 "Casamento de container cedeu o navegador a um login "
                 "interativo após %s de %s cupom(ns).", i, len(cupons),

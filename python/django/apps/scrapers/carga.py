@@ -5,11 +5,36 @@ from contextlib import contextmanager
 from django.db import connections
 from django.conf import settings
 from apps.accounts.tenant import in_system_context
-from apps.scrapers.resource_control import leased_resource, machine_resource_slot
+from apps.scrapers.resource_control import (
+    leased_resource, limpar_interesse_de_esteira, machine_resource_slot,
+    sinalizar_interesse_de_esteira,
+)
 
 
 class BrowserResourceUnavailable(RuntimeError):
     """O navegador não abriu porque outro job possui o recurso necessário."""
+
+
+def _registrar_na_fila(resource_key, owner_kind, conseguiu):
+    """Põe a esteira na fila do navegador, ou a tira de lá quando ela entra.
+
+    Perder a vez precisa deixar rastro. Antes disto, uma esteira negada só escrevia
+    uma linha de log e sumia até o próximo ciclo — quem estava com o Chromium não
+    tinha como saber que havia alguém esperando, e a varredura de 40 páginas seguia
+    até o fim enquanto links, verificação e envio ficavam parados (medido em
+    20/08/2026: `0 enviada(s)` por tick, 9004 projeções paradas).
+
+    Chamado no ponto da NEGATIVA e no da CONQUISTA, então ninguém precisa lembrar de
+    limpar depois: quem entrou não está mais na fila.
+    """
+    if resource_key != "django_chromium":
+        # Só o slot global representa a CPU/memória disputada por todas as esteiras.
+        # Lease de sessão é exclusão mútua por credencial, não fila de recurso.
+        return
+    if conseguiu:
+        limpar_interesse_de_esteira(owner_kind, resource_key)
+    else:
+        sinalizar_interesse_de_esteira(owner_kind, resource_key)
 
 
 @contextmanager
@@ -35,6 +60,7 @@ def operacao_pesada(*, resource_key="django_chromium", owner_kind="scheduled",
         resource_key, owner_kind=owner_kind, organization=organization,
     ) as (acquired, _detail):
         if not acquired:
+            _registrar_na_fila(resource_key, owner_kind, False)
             yield False
             return
         # O lease acima coordena workers via Postgres. O lock local inclui também
@@ -45,6 +71,7 @@ def operacao_pesada(*, resource_key="django_chromium", owner_kind="scheduled",
             yield True
             return
         with machine_resource_slot(resource_key) as machine_acquired:
+            _registrar_na_fila(resource_key, owner_kind, machine_acquired)
             yield machine_acquired
 
 

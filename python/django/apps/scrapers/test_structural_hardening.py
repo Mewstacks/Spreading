@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import date, timedelta
 from unittest.mock import Mock, patch
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
@@ -284,6 +285,136 @@ class BrowserResourceContractTests(TestCase):
             limpar_interesse_manual("django_chromium")
             self.assertFalse(interesse_interativo_pendente("django_chromium"))
 
+    def test_a_suite_nunca_le_os_marcadores_da_maquina(self):
+        """Contrato de hermeticidade, e ele já foi violado.
+
+        `_caminho_de_lock` caía no /tmp da máquina quando ninguém apontava um
+        diretório — inclusive durante os testes. Um `spreading-django_chromium.
+        manual-wanted` deixado por uma raspagem manual de verdade fazia
+        `casar_cupons_container` ceder o navegador no primeiro cupom, e
+        `test_limite_de_cupons_por_passada` falhava com `1 != 10` sem nenhuma
+        relação com o código sob teste. Uma execução vermelha, cinco verdes, mesmo
+        comando: portão que às vezes mente ensina a ignorar vermelho.
+        """
+        import os
+        import tempfile
+
+        from apps.scrapers.resource_control import _diretorio_de_lock
+
+        os.environ.pop("SPREADING_RESOURCE_LOCK_DIR", None)
+        self.assertNotEqual(_diretorio_de_lock(), tempfile.gettempdir())
+        # E continua obedecendo a quem aponta um diretório de propósito.
+        with tempfile.TemporaryDirectory() as escolhido, patch.dict(
+            os.environ, {"SPREADING_RESOURCE_LOCK_DIR": escolhido},
+        ):
+            self.assertEqual(_diretorio_de_lock(), escolhido)
+
+    def test_a_suite_nao_escreve_no_estado_real_dos_workers(self):
+        """Mesmo contrato, outro diretório: `.automacao` guarda o heartbeat e o
+        cursor de retomada da varredura. A suíte escrevendo lá significaria um teste
+        de raspagem deixando a página 3 marcada para o teste seguinte encontrar — e,
+        no ambiente de quem desenvolve, mexendo no estado do worker de verdade."""
+        import os
+
+        from apps.scrapers import automacao_state
+
+        real = os.path.join(
+            getattr(settings, "ML_AUTH_DIR", "") or settings.BASE_DIR, ".automacao")
+        self.assertNotEqual(os.path.abspath(automacao_state._DIR),
+                            os.path.abspath(real))
+
+    def test_esteira_negada_entra_na_fila_e_sai_ao_conquistar(self):
+        """O flock diz "ocupado"; a fila diz "tem uma ESTEIRA esperando".
+
+        Até 20/08/2026 só uma pessoa podia interromper um lote longo. O resultado
+        medido em produção: a varredura de 40 páginas segurava o Chromium por
+        ~62min e links, verificação e envio perdiam a vez em todo ciclo — sem link
+        nenhum cupom fica pronto, e sem cupom pronto o tick publica `0 enviada(s)`.
+        """
+        import os
+        import tempfile
+
+        from apps.scrapers import resource_control
+        from apps.scrapers.resource_control import (
+            esteiras_na_fila, interesse_pendente, limpar_interesse_de_esteira,
+            sinalizar_interesse_de_esteira,
+        )
+
+        with tempfile.TemporaryDirectory() as lock_dir, patch.dict(
+            os.environ, {"SPREADING_RESOURCE_LOCK_DIR": lock_dir},
+        ):
+            self.assertFalse(interesse_pendente("django_chromium"))
+
+            self.assertTrue(sinalizar_interesse_de_esteira("links_generate"))
+            self.assertEqual(esteiras_na_fila("django_chromium"), ["links_generate"])
+            self.assertTrue(interesse_pendente("django_chromium"))
+
+            # Quem pediu não cede para si mesmo — senão o lote não sairia do lugar.
+            self.assertFalse(
+                interesse_pendente("django_chromium", exceto="links_generate"))
+
+            # Um processo morto no meio do ciclo não pode calar a varredura para
+            # sempre: o pedido vale por uma janela, não indefinidamente.
+            with patch.object(resource_control, "INTERESSE_DE_ESTEIRA_TTL_S", -1):
+                self.assertFalse(interesse_pendente("django_chromium"))
+
+            limpar_interesse_de_esteira("links_generate")
+            self.assertFalse(interesse_pendente("django_chromium"))
+
+    def test_as_duas_varreduras_longas_nao_ganham_prioridade(self):
+        """Se `scrape` e `scrape_rapido` pudessem furar a fila, elas cederiam uma
+        para a outra em looping e nenhuma terminaria uma passada."""
+        import os
+        import tempfile
+
+        from apps.scrapers.resource_control import (
+            esteiras_na_fila, sinalizar_interesse_de_esteira,
+        )
+
+        with tempfile.TemporaryDirectory() as lock_dir, patch.dict(
+            os.environ, {"SPREADING_RESOURCE_LOCK_DIR": lock_dir},
+        ):
+            for lote_longo in ("scrape", "scrape_rapido", "ml_offers", "ml_search"):
+                self.assertFalse(sinalizar_interesse_de_esteira(lote_longo))
+            self.assertEqual(esteiras_na_fila("django_chromium"), [])
+
+    def test_negativa_de_navegador_poe_a_esteira_na_fila_sozinha(self):
+        """O registro mora no ponto da negativa: nenhum chamador precisa lembrar."""
+        import os
+        import tempfile
+        from contextlib import contextmanager
+
+        from apps.scrapers import carga
+        from apps.scrapers.resource_control import esteiras_na_fila
+
+        @contextmanager
+        def _lease_negado(*_a, **_kw):
+            yield (False, {})
+
+        @contextmanager
+        def _lease_dado(*_a, **_kw):
+            yield ("token", {})
+
+        with tempfile.TemporaryDirectory() as lock_dir, patch.dict(
+            os.environ, {"SPREADING_RESOURCE_LOCK_DIR": lock_dir},
+        ), patch.object(carga.connections["default"], "vendor", "postgresql"), \
+                patch.object(carga, "in_system_context", return_value=True):
+            with patch.object(carga, "leased_resource", _lease_negado):
+                with carga.operacao_pesada(owner_kind="links_verify") as conseguiu:
+                    self.assertFalse(conseguiu)
+            self.assertEqual(esteiras_na_fila("django_chromium"), ["links_verify"])
+
+            @contextmanager
+            def _slot_dado(*_a, **_kw):
+                yield True
+
+            with patch.object(carga, "leased_resource", _lease_dado), \
+                    patch.object(carga, "machine_resource_slot", _slot_dado):
+                with carga.operacao_pesada(owner_kind="links_verify") as conseguiu:
+                    self.assertTrue(conseguiu)
+            # Conquistou: saiu da fila sem ninguém precisar limpar.
+            self.assertEqual(esteiras_na_fila("django_chromium"), [])
+
     def test_lote_de_links_devolve_o_navegador_a_um_login_esperando(self):
         from apps.scrapers.scraper_mercadolivre import link as ml_link
 
@@ -310,8 +441,8 @@ class BrowserResourceContractTests(TestCase):
                              lambda fn, *a, **k: None), \
                 patch.object(ml_link, "_afiliar_url_na_pagina",
                              lambda _p, url: afiliados.append(url) or "https://meli.la/x"), \
-                patch.object(ml_link, "interesse_interativo_pendente",
-                             lambda _r: len(afiliados) >= 2):
+                patch.object(ml_link, "interesse_pendente",
+                             lambda _r, exceto=None: len(afiliados) >= 2):
             gerados, _falhas = ml_link.gerar_links_em_lote(produtos)
 
         # Cede DEPOIS de terminar o item corrente: dois gerados, dois devolvidos

@@ -664,6 +664,19 @@ class RaspagemCedeAoLoginInterativoTests(TestCase):
     def _browser_falso():
         yield Mock(), Mock()
 
+    def setUp(self):
+        # O cursor de retomada mora no estado do worker. Ceder o navegador aqui não
+        # pode deixar a página 3 escrita para o próximo teste da suíte encontrar.
+        import tempfile
+
+        from apps.scrapers import automacao_state
+
+        estado = tempfile.TemporaryDirectory()
+        self.addCleanup(estado.cleanup)
+        remendo = patch.object(automacao_state, "_DIR", estado.name)
+        remendo.start()
+        self.addCleanup(remendo.stop)
+
     def test_mapear_ofertas_devolve_o_navegador_a_um_login_esperando(self):
         from apps.scrapers.scraper_mercadolivre import ofertas_scraper
 
@@ -687,8 +700,8 @@ class RaspagemCedeAoLoginInterativoTests(TestCase):
                 patch.object(ofertas_scraper, "_coletar_cards", side_effect=_cards), \
                 patch.object(ofertas_scraper, "_salvar", return_value=2) as salvar, \
                 patch.object(
-                    ofertas_scraper, "interesse_interativo_pendente",
-                    lambda _r: len(paginas_pedidas) >= 2,
+                    ofertas_scraper, "interesse_pendente",
+                    lambda _r, exceto=None: len(paginas_pedidas) >= 2,
                 ):
             ofertas_scraper.mapear_ofertas(max_paginas=40)
 
@@ -696,6 +709,132 @@ class RaspagemCedeAoLoginInterativoTests(TestCase):
         # ao próximo ciclo — nada se perde, e o login não espera 40 páginas.
         self.assertEqual(len(paginas_pedidas), 2)
         self.assertEqual(len(salvar.call_args.args[0]), 2)
+
+    def test_varredura_cedida_retoma_da_pagina_seguinte_no_ciclo_seguinte(self):
+        """Ceder só é barato se a próxima passada continuar de onde esta parou.
+
+        Recomeçando sempre da página 1, ceder na página 2 significaria nunca mais
+        raspar da 3 em diante: as ofertas do fundo do feed sumiriam do catálogo
+        justamente quando a máquina está mais disputada — e a máquina passou a ser
+        mais disputada de propósito, agora que as esteiras automáticas também
+        interrompem a varredura.
+        """
+        import os
+        import tempfile
+
+        from apps.scrapers import automacao_state
+        from apps.scrapers.scraper_mercadolivre import ofertas_scraper
+
+        paginas_pedidas = []
+
+        def _goto(url, **_kw):
+            paginas_pedidas.append(int(url.rsplit("page=", 1)[1]))
+
+        page = Mock()
+        page.goto = _goto
+
+        @contextmanager
+        def _browser_com_page():
+            yield page, Mock()
+
+        def _cards(_page):
+            return [{
+                "link_produto":
+                    f"https://produto.mercadolivre.com.br/MLB-{len(paginas_pedidas)}",
+                "nome": "Item", "preco_sem_desconto": 100, "preco_com_cupom": 80,
+                "imagem_url": "https://img/1.jpg",
+            }]
+
+        def _raspar(cede_em, cards=_cards):
+            with patch.object(ofertas_scraper, "coordinated_ml_browser",
+                              lambda **_k: _browser_com_page()), \
+                    patch.object(ofertas_scraper, "iniciar_browser",
+                                 lambda **_k: _browser_com_page()), \
+                    patch.object(ofertas_scraper, "storage_state", return_value=None), \
+                    patch.object(ofertas_scraper, "pausa_humana", Mock()), \
+                    patch.object(ofertas_scraper, "_coletar_cards", side_effect=cards), \
+                    patch.object(ofertas_scraper, "_salvar", return_value=1), \
+                    patch.object(
+                        ofertas_scraper, "interesse_pendente",
+                        lambda _r, exceto=None: len(paginas_pedidas) >= cede_em,
+                    ):
+                ofertas_scraper.mapear_ofertas(max_paginas=40)
+
+        with tempfile.TemporaryDirectory() as estado_dir, \
+                patch.object(automacao_state, "_DIR", estado_dir):
+            _raspar(cede_em=2)
+            self.assertEqual(paginas_pedidas, [1, 2])
+            self.assertEqual(
+                automacao_state.read_state("scrape")[ofertas_scraper.CURSOR_OFERTAS],
+                3,
+            )
+
+            paginas_pedidas.clear()
+            _raspar(cede_em=2)
+            # Retoma na 3, não na 1: o feed inteiro é coberto ao longo dos ciclos.
+            self.assertEqual(paginas_pedidas, [3, 4])
+
+            # Passada que termina sozinha zera o cursor — o próximo ciclo volta ao
+            # topo, onde as ofertas novas entram.
+            paginas_pedidas.clear()
+            with patch.object(ofertas_scraper, "VAZIAS_PARA_PARAR", 1):
+                _raspar(cede_em=99, cards=lambda _page: [])
+            self.assertEqual(paginas_pedidas, [5])
+            self.assertEqual(
+                automacao_state.read_state("scrape")[ofertas_scraper.CURSOR_OFERTAS],
+                1,
+            )
+
+    def test_varredura_interrompida_volta_em_minutos_e_nao_em_horas(self):
+        """O ciclo de raspagem vale 3h. Se uma passada cedida esperasse esse
+        intervalo, o cursor andaria duas páginas a cada três horas e o fundo do
+        feed levaria dias — ceder sairia mais caro que não ceder."""
+        from apps.scrapers import automacao_state
+        from apps.scrapers.management.commands.automacao import _resta_varredura
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import CURSOR_OFERTAS
+
+        with patch.object(automacao_state, "read_state",
+                          return_value={CURSOR_OFERTAS: 7}):
+            self.assertEqual(_resta_varredura(), 7)
+        # Passada completa (ou estado ainda sem cursor) mantém o intervalo normal.
+        with patch.object(automacao_state, "read_state",
+                          return_value={CURSOR_OFERTAS: 1}):
+            self.assertEqual(_resta_varredura(), 0)
+        with patch.object(automacao_state, "read_state", return_value={}):
+            self.assertEqual(_resta_varredura(), 0)
+
+    def test_lane_flash_ignora_o_cursor_e_sempre_le_o_topo_do_feed(self):
+        """A lane rápida existe para pegar relâmpago; retomar do meio a desvirtua."""
+        from apps.scrapers import automacao_state
+        from apps.scrapers.scraper_mercadolivre import ofertas_scraper
+
+        paginas_pedidas = []
+
+        def _goto(url, **_kw):
+            paginas_pedidas.append(int(url.rsplit("page=", 1)[1]))
+
+        page = Mock()
+        page.goto = _goto
+
+        @contextmanager
+        def _browser_com_page():
+            yield page, Mock()
+
+        with patch.object(automacao_state, "read_state",
+                          return_value={ofertas_scraper.CURSOR_OFERTAS: 7}), \
+                patch.object(automacao_state, "write_state") as gravou, \
+                patch.object(ofertas_scraper, "coordinated_ml_browser",
+                             lambda **_k: _browser_com_page()), \
+                patch.object(ofertas_scraper, "iniciar_browser",
+                             lambda **_k: _browser_com_page()), \
+                patch.object(ofertas_scraper, "storage_state", return_value=None), \
+                patch.object(ofertas_scraper, "pausa_humana", Mock()), \
+                patch.object(ofertas_scraper, "_coletar_cards", return_value=[]), \
+                patch.object(ofertas_scraper, "VAZIAS_PARA_PARAR", 1):
+            ofertas_scraper.mapear_ofertas(max_paginas=8, substituir=False)
+
+        self.assertEqual(paginas_pedidas, [1])
+        gravou.assert_not_called()
 
     def test_buscar_por_termo_devolve_o_navegador_a_um_login_esperando(self):
         from apps.scrapers.scraper_mercadolivre import ofertas_scraper
@@ -730,8 +869,8 @@ class RaspagemCedeAoLoginInterativoTests(TestCase):
                 patch.object(ofertas_scraper, "_salvar", return_value=1), \
                 patch.object(ofertas_scraper, "_reconectar_db", Mock()), \
                 patch.object(
-                    ofertas_scraper, "interesse_interativo_pendente",
-                    lambda _r: len(termos_lidos) >= 1,
+                    ofertas_scraper, "interesse_pendente",
+                    lambda _r, exceto=None: len(termos_lidos) >= 1,
                 ):
             ofertas_scraper.buscar_por_termo(
                 "fone, robo aspirador, cafeteira", max_paginas=1,
@@ -755,8 +894,8 @@ class RaspagemCedeAoLoginInterativoTests(TestCase):
 
         with patch(
             "apps.scrapers.scraper_mercadolivre.cupons_container."
-            "interesse_interativo_pendente",
-            lambda _r: len(chamadas) >= 2,
+            "interesse_pendente",
+            lambda _r, exceto=None: len(chamadas) >= 2,
         ):
             pares = _coletar(cupons, _coletor, max_paginas=2)
 
