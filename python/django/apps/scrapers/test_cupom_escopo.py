@@ -13,7 +13,10 @@ a fonte não publicou recebe a home do ML como destino. As duas páginas respond
 200 com dezenas de cards de oferta — e cada card virava um ``ProdutoCupom``
 "confirmado", que é exatamente o que libera o código a entrar na mensagem.
 """
+from types import SimpleNamespace
+
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
@@ -36,6 +39,16 @@ CARD_DE_VITRINE = """
   </div>
 </div>
 """
+
+
+def _editor():
+    """Stub do schema_editor: `_system_context` só precisa da conexão.
+
+    O schema_editor real do SQLite recusa entrar dentro de uma transação, e o
+    TestCase mantém uma aberta. O que interessa testar é o caminho da função, e
+    ele passa por `schema_editor.connection`.
+    """
+    return SimpleNamespace(connection=connection)
 
 
 class _Resposta:
@@ -321,7 +334,7 @@ class PurgaDaVitrineTests(TestCase):
             codigo="CONT",
             url="https://lista.mercadolivre.com.br/_Container_x", regra="container")
 
-        migracao.expirar(registro, None)
+        migracao.expirar(registro, _editor())
 
         vivos = set(ProdutoCupom.objects.filter(
             status="confirmado").values_list("id", flat=True))
@@ -430,9 +443,38 @@ class SiteInteiroContestadoTests(TestCase):
             evidencia={"regra": "container", "item_id": "MLB333"},
         )
 
-        migracao.expirar(registro, None)
+        migracao.expirar(registro, _editor())
 
         massa.refresh_from_db()
         legitima.refresh_from_db()
         self.assertEqual(massa.status, "expirado")
         self.assertEqual(legitima.status, "confirmado")
+
+
+class MigracaoAbreContextoDeSistemaTests(TestCase):
+    """A migração de dados PRECISA abrir `app.system_context` antes de consultar.
+
+    Sem isso o RLS de produção esconde todas as linhas e a migração é registrada
+    como aplicada sem ter mudado nada — foi o que aconteceu na primeira aplicação
+    da 0064. Em SQLite não há RLS, então a suíte nunca veria o efeito; o que dá
+    para travar aqui é o contrato: a função chama o helper.
+    """
+
+    def test_expirar_abre_o_contexto_antes_de_consultar(self):
+        from importlib import import_module
+
+        from django.apps import apps as registro
+
+        for nome in ("0064_purga_associacao_vitrine_generica",
+                     "0065_reaplica_purga_com_contexto"):
+            migracao = import_module(f"apps.scrapers.migrations.{nome}")
+            origem = import_module(
+                "apps.scrapers.migrations.0064_purga_associacao_vitrine_generica")
+            chamadas = []
+            real = origem._system_context
+            origem._system_context = lambda editor: chamadas.append(editor)
+            try:
+                migracao.expirar(registro, _editor())
+            finally:
+                origem._system_context = real
+            self.assertEqual(len(chamadas), 1, f"{nome} não abriu o contexto")

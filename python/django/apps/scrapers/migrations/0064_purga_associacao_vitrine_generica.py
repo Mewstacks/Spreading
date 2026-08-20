@@ -25,11 +25,38 @@ esperar a validade do cupom.
 
 Associação de container (``regra="container"``) e listagens reais não são tocadas.
 """
+import hashlib
+import hmac
 from urllib.parse import urlsplit
 
+from django.conf import settings
 from django.db import migrations
 
 HOST_LISTAGEM = "lista.mercadolivre.com.br"
+
+
+def _system_context(schema_editor):
+    """Abre o contexto cross-tenant, como toda migração de dados deste app.
+
+    Sem isto o RLS de produção esconde TODAS as linhas da conexão da migração, e
+    o `update()` abaixo percorre um conjunto vazio: a migração "roda com sucesso"
+    sem alterar nada. Foi o que aconteceu na primeira aplicação — os vínculos
+    seguiram confirmados até a próxima preparação do cupom. Mesmo helper de
+    `0061_coupon_pipeline_contracts`. Em SQLite (testes) não há RLS e vira no-op,
+    e é por isso que a suíte não flagrou a falta.
+    """
+    connection = schema_editor.connection
+    if connection.vendor != "postgresql" or not settings.TENANT_CONTEXT_SIGNING_KEY:
+        return
+    assinatura = hmac.new(
+        settings.TENANT_CONTEXT_SIGNING_KEY.encode("utf-8"), b"system:", hashlib.sha256,
+    ).hexdigest()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT set_config('app.system_context', 'on', true), "
+            "set_config('app.system_signature', %s, true)",
+            [assinatura],
+        )
 
 
 def _e_listagem(url) -> bool:
@@ -57,6 +84,7 @@ def _codigos_contestados(CupomNormalizado):
 
 
 def expirar(apps, schema_editor):
+    _system_context(schema_editor)
     CupomNormalizado = apps.get_model("scrapers", "CupomNormalizado")
     ProdutoCupom = apps.get_model("scrapers", "ProdutoCupom")
     CupomPreparacao = apps.get_model("scrapers", "CupomPreparacao")
