@@ -12,10 +12,13 @@ Windows (dev) e no container (prod), sem Popen/taskkill.
   - "links":  geração/verificação de links; instalações antigas herdam "scrape"
     até a primeira configuração explícita.
 """
+import atexit
 import json
 import os
+import shutil
 import sys
 import subprocess
+import tempfile
 import time
 
 from django.conf import settings
@@ -24,8 +27,31 @@ from django.conf import settings
 # um worker vivo (honcho em prod, ou subprocess destacado em dev). > isto = morto.
 HEARTBEAT_STALE = 90
 
-# Em produção o volume monta em /data; guarda o estado lá p/ sobreviver a deploy.
-_DIR = os.path.join(getattr(settings, "ML_AUTH_DIR", "") or settings.BASE_DIR, ".automacao")
+
+def _diretorio_de_estado() -> str:
+    """Onde o heartbeat e o cursor dos loops moram.
+
+    Em produção o volume monta em /data; guarda o estado lá p/ sobreviver a deploy.
+
+    Nos testes é um diretório próprio, e isso é contrato, não conveniência: a suíte
+    escrevia no MESMO estado do worker de desenvolvimento. Um teste que exercita a
+    raspagem deixava lá o cursor de retomada e o teste seguinte começava a varredura
+    na página 3 — `3 != 5` em `test_single_blank_page_does_not_truncate_the_feed`,
+    sem nenhuma relação com o código sob teste. O PID entra no nome porque
+    `--parallel` roda vários processos e cada um precisa do próprio estado.
+    """
+    if getattr(settings, "RUNNING_TESTS", False):
+        caminho = os.path.join(
+            tempfile.gettempdir(), f"spreading-testes-{os.getpid()}", "automacao",
+        )
+        if not os.path.isdir(caminho):
+            atexit.register(shutil.rmtree, caminho, True)
+        return caminho
+    return os.path.join(
+        getattr(settings, "ML_AUTH_DIR", "") or settings.BASE_DIR, ".automacao")
+
+
+_DIR = _diretorio_de_estado()
 os.makedirs(_DIR, exist_ok=True)
 
 JOBS = ("scrape", "envio", "links", "relatorios")

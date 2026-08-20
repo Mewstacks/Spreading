@@ -18,7 +18,7 @@ from apps.scrapers.carga import coordinated_ml_browser
 from apps.scrapers.ml_auth import storage_state
 from apps.scrapers.models import Produto
 from apps.scrapers.progresso import emitir_progresso
-from apps.scrapers.resource_control import interesse_interativo_pendente
+from apps.scrapers.resource_control import interesse_pendente
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 logger = logging.getLogger(__name__)
@@ -518,35 +518,78 @@ def _upsert_ofertas(coletados):
     return n
 
 
+CURSOR_OFERTAS = "cursor_ofertas_ml"
+
+
+def _ler_cursor_ofertas(max_paginas: int) -> int:
+    """Página em que a próxima passada começa. Sempre dentro de 1..max_paginas.
+
+    Um cursor fora da faixa (o operador baixou `max_paginas`, ou o arquivo veio de
+    uma versão anterior) volta ao topo em vez de raspar o vazio.
+    """
+    from apps.scrapers import automacao_state as st
+
+    try:
+        cursor = int(st.read_state("scrape").get(CURSOR_OFERTAS) or 1)
+    except (TypeError, ValueError):
+        return 1
+    return cursor if 1 <= cursor <= max_paginas else 1
+
+
+def _gravar_cursor_ofertas(proxima_pagina: int) -> None:
+    from apps.scrapers import automacao_state as st
+
+    st.write_state("scrape", **{CURSOR_OFERTAS: max(1, int(proxima_pagina))})
+
+
 def mapear_ofertas(max_paginas=40, substituir=True, usuario=None):
     """Raspa N páginas de /ofertas. substituir=True (lane LENTA): regrava todo o feed.
     substituir=False (lane RÁPIDA/flash, B3): upsert por link, sem zerar o feed.
 
     /ofertas é público: a sessão aqui é opcional (melhora preço/frete
     personalizado quando existe), não requisito — por isso não avisamos quando
-    falta, ao contrário da raspagem de cupons."""
+    falta, ao contrário da raspagem de cupons.
+
+    A lane lenta é RETOMÁVEL. Ceder o navegador no meio da varredura só é barato se
+    a próxima passada continuar de onde esta parou; recomeçando sempre da página 1,
+    ceder na página 5 significaria nunca mais raspar da 6 em diante — as ofertas do
+    fundo do feed sumiriam do catálogo justamente quando a máquina está mais
+    disputada. O cursor mora no estado do worker (volume, sobrevive a deploy).
+    """
     logger.info("Iniciando raspagem de ofertas ML (%s)", "full" if substituir else "flash")
     coletados = []
 
     vazias_seguidas = 0
+    # A lane flash existe para pegar o topo do feed quente; retomar do meio a
+    # desvirtuaria. Só a lane lenta, que precisa cobrir o feed inteiro, usa cursor.
+    pagina_inicial = _ler_cursor_ofertas(max_paginas) if substituir else 1
+    proxima_pagina = 1  # 1 = passada completa; o ciclo seguinte recomeça do topo
     state = storage_state(usuario)
+    if pagina_inicial > 1:
+        logger.info("Raspagem de ofertas ML retomando da página %s de %s.",
+                    pagina_inicial, max_paginas)
     with coordinated_ml_browser(
         usuario=usuario, authenticated=state is not None,
         owner_kind="ml_offers",
     ), iniciar_browser(storage_state=state, headless=True) as (page, context):
-        for n in range(1, max_paginas + 1):
-            # Alguém está esperando o navegador para logar AGORA. A raspagem
-            # completa segura o Chromium da máquina por dezenas de páginas — sem
-            # esta saída o login interativo esgotava os 45s de espera toda vez
-            # que a lane `scrape` estava rodando, e a tela abria e fechava
-            # sozinha ("A automação está concluindo uma tarefa de navegador").
-            # Sair aqui não perde trabalho: o que já foi coletado é salvo, e a
-            # página seguinte é a primeira do próximo ciclo.
-            if n > 1 and interesse_interativo_pendente("django_chromium"):
+        for n in range(pagina_inicial, max_paginas + 1):
+            # Alguém está esperando o navegador AGORA — uma pessoa logando ou uma
+            # esteira automática que perdeu a vez. A raspagem completa segura o
+            # Chromium da máquina por dezenas de páginas (~93s cada, ~62min o ciclo
+            # inteiro medido em 20/08/2026); sem esta saída o login interativo
+            # esgotava os 45s de espera e, pior, links/verificação/envio ficavam
+            # parados o ciclo inteiro — sem link não há cupom pronto, e sem cupom
+            # pronto não há envio.
+            # Sair aqui não perde trabalho: o que já foi coletado é salvo e o
+            # cursor guarda a próxima página, de onde o ciclo seguinte retoma.
+            if n > pagina_inicial and interesse_pendente(
+                    "django_chromium", exceto="ml_offers"):
                 logger.info(
-                    "Raspagem de ofertas ML cedeu o navegador a um login "
-                    "interativo após %s de %s página(s).", n - 1, max_paginas,
+                    "Raspagem de ofertas ML cedeu o navegador após %s de %s "
+                    "página(s); retoma na página %s.",
+                    n - pagina_inicial, max_paginas, n,
                 )
+                proxima_pagina = n
                 break
             emitir_progresso(f"[PROGRESSO] Ofertas página {n}/{max_paginas} ({n*100//max_paginas}%)")
             try:
@@ -579,6 +622,11 @@ def mapear_ofertas(max_paginas=40, substituir=True, usuario=None):
             vazias_seguidas = 0
             coletados.extend(cards)
             pausa_humana()  # ritmo humano entre páginas (anti-bloqueio)
+
+    if substituir:
+        # Fora do `with`: gravar o cursor não depende do navegador, e sair do
+        # contexto primeiro evita segurar o Chromium por uma escrita em disco.
+        _gravar_cursor_ofertas(proxima_pagina)
 
     if not coletados:
         logger.warning("Raspagem de ofertas ML vazia; feed existente preservado")
@@ -617,12 +665,13 @@ def buscar_por_termo(termo_busca, min_desconto=15, max_paginas=3, macro=None,
         owner_kind="ml_search",
     ), iniciar_browser(storage_state=state, headless=True) as (page, context):
         for indice_termo, termo in enumerate(termos):
-            # Mesmo motivo de mapear_ofertas: ceder ao login interativo em vez de
+            # Mesmo motivo de mapear_ofertas: ceder a quem está na fila em vez de
             # segurar o Chromium até o fim de todos os termos configurados.
-            if indice_termo > 0 and interesse_interativo_pendente("django_chromium"):
+            if indice_termo > 0 and interesse_pendente(
+                    "django_chromium", exceto="ml_search"):
                 logger.info(
-                    "Busca ML cedeu o navegador a um login interativo após "
-                    "%s de %s termo(s).", indice_termo, len(termos),
+                    "Busca ML cedeu o navegador após %s de %s termo(s).",
+                    indice_termo, len(termos),
                 )
                 break
             slug = _slug_busca(termo)

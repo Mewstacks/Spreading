@@ -20,6 +20,7 @@ from apps.scrapers.models import (
     normalizar_busca,
 )
 from apps.scrapers.progresso import emitir_progresso, emitir_fase
+from apps.scrapers.resource_control import interesse_pendente
 from django.db import DatabaseError, OperationalError, connections, transaction
 from django.utils import timezone
 
@@ -1161,6 +1162,17 @@ def main(usuario=None):
         owner_kind="ml_coupon_products",
     ), iniciar_browser(storage_state=state, headless=True) as (page, context):
         for i, cupom in enumerate(cupons_pendentes, 1):
+            # Mesmo motivo de mapear_ofertas e do lote de links: um cupom por vez,
+            # mas N cupons seguram o Chromium da máquina. Cede DEPOIS do item
+            # corrente; os restantes continuam pendentes e voltam no ciclo seguinte,
+            # que é o comportamento normal desta fila.
+            if i > 1 and interesse_pendente(
+                    "django_chromium", exceto="ml_coupon_products"):
+                logger.info(
+                    "Listagem de produtos por cupom cedeu o navegador após "
+                    "%s de %s cupom(ns).", i - 1, total,
+                )
+                break
             emitir_progresso(f"[PROGRESSO] Cupom {i}/{total} ({i*100//total}%)")
             resultado = listar_itens_por_cupom(cupom, page)
             if resultado:

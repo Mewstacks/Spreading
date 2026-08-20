@@ -558,6 +558,21 @@ class OfferFeedPaginationTests(TestCase):
     """O feed /ofertas tem ~40 páginas cheias; uma página em branco é quase sempre
     challenge do anti-bot, não fim do catálogo."""
 
+    def setUp(self):
+        # A varredura é retomável e guarda no estado do worker a página em que
+        # parou. Estes testes contam páginas a partir da PRIMEIRA, então precisam de
+        # um estado próprio: sem isso, um teste anterior que cedeu o navegador na
+        # página 3 fazia a contagem começar de lá (`3 != 5`).
+        import tempfile
+
+        from apps.scrapers import automacao_state
+
+        estado = tempfile.TemporaryDirectory()
+        self.addCleanup(estado.cleanup)
+        remendo = patch.object(automacao_state, "_DIR", estado.name)
+        remendo.start()
+        self.addCleanup(remendo.stop)
+
     def _rodar(self, paginas_de_cards, max_paginas=6):
         from contextlib import contextmanager
         from unittest.mock import MagicMock

@@ -23,6 +23,19 @@ logger = logging.getLogger("apps.automacao")
 ERRO_PUBLICO = "Falha temporária no serviço. Uma nova tentativa será feita no próximo ciclo."
 RETRY_MINUTOS = 5
 BACKOFF_BANCO_MAX_S = 300
+# Intervalo até retomar uma varredura que cedeu o navegador no meio do caminho.
+RETOMADA_MINUTOS = 5
+
+
+def _resta_varredura():
+    """Página em que a varredura de ofertas parou, ou 0 se a passada terminou."""
+    from apps.scrapers.scraper_mercadolivre.ofertas_scraper import CURSOR_OFERTAS
+
+    try:
+        cursor = int(st.read_state("scrape").get(CURSOR_OFERTAS) or 1)
+    except (TypeError, ValueError):
+        return 0
+    return cursor if cursor > 1 else 0
 
 
 @contextmanager
@@ -728,16 +741,29 @@ class Command(BaseCommand):
                 ciclos += 1
                 fim = timezone.now()
                 degradado = bool(resultado["falhas"])
-                proximo = fim + (timedelta(minutes=30) if degradado
-                                 else timedelta(seconds=scrape_seg))
+                # Passada interrompida no meio não pode esperar o intervalo cheio.
+                # A varredura agora cede o navegador para as esteiras que estão na
+                # fila (links, verificação, envio) e guarda a página em que parou;
+                # se ela só voltasse daqui a três horas, o cursor andaria duas
+                # páginas por ciclo e o fundo do feed levaria dias para ser lido.
+                # Retomar em minutos mantém a cobertura E a cessão.
+                retomando = _resta_varredura()
+                proximo = fim + (
+                    timedelta(minutes=RETOMADA_MINUTOS) if retomando
+                    else timedelta(minutes=30) if degradado
+                    else timedelta(seconds=scrape_seg))
                 erro = ("Falha parcial: " + ", ".join(resultado["falhas"])
                         if degradado else "")
                 st.write_state(
                     "scrape", fase="degradado" if degradado else "aguardando", loja_atual=None,
                     ultimo_ciclo_fim=fim.isoformat(), proximo_ciclo=proximo.isoformat(),
                     ciclos=ciclos, erro=erro,
-                    ultima_msg=(f"Ciclo {ciclos} parcial; nova tentativa em 30 min."
-                                if degradado else f"Ciclo {ciclos} concluído às {fim:%H:%M}."),
+                    ultima_msg=(
+                        f"Ciclo {ciclos} cedeu o navegador na página {retomando}; "
+                        f"retoma em {RETOMADA_MINUTOS} min." if retomando
+                        else f"Ciclo {ciclos} parcial; nova tentativa em 30 min."
+                        if degradado
+                        else f"Ciclo {ciclos} concluído às {fim:%H:%M}."),
                 )
             except DatabaseError as e:
                 falhas_banco += 1
