@@ -517,9 +517,27 @@ def _texto_ia_sem_formatacao(texto, limite=120):
 def _salvar_cache_ia(produto, *, titulo="", nome_curto="", persistir=True):
     """Atualiza cache de IA sem deixar uma falha de escrita quebrar a transação.
 
-    No envio de cupom público os valores servem apenas para compor a mensagem e
-    ficam em memória; o catálogo compartilhado só é escrito pelo worker.
+    O catálogo compartilhado (``organization_id IS NULL``) é legível por qualquer
+    tenant e gravável só em contexto de sistema — é o que a política ``tenant_update``
+    diz: ``USING ((system) OR organization_id = <org>)``. Como o envio roda no
+    contexto da organização, o UPDATE casava zero linhas e o Django levantava
+    ``Produto.NotUpdated``; o except abaixo engolia, e o cache NUNCA era gravado.
+
+    O tamanho do desperdício, medido em produção em 20/08/2026: 148 de 47.554
+    produtos tinham ``nome_llm``. Ou seja, quase toda mensagem enviada pagava uma
+    chamada nova ao modelo (~6-8s no log) para reescrever um título que o produto
+    já tinha recebido antes.
+
+    A correção NÃO afrouxa o RLS: abre o contexto de sistema só para gravar o
+    cache do catálogo público, que é exatamente para isso que ele existe. Os
+    workers do Procfile já rodam com ``TENANT_SYSTEM_PROCESS=1``. No processo web
+    (envio manual pela tela) a role não é privilegiada, `system_context` recusa com
+    PermissionDenied e o comportamento volta a ser o de hoje: a mensagem sai com o
+    título em memória e ninguém quebra.
     """
+    from contextlib import nullcontext
+
+    from apps.accounts.tenant import in_system_context, system_context
     campos = []
     if titulo and titulo != (getattr(produto, "frase_llm", "") or ""):
         produto.frase_llm = titulo
@@ -530,11 +548,18 @@ def _salvar_cache_ia(produto, *, titulo="", nome_curto="", persistir=True):
     if (not campos or not persistir or not hasattr(produto, "save")
             or not getattr(produto, "pk", None)):
         return
+    # Só o catálogo compartilhado precisa do contexto de sistema. Produto de uma
+    # organização é gravável pelo tenant dono e não deve sair do escopo dele.
+    compartilhado = (getattr(produto, "organization_id", None) is None
+                     and not in_system_context())
     try:
-        # Savepoint obrigatório: DatabaseError capturado dentro de um atomic
-        # externo (RLS, timeout etc.) não pode contaminar o envio inteiro.
-        with transaction.atomic():
-            produto.save(update_fields=campos)
+        # `system_context` recusa role não privilegiada no __enter__; o except
+        # abaixo já é o caminho de "não deu para gravar", igual a hoje.
+        with system_context() if compartilhado else nullcontext():
+            # Savepoint obrigatório: DatabaseError capturado dentro de um atomic
+            # externo (RLS, timeout etc.) não pode contaminar o envio inteiro.
+            with transaction.atomic():
+                produto.save(update_fields=campos)
     except Exception:
         logger.warning("Cache de IA não foi persistido para o produto %s",
                        getattr(produto, "pk", "?"), exc_info=True)
