@@ -72,17 +72,22 @@ def stats_em_lote(produtos, dias: int = 30) -> dict:
     Filtra por marketplace junto com a chave pra bater com o índice composto
     (marketplace, chave, data); a chave sozinha já é única, mas não é prefixo dele.
     """
-    from django.db.models import Count, Min
+    from functools import reduce
+    from operator import or_
+
+    from django.db.models import Count, Min, Q
 
     if not produtos:
         return {}
     desde = timezone.now() - timedelta(days=dias)
+    pares = sorted({
+        (getattr(p, "marketplace", "mercadolivre"), chave_produto(p))
+        for p in produtos
+    })
+    pares_q = reduce(or_, (Q(marketplace=marketplace, chave=chave)
+                           for marketplace, chave in pares))
     linhas = (
-        PrecoHistorico.objects.filter(
-            marketplace__in={getattr(p, "marketplace", "mercadolivre") for p in produtos},
-            chave__in={chave_produto(p) for p in produtos},
-            data__gte=desde,
-        )
+        PrecoHistorico.objects.filter(pares_q, data__gte=desde)
         .values("chave").annotate(n=Count("id"), minimo=Min("preco"))
     )
     return {l["chave"]: {"n": l["n"], "minimo": l["minimo"]} for l in linhas}

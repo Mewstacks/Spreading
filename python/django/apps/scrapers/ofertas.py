@@ -1695,6 +1695,9 @@ def selecionar_cupons_para_aviso(configuracao, usuario, limite=LIMITE_CUPONS_AVI
     if not marketplace or organization is None:
         return []
 
+    # A constraint uniq_coupon_readiness_projection garante no máximo uma projeção
+    # para este conjunto exato de dimensões. DISTINCT aqui só fazia o Postgres
+    # ordenar/copiar todas as colunas largas de CupomNormalizado antes do LIMIT.
     base = CupomNormalizado.objects.select_related("fonte", "programa", "integracao").filter(
         cupons_visiveis_q(usuario),
         Q(inicio__isnull=True) | Q(inicio__lte=agora),
@@ -1705,7 +1708,7 @@ def selecionar_cupons_para_aviso(configuracao, usuario, limite=LIMITE_CUPONS_AVI
         disponibilidades__channel=getattr(configuracao, "canal", "whatsapp"),
         disponibilidades__use_mode="code_notice",
         disponibilidades__stage="ready",
-    ).exclude(codigo="").distinct()
+    ).exclude(codigo="")
     if not getattr(configuracao, "incluir_restritos", True):
         base = base.filter(restrito=False)
 
@@ -1732,7 +1735,9 @@ def selecionar_cupons_para_aviso(configuracao, usuario, limite=LIMITE_CUPONS_AVI
     contestados = codigos_com_escopo_contestado(
         CupomNormalizado.objects.filter(
             marketplace=marketplace, estado="ativo",
-        ).exclude(codigo="").only("id", "codigo", "regras", "external_id")
+        ).exclude(codigo="").only(
+            "id", "codigo", "regras", "external_id", "redemption_mode",
+        )
     )
 
     candidatos = []

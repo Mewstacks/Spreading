@@ -1590,14 +1590,6 @@ def configuracoes(request):
                 cfg_obj.programas.set(program_ids)
         return redirect("scraper-configuracoes")
 
-    macros = _taxonomia_cacheada("macros", request, lambda: list(
-        Produto.objects
-        .exclude(macro_categoria__isnull=True).exclude(macro_categoria="")
-        .values_list("macro_categoria", flat=True).distinct().order_by("macro_categoria")
-    ))
-    # Grupos do WhatsApp NÃO são buscados aqui: a chamada ao Node pode travar o render
-    # (até 15s) quando o serviço está offline. Carregados via AJAX (ver whatsapp_grupos_json).
-
     from apps.scrapers.scraper_mercadolivre.ofertas_scraper import SUBNICHOS
     subnichos = [{"macro": m, "itens": [{"label": l, "termos": t} for l, t in itens]}
                  for m, itens in SUBNICHOS.items()]
@@ -1608,6 +1600,16 @@ def configuracoes(request):
     configs_qs = ConfiguracaoEnvio.objects.filter(owner=request.user).prefetch_related(
         "programas").order_by("macro_categoria")
     configs = list(configs_qs)
+    # Esta tela precisa da taxonomia editorial, não de um DISTINCT sobre todo o
+    # catálogo acumulado. Em produção o primeiro GET gastava dezenas de segundos
+    # só para montar o select.
+    # Preserva também macros de regras antigas que não estejam mais no dicionário.
+    macros = sorted(
+        set(SUBNICHOS)
+        | {config.macro_categoria for config in configs if config.macro_categoria}
+    )
+    # Grupos do WhatsApp NÃO são buscados aqui: a chamada ao Node pode travar o render
+    # (até 15s) quando o serviço está offline. Carregados via AJAX (ver whatsapp_grupos_json).
     from apps.scrapers.content_ranking import previa_melhor_conteudo
     from apps.scrapers.ofertas import selecionar_cupons_para_aviso
     for config in configs:
@@ -2164,11 +2166,26 @@ def top_promocoes(request):
     # esconder também é o que tira o peso do GET do usuário comum.
     diagnostico = request.user.is_staff
 
-    # Os dois DISTINCT varrem a tabela de produtos e alimentam só os seletores da
-    # aba Ofertas; na aba Cupons eles não têm leitor no template.
+    from django.db.models import Q
+    from apps.scrapers.maintenance import produtos_frescos_q
+
+    def _produtos_da_taxonomia():
+        # Os filtros devem descrever o mesmo universo que a lista: itens frescos,
+        # publicáveis e visíveis para o usuário. Consultar o histórico inteiro fazia
+        # o DISTINCT atravessar anos de observações mortas e travava a navegação.
+        return Produto.objects.filter(
+            produtos_frescos_q(),
+        ).exclude(
+            estado__in=["indisponivel", "invalido", "expirado", "stale"]
+        ).filter(
+            Q(owner__isnull=True) | Q(owner=request.user)
+        )
+
+    # Os dois DISTINCT alimentam só os seletores da aba Ofertas; na aba Cupons
+    # eles não têm leitor no template.
     macro_categorias = [] if aba_cupons else _taxonomia_cacheada(
         "macros", request, lambda: list(
-            Produto.objects
+            _produtos_da_taxonomia()
             .exclude(macro_categoria__isnull=True)
             .exclude(macro_categoria="")
             .values_list("macro_categoria", flat=True)
@@ -2180,7 +2197,7 @@ def top_promocoes(request):
         agrupado = {}
         macros_sem_categoria = set()
         for row in (
-            Produto.objects
+            _produtos_da_taxonomia()
             .exclude(macro_categoria__isnull=True).exclude(macro_categoria="")
             .values("macro_categoria", "categoria")
             .distinct()
@@ -2207,9 +2224,6 @@ def top_promocoes(request):
 
     # Ordenação: 'percent' (padrão — melhor p/ deal bot) ou 'valor' (R$ absoluto economizado).
     ordenar = "valor" if filtros.get("ordenar") == "valor" else "percent"
-
-    from django.db.models import Q
-    from apps.scrapers.maintenance import produtos_frescos_q
 
     # Cada aba preenche apenas o seu lado. A outra fica nestes neutros: o template
     # ainda cita as variáveis, mas dentro de um `{% if tipo %}` que não abre.
