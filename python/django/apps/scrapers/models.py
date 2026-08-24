@@ -143,6 +143,17 @@ class Produto(models.Model):
             kwargs["update_fields"] = list(update_fields) + ["nome_norm"]
         return super().save(*args, **kwargs)
 
+    class Meta:
+        indexes = [
+            # Chave exata de todos os upserts de coleta. Sem este índice, cada card
+            # raspado fazia uma varredura do catálogo acumulado e monopolizava o
+            # PostgreSQL enquanto o painel tentava navegar.
+            models.Index(
+                fields=["marketplace", "owner", "link_produto"],
+                name="scrapers_prod_lookup_idx",
+            ),
+        ]
+
 
 class FonteIngestao(models.Model):
     """Estado durável de um conector. Nunca contém credenciais."""
