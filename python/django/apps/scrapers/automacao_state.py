@@ -22,6 +22,7 @@ import tempfile
 import time
 
 from django.conf import settings
+from django.db import transaction
 
 # Heartbeat: o loop grava estado a cada ~15s. Se o último estado é recente, existe
 # um worker vivo (honcho em prod, ou subprocess destacado em dev). > isto = morto.
@@ -55,6 +56,31 @@ _DIR = _diretorio_de_estado()
 os.makedirs(_DIR, exist_ok=True)
 
 JOBS = ("scrape", "envio", "links", "relatorios")
+
+
+def _usa_banco() -> bool:
+    """Produção precisa de estado comum entre as VMs web e worker."""
+    backend = os.getenv("AUTOMACAO_STATE_BACKEND", "").strip().lower()
+    if backend:
+        return backend == "database"
+    return settings.APP_ENV in {"staging", "production"}
+
+
+def _defaults_ligados() -> set[str]:
+    return {
+        job.strip()
+        for job in os.getenv("AUTOMACAO_DEFAULT_ENABLED", "").split(",")
+        if job.strip()
+    }
+
+
+def _registro(job: str):
+    # Import tardio: o módulo também é importado durante o bootstrap do Django.
+    from apps.scrapers.models import AutomacaoEstado
+    return AutomacaoEstado.objects.get_or_create(
+        job=job,
+        defaults={"enabled": job in _defaults_ligados()},
+    )[0]
 
 # Qual FLAG comanda cada fonte de ingestão. Existe para a tela poder separar
 # "a fonte quebrou" de "ninguém mandou esta lane rodar" — dois diagnósticos com
@@ -93,18 +119,32 @@ def configuredfile(job: str) -> str:
 
 def links_herda_scrape() -> bool:
     """Compatibilidade até a lane receber sua primeira escolha explícita."""
+    if _usa_banco():
+        return not _registro("links").configured
     return not os.path.exists(configuredfile("links"))
 
 
 # ── Flag liga/desliga ─────────────────────────────────────────
 def is_enabled(job: str) -> bool:
     """Ligado = arquivo-flag existe. Default DESLIGADO (nada roda até o usuário ligar)."""
+    if _usa_banco():
+        registro = _registro(job)
+        if job == "links" and not registro.configured:
+            return _registro("scrape").enabled
+        return registro.enabled
     if job == "links" and links_herda_scrape():
         return os.path.exists(enabledfile("scrape"))
     return os.path.exists(enabledfile(job))
 
 
 def set_enabled(job: str, on: bool):
+    if _usa_banco():
+        from apps.scrapers.models import AutomacaoEstado
+        defaults = {"enabled": bool(on)}
+        if job == "links":
+            defaults["configured"] = True
+        AutomacaoEstado.objects.update_or_create(job=job, defaults=defaults)
+        return
     if job == "links":
         # Um marcador separado distingue "a flag nova ainda não existe" de
         # "alguém desligou links explicitamente". Sem ele, desligar removeria o
@@ -139,6 +179,8 @@ def parar(job: str) -> bool:
 # ── Heartbeat / estado ────────────────────────────────────────
 def read_state(job: str) -> dict:
     """Heartbeat do loop: fase atual, último/próximo ciclo, contadores."""
+    if _usa_banco():
+        return dict(_registro(job).state or {})
     try:
         with open(statefile(job), encoding="utf-8") as f:
             return json.load(f)
@@ -148,6 +190,19 @@ def read_state(job: str) -> dict:
 
 def write_state(job: str, **campos) -> dict:
     """Mescla campos no estado e grava atômico. Chamado pelo loop a cada fase."""
+    if _usa_banco():
+        from apps.scrapers.models import AutomacaoEstado
+        with transaction.atomic():
+            registro, _ = AutomacaoEstado.objects.select_for_update().get_or_create(
+                job=job,
+                defaults={"enabled": job in _defaults_ligados()},
+            )
+            estado = dict(registro.state or {})
+            estado.update(campos)
+            estado["atualizado_em"] = time.time()
+            registro.state = estado
+            registro.save(update_fields=["state", "updated_at"])
+        return estado
     estado = read_state(job)
     estado.update(campos)
     estado["atualizado_em"] = time.time()
@@ -162,6 +217,10 @@ def write_state(job: str, **campos) -> dict:
 
 
 def clear_state(job: str):
+    if _usa_banco():
+        from apps.scrapers.models import AutomacaoEstado
+        AutomacaoEstado.objects.filter(job=job).update(state={})
+        return
     try:
         os.remove(statefile(job))
     except OSError:

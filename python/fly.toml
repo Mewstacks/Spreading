@@ -13,6 +13,10 @@ kill_timeout = "30s"
 [build]
   dockerfile = "Dockerfile"
 
+[processes]
+  web = "honcho -f Procfile.web start"
+  worker = "honcho -f Procfile.worker start"
+
 [[restart]]
   policy = "always"
 
@@ -23,6 +27,9 @@ kill_timeout = "30s"
   # Piloto Awin ativo; cada afiliado conecta o próprio token pela tela Conta.
   AWIN_INTEGRATION_ENABLED = "1"
   ML_AUTH_DIR = "/data/ml_sessions"
+  # O painel e os loops agora rodam em VMs distintas; PostgreSQL é o estado comum.
+  AUTOMACAO_STATE_BACKEND = "database"
+  AUTOMACAO_DEFAULT_ENABLED = "scrape,envio,links,relatorios"
   # Serviço do WhatsApp na rede privada do Fly (.internal).
   WHATSAPP_API_URL = "http://spreading-wa.internal:3000"
 
@@ -37,8 +44,10 @@ kill_timeout = "30s"
 [[mounts]]
   source = "ml_data"
   destination = "/data"
+  processes = ["web"]
 
 [http_service]
+  processes = ["web"]
   internal_port = 8080
   force_https = true
   auto_stop_machines = false
@@ -72,5 +81,12 @@ kill_timeout = "30s"
 # a pressão após o ajuste permanecer baixa.
 # Preços da tabela da região gru, que tem markup de ~1,55× sobre a tabela base.
 [[vm]]
-  size = "shared-cpu-4x"
+  processes = ["web"]
+  size = "shared-cpu-2x"
+  memory = "2gb"
+
+[[vm]]
+  processes = ["worker"]
+  # Playwright/Chromium precisa de 2 GB; 1 GB torna a economia falsa por OOM/restarts.
+  size = "shared-cpu-2x"
   memory = "2gb"

@@ -1,0 +1,3 @@
+web: gunicorn core.wsgi:application --chdir django --bind 0.0.0.0:8080 --workers 1 --threads 8 --timeout 120
+# Relatórios ainda usam /data/report_sessions; ficam com o process group que monta o volume.
+relatorios: sleep 30 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo relatorios

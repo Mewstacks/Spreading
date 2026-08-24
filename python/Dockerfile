@@ -22,7 +22,7 @@ RUN pip install -r requirements.txt \
 
 # Código da aplicação (django/) + Procfile dos processos.
 COPY django/ ./django/
-COPY Procfile ./
+COPY Procfile Procfile.web Procfile.worker ./
 
 # Estáticos compilados na build (servidos pelo WhiteNoise em runtime).
 # DEBUG=0 aqui é OBRIGATÓRIO: gera o staticfiles.json (ManifestStaticFilesStorage)

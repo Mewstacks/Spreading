@@ -1,0 +1,8 @@
+monitor: sleep 10 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar --tick 5
+envio: sleep 20 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo envio --tick 5
+manual: sleep 30 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo manual
+cupons: sleep 45 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo cupons --tick 15 --lote 40
+scrapeflash: sleep 60 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape_rapido --tick 5
+links: sleep 75 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo links --tick 5 --lote 40
+scrape: sleep 90 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape --scrape-horas 3
+canais: sleep 120 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar_canais --tick 60

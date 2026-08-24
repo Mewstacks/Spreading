@@ -62,6 +62,7 @@ const {
     rejeicaoRecuperavelDuranteLogout,
 } = require('./qr_lifecycle');
 const { SONDAS_HTTP_PARA_MATAR, GRACA_BOOT_MS } = require('./watchdog_policy');
+const { headlessFromEnv } = require('./browser_mode');
 
 const app = express();
 
@@ -216,7 +217,7 @@ const WA_TAKEOVER_ON_CONFLICT = process.env.WA_TAKEOVER_ON_CONFLICT === '1';
 //
 // WA_WEB_VERSION continua configurável por Fly secret + restart, sem deploy.
 // Mantenha o sufixo -alpha no nome das versões arquivadas.
-const WA_WEB_VERSION = process.env.WA_WEB_VERSION || '2.3000.1044104838-alpha';
+const WA_WEB_VERSION = process.env.WA_WEB_VERSION || '2.3000.1045866108-alpha';
 const WA_WEB_VERSION_REMOTE_PATH = process.env.WA_WEB_VERSION_REMOTE_PATH
     || 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html';
 const SESSION_INIT_TIMEOUT_MS = parseInt(process.env.SESSION_INIT_TIMEOUT_MS, 10) || 90000;
@@ -1572,6 +1573,7 @@ const initializeSession = (session) => {
             strict: false,
         },
         puppeteer: {
+            headless: headlessFromEnv(process.env.WA_HEADLESS),
             protocolTimeout: 300000,
             executablePath: PUPPETEER_EXECUTABLE_PATH,
             args: [

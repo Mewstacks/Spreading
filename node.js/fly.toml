@@ -29,6 +29,8 @@ kill_timeout = "90s"
 
 [env]
   PORT = "3000"
+  # Mitiga o post_logout observado no modo headless; a tela vive no Xvfb do container.
+  WA_HEADLESS = "0"
   WA_CAPABILITY_ISSUER = "spreading-web"
   WA_CAPABILITY_AUDIENCE = "spreading-wa"
   # 1, não 2. Cada sessão é um Chromium rodando o WhatsApp Web inteiro, e esta VM

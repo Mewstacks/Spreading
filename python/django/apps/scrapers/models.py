@@ -935,6 +935,16 @@ class WorkerHeartbeat(models.Model):
     details = models.JSONField(default=dict, blank=True)
 
 
+class AutomacaoEstado(models.Model):
+    """Chave e heartbeat globais dos loops, compartilhados entre process groups."""
+
+    job = models.CharField(max_length=32, unique=True)
+    enabled = models.BooleanField(default=False)
+    configured = models.BooleanField(default=False)
+    state = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
 class ResourceLease(models.Model):
     resource_key = models.CharField(max_length=180, unique=True)
     owner_token = models.CharField(max_length=64, blank=True, default="", db_index=True)
