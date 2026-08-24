@@ -2181,27 +2181,18 @@ def top_promocoes(request):
             Q(owner__isnull=True) | Q(owner=request.user)
         )
 
-    # Os dois DISTINCT alimentam só os seletores da aba Ofertas; na aba Cupons
-    # eles não têm leitor no template.
-    macro_categorias = [] if aba_cupons else _taxonomia_cacheada(
-        "macros", request, lambda: list(
-            _produtos_da_taxonomia()
-            .exclude(macro_categoria__isnull=True)
-            .exclude(macro_categoria="")
-            .values_list("macro_categoria", flat=True)
-            .distinct()
-            .order_by("macro_categoria")
-        ))
-
-    def _montar_categorias_por_macro():
+    def _montar_taxonomia_top():
+        # Uma amostra recente basta para montar filtros navegáveis. Os dois
+        # DISTINCT anteriores ainda precisavam varrer o universo visível inteiro;
+        # sob a raspagem ativa chegaram a somar 8s. Uma leitura limitada alimenta
+        # macros e categorias de uma vez e fica cacheada por organização.
         agrupado = {}
         macros_sem_categoria = set()
         for row in (
             _produtos_da_taxonomia()
             .exclude(macro_categoria__isnull=True).exclude(macro_categoria="")
             .values("macro_categoria", "categoria")
-            .distinct()
-            .order_by("macro_categoria", "categoria")
+            .order_by("-ultima_observacao")[:2000]
         ):
             macro = row["macro_categoria"]
             categoria = row["categoria"]
@@ -2217,10 +2208,17 @@ def top_promocoes(request):
             agrupado.setdefault(macro, []).append(categoria)
         for macro in macros_sem_categoria:
             agrupado[macro].append(SEM_SUBCATEGORIA)
-        return {macro: cats for macro, cats in agrupado.items() if cats}
+        categorias = {
+            macro: sorted(set(cats)) for macro, cats in agrupado.items() if cats
+        }
+        return {"macros": sorted(agrupado), "categorias": categorias}
 
-    categorias_por_macro = {} if aba_cupons else _taxonomia_cacheada(
-        "categorias", request, _montar_categorias_por_macro)
+    taxonomia_top = {} if aba_cupons else _taxonomia_cacheada(
+        "top", request, _montar_taxonomia_top)
+    macro_categorias = sorted(
+        set(taxonomia_top.get("macros", [])) | set(macros_selecionados)
+    )
+    categorias_por_macro = taxonomia_top.get("categorias", {})
 
     # Ordenação: 'percent' (padrão — melhor p/ deal bot) ou 'valor' (R$ absoluto economizado).
     ordenar = "valor" if filtros.get("ordenar") == "valor" else "percent"
@@ -2464,16 +2462,22 @@ def top_promocoes(request):
         # diferentes. Seleciona primeiro a observação mais recente de cada identidade;
         # só então ranqueia, evitando duplicatas e preço antigo vencer pelo desconto.
         from apps.scrapers.product_identity import deduplicar_por_produto
-        # O catálogo INTEIRO é materializado aqui (a dedup e o ranking são em Python),
-        # mas a página mostra 20 itens: trazer as ~30 colunas de cada linha era o
-        # grosso do custo do GET — em especial `evidencia`, que é JSONField e cobrava
-        # um json.loads por linha. `only` limita ao que este caminho realmente lê:
+        # A dedup e o ranking ainda são em Python, mas nunca mais materializam o
+        # catálogo fresco inteiro para mostrar 20 itens. A janela cobre 2.000
+        # observações recentes na primeira página e cresce conforme o usuário
+        # avança; assim a navegação tem custo limitado sem congelar num top fixo.
+        # `only` limita também as colunas ao que este caminho realmente lê:
         # dedup (product_identity), `preparar_exibicao` de cada loja, o histórico de
         # preço e as colunas do template.
         #
         # Ao acrescentar um campo ao template desta tela, acrescente-o AQUI também:
         # campo de fora da lista continua correto, mas custa uma query por item
         # exibido (Django busca sob demanda o que ficou deferido).
+        try:
+            pagina_janela = max(1, int(pagina or 1))
+        except (TypeError, ValueError):
+            pagina_janela = 1
+        limite_catalogo = min(10000, max(2000, pagina_janela * 500))
         candidatos = deduplicar_por_produto(
             qs.order_by("-ultima_observacao", "-id").only(
                 "id", "marketplace", "asin", "nome", "campanha_id",
@@ -2481,7 +2485,7 @@ def top_promocoes(request):
                 "categoria", "macro_categoria",
                 "preco_sem_desconto", "preco_com_cupom", "preco_efetivo",
                 "ultima_observacao", "owner_id", "afiliado_ok",
-            )
+            )[:limite_catalogo]
         )
         campo_ordem = "economia" if ordenar == "valor" else "percent"
         candidatos.sort(
