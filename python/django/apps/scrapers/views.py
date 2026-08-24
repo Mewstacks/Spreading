@@ -2455,25 +2455,6 @@ def top_promocoes(request):
         if atualizado_desde:
             qs = qs.filter(ultima_observacao__gte=timezone.now() - timezone.timedelta(hours=atualizado_desde))
 
-        # Prontidão de afiliação como EXISTS correlacionado. Antes a view
-        # materializava o catálogo e mandava dezenas de milhares de IDs de volta ao
-        # Postgres em um IN gigante para cada loja. Sob a escrita da raspagem essa
-        # consulta variava de 6 a 50 segundos. O índice único (usuario, produto)
-        # resolve estes predicados durante a própria leitura de Produto.
-        linhas_afiliadas = LinkAfiliadoUsuario.objects.filter(
-            usuario=request.user, produto_id=OuterRef("pk"),
-        )
-        qs = qs.annotate(
-            _tem_linha_afiliada=Exists(linhas_afiliadas),
-            _tem_link_cacheado=Exists(linhas_afiliadas.exclude(link_afiliado="")),
-            _tem_link_aprovado=Exists(
-                linhas_afiliadas.filter(verificado_ok=True).exclude(link_afiliado="")
-            ),
-            _tem_link_reprovado=Exists(
-                linhas_afiliadas.filter(verificado_ok=False)
-            ),
-        )
-
         # A afiliação é resolvida antes da paginação. Não pode haver um corte de ranking
         # aqui: ele fazia a tela anunciar centenas de links prontos no resumo, mas
         # paginava somente os afiliados que por acaso estivessem entre os 200 maiores
@@ -2538,46 +2519,33 @@ def top_promocoes(request):
 
         pendentes_ocultos = 0
         if so_afiliados:
-            from apps.scrapers.afiliado import tag_amazon
-
-            amazon_tem_tag = bool(tag_amazon(request.user))
-            shopee_pronta = IntegracaoAfiliado.objects.filter(
-                owner=request.user, provedor="shopee", habilitada=True,
-            ).exists()
-
-            def _afiliado_pronto(produto):
-                marketplace = produto.marketplace
-                if marketplace == "mercadolivre":
-                    # Link global é apenas fallback legado e só vale se ainda não
-                    # existe uma linha por usuário com veredito mais novo.
-                    return bool(
-                        produto._tem_link_aprovado
-                        or (not produto._tem_linha_afiliada and produto.link_afiliado)
-                    )
-                if marketplace == "amazon":
-                    if produto._tem_link_reprovado:
-                        return False
-                    return bool(
-                        produto._tem_link_aprovado
-                        or produto._tem_link_cacheado
-                        or produto.link_afiliado
-                        or (amazon_tem_tag and (produto.asin or produto.link_produto))
-                    )
-                if marketplace == "awin":
-                    link = str(produto.link_produto or "").lower()
-                    return bool(
-                        produto.owner_id == request.user.id
-                        and link.startswith(("https://www.awin1.com/", "http://www.awin1.com/",
-                                             "https://awin1.com/", "http://awin1.com/"))
-                    )
-                if marketplace == "shopee":
-                    return shopee_pronta
-                return bool(produto.afiliado_ok)
-
-            prontos = [p for p in candidatos if _afiliado_pronto(p)]
-            pendentes_ocultos = len(candidatos) - len(prontos)
-            pendentes_por_loja = contar_por_marketplace(
-                [p for p in candidatos if not _afiliado_pronto(p)])
+            # Resolver o catálogo inteiro exigia validar milhares de linhas sob RLS
+            # antes de mostrar 20 cards. Também não podemos usar EXISTS correlacionado:
+            # a política de tenant é deliberadamente cara e seria reavaliada quatro
+            # vezes por produto. Caminhamos pelo ranking em lotes pequenos e paramos
+            # assim que há itens suficientes para a página pedida + prova de próxima.
+            try:
+                pagina_pedida = max(1, int(pagina or 1))
+            except (TypeError, ValueError):
+                pagina_pedida = 1
+            necessarios = pagina_pedida * POR_PAGINA + 1
+            tamanho_lote = 100
+            prontos, pendentes = [], []
+            for inicio in range(0, len(candidatos), tamanho_lote):
+                lote = candidatos[inicio:inicio + tamanho_lote]
+                _preparar(lote)
+                prontos.extend(
+                    produto for produto in lote
+                    if getattr(produto, "afiliado_pronto", False)
+                )
+                pendentes.extend(
+                    produto for produto in lote
+                    if not getattr(produto, "afiliado_pronto", False)
+                )
+                if len(prontos) >= necessarios:
+                    break
+            pendentes_ocultos = len(pendentes)
+            pendentes_por_loja = contar_por_marketplace(pendentes)
             candidatos = prontos
             # Com o corte de afiliação resolvido, sabemos exatamente quais lojas têm
             # item PRONTO — é a hora certa de garantir a presença de cada uma na
@@ -2587,9 +2555,6 @@ def top_promocoes(request):
                 candidatos = equilibrar_primeira_pagina(candidatos, POR_PAGINA)
             page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
             produtos = list(page_obj)
-            # Os predicados acima decidem quem pode entrar na lista; os adapters
-            # carregam os detalhes/motivos somente para os 20 cards renderizados.
-            _preparar(produtos)
         else:
             pendentes_por_loja = {}
             page_obj = Paginator(candidatos, POR_PAGINA).get_page(pagina)
