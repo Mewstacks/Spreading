@@ -2192,7 +2192,7 @@ def top_promocoes(request):
             _produtos_da_taxonomia()
             .exclude(macro_categoria__isnull=True).exclude(macro_categoria="")
             .values("macro_categoria", "categoria")
-            .order_by("-ultima_observacao")[:2000]
+            .order_by("-ultima_observacao")[:500]
         ):
             macro = row["macro_categoria"]
             categoria = row["categoria"]
@@ -2463,7 +2463,7 @@ def top_promocoes(request):
         # só então ranqueia, evitando duplicatas e preço antigo vencer pelo desconto.
         from apps.scrapers.product_identity import deduplicar_por_produto
         # A dedup e o ranking ainda são em Python, mas nunca mais materializam o
-        # catálogo fresco inteiro para mostrar 20 itens. A janela cobre 2.000
+        # catálogo fresco inteiro para mostrar 20 itens. A janela cobre 500
         # observações recentes na primeira página e cresce conforme o usuário
         # avança; assim a navegação tem custo limitado sem congelar num top fixo.
         # `only` limita também as colunas ao que este caminho realmente lê:
@@ -2477,7 +2477,7 @@ def top_promocoes(request):
             pagina_janela = max(1, int(pagina or 1))
         except (TypeError, ValueError):
             pagina_janela = 1
-        limite_catalogo = min(10000, max(2000, pagina_janela * 500))
+        limite_catalogo = min(5000, max(500, pagina_janela * 250))
         candidatos = deduplicar_por_produto(
             qs.order_by("-ultima_observacao", "-id").only(
                 "id", "marketplace", "asin", "nome", "campanha_id",
