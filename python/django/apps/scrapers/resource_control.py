@@ -1,9 +1,12 @@
 """Leases PostgreSQL observáveis para recursos que não podem compartilhar sessão/browser."""
 
 import atexit
+import logging
 import os
 import shutil
+import signal
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -71,6 +74,143 @@ INTERESSE_DE_ESTEIRA_TTL_S = 180
 # `scrape_rapido` são justamente os lotes longos: deixá-las sinalizar faria uma
 # ceder para a outra em looping e nenhuma das duas terminaria uma passada.
 ESTEIRAS_SEM_PRIORIDADE = frozenset({"scrape", "scrape_rapido", "ml_offers", "ml_search"})
+
+# ── Teto de posse: o lease volta para a fila SEM a cooperação do dono ──
+#
+# O heartbeat do lease roda numa thread daemon separada do trabalho: ele prova que
+# o PROCESSO respira, nunca que a tarefa ANDA. Em 25/08/2026 o worker `scrape`
+# pendurou às 10:14 dentro do Playwright — a IPC do driver não tem timeout, então
+# um Chromium morto sob memória bloqueia a chamada síncrona para sempre — e a
+# thread seguiu renovando `expires_at` por oito horas. O TTL de 90s nunca disparou.
+#
+# Enquanto isso TODAS as outras esteiras liam "navegador ocupado por outra tarefa":
+# links (0 gerado), cupons (preparo adiado item a item), verificação de destino
+# (40 transitórios por ciclo), envio (0 enviada por tick). A tela mostrava "Link
+# Builder temporariamente indisponível" sem nenhum Link Builder envolvido.
+#
+# A cessão cooperativa (interesse_de_esteira) resolve o lote LONGO; ela não resolve
+# o lote TRAVADO, porque quem está travado não chega ao ponto de checar a fila.
+# Por isso o teto é aplicado por quem PEDE o recurso, não por quem o detém.
+#
+# Os valores ficam acima de uma passada saudável: a varredura completa do ML leva
+# ~62min (40 páginas × ~93s) e uma raspagem manual de cupons já levou 56min em
+# produção. Abaixo disso, expropriar mataria trabalho bom.
+TETO_DE_POSSE_SEGUNDOS = 20 * 60
+TETO_DE_POSSE_LOTE_LONGO_SEGUNDOS = 90 * 60
+LOTES_LONGOS = frozenset(ESTEIRAS_SEM_PRIORIDADE | {"manual"})
+
+# Um dono saudável cede o navegador em ~1 página depois que alguém entra na fila.
+# Se existe fila contra o MESMO dono há tanto tempo, ele não está cedendo: está
+# travado. `manual_waiting_since`/`scheduled_waiting_since` já são gravados no
+# momento da negativa — em produção o marcador ficou parado em 10:16 por 8h.
+CESSAO_MAX_SEGUNDOS = 10 * 60
+
+logger = logging.getLogger(__name__)
+
+
+def _teto_de_posse(owner_kind: str) -> int:
+    return (TETO_DE_POSSE_LOTE_LONGO_SEGUNDOS if owner_kind in LOTES_LONGOS
+            else TETO_DE_POSSE_SEGUNDOS)
+
+
+def _descendentes_de_navegador(pid: int) -> list:
+    """PIDs de Playwright/Chromium descendentes deste processo. Linux, sem deps.
+
+    Ler /proc evita dependência nova só para o caminho de recuperação — e é
+    exatamente onde a prova do incidente apareceu: `/proc/locks` mostrando o
+    FLOCK de `django_chromium` preso ao PID do worker `scrape`.
+    """
+    try:
+        entradas = [nome for nome in os.listdir("/proc") if nome.isdigit()]
+    except OSError:
+        return []
+    pais, linhas = {}, {}
+    for entrada in entradas:
+        alvo = int(entrada)
+        try:
+            with open(f"/proc/{entrada}/stat", "rb") as arquivo:
+                # O nome do processo vem entre parênteses e pode conter espaço;
+                # cortar no ") " é o único jeito seguro de achar o ppid.
+                campos = arquivo.read().rsplit(b") ", 1)[-1].split()
+            pais[alvo] = int(campos[1])
+            with open(f"/proc/{entrada}/cmdline", "rb") as arquivo:
+                # /proc/<pid>/cmdline separa os argumentos por NUL.
+                linhas[alvo] = arquivo.read().decode(
+                    "utf-8", "replace").replace(chr(0), " ")
+        except (OSError, ValueError, IndexError):
+            continue
+    descendentes, fronteira = set(), [pid]
+    while fronteira:
+        atual = fronteira.pop()
+        for filho, pai in pais.items():
+            if pai == atual and filho not in descendentes:
+                descendentes.add(filho)
+                fronteira.append(filho)
+    # Só o navegador. Um worker pode ter outros filhos e derrubar tudo trocaria
+    # um travamento por um estrago.
+    marcas = ("playwright", "chrome-headless-shell", "chromium")
+    return [
+        alvo for alvo in sorted(descendentes)
+        if any(marca in linhas.get(alvo, "") for marca in marcas)
+    ]
+
+
+def _derrubar_navegador_travado(resource_key: str) -> int:
+    """Mata o Playwright/Chromium deste processo para destravar a chamada síncrona.
+
+    Existe porque expropriar o lease no Postgres NÃO basta. O segundo portão é o
+    `machine_resource_slot`, um flock em /tmp, e flock só é liberado pelo sistema
+    quando o processo MORRE. Em 25/08/2026 o worker `scrape` ficou vivo e travado
+    dentro do Playwright — a IPC do driver não tem timeout —, com o Chromium de pé
+    desde 10:17 e cinco esteiras na fila.
+
+    Derrubar o navegador faz a chamada bloqueada levantar, os `with` desenrolarem
+    e o flock cair. O worker sobrevive e volta ao ciclo: matar o processo levaria
+    a VM inteira junto (honcho termina todos quando um sai).
+    """
+    if resource_key != "django_chromium" or not sys.platform.startswith("linux"):
+        return 0
+    derrubados = 0
+    for alvo in _descendentes_de_navegador(os.getpid()):
+        try:
+            os.kill(alvo, signal.SIGKILL)
+            derrubados += 1
+        except OSError:
+            continue
+    return derrubados
+
+
+def _encerrar_por_teto(resource_key: str, motivo: str) -> None:
+    derrubados = _derrubar_navegador_travado(resource_key)
+    logger.warning(
+        "Lease %s liberado (%s): %s processo(s) de navegador derrubado(s). "
+        "A chamada travada levanta e o worker volta ao ciclo.",
+        resource_key, motivo, derrubados,
+    )
+
+
+def _motivo_de_expropriacao(lease, now) -> str:
+    """Por que este lease deve voltar à fila apesar do heartbeat vivo (ou '')."""
+    if not lease.acquired_at:
+        return ""
+    posse = (now - lease.acquired_at).total_seconds()
+    teto = _teto_de_posse(lease.owner_kind)
+    if posse >= teto:
+        return f"posse de {int(posse)}s acima do teto de {teto}s"
+    if posse < CESSAO_MAX_SEGUNDOS:
+        # Nunca expropria dono recente: um marcador de espera herdado do dono
+        # anterior não pode derrubar quem acabou de entrar.
+        return ""
+    esperas = [
+        marca for marca in (lease.manual_waiting_since, lease.scheduled_waiting_since)
+        if marca is not None
+    ]
+    if not esperas:
+        return ""
+    espera = (now - min(esperas)).total_seconds()
+    if espera >= CESSAO_MAX_SEGUNDOS:
+        return f"fila esperando ha {int(espera)}s sem cessao"
+    return ""
 
 
 def _chave_segura(valor, limite: int = 100) -> str:
@@ -444,6 +584,26 @@ def acquire(resource_key, *, owner_kind="scheduled", organization=None):
                 lease.expires_at = now + timedelta(seconds=LEASE_TTL_SECONDS)
                 lease.save(update_fields=["heartbeat_at", "expires_at"])
         if occupied:
+            motivo = _motivo_de_expropriacao(lease, now)
+            if motivo:
+                # Some com o dono e cai no caminho normal de atribuição abaixo. A
+                # gravação é imediata porque este bloco pode retornar antes do
+                # save final (fila manual, justiça entre lanes).
+                logger.warning(
+                    "Lease %s expropriado de %r: %s. O recurso volta para a fila.",
+                    resource_key, lease.owner_kind or "desconhecido", motivo,
+                )
+                occupied = False
+                lease.owner_token = ""
+                lease.owner_kind = ""
+                lease.acquired_at = None
+                lease.heartbeat_at = None
+                lease.expires_at = None
+                lease.save(update_fields=[
+                    "owner_token", "owner_kind", "acquired_at",
+                    "heartbeat_at", "expires_at",
+                ])
+        if occupied:
             field = _lane_field(owner_kind)
             if getattr(lease, field) is None:
                 setattr(lease, field, now)
@@ -564,13 +724,26 @@ def leased_resource(resource_key="django_chromium", *, owner_kind="scheduled",
         return
 
     stop = threading.Event()
+    limite_de_posse = time.monotonic() + _teto_de_posse(owner_kind)
 
     def _pulse():
         while not stop.wait(HEARTBEAT_SECONDS):
+            if time.monotonic() >= limite_de_posse:
+                # Parar de renovar deixa o TTL de 90s libertar o recurso mesmo
+                # quando ninguém está pedindo. Renovar para sempre foi o que
+                # transformou um travamento em oito horas de funil parado.
+                _encerrar_por_teto(resource_key, "teto de posse atingido")
+                return
             close_old_connections()
             try:
                 with system_context():
                     if not heartbeat(resource_key, token):
+                        # Perder o heartbeat só acontece quando alguém expropriou
+                        # este lease — o sistema já concluiu que estamos travados.
+                        # Solta o navegador junto: senão o flock da máquina segue
+                        # preso a este processo VIVO e o novo dono trava no
+                        # segundo portão, com o lease do Postgres já nas mãos.
+                        _encerrar_por_teto(resource_key, "lease expropriado")
                         return
             finally:
                 close_old_connections()
