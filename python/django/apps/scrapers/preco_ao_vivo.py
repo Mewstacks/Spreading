@@ -126,13 +126,30 @@ def _preco_ml(produto, url="", usuario=None):
         # Sem credencial o GET anônimo cairia no challenge de qualquer forma.
         # Não chamamos avisar_sem_sessao: gera evento e isto roda POR ITEM.
         return None
-    alvo = url or getattr(produto, "link_produto", "")
+    origem = getattr(produto, "link_produto", "") or ""
+    alvo = url or origem
     relatorio = link_http.relatorio_de_preco(alvo, sessao=sessao)
+    # O short link do Programa pode abrir a vitrine social do afiliado. Ela serve
+    # para validar a atribuição, mas nem sempre contém o buybox completo (inclusive
+    # o terceiro preço "com Cupom"). Nesse caso a PDP canônica é a fonte de preço.
+    if origem and origem != alvo and (
+            relatorio.get("bloqueio")
+            or relatorio.get("preco", 0) <= 0
+            or relatorio.get("preco_cupom", 0) <= 0):
+        origem_relatorio = link_http.relatorio_de_preco(origem, sessao=sessao)
+        if not origem_relatorio.get("bloqueio") and origem_relatorio.get("preco", 0) > 0:
+            if relatorio.get("bloqueio") or relatorio.get("preco", 0) <= 0:
+                relatorio = origem_relatorio
+            elif origem_relatorio.get("preco_cupom", 0) > 0:
+                relatorio["preco_cupom"] = origem_relatorio["preco_cupom"]
+                relatorio["cupom_detectado"] = True
     if relatorio.get("bloqueio") or relatorio.get("preco", 0) <= 0:
         return None
     return {
         "preco": relatorio["preco"],
         "preco_de": relatorio.get("preco_de") or 0,
+        "preco_cupom": relatorio.get("preco_cupom") or 0,
+        "cupom_detectado": bool(relatorio.get("cupom_detectado")),
         "fonte": "ml-http-sessao",
     }
 
@@ -170,7 +187,7 @@ def revalidar(produto, usuario=None, configuracao=None, *, url="") -> dict:
     # o combinado, logo abaixo da linha "ative o cupom". Melhor um pós-cupom de
     # algumas horas atrás do que o número errado.
     efetivo = getattr(produto, "preco_efetivo", 0) or 0
-    if 0 < efetivo < atual:
+    if mkt == "amazon" and 0 < efetivo < atual:
         return _resultado(True, efetivo, fonte="cupom_ativacao_nao_revalidavel")
 
     inicio = time.monotonic()
@@ -192,6 +209,8 @@ def revalidar(produto, usuario=None, configuracao=None, *, url="") -> dict:
         return _resultado(True, atual, fonte="inconclusivo", motivo="sem dado ao vivo")
 
     novo = vivo["preco"]
+    if mkt == "mercadolivre":
+        _aplicar_cupom_ml(produto, vivo)
     variacao = abs(novo - atual) / atual
     logger.info(
         "preco_ao_vivo %s id=%s asin=%s fonte=%s banco=%.2f vivo=%.2f variacao=%.4f ms=%.0f",
@@ -322,7 +341,8 @@ def _aplicar(produto, novo, preco_de):
     """
     campos = ["preco_com_cupom", "preco_efetivo", "ultima_verificacao"]
     produto.preco_com_cupom = novo
-    produto.preco_efetivo = novo
+    efetivo = getattr(produto, "preco_efetivo", 0) or 0
+    produto.preco_efetivo = efetivo if 0 < efetivo < novo else novo
     produto.ultima_verificacao = timezone.now()
     if preco_de and preco_de > novo:
         produto.preco_sem_desconto = preco_de
@@ -347,6 +367,61 @@ def _aplicar(produto, novo, preco_de):
     precos.registrar(getattr(produto, "marketplace", "") or "mercadolivre",
                      getattr(produto, "asin", ""),
                      getattr(produto, "link_produto", ""), novo)
+
+
+def _aplicar_cupom_ml(produto, vivo):
+    """Atualiza o terceiro preço da PDP sem misturá-lo com a vitrine.
+
+    A mensagem desta mesma execução usa o objeto em memória. A gravação continua
+    best-effort porque produtos do pool compartilhado podem estar sob RLS.
+    """
+    vitrine = float(vivo.get("preco") or 0)
+    preco_cupom = float(vivo.get("preco_cupom") or 0)
+    confirmado = bool(vivo.get("cupom_detectado") and 0 < preco_cupom < vitrine)
+    evidencia = dict(getattr(produto, "evidencia", {}) or {})
+    promocao_anterior = dict(evidencia.get("promotion") or {})
+
+    if confirmado:
+        evidencia["promotion"] = {
+            **promocao_anterior,
+            "present": True,
+            "coupon_confirmed": True,
+            "coupon_final_price": preco_cupom,
+            "source": "pdp-live",
+        }
+        efetivo_novo = preco_cupom
+    else:
+        # Uma PDP real sem o badge revoga a observação anterior. Challenge/timeout
+        # não chega aqui, portanto não é confundido com cupom expirado.
+        if promocao_anterior.get("source") in {"pdp-live", "offer-card"}:
+            evidencia.pop("promotion", None)
+        efetivo_novo = vitrine
+
+    mudou = (
+        getattr(produto, "preco_efetivo", 0) != efetivo_novo
+        or evidencia != (getattr(produto, "evidencia", {}) or {})
+    )
+    produto.preco_efetivo = efetivo_novo
+    produto.evidencia = evidencia
+    if not mudou:
+        return
+
+    campos = ["preco_efetivo", "evidencia"]
+    # O título gerado pode citar o preço antigo; a linha de preço já usa o valor
+    # novo, então manter o cache produziria uma mensagem contraditória.
+    if getattr(produto, "frase_llm", ""):
+        produto.frase_llm = ""
+        campos.append("frase_llm")
+    if getattr(produto, "nome_llm", ""):
+        produto.nome_llm = ""
+        campos.append("nome_llm")
+    try:
+        produto.save(update_fields=campos)
+    except Exception:
+        logger.info(
+            "preco_ao_vivo não gravou cupom PDP id=%s (segue em memória)",
+            getattr(produto, "pk", ""), exc_info=True,
+        )
 
 
 def _minimo_desconto(usuario, configuracao):

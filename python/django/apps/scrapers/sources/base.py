@@ -39,8 +39,9 @@ class IngestedItem:
     canonical_url: str
     title: str
     current_price: float = 0
-    # Preço realmente pago quando a fonte conhece um desconto que só aparece no
-    # checkout (cupom de ativação da Amazon). Vazio significa "igual ao current".
+    # Preço realmente pago quando a fonte conhece um desconto ativável além da
+    # vitrine (cupom oficial Amazon ou badge "com Cupom" do ML).
+    # Vazio significa "igual ao current".
     effective_price: float = 0
     reference_price: float = 0
     image_url: str = ""

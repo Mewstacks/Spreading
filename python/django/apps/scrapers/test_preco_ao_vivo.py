@@ -136,8 +136,10 @@ class RevalidacaoTests(TestCase):
         self.assertLess(self.produto.preco_efetivo, self.produto.preco_com_cupom)
 
 
-def _relatorio(preco=0.0, preco_de=0.0, bloqueio="", morto=False):
+def _relatorio(preco=0.0, preco_de=0.0, bloqueio="", morto=False,
+               preco_cupom=0.0, cupom_detectado=False):
     return {"preco": preco, "preco_de": preco_de, "url_final": "",
+            "preco_cupom": preco_cupom, "cupom_detectado": cupom_detectado,
             "bloqueio": bloqueio, "morto": morto}
 
 
@@ -180,6 +182,49 @@ class RevalidacaoMercadoLivreTests(TestCase):
         self.assertEqual(self.produto.preco_com_cupom, 1499.0)
         self.assertEqual(self.produto.preco_efetivo, 1499.0)
 
+    def test_preco_com_cupom_da_pdp_vira_preco_efetivo(self):
+        self.produto.preco_sem_desconto = 399.0
+        self.produto.preco_com_cupom = 113.74
+        self.produto.preco_efetivo = 113.74
+        self.produto.save(update_fields=[
+            "preco_sem_desconto", "preco_com_cupom", "preco_efetivo",
+        ])
+
+        resultado, _ = self._revalidar(_relatorio(
+            113.74, 399.0, preco_cupom=98.77, cupom_detectado=True,
+        ))
+
+        self.assertTrue(resultado["ok"])
+        self.produto.refresh_from_db()
+        self.assertEqual(self.produto.preco_com_cupom, 113.74)
+        self.assertEqual(self.produto.preco_efetivo, 98.77)
+        self.assertEqual(
+            self.produto.evidencia["promotion"]["coupon_final_price"], 98.77,
+        )
+        self.assertEqual(
+            self.produto.evidencia["promotion"]["source"], "pdp-live",
+        )
+
+    def test_pdp_sem_badge_remove_cupom_obsoleto(self):
+        self.produto.preco_com_cupom = 113.74
+        self.produto.preco_efetivo = 98.77
+        self.produto.evidencia = {
+            "promotion": {
+                "present": True, "coupon_confirmed": True,
+                "coupon_final_price": 98.77, "source": "offer-card",
+            },
+        }
+        self.produto.save(update_fields=[
+            "preco_com_cupom", "preco_efetivo", "evidencia",
+        ])
+
+        resultado, _ = self._revalidar(_relatorio(113.74, 399.0))
+
+        self.assertTrue(resultado["ok"])
+        self.produto.refresh_from_db()
+        self.assertEqual(self.produto.preco_efetivo, 113.74)
+        self.assertNotIn("promotion", self.produto.evidencia)
+
     def test_preco_que_subiu_derrubando_o_desconto_aborta(self):
         config = ConfiguracaoEnvio.objects.create(
             owner=self.user, grupo_id="123@g.us", min_desconto_percent=15.0)
@@ -190,10 +235,13 @@ class RevalidacaoMercadoLivreTests(TestCase):
         self.assertIn("desconto caiu", resultado["motivo"])
 
     def test_confere_a_url_publicada_e_nao_o_link_do_produto(self):
-        """É o GET que segue meli.la -> PDP: a página que o assinante abre."""
+        """Confere o publicado primeiro; a PDP completa o dado de cupom ausente."""
         _resultado, chamada = self._revalidar(
             _relatorio(1799.0, 2499.0), url="https://meli.la/abc")
-        self.assertEqual(chamada.call_args.args[0], "https://meli.la/abc")
+        self.assertEqual(chamada.call_args_list[0].args[0], "https://meli.la/abc")
+        self.assertEqual(
+            chamada.call_args_list[1].args[0], self.produto.link_produto,
+        )
 
     def test_sem_url_cai_no_link_do_produto(self):
         _resultado, chamada = self._revalidar(_relatorio(1799.0, 2499.0))
