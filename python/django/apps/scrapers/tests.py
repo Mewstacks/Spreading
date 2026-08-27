@@ -3064,6 +3064,32 @@ class RankingAndCooldownTests(TestCase):
         self.assertEqual(selected, [product])
         get_marketplace.assert_not_called()
 
+    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
+    def test_ranking_loads_price_history_in_one_query(self, get_marketplace):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        products = [self._product(f"Produto {i}", 60) for i in range(20)]
+        for product in products:
+            registrar_preco("mercadolivre", "", product.link_produto, 80)
+            registrar_preco("mercadolivre", "", product.link_produto, 60)
+
+        from apps.scrapers.ofertas import selecionar_item_para_grupo
+        with CaptureQueriesContext(connection) as queries:
+            selected = selecionar_item_para_grupo(
+                usuario=self.user, grupo_id=self.group_a,
+                min_desconto_percent=10, limite_envio=20, verificar=False,
+            )
+
+        history_queries = [
+            query for query in queries.captured_queries
+            if "scrapers_precohistorico" in query["sql"].lower()
+        ]
+        self.assertEqual(len(selected), 20)
+        # Uma janela de 30 dias decide elegibilidade e outra de 90 dias comprova
+        # o preço riscado. O número é fixo, independentemente dos 20 produtos.
+        self.assertEqual(len(history_queries), 2)
+
 
 class MonitorCatalogMaintenanceTests(SimpleTestCase):
     @patch("apps.scrapers.maintenance.diagnosticar_alertas_pipeline_cupons",

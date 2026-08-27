@@ -9,7 +9,11 @@ from django.utils import timezone
 from django.db import DatabaseError, transaction
 from django.db.models import F, FloatField, ExpressionWrapper, Count, Q
 from apps.scrapers.models import Produto, Cupom, HistoricoEnvio, Publicacao
-from apps.scrapers.precos import stats as _stats_preco
+from apps.scrapers.precos import (
+    chave_produto as _chave_preco,
+    stats as _stats_preco,
+    stats_em_lote as _stats_preco_em_lote,
+)
 from apps.scrapers.whatsapp_client import DESCONHECIDO, PERMANENTE, TRANSITORIO
 
 logger = logging.getLogger(__name__)
@@ -395,6 +399,8 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
     elegiveis = deduplicar_por_produto(
         elegiveis_qs.order_by("-ultima_observacao", "-id")[:TETO_CANDIDATOS]
     )
+    historicos = _stats_preco_em_lote(elegiveis, dias=30)
+    historicos_comprovacao = _stats_preco_em_lote(elegiveis, dias=90)
     cupons = {
         c.campanha_id: c for c in Cupom.objects.filter(
             campanha_id__in=[produto.campanha_id for produto in elegiveis],
@@ -431,7 +437,7 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
         # O histórico sobe para cá porque agora ele decide ELEGIBILIDADE, não só
         # pontuação: item colado na própria mínima entra mesmo com desconto de
         # vitrine baixo, e antes era descartado no SQL sem chance de ser avaliado.
-        historico = _stats_preco(produto, dias=30)
+        historico = historicos.get(_chave_preco(produto))
         if not _passa_no_minimo(produto, produto.preco_com_cupom, historico,
                                 min_desconto_percent):
             continue
@@ -448,7 +454,10 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
         # certa é não pontuar o que não foi verificado. Sem prova, a nota se apoia só
         # na economia em reais — que também vem do "de" mas é limitada pelo preço
         # real do item — e o desconto deixa de ser argumento.
-        comprovado = _desconto_comprovado(produto, produto.preco_com_cupom)
+        comprovado = _desconto_comprovado(
+            produto, produto.preco_com_cupom,
+            historico=historicos_comprovacao.get(_chave_preco(produto)),
+        )
         if comprovado:
             score = produto.desconto_percent * 2 + produto.economia_rs / 20
             motivos = [f"{produto.desconto_percent:.0f}% de desconto comprovado"]
@@ -2217,7 +2226,12 @@ def _passa_no_minimo(produto, preco_final, historico, min_desconto_percent) -> b
     return _no_fundo_do_historico(produto, preco_final, historico)
 
 
-def _desconto_comprovado(produto, preco_final: float) -> bool:
+_SEM_HISTORICO_PRECARREGADO = object()
+
+
+def _desconto_comprovado(
+    produto, preco_final: float, *, historico=_SEM_HISTORICO_PRECARREGADO,
+) -> bool:
     """Nós já vimos este item custar mais caro?
 
     É a diferença entre "a loja diz que estava R$ 500" e "nós observamos R$ 500".
@@ -2236,14 +2250,15 @@ def _desconto_comprovado(produto, preco_final: float) -> bool:
     """
     if preco_final <= 0:
         return False
-    try:
-        historico = _stats_preco(produto, dias=90)
-    except Exception:
-        # Sem conseguir consultar, o desconto fica NÃO comprovado. Falha fechada:
-        # a mensagem perde o "DE" e não afirma nada que não foi verificado.
-        logger.warning("Histórico indisponível para o produto %s; desconto não "
-                       "comprovado.", getattr(produto, "pk", "?"))
-        return False
+    if historico is _SEM_HISTORICO_PRECARREGADO:
+        try:
+            historico = _stats_preco(produto, dias=90)
+        except Exception:
+            # Sem conseguir consultar, o desconto fica NÃO comprovado. Falha fechada:
+            # a mensagem perde o "DE" e não afirma nada que não foi verificado.
+            logger.warning("Histórico indisponível para o produto %s; desconto não "
+                           "comprovado.", getattr(produto, "pk", "?"))
+            return False
     if not historico or not historico.get("n"):
         return False
     return historico["mediana"] > preco_final * 1.02
