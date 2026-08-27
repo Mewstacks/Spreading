@@ -11,6 +11,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
+from django.core.management import call_command
 from django.db import IntegrityError, transaction
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
@@ -21,7 +22,8 @@ from apps.accounts.models import (
 )
 from apps.scrapers.models import (
     ConfiguracaoEnvio,
-    CupomDisponibilidade, CupomFonteObservacao, CupomNormalizado, CupomPreparacao,
+    CupomDisponibilidade, CupomDisponibilidadeEvento, CupomFonteObservacao,
+    CupomNormalizado, CupomPreparacao,
     FonteIngestao,
     LinkAfiliadoCupomUsuario, LinkAfiliadoProdutoCupomUsuario,
     LinkAfiliadoUsuario, Produto, ProdutoCupom,
@@ -549,6 +551,17 @@ class BrowserResourceContractTests(TestCase):
             self.assertEqual(resources, [
                 "django_chromium", "source_ingest:amazon-public-coupons",
             ])
+
+    def test_scrape_e_flash_nao_seguram_chromium_o_ciclo_inteiro(self):
+        import inspect
+        from apps.scrapers.management.commands.automacao import Command
+
+        scrape = inspect.getsource(Command._loop_scrape)
+        flash = inspect.getsource(Command._loop_scrape_rapido)
+        self.assertNotIn("operacao_pesada", scrape)
+        self.assertNotIn("operacao_pesada", flash)
+        self.assertIn("_rodar_scrape()", scrape)
+        self.assertIn("_rodar_scrape_rapido()", flash)
 
 
 class WhatsAppReconcileSafetyTests(SimpleTestCase):
@@ -1638,6 +1651,44 @@ class CouponReadinessReasonTests(TestCase):
         projection.refresh_from_db()
         self.assertEqual(projection.stage, "ready")
 
+    def test_campanha_da_org_sistema_nao_vaza_pra_outra_conta(self):
+        """Produção: só a org em ML_SYSTEM_ORGANIZATION_ID vê campanhas autenticadas.
+
+        lules é essa org. teste1/luiza projetam ~140 cupons públicos; lules ~2800.
+        """
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-campanhas",
+            defaults={"marketplace": "mercadolivre", "nome": "Campanhas"},
+        )
+        coupon = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:lules-only",
+            marketplace="mercadolivre", titulo="Só a org sistema",
+            codigo="", audience_scope="organization",
+            organization=self.organization, owner=None,
+            link="https://lista.mercadolivre.com.br/_Container_sys",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 10,
+                    "container_url": "https://lista.mercadolivre.com.br/_Container_sys"},
+        )
+        outsider = get_user_model().objects.create_user("nao-lules", password="x")
+        ensure_personal_organization(outsider)
+
+        with self._ml():
+            self.assertEqual(projetar_disponibilidade_cupons(self.user)["total"], 1)
+            self.assertTrue(
+                CupomDisponibilidade.objects.filter(
+                    usuario=self.user, cupom=coupon,
+                ).exists(),
+            )
+            self.assertEqual(projetar_disponibilidade_cupons(outsider)["total"], 0)
+            self.assertFalse(
+                CupomDisponibilidade.objects.filter(
+                    usuario=outsider, cupom=coupon,
+                ).exists(),
+            )
+
     def test_cupom_de_codigo_do_ml_tem_quem_prepare_o_link(self):
         """Impasse fechado: o cupom aparecia na tela e nunca ficava disponível.
 
@@ -1767,6 +1818,51 @@ class CouponReadinessReasonTests(TestCase):
             CupomDisponibilidade.objects.filter(usuario=self.user).exists(),
             "A tela de Promoções voltou a escrever projeção dentro da request.",
         )
+
+    def test_backfill_apaga_orfas_em_lotes_e_reprojeta(self):
+        """DELETE único de órfãs+eventos estoura statement_timeout em produção.
+
+        Com lote pequeno o comando termina e a conta viva continua projetada.
+        """
+        vivo = self._code()
+        orfaos = [
+            CupomNormalizado.objects.create(
+                fonte=self.source, external_id=f"code:dead{i}",
+                marketplace="mercadolivre", titulo="Expirado",
+                codigo=f"DEAD{i}", estado="expirado",
+                regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                        "valor_desconto": 10},
+            )
+            for i in range(3)
+        ]
+        for cupom in [vivo, *orfaos]:
+            proj = CupomDisponibilidade.objects.create(
+                organization=self.organization, usuario=self.user, cupom=cupom,
+                channel="whatsapp", use_mode="code_notice", stage="collected",
+            )
+            CupomDisponibilidadeEvento.objects.create(
+                organization=self.organization, disponibilidade=proj,
+                from_stage="", to_stage="collected",
+                marketplace="mercadolivre", source=self.source.slug,
+                use_mode="code_notice",
+            )
+        saida = io.StringIO()
+        with patch(
+            "apps.scrapers.management.commands.backfill_disponibilidade_cupons.ORPHAN_BATCH",
+            1,
+        ), self._ml():
+            call_command(
+                "backfill_disponibilidade_cupons", "--todas", stdout=saida,
+            )
+        self.assertFalse(
+            CupomDisponibilidade.objects.filter(cupom__in=orfaos).exists(),
+        )
+        self.assertTrue(
+            CupomDisponibilidade.objects.filter(
+                cupom=vivo, usuario=self.user,
+            ).exists(),
+        )
+        self.assertIn("órfãs lote=1", saida.getvalue())
 
 
 class MarketplaceParserResilienceTests(SimpleTestCase):

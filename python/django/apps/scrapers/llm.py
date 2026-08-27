@@ -8,29 +8,28 @@ logger = logging.getLogger(__name__)
 
 _MODELO_PADRAO = "claude-sonnet-5"
 
-_PROMPT = """Você é um vendedor brasileiro especialista em grupos de WhatsApp. Seu estilo é direto, malandro e muito bem-humorado.
-Crie a chamada da promoção e um nome curto e claro para o produto.
+_PROMPT = """Você escreve a chamada de um achado para grupo de WhatsApp no Brasil.
+Tom: assertivo, concreto, curto. Alguém que achou um desconto de verdade, não um influencer.
 
 REGRAS OBRIGATÓRIAS:
-1. "titulo": TUDO EM CAIXA ALTA, máximo de 6 palavras, sem aspas, emoji, ponto final, preço, porcentagem ou a palavra "cupom".
-2. O título deve ser brasileiro, descontraído e apelativo; não é uma descrição técnica.
-3. "nome_curto": mantenha somente tipo do produto, marca, modelo e 1 ou 2 características essenciais para o cliente identificá-lo.
-4. Remova listas de especificações, recursos secundários, texto publicitário, frete e repetições.
-5. O nome curto deve ter no máximo 70 caracteres e não pode inventar informação.
-6. Não use Markdown, asteriscos ou qualquer formatação.
-7. Responda SOMENTE com JSON válido: {{"titulo":"...","nome_curto":"..."}}.
+1. "titulo": TUDO EM CAIXA ALTA, 3 a 6 palavras, sem aspas, emoji, ponto, preço, %, R$ ou a palavra cupom.
+2. O título nomeia o ganho (o que a pessoa leva ou o que muda). Proibido: IMPERDÍVEL, OPORTUNIDADE, CORRE, BORA, CLIQUE, OFERTA, PROMOÇÃO, DESCONTO, OFF, PROMO.
+3. Sem piada sobre o comprador. Sem "pra tu que". Sem "se sentir".
+4. "nome_curto": tipo + marca + modelo + no máximo 2 características. Máximo 70 caracteres. Não invente.
+5. Sem Markdown, asterisco ou formatação.
+6. Responda SOMENTE JSON: {{"titulo":"...","nome_curto":"..."}}.
 
-Exemplos de como responder:
+Exemplos:
 Produto: Multivitamínico 120 Cáps. Growth Supplements
-Resposta: {{"titulo":"PRA TU QUE NÃO COME SALADA","nome_curto":"Multivitamínico Growth 120 cápsulas"}}
+Resposta: {{"titulo":"VITAMINA SEM ENROLAÇÃO","nome_curto":"Multivitamínico Growth 120 cápsulas"}}
 
 Produto: Cadeira Gamer Wells Preta Healer
-Resposta: {{"titulo":"PARA VOCÊ SE SENTIR UM PROPLAYER","nome_curto":"Cadeira Gamer Healer Wells Preta"}}
+Resposta: {{"titulo":"CADEIRA QUE SEGURA PESO","nome_curto":"Cadeira Gamer Healer Wells Preta"}}
 
 Produto: Monitor Gamer Samsung Odyssey G5 27, Resolução QHD, Taxa de atualização de 165Hz & 1ms de tempo de resposta (MPRT), Curvatura com 1000R, HDR 10, AMD FreeSync, Eye Saver Mode & Flicker Free Mode
-Resposta: {{"titulo":"TELA BRABA PRA JOGAR BONITO","nome_curto":"Monitor Gamer Samsung Odyssey G5 27 QHD 165Hz"}}
+Resposta: {{"titulo":"TELA QUE NÃO ATRASA","nome_curto":"Monitor Gamer Samsung Odyssey G5 27 QHD 165Hz"}}
 
-Agora faça o seu:
+Agora:
 {contexto}
 Resposta:"""
 
@@ -85,6 +84,25 @@ def _sem_formatacao(texto, limite=80) -> str:
     return (cortado or limpo[:limite]).rstrip(" -–—,;|/")
 
 
+_TITULO_PROIBIDO = re.compile(
+    r"\b(?:CUPOM|PROMOÇÃO|PROMOCAO|OFERTA|IMPERD[IÍ]VEL|OPORTUNIDADE|"
+    r"CORRE|BORA|CLIQUE|DESCONTO|OFF|PROMO)\b",
+    re.I,
+)
+
+
+def _titulo_chamada(texto) -> str:
+    limpo = _sem_formatacao(texto, 80).upper()
+    palavras = [p for p in re.split(r"\s+", limpo) if p]
+    if not 2 <= len(palavras) <= 6:
+        return ""
+    if _TITULO_PROIBIDO.search(limpo):
+        return ""
+    if re.search(r"\d+\s*%|R\$", limpo):
+        return ""
+    return limpo
+
+
 def _cliente(timeout):
     import anthropic
 
@@ -132,7 +150,7 @@ def gerar_conteudo(nome: str, timeout: int = 30, preco=None,
         if not isinstance(dados, dict):
             return vazio
         return {
-            "titulo": _sem_formatacao(dados.get("titulo"), 80).upper(),
+            "titulo": _titulo_chamada(dados.get("titulo")),
             "nome_curto": _sem_formatacao(dados.get("nome_curto"), 70),
         }
     except Exception as exc:

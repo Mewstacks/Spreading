@@ -656,7 +656,8 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
     """
     from apps.scrapers.senders.base import WhatsAppMarkup
     from apps.scrapers.coupon_rules import (
-        codigo_publicavel, escopo_produtos_cupom, formatar_numero, regras_do_cupom,
+        codigo_publicavel, desconto_para_comprador, escopo_produtos_cupom,
+        formatar_numero, regras_do_cupom,
     )
     m = markup or WhatsAppMarkup()
     esc = m.escape
@@ -668,7 +669,11 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
     linhas = [m.bold(f"Novo cupom ⚡️ {esc(loja)}"), ""]
 
     # Linha do desconto: "🛒 15% DE DESCONTO acima de R$79 (limitado a R$60)"
-    numero_desconto = formatar_numero(regras.get("valor_desconto"))
+    # Comissão Shopee não entra: não é abatimento na loja.
+    numero_desconto = (
+        formatar_numero(regras.get("valor_desconto"))
+        if desconto_para_comprador(cupom) else ""
+    )
     valor = ""
     if numero_desconto:
         valor = (f"{numero_desconto}%" if regras.get("tipo_desconto") == "porcentagem"
@@ -1154,18 +1159,24 @@ def resolver_link_afiliado_cupom(cupom, usuario):
     if marketplace == "amazon":
         from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
         from apps.scrapers.afiliado import tag_amazon
+        from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_cupom
         tag = _executar_orm(tag_amazon, usuario)
-        if not tag or not origem.startswith("https://"):
+        if not tag:
             return {"sucesso": False, "motivo": "Cadastre sua tag Amazon para usar este cupom."}
-        parts = urlsplit(origem)
-        hostname = (parts.hostname or "").lower()
-        if not (hostname == "amazon.com.br" or hostname.endswith(".amazon.com.br")):
-            return {"sucesso": False, "motivo": "O link informado não pertence à Amazon Brasil."}
-        query = dict(parse_qsl(parts.query, keep_blank_values=True))
-        query["tag"] = tag
-        return {"sucesso": True,
-                "link": urlunsplit((parts.scheme, parts.netloc, parts.path,
-                                     urlencode(query), parts.fragment))}
+        if origem.startswith("https://"):
+            parts = urlsplit(origem)
+            hostname = (parts.hostname or "").lower()
+            if not (hostname == "amazon.com.br" or hostname.endswith(".amazon.com.br")):
+                return {"sucesso": False, "motivo": "O link informado não pertence à Amazon Brasil."}
+            query = dict(parse_qsl(parts.query, keep_blank_values=True))
+            query["tag"] = tag
+            return {"sucesso": True,
+                    "link": urlunsplit((parts.scheme, parts.netloc, parts.path,
+                                         urlencode(query), parts.fragment))}
+        destino = _executar_orm(gerar_link_afiliado_cupom, cupom, usuario)
+        if str(destino or "").startswith("https://"):
+            return {"sucesso": True, "link": destino}
+        return {"sucesso": False, "motivo": "Cadastre sua tag Amazon para usar este cupom."}
     if marketplace != "mercadolivre":
         return {"sucesso": False,
                 "motivo": "Esta loja ainda não oferece link afiliado para cupons."}
@@ -1352,6 +1363,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     # colagem e preço por item. Sem essa prova, o código continua publicável apenas
     # como aviso de loja, que é o contrato seguro pedido para cupons digitáveis.
     modo_codigo = bool(tem_codigo and not relacoes_preparadas)
+    modo_link_direto = False
     link_codigo = ""
     if modo_codigo and not enqueue_only:
         resolucao_codigo = resolver_link_afiliado_cupom(cupom, usuario)
@@ -1367,6 +1379,32 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         link_codigo = resolucao_codigo["link"]
 
     if not modo_codigo and not relacoes_preparadas:
+        # Shopee/Awin: a API já devolve HTTPS afiliado. Amazon oficial: ASIN +
+        # tag, sem Chromium. Exigir ProdutoCupom (mapa ML) marcava ready na
+        # tela e recusava no envio.
+        from apps.scrapers.coupon_rules import ativacao_publicavel
+        destino = str(getattr(cupom, "link", "") or "")
+        marketplace = str(getattr(cupom, "marketplace", "") or "").lower()
+        if (marketplace in {"shopee", "awin"}
+                and ativacao_publicavel(cupom, usuario=usuario)
+                and destino.startswith("https://")):
+            modo_link_direto = True
+            link_codigo = destino
+        elif marketplace == "amazon" and ativacao_publicavel(cupom, usuario=usuario):
+            from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_cupom
+            destino_az = _executar_orm(gerar_link_afiliado_cupom, cupom, usuario)
+            if str(destino_az or "").startswith("https://"):
+                modo_link_direto = True
+                link_codigo = destino_az
+        elif marketplace == "mercadolivre" and ativacao_publicavel(cupom, usuario=usuario):
+            from apps.scrapers.coupon_links import gerar_link_afiliado_listagem_ml
+            destino_ml = _executar_orm(gerar_link_afiliado_listagem_ml, cupom, usuario)
+            if str(destino_ml or "").startswith("https://"):
+                modo_link_direto = True
+                link_codigo = destino_ml
+
+    aviso_sem_produto = modo_codigo or modo_link_direto
+    if not aviso_sem_produto and not relacoes_preparadas:
         _executar_orm(
             log_event,
             "publicacao", "coupon_not_ready",
@@ -1378,10 +1416,10 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 "motivo": "Este cupom está sendo atualizado e ainda não está disponível para envio.",
                 "classe": "transitorio", "cupom_em_preparo": True}
     relacoes_prontas = (
-        [] if modo_codigo
+        [] if aviso_sem_produto
         else _executar_orm(relacoes_prontas_para_envio, cupom, usuario)
     )
-    if not modo_codigo and not relacoes_prontas:
+    if not aviso_sem_produto and not relacoes_prontas:
         _executar_orm(
             log_event,
             "publicacao", "coupon_link_pending",
@@ -1547,7 +1585,8 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         # foto manual para aparentar associação que a fonte não comprovou.
         img_kwargs = {}
         relacao_topo = None
-        if modo_codigo:
+        itens_cupom, bloqueio_afiliacao = [], None
+        if aviso_sem_produto:
             link_registro = link_codigo
             mensagem = montar_mensagem_cupom(
                 cupom, link_afiliado=link_registro, markup=sender.markup,
@@ -1560,7 +1599,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         else:
             itens_cupom, bloqueio_afiliacao = _preparar_itens_cupom(
                 cupom, usuario, relacoes_prontas)
-        if (not modo_codigo and itens_cupom
+        if (not aviso_sem_produto and itens_cupom
                 and getattr(settings, "PRECO_REVALIDA_ANTES_ENVIO", True)):
             # Antes da IA (para a chamada nascer do preço fresco), antes do corte
             # do Telegram e antes da colagem — que é quem garante foto↔texto.
@@ -1570,7 +1609,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
             if not itens_cupom:
                 return falhar("Os preços deste cupom mudaram; nenhum produto "
                               "continua dentro das regras dele.", classe="transitorio")
-        if not modo_codigo and itens_cupom:
+        if not aviso_sem_produto and itens_cupom:
             _preparar_conteudo_ia_cupom(itens_cupom)
             # Telegram limita legendas de foto a 1024 caracteres. Como a regra e
             # "ate 9", remove os itens de menor prioridade ate a mensagem caber.
@@ -1587,14 +1626,14 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 cupom, itens_cupom, markup=sender.markup)
             link_registro = itens_cupom[0]["link"]
             img_kwargs = {"imagem_b64": colagem_b64, "mimetype": colagem_mime}
-        elif not modo_codigo and bloqueio_afiliacao:
+        elif not aviso_sem_produto and bloqueio_afiliacao:
             # Havia produtos comprovados, mas a sessão do Mercado Livre caiu na
             # hora de gerar os links afiliados. Não é "cupom sem produtos": é
             # reconexão. Transitório para não pausar a automação por queda de
             # sessão, e com o flag que a UI usa para oferecer o botão de reconectar.
             return falhar(bloqueio_afiliacao["mensagem"], classe="transitorio",
                           precisa_login_ml=bloqueio_afiliacao["precisa_login_ml"])
-        elif not modo_codigo:
+        elif not aviso_sem_produto:
             return falhar("Cupom sem produtos comprovadamente aplicáveis, com foto e link afiliado.",
                           classe="permanente")
         if not mensagem.strip():
@@ -1603,7 +1642,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         # com 0/0 e não havia como reconciliar "o preço anunciado não bate".
         # Aqui o par é (vitrine, pós-cupom) — nas publicações de produto o par é
         # (tabela, vitrine), que é o que aquela mensagem anuncia.
-        if not modo_codigo:
+        if not aviso_sem_produto:
             relacao_topo = itens_cupom[0].get("relacao")
 
         def _gravar_mensagem():

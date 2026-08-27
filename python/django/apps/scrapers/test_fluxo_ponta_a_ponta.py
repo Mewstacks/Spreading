@@ -418,3 +418,31 @@ class SelecaoAutomaticaEquilibradaTests(TestCase):
         lojas = {c.obj.marketplace for c in candidatos}
         self.assertIn("amazon", lojas)
         self.assertIn("mercadolivre", lojas)
+
+    def test_shopee_entra_no_ranking_sem_mapa_ml(self):
+        from types import SimpleNamespace
+        from apps.scrapers.content_ranking import _coupon_candidates
+
+        fonte = FonteIngestao.objects.create(
+            slug="shopee-campaigns", marketplace="shopee", nome="Shopee",
+            status="ok",
+        )
+        CupomNormalizado.objects.create(
+            fonte=fonte, owner=self.user,
+            external_id="shopee:campanha:SHOP:x", marketplace="shopee",
+            titulo="Campanha Shopee", codigo="",
+            link="https://s.shopee.com.br/x",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 12},
+            evidencia={"transport": "shopee-affiliate-api"},
+        )
+        config = SimpleNamespace(
+            owner=self.user, grupo_id="g@g.us", marketplace="", macro_categoria="",
+            termo_busca="", horas_cooldown=24, min_desconto_percent=10,
+            incluir_restritos=True, incluir_sem_desconto=True,
+            programas=SimpleNamespace(values_list=lambda *a, **k: []),
+        )
+        with patch("apps.scrapers.coupon_products.ids_cupons_prontos",
+                   return_value=set()):
+            candidatos = _coupon_candidates(config, limit=8)
+        self.assertIn("shopee", {c.obj.marketplace for c in candidatos})

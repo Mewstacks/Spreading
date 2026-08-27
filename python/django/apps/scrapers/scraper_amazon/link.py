@@ -118,6 +118,22 @@ def gerar_link_afiliado_para_produto(produto, usuario=None):
     }
 
 
+def gerar_link_afiliado_cupom(cupom, usuario=None) -> str:
+    """`?tag=` no primeiro ASIN oficial, senão a home da loja. Sem browser."""
+    tag = _tag(usuario)
+    if not tag:
+        return ""
+    evid = getattr(cupom, "evidencia", None) or {}
+    if not isinstance(evid, dict):
+        evid = {}
+    asins = evid.get("asins") or []
+    asin = str(asins[0] if asins else "").strip()
+    host = getattr(settings, "AMAZON_MARKETPLACE", "www.amazon.com.br")
+    if asin:
+        return f"https://{host}/dp/{asin}?{urlencode({'tag': tag})}"
+    return f"https://{host}/?{urlencode({'tag': tag})}"
+
+
 # Reprovação que fala do PRODUTO, não do link: o anúncio saiu do ar. É a única
 # reprovação legítima que a Amazon produz hoje, então é a única que o reparo
 # preserva — todo o resto em item Amazon veio do verificador errado.

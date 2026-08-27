@@ -366,12 +366,16 @@ def site_wide_confiavel(cupom, *, codigos_contestados=None) -> bool:
     ).exists()
 
 
-# Fontes cuja saída é ALEGAÇÃO de terceiro, não observação nossa. O adaptador do
-# Promobit já dizia isto na própria docstring: cupom de comunidade "soma evidência
-# e corrobora o que outra fonte já viu, mas não deveria, sozinho, mandar um
-# influenciador anunciar um código para o grupo dele". Faltava o portão.
+# Fontes cuja saída é ALEGAÇÃO de terceiro, não observação nossa.
 FONTES_COMUNIDADE = frozenset({
     "promobit-cupons", "telegram-publico", "promobit-community", "pelando-community",
+})
+# Telegram/IA e stubs: alegação crua — sozinho não lista (TODOSITE100).
+# Promobit na página pública `/cupons/loja/<loja>/` é o mesmo canal que
+# agregadores (Cuponomia, Promobit) usam: código digitável já filtrado.
+# Sem este recorte a Amazon oficial (~8 cards de ativação) era o teto.
+FONTES_COMUNIDADE_SEM_LISTAGEM = frozenset({
+    "telegram-publico", "promobit-community", "pelando-community",
 })
 
 
@@ -407,6 +411,20 @@ def comunidade_corroborada(cupom) -> bool:
     ).exclude(pk=getattr(cupom, "pk", None)).exclude(
         fonte__slug__in=FONTES_COMUNIDADE,
     ).exists()
+
+
+def aguarda_corroboracao_oficial(cupom) -> bool:
+    """True quando o cupom ainda não pode ir sozinho para a lista.
+
+    Promobit (`promobit-cupons`) lista: é página de loja com código digitável.
+    Telegram e stubs continuam exigindo a mesma chave numa fonte oficial.
+    """
+    slug = str(getattr(getattr(cupom, "fonte", None), "slug", "") or "")
+    if slug == "promobit-cupons":
+        return False
+    if slug in FONTES_COMUNIDADE_SEM_LISTAGEM:
+        return not comunidade_corroborada(cupom)
+    return cupom_de_comunidade(cupom) and not comunidade_corroborada(cupom)
 
 
 def escopo_delimitado(cupom, *, codigos_contestados=None) -> bool:
@@ -561,6 +579,27 @@ def _ativacao_ml_publicavel(cupom, regras, usuario=None) -> bool:
     return regras.get("valor_desconto") not in (None, "", 0)
 
 
+def _ativacao_link_https_publicavel(cupom, regras, *, fonte_slug) -> bool:
+    """Shopee/Awin: a API já devolve o destino afiliado. Sem Chromium, sem produto.
+
+    Sem isto `ativacao_publicavel` só aceitava ML e Amazon — campanhas HTTP
+    (Shopee GraphQL, Awin) caíam em `activation_evidence_incomplete` e nunca
+    apareciam na lista, mesmo com `offerLink`/`destinationUrl` válido.
+    """
+    source = str(getattr(getattr(cupom, "fonte", None), "slug", "") or "")
+    if source != fonte_slug:
+        return False
+    from urllib.parse import urlsplit
+
+    try:
+        partes = urlsplit(str(getattr(cupom, "link", "") or ""))
+    except ValueError:
+        return False
+    if partes.scheme != "https" or not partes.netloc:
+        return False
+    return regras.get("valor_desconto") not in (None, "", 0)
+
+
 def ativacao_publicavel(cupom, usuario=None) -> bool:
     """Aceita ativação quando a loja prova promoção + produtos.
 
@@ -568,6 +607,7 @@ def ativacao_publicavel(cupom, usuario=None) -> bool:
     preço final depois da ativação.
     Mercado Livre: campanha com container público — ver `_ativacao_ml_publicavel`,
     atrás da flag ML_CUPONS_ATIVACAO_ENABLED.
+    Shopee/Awin: link HTTPS da própria API de afiliados.
     """
     regras = regras_do_cupom(cupom)
     if regras["modo_resgate"] != "ativacao":
@@ -575,6 +615,14 @@ def ativacao_publicavel(cupom, usuario=None) -> bool:
     marketplace = str(getattr(cupom, "marketplace", "") or "").casefold()
     if marketplace == "mercadolivre":
         return _ativacao_ml_publicavel(cupom, regras, usuario=usuario)
+    if marketplace == "shopee":
+        return _ativacao_link_https_publicavel(
+            cupom, regras, fonte_slug="shopee-campaigns",
+        )
+    if marketplace == "awin":
+        return _ativacao_link_https_publicavel(
+            cupom, regras, fonte_slug="awin-offers-api",
+        )
     if marketplace != "amazon":
         return False
     evidence = getattr(cupom, "evidencia", {}) or {}
@@ -589,6 +637,19 @@ def ativacao_publicavel(cupom, usuario=None) -> bool:
 
 def cupom_publicavel(cupom, usuario=None) -> bool:
     return bool(codigo_publicavel(cupom) or ativacao_publicavel(cupom, usuario=usuario))
+
+
+def desconto_para_comprador(cupom) -> bool:
+    """False quando `valor_desconto` é comissão de afiliado, não abatimento na loja.
+
+    Campanhas Shopee (`evidencia.transport=shopee-affiliate-api`) gravam a taxa
+    do publisher em `regras.valor_desconto`. Anunciar isso como "% DE DESCONTO"
+    mente para quem compra.
+    """
+    evidencia = getattr(cupom, "evidencia", None)
+    if isinstance(evidencia, Mapping):
+        return evidencia.get("transport") != "shopee-affiliate-api"
+    return True
 
 
 def formatar_numero(valor) -> str:
@@ -657,6 +718,8 @@ def score_cupom(cupom, usuario=None) -> float:
     confianca. A recencia fica como desempate no `order_by`, nao aqui.
     """
     from django.utils import timezone
+    if aguarda_corroboracao_oficial(cupom):
+        return 0.0
     regras = regras_do_cupom(cupom)
     score = 0.0
     if codigo_publicavel(cupom):
@@ -664,14 +727,22 @@ def score_cupom(cupom, usuario=None) -> float:
     elif ativacao_publicavel(cupom, usuario=usuario):
         score += 25.0
     valor = _numero(regras.get("valor_desconto"))
-    if valor is not None:
-        if regras.get("tipo_desconto") == "porcentagem":
+    tipo = regras.get("tipo_desconto")
+    if valor is not None and desconto_para_comprador(cupom):
+        if tipo == "porcentagem":
             score += min(valor, 60.0)
-        else:  # desconto fixo em R$
+        elif tipo == "fixo":
             score += min(valor / 2.0, 40.0)
     validade = getattr(cupom, "validade", None)
     if validade and validade >= timezone.now():
         score += 10.0
-    confianca = getattr(cupom, "confianca", "")
-    score += {"alta": 15.0, "media": 5.0}.get(confianca, 0.0)
+    confianca = getattr(cupom, "confianca", "") or ""
+    score += {"alta": 15.0, "media": 5.0, "baixa": 3.0}.get(confianca, 3.0)
+    if getattr(cupom, "restrito", False):
+        score -= 8.0
+    from apps.scrapers.maintenance import freshness_points
+    score += freshness_points(getattr(cupom, "ultima_observacao", None))
+    fonte = getattr(cupom, "fonte", None)
+    if fonte is not None and getattr(fonte, "status", "") == "ok":
+        score += 5.0
     return round(score, 2)

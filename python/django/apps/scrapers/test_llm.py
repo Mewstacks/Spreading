@@ -36,6 +36,19 @@ class LLMContentTests(SimpleTestCase):
             resultado["nome_curto"],
             "Monitor Gamer Samsung Odyssey G5 27 QHD 165Hz",
         )
+
+    @patch("apps.scrapers.llm._cliente")
+    def test_rejeita_chamada_de_influencer(self, cliente):
+        from apps.scrapers.llm import gerar_conteudo
+
+        messages = Mock()
+        messages.create.return_value = _resposta(
+            '{"titulo":"IMPERDÍVEL BORA CORRE","nome_curto":"Monitor"}'
+        )
+        cliente.return_value = SimpleNamespace(messages=messages)
+        resultado = gerar_conteudo("Monitor Gamer")
+        self.assertEqual(resultado["titulo"], "")
+        self.assertEqual(resultado["nome_curto"], "Monitor")
         self.assertEqual(messages.create.call_args.kwargs["model"], "modelo-de-teste")
         self.assertEqual(
             messages.create.call_args.kwargs["thinking"],

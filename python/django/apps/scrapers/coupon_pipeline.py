@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -51,6 +52,25 @@ def _usuarios_ativos(usuarios=None):
         return list(get_user_model().objects.filter(is_active=True))
     ids = [getattr(user, "id", user) for user in usuarios]
     return list(get_user_model().objects.filter(is_active=True, id__in=ids))
+
+
+# A página oficial de cupons Amazon é Chromium. Rodá-la a cada 15 min (tick de
+# cupons) disputa o único slot com prep/links do ML. Catálogo fresco já listável
+# não precisa de nova visita; 6h cobre a janela de 48h da vitrine com folga.
+AMAZON_CUPONS_TTL_COLETA = timedelta(hours=6)
+
+
+def _amazon_public_coupons_ainda_frescos() -> bool:
+    from apps.scrapers.maintenance import cupons_frescos_q
+
+    fonte = FonteIngestao.objects.filter(slug="amazon-public-coupons").first()
+    if fonte is None or fonte.ultimo_sucesso is None:
+        return False
+    if timezone.now() - fonte.ultimo_sucesso > AMAZON_CUPONS_TTL_COLETA:
+        return False
+    return CupomNormalizado.objects.filter(
+        fonte=fonte, estado="ativo",
+    ).filter(cupons_frescos_q()).exists()
 
 
 def _materializar_ausencias_saudaveis(slug, payload, rows, *, owner=None):
@@ -184,10 +204,8 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
 
     _coletar_adaptador("ml-cupons-afiliados", resultado)
 
-    # Segunda e terceira fontes públicas, ambas por HTTP puro: rodam mesmo com o
-    # Chromium ocupado e existem justamente para o Mercado Livre deixar de depender
-    # de um único site de terceiro. Entram com precedência baixa (ver
-    # `_SOURCE_PRECEDENCE`): corroboram e descobrem, não decidem sozinhas.
+    # Segunda fonte pública HTTP: códigos digitáveis das páginas de loja do
+    # Promobit (`__NEXT_DATA__` + schema.org). Lista sozinha; Telegram não.
     _coletar_adaptador("promobit-cupons", resultado)
     _coletar_adaptador("telegram-publico", resultado, items=("offers", "coupons"))
 
@@ -201,7 +219,14 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
 
     # A fonte é pública e existe independentemente de alguma conta já possuir tag.
     # O vínculo de afiliado continua por usuário na etapa de link/envio.
-    payload = _coletar_adaptador("amazon-public-coupons", resultado, items=())
+    if _amazon_public_coupons_ainda_frescos():
+        _fonte(
+            resultado, "amazon-public-coupons", status="skipped",
+            motivo="Catálogo oficial ainda fresco; Chromium reservado para o funil.",
+        )
+        payload = {"offers": [], "coupons": []}
+    else:
+        payload = _coletar_adaptador("amazon-public-coupons", resultado, items=())
     rows = payload.get("offers", []) + payload.get("coupons", [])
     if rows:
         from apps.scrapers.sources.persistence import persist_items
@@ -719,6 +744,16 @@ def executar_pipeline_cupons(
             "links_reprovados", "links_transitorios", "links_falhos", "prontos",
         ):
             resultado[key] += int(afiliacao.get(key, 0) or 0)
+        try:
+            from apps.scrapers.coupon_links import (
+                colher_rastreio_ml_browser, rastreio_afiliado_ml,
+            )
+            if not rastreio_afiliado_ml(usuario):
+                colher_rastreio_ml_browser(usuario)
+        except Exception:
+            logger.exception(
+                "Colheita de rastreio ML falhou para usuário %s", usuario.pk,
+            )
         try:
             from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
             por_canal = {

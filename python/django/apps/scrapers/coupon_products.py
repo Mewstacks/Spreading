@@ -53,8 +53,9 @@ MAX_CANDIDATOS = 36
 PREPARO_LOTE_POR_CICLO = 12
 # Teto da varredura por GET. Dimensionado pela demanda real: ~2.400 cupons ativos
 # com janela de preparo de 3h pedem ~800/h, e o ciclo de cupons roda a cada 15 min.
-# Um GET de container custa ~1s e não disputa o Chromium.
-PREPARO_LOTE_HTTP_POR_CICLO = 200
+# 400/ciclo ≈ 1600/h de catch-up. Um GET de container custa ~1s e não disputa o
+# Chromium. O lote Playwright continua em PREPARO_LOTE_POR_CICLO (12).
+PREPARO_LOTE_HTTP_POR_CICLO = 400
 _CENT = Decimal("0.01")
 
 # Mensagem estável do preparo bloqueado por sessão. É ela que a projeção lê para
@@ -566,7 +567,7 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
     def _tentar_http(credencial):
         """(linhas, barrado, falha_transporte, inexistente)."""
         try:
-            response = _ml_http_session(credencial).get(link, timeout=12)
+            response = _ml_http_session(credencial).get(link, timeout=8)
             if parede_de_login(response):
                 return None, True, False, False
             if response.status_code in (404, 410):

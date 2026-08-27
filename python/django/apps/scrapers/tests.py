@@ -4325,6 +4325,30 @@ class VerificarLinksPendentesTests(TestCase):
         self.assertEqual(linha.url_canonica, "https://meli.la/bom")
 
     @patch("apps.scrapers.scraper_mercadolivre.link._relatorio_na_pagina")
+    def test_aprova_grava_matt_word_da_url_final(self, verify):
+        self.setUpBrowserFalso()
+        produto = self._produto("Fone com rastreio")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=produto, afiliado_ok=True, estado="pronto",
+            link_afiliado="https://meli.la/rast", verificado_ok=None)
+        verify.return_value = {
+            "ok": True,
+            "url_final": (
+                "https://www.mercadolivre.com.br/social/lules"
+                "?matt_word=lules&matt_tool=android&ref=" + ("x" * 2000)
+            ),
+        }
+
+        r = ml_link.verificar_links_pendentes(self.user, limite=10)
+
+        self.assertEqual(r["aprovados"], 1)
+        linha = LinkAfiliadoUsuario.objects.get(usuario=self.user, produto=produto)
+        self.assertIs(linha.verificado_ok, True)
+        self.assertIn("matt_word=lules", linha.url_canonica)
+        self.assertNotIn("ref=", linha.url_canonica)
+        self.assertLessEqual(len(linha.url_canonica), 1000)
+
+    @patch("apps.scrapers.scraper_mercadolivre.link._relatorio_na_pagina")
     def test_reprova_link_que_cai_na_vitrine_social(self, verify):
         self.setUpBrowserFalso()
         produto = self._produto("Solda vitrine")

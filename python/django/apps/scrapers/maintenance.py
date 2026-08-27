@@ -25,6 +25,19 @@ def produtos_frescos_q(*, agora=None, max_age_hours=PRODUCT_MAX_AGE_HOURS,
     )
 
 
+def freshness_points(observed, *, agora=None, max_age_hours=COUPON_MAX_AGE_HOURS,
+                     max_points=10.0):
+    """Pontos de recência: 0 depois de `max_age_hours`. Mesma janela do TTL (48h)."""
+    agora = agora or timezone.now()
+    if not observed:
+        return 0.0
+    hours = max(0.0, (agora - observed).total_seconds() / 3600)
+    return max(
+        0.0,
+        max_points * (1.0 - min(hours, float(max_age_hours)) / float(max_age_hours)),
+    )
+
+
 def cupons_frescos_q(*, agora=None, max_age_hours=COUPON_MAX_AGE_HOURS,
                      prefix=""):
     """Cupom com validade explícita vale até ela; sem validade exige recência.

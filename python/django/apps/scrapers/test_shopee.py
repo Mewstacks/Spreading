@@ -222,6 +222,58 @@ class FonteCampanhasTests(_BaseComIntegracao):
             itens = list(ShopeeCampaignsSource().discover_coupons(owner=self.usuario))
         self.assertEqual(itens, [])
 
+    def test_campanha_https_fica_ready_sem_produto_e_nao_mente_desconto(self):
+        from unittest.mock import Mock
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+        from apps.scrapers.coupon_rules import ativacao_publicavel
+        from apps.scrapers.models import (
+            CupomDisponibilidade, CupomNormalizado, FonteIngestao,
+        )
+        from apps.scrapers.ofertas import enviar_cupom, montar_mensagem_cupom
+        from apps.scrapers.senders.base import WhatsAppMarkup
+        from apps.scrapers.conexoes import Estado
+
+        fonte = FonteIngestao.objects.create(
+            slug="shopee-campaigns", marketplace="shopee", nome="Shopee",
+            status="ok",
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, owner=self.usuario,
+            external_id="shopee:campanha:SHOP:frete", marketplace="shopee",
+            titulo="Frete grátis acima de R$ 19", codigo="",
+            link="https://s.shopee.com.br/campanha",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 12},
+            evidencia={"transport": "shopee-affiliate-api", "commission_rate": 12},
+        )
+        self.assertTrue(ativacao_publicavel(cupom, usuario=self.usuario))
+        texto = montar_mensagem_cupom(cupom, link_afiliado=cupom.link)
+        self.assertNotIn("DE DESCONTO", texto)
+        self.assertIn("s.shopee.com.br", texto)
+
+        projetar_disponibilidade_cupons(self.usuario)
+        self.assertEqual(
+            CupomDisponibilidade.objects.get(
+                cupom=cupom, usuario=self.usuario).stage,
+            "ready",
+        )
+
+        sender = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
+        sender.enviar_oferta.return_value = {
+            "sucesso": True, "via": "whatsapp", "mensagem_id": "s1",
+        }
+        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender), \
+                patch("apps.scrapers.conexoes.estado_whatsapp",
+                      return_value=Estado(True, "WhatsApp", "worker", "", "", None)), \
+                patch("apps.scrapers.ofertas._preparar_itens_cupom",
+                      side_effect=AssertionError("Shopee não inventa produto ML")):
+            resultado = enviar_cupom(
+                cupom, "grupo@g.us", usuario=self.usuario,
+            )
+        self.assertTrue(resultado.get("sucesso"), resultado)
+        self.assertFalse(resultado.get("cupom_em_preparo"))
+        self.assertEqual(resultado.get("link"), cupom.link)
+
 
 class MarketplaceShopeeTests(_BaseComIntegracao):
     class ProdutoFalso:

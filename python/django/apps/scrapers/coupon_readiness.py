@@ -7,8 +7,10 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from django.db import transaction
-from django.db.models import Q
+from contextlib import contextmanager
+
+from django.db import connection, transaction
+from django.db.models import Case, IntegerField, Q, Value, When
 from django.utils import timezone
 
 from apps.accounts.feature_flags import feature_decision
@@ -44,6 +46,27 @@ def _resultado(stage, category="", reason="", detail="", retry_at=None):
         "stage": stage, "category": category, "reason_code": reason,
         "safe_detail": detail[:255], "retry_at": retry_at,
     }
+
+
+@contextmanager
+def _session_statement_timeout(value):
+    """Relaxa o timeout da sessão e restaura. `value` é literal PG ('0', '10min')."""
+    if connection.vendor != "postgresql":
+        yield
+        return
+    with connection.cursor() as cursor:
+        cursor.execute("SHOW statement_timeout")
+        previous = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT set_config('statement_timeout', %s, false)", [value],
+        )
+    try:
+        yield
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT set_config('statement_timeout', %s, false)", [previous],
+            )
 
 
 def conexao_ml(usuario):
@@ -108,9 +131,9 @@ def _preflight(cupom, usuario):
     # Cupom de comunidade é alegação de terceiro — inclusive a leitura por IA de
     # uma mensagem de canal. Ele soma evidência quando confirma o que uma fonte
     # oficial já publicou; sozinho, não manda ninguém anunciar um código.
-    from apps.scrapers.coupon_rules import comunidade_corroborada, cupom_de_comunidade
+    from apps.scrapers.coupon_rules import aguarda_corroboracao_oficial
 
-    if cupom_de_comunidade(cupom) and not comunidade_corroborada(cupom):
+    if aguarda_corroboracao_oficial(cupom):
         return _resultado(
             "collected", "waiting", "community_uncorroborated",
             "Cupom visto só em fonte de comunidade; aguardando confirmação oficial.",
@@ -161,7 +184,9 @@ def _codigo(cupom, usuario, conexao):
         if not tag:
             return _resultado("waiting_link", "no_link", "amazon_tag_missing",
                               "Cadastre a tag Amazon para preparar o link.")
-        if not _url_publica(cupom.link):
+        # Código de agregador nasce sem URL de produto (nunca o redirect deles).
+        # Destino comissionado é a home/ASIN com `?tag=` — montado na hora do envio.
+        if str(cupom.link or "").strip() and not _url_publica(cupom.link):
             return _resultado("discarded", "invalid", "invalid_destination",
                               "Destino público inválido.")
         return _resultado("ready")
@@ -246,6 +271,31 @@ def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao):
     if not cupom_publicavel(cupom, usuario=usuario):
         return _resultado("discarded", "invalid", "activation_evidence_incomplete",
                           "Evidência de ativação incompleta.")
+
+    if marketplace == "amazon":
+        # Página oficial já provou promo + ASINs + preço. Link é `?tag=`, sem
+        # Chromium e sem mapa ProdutoCupom (esse mapa é do ML).
+        return _resultado("ready")
+
+    if marketplace == "mercadolivre":
+        # Mesma ideia da Amazon: a listagem pública JÁ é o escopo. Carimbar o
+        # rastreio de um link ML já verificado nesta conta evita Chromium×campanha
+        # (fila de ~2.6k em preparation_pending). Destino continua o container da
+        # campanha — não um aviso genérico de outro cupom (MELIPROMO).
+        from apps.scrapers.coupon_links import gerar_link_afiliado_listagem_ml
+        if gerar_link_afiliado_listagem_ml(cupom, usuario):
+            return _resultado("ready")
+
+    if marketplace in {"shopee", "awin"}:
+        if cupom.integracao and not (
+                cupom.integracao.habilitada and cupom.integracao.status == "conectada"):
+            return _resultado("eligible", "no_session", "integration_disconnected",
+                              "Integração de afiliados desconectada.")
+        return _resultado(
+            "ready" if _url_publica(cupom.link) else "waiting_link",
+            "" if _url_publica(cupom.link) else "no_link",
+            "" if _url_publica(cupom.link) else "affiliate_link_pending",
+        )
 
     if cupom.pk in prontas:
         return _resultado("ready")
@@ -366,6 +416,11 @@ def projetar_disponibilidade_cupons(usuario, channel="whatsapp"):
     organization = organization_for_user(usuario)
     if organization is None:
         return {"stages": {}, "reasons": {}, "total": 0}
+    with _session_statement_timeout("0"):
+        return _projetar_disponibilidade_cupons(usuario, organization, channel)
+
+
+def _projetar_disponibilidade_cupons(usuario, organization, channel):
     agora = timezone.now()
     cupons = list(
         CupomNormalizado.objects.select_related("fonte", "programa", "integracao")
@@ -377,7 +432,13 @@ def projetar_disponibilidade_cupons(usuario, channel="whatsapp"):
         )
         .filter(estado="ativo")
         .filter(cupons_frescos_q(agora=agora))
-        .order_by("-ultima_observacao")[:5000]
+        .annotate(_prio=Case(
+            When(marketplace="amazon", then=Value(0)),
+            When(marketplace="mercadolivre", then=Value(1)),
+            default=Value(2),
+            output_field=IntegerField(),
+        ))
+        .order_by("_prio", "-ultima_observacao")[:5000]
     )
     ativacoes = [c for c in cupons if not codigo_publicavel(c)]
     observations = CupomFonteObservacao.objects.filter(

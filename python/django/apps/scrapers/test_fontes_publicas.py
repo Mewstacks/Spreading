@@ -61,6 +61,27 @@ PROMOBIT_HTML = """
 </script>
 """
 
+PROMOBIT_NEXT = """
+<script id="__NEXT_DATA__" type="application/json">
+{"props":{"pageProps":{"serverCoupons":{"coupons":[
+  {"couponCode":"EXTRA15","couponTitle":"Extra Amazon",
+   "couponDiscountValue":"15% de Desconto","couponDiscountOn":"selecao",
+   "couponStatusName":"APPROVED","couponUntil":"2028-01-01T20:59:59-0300",
+   "couponUrl":"https://www.promobit.com.br/Redirect/cupom/1"},
+  {"couponCode":"VELHO10","couponTitle":"Expirado",
+   "couponDiscountValue":"10% de Desconto","couponStatusName":"APPROVED",
+   "couponUntil":"2020-01-01T20:59:59-0300"},
+  {"couponCode":"NOVO20","couponTitle":"Pendente",
+   "couponDiscountValue":"20% de Desconto","couponStatusName":"PENDING"},
+  {"couponCode":"","couponTitle":"Sem codigo",
+   "couponDiscountValue":"30% de Desconto","couponStatusName":"APPROVED"}
+],"couponsRelated":[
+  {"couponCode":"AUDIO400","couponTitle":"Magalu",
+   "couponDiscountValue":"R$ 400 de Desconto","couponStatusName":"APPROVED"}
+]}}}}
+</script>
+"""
+
 
 class TelegramPublicoTests(TestCase):
     def _coletar(self, corpo=TG_HTML, canais=("canalteste",), destino=DESTINO_CURTO):
@@ -194,6 +215,19 @@ class PromobitTests(TestCase):
         _, itens = self._coletar()
         for item in itens:
             self.assertNotIn("promobit.com.br", item.canonical_url)
+
+    def test_next_data_traz_codigo_que_o_schema_org_nao_lista(self):
+        _, itens = self._coletar(corpo=PROMOBIT_HTML + PROMOBIT_NEXT)
+        codigos = sorted(i.coupon_code for i in itens)
+        self.assertEqual(codigos, ["EXTRA15", "LISTA25"])
+        extra = next(i for i in itens if i.coupon_code == "EXTRA15")
+        self.assertEqual(extra.evidence["transport"], "promobit-next-data")
+        self.assertIsNotNone(extra.valid_until)
+        self.assertNotIn("promobit.com.br", extra.canonical_url)
+
+    def test_next_data_ignora_expirado_pendente_e_loja_relacionada(self):
+        _, itens = self._coletar(corpo=PROMOBIT_NEXT)
+        self.assertEqual([i.coupon_code for i in itens], ["EXTRA15"])
 
     def test_marca_a_origem_como_comunidade(self):
         _, itens = self._coletar()

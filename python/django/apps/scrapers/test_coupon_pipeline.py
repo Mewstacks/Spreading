@@ -1,3 +1,4 @@
+from datetime import timedelta
 from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -344,3 +345,52 @@ class CouponPipelineTests(TestCase):
         # E o ciclo chegou ao fim: fontes que não passam por `run_source` continuam
         # sendo reportadas depois das que falharam.
         self.assertIn("manual-private", result["fontes"])
+
+
+class AmazonPublicCouponsCadenceTests(TestCase):
+    def test_catalogo_fresco_pula_chromium(self):
+        from apps.scrapers.coupon_pipeline import coletar_cupons
+
+        get_user_model().objects.create_user("pipe-az", password="x")
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="amazon-public-coupons",
+            defaults={"marketplace": "amazon", "nome": "Amazon cupons"},
+        )
+        fonte.ultimo_sucesso = timezone.now()
+        fonte.save(update_fields=["ultimo_sucesso"])
+        CupomNormalizado.objects.create(
+            fonte=fonte, external_id="az-1", marketplace="amazon",
+            titulo="Cupom Amazon", estado="ativo",
+            regras={"modo_resgate": "ativacao"},
+        )
+        with patch(
+            "apps.scrapers.sources.run_source",
+            return_value={"status": "empty", "offers": [], "coupons": []},
+        ) as run:
+            result = coletar_cupons(incluir_awin=False)
+        slugs = [call.args[0] for call in run.call_args_list]
+        self.assertNotIn("amazon-public-coupons", slugs)
+        self.assertEqual(result["fontes"]["amazon-public-coupons"]["status"], "skipped")
+
+    def test_catalogo_velho_coleta_de_novo(self):
+        from apps.scrapers.coupon_pipeline import coletar_cupons
+
+        get_user_model().objects.create_user("pipe-az-old", password="x")
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="amazon-public-coupons",
+            defaults={"marketplace": "amazon", "nome": "Amazon cupons"},
+        )
+        fonte.ultimo_sucesso = timezone.now() - timedelta(hours=7)
+        fonte.save(update_fields=["ultimo_sucesso"])
+        CupomNormalizado.objects.create(
+            fonte=fonte, external_id="az-old", marketplace="amazon",
+            titulo="Cupom velho", estado="ativo",
+            regras={"modo_resgate": "ativacao"},
+        )
+        with patch(
+            "apps.scrapers.sources.run_source",
+            return_value={"status": "empty", "offers": [], "coupons": []},
+        ) as run:
+            coletar_cupons(incluir_awin=False)
+        slugs = [call.args[0] for call in run.call_args_list]
+        self.assertIn("amazon-public-coupons", slugs)

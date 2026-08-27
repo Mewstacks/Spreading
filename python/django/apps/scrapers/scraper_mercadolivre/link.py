@@ -1018,7 +1018,11 @@ def verificar_e_aprovar(usuario, produto, link_afiliado, url_isca="") -> str:
         link_afiliado, nome_esperado=getattr(produto, "nome", None),
         confiar_desconto=confiar, usuario=usuario)
     if relatorio.get("ok"):
-        registrar_aprovacao(usuario, produto, link_afiliado, url_canonica=link_afiliado)
+        from apps.scrapers.coupon_links import url_canonica_com_rastreio
+        registrar_aprovacao(
+            usuario, produto, link_afiliado,
+            url_canonica=url_canonica_com_rastreio(relatorio, link_afiliado),
+        )
         return "aprovado"
     # Não abriu o link (rede/timeout) => transitório: mantém o veredito pendente.
     if any("Falha ao abrir link" in str(e) for e in relatorio.get("erros", [])):
@@ -1088,8 +1092,14 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
     def _julgar(linha, relatorio, confiar):
         nonlocal aprovados, reprovados, transitorios
         if relatorio.get("ok"):
-            _no_tenant(registrar_aprovacao, usuario, linha.produto,
-                       linha.link_afiliado, url_canonica=linha.link_afiliado)
+            from apps.scrapers.coupon_links import url_canonica_com_rastreio
+            _no_tenant(
+                registrar_aprovacao, usuario, linha.produto,
+                linha.link_afiliado,
+                url_canonica=url_canonica_com_rastreio(
+                    relatorio, linha.link_afiliado,
+                ),
+            )
             aprovados += 1
         elif any("Falha ao abrir link" in str(e)
                  for e in relatorio.get("erros", [])):

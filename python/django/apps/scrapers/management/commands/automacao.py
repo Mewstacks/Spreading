@@ -680,16 +680,12 @@ class Command(BaseCommand):
             st.write_state("scrape_rapido", fase="raspando")
             try:
                 _renovar_conexoes_db()
-                from apps.scrapers.carga import operacao_pesada
-                with operacao_pesada(owner_kind="scrape_rapido") as acquired:
-                    if not acquired:
-                        proximo = timezone.now() + timedelta(seconds=POLL)
-                        st.write_state("scrape_rapido", fase="aguardando_capacidade", erro="",
-                                       proximo_ciclo=proximo.isoformat(),
-                                       ultima_msg="Aguardando outra tarefa pesada terminar.")
-                        continue
-                    with _heartbeat_durante("scrape_rapido"):
-                        _rodar_scrape_rapido()
+                # Sem lease externo: `mapear_ofertas` já pega `django_chromium`
+                # página a página. O wrap aqui segurava o slot o ciclo inteiro e
+                # o yield interno virava mentira — links/prep morriam
+                # BrowserResourceUnavailable até o flash acabar.
+                with _heartbeat_durante("scrape_rapido"):
+                    _rodar_scrape_rapido()
                 falhas_banco = 0
             except DatabaseError as e:
                 falhas_banco += 1
@@ -727,16 +723,12 @@ class Command(BaseCommand):
             try:
                 st.write_state("scrape", fase="raspando", ciclos=ciclos, erro="")
                 _renovar_conexoes_db()
-                from apps.scrapers.carga import operacao_pesada
-                with operacao_pesada(owner_kind="scrape") as acquired:
-                    if not acquired:
-                        proximo = timezone.now() + timedelta(seconds=POLL)
-                        st.write_state("scrape", fase="aguardando_capacidade", erro="",
-                                       proximo_ciclo=proximo.isoformat(),
-                                       ultima_msg="Aguardando outra tarefa pesada terminar.")
-                        continue
-                    with _heartbeat_durante("scrape"):
-                        resultado = _rodar_scrape()
+                # Sem lease externo. Creators API é HTTP; ML/Amazon-página já
+                # lockam no inner. Outer wrap prendia Chromium ~62min
+                # (ofertas + checkout + campanhas + Amazon HTTP) e o funil
+                # de cupons não gerava link.
+                with _heartbeat_durante("scrape"):
+                    resultado = _rodar_scrape()
                 falhas_banco = 0
                 ciclos += 1
                 fim = timezone.now()

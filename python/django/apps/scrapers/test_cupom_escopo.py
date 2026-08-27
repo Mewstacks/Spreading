@@ -618,6 +618,28 @@ class CupomDeComunidadeTests(TestCase):
         self.assertFalse(cupom_de_comunidade(cupom))
         self.assertIsNone(_preflight(cupom, self.usuario))
 
+    def test_promobit_sozinho_passa_no_preflight(self):
+        from apps.scrapers.coupon_readiness import _preflight
+        from apps.scrapers.coupon_rules import (
+            aguarda_corroboracao_oficial, score_cupom,
+        )
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="promobit-cupons",
+            defaults={"marketplace": "amazon", "nome": "Promobit"},
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="promobit:amazon:LOJA15",
+            marketplace="amazon", titulo="Cupom LOJA15", codigo="LOJA15",
+            link="", redemption_mode="code", estado="ativo",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 15.0,
+                    "modo_resgate": "codigo", "escopo": "selecao"},
+            evidencia={"confianca_origem": "comunidade",
+                       "transport": "promobit-next-data"},
+        )
+        self.assertFalse(aguarda_corroboracao_oficial(cupom))
+        self.assertIsNone(_preflight(cupom, self.usuario))
+        self.assertGreater(score_cupom(cupom), 0)
+
 
 class AvisoSemCodigoRepetidoTests(TestCase):
     """O mesmo código chega por três fontes; a mensagem deve trazê-lo uma vez."""
