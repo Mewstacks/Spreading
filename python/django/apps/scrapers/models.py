@@ -684,7 +684,15 @@ class PrecoHistorico(models.Model):
     data = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
-        indexes = [models.Index(fields=["marketplace", "chave", "data"])]
+        indexes = [
+            models.Index(fields=["marketplace", "chave", "data"]),
+            # O ranking lê preço junto das três chaves. Cobrir o valor evita um
+            # acesso aleatório à tabela para cada observação histórica.
+            models.Index(
+                fields=["marketplace", "chave", "data"], include=["preco"],
+                name="scrape_price_stats_cover",
+            ),
+        ]
 
 
 class HistoricoEnvio(models.Model):
