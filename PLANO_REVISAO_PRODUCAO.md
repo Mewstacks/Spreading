@@ -48,7 +48,34 @@ Cada etapa precisa de evidência própria.
   rejeições em 31,9 s na amostra real.
 - Landing oficial do ML: seis regulamentos reconhecidos e corretamente rejeitados
   por estarem vencidos; parser pronto para novos códigos ativos.
-- Testes direcionados: 229 aprovados; nenhuma migração pendente.
+- Mensagens: validade só aparece quando existe, desconto só é anunciado quando
+  comprovado pelo histórico, selo relâmpago só aparece em oferta realmente marcada
+  como relâmpago e campos configuráveis são escapados contra HTML/XSS.
+- Desempenho/RLS: a validação criptográfica do contexto tenant passou a ser um
+  `InitPlan` por consulta, em vez de ser recalculada para cada linha. O plano real
+  do PostgreSQL de produção confirmou `InitPlan` e `One-Time Filter`; o isolamento
+  e a assinatura HMAC permanecem obrigatórios para dados privados.
+- Testes automatizados: 1.271 testes Django e 169 testes Node aprovados; 24 testes
+  direcionados de isolamento, permissões, CSRF, SQLi e XSS aprovados; nenhuma
+  migração pendente e compilação limpa.
+- Auditoria de produção: papel runtime sem `SUPERUSER`, `BYPASSRLS` ou ownership
+  indevido; nenhum token legado do Mercado Livre armazenado em texto puro.
+- Infraestrutura atual: web e worker com 2 shared CPUs/2 GB, WhatsApp com 2 shared
+  CPUs/4 GB e PostgreSQL com 1 shared CPU/1 GB. O custo-base oficial é cerca de
+  US$81,61/mês antes de tráfego e excede a meta de R$300; a topologia final ainda
+  depende do benchmark após o deploy e de migração/resize com restore ensaiado.
+
+## Gates de deploy desta revisão
+
+- [x] Suítes Django e Node integralmente verdes.
+- [x] Verificação direcionada de isolamento, permissões, CSRF, SQLi e XSS.
+- [x] Auditoria do papel runtime e de segredos legados em produção.
+- [ ] Snapshot verificável dos volumes e comando de rollback anotado.
+- [ ] Deploy canário da correção de RLS e benchmark comparativo em produção.
+- [ ] `tenant_isolation_probe` aprovado no código já implantado.
+- [ ] Canário funcional pela conta `lules`, sem concluir compra.
+- [ ] Restore ensaiado e topologia 24/7 comprovadamente abaixo de R$300/mês.
+- [ ] Sete dias consecutivos de observação sem incidente crítico.
 
 ## Condições externas para o canário final
 

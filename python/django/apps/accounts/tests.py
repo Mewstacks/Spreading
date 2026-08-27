@@ -520,6 +520,23 @@ class RLSPolicyTests(SimpleTestCase):
             statements,
         )
 
+    def test_signature_is_checked_once_per_query_without_weakening_hmac(self):
+        strict = " ".join(policy_statements(
+            "accounts_mercadolivresession", mixed=False,
+        ))
+        mixed = " ".join(policy_statements(
+            "scrapers_produto", mixed=True,
+        ))
+
+        # A subconsulta não correlacionada vira InitPlan no PostgreSQL. Sem ela,
+        # context_valid consultava o segredo e calculava HMAC uma vez por linha.
+        self.assertIn("SELECT tenant_security.context_valid('system'", strict)
+        self.assertIn("SELECT tenant_security.context_valid('organization'", strict)
+        self.assertIn("organization_id IS NULL OR", mixed)
+        self.assertNotIn(
+            "AND tenant_security.context_valid('organization'", strict,
+        )
+
     def test_perfil_pessoal_continua_gravavel_pelo_proprio_actor_em_org_compartilhada(self):
         statements = policy_statements("accounts_perfil", mixed=False)
         update_policy = next(

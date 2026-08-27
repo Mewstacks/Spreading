@@ -638,6 +638,23 @@ def _nome_loja(marketplace, cupom=None) -> str:
     return str(marketplace or "Loja").title()
 
 
+def _linha_validade_cupom(cupom) -> str:
+    """Prazo reproduzível para a mensagem, sem fabricar escassez.
+
+    Fontes que não informam o fim continuam sem chamada de urgência. Quando o
+    prazo existe, ele é convertido para o fuso configurado do projeto para o
+    leitor não precisar interpretar UTC.
+    """
+    validade = getattr(cupom, "validade", None) if cupom is not None else None
+    if not validade:
+        return ""
+    try:
+        local = timezone.localtime(validade)
+    except (TypeError, ValueError):
+        return ""
+    return f"Válido até {local:%d/%m às %Hh%M}"
+
+
 def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
     """Monta o texto de divulgação de um cupom (CupomNormalizado) p/ envio manual.
 
@@ -711,6 +728,10 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
         if not (escopo_produtos and condicao.strip().casefold()
                 == escopo_produtos.strip().casefold()):
             linhas.extend(["", f"⚠️ {m.bold('Condição:')} {esc(condicao[:220])}"])
+
+    validade = _linha_validade_cupom(cupom)
+    if validade:
+        linhas.append(f"⏳ {m.bold(esc(validade))}")
 
     link = str(link_afiliado or getattr(cupom, "link", "") or "").strip()
     if link:
@@ -828,6 +849,9 @@ def montar_mensagem_aviso_cupons(cupons, marketplace, link="", markup=None) -> s
         ).strip()
         if escopo:
             bloco.append(f"🏷️ {m.italic(esc(_escopo_curto(escopo)))}")
+        validade = _linha_validade_cupom(cupom)
+        if validade:
+            bloco.append(f"⏳ {m.italic(esc(validade))}")
         bloco.append(f"🎟 cupom: {m.bold(esc(codigo))}")
         blocos.append("\n".join(bloco))
     if not blocos:
@@ -1131,6 +1155,9 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
     condicao = _condicao_do_cupom(cupom)
     if condicao:
         linhas.append(f"⚠️ {m.bold('Condição:')} {esc(condicao)}")
+    validade = _linha_validade_cupom(cupom)
+    if validade:
+        linhas.append(f"⏳ {m.bold(esc(validade))}")
     return "\n".join(linhas).strip()
 
 
@@ -2250,11 +2277,20 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         conteudo_ia.get("nome_curto") or _nome_principal_produto(produto.nome)
     )
     if template:
+        desconto_coerente_template = (
+            0 < desconto_percent < 90
+            and produto.preco_sem_desconto > preco_final
+            and _desconto_comprovado(produto, preco_final)
+        )
         try:
             return template.format(
-                marca=marca, nome=nome_exibicao,
-                preco=f"R$ {preco_final:.2f}",
-                desconto=f"{desconto_percent:.0f}%", link=link_afiliado,
+                marca=esc(marca), nome=esc(nome_exibicao),
+                preco=esc(f"R$ {_preco_br(preco_final)}"),
+                desconto=esc(
+                    f"{desconto_percent:.0f}%" if desconto_coerente_template else ""
+                ),
+                link=esc(link_afiliado), cta=esc(cta),
+                divulgacao_afiliado=esc(disclosure),
             )
         except (KeyError, ValueError):
             pass
@@ -2267,6 +2303,8 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     #   🔥 DE X | POR Y     [+ 🎟️ CUPOM: ... colado embaixo]
     #   🔗 link
     linhas = []
+    if getattr(produto, "relampago", False):
+        linhas += [m.bold("⚡ OFERTA RELÂMPAGO"), ""]
     # Título da IA (frase_llm) em caixa alta, no topo — a "chamada" do grupo.
     titulo = conteudo_ia.get("titulo", "")
     if titulo:
@@ -2361,8 +2399,16 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         condicao = _condicao_do_cupom(cupom_escolhido)
         if condicao:
             linhas.append(f"⚠️ {m.bold('Condição:')} {esc(condicao)}")
+        validade = _linha_validade_cupom(cupom_escolhido)
+        if validade:
+            linhas.append(f"⏳ {m.bold(esc(validade))}")
         linhas.append("")
+    linhas.append(f"👉 {m.bold(esc(cta))}")
     linhas.append(f"🔗 {esc(link_afiliado)}")
+    if marca and marca.casefold() != "ofertas":
+        linhas.extend(["", m.italic(esc(marca))])
+    if disclosure:
+        linhas.append(m.italic(esc(disclosure)))
     return "\n".join(linhas)
 
 

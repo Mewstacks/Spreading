@@ -2776,6 +2776,52 @@ class AttributionWorkflowTests(TestCase):
         )
         self.assertIn("Tech do Dia", message)
 
+    def test_default_message_uses_configured_cta_brand_and_disclosure(self):
+        from apps.scrapers.ofertas import montar_mensagem
+
+        config = ConfiguracaoEnvio.objects.create(
+            owner=self.user, grupo_id="copy@g.us", nome_marca="Achados da Lu",
+            chamada_acao="Ver preço na loja",
+            divulgacao_afiliado="Link de afiliado; posso receber comissão.",
+        )
+        message = montar_mensagem(
+            self.product, "https://example.com/a", None,
+            usuario=self.user, configuracao=config,
+        )
+
+        self.assertIn("Ver preço na loja", message)
+        self.assertIn("Achados da Lu", message)
+        self.assertIn("Link de afiliado; posso receber comissão.", message)
+
+    def test_custom_template_does_not_claim_unproven_discount_and_escapes_data(self):
+        from apps.scrapers.ofertas import montar_mensagem
+        from apps.scrapers.senders.base import TelegramHTMLMarkup
+
+        self.product.nome = "TV <script>alert(1)</script>"
+        config = ConfiguracaoEnvio.objects.create(
+            owner=self.user, grupo_id="template@g.us",
+            template_a="{nome}|{desconto}|{link}",
+        )
+        message = montar_mensagem(
+            self.product, "https://example.com/a?x=1&y=2", None,
+            markup=TelegramHTMLMarkup(), usuario=self.user, configuracao=config,
+        )
+
+        self.assertIn("&lt;script&gt;", message)
+        self.assertIn("x=1&amp;y=2", message)
+        self.assertNotIn("<script>", message)
+        self.assertNotIn("50%", message)
+
+    def test_flash_label_only_appears_for_real_flash_offer(self):
+        from apps.scrapers.ofertas import montar_mensagem
+
+        comum = montar_mensagem(self.product, "https://example.com/a", None)
+        self.product.relampago = True
+        relampago = montar_mensagem(self.product, "https://example.com/a", None)
+
+        self.assertNotIn("OFERTA RELÂMPAGO", comum)
+        self.assertIn("OFERTA RELÂMPAGO", relampago)
+
     def test_default_affiliate_disclosure_is_not_added_to_messages(self):
         from apps.scrapers.ofertas import montar_mensagem
 
@@ -6156,6 +6202,22 @@ class CasarCuponsContainerTests(TestCase):
 
 
 class MensagemCupomTests(SimpleTestCase):
+    def test_informa_validade_exata_quando_a_fonte_fornece(self):
+        from apps.scrapers.ofertas import montar_mensagem_cupom
+
+        cupom = SimpleNamespace(
+            external_id="checkout:HOJE20", marketplace="mercadolivre",
+            titulo="20% OFF", codigo="HOJE20", link="https://example.com",
+            validade=timezone.now() + timedelta(hours=3),
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 20,
+                    "modo_resgate": "codigo"},
+            restrito=False,
+        )
+        mensagem = montar_mensagem_cupom(cupom)
+
+        self.assertIn("Válido até", mensagem)
+        self.assertRegex(mensagem, r"\d{2}/\d{2} às \d{2}h\d{2}")
+
     def test_exibe_produtos_especificos_descritos_no_titulo_oficial(self):
         from apps.scrapers.ofertas import montar_mensagem_cupom
         cupom = SimpleNamespace(
