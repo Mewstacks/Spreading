@@ -10,6 +10,7 @@ from .amazon_general_coupons import AmazonGeneralCouponsSource
 from .external_feed import LicensedFeedSource
 from .community import PromobitSource as PromobitStub, PelandoSource
 from .ml_public_coupons import MLPublicCouponsSource
+from .ml_official_promotions import MLOfficialPromotionsSource
 from .promobit import PromobitSource
 from .shopee import ShopeeCampaignsSource, ShopeeOffersSource
 from .telegram_publico import TelegramPublicoSource
@@ -21,15 +22,16 @@ SOURCES = {
     AmazonCouponsSource.slug: AmazonCouponsSource(),
     AmazonGeneralCouponsSource.slug: AmazonGeneralCouponsSource(),
     LicensedFeedSource.slug: LicensedFeedSource(),
-    # Esqueleto histórico, mantido desabilitado: o adaptador real do Promobit é o
-    # `promobit-cupons` abaixo, que lê só as páginas que o robots.txt deles libera.
+    # Esqueletos históricos permanecem desabilitados; o adaptador real do
+    # Promobit é `promobit-cupons` abaixo.
     PromobitStub.slug: PromobitStub(),
     PelandoSource.slug: PelandoSource(),
     MLPublicCouponsSource.slug: MLPublicCouponsSource(),
+    MLOfficialPromotionsSource.slug: MLOfficialPromotionsSource(),
     ShopeeOffersSource.slug: ShopeeOffersSource(),
     ShopeeCampaignsSource.slug: ShopeeCampaignsSource(),
-    # Tiram o Mercado Livre de fonte única: ambos por HTTP, sem navegador e sem
-    # credencial, então rodam mesmo enquanto o Chromium está ocupado.
+    # Promobit e Telegram são radares de descoberta. A prontidão exige
+    # corroboração antes de qualquer publicação; ver coupon_rules.
     PromobitSource.slug: PromobitSource(),
     TelegramPublicoSource.slug: TelegramPublicoSource(),
 }

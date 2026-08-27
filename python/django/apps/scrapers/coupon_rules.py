@@ -267,6 +267,7 @@ def codigo_publicavel(cupom) -> str:
 
 _FONTES_ML_ATIVACAO = (
     "mercadolivre-web", "mercadolivre-campanhas", "ml-cupons-afiliados",
+    "ml-official-promotions",
 )
 
 # Subdomínio de LISTAGEM do ML. Por construção toda URL aqui é uma lista de anúncios
@@ -370,12 +371,9 @@ def site_wide_confiavel(cupom, *, codigos_contestados=None) -> bool:
 FONTES_COMUNIDADE = frozenset({
     "promobit-cupons", "telegram-publico", "promobit-community", "pelando-community",
 })
-# Telegram/IA e stubs: alegação crua — sozinho não lista (TODOSITE100).
-# Promobit na página pública `/cupons/loja/<loja>/` é o mesmo canal que
-# agregadores (Cuponomia, Promobit) usam: código digitável já filtrado.
-# Sem este recorte a Amazon oficial (~8 cards de ativação) era o teto.
+# Telegram, agregadores e stubs são alegação de terceiro: nenhum lista sozinho.
 FONTES_COMUNIDADE_SEM_LISTAGEM = frozenset({
-    "telegram-publico", "promobit-community", "pelando-community",
+    "promobit-cupons", "telegram-publico", "promobit-community", "pelando-community",
 })
 
 
@@ -416,12 +414,10 @@ def comunidade_corroborada(cupom) -> bool:
 def aguarda_corroboracao_oficial(cupom) -> bool:
     """True quando o cupom ainda não pode ir sozinho para a lista.
 
-    Promobit (`promobit-cupons`) lista: é página de loja com código digitável.
-    Telegram e stubs continuam exigindo a mesma chave numa fonte oficial.
+    Telegram, agregadores e stubs exigem a mesma chave numa fonte oficial ou
+    licenciada. O fato de um terceiro exibir um código não prova sua aplicação.
     """
     slug = str(getattr(getattr(cupom, "fonte", None), "slug", "") or "")
-    if slug == "promobit-cupons":
-        return False
     if slug in FONTES_COMUNIDADE_SEM_LISTAGEM:
         return not comunidade_corroborada(cupom)
     return cupom_de_comunidade(cupom) and not comunidade_corroborada(cupom)
@@ -580,7 +576,7 @@ def _ativacao_ml_publicavel(cupom, regras, usuario=None) -> bool:
 
 
 def _ativacao_link_https_publicavel(cupom, regras, *, fonte_slug) -> bool:
-    """Shopee/Awin: a API já devolve o destino afiliado. Sem Chromium, sem produto.
+    """Awin: a API já devolve o destino afiliado. Sem Chromium, sem produto.
 
     Sem isto `ativacao_publicavel` só aceitava ML e Amazon — campanhas HTTP
     (Shopee GraphQL, Awin) caíam em `activation_evidence_incomplete` e nunca
@@ -607,7 +603,7 @@ def ativacao_publicavel(cupom, usuario=None) -> bool:
     preço final depois da ativação.
     Mercado Livre: campanha com container público — ver `_ativacao_ml_publicavel`,
     atrás da flag ML_CUPONS_ATIVACAO_ENABLED.
-    Shopee/Awin: link HTTPS da própria API de afiliados.
+    Awin: link HTTPS da própria API de promoções.
     """
     regras = regras_do_cupom(cupom)
     if regras["modo_resgate"] != "ativacao":
@@ -615,10 +611,6 @@ def ativacao_publicavel(cupom, usuario=None) -> bool:
     marketplace = str(getattr(cupom, "marketplace", "") or "").casefold()
     if marketplace == "mercadolivre":
         return _ativacao_ml_publicavel(cupom, regras, usuario=usuario)
-    if marketplace == "shopee":
-        return _ativacao_link_https_publicavel(
-            cupom, regras, fonte_slug="shopee-campaigns",
-        )
     if marketplace == "awin":
         return _ativacao_link_https_publicavel(
             cupom, regras, fonte_slug="awin-offers-api",

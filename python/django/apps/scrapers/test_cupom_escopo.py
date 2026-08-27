@@ -618,7 +618,7 @@ class CupomDeComunidadeTests(TestCase):
         self.assertFalse(cupom_de_comunidade(cupom))
         self.assertIsNone(_preflight(cupom, self.usuario))
 
-    def test_promobit_sozinho_passa_no_preflight(self):
+    def test_promobit_sozinho_tambem_aguarda_corroboracao(self):
         from apps.scrapers.coupon_readiness import _preflight
         from apps.scrapers.coupon_rules import (
             aguarda_corroboracao_oficial, score_cupom,
@@ -636,9 +636,11 @@ class CupomDeComunidadeTests(TestCase):
             evidencia={"confianca_origem": "comunidade",
                        "transport": "promobit-next-data"},
         )
-        self.assertFalse(aguarda_corroboracao_oficial(cupom))
-        self.assertIsNone(_preflight(cupom, self.usuario))
-        self.assertGreater(score_cupom(cupom), 0)
+        self.assertTrue(aguarda_corroboracao_oficial(cupom))
+        resultado = _preflight(cupom, self.usuario)
+        self.assertEqual(resultado["stage"], "collected")
+        self.assertEqual(resultado["reason_code"], "community_uncorroborated")
+        self.assertEqual(score_cupom(cupom), 0)
 
 
 class AvisoSemCodigoRepetidoTests(TestCase):

@@ -4,25 +4,24 @@ Dois adaptadores, não um, porque as duas saídas têm regras de vida diferentes
 
   - ``shopee-offers`` (``productOfferV2``) alimenta ``Produto``. É catálogo: preço
     muda o tempo todo e a ausência de um item numa coleta não significa nada.
-  - ``shopee-campaigns`` (``shopeeOfferV2``) alimenta ``CupomNormalizado``. É
-    promoção com janela de vigência, e é o que o aviso de cupom publica.
+  - ``shopee-campaigns`` (``shopeeOfferV2``) observa campanhas do programa de
+    afiliados, mas não as publica como cupom. A resposta expõe comissão do
+    publisher, não desconto comprovado para o comprador.
 
 Nenhum dos dois usa Chromium (``requires_chromium`` fica False, que é o default), e
 essa é a diferença que importa: eles não entram na fila do navegador que hoje
 represa o funil de cupons do Mercado Livre.
 
 Sobre "cupom" na Shopee: a API de afiliados NÃO expõe endpoint de voucher. O que
-existe são campanhas — nome, comissão e janela — com link comissionado próprio. O
-adaptador as projeta como cupom de ATIVAÇÃO (``modo_resgate="ativacao"``), nunca de
-código: anunciar um código que a pessoa não consegue digitar no checkout é
-exatamente o tipo de promessa quebrada que derruba a confiança de um grupo.
+existe neste contrato são campanhas — nome, comissão e janela — com link
+comissionado próprio. Comissão remunera o afiliado; não reduz o preço do cliente.
+Por isso nenhuma campanha entra em ``CupomNormalizado`` sem um campo futuro e
+explícito de benefício ao comprador.
 """
 import logging
-from datetime import datetime, timezone as dt_timezone
 
 from django.utils import timezone
 
-from apps.scrapers.coupon_rules import normalizar_regras_cupom, tem_restricao_publico
 from apps.scrapers.shopee import (
     ShopeeConfigError, ShopeeError, credenciais_da_integracao, listar_campanhas,
     listar_produtos,
@@ -30,13 +29,6 @@ from apps.scrapers.shopee import (
 from .base import IngestedItem, SourceAdapter
 
 logger = logging.getLogger(__name__)
-
-# Janela curta = campanha relâmpago. O mesmo critério já usado na Awin
-# (`awin.coletar_ofertas`), para que "relâmpago" signifique a mesma coisa em todas
-# as lojas — senão o selo vira enfeite e o usuário aprende a ignorá-lo.
-HORAS_RELAMPAGO = 6
-SEGUNDOS_UM_DIA = 86_400
-
 
 def _integracao(owner):
     from apps.scrapers.models import IntegracaoAfiliado
@@ -46,17 +38,6 @@ def _integracao(owner):
     return IntegracaoAfiliado.objects.filter(
         owner=owner, provedor="shopee", habilitada=True,
     ).first()
-
-
-def _instante(valor):
-    """Epoch em segundos -> datetime ciente. A Shopee devolve inteiros."""
-    try:
-        numero = int(valor)
-    except (TypeError, ValueError):
-        return None
-    if numero <= 0:
-        return None
-    return datetime.fromtimestamp(numero, tz=dt_timezone.utc)
 
 
 def _decimal(valor):
@@ -100,7 +81,7 @@ class ShopeeOffersSource(_ShopeeSourceBase):
             app_id, secret = self._credenciais(owner)
         except ShopeeConfigError:
             self._registrar_vazio("sem_credencial")
-            return
+            return []
         termos = [t for t in (termos or [""]) if t is not None][:8] or [""]
         agora = timezone.now()
         vistos = set()
@@ -175,7 +156,7 @@ class ShopeeOffersSource(_ShopeeSourceBase):
 
 class ShopeeCampaignsSource(_ShopeeSourceBase):
     slug = "shopee-campaigns"
-    name = "Shopee — campanhas e cupons (API)"
+    name = "Shopee — campanhas de afiliado (API)"
 
     def discover_offers(self, **kwargs):
         return []
@@ -185,61 +166,25 @@ class ShopeeCampaignsSource(_ShopeeSourceBase):
             app_id, secret = self._credenciais(owner)
         except ShopeeConfigError:
             self._registrar_vazio("sem_credencial")
-            return
+            return []
         try:
             nos, completa = listar_campanhas(app_id=app_id, secret=secret)
         except ShopeeError as exc:
             logger.warning("Shopee campanhas: %s", exc.public_message)
             self._registrar_vazio("degradado")
-            return
+            return []
 
-        agora = timezone.now()
-        linhas = 0
-        for no in nos:
-            destino = str(no.get("offerLink") or "").strip()
-            nome = str(no.get("offerName") or "").strip()
-            if not destino.startswith("https://") or not nome:
-                continue
-            inicio = _instante(no.get("periodStartTime"))
-            fim = _instante(no.get("periodEndTime"))
-            comissao = _decimal(no.get("commissionRate"))
-            # A comissão da Shopee vem como fração (0.08) ou percentual (8),
-            # conforme a campanha. Normaliza para ponto percentual antes de virar
-            # "valor do desconto", senão 0,08% seria anunciado no lugar de 8%.
-            if 0 < comissao <= 1:
-                comissao = round(comissao * 100, 2)
-            if comissao <= 0:
-                # Sem valor comprovado o cupom seria descartado adiante por
-                # `missing_discount`; melhor não persistir do que sujar o funil.
-                continue
-            relampago = bool(
-                (inicio and fim and (fim - inicio).total_seconds() <= SEGUNDOS_UM_DIA)
-                or (fim and agora <= fim <= agora + timezone.timedelta(
-                    hours=HORAS_RELAMPAGO))
-            )
-            external_id = f"shopee:campanha:{no.get('offerType') or 'geral'}:{nome}"[:160]
-            regras = normalizar_regras_cupom({
-                "tipo_desconto": "percentual",
-                "valor_desconto": comissao,
-                "modo_resgate": "ativacao",
-                "escopo": str(no.get("offerType") or ""),
-                "dia_inicio": inicio.isoformat() if inicio else "",
-                "dia_fim": fim.isoformat() if fim else "",
-            }, external_id=external_id, codigo="")
-            linhas += 1
-            yield IngestedItem(
-                external_id=external_id, marketplace="shopee", source=self.slug,
-                kind="coupon", canonical_url=destino[:1000], title=nome[:255],
-                coupon_code="", coupon_rules=regras, content_type="promotion",
-                starts_at=inicio, valid_until=fim,
-                image_url=str(no.get("imageUrl") or "")[:1000],
-                restricted=tem_restricao_publico(nome),
-                flash=relampago, observed_at=agora,
-                evidence={
-                    "transport": "shopee-affiliate-api",
-                    "offer_type": str(no.get("offerType") or "")[:80],
-                    "commission_rate": comissao,
-                },
-            )
-        self.last_health_status = "healthy" if linhas else "healthy_empty"
-        self.last_metrics = {"rows": linhas, "complete": bool(completa)}
+        # `commissionRate` é receita do publisher. Não existe neste payload um
+        # voucher, uma redução de preço ou outra vantagem verificável do comprador.
+        # Registrar a rejeição mantém a fonte observável sem contaminar o catálogo.
+        observadas = len(nos)
+        self.last_health_status = "healthy_empty"
+        self.last_metrics = {
+            "rows": 0,
+            "source_rows": observadas,
+            "complete": bool(completa),
+            "rejected_by_reason": {
+                "affiliate_commission_is_not_customer_discount": observadas,
+            },
+        }
+        return []

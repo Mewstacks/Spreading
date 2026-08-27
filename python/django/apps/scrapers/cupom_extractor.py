@@ -67,6 +67,18 @@ _SINAL_DE_CUPOM = re.compile(
 # Código digitável: sem espaço, 4 a 30, começa por letra ou número.
 _CODIGO_OK = re.compile(r"^[A-Z0-9][A-Z0-9._-]{3,29}$")
 
+_DESCONTO_PERCENTUAL = re.compile(r"(?<!\d)(\d{1,2})\s*%\s*(?:OFF)?", re.I)
+_DESCONTO_FIXO = re.compile(r"R\$\s*([\d.]+(?:,\d{1,2})?)\s*OFF", re.I)
+_DINHEIRO = re.compile(r"R\$\s*([\d.]+(?:,\d{1,2})?)", re.I)
+_TOKEN_CODIGO = re.compile(r"\b[A-Z0-9][A-Z0-9._-]{3,29}\b")
+_NAO_CODIGOS = {
+    "AMAZON", "MERCADO", "LIVRE", "SHOPEE", "CUPOM", "CUPONS", "VOUCHER",
+    "DESCONTO", "DESCONTOS", "OFERTA", "OFERTAS", "PROMO", "PROMOCAO",
+    "PROMOCOES", "LIMITADO", "LIMITE", "MINIMO", "MINIMA", "TODO", "SITE",
+    "HOJE", "AGORA", "APENAS", "SOMENTE", "VALIDO", "VALIDA", "FRETE",
+    "GRATIS", "CLIQUE", "ATIVE", "AQUI", "SELECIONADOS", "PRODUTOS",
+}
+
 _PROMPT = """Extraia os cupons de desconto desta mensagem de um canal brasileiro de ofertas.
 
 Uma mensagem pode conter vários cupons, um só, ou nenhum.
@@ -106,6 +118,120 @@ def _numero(valor) -> float:
         return round(float(str(valor).replace(",", ".")), 2)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _loja_mencionada(texto: str, padrao="") -> str:
+    bruto = (texto or "").casefold()
+    if "mercado livre" in bruto or "mercadolivre" in bruto or "meli.la" in bruto:
+        return "mercadolivre"
+    if "amazon" in bruto or "amzn.to" in bruto:
+        return "amazon"
+    if "shopee" in bruto or "shope.ee" in bruto:
+        return "shopee"
+    return padrao if padrao in LOJAS_ACEITAS else ""
+
+
+def _dinheiro(valor: str) -> float:
+    return _numero(str(valor or "").replace(".", "").replace(",", "."))
+
+
+def _candidatos_codigo(linha: str) -> list[str]:
+    """Tokens com cara de código, nunca palavras de marketing ou valores."""
+    texto = (linha or "").upper()
+    candidatos = []
+    for token in _TOKEN_CODIGO.findall(texto):
+        token = token.strip("._-")
+        if token in _NAO_CODIGOS or not _CODIGO_OK.match(token):
+            continue
+        tem_letra = any(c.isalpha() for c in token)
+        tem_numero = any(c.isdigit() for c in token)
+        # Código alfanumérico é o padrão. Código só de letras precisa ser longo;
+        # isso preserva casos reais como OMELHOR sem aceitar OFF/HOJE/CUPOM.
+        if not tem_letra or (not tem_numero and len(token) < 7):
+            continue
+        candidatos.append(token)
+    return list(dict.fromkeys(candidatos))
+
+
+def extrair_deterministico(texto: str, *, loja_padrao="") -> list[dict]:
+    """Fallback local para formatos comuns; não inventa campos ausentes.
+
+    O LLM continua cobrindo linguagem livre. Este parser impede que falta de chave,
+    cota ou rede transforme mensagens estruturadas (`10% OFF: CODIGO`) em zero.
+    """
+    if not parece_ter_cupom(texto):
+        return []
+    loja = _loja_mencionada(texto, loja_padrao)
+    if not loja:
+        return []
+    brutos = []
+    linhas = [linha.strip() for linha in (texto or "").splitlines() if linha.strip()]
+    for indice, linha in enumerate(linhas):
+        percentual = _DESCONTO_PERCENTUAL.search(linha)
+        fixo = _DESCONTO_FIXO.search(linha)
+        if not percentual and not fixo:
+            continue
+        # O código precisa ocupar uma posição explícita: depois de `:`/`-`, depois
+        # da palavra cupom, ou na linha seguinte `Use o cupom: X`. Varrer a linha
+        # inteira aceitava nome de produto como SMARTPHONE/MOTOROLA/100ML.
+        fragmentos = []
+        if ":" in linha:
+            fragmentos.append(linha.rsplit(":", 1)[1])
+        depois_hifen = re.search(r"\)\s*[-–—]\s*(.+)$", linha)
+        if depois_hifen:
+            fragmentos.append(depois_hifen.group(1))
+        cupom_inline = re.search(
+            r"\bcupom\s*:?[ \t]+([A-Z0-9][A-Z0-9._/-]{3,60})", linha, re.I,
+        )
+        if cupom_inline:
+            fragmentos.append(cupom_inline.group(1))
+        for proxima in linhas[indice + 1:indice + 3]:
+            uso = re.search(
+                r"(?:usem?|digite|aplique)\s+(?:o\s+)?cupom\s*:\s*(.+)$",
+                proxima, re.I,
+            )
+            if uso:
+                fragmentos.append(uso.group(1))
+                break
+        codigos = list(dict.fromkeys(
+            codigo for fragmento in fragmentos
+            for codigo in _candidatos_codigo(fragmento)
+        ))
+        if not codigos:
+            continue
+        tipo = "porcentagem" if percentual else "fixo"
+        valor = float(percentual.group(1)) if percentual else _dinheiro(fixo.group(1))
+        if valor <= 0 or (tipo == "porcentagem" and valor >= 100):
+            continue
+        valores = [_dinheiro(v) for v in _DINHEIRO.findall(linha)]
+        minimo = 0.0
+        teto = 0.0
+        limite = re.search(
+            r"limite(?:\s+de)?\s+R\$\s*([\d.]+(?:,\d{1,2})?)", linha, re.I,
+        )
+        if limite:
+            teto = _dinheiro(limite.group(1))
+        compra = re.search(
+            r"(?:em|acima\s+de|compras?\s+(?:a\s+partir\s+)?de)\s+(?:R\$\s*)?"
+            r"([\d.]+(?:,\d{1,2})?)", linha, re.I,
+        )
+        if compra:
+            minimo = _dinheiro(compra.group(1))
+        elif tipo == "fixo" and len(valores) > 1:
+            minimo = valores[1]
+        escopo = ""
+        if ":" in linha:
+            antes = linha.rsplit(":", 1)[0]
+            antes = _DESCONTO_PERCENTUAL.sub("", antes)
+            antes = _DESCONTO_FIXO.sub("", antes)
+            antes = re.sub(r"limite.*?(?=\bem\b|$)", "", antes, flags=re.I)
+            escopo = antes.strip(" ,-–—()")[-120:]
+        for codigo in codigos:
+            brutos.append({
+                "codigo": codigo, "loja": loja, "tipo": tipo, "valor": valor,
+                "minimo": minimo, "teto": teto, "escopo": escopo,
+            })
+    return _limpar({"cupons": brutos}, loja_padrao=loja)
 
 
 def _limpar(bruto, loja_padrao="") -> list[dict]:
@@ -184,11 +310,12 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
     texto = (texto or "").strip()
     if not texto or not parece_ter_cupom(texto):
         return []
+    fallback = extrair_deterministico(texto, loja_padrao=loja_padrao)
     if not getattr(settings, "CUPOM_LLM_ATIVO", True):
-        return []
+        return fallback
     if not getattr(settings, "ANTHROPIC_API_KEY", ""):
         logger.debug("Extração de cupom por IA sem ANTHROPIC_API_KEY; ignorando.")
-        return []
+        return fallback
 
     chave = _chave_cache(texto)
     guardado = cache.get(chave)
@@ -225,7 +352,8 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
         logger.warning("Extração de cupom por IA falhou (%s: %s).",
                        type(exc).__name__, exc)
         # Não cacheia falha: a próxima coleta tenta de novo.
-        return []
+        return fallback
 
-    cache.set(chave, cupons, _TTL_CACHE_S)
-    return cupons
+    resultado = cupons or fallback
+    cache.set(chave, resultado, _TTL_CACHE_S)
+    return resultado

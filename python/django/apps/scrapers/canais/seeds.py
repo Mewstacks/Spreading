@@ -23,6 +23,48 @@ Canal do Telegram muda de dono, vira privado e morre sem aviso — por isso o co
 # (handle, rótulo, marketplaces observados, links de loja em 20 posts)
 CANAIS_SUGERIDOS = [
     {
+        "handle": "cupombr",
+        "nome": "Cupom BR — Mercado Livre",
+        "marketplaces": ["mercadolivre"],
+        "densidade": 95,
+        "nota": "31 códigos estruturados observados em 21 mensagens públicas.",
+    },
+    {
+        "handle": "cupom_shopee",
+        "nome": "Cupom Shopee",
+        "marketplaces": ["shopee"],
+        "densidade": 90,
+        "nota": "Canal especializado; códigos digitáveis e regras de mínimo.",
+    },
+    {
+        "handle": "fadadoscupons",
+        "nome": "Fada dos Cupons",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 85,
+        "nota": "12 códigos estruturados observados na prévia pública.",
+    },
+    {
+        "handle": "nerdcupons",
+        "nome": "Nerd Cupons",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 80,
+        "nota": "Cobertura multiloja com códigos digitáveis recentes.",
+    },
+    {
+        "handle": "LinksBrazil",
+        "nome": "LinksBR — Promoções",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 75,
+        "nota": "Prévia pública ativa e alta frequência de sinais de cupom.",
+    },
+    {
+        "handle": "bruxopromos",
+        "nome": "Bruxo das Promoções",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 65,
+        "nota": "Fonte adicional para corroboração e cupons relâmpago.",
+    },
+    {
         "handle": "achadinhosdomercadolivre",
         "nome": "Achadinhos do Mercado Livre e da Shopee",
         "marketplaces": ["mercadolivre", "shopee"],

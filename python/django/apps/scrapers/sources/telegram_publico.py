@@ -26,6 +26,7 @@ import html
 import logging
 import re
 from datetime import datetime, timezone as dt_timezone
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from django.utils import timezone
@@ -38,7 +39,10 @@ from .base import IngestedItem, SourceAdapter, normalizar_dinheiro
 logger = logging.getLogger(__name__)
 
 BASE = "https://t.me/s/"
-_TIMEOUT = (5, 20)
+_TIMEOUT = (4, 12)
+_REDIRECT_TIMEOUT = (3, 7)
+_REDIRECT_WORKERS = 16
+_CHANNEL_WORKERS = 6
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
 
@@ -123,7 +127,7 @@ def resolver(url: str, sessao=None) -> str:
     cliente = sessao or requests
     try:
         resposta = cliente.get(
-            url, timeout=_TIMEOUT, headers={"User-Agent": _UA},
+            url, timeout=_REDIRECT_TIMEOUT, headers={"User-Agent": _UA},
             allow_redirects=True, stream=True,
         )
         final = str(resposta.url or "")
@@ -187,6 +191,7 @@ class TelegramPublicoSource(SourceAdapter):
     def __init__(self):
         self.last_metrics = {}
         self.last_health_status = "unknown"
+        self._page_cache = {}
 
     def _canais(self, handles=None):
         if handles:
@@ -197,12 +202,32 @@ class TelegramPublicoSource(SourceAdapter):
         if not _HANDLE_OK.match(handle):
             logger.warning("Handle de canal recusado: %r", handle[:40])
             return ""
+        if handle in self._page_cache:
+            return self._page_cache[handle]
         resposta = requests.get(
             f"{BASE}{handle}", timeout=_TIMEOUT, headers={"User-Agent": _UA},
         )
-        if resposta.status_code != 200:
-            return ""
-        return resposta.text or ""
+        corpo = resposta.text or "" if resposta.status_code == 200 else ""
+        self._page_cache[handle] = corpo
+        return corpo
+
+    def _carregar_canais(self, handles):
+        """Baixa previews em paralelo, isolando timeout/falha por canal."""
+        alvos = list(handles)[:12]
+
+        def carregar(handle):
+            try:
+                return handle, self._baixar(handle), ""
+            except requests.RequestException as exc:
+                logger.info(
+                    "Canal @%s indisponível (%s).", handle, type(exc).__name__,
+                )
+                return handle, "", type(exc).__name__
+
+        with ThreadPoolExecutor(
+            max_workers=min(_CHANNEL_WORKERS, max(1, len(alvos))),
+        ) as executor:
+            return list(executor.map(carregar, alvos))
 
     def _mensagens(self, corpo):
         """(post_id, texto) das mensagens da prévia, na ordem em que aparecem."""
@@ -223,13 +248,8 @@ class TelegramPublicoSource(SourceAdapter):
         # a uma fonte sem novidade. A diferença é o que diz se o parser quebrou.
         descartados = {"nao_e_produto": 0, "nao_resolveu": 0}
 
-        for handle in handles[:12]:
-            try:
-                corpo = self._baixar(handle)
-            except requests.RequestException as exc:
-                falhas += 1
-                logger.info("Canal @%s indisponível (%s).", handle, type(exc).__name__)
-                continue
+        mensagens = []
+        for handle, corpo, _erro in self._carregar_canais(handles):
             if not corpo:
                 falhas += 1
                 continue
@@ -237,6 +257,19 @@ class TelegramPublicoSource(SourceAdapter):
             for post, texto in self._mensagens(corpo):
                 if not texto:
                     continue
+                mensagens.append((handle, post, texto))
+
+        encurtados = []
+        for _handle, _post, texto in mensagens:
+            for bruto in _URL.findall(texto):
+                bruto = bruto.rstrip(").,;")
+                if any(d in bruto.lower() for d in _ENCURTADORES):
+                    encurtados.append(bruto)
+        unicos = list(dict.fromkeys(encurtados))
+        with ThreadPoolExecutor(max_workers=_REDIRECT_WORKERS) as executor:
+            destinos = dict(zip(unicos, executor.map(resolver, unicos)))
+
+        for handle, post, texto in mensagens:
                 preco_alegado = 0.0
                 achado_preco = _PRECO.search(texto)
                 if achado_preco:
@@ -251,7 +284,7 @@ class TelegramPublicoSource(SourceAdapter):
                     # `meli.la` entrava como se fosse anúncio.
                     url = bruto
                     if any(d in bruto.lower() for d in _ENCURTADORES):
-                        url = resolver(bruto)
+                        url = destinos.get(bruto, "")
                         if not url:
                             descartados["nao_resolveu"] += 1
                             continue
@@ -291,6 +324,8 @@ class TelegramPublicoSource(SourceAdapter):
             "canais_falhos": falhas,
             "itens": len(vistos),
             "descartados": dict(descartados),
+            "redirects_total": len(unicos),
+            "redirects_resolvidos": sum(bool(url) for url in destinos.values()),
             # Nunca "completo": a prévia mostra só as mensagens recentes, então
             # ausência aqui não prova que a oferta sumiu e não pode expirar catálogo.
             "complete": False,
@@ -319,13 +354,7 @@ class TelegramPublicoSource(SourceAdapter):
         vistos = set()
         lidos = falhas = sem_valor = 0
 
-        for handle in handles[:12]:
-            try:
-                corpo = self._baixar(handle)
-            except requests.RequestException as exc:
-                falhas += 1
-                logger.info("Canal @%s indisponível (%s).", handle, type(exc).__name__)
-                continue
+        for handle, corpo, _erro in self._carregar_canais(handles):
             if not corpo:
                 falhas += 1
                 continue
@@ -374,6 +403,7 @@ class TelegramPublicoSource(SourceAdapter):
                     )
         self.last_health_status = "healthy" if lidos else "degraded"
         self.last_metrics = {
+            **self.last_metrics,
             "canais_lidos": lidos,
             "canais_falhos": falhas,
             "cupons": len(vistos),

@@ -1188,14 +1188,10 @@ class AmazonOfficialReadySendTests(TestCase):
 
 
 class PromobitAmazonCodigoReadySendTests(TestCase):
-    def test_codigo_promobit_sem_url_fica_ready_e_envia_com_tag(self):
-        from unittest.mock import Mock, patch
+    def test_codigo_promobit_sem_fonte_licenciada_nao_fica_ready(self):
         from apps.accounts.models import Perfil
-        from apps.scrapers.conexoes import Estado
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
         from apps.scrapers.models import CupomDisponibilidade, CupomNormalizado, FonteIngestao
-        from apps.scrapers.ofertas import enviar_cupom
-        from apps.scrapers.senders.base import WhatsAppMarkup
 
         user = get_user_model().objects.create_user("az-promo", password="test")
         Perfil.objects.filter(user=user).update(afiliado_tag_amazon="loja-20")
@@ -1216,19 +1212,8 @@ class PromobitAmazonCodigoReadySendTests(TestCase):
         projetar_disponibilidade_cupons(user)
         self.assertEqual(
             CupomDisponibilidade.objects.get(cupom=cupom, usuario=user).stage,
-            "ready",
+            "collected",
         )
-        sender = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
-        sender.enviar_oferta.return_value = {
-            "sucesso": True, "via": "whatsapp", "mensagem_id": "p1",
-        }
-        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender), \
-                patch("apps.scrapers.conexoes.estado_whatsapp",
-                      return_value=Estado(True, "WhatsApp", "worker", "", "", None)):
-            resultado = enviar_cupom(cupom, "grupo@g.us", usuario=user)
-        self.assertTrue(resultado.get("sucesso"), resultado)
-        self.assertIn("amazon.com.br", resultado.get("link") or "")
-        self.assertIn("tag=loja-20", resultado.get("link") or "")
 
 
 @override_settings(ML_CUPONS_ATIVACAO_ENABLED=True, PILOT_ORGANIZATION_IDS=set())

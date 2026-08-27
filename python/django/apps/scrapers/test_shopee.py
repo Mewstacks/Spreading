@@ -187,25 +187,25 @@ class FonteCampanhasTests(_BaseComIntegracao):
         base.update(extra)
         return base
 
-    def test_campanha_vira_cupom_de_ativacao_com_desconto_em_pontos(self):
+    def test_comissao_de_campanha_nao_vira_cupom(self):
         with patch("apps.scrapers.sources.shopee.listar_campanhas",
                    return_value=([self._campanha()], True)):
-            itens = list(ShopeeCampaignsSource().discover_coupons(owner=self.usuario))
-        self.assertEqual(len(itens), 1)
-        item = itens[0]
-        self.assertEqual(item.kind, "coupon")
-        self.assertEqual(item.coupon_code, "")
-        # 0.12 (fração) tem de virar 12 pontos percentuais, não 0,12%.
-        self.assertEqual(item.coupon_rules["valor_desconto"], 12.0)
-        self.assertEqual(item.coupon_rules["modo_resgate"], "ativacao")
+            fonte = ShopeeCampaignsSource()
+            itens = list(fonte.discover_coupons(owner=self.usuario))
+        self.assertEqual(itens, [])
+        self.assertEqual(fonte.last_metrics["source_rows"], 1)
+        self.assertEqual(
+            fonte.last_metrics["rejected_by_reason"],
+            {"affiliate_commission_is_not_customer_discount": 1},
+        )
 
-    def test_percentual_ja_em_pontos_nao_e_multiplicado_de_novo(self):
+    def test_comissao_em_pontos_tambem_nao_vira_desconto(self):
         with patch("apps.scrapers.sources.shopee.listar_campanhas",
                    return_value=([self._campanha(commissionRate="15")], True)):
             itens = list(ShopeeCampaignsSource().discover_coupons(owner=self.usuario))
-        self.assertEqual(itens[0].coupon_rules["valor_desconto"], 15.0)
+        self.assertEqual(itens, [])
 
-    def test_janela_curta_marca_relampago(self):
+    def test_janela_curta_nao_inventa_cupom_relampago(self):
         agora = timezone.now()
         curta = self._campanha(
             periodStartTime=int(agora.timestamp()),
@@ -214,7 +214,7 @@ class FonteCampanhasTests(_BaseComIntegracao):
         with patch("apps.scrapers.sources.shopee.listar_campanhas",
                    return_value=([curta], True)):
             itens = list(ShopeeCampaignsSource().discover_coupons(owner=self.usuario))
-        self.assertTrue(itens[0].flash)
+        self.assertEqual(itens, [])
 
     def test_campanha_sem_desconto_comprovado_nao_entra(self):
         with patch("apps.scrapers.sources.shopee.listar_campanhas",
@@ -222,16 +222,12 @@ class FonteCampanhasTests(_BaseComIntegracao):
             itens = list(ShopeeCampaignsSource().discover_coupons(owner=self.usuario))
         self.assertEqual(itens, [])
 
-    def test_campanha_https_fica_ready_sem_produto_e_nao_mente_desconto(self):
-        from unittest.mock import Mock
+    def test_registro_legado_de_comissao_shopee_nao_fica_publicavel(self):
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
         from apps.scrapers.coupon_rules import ativacao_publicavel
         from apps.scrapers.models import (
             CupomDisponibilidade, CupomNormalizado, FonteIngestao,
         )
-        from apps.scrapers.ofertas import enviar_cupom, montar_mensagem_cupom
-        from apps.scrapers.senders.base import WhatsAppMarkup
-        from apps.scrapers.conexoes import Estado
 
         fonte = FonteIngestao.objects.create(
             slug="shopee-campaigns", marketplace="shopee", nome="Shopee",
@@ -246,33 +242,14 @@ class FonteCampanhasTests(_BaseComIntegracao):
                     "valor_desconto": 12},
             evidencia={"transport": "shopee-affiliate-api", "commission_rate": 12},
         )
-        self.assertTrue(ativacao_publicavel(cupom, usuario=self.usuario))
-        texto = montar_mensagem_cupom(cupom, link_afiliado=cupom.link)
-        self.assertNotIn("DE DESCONTO", texto)
-        self.assertIn("s.shopee.com.br", texto)
+        self.assertFalse(ativacao_publicavel(cupom, usuario=self.usuario))
 
         projetar_disponibilidade_cupons(self.usuario)
         self.assertEqual(
             CupomDisponibilidade.objects.get(
                 cupom=cupom, usuario=self.usuario).stage,
-            "ready",
+            "discarded",
         )
-
-        sender = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
-        sender.enviar_oferta.return_value = {
-            "sucesso": True, "via": "whatsapp", "mensagem_id": "s1",
-        }
-        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender), \
-                patch("apps.scrapers.conexoes.estado_whatsapp",
-                      return_value=Estado(True, "WhatsApp", "worker", "", "", None)), \
-                patch("apps.scrapers.ofertas._preparar_itens_cupom",
-                      side_effect=AssertionError("Shopee não inventa produto ML")):
-            resultado = enviar_cupom(
-                cupom, "grupo@g.us", usuario=self.usuario,
-            )
-        self.assertTrue(resultado.get("sucesso"), resultado)
-        self.assertFalse(resultado.get("cupom_em_preparo"))
-        self.assertEqual(resultado.get("link"), cupom.link)
 
 
 class MarketplaceShopeeTests(_BaseComIntegracao):

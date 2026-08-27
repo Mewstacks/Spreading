@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from datetime import timedelta
-
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db.models import Q
@@ -54,9 +53,8 @@ def _usuarios_ativos(usuarios=None):
     return list(get_user_model().objects.filter(is_active=True, id__in=ids))
 
 
-# A página oficial de cupons Amazon é Chromium. Rodá-la a cada 15 min (tick de
-# cupons) disputa o único slot com prep/links do ML. Catálogo fresco já listável
-# não precisa de nova visita; 6h cobre a janela de 48h da vitrine com folga.
+# A página de cupons Amazon é Chromium. Rodá-la a cada 15 min disputa o slot
+# com preparo/links do ML; 6h mantém o catálogo fresco sem bloquear o funil.
 AMAZON_CUPONS_TTL_COLETA = timedelta(hours=6)
 
 
@@ -203,9 +201,10 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
     usuarios = _usuarios_ativos(usuarios)
 
     _coletar_adaptador("ml-cupons-afiliados", resultado)
+    _coletar_adaptador("ml-official-promotions", resultado)
 
-    # Segunda fonte pública HTTP: códigos digitáveis das páginas de loja do
-    # Promobit (`__NEXT_DATA__` + schema.org). Lista sozinha; Telegram não.
+    # Promobit e Telegram servem como radares comunitários. Encontrar não é
+    # publicar: coupon_rules exige corroboração independente antes da prontidão.
     _coletar_adaptador("promobit-cupons", resultado)
     _coletar_adaptador("telegram-publico", resultado, items=("offers", "coupons"))
 
@@ -217,12 +216,12 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
             motivo="Fonte oficial/licenciada de códigos gerais não configurada.",
         )
 
-    # A fonte é pública e existe independentemente de alguma conta já possuir tag.
-    # O vínculo de afiliado continua por usuário na etapa de link/envio.
+    # A fonte pública existe independentemente de alguma conta possuir tag; a
+    # afiliação continua individual na etapa de link/envio.
     if _amazon_public_coupons_ainda_frescos():
         _fonte(
             resultado, "amazon-public-coupons", status="skipped",
-            motivo="Catálogo oficial ainda fresco; Chromium reservado para o funil.",
+            motivo="Catálogo público ainda fresco; Chromium reservado para o funil.",
         )
         payload = {"offers": [], "coupons": []}
     else:
@@ -236,9 +235,6 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
             )
             counts = persist_items(rows, owner=None, **health_kwargs)
             persistidos = counts["offers"] + counts["coupons"]
-            # A Amazon é persistida fora de ``_coletar_adaptador`` porque ofertas
-            # e cupons compartilham o mesmo snapshot. Compare ausências somente
-            # agora, com todas as linhas do inventário já gravadas.
             _materializar_ausencias_saudaveis(
                 "amazon-public-coupons", payload, rows, owner=None,
             )

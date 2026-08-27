@@ -1,4 +1,4 @@
-"""Promobit e Telegram público: as duas fontes que tiram o ML de fonte única.
+"""Promobit e Telegram público: radares comunitários sujeitos a validação.
 
 O eixo de todos estes testes é o mesmo: **alegação de terceiro não pode virar preço**.
 Um "de R$ 500 por R$ 99" escrito por um canal desconhecido, se entrasse como preço de

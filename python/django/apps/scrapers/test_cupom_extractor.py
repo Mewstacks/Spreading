@@ -14,7 +14,9 @@ from unittest.mock import patch
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 
-from apps.scrapers.cupom_extractor import _limpar, extrair, parece_ter_cupom
+from apps.scrapers.cupom_extractor import (
+    _limpar, extrair, extrair_deterministico, parece_ter_cupom,
+)
 
 # Transcrição fiel de uma mensagem real do @cupombr, medida em 19/08/2026.
 MENSAGEM_REAL = """LISTÃO de Cupom Mercado Livre
@@ -107,6 +109,31 @@ class RegraDeAceitacaoTests(TestCase):
         self.assertEqual(_limpar({"cupons": "nao e lista"}), [])
         self.assertEqual(_limpar({"cupons": ["texto solto"]}), [])
 
+    def test_fallback_local_le_lista_real_sem_chave(self):
+        achados = extrair_deterministico(MENSAGEM_REAL)
+        self.assertEqual(
+            [c["codigo"] for c in achados],
+            ["TODOOSITE1308", "TVS1208CELULAR", "CASA1508", "OMELHOR"],
+        )
+        self.assertEqual(achados[0]["teto"], 20.0)
+        self.assertEqual(achados[2]["minimo"], 399.0)
+
+    def test_fallback_nao_confunde_nome_de_produto_com_codigo(self):
+        texto = (
+            "🔥 Smartphone Motorola Moto G17 4G 128GB (Cupom 10% OFF)\n"
+            "💰 R$ 728,19\nhttps://meli.la/abc"
+        )
+        self.assertEqual(extrair_deterministico(texto), [])
+
+    def test_fallback_associa_codigo_na_linha_seguinte(self):
+        texto = (
+            "Cupom Shopee\nR$15 OFF nas compras acima de R$79\n"
+            "Usem o Cupom: F1MD03SQU3NT4\nhttps://s.shopee.com.br/abc"
+        )
+        achados = extrair_deterministico(texto)
+        self.assertEqual([c["codigo"] for c in achados], ["F1MD03SQU3NT4"])
+        self.assertEqual(achados[0]["minimo"], 79.0)
+
 
 @override_settings(ANTHROPIC_API_KEY="chave-de-teste", CUPOM_LLM_ATIVO=True)
 class ExtracaoTests(TestCase):
@@ -142,7 +169,7 @@ class ExtracaoTests(TestCase):
     def test_falha_do_modelo_devolve_vazio_e_nao_cacheia(self):
         """Erro de leitura não pode derrubar a coleta nem congelar o resultado."""
         with patch("apps.scrapers.llm._cliente", side_effect=RuntimeError("api fora")):
-            self.assertEqual(extrair(MENSAGEM_REAL), [])
+            self.assertEqual(len(extrair(MENSAGEM_REAL)), 4)
         with patch("apps.scrapers.llm._cliente"), \
                 patch("apps.scrapers.llm._texto_resposta", return_value="{}"), \
                 patch("apps.scrapers.llm._json_resposta", return_value=SAIDA_MODELO):
@@ -172,11 +199,11 @@ class ExtracaoTests(TestCase):
     @override_settings(ANTHROPIC_API_KEY="")
     def test_sem_chave_nao_chama_nada(self):
         with patch("apps.scrapers.llm._cliente") as cliente:
-            self.assertEqual(extrair(MENSAGEM_REAL), [])
+            self.assertEqual(len(extrair(MENSAGEM_REAL)), 4)
         cliente.assert_not_called()
 
     @override_settings(CUPOM_LLM_ATIVO=False)
     def test_desligado_por_flag(self):
         with patch("apps.scrapers.llm._cliente") as cliente:
-            self.assertEqual(extrair(MENSAGEM_REAL), [])
+            self.assertEqual(len(extrair(MENSAGEM_REAL)), 4)
         cliente.assert_not_called()
