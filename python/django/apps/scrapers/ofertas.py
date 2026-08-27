@@ -338,8 +338,15 @@ def _selecionar_item_legacy(macros_selecionadas=None, categorias_selecionadas=No
 def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas=None,
                                limite_envio=1, horas_cooldown=24,
                                min_desconto_percent=15.0, termo=None,
-                               marketplace=None, usuario=None, grupo_id=None):
-    """Ranking determinístico, explicável e personalizado por desempenho."""
+                               marketplace=None, usuario=None, grupo_id=None,
+                               verificar=True):
+    """Ranking determinístico, explicável e personalizado por desempenho.
+
+    ``verificar=False`` só monta o shortlist. O pipeline v2 faz a confirmação
+    just-in-time em ``enviar_oferta_de_produto``; verificar também aqui duplicava
+    a mesma chamada externa e fazia um pool de oito itens consumir até oito
+    timeouts antes de sequer tentar o primeiro envio.
+    """
     from django.db.models import Q
     from apps.scrapers.marketplaces.registry import get_marketplace
 
@@ -489,6 +496,9 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
         opcoes.append(produto)
 
     opcoes.sort(key=lambda p: (-p.score_oferta, p.id))
+    if not verificar:
+        return opcoes[:limite_envio]
+
     escolhidos = []
     for produto in opcoes:
         if len(escolhidos) >= limite_envio:

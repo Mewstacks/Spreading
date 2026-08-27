@@ -3051,6 +3051,19 @@ class RankingAndCooldownTests(TestCase):
 
         self.assertEqual(selected, [second])
 
+    @patch("apps.scrapers.marketplaces.registry.get_marketplace")
+    def test_shortlist_does_not_repeat_live_validation(self, get_marketplace):
+        product = self._product("Oferta para shortlist", 60)
+
+        from apps.scrapers.ofertas import selecionar_item_para_grupo
+        selected = selecionar_item_para_grupo(
+            usuario=self.user, grupo_id=self.group_a,
+            min_desconto_percent=10, verificar=False,
+        )
+
+        self.assertEqual(selected, [product])
+        get_marketplace.assert_not_called()
+
 
 class MonitorCatalogMaintenanceTests(SimpleTestCase):
     @patch("apps.scrapers.maintenance.diagnosticar_alertas_pipeline_cupons",

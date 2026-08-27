@@ -270,9 +270,12 @@ class AwinCatalogTests(TestCase):
         self._marcar_pronto(strong)
         config = ConfiguracaoEnvio.objects.create(
             owner=self.user, grupo_id="group", min_desconto_percent=0,
-            incluir_restritos=True, incluir_sem_desconto=True)
+            marketplace="awin", incluir_restritos=True,
+            incluir_sem_desconto=True)
         from apps.scrapers.content_ranking import selecionar_conteudo_para_grupo
-        candidates = selecionar_conteudo_para_grupo(config, limit=2)
+        # Inclui também os produtos comprovados que materializam os dois cupons.
+        # O foco desta asserção é a ordem relativa dos cupons, não excluir produtos.
+        candidates = selecionar_conteudo_para_grupo(config, limit=4)
         self.assertEqual(candidates[0].obj, strong)
         self.assertIn(weak, [item.obj for item in candidates])
         from apps.scrapers.ofertas import montar_mensagem_cupom

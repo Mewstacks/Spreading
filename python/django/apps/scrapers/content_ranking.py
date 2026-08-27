@@ -88,6 +88,10 @@ def _product_candidates(config, limit):
         min_desconto_percent=config.min_desconto_percent,
         termo=config.termo_busca, marketplace=config.marketplace or None,
         usuario=config.owner, grupo_id=config.grupo_id,
+        # O envio confirma ao vivo somente o candidato escolhido. Validar todo o
+        # shortlist aqui fazia oito chamadas externas e repetia a primeira logo
+        # depois em enviar_oferta_de_produto.
+        verificar=False,
     )
     performance_por_produto = _performance_em_lote(
         config.owner, config.grupo_id, "produto_id", [p.id for p in products])
