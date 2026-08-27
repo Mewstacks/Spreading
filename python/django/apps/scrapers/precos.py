@@ -84,6 +84,39 @@ def stats_em_lote(produtos, dias: int = 30) -> dict:
         (getattr(p, "marketplace", "mercadolivre"), chave_produto(p))
         for p in produtos
     })
+    from django.db import connection
+
+    if connection.vendor == "postgresql":
+        # O caminho ORM portátil devolve cada observação para o Python. Em produção
+        # há mais de um milhão delas; para centenas de chaves isso ainda transferia
+        # e ordenava dezenas de milhares de linhas. O PostgreSQL calcula os três
+        # agregados junto ao índice e devolve uma linha por produto.
+        tabela = connection.ops.quote_name(PrecoHistorico._meta.db_table)
+        valores = ", ".join(["(%s, %s)"] * len(pares))
+        parametros = [valor for par in pares for valor in par]
+        parametros.append(desde)
+        sql = f"""
+            WITH requested(marketplace, chave) AS (VALUES {valores})
+            SELECT h.chave,
+                   COUNT(*)::bigint,
+                   MIN(h.preco),
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY h.preco)
+              FROM {tabela} h
+              JOIN requested r
+                ON r.marketplace = h.marketplace AND r.chave = h.chave
+             WHERE h.data >= %s
+             GROUP BY h.marketplace, h.chave
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(sql, parametros)
+            return {
+                chave: {
+                    "n": int(n), "minimo": float(minimo),
+                    "mediana": float(mediana),
+                }
+                for chave, n, minimo, mediana in cursor.fetchall()
+            }
+
     pares_q = reduce(or_, (Q(marketplace=marketplace, chave=chave)
                            for marketplace, chave in pares))
     linhas = (

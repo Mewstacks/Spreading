@@ -3090,6 +3090,23 @@ class RankingAndCooldownTests(TestCase):
         # o preço riscado. O número é fixo, independentemente dos 20 produtos.
         self.assertEqual(len(history_queries), 2)
 
+    @patch("django.db.connection")
+    def test_postgres_price_history_is_aggregated_in_database(self, db_connection):
+        product = self._product("Produto PostgreSQL", 60)
+        db_connection.vendor = "postgresql"
+        db_connection.ops.quote_name.return_value = '"scrapers_precohistorico"'
+        cursor = db_connection.cursor.return_value.__enter__.return_value
+        cursor.fetchall.return_value = [
+            (f"mercadolivre:url:{product.link_produto}", 3, 60.0, 80.0),
+        ]
+
+        from apps.scrapers.precos import chave_produto, stats_em_lote
+        result = stats_em_lote([product], dias=90)
+
+        self.assertEqual(result[chave_produto(product)]["mediana"], 80.0)
+        sql, params = cursor.execute.call_args.args
+        self.assertIn("percentile_cont(0.5)", sql)
+        self.assertIn(product.link_produto, str(params))
 
 class MonitorCatalogMaintenanceTests(SimpleTestCase):
     @patch("apps.scrapers.maintenance.diagnosticar_alertas_pipeline_cupons",
