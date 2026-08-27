@@ -229,6 +229,42 @@ class PromobitTests(TestCase):
         _, itens = self._coletar(corpo=PROMOBIT_NEXT)
         self.assertEqual([i.coupon_code for i in itens], ["EXTRA15"])
 
+    def test_corrige_percentual_impossivel_sem_perder_condicoes_reais(self):
+        corpo = """
+        <script id="__NEXT_DATA__" type="application/json">
+        {"props":{"pageProps":{"serverCoupons":{"coupons":[{
+          "couponCode":"MELHORPROMO",
+          "couponTitle":"Economize 20000% no Mercado Livre",
+          "couponDiscountValue":"20000% de Desconto",
+          "couponDiscount":"Desconto de R$200 para compras a partir de R$4.999, limitado a R$200",
+          "couponDiscountOn":"https://lista.mercadolivre.com.br/_Container_200-smf",
+          "couponStatusName":"APPROVED"
+        }]}}}}
+        </script>
+        """
+        _, itens = self._coletar(corpo=corpo, lojas=("mercado-livre",))
+
+        self.assertEqual(len(itens), 1)
+        item = itens[0]
+        self.assertEqual(item.title, "Cupom MELHORPROMO — R$ 200,00 OFF")
+        self.assertNotIn("20000%", item.coupon_rules["escopo"])
+        self.assertEqual(item.coupon_rules["tipo_desconto"], "fixo")
+        self.assertEqual(item.coupon_rules["valor_desconto"], 200.0)
+        self.assertEqual(item.coupon_rules["valor_minimo"], 4999.0)
+        self.assertEqual(item.coupon_rules["desconto_maximo"], 200.0)
+        self.assertEqual(
+            item.coupon_rules["container_url"],
+            "https://lista.mercadolivre.com.br/_Container_200-smf",
+        )
+
+    def test_preserva_percentual_decimal_valido_na_descricao(self):
+        corpo = PROMOBIT_NEXT.replace("15%", "12,5%").replace("EXTRA15", "EXTRA125")
+        _, itens = self._coletar(corpo=corpo)
+
+        self.assertEqual(len(itens), 1)
+        self.assertEqual(itens[0].coupon_rules["valor_desconto"], 12.5)
+        self.assertIn("12,5%", itens[0].coupon_rules["escopo"])
+
     def test_marca_a_origem_como_comunidade(self):
         _, itens = self._coletar()
         self.assertEqual(itens[0].evidence["confianca_origem"], "comunidade")

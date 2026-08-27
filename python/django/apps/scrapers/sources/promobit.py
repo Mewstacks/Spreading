@@ -54,8 +54,19 @@ LOJAS = {
     "shopee": "shopee",
 }
 
-_PERCENTUAL = re.compile(r"(\d{1,2})\s*%")
-_REAIS = re.compile(r"R\$\s*([\d.]+,\d{2}|\d+)")
+_PERCENTUAL = re.compile(r"(?<![\d.,])(\d{1,2}(?:[.,]\d{1,2})?)\s*%")
+_DINHEIRO_BR = r"(\d{1,3}(?:\.\d{3})+(?:,\d{2})?|\d+(?:,\d{2})?)"
+_REAIS = re.compile(rf"R\$\s*{_DINHEIRO_BR}")
+_PERCENTUAL_QUALQUER = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*%\s*(?:de desconto|off)?", re.I)
+_MINIMO = re.compile(
+    r"(?:a partir de|acima de|m[ií]nim[oa](?:\s+de)?|em compras? de)\s*"
+    rf"R\$\s*{_DINHEIRO_BR}", re.I,
+)
+_MAXIMO = re.compile(
+    r"(?:desconto m[aá]ximo de|limitad[oa]\s+a(?:t[eé])?|limite de)\s*"
+    rf"R\$\s*{_DINHEIRO_BR}", re.I,
+)
+_CONTAINER = re.compile(r"https://lista\.mercadolivre\.com\.br/[^\s,;]+", re.I)
 
 # Código que a pessoa digita no checkout: sem espaço, 3 a 30 caracteres, letras,
 # números e os separadores que o varejo usa. O filtro existe porque a fonte real
@@ -74,6 +85,38 @@ def _codigo_valido(codigo: str) -> bool:
 
 def _texto(valor):
     return html.unescape(str(valor or "")).strip()
+
+
+def _dinheiro(valor):
+    from .base import normalizar_dinheiro
+    bruto = str(valor or "").strip()
+    # Nesta fonte o ponto sem vírgula é separador de milhar (R$4.999), não quatro
+    # reais e novecentos e noventa e nove milésimos.
+    if re.fullmatch(r"\d{1,3}(?:\.\d{3})+", bruto):
+        bruto = bruto.replace(".", "")
+    return normalizar_dinheiro(bruto) if bruto else 0.0
+
+
+def _descricao_segura(texto):
+    """Remove percentuais impossíveis sem apagar a condição monetária real."""
+    def substituir(match):
+        try:
+            valor = float(match.group(1).replace(",", "."))
+        except ValueError:
+            return ""
+        return match.group(0) if 0 < valor < 100 else ""
+
+    return " ".join(_PERCENTUAL_QUALQUER.sub(substituir, _texto(texto)).split())
+
+
+def _titulo_normalizado(codigo, tipo, valor):
+    if tipo == "porcentagem":
+        numero = f"{float(valor):g}".replace(".", ",")
+        desconto = f"{numero}% OFF"
+    else:
+        numero = f"{float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        desconto = f"R$ {numero} OFF"
+    return f"Cupom {codigo} — {desconto}"
 
 
 def _blocos(corpo):
@@ -135,20 +178,28 @@ def _montar(marketplace, slug_loja, codigo, nome, descricao, validade, agora,
     codigo = _texto(codigo).upper()
     if not _codigo_valido(codigo):
         return None
-    tipo, valor = _desconto(f"{nome} {descricao}")
+    texto_completo = f"{nome} {descricao}"
+    tipo, valor = _desconto(texto_completo)
     if not valor:
         return None
+    descricao = _descricao_segura(descricao)
+    minimo = _MINIMO.search(descricao)
+    maximo = _MAXIMO.search(descricao)
+    container = _CONTAINER.search(descricao)
     chave = f"promobit:{marketplace}:{codigo}"
     regras = normalizar_regras_cupom({
         "tipo_desconto": tipo,
         "valor_desconto": valor,
+        "valor_minimo": _dinheiro(minimo.group(1)) if minimo else None,
+        "desconto_maximo": _dinheiro(maximo.group(1)) if maximo else None,
+        "container_url": container.group(0).rstrip(".") if container else "",
         "modo_resgate": "codigo",
         "escopo": descricao,
     }, external_id=chave, codigo=codigo)
     return IngestedItem(
         external_id=chave[:160], marketplace=marketplace,
         source="promobit-cupons", kind="coupon",
-        canonical_url="", title=(nome or f"Cupom {codigo}")[:255],
+        canonical_url="", title=_titulo_normalizado(codigo, tipo, valor)[:255],
         coupon_code=codigo[:120], coupon_rules=regras,
         content_type="voucher",
         restricted=tem_restricao_publico(f"{nome} {descricao}"),
@@ -166,14 +217,13 @@ def _desconto(texto):
     """(tipo, valor) a partir do texto da oferta. Sem número, não há cupom."""
     achado = _PERCENTUAL.search(texto)
     if achado:
-        valor = int(achado.group(1))
+        valor = float(achado.group(1).replace(",", "."))
         # 100% não existe em cupom de varejo; é erro de parse ou promessa falsa.
         if 0 < valor < 100:
             return "porcentagem", float(valor)
     achado = _REAIS.search(texto)
     if achado:
-        from .base import normalizar_dinheiro
-        valor = normalizar_dinheiro(achado.group(1))
+        valor = _dinheiro(achado.group(1))
         if valor > 0:
             return "fixo", valor
     return "", 0.0
