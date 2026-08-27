@@ -13,6 +13,22 @@ _TTL_HIT_S = 3600.0
 _TTL_MISS_S = 120.0
 
 
+def _chave_usuario(usuario):
+    """Identidade de cache que não sobrevive à recriação de uma conta.
+
+    Usar somente ``pk`` deixa um valor antigo ser entregue a outra conta quando
+    uma base é restaurada, testes revertem transações ou um usuário é apagado e
+    o identificador volta a ser usado. ``date_joined`` distingue essas vidas sem
+    transformar cada instância carregada pelo ORM numa chave diferente.
+    """
+    if usuario is None:
+        return None
+    joined = getattr(usuario, "date_joined", None)
+    joined_key = joined.isoformat() if joined is not None else ""
+    return (getattr(getattr(usuario, "_state", None), "db", None),
+            getattr(usuario, "pk", None), joined_key)
+
+
 def coupon_link_verified_and_fresh(link, *, now=None) -> bool:
     """True somente para cache de cupom aprovado e dentro do TTL operacional."""
     if link is None or link.verificado_ok is not True:
@@ -217,7 +233,7 @@ def rastreio_afiliado_ml(usuario, *, forcar=False) -> dict:
     """
     if usuario is None:
         return {}
-    chave = getattr(usuario, "pk", None)
+    chave = _chave_usuario(usuario)
     if forcar:
         _cache_apagar(chave)
     elif chave is not None:
@@ -267,7 +283,7 @@ def colher_rastreio_ml_browser(usuario) -> dict:
     if not achados:
         return {}
     _persistir_rastreio(linha, destino)
-    chave = getattr(usuario, "pk", None)
+    chave = _chave_usuario(usuario)
     _cache_apagar(chave)
     _cache_gravar(chave, achados)
     return achados

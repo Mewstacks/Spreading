@@ -419,7 +419,7 @@ class SelecaoAutomaticaEquilibradaTests(TestCase):
         self.assertIn("amazon", lojas)
         self.assertIn("mercadolivre", lojas)
 
-    def test_shopee_entra_no_ranking_sem_mapa_ml(self):
+    def test_comissao_shopee_nao_entra_no_ranking_como_desconto(self):
         from types import SimpleNamespace
         from apps.scrapers.content_ranking import _coupon_candidates
 
@@ -445,4 +445,4 @@ class SelecaoAutomaticaEquilibradaTests(TestCase):
         with patch("apps.scrapers.coupon_products.ids_cupons_prontos",
                    return_value=set()):
             candidatos = _coupon_candidates(config, limit=8)
-        self.assertIn("shopee", {c.obj.marketplace for c in candidatos})
+        self.assertNotIn("shopee", {c.obj.marketplace for c in candidatos})

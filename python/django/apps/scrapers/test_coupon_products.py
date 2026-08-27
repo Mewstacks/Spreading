@@ -1424,6 +1424,42 @@ class MlCampanhaListagemReadySendTests(TestCase):
         self.assertEqual(primeiro, segundo)
         self.assertEqual(expand.call_count, 1)
 
+    def test_cache_nao_vaza_quando_id_de_usuario_e_reutilizado(self):
+        from apps.scrapers.coupon_links import rastreio_afiliado_ml
+        from apps.scrapers.models import LinkAfiliadoUsuario, Produto
+
+        antigo = get_user_model().objects.create_user("ml-antigo", password="test")
+        user_id = antigo.pk
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Produto antigo", origem="oferta",
+            estado="ativo", preco_sem_desconto=10, preco_com_cupom=8,
+            link_produto="https://www.mercadolivre.com.br/p/MLB-CACHE",
+        )
+        LinkAfiliadoUsuario.objects.create(
+            usuario=antigo, produto=produto, afiliado_ok=True, estado="pronto",
+            link_afiliado=(
+                "https://www.mercadolivre.com.br/x?matt_word=conta_antiga"
+            ),
+            url_canonica=(
+                "https://www.mercadolivre.com.br/x?matt_word=conta_antiga"
+            ),
+            verificado_ok=True, verificado_em=timezone.now(),
+        )
+        self.assertEqual(
+            rastreio_afiliado_ml(antigo).get("matt_word"), "conta_antiga",
+        )
+
+        antigo.delete()
+        # Uma restauração/recriação pode reutilizar o PK. A instância não
+        # precisa ser persistida para provar a chave: a consulta ORM usa seu PK e
+        # deve encontrar zero links depois do cascade acima.
+        novo = get_user_model()(
+            id=user_id, username="ml-novo",
+            date_joined=timezone.now() + timedelta(seconds=1),
+        )
+        novo._state.db = "default"
+        self.assertEqual(rastreio_afiliado_ml(novo), {})
+
     def test_colher_browser_grava_rastreio_sem_inventar(self):
         from unittest.mock import patch
         from apps.scrapers.coupon_links import colher_rastreio_ml_browser
