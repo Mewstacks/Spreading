@@ -642,6 +642,24 @@ class CupomDeComunidadeTests(TestCase):
         self.assertEqual(resultado["reason_code"], "community_uncorroborated")
         self.assertEqual(score_cupom(cupom), 0)
 
+    def test_corroboracao_em_lote_preserva_loja_e_codigo(self):
+        from apps.scrapers.coupon_rules import (
+            aguarda_corroboracao_oficial, corroboracoes_oficiais_em_lote,
+        )
+        ml = self._cupom(self.comunidade, "MESMOCODIGO")
+        amazon = CupomNormalizado.objects.create(
+            fonte=self.comunidade, external_id="amazon:comunidade:MESMOCODIGO",
+            marketplace="amazon", titulo="Cupom Amazon", codigo="MESMOCODIGO",
+        )
+        self._cupom(self.oficial, "mesmocodigo", sufixo=":oficial")
+
+        corroboracoes = corroboracoes_oficiais_em_lote([ml, amazon])
+
+        self.assertFalse(aguarda_corroboracao_oficial(
+            ml, corroboracoes=corroboracoes))
+        self.assertTrue(aguarda_corroboracao_oficial(
+            amazon, corroboracoes=corroboracoes))
+
 
 class AvisoSemCodigoRepetidoTests(TestCase):
     """O mesmo código chega por três fontes; a mensagem deve trazê-lo uma vez."""

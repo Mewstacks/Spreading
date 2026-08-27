@@ -411,13 +411,55 @@ def comunidade_corroborada(cupom) -> bool:
     ).exists()
 
 
-def aguarda_corroboracao_oficial(cupom) -> bool:
+def corroboracoes_oficiais_em_lote(cupons) -> set[tuple[str, str]]:
+    """Pares ``(marketplace, codigo)`` corroborados, em uma consulta.
+
+    O ranking avalia dezenas de cupons por regra. Chamar
+    ``comunidade_corroborada`` dentro desse laço fazia um ``EXISTS`` por código e,
+    no banco pequeno da produção, somava mais de dez segundos a cada tick. O
+    resultado continua sendo exatamente a mesma prova: mesma loja e mesmo código
+    em uma fonte fora da comunidade.
+    """
+    pares = {
+        (str(getattr(c, "marketplace", "") or "").casefold(),
+         _texto(getattr(c, "codigo", "")).upper())
+        for c in cupons if cupom_de_comunidade(c) and getattr(c, "codigo", "")
+    }
+    if not pares:
+        return set()
+    from django.db.models.functions import Upper
+    from apps.scrapers.models import CupomNormalizado
+
+    marketplaces = {marketplace for marketplace, _ in pares}
+    codigos = {codigo for _, codigo in pares}
+    linhas = (CupomNormalizado.objects.filter(
+        marketplace__in=marketplaces, estado="ativo",
+    ).exclude(
+        fonte__slug__in=FONTES_COMUNIDADE,
+    ).annotate(
+        codigo_normalizado=Upper("codigo"),
+    ).filter(
+        codigo_normalizado__in=codigos,
+    ).values_list("marketplace", "codigo_normalizado"))
+    return {
+        (str(marketplace or "").casefold(), str(codigo or "").upper())
+        for marketplace, codigo in linhas
+    }
+
+
+def aguarda_corroboracao_oficial(cupom, *, corroboracoes=None) -> bool:
     """True quando o cupom ainda não pode ir sozinho para a lista.
 
     Telegram, agregadores e stubs exigem a mesma chave numa fonte oficial ou
     licenciada. O fato de um terceiro exibir um código não prova sua aplicação.
     """
     slug = str(getattr(getattr(cupom, "fonte", None), "slug", "") or "")
+    if corroboracoes is not None and cupom_de_comunidade(cupom):
+        chave = (
+            str(getattr(cupom, "marketplace", "") or "").casefold(),
+            _texto(getattr(cupom, "codigo", "")).upper(),
+        )
+        return chave not in corroboracoes
     if slug in FONTES_COMUNIDADE_SEM_LISTAGEM:
         return not comunidade_corroborada(cupom)
     return cupom_de_comunidade(cupom) and not comunidade_corroborada(cupom)

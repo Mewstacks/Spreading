@@ -3106,6 +3106,7 @@ class RankingAndCooldownTests(TestCase):
         self.assertEqual(result[chave_produto(product)]["mediana"], 80.0)
         sql, params = cursor.execute.call_args.args
         self.assertIn("percentile_cont(0.5)", sql)
+        self.assertIn("CROSS JOIN LATERAL", sql)
         self.assertIn(product.link_produto, str(params))
 
 class MonitorCatalogMaintenanceTests(SimpleTestCase):

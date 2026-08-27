@@ -97,15 +97,19 @@ def stats_em_lote(produtos, dias: int = 30) -> dict:
         parametros.append(desde)
         sql = f"""
             WITH requested(marketplace, chave) AS (VALUES {valores})
-            SELECT h.chave,
-                   COUNT(*)::bigint,
-                   MIN(h.preco),
-                   percentile_cont(0.5) WITHIN GROUP (ORDER BY h.preco)
-              FROM {tabela} h
-              JOIN requested r
-                ON r.marketplace = h.marketplace AND r.chave = h.chave
-             WHERE h.data >= %s
-             GROUP BY h.marketplace, h.chave
+            SELECT r.chave, stats.n, stats.minimo, stats.mediana
+              FROM requested r
+              CROSS JOIN LATERAL (
+                    SELECT COUNT(*)::bigint AS n,
+                           MIN(h.preco) AS minimo,
+                           percentile_cont(0.5)
+                               WITHIN GROUP (ORDER BY h.preco) AS mediana
+                      FROM {tabela} h
+                     WHERE h.marketplace = r.marketplace
+                       AND h.chave = r.chave
+                       AND h.data >= %s
+              ) stats
+             WHERE stats.n > 0
         """
         with connection.cursor() as cursor:
             cursor.execute(sql, parametros)

@@ -176,7 +176,8 @@ def _coupon_candidates(config, limit):
             )
     from apps.scrapers.coupon_products import ids_cupons_prontos
     from apps.scrapers.coupon_rules import (
-        aguarda_corroboracao_oficial, desconto_para_comprador,
+        aguarda_corroboracao_oficial, corroboracoes_oficiais_em_lote,
+        desconto_para_comprador,
     )
     from apps.scrapers.models import CupomDisponibilidade
     prontos = ids_cupons_prontos(config.owner, pool)
@@ -189,11 +190,12 @@ def _coupon_candidates(config, limit):
     performance_por_cupom = _performance_em_lote(
         config.owner, config.grupo_id, "cupom_normalizado_id",
         ready_ids or prontos)
+    corroboracoes = corroboracoes_oficiais_em_lote(pool)
     candidates = []
     for coupon in pool:
         if not _cupom_rankeavel(coupon, config.owner, prontos, ready_ids):
             continue
-        if aguarda_corroboracao_oficial(coupon):
+        if aguarda_corroboracao_oficial(coupon, corroboracoes=corroboracoes):
             continue
         if coupon.programa and not (
             coupon.programa.habilitado and coupon.programa.status_vinculo == "joined"
