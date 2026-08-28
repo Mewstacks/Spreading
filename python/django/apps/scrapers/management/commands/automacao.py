@@ -145,8 +145,12 @@ def _rodar_scrape_rapido(paginas=8):
     """LANE RÁPIDA/flash (B3): só o feed /ofertas do ML, poucas páginas, em UPSERT
     (não zera o feed da lane lenta). Pega deals-relâmpago entre as raspagens completas."""
     from apps.scrapers.scraper_mercadolivre.ofertas_scraper import mapear_ofertas
+    from apps.scrapers.coupon_pipeline import _coletar_adaptador, _metricas_vazias
     from apps.scrapers.models import FonteIngestao
     logger.info("[%s] SCRAPE-FLASH: feed ML (%s paginas)", timezone.now().strftime("%H:%M"), paginas)
+    # A agenda oficial e HTTP/SSR e deve rodar mesmo quando o Chromium do feed
+    # estiver ocupado. Assim um cupom de uma hora nao espera o ciclo de 15 min.
+    _coletar_adaptador("ml-lightning-coupons", _metricas_vazias())
     total = mapear_ofertas(max_paginas=paginas, substituir=False)
     now = timezone.now()
     fonte, _ = FonteIngestao.objects.get_or_create(

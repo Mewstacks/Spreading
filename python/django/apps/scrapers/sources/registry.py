@@ -11,6 +11,7 @@ from .external_feed import LicensedFeedSource
 from .community import PromobitSource as PromobitStub, PelandoSource
 from .ml_public_coupons import MLPublicCouponsSource
 from .ml_official_promotions import MLOfficialPromotionsSource
+from .ml_lightning_coupons import MLLightningCouponsSource
 from .promobit import PromobitSource
 from .shopee import ShopeeCampaignsSource, ShopeeOffersSource
 from .shopee_public_coupons import ShopeePublicCouponsSource
@@ -29,6 +30,7 @@ SOURCES = {
     PelandoSource.slug: PelandoSource(),
     MLPublicCouponsSource.slug: MLPublicCouponsSource(),
     MLOfficialPromotionsSource.slug: MLOfficialPromotionsSource(),
+    MLLightningCouponsSource.slug: MLLightningCouponsSource(),
     ShopeeOffersSource.slug: ShopeeOffersSource(),
     ShopeeCampaignsSource.slug: ShopeeCampaignsSource(),
     ShopeePublicCouponsSource.slug: ShopeePublicCouponsSource(),

@@ -294,12 +294,14 @@ class RegistroDeFontesTests(TestCase):
         self.assertIn("promobit-cupons", SOURCES)
         self.assertIn("telegram-publico", SOURCES)
         self.assertIn("shopee-public-coupons", SOURCES)
+        self.assertIn("ml-lightning-coupons", SOURCES)
 
     def test_precedencia_baixa_para_alegacao_de_terceiro(self):
         """Comunidade corrobora; não decide sozinha contra uma fonte oficial."""
         from apps.scrapers.sources.persistence import _SOURCE_PRECEDENCE
 
         oficial = _SOURCE_PRECEDENCE["ml-cupons-afiliados"]
+        self.assertEqual(_SOURCE_PRECEDENCE["ml-lightning-coupons"], oficial)
         for slug in ("promobit-cupons", "telegram-publico"):
             self.assertGreater(_SOURCE_PRECEDENCE[slug], oficial, slug)
 

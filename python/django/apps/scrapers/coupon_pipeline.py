@@ -216,6 +216,7 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
 
     _coletar_adaptador("ml-cupons-afiliados", resultado)
     _coletar_adaptador("ml-official-promotions", resultado)
+    _coletar_adaptador("ml-lightning-coupons", resultado)
 
     # Promobit e Telegram servem como radares comunitários. Encontrar não é
     # publicar: coupon_rules exige corroboração independente antes da prontidão.

@@ -27,6 +27,7 @@ def _amazon_asin(item):
 _SOURCE_PRECEDENCE = {
     "ml-cupons-afiliados": 10,
     "ml-official-promotions": 10,
+    "ml-lightning-coupons": 10,
     "mercadolivre-web": 20,
     # A mesma campanha vista também na vitrine pública deve vencer a observação
     # autenticada: é a confirmação que permite ampliar a audiência.
