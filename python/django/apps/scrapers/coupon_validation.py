@@ -177,7 +177,15 @@ def registrar_resultado(validation, *, status, reason_code="", safe_detail="",
         locked.subtotal_before = before
         locked.subtotal_after = after
         locked.discount_amount = discount if discount and discount > 0 else None
-        locked.evidence = evidence
+        # Preserva o alvo/fingerprint do agendamento e acrescenta somente a
+        # observação do checkout. Substituir o JSON apagava justamente qual produto
+        # havia sido testado, tornando uma aceitação impossível de auditar depois.
+        merged_evidence = dict(locked.evidence or {})
+        original_cart_context = merged_evidence.get("cart_context")
+        merged_evidence.update(evidence)
+        if original_cart_context is not None:
+            merged_evidence["cart_context"] = original_cart_context
+        locked.evidence = merged_evidence
         locked.no_purchase = True
         locked.attempts += 1
         locked.verified_at = now
