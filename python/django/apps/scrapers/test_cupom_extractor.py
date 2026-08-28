@@ -167,13 +167,27 @@ class ExtracaoTests(TestCase):
         cliente.assert_not_called()
 
     def test_falha_do_modelo_devolve_vazio_e_nao_cacheia(self):
-        """Erro de leitura não pode derrubar a coleta nem congelar o resultado."""
+        """Erro não derruba a coleta nem congela a mensagem como vazia."""
         with patch("apps.scrapers.llm._cliente", side_effect=RuntimeError("api fora")):
             self.assertEqual(len(extrair(MENSAGEM_REAL)), 4)
+        # Simula o TTL do circuito encerrado; a mensagem em si não foi cacheada.
+        cache.delete("cupom-llm-circuit:anthropic")
         with patch("apps.scrapers.llm._cliente"), \
                 patch("apps.scrapers.llm._texto_resposta", return_value="{}"), \
                 patch("apps.scrapers.llm._json_resposta", return_value=SAIDA_MODELO):
             self.assertEqual(len(extrair(MENSAGEM_REAL)), 2)
+
+    def test_erro_de_credito_abre_circuito_e_evita_tempestade_de_chamadas(self):
+        outra = MENSAGEM_REAL.replace("CASA1508", "CASA1509")
+        with patch(
+            "apps.scrapers.llm._cliente",
+            side_effect=RuntimeError("Your credit balance is too low; billing"),
+        ) as cliente:
+            self.assertEqual(len(extrair(MENSAGEM_REAL)), 4)
+            self.assertEqual(len(extrair(outra)), 4)
+
+        self.assertEqual(cliente.call_count, 1)
+        self.assertEqual(cache.get("cupom-llm-circuit:anthropic"), "credential_or_credit")
 
     def test_resposta_truncada_salva_os_cupons_inteiros(self):
         """Erro real de produção: `Unterminated string` no meio da lista.

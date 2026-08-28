@@ -49,6 +49,22 @@ _MODELO_PADRAO = "claude-sonnet-5"
 # 30 dias: um cupom lido hoje não muda de texto amanhã, e a mensagem do canal é
 # imutável. O cache existe para não pagar duas vezes pela mesma leitura.
 _TTL_CACHE_S = 30 * 24 * 3600
+_CHAVE_CIRCUITO = "cupom-llm-circuit:anthropic"
+
+
+def _circuito_por_erro(exc) -> tuple[str, int]:
+    """Classifica indisponibilidade sem depender do SDK ou vazar a resposta."""
+    texto = f"{type(exc).__name__} {exc}".casefold()
+    if any(sinal in texto for sinal in (
+        "credit balance", "billing", "insufficient", "authentication",
+        "unauthorized", "invalid x-api-key", "permission",
+    )):
+        return "credential_or_credit", 15 * 60
+    if "rate limit" in texto or "429" in texto:
+        return "rate_limited", 60
+    # Rede/modelo fora: basta impedir a tempestade dentro do ciclo atual. Uma
+    # coleta seguinte pode tentar novamente logo depois.
+    return "temporary_failure", 30
 
 # Lojas que sabemos afiliar. Cupom de loja fora daqui é trabalho para o
 # influenciador e comissão para outra pessoa.
@@ -316,6 +332,8 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
     if not getattr(settings, "ANTHROPIC_API_KEY", ""):
         logger.debug("Extração de cupom por IA sem ANTHROPIC_API_KEY; ignorando.")
         return fallback
+    if cache.get(_CHAVE_CIRCUITO):
+        return fallback
 
     chave = _chave_cache(texto)
     guardado = cache.get(chave)
@@ -349,9 +367,15 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
             dados = _resgatar_parcial(texto_resposta)
         cupons = _limpar(dados, loja_padrao)
     except Exception as exc:
-        logger.warning("Extração de cupom por IA falhou (%s: %s).",
-                       type(exc).__name__, exc)
-        # Não cacheia falha: a próxima coleta tenta de novo.
+        motivo, ttl = _circuito_por_erro(exc)
+        cache.set(_CHAVE_CIRCUITO, motivo, ttl)
+        logger.warning(
+            "Extração por IA indisponível (%s); circuito aberto por %ss e parser local ativo.",
+            motivo, ttl,
+        )
+        # Não cacheia a mensagem como vazia: depois de o circuito reabrir ela pode
+        # ganhar a leitura de linguagem livre. O circuito apenas impede dezenas de
+        # chamadas idênticas no mesmo ciclo.
         return fallback
 
     resultado = cupons or fallback
