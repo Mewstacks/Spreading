@@ -8,6 +8,7 @@ suficiente para produzir um veredito aceito.
 from __future__ import annotations
 
 import hashlib
+import re
 import unicodedata
 from decimal import Decimal, InvalidOperation
 
@@ -27,17 +28,21 @@ TERMINAL_REJECTIONS = frozenset({
 })
 _CATEGORY_HINTS = (
     (("LIVRO", "LEIA", "KINDLE"), ("livro", "ebook", "kindle", "leitura")),
-    (("DECOR", "CASA"), ("decor", "casa", "moveis", "movel", "cama", "mesa", "banho")),
+    (("DECOR",), ("decor", "moveis", "movel", "cama", "mesa", "banho")),
+    (("CASA",), ("casa", "lar", "moveis", "movel", "decor")),
     (("OBRA", "CONSTRO", "TOOLS", "FERRAMENT"),
      ("construcao", "ferrament", "furadeira", "parafusadeira", "serra", "obra")),
-    (("PNEU", "AUTO"), ("pneu", "automot", "carro", "moto")),
-    (("TV", "CELULAR", "TECH", "ELETRON"),
-     ("tv", "televisor", "celular", "smartphone", "eletron", "informatica")),
+    (("PNEU",), ("pneu",)),
+    (("AUTO",), ("automot", "carro", "moto", "pneu")),
+    (("TV",), ("tv", "televisor", "eletron")),
+    (("CELULAR",), ("celular", "smartphone", "telefonia")),
+    (("TECH", "ELETRON"), ("eletron", "informatica", "tecnologia")),
     (("PET",), ("pet", "cachorro", "gato", "racao")),
     (("MODA", "ROUPA", "TENIS"), ("moda", "roupa", "tenis", "calcado")),
     (("BELEZA", "MAKE", "COSMET"), ("beleza", "maquiagem", "cosmet", "perfume")),
     (("ESPORTE", "FITNESS", "TREINO"), ("esporte", "fitness", "academia", "treino")),
-    (("BRINQUED", "BEBE"), ("brinqued", "bebe", "infantil")),
+    (("BRINQUED",), ("brinqued",)),
+    (("BEBE",), ("bebe", "infantil")),
 )
 
 
@@ -70,11 +75,28 @@ def target_matches_coupon(cupom, product):
     terms = target_terms(cupom)
     if not terms:
         return True
-    haystack = _fold(" ".join((
-        str(product.nome or ""), str(product.nome_norm or ""),
+
+    def matches(value):
+        tokens = set(re.findall(r"[a-z0-9]+", _fold(value)))
+        for term in terms:
+            if term in tokens or f"{term}s" in tokens:
+                return True
+            # Radicais explícitos (eletron/automot/brinqued...) precisam casar o
+            # começo de uma palavra, nunca um trecho arbitrário como ebook/notebook.
+            if len(term) >= 6 and any(token.startswith(term) for token in tokens):
+                return True
+        return False
+
+    structured = " ".join((
         str(product.categoria or ""), str(product.macro_categoria or ""),
-    )))
-    return any(term in haystack for term in terms)
+    ))
+    meaningful = {
+        token for token in re.findall(r"[a-z0-9]+", _fold(structured))
+        if token not in {"desconhecido", "sem", "categoria"}
+    }
+    if meaningful:
+        return matches(structured)
+    return matches(" ".join((str(product.nome or ""), str(product.nome_norm or ""))))
 
 
 def cart_fingerprint(cupom, *, product_key="", cart_context=None):

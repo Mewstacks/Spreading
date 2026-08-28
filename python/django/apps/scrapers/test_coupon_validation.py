@@ -163,3 +163,20 @@ class CouponValidationLedgerTests(TestCase):
 
         self.assertEqual(result["scheduled"], 1)
         self.assertEqual(CupomValidacao.objects.get().product_key, book.asin)
+
+    def test_category_match_does_not_use_substrings_or_override_known_macro(self):
+        from .coupon_validation import target_matches_coupon
+
+        cases = (
+            ("LIVROS15", "Notebook Dell", "Eletrônicos e Informática"),
+            ("OBRAS15", "Patinete elétrico dobrável", ""),
+            ("PNEU100", "Motorola Moto G67", "Celulares, Telefonia e Wearables"),
+            ("DECOR50", "Depilador para uso em casa", "Beleza e Cuidados Pessoais"),
+            ("BEBESEPETS", "Console Playstation 5", "Games, Brinquedos e Hobbies"),
+        )
+        for code, name, macro in cases:
+            with self.subTest(code=code, name=name):
+                self.coupon.codigo = code
+                product = Produto(nome=name, nome_norm=name.casefold(), categoria="DESCONHECIDO",
+                                  macro_categoria=macro)
+                self.assertFalse(target_matches_coupon(self.coupon, product))
