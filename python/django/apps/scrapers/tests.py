@@ -6073,6 +6073,44 @@ class CuponsAfiliadosMLTests(SimpleTestCase):
         from apps.scrapers.sources.ml_public_coupons import _extrair_array_js
         self.assertEqual(_extrair_array_js("<html>sem cupons</html>", "COUPONS"), [])
 
+    def test_corrige_valor_fixo_em_centavos_rotulado_como_percentual(self):
+        from apps.scrapers.sources.ml_public_coupons import MLPublicCouponsSource
+
+        html = self.HTML.replace(
+            '"nome":"ATIVO"', '"nome":"MELHORPROMO"',
+        ).replace(
+            '"valor_desconto":"20%","min_compra":"49","desconto_max":"60"',
+            '"valor_desconto":"20000%","min_compra":"4399","desconto_max":"200"',
+        ).replace('"discount_num":20', '"discount_num":20000', 1)
+        src = MLPublicCouponsSource()
+        with patch(
+            "apps.scrapers.sources.ml_public_coupons.requests.get",
+            return_value=Mock(text=html, status_code=200, headers={}, raise_for_status=Mock()),
+        ):
+            itens = list(src.discover_coupons())
+
+        cupom = next(item for item in itens if item.coupon_code == "MELHORPROMO")
+        self.assertEqual(cupom.title, "MELHORPROMO — R$ 200,00 OFF (Fashion)")
+        self.assertEqual(cupom.coupon_rules["tipo_desconto"], "fixo")
+        self.assertEqual(cupom.coupon_rules["valor_desconto"], 200.0)
+        self.assertEqual(cupom.coupon_rules["valor_minimo"], 4399.0)
+
+    def test_rejeita_percentual_impossivel_sem_corroboração_monetaria(self):
+        from apps.scrapers.sources.ml_public_coupons import MLPublicCouponsSource
+
+        html = self.HTML.replace('"discount_num":20', '"discount_num":20000', 1).replace(
+            '"valor_desconto":"20%"', '"valor_desconto":"20000%"', 1,
+        )
+        src = MLPublicCouponsSource()
+        with patch(
+            "apps.scrapers.sources.ml_public_coupons.requests.get",
+            return_value=Mock(text=html, status_code=200, headers={}, raise_for_status=Mock()),
+        ):
+            itens = list(src.discover_coupons())
+
+        self.assertNotIn("ATIVO", {item.coupon_code for item in itens})
+        self.assertEqual(src.last_metrics["rejections"]["invalid_discount"], 1)
+
 
 class MelhorCupomNormalizadoTests(TestCase):
     """Gate de confiança do auto-apply de cupom na mensagem (fase 2)."""

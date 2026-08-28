@@ -1,6 +1,27 @@
 import hashlib
+import logging
+import re
 
 from django.utils import timezone
+
+
+logger = logging.getLogger(__name__)
+_ASIN_EXATO = re.compile(r"^[A-Z0-9]{10}$", re.I)
+_ASIN_NA_URL = re.compile(
+    r"/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})(?:[/?#]|$)|[?&]asin=([A-Z0-9]{10})(?:[&#]|$)",
+    re.I,
+)
+
+
+def _amazon_asin(item):
+    """Extrai a chave real do produto sem gravar external_id arbitrário em ASIN."""
+    external_id = str(getattr(item, "external_id", "") or "").strip().upper()
+    if _ASIN_EXATO.fullmatch(external_id):
+        return external_id
+    match = _ASIN_NA_URL.search(str(getattr(item, "canonical_url", "") or ""))
+    if not match:
+        return ""
+    return str(match.group(1) or match.group(2) or "").upper()
 
 
 _SOURCE_PRECEDENCE = {
@@ -246,8 +267,18 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
             coupons += 1
             continue
         lookup = {"marketplace": item.marketplace, "owner": owner}
-        lookup["asin" if item.marketplace == "amazon" else "link_produto"] = (
-            item.external_id if item.marketplace == "amazon" else item.canonical_url)
+        product_asin = ""
+        if item.marketplace == "amazon":
+            product_asin = _amazon_asin(item)
+            if not product_asin:
+                logger.warning(
+                    "Oferta Amazon descartada sem ASIN verificável (fonte=%s).",
+                    str(item.source or "")[:80],
+                )
+                continue
+            lookup["asin"] = product_asin
+        else:
+            lookup["link_produto"] = item.canonical_url
         anterior = Produto.objects.filter(**lookup).values_list(
             "evidencia", flat=True).first()
         defaults = {
@@ -295,7 +326,7 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
         from apps.scrapers import precos
         precos.registrar(
             item.marketplace,
-            item.external_id if item.marketplace == "amazon" else "",
+            product_asin,
             item.canonical_url,
             defaults["preco_efetivo"],
         )

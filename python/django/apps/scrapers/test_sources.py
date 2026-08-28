@@ -48,6 +48,41 @@ class SourcePipelineTests(TestCase):
         persist_items([item], owner=self.user)
         self.assertEqual(Produto.objects.filter(owner=self.user, asin=item.external_id).count(), 1)
 
+    def test_telegram_amazon_extrai_asin_da_url_em_vez_do_external_id_longo(self):
+        item = IngestedItem(
+            external_id=(
+                "tg:amazon:https://www.amazon.com.br/Produto/dp/B0GFMC7BHK/"
+                "ref=telegram-canal"
+            ),
+            marketplace="amazon", source="telegram-publico", kind="offer",
+            canonical_url=(
+                "https://www.amazon.com.br/Produto/dp/B0GFMC7BHK/"
+                "ref=telegram-canal"
+            ),
+            title="Produto citado no Telegram", observed_at=timezone.now(),
+            evidence={"transport": "telegram-preview"},
+        )
+
+        resultado = persist_items([item])
+
+        self.assertEqual(resultado["offers"], 1)
+        produto = Produto.objects.get(marketplace="amazon", asin="B0GFMC7BHK")
+        self.assertEqual(produto.fonte, "telegram-publico")
+        self.assertLessEqual(len(produto.asin), 20)
+
+    def test_oferta_amazon_sem_asin_nao_inventa_chave(self):
+        item = IngestedItem(
+            external_id="tg:amazon:https://www.amazon.com.br/promocoes",
+            marketplace="amazon", source="telegram-publico", kind="offer",
+            canonical_url="https://www.amazon.com.br/promocoes",
+            title="Página sem produto", observed_at=timezone.now(),
+        )
+
+        resultado = persist_items([item])
+
+        self.assertEqual(resultado["offers"], 0)
+        self.assertFalse(Produto.objects.filter(marketplace="amazon").exists())
+
     def test_amazon_coupon_source_groups_asins_and_preserves_final_price(self):
         from apps.scrapers.sources.amazon_coupons import AmazonCouponsSource
 

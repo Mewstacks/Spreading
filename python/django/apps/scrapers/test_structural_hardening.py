@@ -660,6 +660,15 @@ class ManualQueueOperationalStateTests(TestCase):
 
         first = self._job(self.user_a, self.org_a)
         second = self._job(self.user_b, self.org_b)
+        # SQLite/Windows pode dar o mesmo instante aos dois auto_now_add; como a
+        # PK é UUID aleatória, esse empate não prova ordem de submissão e deixava a
+        # suíte integral intermitente. Este teste verifica posições distintas, não
+        # a política para pedidos realmente simultâneos, então explicita a ordem.
+        now = timezone.now()
+        type(first).objects.filter(pk=first.pk).update(
+            criada_em=now - timedelta(microseconds=1),
+        )
+        type(second).objects.filter(pk=second.pk).update(criada_em=now)
         WorkerHeartbeat.objects.create(
             worker_id="manual:test", worker_type="manual", state="idle",
         )
