@@ -23,6 +23,18 @@ from .models import CupomValidacao
 
 ACCEPTED_TTL_HOURS = 6
 REJECTED_TTL_MINUTES = 30
+INCONCLUSIVE_RETRY_MINUTES = {
+    "browser_busy": 5,
+    "challenge": 30,
+    "browser_error": 30,
+    "session_expired": 360,
+    "session_required": 360,
+    "cart_not_empty": 360,
+    "cart_layout_unknown": 60,
+    "add_to_cart_control_missing": 60,
+    "coupon_control_missing": 60,
+    "coupon_apply_control_missing": 60,
+}
 TERMINAL_REJECTIONS = frozenset({
     "invalid_code", "expired", "usage_exhausted", "promotion_ended",
 })
@@ -166,7 +178,9 @@ def registrar_resultado(validation, *, status, reason_code="", safe_detail="",
     now = timezone.now()
     retry_at = None
     if status == "inconclusive":
-        retry_at = now + timezone.timedelta(minutes=15)
+        retry_at = now + timezone.timedelta(
+            minutes=INCONCLUSIVE_RETRY_MINUTES.get(reason_code, 15),
+        )
     elif status == "rejected" and reason_code not in TERMINAL_REJECTIONS:
         retry_at = now + timezone.timedelta(minutes=30)
     with transaction.atomic():

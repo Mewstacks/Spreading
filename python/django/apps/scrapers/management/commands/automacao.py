@@ -187,6 +187,14 @@ def _rodar_cupons(lote=40):
         limite_preparo=max(12, lote),
         limite_links=max(1, lote),
     )
+    # Lote deliberadamente pequeno: checkout disputa o mesmo Chromium das fontes e
+    # dos links. O adaptador só usa a sessão do próprio usuário, isola um carrinho
+    # vazio e nunca avança para checkout/pagamento.
+    from apps.scrapers.coupon_validation_adapters import CHECKOUT_VALIDATION_ADAPTERS
+    from apps.scrapers.coupon_validation_runner import run_validation_batch
+    resultado["validacoes_checkout"] = run_validation_batch(
+        adapters=CHECKOUT_VALIDATION_ADAPTERS, limit=2,
+    )
     logger.info(
         "CUPONS: %s encontrado(s), %s persistido(s), %s preparado(s), "
         "%s link(s) verificado(s), %s cupom(ns) pronto(s), %s falha(s)",
