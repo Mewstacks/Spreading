@@ -93,6 +93,7 @@ _NAO_CODIGOS = {
     "PROMOCOES", "LIMITADO", "LIMITE", "MINIMO", "MINIMA", "TODO", "SITE",
     "HOJE", "AGORA", "APENAS", "SOMENTE", "VALIDO", "VALIDA", "FRETE",
     "GRATIS", "CLIQUE", "ATIVE", "AQUI", "SELECIONADOS", "PRODUTOS",
+    "ESTOQUE", "LOJA", "LOJAS", "OFICIAL", "OFICIAIS", "CANAL", "GRUPO",
 }
 
 _PROMPT = """Extraia os cupons de desconto desta mensagem de um canal brasileiro de ofertas.
@@ -167,6 +168,16 @@ def _candidatos_codigo(linha: str) -> list[str]:
             continue
         candidatos.append(token)
     return list(dict.fromkeys(candidatos))
+
+
+def codigo_plausivel(codigo: str) -> bool:
+    """Filtro final comum ao parser local e à transcrição do modelo."""
+    value = str(codigo or "").strip().upper()
+    if not _CODIGO_OK.match(value) or value in _NAO_CODIGOS:
+        return False
+    if value.isalpha() and len(value) < 7:
+        return False
+    return any(char.isalpha() for char in value)
 
 
 def extrair_deterministico(texto: str, *, loja_padrao="") -> list[dict]:
@@ -264,7 +275,7 @@ def _limpar(bruto, loja_padrao="") -> list[dict]:
         if not isinstance(item, dict):
             continue
         codigo = str(item.get("codigo") or "").strip().upper()
-        if not _CODIGO_OK.match(codigo) or codigo in vistos:
+        if not codigo_plausivel(codigo) or codigo in vistos:
             continue
         loja = str(item.get("loja") or "").strip().lower() or loja_padrao
         if loja not in LOJAS_ACEITAS:

@@ -212,6 +212,27 @@ class TelegramPublicoTests(TestCase):
             self.assertEqual(list(fonte.discover_offers(include_offers=False)), [])
         carregar.assert_not_called()
 
+    def test_handle_do_canal_nunca_vira_codigo_de_cupom(self):
+        fonte = TelegramPublicoSource()
+        cupons = [
+            {"codigo": "TVCASASBAHIA", "loja": "mercadolivre",
+             "tipo": "porcentagem", "valor": 10, "minimo": 0, "teto": 0,
+             "escopo": ""},
+            {"codigo": "REAL10", "loja": "mercadolivre",
+             "tipo": "porcentagem", "valor": 10, "minimo": 0, "teto": 0,
+             "escopo": ""},
+        ]
+        with patch.object(fonte, "_carregar_canais",
+                          return_value=[("TVCASASBAHIA", "html", "")]), \
+                patch.object(fonte, "_mensagens",
+                             return_value=[("post-1", "10% OFF")]), \
+                patch("apps.scrapers.sources.telegram_publico.extrair",
+                      return_value=cupons):
+            itens = list(fonte.discover_coupons(canais=["TVCASASBAHIA"]))
+
+        self.assertEqual([item.coupon_code for item in itens], ["REAL10"])
+        self.assertEqual(fonte.last_metrics["codigos_ruidosos_descartados"], 1)
+
 
 class PromobitTests(TestCase):
     def _coletar(self, corpo=PROMOBIT_HTML, lojas=("amazon",)):

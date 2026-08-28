@@ -69,6 +69,13 @@ class RegraDeAceitacaoTests(TestCase):
         ]})
         self.assertEqual(aceitos, [])
 
+    def test_palavra_operacional_nao_vira_codigo_via_modelo(self):
+        aceitos = _limpar({"cupons": [
+            {"codigo": "ESTOQUE", "loja": "mercadolivre",
+             "tipo": "porcentagem", "valor": 10},
+        ]})
+        self.assertEqual(aceitos, [])
+
     def test_cem_por_cento_e_recusado(self):
         aceitos = _limpar({"cupons": [
             {"codigo": "TUDO100", "loja": "mercadolivre",

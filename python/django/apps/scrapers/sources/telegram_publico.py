@@ -34,7 +34,7 @@ from django.utils import timezone
 
 from apps.scrapers.canais.seeds import CANAIS_SUGERIDOS
 from apps.scrapers.coupon_rules import normalizar_regras_cupom
-from apps.scrapers.cupom_extractor import extrair, parece_ter_cupom
+from apps.scrapers.cupom_extractor import codigo_plausivel, extrair, parece_ter_cupom
 from .base import IngestedItem, SourceAdapter, normalizar_dinheiro
 
 logger = logging.getLogger(__name__)
@@ -357,9 +357,12 @@ class TelegramPublicoSource(SourceAdapter):
         atrapalha quem lê o diagnóstico.
         """
         handles = self._canais(canais)
+        handle_codes = {
+            re.sub(r"[^A-Z0-9]", "", handle.upper()) for handle in handles
+        }
         agora = timezone.now()
         vistos = set()
-        lidos = falhas = sem_valor = 0
+        lidos = falhas = sem_valor = codigos_handle = 0
 
         for handle, corpo, _erro in self._carregar_canais(handles):
             if not corpo:
@@ -382,6 +385,13 @@ class TelegramPublicoSource(SourceAdapter):
                     sem_valor += 1
                     continue
                 for cupom in achados:
+                    normalized_code = re.sub(
+                        r"[^A-Z0-9]", "", str(cupom.get("codigo") or "").upper(),
+                    )
+                    if (not codigo_plausivel(cupom.get("codigo"))
+                            or normalized_code in handle_codes):
+                        codigos_handle += 1
+                        continue
                     chave = f"telegram:{cupom['loja']}:{cupom['codigo']}"
                     if chave in vistos:
                         continue
@@ -415,6 +425,7 @@ class TelegramPublicoSource(SourceAdapter):
             "canais_falhos": falhas,
             "cupons": len(vistos),
             "sem_cupom_legivel": sem_valor,
+            "codigos_ruidosos_descartados": codigos_handle,
             # Nunca completo: a prévia mostra só as mensagens recentes.
             "complete": False,
         }
