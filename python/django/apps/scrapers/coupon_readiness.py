@@ -21,8 +21,8 @@ from apps.scrapers.coupon_products import (
     mapa_relacoes_prontas,
 )
 from apps.scrapers.coupon_rules import (
-    codigo_publicavel, coupon_mode_enabled, cupom_publicavel, forca_evidencia,
-    listagem_publica_ml, regras_do_cupom,
+    codigo_publicavel, corroboracoes_oficiais_em_lote, coupon_mode_enabled,
+    cupom_publicavel, forca_evidencia, listagem_publica_ml, regras_do_cupom,
 )
 from apps.scrapers.coupon_links import coupon_link_verified_and_fresh
 from apps.scrapers.maintenance import cupons_frescos_q
@@ -105,7 +105,7 @@ def conexao_ml(usuario):
     return {"ok": True, "reason": "", "detail": ""}
 
 
-def _preflight(cupom, usuario):
+def _preflight(cupom, usuario, *, corroboracoes=None):
     agora = timezone.now()
     if cupom.validade and cupom.validade < agora:
         return _resultado("discarded", "rejected", "expired", "Cupom expirado.")
@@ -133,7 +133,7 @@ def _preflight(cupom, usuario):
     # oficial já publicou; sozinho, não manda ninguém anunciar um código.
     from apps.scrapers.coupon_rules import aguarda_corroboracao_oficial
 
-    if aguarda_corroboracao_oficial(cupom):
+    if aguarda_corroboracao_oficial(cupom, corroboracoes=corroboracoes):
         return _resultado(
             "collected", "waiting", "community_uncorroborated",
             "Cupom visto só em fonte de comunidade; aguardando confirmação oficial.",
@@ -159,7 +159,8 @@ def _tem_link_de_aviso(usuario, marketplace) -> bool:
     return any(coupon_link_verified_and_fresh(linha) for linha in candidatos)
 
 
-def _codigo(cupom, usuario, conexao):
+def _codigo(cupom, usuario, conexao, *, links_codigo=None,
+            links_aviso_por_marketplace=None):
     codigo = codigo_publicavel(cupom)
     if not codigo:
         return None
@@ -191,9 +192,13 @@ def _codigo(cupom, usuario, conexao):
                               "Destino público inválido.")
         return _resultado("ready")
     if marketplace == "mercadolivre":
-        link = LinkAfiliadoCupomUsuario.objects.filter(
-            usuario=usuario, cupom=cupom,
-        ).exclude(link_afiliado="").first()
+        link = (
+            links_codigo.get(cupom.pk)
+            if links_codigo is not None
+            else LinkAfiliadoCupomUsuario.objects.filter(
+                usuario=usuario, cupom=cupom,
+            ).exclude(link_afiliado="").first()
+        )
         if coupon_link_verified_and_fresh(link):
             return _resultado("ready")
         # A mensagem de aviso leva UM link para a lista inteira de códigos — é o
@@ -209,7 +214,12 @@ def _codigo(cupom, usuario, conexao):
         # A atribuição não muda: o clique sai pelo link do usuário e a comissão
         # segue o clique, não o código digitado no checkout — que é exatamente o que
         # já acontece com os outros códigos do mesmo aviso.
-        if _tem_link_de_aviso(usuario, marketplace):
+        tem_link_aviso = (
+            links_aviso_por_marketplace.get(marketplace, False)
+            if links_aviso_por_marketplace is not None
+            else _tem_link_de_aviso(usuario, marketplace)
+        )
+        if tem_link_aviso:
             return _resultado("ready")
         if link and link.verificado_ok is None:
             return _resultado(
@@ -242,7 +252,8 @@ def _codigo(cupom, usuario, conexao):
                       "O destino afiliado ainda não está disponível.")
 
 
-def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao):
+def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao, *,
+              ml_listing_tracking_available=None):
     marketplace = str(cupom.marketplace or "").lower()
     if (marketplace != "mercadolivre"
             and not coupon_mode_enabled(cupom, use_mode="product_activation")):
@@ -282,8 +293,14 @@ def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao):
         # rastreio de um link ML já verificado nesta conta evita Chromium×campanha
         # (fila de ~2.6k em preparation_pending). Destino continua o container da
         # campanha — não um aviso genérico de outro cupom (MELIPROMO).
-        from apps.scrapers.coupon_links import gerar_link_afiliado_listagem_ml
-        if gerar_link_afiliado_listagem_ml(cupom, usuario):
+        if ml_listing_tracking_available is None:
+            from apps.scrapers.coupon_links import gerar_link_afiliado_listagem_ml
+            tracking_available = bool(gerar_link_afiliado_listagem_ml(cupom, usuario))
+        else:
+            # A listagem deste cupom já foi validada acima. O componente que se
+            # repete para todas as campanhas é somente o tracking da conta.
+            tracking_available = ml_listing_tracking_available
+        if tracking_available:
             return _resultado("ready")
 
     if marketplace in {"shopee", "awin"}:
@@ -420,6 +437,111 @@ def projetar_disponibilidade_cupons(usuario, channel="whatsapp"):
         return _projetar_disponibilidade_cupons(usuario, organization, channel)
 
 
+def _links_codigo_em_lote(usuario, cupons):
+    """Cache por cupom e veredito por loja em uma única consulta."""
+    ids = [cupom.pk for cupom in cupons]
+    if not ids:
+        return {}, {}
+    rows = list(LinkAfiliadoCupomUsuario.objects.filter(
+        usuario=usuario, cupom_id__in=ids,
+    ).exclude(link_afiliado="").select_related("cupom"))
+    por_cupom = {row.cupom_id: row for row in rows}
+    por_marketplace = {}
+    for row in rows:
+        marketplace = str(row.cupom.marketplace or "").lower()
+        if row.verificado_ok is True and coupon_link_verified_and_fresh(row):
+            por_marketplace[marketplace] = True
+    return por_cupom, por_marketplace
+
+
+def _persistir_projecoes_em_lote(
+        usuario, organization, channel, planejadas, preparos, agora):
+    """Grava reconciliação e transições sem uma transação por cupom."""
+    ids = [cupom.pk for cupom, _use_mode, _outcome in planejadas]
+    if not ids:
+        return
+    campos_estado = (
+        "stage", "category", "reason_code", "safe_detail", "retry_at",
+    )
+    with transaction.atomic():
+        existentes = {
+            (row.cupom_id, row.use_mode): row
+            for row in CupomDisponibilidade.objects.select_for_update().filter(
+                organization=organization, usuario=usuario, channel=channel,
+                cupom_id__in=ids,
+            )
+        }
+        chaves_existentes = set(existentes)
+        novas = [
+            CupomDisponibilidade(
+                organization=organization, usuario=usuario, cupom=cupom,
+                channel=channel, use_mode=use_mode, **outcome,
+            )
+            for cupom, use_mode, outcome in planejadas
+            if (cupom.pk, use_mode) not in existentes
+        ]
+        if novas:
+            # A chave natural torna inofensiva uma projeção concorrente.
+            CupomDisponibilidade.objects.bulk_create(
+                novas, batch_size=500, ignore_conflicts=True,
+            )
+            existentes = {
+                (row.cupom_id, row.use_mode): row
+                for row in CupomDisponibilidade.objects.select_for_update().filter(
+                    organization=organization, usuario=usuario, channel=channel,
+                    cupom_id__in=ids,
+                )
+            }
+
+        alteradas, tocadas, eventos = [], [], []
+        for cupom, use_mode, outcome in planejadas:
+            chave = (cupom.pk, use_mode)
+            projection = existentes[chave]
+            criada = chave not in chaves_existentes
+            valores_diferentes = any(
+                getattr(projection, field) != outcome[field]
+                for field in campos_estado
+            )
+            mudou = criada or valores_diferentes
+            anterior = "" if criada else projection.stage
+            if valores_diferentes:
+                for field, value in outcome.items():
+                    setattr(projection, field, value)
+                projection.updated_at = agora
+                alteradas.append(projection)
+            elif not criada:
+                tocadas.append(projection.pk)
+            if mudou:
+                preparo = preparos.get(cupom.pk)
+                eventos.append(CupomDisponibilidadeEvento(
+                    organization=organization, disponibilidade=projection,
+                    from_stage=anterior, to_stage=outcome["stage"],
+                    category=outcome["category"],
+                    reason_code=outcome["reason_code"],
+                    marketplace=cupom.marketplace,
+                    source=getattr(cupom.fonte, "slug", ""), use_mode=use_mode,
+                    evidence_strength=(
+                        forca_evidencia(cupom)
+                        if use_mode == "product_activation" else "official_code"
+                    ),
+                    attempt=getattr(preparo, "tentativas", 0),
+                    duration_ms=getattr(preparo, "duracao_ms", 0),
+                    source_run_id=getattr(preparo, "source_run_id", ""),
+                ))
+        if alteradas:
+            CupomDisponibilidade.objects.bulk_update(
+                alteradas, [*campos_estado, "updated_at"], batch_size=500,
+            )
+        if tocadas:
+            CupomDisponibilidade.objects.filter(pk__in=tocadas).update(
+                updated_at=agora,
+            )
+        if eventos:
+            CupomDisponibilidadeEvento.objects.bulk_create(
+                eventos, batch_size=500,
+            )
+
+
 def _projetar_disponibilidade_cupons(usuario, organization, channel):
     agora = timezone.now()
     cupons = list(
@@ -466,7 +588,18 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
         # o diagnóstico corrente na compreensão do dicionário.
         preparos.setdefault(preparo.cupom_id, preparo)
     conexao = conexao_ml(usuario)
+    codigos = [cupom for cupom in cupons if codigo_publicavel(cupom)]
+    links_codigo, links_aviso = _links_codigo_em_lote(usuario, codigos)
+    corroboracoes = corroboracoes_oficiais_em_lote(cupons)
+    ml_tracking = None
+    if any(
+        str(cupom.marketplace or "").lower() == "mercadolivre"
+        for cupom in ativacoes
+    ):
+        from apps.scrapers.coupon_links import rastreio_afiliado_ml
+        ml_tracking = bool(rastreio_afiliado_ml(usuario))
     stages, reasons = {}, {}
+    planejadas = []
     for cupom in cupons:
         use_mode = "code_notice" if codigo_publicavel(cupom) else "product_activation"
         outcome = (
@@ -476,48 +609,29 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
             ) if cupom.pk in not_found_coupon_ids else _resultado(
                 "discarded", "rejected", "lower_precedence_duplicate",
                 "Outra fonte saudável de maior precedência publicou este cupom.",
-            ) if cupom.pk in loser_coupon_ids else _preflight(cupom, usuario)
+            ) if cupom.pk in loser_coupon_ids else _preflight(
+                cupom, usuario, corroboracoes=corroboracoes,
+            )
         )
         if outcome is None:
             outcome = (
-                _codigo(cupom, usuario, conexao)
-                if use_mode == "code_notice"
-                else _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao)
-            )
-        with transaction.atomic():
-            projection, created = CupomDisponibilidade.objects.select_for_update().get_or_create(
-                organization=organization, usuario=usuario, cupom=cupom,
-                channel=channel, use_mode=use_mode, defaults=outcome,
-            )
-            changed = created or any(
-                getattr(projection, field) != outcome[field]
-                for field in ("stage", "category", "reason_code", "safe_detail", "retry_at")
-            )
-            previous = "" if created else projection.stage
-            if changed:
-                for field, value in outcome.items():
-                    setattr(projection, field, value)
-                projection.save()
-                CupomDisponibilidadeEvento.objects.create(
-                    organization=organization, disponibilidade=projection,
-                    from_stage=previous, to_stage=projection.stage,
-                    category=projection.category, reason_code=projection.reason_code,
-                    marketplace=cupom.marketplace,
-                    source=getattr(cupom.fonte, "slug", ""), use_mode=use_mode,
-                    evidence_strength=(forca_evidencia(cupom)
-                                       if use_mode == "product_activation" else "official_code"),
-                    attempt=getattr(preparos.get(cupom.pk), "tentativas", 0),
-                    duration_ms=getattr(preparos.get(cupom.pk), "duracao_ms", 0),
-                    source_run_id=getattr(preparos.get(cupom.pk), "source_run_id", ""),
+                _codigo(
+                    cupom, usuario, conexao, links_codigo=links_codigo,
+                    links_aviso_por_marketplace=links_aviso,
                 )
-            else:
-                # ``updated_at`` representa a última reconciliação, não apenas a
-                # última mudança de estado. Sem este toque, um cupom estável em
-                # ready disparava falsamente o alerta de projeção atrasada.
-                projection.save(update_fields=["updated_at"])
+                if use_mode == "code_notice"
+                else _ativacao(
+                    cupom, usuario, preparadas, prontas, preparos, conexao,
+                    ml_listing_tracking_available=ml_tracking,
+                )
+            )
+        planejadas.append((cupom, use_mode, outcome))
         stages[outcome["stage"]] = stages.get(outcome["stage"], 0) + 1
         reason = outcome["reason_code"] or "none"
         reasons[reason] = reasons.get(reason, 0) + 1
+    _persistir_projecoes_em_lote(
+        usuario, organization, channel, planejadas, preparos, agora,
+    )
     return {"stages": stages, "reasons": reasons, "total": len(cupons)}
 
 

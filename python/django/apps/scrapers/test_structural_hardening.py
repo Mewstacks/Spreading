@@ -12,8 +12,9 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from apps.accounts.models import (
@@ -1278,6 +1279,39 @@ class CouponReadinessReasonTests(TestCase):
             projetar_disponibilidade_cupons(self.user)
         projection.refresh_from_db()
         self.assertEqual(projection.stage, "ready")
+
+    def test_reconciliacao_em_lote_nao_cresce_queries_por_cupom(self):
+        """Quarenta alegações não podem virar quarenta EXISTS/transações."""
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        comunidade = FonteIngestao.objects.create(
+            slug="telegram-publico", marketplace="mercadolivre", nome="Telegram",
+        )
+        CupomNormalizado.objects.bulk_create([
+            CupomNormalizado(
+                fonte=comunidade, external_id=f"tg:batch:{indice}",
+                marketplace="mercadolivre", titulo=f"Cupom Telegram {indice}",
+                codigo=f"TELE{indice:04d}",
+                regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                        "valor_desconto": 10},
+            )
+            for indice in range(40)
+        ])
+        with self._ml(conectado=False, detalhe="sem_sessao"):
+            projetar_disponibilidade_cupons(self.user)
+
+        with self._ml(conectado=False, detalhe="sem_sessao"), \
+                CaptureQueriesContext(connection) as queries:
+            resultado = projetar_disponibilidade_cupons(self.user)
+
+        self.assertEqual(resultado["total"], 40)
+        self.assertLessEqual(len(queries), 25)
+        self.assertEqual(
+            CupomDisponibilidade.objects.filter(
+                usuario=self.user, reason_code="community_uncorroborated",
+            ).count(),
+            40,
+        )
 
     def test_cache_verificado_continua_ready_sem_sessao_e_cache_vencido_nao(self):
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
