@@ -1296,8 +1296,9 @@ class MlCampanhaListagemReadySendTests(TestCase):
         stage = CupomDisponibilidade.objects.get(cupom=cupom, usuario=user)
         self.assertNotEqual(stage.stage, "ready")
 
-    def test_campanha_com_meli_la_expande_rastreio(self):
+    def test_worker_expande_meli_la_e_projecao_so_le_prova_persistida(self):
         from unittest.mock import patch
+        from apps.scrapers.coupon_links import rastreio_afiliado_ml
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
         from apps.scrapers.models import (
             CupomDisponibilidade, CupomNormalizado, FonteIngestao,
@@ -1332,7 +1333,21 @@ class MlCampanhaListagemReadySendTests(TestCase):
             return_value=(
                 {"matt_word": "lules", "matt_tool": "android"}, dest,
             ),
-        ):
+        ) as expand:
+            # Reconciliação nunca abre rede: sem prova persistida, conserva.
+            projetar_disponibilidade_cupons(user)
+            self.assertNotEqual(
+                CupomDisponibilidade.objects.get(
+                    cupom=cupom, usuario=user,
+                ).stage,
+                "ready",
+            )
+            expand.assert_not_called()
+            # O worker de descoberta expande uma vez e persiste os parâmetros.
+            self.assertEqual(
+                rastreio_afiliado_ml(user).get("matt_word"), "lules",
+            )
+            expand.assert_called_once()
             projetar_disponibilidade_cupons(user)
         self.assertEqual(
             CupomDisponibilidade.objects.get(cupom=cupom, usuario=user).stage,

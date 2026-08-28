@@ -1109,6 +1109,12 @@ class LinkAfiliadoUsuario(models.Model):
 
     class Meta:
         unique_together = ("usuario", "produto")
+        indexes = [
+            models.Index(
+                fields=["usuario", "verificado_ok", "-verificado_em"],
+                name="linkusr_ready_recent_idx",
+            ),
+        ]
 
 
 class CupomCodigo(models.Model):

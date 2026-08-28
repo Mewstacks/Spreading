@@ -1292,6 +1292,8 @@ class CouponReadinessReasonTests(TestCase):
                 fonte=comunidade, external_id=f"tg:batch:{indice}",
                 marketplace="mercadolivre", titulo=f"Cupom Telegram {indice}",
                 codigo=f"TELE{indice:04d}",
+                audience_scope=("organization" if indice >= 20 else "public"),
+                organization=(self.organization if indice >= 20 else None),
                 regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
                         "valor_desconto": 10},
             )

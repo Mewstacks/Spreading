@@ -202,6 +202,29 @@ def _linha_com_rastreio(usuario):
     )
 
 
+def _linha_recente_com_rastreio(usuario, limite=32):
+    """Procura prova já persistida numa janela indexável e limitada.
+
+    O fallback histórico usa seis ``icontains`` sobre dezenas de milhares de URLs.
+    Ele continua disponível para tarefas de descoberta, mas uma projeção nunca
+    deve pagar esse scan nem expandir um encurtador na rede.
+    """
+    from apps.scrapers.models import LinkAfiliadoCupomUsuario, LinkAfiliadoUsuario
+
+    candidatos = list(LinkAfiliadoCupomUsuario.objects.filter(
+        usuario=usuario, verificado_ok=True,
+    ).exclude(link_afiliado="").only(
+        "link_afiliado", "url_canonica",
+    ).order_by("-verificado_em", "-pk")[:limite])
+    candidatos.extend(LinkAfiliadoUsuario.objects.filter(
+        usuario=usuario, verificado_ok=True,
+        produto__marketplace="mercadolivre",
+    ).exclude(link_afiliado="").only(
+        "link_afiliado", "url_canonica",
+    ).order_by("-verificado_em", "-pk")[:limite])
+    return next((linha for linha in candidatos if _params_de_linha(linha)), None)
+
+
 def _linha_encurtador(usuario):
     from apps.scrapers.models import LinkAfiliadoCupomUsuario, LinkAfiliadoUsuario
 
@@ -219,7 +242,8 @@ def _linha_encurtador(usuario):
     return None
 
 
-def rastreio_afiliado_ml(usuario, *, forcar=False) -> dict:
+def rastreio_afiliado_ml(usuario, *, forcar=False,
+                         somente_persistido_rapido=False) -> dict:
     """Params de tracking já provados num link ML deste usuário.
 
     O Link Builder (Chromium) é a única fábrica. Daí em diante copiar
@@ -240,6 +264,16 @@ def rastreio_afiliado_ml(usuario, *, forcar=False) -> dict:
         valor, hit = _cache_ler(chave)
         if hit:
             return valor
+
+    if somente_persistido_rapido:
+        linha = _linha_recente_com_rastreio(usuario)
+        if linha:
+            achados = _params_de_linha(linha)
+            _cache_gravar(chave, achados)
+            return achados
+        # Não grave miss: a tarefa normal ainda pode fazer a busca completa ou
+        # expandir um meli.la e popular a prova sem esperar o TTL negativo.
+        return {}
 
     linha = _linha_com_rastreio(usuario)
     if linha:

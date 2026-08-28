@@ -1056,6 +1056,22 @@ class EstadoMLTests(SimpleTestCase):
             self.assertTrue(estado_ml(Mock(id=7)).conectado)
         sonda.assert_not_called()
 
+    def test_leitor_de_projecao_usa_snapshot_vencido_sem_ir_a_rede(self):
+        from apps.scrapers.conexoes import estado_ml
+
+        with (
+            self._org(),
+            patch("apps.accounts.ml_sessions.probe_snapshot",
+                  return_value=self._snapshot(last_probe_at=None,
+                                              last_probe_result="conectado")),
+            patch("apps.accounts.ml_sessions.load_storage_state") as load,
+            patch("apps.scrapers.conexoes.sondar_sessao_ml") as sonda,
+        ):
+            estado = estado_ml(Mock(id=7), permitir_sonda=False)
+        self.assertTrue(estado.conectado)
+        load.assert_not_called()
+        sonda.assert_not_called()
+
     def test_conectado_e_cacheado(self):
         """A sonda vai à rede; dashboard e Saúde fazem polling. Sem cache, cada aba
         aberta viraria uma ida ao ML."""

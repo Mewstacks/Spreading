@@ -33,6 +33,9 @@ from apps.scrapers.models import (
 )
 
 
+_ORGANIZATION_NOT_PROVIDED = object()
+
+
 def _url_publica(url):
     try:
         partes = urlsplit(str(url or ""))
@@ -69,7 +72,7 @@ def _session_statement_timeout(value):
             )
 
 
-def conexao_ml(usuario):
+def conexao_ml(usuario, *, permitir_sonda=True):
     """Veredito ÚNICO da conexão ML para uma projeção inteira.
 
     Antes cada cupom lia ``MercadoLivreSession.status`` cru. Isso era uma SEGUNDA
@@ -85,7 +88,7 @@ def conexao_ml(usuario):
     """
     from apps.scrapers.conexoes import estado_ml, estado_ml_linkbuilder
 
-    site = estado_ml(usuario)
+    site = estado_ml(usuario, permitir_sonda=permitir_sonda)
     if not site.conectado:
         ausente = site.detalhe == "sem_sessao"
         return {
@@ -105,7 +108,8 @@ def conexao_ml(usuario):
     return {"ok": True, "reason": "", "detail": ""}
 
 
-def _preflight(cupom, usuario, *, corroboracoes=None):
+def _preflight(cupom, usuario, *, corroboracoes=None,
+               organization=_ORGANIZATION_NOT_PROVIDED):
     agora = timezone.now()
     if cupom.validade and cupom.validade < agora:
         return _resultado("discarded", "rejected", "expired", "Cupom expirado.")
@@ -119,7 +123,8 @@ def _preflight(cupom, usuario, *, corroboracoes=None):
         return _resultado("discarded", "rejected", "tenant_scope",
                           "Cupom pertence a outra organização.")
     if getattr(cupom, "audience_scope", "public") == "organization":
-        organization = organization_for_user(usuario)
+        if organization is _ORGANIZATION_NOT_PROVIDED:
+            organization = organization_for_user(usuario)
         if not organization or (
                 cupom.organization_id and cupom.organization_id != organization.pk):
             return _resultado("discarded", "rejected", "audience_restricted",
@@ -587,7 +592,9 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
         # O primeiro registro é o mais novo; não deixe um retry antigo substituir
         # o diagnóstico corrente na compreensão do dicionário.
         preparos.setdefault(preparo.cupom_id, preparo)
-    conexao = conexao_ml(usuario)
+    # A projeção reconcilia estado persistido; a sonda HTTP pertence ao worker
+    # de conexão. Fazê-la aqui prendia todo o catálogo em rede a cada cache frio.
+    conexao = conexao_ml(usuario, permitir_sonda=False)
     codigos = [cupom for cupom in cupons if codigo_publicavel(cupom)]
     links_codigo, links_aviso = _links_codigo_em_lote(usuario, codigos)
     corroboracoes = corroboracoes_oficiais_em_lote(cupons)
@@ -597,7 +604,9 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
         for cupom in ativacoes
     ):
         from apps.scrapers.coupon_links import rastreio_afiliado_ml
-        ml_tracking = bool(rastreio_afiliado_ml(usuario))
+        ml_tracking = bool(rastreio_afiliado_ml(
+            usuario, somente_persistido_rapido=True,
+        ))
     stages, reasons = {}, {}
     planejadas = []
     for cupom in cupons:
@@ -611,6 +620,7 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
                 "Outra fonte saudável de maior precedência publicou este cupom.",
             ) if cupom.pk in loser_coupon_ids else _preflight(
                 cupom, usuario, corroboracoes=corroboracoes,
+                organization=organization,
             )
         )
         if outcome is None:
