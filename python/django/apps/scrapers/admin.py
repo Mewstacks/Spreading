@@ -4,7 +4,7 @@ from apps.scrapers.models import (
     Cupom, Produto, HistoricoEnvio, ConfiguracaoEnvio, CupomCodigo, LinkAfiliadoUsuario,
     Publicacao, CliquePublicacao, ReceitaAfiliado, RelatorioSync, EventoOperacional,
     FonteIngestao, ExecucaoIngestao, CupomNormalizado, ProdutoCupom,
-    IntegracaoAfiliado, ProgramaAfiliado,
+    IntegracaoAfiliado, ProgramaAfiliado, CupomValidacao,
 )
 
 
@@ -117,6 +117,17 @@ class CupomNormalizadoAdmin(admin.ModelAdmin):
 class ProdutoCupomAdmin(admin.ModelAdmin):
     list_display = ("produto", "cupom", "status", "verificado_em")
     list_filter = ("status",)
+
+
+@admin.register(CupomValidacao)
+class CupomValidacaoAdmin(admin.ModelAdmin):
+    list_display = (
+        "cupom", "usuario", "marketplace", "status", "discount_amount",
+        "reason_code", "verified_at", "no_purchase",
+    )
+    list_filter = ("marketplace", "status", "reason_code", "no_purchase")
+    search_fields = ("cupom__codigo", "usuario__username", "product_key")
+    readonly_fields = [field.name for field in CupomValidacao._meta.fields]
 
 
 @admin.register(IntegracaoAfiliado)

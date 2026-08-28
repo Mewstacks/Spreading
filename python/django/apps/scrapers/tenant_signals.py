@@ -15,6 +15,7 @@ _USER_FIELD_MODELS = {
     models.IntegracaoAfiliado: "owner",
     models.CupomNormalizado: "owner",
     models.CupomPreparacao: "usuario",
+    models.CupomValidacao: "usuario",
     models.HistoricoEnvio: "usuario",
     models.Publicacao: "usuario",
     models.LinkAfiliadoCupomUsuario: "usuario",

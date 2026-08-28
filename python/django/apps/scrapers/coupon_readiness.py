@@ -108,7 +108,7 @@ def conexao_ml(usuario, *, permitir_sonda=True):
     return {"ok": True, "reason": "", "detail": ""}
 
 
-def _preflight(cupom, usuario, *, corroboracoes=None,
+def _preflight(cupom, usuario, *, corroboracoes=None, validacoes_checkout=None,
                organization=_ORGANIZATION_NOT_PROVIDED):
     agora = timezone.now()
     if cupom.validade and cupom.validade < agora:
@@ -133,6 +133,20 @@ def _preflight(cupom, usuario, *, corroboracoes=None,
     if regras.get("valor_desconto") in (None, "", 0):
         return _resultado("discarded", "invalid", "missing_discount",
                           "A fonte não comprovou o valor do desconto.")
+    from apps.scrapers.coupon_validation import veredito_para_cupom
+
+    checkout_status, checkout_reason = veredito_para_cupom(
+        cupom, validacoes_checkout,
+    )
+    if checkout_status == "rejected":
+        return _resultado(
+            "discarded", "rejected", f"checkout_{checkout_reason}",
+            "O checkout rejeitou este código de forma conclusiva.",
+        )
+    # Uma redução monetária observada no checkout é prova primária. Ela libera o
+    # radar comunitário sem fingir que um segundo agregador seria confirmação.
+    if checkout_status == "accepted":
+        return None
     # Cupom de comunidade é alegação de terceiro — inclusive a leitura por IA de
     # uma mensagem de canal. Ele soma evidência quando confirma o que uma fonte
     # oficial já publicou; sozinho, não manda ninguém anunciar um código.
@@ -650,6 +664,8 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
         owner=usuario, provedor="shopee", habilitada=True, status="conectada",
     ).exists()
     corroboracoes = corroboracoes_oficiais_em_lote(cupons)
+    from apps.scrapers.coupon_validation import validacoes_recentes_por_codigo
+    validacoes_checkout = validacoes_recentes_por_codigo(usuario, cupons)
     ml_tracking = None
     if any(
         str(cupom.marketplace or "").lower() == "mercadolivre"
@@ -672,6 +688,7 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
                 "Outra fonte saudável de maior precedência publicou este cupom.",
             ) if cupom.pk in loser_coupon_ids else _preflight(
                 cupom, usuario, corroboracoes=corroboracoes,
+                validacoes_checkout=validacoes_checkout,
                 organization=organization,
             )
         )

@@ -811,6 +811,10 @@ def executar_pipeline_cupons(
             }
             afiliacao["disponibilidade"] = por_canal["whatsapp"]
             afiliacao["disponibilidade_por_canal"] = por_canal
+            from apps.scrapers.coupon_validation import agendar_lote_validacao
+            afiliacao["validacao_checkout"] = agendar_lote_validacao(
+                usuario, limite=30, channel="whatsapp",
+            )
         except Exception:
             resultado["falhos"] += 1
             logger.exception(

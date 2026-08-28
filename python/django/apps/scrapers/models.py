@@ -569,6 +569,71 @@ class CupomDisponibilidadeEvento(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
 
+class CupomValidacao(models.Model):
+    """Tentativa auditável de aplicar um código, sempre sem concluir a compra."""
+
+    STATUS = [
+        ("pending", "Pendente"), ("running", "Em execução"),
+        ("accepted", "Aceito"), ("rejected", "Rejeitado"),
+        ("inconclusive", "Inconclusivo"),
+    ]
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE,
+        related_name="validacoes_cupons",
+    )
+    usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="validacoes_cupons",
+    )
+    cupom = models.ForeignKey(
+        CupomNormalizado, on_delete=models.CASCADE, related_name="validacoes",
+    )
+    marketplace = models.CharField(max_length=20, db_index=True)
+    product_key = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    product_url = models.URLField(max_length=1500, blank=True, default="")
+    cart_fingerprint = models.CharField(max_length=64, db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS, default="pending",
+                              db_index=True)
+    reason_code = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    safe_detail = models.CharField(max_length=255, blank=True, default="")
+    subtotal_before = models.DecimalField(max_digits=12, decimal_places=2,
+                                          null=True, blank=True)
+    subtotal_after = models.DecimalField(max_digits=12, decimal_places=2,
+                                         null=True, blank=True)
+    discount_amount = models.DecimalField(max_digits=12, decimal_places=2,
+                                          null=True, blank=True)
+    evidence = models.JSONField(default=dict, blank=True)
+    no_purchase = models.BooleanField(default=True)
+    attempts = models.PositiveIntegerField(default=0)
+    started_at = models.DateTimeField(null=True, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    retry_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["usuario", "cupom", "cart_fingerprint"],
+                name="uniq_coupon_cart_validation",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(no_purchase=True),
+                name="coupon_validation_never_purchases",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["usuario", "status", "verified_at"],
+                name="coupon_validation_user_status",
+            ),
+            models.Index(
+                fields=["marketplace", "verified_at"],
+                name="coupon_validation_market_time",
+            ),
+        ]
+
+
 class ProdutoCupom(models.Model):
     STATUS = [
         ("confirmado", "Confirmado"), ("provavel", "Provável"),

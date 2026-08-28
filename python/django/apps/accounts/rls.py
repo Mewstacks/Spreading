@@ -24,6 +24,7 @@ STRICT_TENANT_TABLES = (
     "scrapers_eventoraspagem",
     "scrapers_cupomdisponibilidade",
     "scrapers_cupomdisponibilidadeevento",
+    "scrapers_cupomvalidacao",
     "scrapers_publicacaotentativa",
     "scrapers_publicacaoevento",
 )
