@@ -144,13 +144,29 @@ Fontes primárias consultadas:
 ## Evidências já obtidas nesta revisão
 
 - Shopee: campanha/comissão deixou de ser convertida em cupom do comprador.
+- Shopee oficial: 17 vouchers observados em produção, oito ativos aceitos, oito
+  indisponíveis e um cashback corretamente rejeitado. Os oito ativos ficam
+  elegíveis, mas não são enviados sem integração afiliada própria da conta.
+- Méliuz: novo radar público sem Chromium encontrou 84 códigos distintos em 3,9 s
+  (23 Amazon, 38 Mercado Livre e 23 Shopee), descartando 14 placeholders, sete
+  entradas inválidas e cinco duplicatas. Em produção, 13 códigos do ML coincidiram
+  com fonte oficial; os demais permaneceram retidos para validação.
 - Promobit: 61–62 candidatos reais por ciclo em cerca de 4 segundos.
-- Telegram: 12 canais, 45 códigos e 18 ofertas reais na amostra de 27/08/2026;
-  ciclo caiu de 151,7 s/6 canais para 31,1 s/12 canais.
+- Telegram: 12/12 canais e 51 códigos distintos em produção; o ciclo específico
+  de cupons caiu de 11,1 s para 3,53 s ao deixar de resolver 124 redirecionamentos
+  que não produziram nenhum produto. Cache de HTML agora vence em 120 segundos,
+  portanto novas mensagens não dependem de reiniciar a VM.
 - Amazon pública: 10 ofertas e 9 cupons distintos, inventário completo e zero
   rejeições em 31,9 s na amostra real.
 - Landing oficial do ML: seis regulamentos reconhecidos e corretamente rejeitados
   por estarem vencidos; parser pronto para novos códigos ativos.
+- ML afiliados: 29 códigos oficiais ativos aceitos em produção. O monitor HTTP de
+  cupons-relâmpago roda a cada cinco minutos e leva cerca de 2,35 s; na amostra de
+  28/08, a página oficial servia cinco campanhas de 08/06 já encerradas, todas
+  rejeitadas sem apagar o catálogo anterior.
+- Snapshot `lules`/WhatsApp após o quarto deploy: 1.182 cupons frescos — 998
+  prontos, 173 comunitários aguardando validação, oito vouchers Shopee aguardando
+  integração própria e três descartes explícitos. A projeção levou 1,19 s.
 - Mensagens: validade só aparece quando existe, desconto só é anunciado quando
   comprovado pelo histórico, selo relâmpago só aparece em oferta realmente marcada
   como relâmpago e campos configuráveis são escapados contra HTML/XSS.
@@ -158,7 +174,7 @@ Fontes primárias consultadas:
   `InitPlan` por consulta, em vez de ser recalculada para cada linha. O plano real
   do PostgreSQL de produção confirmou `InitPlan` e `One-Time Filter`; o isolamento
   e a assinatura HMAC permanecem obrigatórios para dados privados.
-- Testes automatizados: 1.271 testes Django e 169 testes Node aprovados; 24 testes
+- Testes automatizados: 1.304 testes Django e 169 testes Node aprovados; 24 testes
   direcionados de isolamento, permissões, CSRF, SQLi e XSS aprovados; nenhuma
   migração pendente e compilação limpa.
 - Auditoria de produção: papel runtime sem `SUPERUSER`, `BYPASSRLS` ou ownership
@@ -173,8 +189,8 @@ Fontes primárias consultadas:
 - [x] Suítes Django e Node integralmente verdes.
 - [x] Verificação direcionada de isolamento, permissões, CSRF, SQLi e XSS.
 - [x] Auditoria do papel runtime e de segredos legados em produção.
-- [ ] Snapshot verificável dos volumes e comando de rollback anotado.
-- [ ] Deploy canário da correção de RLS e benchmark comparativo em produção.
+- [x] Snapshot verificável dos volumes e comando de rollback anotado.
+- [x] Deploy canário da correção de RLS e benchmark comparativo em produção.
 - [ ] `tenant_isolation_probe` aprovado no código já implantado.
 - [ ] Canário funcional pela conta `lules`, sem concluir compra.
 - [ ] Restore ensaiado e topologia 24/7 comprovadamente abaixo de R$300/mês.
