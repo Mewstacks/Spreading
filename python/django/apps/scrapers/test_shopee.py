@@ -27,7 +27,10 @@ from django.utils import timezone
 from apps.accounts.models import ensure_personal_organization
 from apps.scrapers import shopee
 from apps.scrapers.marketplaces.registry import get_marketplace
-from apps.scrapers.models import IntegracaoAfiliado
+from apps.scrapers.models import (
+    CupomNormalizado, FonteIngestao, IntegracaoAfiliado,
+    LinkAfiliadoCupomUsuario,
+)
 from apps.scrapers.sources.shopee import ShopeeCampaignsSource, ShopeeOffersSource
 
 
@@ -259,6 +262,21 @@ class MarketplaceShopeeTests(_BaseComIntegracao):
         link_produto = "https://shopee.com.br/produto-999"
         marketplace = "shopee"
 
+    def _cupom_oficial(self, promotion="123"):
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="shopee-public-coupons",
+            defaults={"marketplace": "shopee", "nome": "Shopee"},
+        )
+        return CupomNormalizado.objects.create(
+            fonte=fonte, external_id=f"shopee-voucher:{promotion}",
+            marketplace="shopee", titulo="R$ 20 OFF", codigo="",
+            link=f"https://shopee.com.br/voucher/details?promotionId={promotion}",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "fixo",
+                    "valor_desconto": 20},
+            evidencia={"association": "shopee-official-coupon-page",
+                       "promotion_id": promotion, "availability": "claimable"},
+        )
+
     def test_registry_resolve_a_loja(self):
         self.assertEqual(get_marketplace("shopee").slug, "shopee")
 
@@ -279,6 +297,53 @@ class MarketplaceShopeeTests(_BaseComIntegracao):
         loja = get_marketplace("shopee")
         self.assertFalse(loja.verify_affiliate_tag("https://shopee.com.br/produto-999"))
         self.assertTrue(loja.verify_affiliate_tag("https://s.shopee.com.br/xyz"))
+
+    def test_cupom_oficial_recebe_link_da_conta_do_usuario(self):
+        from apps.scrapers.ofertas import resolver_link_afiliado_cupom
+
+        cupom = self._cupom_oficial()
+        with patch("apps.scrapers.shopee.gerar_link",
+                   return_value="https://s.shopee.com.br/cupom123") as gerar:
+            primeiro = resolver_link_afiliado_cupom(cupom, self.usuario)
+            segundo = resolver_link_afiliado_cupom(cupom, self.usuario)
+
+        self.assertTrue(primeiro["sucesso"])
+        self.assertTrue(segundo["cache"])
+        gerar.assert_called_once()
+        self.assertIn(f"u{self.usuario.pk}", gerar.call_args.kwargs["sub_ids"])
+        self.assertTrue(LinkAfiliadoCupomUsuario.objects.get(
+            usuario=self.usuario, cupom=cupom,
+        ).verificado_ok)
+
+    def test_cupom_oficial_so_fica_ready_depois_do_link_da_conta(self):
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+        from apps.scrapers.ofertas import resolver_link_afiliado_cupom
+
+        cupom = self._cupom_oficial("456")
+        antes = projetar_disponibilidade_cupons(self.usuario)
+        self.assertEqual(antes["reasons"].get("affiliate_link_pending"), 1)
+
+        with patch("apps.scrapers.shopee.gerar_link",
+                   return_value="https://s.shopee.com.br/cupom456"):
+            self.assertTrue(
+                resolver_link_afiliado_cupom(cupom, self.usuario)["sucesso"],
+            )
+        depois = projetar_disponibilidade_cupons(self.usuario)
+        self.assertEqual(depois["stages"].get("ready"), 1)
+
+    def test_sem_integracao_cupom_oficial_explica_o_bloqueio(self):
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        self.integracao.status = "pendente"
+        self.integracao.save(update_fields=["status"])
+        self._cupom_oficial("789")
+
+        resultado = projetar_disponibilidade_cupons(self.usuario)
+
+        self.assertEqual(
+            resultado["reasons"].get("shopee_integration_disconnected"), 1,
+        )
+        self.assertIsNone(resultado["stages"].get("ready"))
 
     def test_falha_da_api_nao_marca_produto_como_inafiliavel(self):
         loja = get_marketplace("shopee")

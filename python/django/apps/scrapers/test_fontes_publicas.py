@@ -13,6 +13,9 @@ from django.test import TestCase
 from apps.scrapers.sources.promobit import PromobitSource
 from apps.scrapers.sources.registry import SOURCES
 from apps.scrapers.sources.telegram_publico import TelegramPublicoSource
+from apps.scrapers.sources.shopee_public_coupons import (
+    ShopeePublicCouponsSource, _parse_rendered_card, _snapshot_state,
+)
 
 TG_HTML = """
 <div class="tgme_widget_message" data-post="canalteste/376">
@@ -290,6 +293,7 @@ class RegistroDeFontesTests(TestCase):
     def test_as_duas_fontes_estao_registradas(self):
         self.assertIn("promobit-cupons", SOURCES)
         self.assertIn("telegram-publico", SOURCES)
+        self.assertIn("shopee-public-coupons", SOURCES)
 
     def test_precedencia_baixa_para_alegacao_de_terceiro(self):
         """Comunidade corrobora; não decide sozinha contra uma fonte oficial."""
@@ -322,6 +326,77 @@ class InventarioParcialTests(TestCase):
     def test_fonte_oficial_continua_cobrada_por_completude(self):
         """A página oficial ou lista tudo, ou está quebrada — e isso tem de aparecer."""
         self.assertTrue(SOURCES["ml-cupons-afiliados"].inventario_completo)
+
+
+class ShopeePublicCouponsTests(TestCase):
+    def _card(self, text, promotion="1496364873691136"):
+        return {
+            "text": text,
+            "href": (
+                "/voucher/details?evcode=MTIz&promotionId="
+                f"{promotion}&signature=publica"
+            ),
+        }
+
+    def test_parseia_voucher_fixo_disponivel(self):
+        row, reason = _parse_rendered_card(self._card(
+            "TODAS AS LOJAS\nR$20 OFF\nNas compras acima de R$159\n"
+            "Limitado a R$20\nCondicoes\nEu quero"
+        ))
+
+        self.assertEqual(reason, "")
+        self.assertEqual(row["discount_type"], "fixo")
+        self.assertEqual(row["discount"], 20)
+        self.assertEqual(row["minimum"], 159)
+        self.assertEqual(row["maximum"], 20)
+        self.assertIn("promotionId=1496364873691136", row["url"])
+
+    def test_parseia_percentual_e_milhar_brasileiro(self):
+        row, _ = _parse_rendered_card(self._card(
+            "MOVEIS\n12,5% OFF\nNas compras acima de R$1,6mil "
+            "Limitado a R$200\nCondicoes\nEu quero"
+        ))
+
+        self.assertEqual(row["discount_type"], "porcentagem")
+        self.assertEqual(row["discount"], 12.5)
+        self.assertEqual(row["minimum"], 1600)
+
+    def test_nao_confunde_cashback_com_desconto(self):
+        row, reason = _parse_rendered_card(self._card(
+            "CUPOM\n20% DE CASHBACK\nLimitado a R$20\nCondicoes\nEu quero"
+        ))
+
+        self.assertIsNone(row)
+        self.assertEqual(reason, "cashback_not_discount")
+
+    def test_esgotado_nao_entra(self):
+        row, reason = _parse_rendered_card(self._card(
+            "TODAS AS LOJAS\nR$20 OFF\nCondicoes\nEsgotado"
+        ))
+
+        self.assertIsNone(row)
+        self.assertEqual(reason, "unavailable")
+
+    def test_fonte_oficial_consume_slot_de_chromium(self):
+        self.assertTrue(ShopeePublicCouponsSource.requires_chromium)
+
+    def test_snapshot_esgotado_e_cashback_pode_ser_vazio_saudavel(self):
+        complete, health, schema_errors = _snapshot_state(
+            4, 0, {"unavailable": 3, "cashback_not_discount": 1},
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual(health, "healthy_empty")
+        self.assertEqual(schema_errors, 0)
+
+    def test_quebra_de_schema_preserva_catalogo_anterior(self):
+        complete, health, schema_errors = _snapshot_state(
+            5, 2, {"unavailable": 2, "missing_discount": 1},
+        )
+
+        self.assertFalse(complete)
+        self.assertEqual(health, "partial")
+        self.assertEqual(schema_errors, 1)
 
     def test_alerta_ignora_as_parciais(self):
         from apps.scrapers.maintenance import diagnosticar_alertas_pipeline_cupons

@@ -1223,6 +1223,82 @@ def resolver_link_afiliado_cupom(cupom, usuario):
         if str(destino or "").startswith("https://"):
             return {"sucesso": True, "link": destino}
         return {"sucesso": False, "motivo": "Cadastre sua tag Amazon para usar este cupom."}
+    if marketplace == "shopee":
+        from urllib.parse import urlsplit
+        from apps.scrapers.coupon_links import (
+            canonical_coupon_link, coupon_link_verified_and_fresh,
+        )
+        from apps.scrapers.shopee import (
+            ShopeeError, credenciais_da_integracao, gerar_link,
+        )
+
+        def _estado_shopee():
+            from apps.scrapers.models import IntegracaoAfiliado
+            integracao = IntegracaoAfiliado.objects.filter(
+                owner=usuario, provedor="shopee", habilitada=True,
+                status="conectada",
+            ).first()
+            cache = LinkAfiliadoCupomUsuario.objects.filter(
+                usuario=usuario, cupom=cupom,
+            ).first()
+            return integracao, cache
+
+        integracao, cache = _executar_orm(_estado_shopee)
+        marketplace_adapter = get_marketplace("shopee")
+        if cache and coupon_link_verified_and_fresh(cache) \
+                and marketplace_adapter.verify_affiliate_tag(
+                    cache.link_afiliado, usuario=usuario,
+                ):
+            return {
+                "sucesso": True, "link": canonical_coupon_link(cache),
+                "cache": True,
+            }
+        if not integracao:
+            return {
+                "sucesso": False,
+                "motivo": "Conecte sua conta de afiliado da Shopee para usar este cupom.",
+                "precisa_integracao_shopee": True,
+            }
+        destino = origem or "https://shopee.com.br/m/cupom-de-desconto"
+        try:
+            parts = urlsplit(destino)
+            hostname = (parts.hostname or "").casefold()
+        except ValueError:
+            hostname = ""
+        if not (
+            destino.startswith("https://")
+            and (hostname == "shopee.com.br" or hostname.endswith(".shopee.com.br"))
+        ):
+            return {"sucesso": False, "motivo": "Destino Shopee invalido para afiliacao."}
+        try:
+            app_id, secret = _executar_orm(credenciais_da_integracao, integracao)
+            link = gerar_link(
+                destino, app_id=app_id, secret=secret,
+                sub_ids=[f"u{usuario.pk}", "spreading", f"c{cupom.pk}"],
+            )
+        except ShopeeError as exc:
+            return {"sucesso": False, "motivo": exc.public_message}
+        if not marketplace_adapter.verify_affiliate_tag(link, usuario=usuario):
+            return {"sucesso": False,
+                    "motivo": "A Shopee nao confirmou a atribuicao do link."}
+
+        def _gravar_shopee():
+            from apps.accounts.models import organization_for_user
+            LinkAfiliadoCupomUsuario.objects.update_or_create(
+                usuario=usuario, cupom=cupom,
+                defaults={
+                    "organization": organization_for_user(usuario),
+                    "url_origem": destino, "link_afiliado": link,
+                    "afiliado_ok": True, "estado": "pronto",
+                    "verificado_ok": True, "verificado_em": timezone.now(),
+                    "url_canonica": link, "verificacao_motivo": "",
+                    "ultimo_erro": "", "ultima_tentativa": timezone.now(),
+                    "proxima_tentativa": None,
+                },
+            )
+
+        _executar_orm(_gravar_shopee)
+        return {"sucesso": True, "link": link, "cache": False}
     if marketplace != "mercadolivre":
         return {"sucesso": False,
                 "motivo": "Esta loja ainda não oferece link afiliado para cupons."}
@@ -1431,11 +1507,17 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         from apps.scrapers.coupon_rules import ativacao_publicavel
         destino = str(getattr(cupom, "link", "") or "")
         marketplace = str(getattr(cupom, "marketplace", "") or "").lower()
-        if (marketplace in {"shopee", "awin"}
+        if (marketplace == "awin"
                 and ativacao_publicavel(cupom, usuario=usuario)
                 and destino.startswith("https://")):
             modo_link_direto = True
             link_codigo = destino
+        elif marketplace == "shopee" and ativacao_publicavel(
+                cupom, usuario=usuario):
+            resolucao_shopee = resolver_link_afiliado_cupom(cupom, usuario)
+            if resolucao_shopee.get("sucesso"):
+                modo_link_direto = True
+                link_codigo = resolucao_shopee["link"]
         elif marketplace == "amazon" and ativacao_publicavel(cupom, usuario=usuario):
             from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_cupom
             destino_az = _executar_orm(gerar_link_afiliado_cupom, cupom, usuario)

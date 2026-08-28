@@ -28,7 +28,7 @@ from apps.scrapers.coupon_links import coupon_link_verified_and_fresh
 from apps.scrapers.maintenance import cupons_frescos_q
 from apps.scrapers.models import (
     CupomDisponibilidade, CupomDisponibilidadeEvento, CupomFonteObservacao,
-    CupomNormalizado,
+    CupomNormalizado, IntegracaoAfiliado,
     CupomPreparacao, LinkAfiliadoCupomUsuario, LinkAfiliadoUsuario,
 )
 
@@ -165,7 +165,7 @@ def _tem_link_de_aviso(usuario, marketplace) -> bool:
 
 
 def _codigo(cupom, usuario, conexao, *, links_codigo=None,
-            links_aviso_por_marketplace=None):
+            links_aviso_por_marketplace=None, shopee_conectada=False):
     codigo = codigo_publicavel(cupom)
     if not codigo:
         return None
@@ -249,6 +249,31 @@ def _codigo(cupom, usuario, conexao, *, links_codigo=None,
         if not link:
             return _resultado("waiting_link", "no_link", "affiliate_link_pending",
                               "Código válido; link afiliado ainda não foi preparado.")
+    if marketplace == "shopee":
+        link = (
+            links_codigo.get(cupom.pk)
+            if links_codigo is not None
+            else LinkAfiliadoCupomUsuario.objects.filter(
+                usuario=usuario, cupom=cupom,
+            ).exclude(link_afiliado="").first()
+        )
+        if coupon_link_verified_and_fresh(link):
+            return _resultado("ready")
+        if not shopee_conectada:
+            return _resultado(
+                "eligible", "no_session", "shopee_integration_disconnected",
+                "Conecte a conta de afiliado da Shopee para preparar o link.",
+            )
+        if link and link.verificado_ok is False:
+            return _resultado(
+                "waiting_link", "no_link", "affiliate_link_rejected",
+                link.verificacao_motivo or "A Shopee nao aprovou o link afiliado.",
+                link.proxima_tentativa,
+            )
+        return _resultado(
+            "waiting_link", "no_link", "affiliate_link_pending",
+            "Cupom valido; link afiliado Shopee ainda nao foi preparado.",
+        )
     if marketplace == "awin":
         return _resultado("ready" if _url_publica(cupom.link) else "waiting_link",
                           "" if _url_publica(cupom.link) else "no_link",
@@ -258,7 +283,8 @@ def _codigo(cupom, usuario, conexao, *, links_codigo=None,
 
 
 def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao, *,
-              ml_listing_tracking_available=None):
+              ml_listing_tracking_available=None, links_diretos=None,
+              shopee_conectada=False):
     marketplace = str(cupom.marketplace or "").lower()
     if (marketplace != "mercadolivre"
             and not coupon_mode_enabled(cupom, use_mode="product_activation")):
@@ -308,7 +334,26 @@ def _ativacao(cupom, usuario, preparadas, prontas, preparos, conexao, *,
         if tracking_available:
             return _resultado("ready")
 
-    if marketplace in {"shopee", "awin"}:
+    if marketplace == "shopee":
+        link = (
+            links_diretos.get(cupom.pk)
+            if links_diretos is not None
+            else LinkAfiliadoCupomUsuario.objects.filter(
+                usuario=usuario, cupom=cupom,
+            ).exclude(link_afiliado="").first()
+        )
+        if coupon_link_verified_and_fresh(link):
+            return _resultado("ready")
+        if not shopee_conectada:
+            return _resultado(
+                "eligible", "no_session", "shopee_integration_disconnected",
+                "Cupom oficial coletado; conecte a conta afiliada da Shopee.",
+            )
+        return _resultado(
+            "waiting_link", "no_link", "affiliate_link_pending",
+            "Cupom oficial coletado; link afiliado Shopee em preparacao.",
+        )
+    if marketplace == "awin":
         if cupom.integracao and not (
                 cupom.integracao.habilitada and cupom.integracao.status == "conectada"):
             return _resultado("eligible", "no_session", "integration_disconnected",
@@ -595,8 +640,15 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
     # A projeção reconcilia estado persistido; a sonda HTTP pertence ao worker
     # de conexão. Fazê-la aqui prendia todo o catálogo em rede a cada cache frio.
     conexao = conexao_ml(usuario, permitir_sonda=False)
-    codigos = [cupom for cupom in cupons if codigo_publicavel(cupom)]
-    links_codigo, links_aviso = _links_codigo_em_lote(usuario, codigos)
+    diretos = [
+        cupom for cupom in cupons
+        if codigo_publicavel(cupom)
+        or str(cupom.marketplace or "").lower() == "shopee"
+    ]
+    links_codigo, links_aviso = _links_codigo_em_lote(usuario, diretos)
+    shopee_conectada = IntegracaoAfiliado.objects.filter(
+        owner=usuario, provedor="shopee", habilitada=True, status="conectada",
+    ).exists()
     corroboracoes = corroboracoes_oficiais_em_lote(cupons)
     ml_tracking = None
     if any(
@@ -628,11 +680,14 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
                 _codigo(
                     cupom, usuario, conexao, links_codigo=links_codigo,
                     links_aviso_por_marketplace=links_aviso,
+                    shopee_conectada=shopee_conectada,
                 )
                 if use_mode == "code_notice"
                 else _ativacao(
                     cupom, usuario, preparadas, prontas, preparos, conexao,
                     ml_listing_tracking_available=ml_tracking,
+                    links_diretos=links_codigo,
+                    shopee_conectada=shopee_conectada,
                 )
             )
         planejadas.append((cupom, use_mode, outcome))

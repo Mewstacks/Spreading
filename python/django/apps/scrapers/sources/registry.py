@@ -13,6 +13,7 @@ from .ml_public_coupons import MLPublicCouponsSource
 from .ml_official_promotions import MLOfficialPromotionsSource
 from .promobit import PromobitSource
 from .shopee import ShopeeCampaignsSource, ShopeeOffersSource
+from .shopee_public_coupons import ShopeePublicCouponsSource
 from .telegram_publico import TelegramPublicoSource
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ SOURCES = {
     MLOfficialPromotionsSource.slug: MLOfficialPromotionsSource(),
     ShopeeOffersSource.slug: ShopeeOffersSource(),
     ShopeeCampaignsSource.slug: ShopeeCampaignsSource(),
+    ShopeePublicCouponsSource.slug: ShopeePublicCouponsSource(),
     # Promobit e Telegram são radares de descoberta. A prontidão exige
     # corroboração antes de qualquer publicação; ver coupon_rules.
     PromobitSource.slug: PromobitSource(),

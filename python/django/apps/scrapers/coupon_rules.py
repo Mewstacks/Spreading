@@ -657,6 +657,18 @@ def ativacao_publicavel(cupom, usuario=None) -> bool:
         return _ativacao_link_https_publicavel(
             cupom, regras, fonte_slug="awin-offers-api",
         )
+    if marketplace == "shopee":
+        evidence = getattr(cupom, "evidencia", {}) or {}
+        source = getattr(getattr(cupom, "fonte", None), "slug", "")
+        return bool(
+            source == "shopee-public-coupons"
+            and evidence.get("association") == "shopee-official-coupon-page"
+            and evidence.get("promotion_id")
+            and evidence.get("availability") == "claimable"
+            and _ativacao_link_https_publicavel(
+                cupom, regras, fonte_slug="shopee-public-coupons",
+            )
+        )
     if marketplace != "amazon":
         return False
     evidence = getattr(cupom, "evidencia", {}) or {}

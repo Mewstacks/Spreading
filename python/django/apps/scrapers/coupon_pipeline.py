@@ -56,6 +56,7 @@ def _usuarios_ativos(usuarios=None):
 # A página de cupons Amazon é Chromium. Rodá-la a cada 15 min disputa o slot
 # com preparo/links do ML; 6h mantém o catálogo fresco sem bloquear o funil.
 AMAZON_CUPONS_TTL_COLETA = timedelta(hours=6)
+SHOPEE_CUPONS_TTL_COLETA = timedelta(minutes=30)
 
 
 def _amazon_public_coupons_ainda_frescos() -> bool:
@@ -65,6 +66,19 @@ def _amazon_public_coupons_ainda_frescos() -> bool:
     if fonte is None or fonte.ultimo_sucesso is None:
         return False
     if timezone.now() - fonte.ultimo_sucesso > AMAZON_CUPONS_TTL_COLETA:
+        return False
+    return CupomNormalizado.objects.filter(
+        fonte=fonte, estado="ativo",
+    ).filter(cupons_frescos_q()).exists()
+
+
+def _shopee_public_coupons_ainda_frescos() -> bool:
+    from apps.scrapers.maintenance import cupons_frescos_q
+
+    fonte = FonteIngestao.objects.filter(slug="shopee-public-coupons").first()
+    if fonte is None or fonte.ultimo_sucesso is None:
+        return False
+    if timezone.now() - fonte.ultimo_sucesso > SHOPEE_CUPONS_TTL_COLETA:
         return False
     return CupomNormalizado.objects.filter(
         fonte=fonte, estado="ativo",
@@ -207,6 +221,17 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
     # publicar: coupon_rules exige corroboração independente antes da prontidão.
     _coletar_adaptador("promobit-cupons", resultado)
     _coletar_adaptador("telegram-publico", resultado, items=("offers", "coupons"))
+
+    # Inventario publico de vouchers de ativacao. A coleta usa o mesmo slot de
+    # Chromium das demais fontes, por isso o snapshot saudavel e reutilizado por
+    # 30 minutos; campanhas curtas continuam entrando no mesmo ciclo operacional.
+    if _shopee_public_coupons_ainda_frescos():
+        _fonte(
+            resultado, "shopee-public-coupons", status="skipped",
+            motivo="Catalogo publico ainda fresco; Chromium reservado para o funil.",
+        )
+    else:
+        _coletar_adaptador("shopee-public-coupons", resultado)
 
     if getattr(settings, "AMAZON_GENERAL_COUPONS_URL", ""):
         _coletar_adaptador("amazon-general-coupons", resultado)
@@ -362,15 +387,29 @@ def afiliar_cupons_de_codigo(usuario, cupons, *, limite=8):
     interrompe o lote em vez de gastar as tentativas restantes contra a mesma
     recusa.
     """
-    from apps.scrapers.coupon_rules import codigo_publicavel
+    from apps.scrapers.coupon_rules import (
+        aguarda_corroboracao_oficial, ativacao_publicavel, codigo_publicavel,
+    )
     from apps.scrapers.models import LinkAfiliadoCupomUsuario
     from apps.scrapers.ofertas import resolver_link_afiliado_cupom
 
-    candidatos = [
-        cupom for cupom in cupons
-        if str(cupom.marketplace or "").lower() == "mercadolivre"
-        and codigo_publicavel(cupom)
-    ]
+    shopee_conectada = IntegracaoAfiliado.objects.filter(
+        owner=usuario, provedor="shopee", habilitada=True, status="conectada",
+    ).exists()
+
+    candidatos = []
+    for cupom in cupons:
+        marketplace = str(cupom.marketplace or "").lower()
+        tem_codigo = bool(codigo_publicavel(cupom))
+        if tem_codigo and aguarda_corroboracao_oficial(cupom):
+            continue
+        if (
+            (marketplace == "mercadolivre" and tem_codigo)
+            or (marketplace == "shopee" and shopee_conectada and (
+                tem_codigo or ativacao_publicavel(cupom, usuario=usuario)
+            ))
+        ):
+            candidatos.append(cupom)
     if not candidatos:
         return {"gerados": 0, "falhas": 0, "pendentes": 0}
     from apps.scrapers.monitor_conexao import ml_conectado
@@ -400,10 +439,17 @@ def afiliar_cupons_de_codigo(usuario, cupons, *, limite=8):
     }
     com_cache = [c for c in pendentes if c.pk in cache_link_ids]
     sem_cache = [c for c in pendentes if c.pk not in cache_link_ids]
-    if not ml_conectado(usuario):
-        pendentes = com_cache
-    else:
-        pendentes = com_cache + sem_cache
+    sem_cache_ml = [
+        c for c in sem_cache
+        if str(c.marketplace or "").lower() == "mercadolivre"
+    ]
+    sem_cache_http = [
+        c for c in sem_cache
+        if str(c.marketplace or "").lower() != "mercadolivre"
+    ]
+    pendentes = com_cache + sem_cache_http
+    if ml_conectado(usuario):
+        pendentes += sem_cache_ml
 
     gerados = falhas = 0
     for cupom in pendentes[:max(0, limite)]:
