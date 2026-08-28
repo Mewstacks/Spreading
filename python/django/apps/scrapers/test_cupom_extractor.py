@@ -141,6 +141,21 @@ class RegraDeAceitacaoTests(TestCase):
         self.assertEqual([c["codigo"] for c in achados], ["F1MD03SQU3NT4"])
         self.assertEqual(achados[0]["minimo"], 79.0)
 
+    def test_fallback_nao_confunde_path_de_link_curto_com_codigo(self):
+        texto = (
+            "Cupom Shopee 50% OFF limite R$10: SP08T3AF "
+            "Resgate: https://s.shopee.com.br/1qU7Zs67MB "
+            "Carrinho: https://s.shopee.com.br/7plKiu5H62"
+        )
+        achados = extrair_deterministico(texto)
+        self.assertEqual([item["codigo"] for item in achados], ["SP08T3AF"])
+
+    def test_dominio_transcrito_pelo_modelo_nao_e_codigo(self):
+        self.assertEqual(_limpar({"cupons": [
+            {"codigo": "S.SHOPEE.COM.BR", "loja": "shopee",
+             "tipo": "porcentagem", "valor": 50},
+        ]}), [])
+
 
 @override_settings(ANTHROPIC_API_KEY="chave-de-teste", CUPOM_LLM_ATIVO=True)
 class ExtracaoTests(TestCase):

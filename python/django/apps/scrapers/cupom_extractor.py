@@ -87,6 +87,7 @@ _DESCONTO_PERCENTUAL = re.compile(r"(?<!\d)(\d{1,2})\s*%\s*(?:OFF)?", re.I)
 _DESCONTO_FIXO = re.compile(r"R\$\s*([\d.]+(?:,\d{1,2})?)\s*OFF", re.I)
 _DINHEIRO = re.compile(r"R\$\s*([\d.]+(?:,\d{1,2})?)", re.I)
 _TOKEN_CODIGO = re.compile(r"\b[A-Z0-9][A-Z0-9._-]{3,29}\b")
+_URL_NO_TEXTO = re.compile(r"https?://\S+", re.I)
 _NAO_CODIGOS = {
     "AMAZON", "MERCADO", "LIVRE", "SHOPEE", "CUPOM", "CUPONS", "VOUCHER",
     "DESCONTO", "DESCONTOS", "OFERTA", "OFERTAS", "PROMO", "PROMOCAO",
@@ -175,6 +176,8 @@ def codigo_plausivel(codigo: str) -> bool:
     value = str(codigo or "").strip().upper()
     if not _CODIGO_OK.match(value) or value in _NAO_CODIGOS:
         return False
+    if value.startswith(("HTTP", "WWW")) or value.endswith((".BR", ".COM")):
+        return False
     if value.isalpha() and len(value) < 7:
         return False
     return any(char.isalpha() for char in value)
@@ -194,21 +197,28 @@ def extrair_deterministico(texto: str, *, loja_padrao="") -> list[dict]:
     brutos = []
     linhas = [linha.strip() for linha in (texto or "").splitlines() if linha.strip()]
     for indice, linha in enumerate(linhas):
-        percentual = _DESCONTO_PERCENTUAL.search(linha)
-        fixo = _DESCONTO_FIXO.search(linha)
+        # A preview pode achatar mensagem e links numa linha. Retirar URLs antes
+        # do parser impede que o path curto seja confundido com código de cupom.
+        linha_parse = _URL_NO_TEXTO.sub(" ", linha)
+        percentual = _DESCONTO_PERCENTUAL.search(linha_parse)
+        fixo = _DESCONTO_FIXO.search(linha_parse)
         if not percentual and not fixo:
             continue
         # O código precisa ocupar uma posição explícita: depois de `:`/`-`, depois
         # da palavra cupom, ou na linha seguinte `Use o cupom: X`. Varrer a linha
         # inteira aceitava nome de produto como SMARTPHONE/MOTOROLA/100ML.
         fragmentos = []
-        if ":" in linha:
-            fragmentos.append(linha.rsplit(":", 1)[1])
-        depois_hifen = re.search(r"\)\s*[-–—]\s*(.+)$", linha)
+        fragmentos.extend(re.findall(
+            r":\s*([A-Z0-9][A-Z0-9._/-]{3,60})(?=\s|$|[,/])",
+            linha_parse, re.I,
+        ))
+        if ":" in linha_parse:
+            fragmentos.append(linha_parse.rsplit(":", 1)[1])
+        depois_hifen = re.search(r"\)\s*[-–—]\s*(.+)$", linha_parse)
         if depois_hifen:
             fragmentos.append(depois_hifen.group(1))
         cupom_inline = re.search(
-            r"\bcupom\s*:?[ \t]+([A-Z0-9][A-Z0-9._/-]{3,60})", linha, re.I,
+            r"\bcupom\s*:?[ \t]+([A-Z0-9][A-Z0-9._/-]{3,60})", linha_parse, re.I,
         )
         if cupom_inline:
             fragmentos.append(cupom_inline.group(1))
@@ -230,25 +240,25 @@ def extrair_deterministico(texto: str, *, loja_padrao="") -> list[dict]:
         valor = float(percentual.group(1)) if percentual else _dinheiro(fixo.group(1))
         if valor <= 0 or (tipo == "porcentagem" and valor >= 100):
             continue
-        valores = [_dinheiro(v) for v in _DINHEIRO.findall(linha)]
+        valores = [_dinheiro(v) for v in _DINHEIRO.findall(linha_parse)]
         minimo = 0.0
         teto = 0.0
         limite = re.search(
-            r"limite(?:\s+de)?\s+R\$\s*([\d.]+(?:,\d{1,2})?)", linha, re.I,
+            r"limite(?:\s+de)?\s+R\$\s*([\d.]+(?:,\d{1,2})?)", linha_parse, re.I,
         )
         if limite:
             teto = _dinheiro(limite.group(1))
         compra = re.search(
             r"(?:em|acima\s+de|compras?\s+(?:a\s+partir\s+)?de)\s+(?:R\$\s*)?"
-            r"([\d.]+(?:,\d{1,2})?)", linha, re.I,
+            r"([\d.]+(?:,\d{1,2})?)", linha_parse, re.I,
         )
         if compra:
             minimo = _dinheiro(compra.group(1))
         elif tipo == "fixo" and len(valores) > 1:
             minimo = valores[1]
         escopo = ""
-        if ":" in linha:
-            antes = linha.rsplit(":", 1)[0]
+        if ":" in linha_parse:
+            antes = linha_parse.rsplit(":", 1)[0]
             antes = _DESCONTO_PERCENTUAL.sub("", antes)
             antes = _DESCONTO_FIXO.sub("", antes)
             antes = re.sub(r"limite.*?(?=\bem\b|$)", "", antes, flags=re.I)
