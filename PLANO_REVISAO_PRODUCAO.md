@@ -49,6 +49,12 @@ das regras, velocidade de entrega e ausência de duplicatas.
 - [ ] **Ranking pela utilidade real:** ordenar por economia realmente observada,
   recência da confirmação, taxa de sucesso, aderência ao perfil e urgência, e não
   por comissão ou texto publicitário da fonte.
+- [ ] **Funil e conversão auditáveis:** atribuir 100% das publicações e links ao
+  usuário, destino, fonte, cupom, variante de mensagem e instante; reconciliar ao
+  menos 99% dos cliques/pedidos importados que tragam identificador suportado.
+  Testes A/B só declaram vencedor com amostra suficiente e devem buscar ganho
+  relativo de pelo menos 10% em CTR ou conversão sem piorar entrega, opt-out ou
+  precisão. Sem amostra, o placar diz “inconclusivo”, nunca “melhor”.
 - [ ] **Entrega superior no WhatsApp:** sustentar uma fila de ao menos 40 mensagens
   de cupom úteis por dia para cada marketplace, quando o inventário validado
   permitir, com limite configurável por usuário, segmentação por loja/categoria,
@@ -164,9 +170,17 @@ Fontes primárias consultadas:
   cupons-relâmpago roda a cada cinco minutos e leva cerca de 2,35 s; na amostra de
   28/08, a página oficial servia cinco campanhas de 08/06 já encerradas, todas
   rejeitadas sem apagar o catálogo anterior.
-- Snapshot `lules`/WhatsApp após o quarto deploy: 1.182 cupons frescos — 998
-  prontos, 173 comunitários aguardando validação, oito vouchers Shopee aguardando
-  integração própria e três descartes explícitos. A projeção levou 1,19 s.
+- Snapshot `lules`/WhatsApp em 28/08 às 18h02 BRT: 4.489 estados projetados. O ML
+  tinha 3.012 prontos e 138 comunitários retidos; a Amazon, quatro prontos e 44
+  retidos; a Shopee, 79 comunitários retidos e oito vouchers oficiais aguardando
+  integração própria. Havia 2.076 produtos frescos do ML, 754 da Amazon e 193 da
+  Shopee. Zero envio nas 24 horas anteriores confirmou que o WhatsApp desconectado
+  da conta `lules` é bloqueio real de conversão, e não falta de coleta.
+- Validação sem compra: ledger com constraint PostgreSQL `no_purchase`, RLS por
+  tenant, alvos por categoria e executor transacional. Em produção, 42 hipóteses
+  incompatíveis foram encerradas com evidência e 163 tentativas coerentes ficaram
+  na fila (37 Amazon e 126 ML). O executor evita trabalho duplicado, recupera worker
+  interrompido, preserva o carrinho auditado e recusa “aceito” sem redução monetária.
 - Mensagens: validade só aparece quando existe, desconto só é anunciado quando
   comprovado pelo histórico, selo relâmpago só aparece em oferta realmente marcada
   como relâmpago e campos configuráveis são escapados contra HTML/XSS.
@@ -174,7 +188,7 @@ Fontes primárias consultadas:
   `InitPlan` por consulta, em vez de ser recalculada para cada linha. O plano real
   do PostgreSQL de produção confirmou `InitPlan` e `One-Time Filter`; o isolamento
   e a assinatura HMAC permanecem obrigatórios para dados privados.
-- Testes automatizados: 1.304 testes Django e 169 testes Node aprovados; 24 testes
+- Testes automatizados: 1.318 testes Django e 169 testes Node aprovados; 24 testes
   direcionados de isolamento, permissões, CSRF, SQLi e XSS aprovados; nenhuma
   migração pendente e compilação limpa.
 - Auditoria de produção: papel runtime sem `SUPERUSER`, `BYPASSRLS` ou ownership
