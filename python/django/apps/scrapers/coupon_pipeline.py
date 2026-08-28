@@ -221,7 +221,12 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
     # Promobit e Telegram servem como radares comunitários. Encontrar não é
     # publicar: coupon_rules exige corroboração independente antes da prontidão.
     _coletar_adaptador("promobit-cupons", resultado)
-    _coletar_adaptador("telegram-publico", resultado, items=("offers", "coupons"))
+    # O ciclo de cupons nao resolve links de oferta: na medicao de producao, 124
+    # redirects custaram ~9s e geraram zero produto, enquanto os mesmos textos
+    # trouxeram 51 codigos. A coleta de ofertas segue disponivel sob demanda.
+    _coletar_adaptador(
+        "telegram-publico", resultado, items=("coupons",), include_offers=False,
+    )
 
     # Inventario publico de vouchers de ativacao. A coleta usa o mesmo slot de
     # Chromium das demais fontes, por isso o snapshot saudavel e reutilizado por

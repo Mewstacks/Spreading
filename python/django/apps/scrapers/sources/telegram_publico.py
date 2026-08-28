@@ -25,6 +25,7 @@ re-divulgar a mensagem original em tempo quase real. Esta fonte serve para o cat
 import html
 import logging
 import re
+import time
 from datetime import datetime, timezone as dt_timezone
 from concurrent.futures import ThreadPoolExecutor
 
@@ -43,6 +44,7 @@ _TIMEOUT = (4, 12)
 _REDIRECT_TIMEOUT = (3, 7)
 _REDIRECT_WORKERS = 16
 _CHANNEL_WORKERS = 6
+_PAGE_CACHE_TTL_SECONDS = 120
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
 
@@ -202,13 +204,15 @@ class TelegramPublicoSource(SourceAdapter):
         if not _HANDLE_OK.match(handle):
             logger.warning("Handle de canal recusado: %r", handle[:40])
             return ""
-        if handle in self._page_cache:
-            return self._page_cache[handle]
+        cached = self._page_cache.get(handle)
+        now = time.monotonic()
+        if cached and now - cached[0] < _PAGE_CACHE_TTL_SECONDS:
+            return cached[1]
         resposta = requests.get(
             f"{BASE}{handle}", timeout=_TIMEOUT, headers={"User-Agent": _UA},
         )
         corpo = resposta.text or "" if resposta.status_code == 200 else ""
-        self._page_cache[handle] = corpo
+        self._page_cache[handle] = (now, corpo)
         return corpo
 
     def _carregar_canais(self, handles):
@@ -239,7 +243,10 @@ class TelegramPublicoSource(SourceAdapter):
             post = ids[indice] if indice < len(ids) else ""
             yield post, _texto_limpo(bloco)
 
-    def discover_offers(self, canais=None, **kwargs):
+    def discover_offers(self, canais=None, include_offers=True, **kwargs):
+        if not include_offers:
+            self.last_metrics = {"offers_skipped": True, "complete": False}
+            return
         handles = self._canais(canais)
         agora = timezone.now()
         vistos = set()
@@ -413,4 +420,8 @@ class TelegramPublicoSource(SourceAdapter):
         }
 
     def healthcheck(self):
-        return {"ok": True, "status": "ok"}
+        return {
+            "ok": self.last_health_status == "healthy",
+            "status": self.last_health_status,
+            "metrics": self.last_metrics,
+        }

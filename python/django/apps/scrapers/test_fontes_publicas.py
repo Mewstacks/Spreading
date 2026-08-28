@@ -5,7 +5,7 @@ Um "de R$ 500 por R$ 99" escrito por um canal desconhecido, se entrasse como pre
 referência, produziria um desconto falso com a assinatura de quem publica. Por isso
 várias asserções aqui verificam o que a fonte NÃO faz.
 """
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import requests
 from django.test import TestCase
@@ -171,6 +171,27 @@ class TelegramPublicoTests(TestCase):
 
     def test_nao_pede_navegador(self):
         self.assertFalse(getattr(TelegramPublicoSource, "requires_chromium", False))
+
+    @patch("apps.scrapers.sources.telegram_publico.time.monotonic",
+           side_effect=[100, 110, 221])
+    @patch("apps.scrapers.sources.telegram_publico.requests.get")
+    def test_cache_expira_e_novas_mensagens_voltam_a_ser_lidas(self, get, _clock):
+        get.side_effect = [
+            Mock(status_code=200, text="primeira"),
+            Mock(status_code=200, text="segunda"),
+        ]
+        fonte = TelegramPublicoSource()
+
+        self.assertEqual(fonte._baixar("cupombr"), "primeira")
+        self.assertEqual(fonte._baixar("cupombr"), "primeira")
+        self.assertEqual(fonte._baixar("cupombr"), "segunda")
+        self.assertEqual(get.call_count, 2)
+
+    def test_ciclo_de_cupons_nao_resolve_ofertas_sem_uso(self):
+        fonte = TelegramPublicoSource()
+        with patch.object(fonte, "_carregar_canais") as carregar:
+            self.assertEqual(list(fonte.discover_offers(include_offers=False)), [])
+        carregar.assert_not_called()
 
 
 class PromobitTests(TestCase):
