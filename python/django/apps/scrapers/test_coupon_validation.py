@@ -135,3 +135,31 @@ class CouponValidationLedgerTests(TestCase):
         self.assertEqual(CupomValidacao.objects.count(), 1)
         self.assertEqual(CupomValidacao.objects.get().product_key, expensive.asin)
         self.assertEqual(second["reused"], 1)
+
+    def test_scheduler_respects_category_hint_in_the_code(self):
+        self.coupon.codigo = "LIVROS15"
+        self.coupon.regras = {**self.coupon.regras, "valor_minimo": 50}
+        self.coupon.save(update_fields=("codigo", "regras"))
+        CupomDisponibilidade.objects.create(
+            organization=organization_for_user(self.user), usuario=self.user,
+            cupom=self.coupon, channel="whatsapp", use_mode="code_notice",
+            stage="collected", category="waiting",
+            reason_code="community_uncorroborated",
+        )
+        Produto.objects.create(
+            marketplace="amazon", nome="Kit Starlink", preco_sem_desconto=500,
+            preco_com_cupom=450, preco_efetivo=450,
+            link_produto="https://www.amazon.com.br/dp/B000000003",
+            asin="B000000003",
+        )
+        book = Produto.objects.create(
+            marketplace="amazon", nome="Livro Engenharia de Software",
+            preco_sem_desconto=120, preco_com_cupom=90, preco_efetivo=90,
+            link_produto="https://www.amazon.com.br/dp/B000000004",
+            asin="B000000004", macro_categoria="Livros",
+        )
+
+        result = agendar_lote_validacao(self.user, limite=5)
+
+        self.assertEqual(result["scheduled"], 1)
+        self.assertEqual(CupomValidacao.objects.get().product_key, book.asin)

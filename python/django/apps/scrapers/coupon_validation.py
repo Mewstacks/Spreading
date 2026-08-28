@@ -8,6 +8,7 @@ suficiente para produzir um veredito aceito.
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
@@ -24,6 +25,20 @@ REJECTED_TTL_MINUTES = 30
 TERMINAL_REJECTIONS = frozenset({
     "invalid_code", "expired", "usage_exhausted", "promotion_ended",
 })
+_CATEGORY_HINTS = (
+    (("LIVRO", "LEIA", "KINDLE"), ("livro", "ebook", "kindle", "leitura")),
+    (("DECOR", "CASA"), ("decor", "casa", "moveis", "movel", "cama", "mesa", "banho")),
+    (("OBRA", "CONSTRO", "TOOLS", "FERRAMENT"),
+     ("construcao", "ferrament", "furadeira", "parafusadeira", "serra", "obra")),
+    (("PNEU", "AUTO"), ("pneu", "automot", "carro", "moto")),
+    (("TV", "CELULAR", "TECH", "ELETRON"),
+     ("tv", "televisor", "celular", "smartphone", "eletron", "informatica")),
+    (("PET",), ("pet", "cachorro", "gato", "racao")),
+    (("MODA", "ROUPA", "TENIS"), ("moda", "roupa", "tenis", "calcado")),
+    (("BELEZA", "MAKE", "COSMET"), ("beleza", "maquiagem", "cosmet", "perfume")),
+    (("ESPORTE", "FITNESS", "TREINO"), ("esporte", "fitness", "academia", "treino")),
+    (("BRINQUED", "BEBE"), ("brinqued", "bebe", "infantil")),
+)
 
 
 def _decimal(value):
@@ -31,6 +46,35 @@ def _decimal(value):
         return Decimal(str(value)).quantize(Decimal("0.01"))
     except (InvalidOperation, TypeError, ValueError):
         return None
+
+
+def _fold(value):
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    return "".join(char for char in normalized if not unicodedata.combining(char)).casefold()
+
+
+def target_terms(cupom):
+    rules = cupom.regras if isinstance(cupom.regras, dict) else {}
+    identity = _fold(" ".join((
+        str(cupom.codigo or ""), str(cupom.categoria or ""),
+        str(rules.get("container_name") or ""), str(rules.get("escopo") or ""),
+    ))).upper()
+    terms = set()
+    for triggers, candidates in _CATEGORY_HINTS:
+        if any(trigger in identity for trigger in triggers):
+            terms.update(candidates)
+    return tuple(sorted(terms))
+
+
+def target_matches_coupon(cupom, product):
+    terms = target_terms(cupom)
+    if not terms:
+        return True
+    haystack = _fold(" ".join((
+        str(product.nome or ""), str(product.nome_norm or ""),
+        str(product.categoria or ""), str(product.macro_categoria or ""),
+    )))
+    return any(term in haystack for term in terms)
 
 
 def cart_fingerprint(cupom, *, product_key="", cart_context=None):
@@ -194,6 +238,38 @@ def agendar_lote_validacao(usuario, *, limite=30, alvos_por_cupom=1,
     for product in products:
         by_marketplace.setdefault(product.marketplace, []).append(product)
 
+    # Fecha alvos evidentemente incompatíveis antes que um executor gaste sessão e
+    # Chromium neles. São hipóteses geradas por nós, não observações de checkout.
+    pending = list(CupomValidacao.objects.filter(
+        usuario=usuario, status="pending",
+    ).select_related("cupom"))
+    product_ids = {
+        (row.evidence.get("cart_context") or {}).get("product_id")
+        for row in pending if isinstance(row.evidence, dict)
+    }
+    products_by_id = {
+        product.pk: product for product in Produto.objects.filter(
+            pk__in={pk for pk in product_ids if pk},
+        )
+    }
+    invalid_pending = []
+    for row in pending:
+        product_id = (row.evidence.get("cart_context") or {}).get("product_id")
+        product = products_by_id.get(product_id)
+        if product is not None and not target_matches_coupon(row.cupom, product):
+            row.status = "inconclusive"
+            row.reason_code = "target_scope_mismatch"
+            row.safe_detail = "Produto-alvo incompatível com a categoria indicada pelo cupom."
+            row.verified_at = timezone.now()
+            row.retry_at = None
+            invalid_pending.append(row)
+    if invalid_pending:
+        CupomValidacao.objects.bulk_update(
+            invalid_pending,
+            ("status", "reason_code", "safe_detail", "verified_at", "retry_at"),
+            batch_size=200,
+        )
+
     scheduled = reused = no_target = 0
     now = timezone.now()
     for availability in availabilities:
@@ -206,6 +282,8 @@ def agendar_lote_validacao(usuario, *, limite=30, alvos_por_cupom=1,
         for product in by_marketplace.get(coupon.marketplace, []):
             price = _decimal(product.preco_efetivo or product.preco_com_cupom)
             if price is None or price <= 0 or price < minimum:
+                continue
+            if not target_matches_coupon(coupon, product):
                 continue
             candidates.append(product)
             if len(candidates) >= max(1, alvos_por_cupom):
@@ -247,4 +325,5 @@ def agendar_lote_validacao(usuario, *, limite=30, alvos_por_cupom=1,
         "reused": reused,
         "without_product_target": no_target,
         "candidates_seen": len(availabilities),
+        "invalid_targets_closed": len(invalid_pending),
     }
