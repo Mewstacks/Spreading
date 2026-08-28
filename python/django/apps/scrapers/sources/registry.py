@@ -12,6 +12,7 @@ from .community import PromobitSource as PromobitStub, PelandoSource
 from .ml_public_coupons import MLPublicCouponsSource
 from .ml_official_promotions import MLOfficialPromotionsSource
 from .ml_lightning_coupons import MLLightningCouponsSource
+from .meliuz_coupons import MeliuzCouponsSource
 from .promobit import PromobitSource
 from .shopee import ShopeeCampaignsSource, ShopeeOffersSource
 from .shopee_public_coupons import ShopeePublicCouponsSource
@@ -31,6 +32,7 @@ SOURCES = {
     MLPublicCouponsSource.slug: MLPublicCouponsSource(),
     MLOfficialPromotionsSource.slug: MLOfficialPromotionsSource(),
     MLLightningCouponsSource.slug: MLLightningCouponsSource(),
+    MeliuzCouponsSource.slug: MeliuzCouponsSource(),
     ShopeeOffersSource.slug: ShopeeOffersSource(),
     ShopeeCampaignsSource.slug: ShopeeCampaignsSource(),
     ShopeePublicCouponsSource.slug: ShopeePublicCouponsSource(),

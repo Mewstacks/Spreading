@@ -11,6 +11,7 @@ import requests
 from django.test import TestCase
 
 from apps.scrapers.sources.promobit import PromobitSource
+from apps.scrapers.sources.meliuz_coupons import MeliuzCouponsSource
 from apps.scrapers.sources.registry import SOURCES
 from apps.scrapers.sources.telegram_publico import TelegramPublicoSource
 from apps.scrapers.sources.shopee_public_coupons import (
@@ -83,6 +84,24 @@ PROMOBIT_NEXT = """
    "couponDiscountValue":"R$ 400 de Desconto","couponStatusName":"APPROVED"}
 ]}}}}
 </script>
+"""
+
+MELIUZ_HTML = """
+<div class="cpn-layout offer-cpn" data-offer-id="308750"
+ data-offer-code="JARDIM30" data-offer-title="Jardim com 30% OFF">
+ <span class="offer-cpn__offer-summary"><strong>30%</strong></span>
+ <div class="cpn-layout__rules" hidden>Em compras acima de R$200, limitado a R$80.</div>
+</div>
+<div class="cpn-layout offer-cpn" data-offer-id="308751"
+ data-offer-code="CUPOMNOLINK" data-offer-title="Veja o cupom no link">
+ <span class="offer-cpn__offer-summary"><strong>20%</strong></span>
+ <div class="cpn-layout__rules" hidden>Confira os produtos.</div>
+</div>
+<h2>Cupons expirados de Amazon</h2>
+<div class="cpn-layout offer-cpn" data-offer-id="antigo"
+ data-offer-code="VELHO50" data-offer-title="Cupom antigo">
+ <span class="offer-cpn__offer-summary"><strong>50%</strong></span>
+</div>
 """
 
 
@@ -310,9 +329,45 @@ class PromobitTests(TestCase):
         baixar.assert_not_called()
 
 
+class MeliuzCouponsTests(TestCase):
+    def _collect(self, body=MELIUZ_HTML):
+        source = MeliuzCouponsSource()
+        with patch.object(MeliuzCouponsSource, "_download", return_value=body):
+            items = list(source.discover_coupons(marketplaces=["amazon"]))
+        return source, items
+
+    def test_extracts_only_real_active_code(self):
+        source, items = self._collect()
+
+        self.assertEqual([item.coupon_code for item in items], ["JARDIM30"])
+        self.assertEqual(items[0].coupon_rules["valor_desconto"], 30)
+        self.assertEqual(items[0].coupon_rules["valor_minimo"], 200)
+        self.assertEqual(items[0].coupon_rules["desconto_maximo"], 80)
+        self.assertEqual(source.last_metrics["cards_seen"], 2)
+
+    def test_does_not_reuse_aggregator_affiliate_redirect(self):
+        _, items = self._collect()
+
+        self.assertEqual(items[0].canonical_url, "")
+        self.assertEqual(items[0].evidence["confianca_origem"], "comunidade")
+
+    def test_placeholder_and_expired_section_are_rejected(self):
+        source, _ = self._collect()
+
+        self.assertEqual(source.last_metrics["rejected_by_reason"]["placeholder_code"], 1)
+        self.assertNotIn("VELHO50", str(source.last_metrics))
+
+    def test_is_always_a_partial_radar(self):
+        source, _ = self._collect()
+
+        self.assertFalse(source.last_metrics["complete"])
+        self.assertEqual(source.last_health_status, "healthy")
+
+
 class RegistroDeFontesTests(TestCase):
     def test_as_duas_fontes_estao_registradas(self):
         self.assertIn("promobit-cupons", SOURCES)
+        self.assertIn("meliuz-cupons", SOURCES)
         self.assertIn("telegram-publico", SOURCES)
         self.assertIn("shopee-public-coupons", SOURCES)
         self.assertIn("ml-lightning-coupons", SOURCES)
@@ -323,7 +378,7 @@ class RegistroDeFontesTests(TestCase):
 
         oficial = _SOURCE_PRECEDENCE["ml-cupons-afiliados"]
         self.assertEqual(_SOURCE_PRECEDENCE["ml-lightning-coupons"], oficial)
-        for slug in ("promobit-cupons", "telegram-publico"):
+        for slug in ("promobit-cupons", "meliuz-cupons", "telegram-publico"):
             self.assertGreater(_SOURCE_PRECEDENCE[slug], oficial, slug)
 
     def test_esqueleto_antigo_do_promobit_continua_desabilitado(self):
@@ -344,6 +399,7 @@ class InventarioParcialTests(TestCase):
 
     def test_fontes_de_recorte_se_declaram_parciais(self):
         self.assertFalse(SOURCES["promobit-cupons"].inventario_completo)
+        self.assertFalse(SOURCES["meliuz-cupons"].inventario_completo)
         self.assertFalse(SOURCES["telegram-publico"].inventario_completo)
 
     def test_fonte_oficial_continua_cobrada_por_completude(self):

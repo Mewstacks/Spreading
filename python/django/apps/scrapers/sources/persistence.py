@@ -41,6 +41,7 @@ _SOURCE_PRECEDENCE = {
     # viu e para achar cupom que nos escapou — não para, sozinhas, mandar um
     # influenciador anunciar um código ao grupo dele.
     "promobit-cupons": 80,
+    "meliuz-cupons": 85,
     "telegram-publico": 90,
     "shopee-public-coupons": 10,
 }
