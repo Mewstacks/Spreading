@@ -127,6 +127,12 @@ class CouponValidationLedgerTests(TestCase):
             link_produto="https://www.amazon.com.br/dp/B000000002",
             asin="B000000002",
         )
+        self.coupon.evidencia = {
+            "confianca_origem": "comunidade",
+            "association": "same_source_item",
+            "product_ids": [expensive.asin],
+        }
+        self.coupon.save(update_fields=("evidencia",))
 
         first = agendar_lote_validacao(self.user, limite=5)
         second = agendar_lote_validacao(self.user, limite=5)
@@ -135,6 +141,26 @@ class CouponValidationLedgerTests(TestCase):
         self.assertEqual(CupomValidacao.objects.count(), 1)
         self.assertEqual(CupomValidacao.objects.get().product_key, expensive.asin)
         self.assertEqual(second["reused"], 1)
+
+    def test_scheduler_does_not_guess_a_product_for_generic_community_code(self):
+        CupomDisponibilidade.objects.create(
+            organization=organization_for_user(self.user), usuario=self.user,
+            cupom=self.coupon, channel="whatsapp", use_mode="code_notice",
+            stage="collected", category="waiting",
+            reason_code="community_uncorroborated",
+        )
+        Produto.objects.create(
+            marketplace="amazon", nome="Produto aleatório", preco_sem_desconto=200,
+            preco_com_cupom=180, preco_efetivo=180,
+            link_produto="https://www.amazon.com.br/dp/B000000099",
+            asin="B000000099",
+        )
+
+        result = agendar_lote_validacao(self.user, limite=5)
+
+        self.assertEqual(result["scheduled"], 0)
+        self.assertEqual(result["without_product_target"], 1)
+        self.assertFalse(CupomValidacao.objects.exists())
 
     def test_scheduler_respects_category_hint_in_the_code(self):
         self.coupon.codigo = "LIVROS15"

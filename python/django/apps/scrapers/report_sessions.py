@@ -143,3 +143,15 @@ def load_report_state(usuario, marketplace: str) -> dict | None:
         raise ValueError("sessão de relatórios ilegível; conecte novamente") from exc
 
     return state
+
+
+def delete_report_state(usuario, marketplace: str) -> None:
+    """Remove explicitamente a sessão e seu veredito lateral."""
+    for path in (
+        encrypted_state_path(usuario, marketplace),
+        _probe_path(usuario, marketplace),
+    ):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass

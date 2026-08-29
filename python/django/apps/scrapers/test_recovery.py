@@ -41,8 +41,8 @@ class ReportQueueTests(TestCase):
 class ReportSessionTests(TestCase):
     def test_amazon_session_is_isolated_and_decrypted_only_in_memory(self):
         from apps.scrapers.report_sessions import (
-            encrypted_state_path, has_report_session, load_report_state,
-            save_report_state,
+            delete_report_state, encrypted_state_path, has_report_session,
+            load_report_state, save_report_state,
         )
 
         first = get_user_model().objects.create_user("session-first", password="x")
@@ -59,6 +59,11 @@ class ReportSessionTests(TestCase):
             self.assertEqual(load_report_state(first, "amazon"), state)
             persisted = encrypted_state_path(first, "amazon").read_bytes()
             self.assertNotIn(b"opaque", persisted)
+            save_report_state(first, "amazon_shop", state)
+            self.assertTrue(has_report_session(first, "amazon_shop"))
+            delete_report_state(first, "amazon_shop")
+            self.assertFalse(has_report_session(first, "amazon_shop"))
+            self.assertTrue(has_report_session(first, "amazon"))
 
     def test_report_parser_marks_login_page_as_reconnect_required(self):
         from apps.scrapers.relatorios import ReportSyncActionRequired, _extract_table_rows

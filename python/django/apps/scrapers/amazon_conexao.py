@@ -1,4 +1,4 @@
-"""Live view para a sessão de relatórios da Amazon Associates.
+"""Live view para sessões Amazon Associates e da conta de compras.
 
 É deliberadamente separado da tag/Creators API: aquelas dão links e catálogo;
 esta sessão dá acesso ao portal de comissões. A senha é digitada na página real da
@@ -18,6 +18,7 @@ import logging
 import queue
 import threading
 import time
+from urllib.parse import urlsplit
 
 from django.core.cache import cache
 
@@ -37,37 +38,50 @@ logger = logging.getLogger(__name__)
 
 LOGIN_URL = "https://associados.amazon.com.br/"
 REPORT_URL = "https://associados.amazon.com.br/home/reports"
+SHOP_URL = "https://www.amazon.com.br/gp/css/homepage.html"
 _threads = {}
 _lock = threading.Lock()
 _transport = LiveTransport("amazon_associados")
+_shop_transport = LiveTransport("amazon_loja")
 
 
-def _key(user_id):
-    return f"amazon_report_conexao:{user_id}"
+def _key(user_id, shopper=False):
+    tipo = "shop" if shopper else "report"
+    return f"amazon_{tipo}_conexao:{user_id}"
 
 
-def _set(user_id, **values):
-    state = cache.get(_key(user_id)) or {}
+def _live_transport(shopper=False):
+    return _shop_transport if shopper else _transport
+
+
+def _session_provider(shopper=False):
+    return "amazon_shop" if shopper else "amazon"
+
+
+def _set(user_id, *, shopper=False, **values):
+    state = cache.get(_key(user_id, shopper)) or {}
     state.update(values)
     state["atualizado_em"] = time.time()
-    cache.set(_key(user_id), state, timeout=LOGIN_DEADLINE_S + 120)
+    cache.set(_key(user_id, shopper), state, timeout=LOGIN_DEADLINE_S + 120)
     if any(values.get(command) for command in ("cancelar", "salvar_agora")):
-        _transport.wake(user_id)
+        _live_transport(shopper).wake(user_id)
     return state
 
 
-def status(user_id):
-    state = cache.get(_key(user_id)) or {"fase": "idle"}
+def status(user_id, *, shopper=False):
+    state = cache.get(_key(user_id, shopper)) or {"fase": "idle"}
     from django.contrib.auth import get_user_model
     user = get_user_model().objects.filter(pk=user_id).first()
-    state["auth_valido"] = bool(user and has_report_session(user, "amazon"))
+    state["auth_valido"] = bool(
+        user and has_report_session(user, _session_provider(shopper))
+    )
     # Sem isto a tela nunca se autocorrigia: o poll não recebia session_id,
     # viewport nem estado do stream, então um badge errado ficava errado.
-    state.update(_transport.status(user_id))
+    state.update(_live_transport(shopper).status(user_id))
     return state
 
 
-def _logado(page) -> bool:
+def _logado(page, *, shopper=False) -> bool:
     """Só aceita uma rota interna autenticada, nunca a landing pública.
 
     A landing da Associates também usa o domínio ``associados.amazon.com.br``. A
@@ -79,6 +93,15 @@ def _logado(page) -> bool:
         value = (page.url or "").lower()
         if any(x in value for x in ("signin", "ap/signin", "login")):
             return False
+        if shopper:
+            host = urlsplit(value).hostname or ""
+            return (
+                (host == "amazon.com.br" or host.endswith(".amazon.com.br"))
+                and "/gp/css/homepage" in value
+                and page.locator(
+                    "input[type='password'], input[name*='password' i]",
+                ).count() == 0
+            )
         if "/home" not in value and "/reports" not in value:
             return False
         return page.locator("input[type='password'], input[name*='password' i]").count() == 0
@@ -89,7 +112,7 @@ def _logado(page) -> bool:
         return False
 
 
-def _abrir_login(page):
+def _abrir_login(page, *, shopper=False):
     """Navega até o login com uma 2ª tentativa — o mesmo tratamento do ML.
 
     Do IP de datacenter da Fly a Amazon também passa por gateway anti-bot e a
@@ -101,7 +124,10 @@ def _abrir_login(page):
 
     for tentativa in range(1, GOTO_TENTATIVAS + 1):
         try:
-            page.goto(LOGIN_URL, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
+            page.goto(
+                SHOP_URL if shopper else LOGIN_URL,
+                wait_until="commit", timeout=GOTO_TIMEOUT_MS,
+            )
             return
         except PlaywrightTimeoutError:
             logger.warning("Login Amazon: navegação estourou o tempo (tentativa %s/%s).",
@@ -116,17 +142,18 @@ def _abrir_login(page):
 # transaction.atomic(), deixando uma conexão `idle in transaction` enquanto o
 # usuário digita a senha.
 @organization_job_sem_transacao
-def _worker(user):
+def _worker(user, shopper=False):
     from playwright.sync_api import sync_playwright
     from apps.scrapers.contexto_login import (
         LAUNCH_ARGS, habilitar_foco, opcoes_de_contexto,
     )
 
     uid = user.id
-    runtime = _transport.get(uid) or _transport.create(uid)
+    transport = _live_transport(shopper)
+    runtime = transport.get(uid) or transport.create(uid)
     estado_capturado = None
     try:
-        _set(uid, fase="iniciando", erro="")
+        _set(uid, shopper=shopper, fase="iniciando", erro="")
         with interactive_browser_slot(), sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=LAUNCH_ARGS)
             try:
@@ -141,9 +168,9 @@ def _worker(user):
                 # Desafios da Amazon costumam abrir popup/nova aba. Sem seguir a
                 # aba ativa, o stream ficava preso na página antiga.
                 active_page = ActivePage(context, page, runtime)
-                _abrir_login(page)
-                _transport.capture(runtime, page, active=True)
-                _set(uid, fase="aguardando_login", erro="",
+                _abrir_login(page, shopper=shopper)
+                transport.capture(runtime, page, active=True)
+                _set(uid, shopper=shopper, fase="aguardando_login", erro="",
                      session_id=runtime.session_id, viewport=runtime.viewport)
                 deadline, logged = time.time() + LOGIN_DEADLINE_S, False
                 # O loop desperta no input para bombear frames e drenar a fila, mas
@@ -159,10 +186,10 @@ def _worker(user):
                 while time.time() < deadline:
                     agora = time.time()
                     if agora >= proxima_leitura:
-                        state = cache.get(_key(uid)) or {}
+                        state = cache.get(_key(uid, shopper)) or {}
                         proxima_leitura = agora + 0.5
                     if state.get("cancelar"):
-                        _set(uid, fase="idle", erro="")
+                        _set(uid, shopper=shopper, fase="idle", erro="")
                         break
                     current_page = active_page.current()
                     if current_page is None:
@@ -175,28 +202,30 @@ def _worker(user):
                             break
                         despachar_input(current_page, evento)
                         houve_input = True
-                    _transport.capture(runtime, current_page, active=houve_input)
+                    transport.capture(runtime, current_page, active=houve_input)
 
                     validacao_manual = bool(state.get("salvar_agora"))
                     if validacao_manual:
                         # O botão de salvar também valida a sessão na página que o
                         # sincronizador usará, sem depender da URL da landing.
-                        _set(uid, fase="validando", salvar_agora=False)
+                        _set(uid, shopper=shopper, fase="validando", salvar_agora=False)
                         state["salvar_agora"] = False
                         # Depois de navegar, confere já: é o momento em que o
                         # resultado muda.
                         proxima_checagem = 0.0
                         try:
-                            current_page.goto(REPORT_URL, wait_until="domcontentloaded",
+                            current_page.goto(
+                                SHOP_URL if shopper else REPORT_URL,
+                                wait_until="domcontentloaded",
                                               timeout=GOTO_TIMEOUT_MS)
-                            _transport.capture(runtime, current_page, active=True)
+                            transport.capture(runtime, current_page, active=True)
                         except Exception:
                             # Um "já entrei" prematuro (ou rede lenta) não pode
                             # encerrar a sessão: o usuário continua no login.
                             logger.warning(
                                 "Validação do login Amazon não navegou (user %s).",
                                 uid, exc_info=True)
-                            _set(uid, fase="aguardando_login",
+                            _set(uid, shopper=shopper, fase="aguardando_login",
                                  aviso="Ainda não foi possível confirmar o login. "
                                        "Conclua a etapa aberta e tente de novo.")
                     # `pode_inspecionar` adia a checagem enquanto o usuário digita: o
@@ -208,22 +237,23 @@ def _worker(user):
                         validacao_manual or pode_inspecionar(runtime)
                     ):
                         proxima_checagem = agora + 1.0
-                        if _logado(current_page):
+                        if _logado(current_page, shopper=shopper):
                             logged = True
                             logger.info(
-                                "ml_login_metric transport=amazon_associados user=%s "
-                                "validation=conectado", uid,
+                                "ml_login_metric transport=%s user=%s validation=conectado",
+                                "amazon_loja" if shopper else "amazon_associados", uid,
                             )
                             break
                     aguardar_atividade(current_page, runtime)
                 if logged:
-                    _set(uid, fase="salvando")
+                    _set(uid, shopper=shopper, fase="salvando")
                     # Só a leitura fica aqui. Gravar depois do bloco mantém o mesmo
                     # formato dos outros workers e garante que a fase só vire
                     # 'conectado' quando a sessão estiver de fato no disco.
                     estado_capturado = context.storage_state()
-                elif (cache.get(_key(uid)) or {}).get("fase") != "idle":
-                    _set(uid, fase="erro", erro="Tempo esgotado esperando o login da Amazon.")
+                elif (cache.get(_key(uid, shopper)) or {}).get("fase") != "idle":
+                    _set(uid, shopper=shopper, fase="erro",
+                         erro="Tempo esgotado esperando o login da Amazon.")
             finally:
                 # Em finally: solto no fim do bloco, o close nao era alcancado
                 # em nenhuma excecao e o Chromium ficava orfao.
@@ -234,20 +264,21 @@ def _worker(user):
                                    uid, exc_info=True)
 
         if estado_capturado is not None:
-            save_report_state(user, "amazon", estado_capturado)
-            _set(uid, fase="conectado", erro="", aviso="", salvar_agora=False)
+            save_report_state(user, _session_provider(shopper), estado_capturado)
+            _set(uid, shopper=shopper, fase="conectado", erro="", aviso="",
+                 salvar_agora=False)
     except Exception as exc:
         codigo = novo_codigo()
         logger.exception("Conexão Amazon falhou (user=%s codigo=%s)", uid, codigo)
-        _set(uid, fase="erro", codigo_erro=codigo,
+        _set(uid, shopper=shopper, fase="erro", codigo_erro=codigo,
              erro=mensagem_de_erro(exc, codigo, servico="A Amazon"))
     finally:
-        _transport.finish(uid, runtime)
+        transport.finish(uid, runtime)
         with _lock:
-            _threads.pop(uid, None)
+            _threads.pop((uid, shopper), None)
 
 
-def criar_sessao(user, client: dict | None = None):
+def criar_sessao(user, client: dict | None = None, *, shopper=False):
     from apps.accounts.feature_flags import enabled_for_user
     if not enabled_for_user("AMAZON_BROWSER_LOGIN_ENABLED", user):
         # Persistido, e não só retornado: o poll do front relê o cache e um estado
@@ -257,35 +288,38 @@ def criar_sessao(user, client: dict | None = None):
         # kill-switch: um problema no gateway da Amazon não tinha como ser contido
         # sem deploy.
         return {
-            **_set(user.id, fase="indisponivel", cancelar=False, salvar_agora=False,
+            **_set(user.id, shopper=shopper, fase="indisponivel", cancelar=False,
+                   salvar_agora=False,
                    erro="Login da Amazon por navegador está desativado para esta organização."),
             "auth_valido": False,
         }
     with _lock:
-        running = _threads.get(user.id)
+        thread_key = (user.id, shopper)
+        running = _threads.get(thread_key)
         if running and running.is_alive():
-            return status(user.id)
-        runtime = _transport.create(user.id, client)
-        _set(user.id, fase="iniciando", erro="", aviso="", cancelar=False,
+            return status(user.id, shopper=shopper)
+        runtime = _live_transport(shopper).create(user.id, client)
+        _set(user.id, shopper=shopper, fase="iniciando", erro="", aviso="",
+             cancelar=False,
              salvar_agora=False, session_id=runtime.session_id,
              viewport=runtime.viewport)
-        thread = threading.Thread(target=_worker, args=(user,), daemon=True)
-        _threads[user.id] = thread
+        thread = threading.Thread(target=_worker, args=(user, shopper), daemon=True)
+        _threads[thread_key] = thread
         thread.start()
-    return status(user.id)
+    return status(user.id, shopper=shopper)
 
 
-def frames(user_id, session_id=None):
-    yield from _transport.frames(user_id, session_id)
+def frames(user_id, session_id=None, *, shopper=False):
+    yield from _live_transport(shopper).frames(user_id, session_id)
 
 
-def enfileirar_input(user_id, session_id, eventos):
-    return _transport.enqueue(user_id, session_id, eventos)
+def enfileirar_input(user_id, session_id, eventos, *, shopper=False):
+    return _live_transport(shopper).enqueue(user_id, session_id, eventos)
 
 
-def salvar_agora(user_id):
-    _set(user_id, salvar_agora=True)
+def salvar_agora(user_id, *, shopper=False):
+    _set(user_id, shopper=shopper, salvar_agora=True)
 
 
-def cancelar(user_id):
-    _set(user_id, cancelar=True, fase="idle", erro="")
+def cancelar(user_id, *, shopper=False):
+    _set(user_id, shopper=shopper, cancelar=True, fase="idle", erro="")

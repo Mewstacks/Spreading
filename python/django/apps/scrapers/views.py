@@ -547,6 +547,7 @@ def amazon_painel(request):
         return redirect("scraper-amazon")
 
     from apps.scrapers.conexoes import estado_amazon_relatorios
+    from apps.scrapers.report_sessions import has_report_session
     sync = RelatorioSync.objects.filter(
         usuario=request.user, marketplace="amazon").first()
     fontes = FonteIngestao.objects.filter(
@@ -558,6 +559,7 @@ def amazon_painel(request):
         # como informação. Não pode voltar a virar requisito de conexão.
         "amazon_conectado": bool(perfil and perfil.amazon_conectado()),
         "amazon_creators_ativa": bool(perfil and perfil.amazon_creators_ativa()),
+        "amazon_shop_conectado": has_report_session(request.user, "amazon_shop"),
         "est_relatorios": estado_amazon_relatorios(request.user),
         "sync": sync,
         "fontes": fontes,
@@ -1141,6 +1143,86 @@ def amazon_conexao_input(request):
 
 
 # --- Conexão do portal de RELATÓRIOS do ML (afiliados), separada do site principal ---
+
+def amazon_shop_conexao_painel(request):
+    """Sessão da loja Amazon usada somente para validar cupom sem comprar."""
+    from apps.scrapers import amazon_conexao
+    return render(request, "scrapers/ml_conexao.html", {
+        "status": amazon_conexao.status(request.user.id, shopper=True),
+        "marketplace_nome": "Amazon Compras",
+        "conexao_prefix": "/scrapers/amazon-shop",
+        "checkout_validation": True, "marketplace_ml": False,
+    })
+
+
+@require_GET
+def amazon_shop_conexao_status_json(request):
+    from apps.scrapers import amazon_conexao
+    return JsonResponse(amazon_conexao.status(request.user.id, shopper=True))
+
+
+@require_POST
+def amazon_shop_conexao_start(request):
+    from apps.scrapers import amazon_conexao
+    import json
+    if len(request.body or b"") > 4096:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        client = json.loads((request.body or b"{}").decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(amazon_conexao.criar_sessao(
+        request.user, client, shopper=True,
+    ))
+
+
+@require_POST
+def amazon_shop_conexao_salvar(request):
+    from apps.scrapers import amazon_conexao
+    amazon_conexao.salvar_agora(request.user.id, shopper=True)
+    return JsonResponse(amazon_conexao.status(request.user.id, shopper=True))
+
+
+@require_POST
+def amazon_shop_conexao_cancelar(request):
+    from apps.scrapers import amazon_conexao
+    amazon_conexao.cancelar(request.user.id, shopper=True)
+    return JsonResponse({"ok": True})
+
+
+@require_POST
+def amazon_shop_conexao_desconectar(request):
+    from apps.scrapers import amazon_conexao
+    from apps.scrapers.report_sessions import delete_report_state
+    amazon_conexao.cancelar(request.user.id, shopper=True)
+    delete_report_state(request.user, "amazon_shop")
+    return JsonResponse({"ok": True})
+
+
+@throttle_sse(6)
+@require_GET
+def amazon_shop_conexao_frames(request):
+    from apps.scrapers import amazon_conexao
+    return _resposta_login_sse(amazon_conexao.frames(
+        request.user.id, request.GET.get("session_id"), shopper=True,
+    ))
+
+
+@require_POST
+def amazon_shop_conexao_input(request):
+    import json
+    from apps.scrapers import amazon_conexao
+    if len(request.body or b"") > 65536:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        payload = json.loads((request.body or b"").decode() or "{}")
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(amazon_conexao.enfileirar_input(
+        request.user.id, payload.get("session_id"), payload.get("events"),
+        shopper=True,
+    ))
+
 
 def ml_relatorio_conexao_painel(request):
     """Login interativo no portal de afiliados do ML, exclusivo para relatórios."""

@@ -21,6 +21,7 @@ from . import ml_auth
 
 logger = logging.getLogger(__name__)
 ML_CART_URL = "https://www.mercadolivre.com.br/gz/cart/v2"
+AMAZON_CART_URL = "https://www.amazon.com.br/gp/cart/view.html"
 _LOGIN_PATHS = ("/login", "/lgz/", "/registration", "loginhub")
 _CHALLENGE_MARKERS = (
     "/gz/account-verification", "captcha", "não sou um robô", "nao sou um robo",
@@ -54,6 +55,20 @@ def _valid_ml_product_url(value) -> bool:
         parsed.scheme == "https"
         and (host == "mercadolivre.com.br" or host.endswith(".mercadolivre.com.br"))
         and bool(parsed.path and parsed.path != "/")
+    )
+
+
+def _valid_amazon_product_url(value) -> bool:
+    try:
+        parsed = urlsplit(str(value or ""))
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    return (
+        parsed.scheme == "https"
+        and (host == "amazon.com.br" or host.endswith(".amazon.com.br"))
+        and bool(re.search(r"/(?:dp|gp/product|gp/aw/d)/[A-Z0-9]{10}(?:[/?]|$)",
+                           parsed.path, re.I))
     )
 
 
@@ -213,6 +228,244 @@ def _remove_target_from_cart(page, product_url) -> bool:
         except Exception:
             continue
     return False
+
+
+def _amazon_session_problem(url, body):
+    folded_url = _fold(url)
+    folded_body = _fold(body)
+    if any(marker in folded_url for marker in ("/ap/signin", "/ap/cvf", "/signin")):
+        return "session_expired"
+    if any(marker in folded_body for marker in (
+        "digite os caracteres que voce ve", "resolva este quebra-cabeca",
+        "insira os caracteres acima", "verificacao necessaria",
+    )):
+        return "challenge"
+    return ""
+
+
+def _amazon_cart_empty(body):
+    text = _fold(body)
+    if any(marker in text for marker in (
+        "seu carrinho da amazon esta vazio", "seu carrinho esta vazio",
+        "carrinho de compras esta vazio",
+    )):
+        return True
+    if any(marker in text for marker in (
+        "subtotal", "excluir", "salvar para mais tarde",
+    )) and _MONEY_RE.search(str(body or "")):
+        return False
+    return None
+
+
+def _open_amazon_cart(page):
+    page.goto(AMAZON_CART_URL, wait_until="domcontentloaded", timeout=45000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=8000)
+    except Exception:
+        pass
+    return _safe_body(page)
+
+
+def _remove_amazon_target(page, product_url) -> bool:
+    asin_match = re.search(
+        r"/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})(?:[/?]|$)",
+        str(product_url or ""), re.I,
+    )
+    asin = asin_match.group(1).upper() if asin_match else ""
+    scopes = []
+    if asin:
+        try:
+            row = page.locator(f'[data-asin="{asin}" i]').first
+            if row.count():
+                scopes.append(row)
+        except Exception:
+            pass
+    scopes.append(page.locator("body"))
+    selectors = (
+        'input[value="Excluir"]', 'input[aria-label*="excluir" i]',
+        'button:has-text("Excluir")', 'button:has-text("Remover")',
+        '[data-action="delete"] input',
+    )
+    for scope in scopes:
+        try:
+            target = _first_visible(scope, selectors)
+            if target is not None:
+                target.click(timeout=5000)
+                page.wait_for_timeout(800)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _observe_amazon_checkout(page, validation) -> ValidationObservation:
+    """Aplica o código na revisão da Amazon e nunca aciona pedido/pagamento."""
+    evidence = {
+        "no_purchase_boundary": True,
+        "isolated_empty_cart": False,
+        "checkout_review_only": False,
+        "address_changed": False,
+        "payment_submitted": False,
+        "order_created": False,
+        "place_order_clicked": False,
+        "cart_cleanup_attempted": False,
+        "cart_cleanup_verified": False,
+    }
+    initial_body = _open_amazon_cart(page)
+    problem = _amazon_session_problem(page.url, initial_body)
+    if problem:
+        return ValidationObservation(
+            status="inconclusive", reason_code=problem,
+            safe_detail="A sessão de compras da Amazon exige reconexão ou verificação.",
+            evidence=evidence,
+        )
+    empty = _amazon_cart_empty(initial_body)
+    if empty is not True:
+        return ValidationObservation(
+            status="inconclusive",
+            reason_code="cart_not_empty" if empty is False else "cart_layout_unknown",
+            safe_detail=(
+                "O carrinho precisa estar vazio para isolar o desconto do produto-alvo."
+                if empty is False else
+                "Não foi possível confirmar com segurança que o carrinho está vazio."
+            ), evidence=evidence,
+        )
+    evidence["isolated_empty_cart"] = True
+
+    page.goto(validation.product_url, wait_until="domcontentloaded", timeout=45000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=8000)
+    except Exception:
+        pass
+    product_body = _safe_body(page)
+    problem = _amazon_session_problem(page.url, product_body)
+    if problem:
+        return ValidationObservation(
+            status="inconclusive", reason_code=problem,
+            safe_detail="A página do produto exigiu reconexão ou verificação.",
+            evidence=evidence,
+        )
+    if not _click_first(page, (
+        '#add-to-cart-button', 'input[name="submit.add-to-cart"]',
+        'button[name="submit.add-to-cart"]',
+    )):
+        unavailable = any(marker in _fold(product_body) for marker in (
+            "nao disponivel", "indisponivel", "sem estoque",
+        ))
+        return ValidationObservation(
+            status="inconclusive",
+            reason_code="product_unavailable" if unavailable else "add_to_cart_control_missing",
+            safe_detail="Não foi possível adicionar o produto-alvo ao carrinho.",
+            evidence=evidence,
+        )
+
+    try:
+        page.wait_for_timeout(1200)
+        cart_body = _open_amazon_cart(page)
+        cart_total = _cart_total(cart_body)
+        if cart_total is None:
+            return ValidationObservation(
+                status="inconclusive", reason_code="cart_total_missing",
+                safe_detail="O total do carrinho não pôde ser medido.", evidence=evidence,
+            )
+
+        # Único passo permitido em direção ao checkout: abrir a revisão. Os
+        # seletores são IDs/names próprios do botão do carrinho e nunca casam
+        # Fazer pedido, Comprar agora, endereço ou pagamento.
+        if not _click_first(page, (
+            'input[name="proceedToRetailCheckout"]',
+            'button[name="proceedToRetailCheckout"]',
+            '#sc-buy-box-ptc-button input',
+        )):
+            return ValidationObservation(
+                status="inconclusive", reason_code="checkout_review_control_missing",
+                safe_detail="A revisão do pedido não pôde ser aberta com segurança.",
+                subtotal_before=cart_total, evidence=evidence,
+            )
+        page.wait_for_timeout(1500)
+        checkout_body = _safe_body(page)
+        problem = _amazon_session_problem(page.url, checkout_body)
+        if problem:
+            return ValidationObservation(
+                status="inconclusive", reason_code=problem,
+                safe_detail="A revisão da Amazon exigiu reconexão ou verificação.",
+                subtotal_before=cart_total, evidence=evidence,
+            )
+        evidence["checkout_review_only"] = True
+        before = _cart_total(checkout_body) or cart_total
+        coupon_input = _first_visible(page, (
+            'input[name="ppw-claimCode"]', 'input[name="claimCode"]',
+            '#spc-gcpromoinput', 'input[placeholder*="código promocional" i]',
+            'input[placeholder*="cupom" i]',
+        ))
+        if coupon_input is None:
+            return ValidationObservation(
+                status="inconclusive", reason_code="coupon_control_missing",
+                safe_detail="O campo de código promocional não apareceu na revisão.",
+                subtotal_before=before, evidence=evidence,
+            )
+        coupon_input.fill(str(validation.cupom.codigo or "").strip().upper())
+        applied = False
+        try:
+            form = coupon_input.locator("xpath=ancestor::form[1]")
+            applied = _click_first(form, (
+                'input[type="submit"]', 'button:has-text("Aplicar")',
+            ))
+        except Exception:
+            pass
+        if not applied:
+            applied = _click_first(page, (
+                'input[name="ppw-claimCodeApplyPressed"]',
+                'button:has-text("Aplicar")',
+            ))
+        if not applied:
+            return ValidationObservation(
+                status="inconclusive", reason_code="coupon_apply_control_missing",
+                safe_detail="O botão de aplicar o código não apareceu.",
+                subtotal_before=before, evidence=evidence,
+            )
+        page.wait_for_timeout(1800)
+        after_body = _safe_body(page)
+        after = _cart_total(after_body)
+        feedback = _coupon_feedback(after_body)
+        evidence["marketplace_feedback"] = feedback or "none"
+        evidence["monetary_transition_observed"] = bool(
+            after is not None and after < before
+        )
+        if after is not None and after < before:
+            return ValidationObservation(
+                status="accepted", reason_code="checkout_discount_observed",
+                safe_detail="O total da revisão caiu após aplicar o código.",
+                subtotal_before=before, subtotal_after=after, evidence=evidence,
+            )
+        if feedback in {
+            "expired", "usage_exhausted", "invalid_code", "minimum_not_met",
+            "target_not_eligible", "payment_method_required", "account_not_eligible",
+        }:
+            return ValidationObservation(
+                status="rejected", reason_code=feedback,
+                safe_detail="A Amazon recusou o código nesta revisão isolada.",
+                subtotal_before=before, subtotal_after=after, evidence=evidence,
+            )
+        return ValidationObservation(
+            status="inconclusive", reason_code="discount_not_observed",
+            safe_detail="Não houve redução monetária comprovável na revisão.",
+            subtotal_before=before, subtotal_after=after, evidence=evidence,
+        )
+    finally:
+        evidence["cart_cleanup_attempted"] = True
+        try:
+            _open_amazon_cart(page)
+            _remove_amazon_target(page, validation.product_url)
+            page.wait_for_timeout(500)
+            evidence["cart_cleanup_verified"] = (
+                _amazon_cart_empty(_safe_body(page)) is True
+            )
+        except Exception:
+            logger.warning(
+                "Falha ao conferir limpeza do carrinho na validação Amazon id=%s",
+                validation.pk,
+            )
 
 
 def _observe_ml_cart(page, validation) -> ValidationObservation:
@@ -415,4 +668,81 @@ def validate_mercadolivre(validation) -> ValidationObservation:
         )
 
 
-CHECKOUT_VALIDATION_ADAPTERS = {"mercadolivre": validate_mercadolivre}
+def validate_amazon(validation) -> ValidationObservation:
+    """Valida na revisão do pedido e sai antes de endereço/pagamento/pedido."""
+    code = str(getattr(validation.cupom, "codigo", "") or "").strip().upper()
+    if not code or len(code) > 60 or not _valid_amazon_product_url(validation.product_url):
+        return ValidationObservation(
+            status="inconclusive", reason_code="invalid_input",
+            safe_detail="Código ou URL de produto inválido para validação.",
+            evidence={"no_purchase_boundary": True},
+        )
+    from apps.scrapers.report_sessions import (
+        has_report_session, load_report_state, registrar_veredito, save_report_state,
+    )
+
+    if not has_report_session(validation.usuario, "amazon_shop"):
+        return ValidationObservation(
+            status="inconclusive", reason_code="session_required",
+            safe_detail="Conecte a conta de compras da Amazon para validar o código.",
+            evidence={"no_purchase_boundary": True},
+        )
+    try:
+        state = load_report_state(validation.usuario, "amazon_shop")
+    except ValueError:
+        registrar_veredito(
+            validation.usuario, "amazon_shop", "suspeito", "session_expired",
+        )
+        return ValidationObservation(
+            status="inconclusive", reason_code="session_expired",
+            safe_detail="A sessão de compras da Amazon está ilegível; reconecte.",
+            evidence={"no_purchase_boundary": True},
+        )
+    if state is None:
+        return ValidationObservation(
+            status="inconclusive", reason_code="session_required",
+            safe_detail="A sessão de compras da Amazon não está mais disponível.",
+            evidence={"no_purchase_boundary": True},
+        )
+    refreshed = None
+    try:
+        with coordinated_ml_browser(
+            usuario=validation.usuario, authenticated=True,
+            owner_kind="amazon_coupon_checkout_validation",
+        ), iniciar_browser(storage_state=state, headless=True) as (page, context):
+            observation = _observe_amazon_checkout(page, validation)
+            if observation.reason_code not in {"session_expired", "challenge"}:
+                refreshed = context.storage_state()
+        if refreshed is not None:
+            save_report_state(validation.usuario, "amazon_shop", refreshed)
+        if observation.reason_code == "session_expired":
+            registrar_veredito(
+                validation.usuario, "amazon_shop", "suspeito",
+                observation.reason_code,
+            )
+        elif observation.reason_code != "challenge":
+            # CAPTCHA não prova que os cookies morreram e não deve zerar nem somar
+            # o contador. Qualquer tela normal já demonstra que a sessão abriu.
+            registrar_veredito(
+                validation.usuario, "amazon_shop", "conectado",
+                observation.reason_code,
+            )
+        return observation
+    except BrowserResourceUnavailable:
+        return ValidationObservation(
+            status="inconclusive", reason_code="browser_busy",
+            safe_detail="O navegador compartilhado está ocupado; a fila tentará novamente.",
+            evidence={"no_purchase_boundary": True},
+        )
+    except BrowserError:
+        return ValidationObservation(
+            status="inconclusive", reason_code="browser_error",
+            safe_detail="O navegador não conseguiu observar a revisão da Amazon.",
+            evidence={"no_purchase_boundary": True},
+        )
+
+
+CHECKOUT_VALIDATION_ADAPTERS = {
+    "mercadolivre": validate_mercadolivre,
+    "amazon": validate_amazon,
+}

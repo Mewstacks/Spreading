@@ -83,6 +83,17 @@ def target_terms(cupom):
     return tuple(sorted(terms))
 
 
+def has_testable_target(cupom, *, codigos_contestados=None):
+    """Há um produto justificável para testar, em vez de escolher um ao acaso."""
+    evidence = cupom.evidencia if isinstance(cupom.evidencia, dict) else {}
+    if any(evidence.get(key) for key in ("product_ids", "asins", "item_ids")):
+        return True
+    if target_terms(cupom):
+        return True
+    from apps.scrapers.coupon_rules import site_wide_confiavel
+    return site_wide_confiavel(cupom, codigos_contestados=codigos_contestados)
+
+
 def target_matches_coupon(cupom, product):
     evidence = cupom.evidencia if isinstance(cupom.evidencia, dict) else {}
     explicit_ids = set()
@@ -339,6 +350,16 @@ def agendar_lote_validacao(usuario, *, limite=30, alvos_por_cupom=1,
             row.retry_at = None
             invalid_pending.append(row)
             continue
+        if not has_testable_target(row.cupom):
+            row.status = "inconclusive"
+            row.reason_code = "target_scope_missing"
+            row.safe_detail = (
+                "A fonte não associou o código a um produto, categoria ou site inteiro."
+            )
+            row.verified_at = timezone.now()
+            row.retry_at = None
+            invalid_pending.append(row)
+            continue
         product_id = (row.evidence.get("cart_context") or {}).get("product_id")
         product = products_by_id.get(product_id)
         if product is not None and not target_matches_coupon(row.cupom, product):
@@ -362,6 +383,9 @@ def agendar_lote_validacao(usuario, *, limite=30, alvos_por_cupom=1,
             break
         coupon = availability.cupom
         if not codigo_publicavel(coupon):
+            continue
+        if not has_testable_target(coupon):
+            no_target += 1
             continue
         rules = regras_do_cupom(coupon)
         minimum = _decimal(rules.get("valor_minimo")) or Decimal("0")

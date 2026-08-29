@@ -37,6 +37,13 @@ class LogadoResilienteTests(TestCase):
         page.url = "https://www.amazon.com.br/ap/signin?openid.mode=checkid_setup"
         self.assertFalse(amazon_conexao._logado(page))
 
+    def test_conta_de_compras_exige_rota_interna_da_loja(self):
+        page = self._PageLogada()
+        page.url = "https://www.amazon.com.br/gp/css/homepage.html"
+        self.assertTrue(amazon_conexao._logado(page, shopper=True))
+        page.url = "https://www.amazon.com.br/"
+        self.assertFalse(amazon_conexao._logado(page, shopper=True))
+
 
 class TransporteAmazonTests(TestCase):
     """A Amazon usa o MESMO transporte do ML: heartbeat, ACK e sessão."""
@@ -107,6 +114,11 @@ class AberturaDoLoginTests(TestCase):
         page = self._PageQueNavega()
         amazon_conexao._abrir_login(page)
         self.assertEqual(page.urls, [amazon_conexao.LOGIN_URL])
+
+    def test_modo_compras_abre_a_conta_da_loja(self):
+        page = self._PageQueNavega()
+        amazon_conexao._abrir_login(page, shopper=True)
+        self.assertEqual(page.urls, [amazon_conexao.SHOP_URL])
 
     def test_timeout_repetido_vira_erro_legivel_e_nao_nameerror(self):
         page = self._PageQueEstoura()

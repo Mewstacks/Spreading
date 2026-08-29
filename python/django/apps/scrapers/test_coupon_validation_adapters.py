@@ -5,8 +5,9 @@ from unittest.mock import patch
 from django.test import SimpleTestCase
 
 from apps.scrapers.coupon_validation_adapters import (
-    _cart_empty, _cart_total, _coupon_feedback, _observe_ml_cart, _session_problem,
-    _valid_ml_product_url, validate_mercadolivre,
+    _cart_empty, _cart_total, _coupon_feedback, _observe_amazon_checkout,
+    _observe_ml_cart, _session_problem, _valid_amazon_product_url,
+    _valid_ml_product_url, validate_amazon, validate_mercadolivre,
 )
 
 
@@ -98,6 +99,57 @@ class _FakePage:
         return _FakeLocator(self, selector, exists=exists)
 
 
+class _FakeAmazonLocator(_FakeLocator):
+    def click(self, timeout=None):
+        selector = self.selector.casefold()
+        self.page.clicked.append(selector)
+        if "add-to-cart" in selector:
+            self.page.added = True
+        elif "proceedtoretailcheckout" in selector:
+            self.page.url = "https://www.amazon.com.br/gp/buy/spc/handlers/display.html"
+        elif "submit" in selector or "aplicar" in selector:
+            self.page.applied = True
+        elif "excluir" in selector or "delete" in selector:
+            self.page.added = False
+
+    def locator(self, selector):
+        if selector.startswith("xpath=ancestor"):
+            return _FakeAmazonLocator(self.page, "form", exists=self.exists)
+        return self.page.locator(selector)
+
+
+class _FakeAmazonPage(_FakePage):
+    def body(self):
+        if "/gp/cart/" in self.url:
+            if not self.added:
+                return "Seu carrinho da Amazon está vazio"
+            return "Subtotal (1 produto)\nR$ 100,00\nExcluir"
+        if "/gp/buy/spc/" in self.url:
+            total = "R$ 80,00" if self.applied else "R$ 100,00"
+            feedback = "Código aplicado\n" if self.applied else ""
+            return f"Resumo do pedido\n{feedback}Total\n{total}"
+        return "Produto disponível"
+
+    def locator(self, selector):
+        folded = selector.casefold()
+        if selector == "body":
+            return _FakeAmazonLocator(self, selector, exists=True)
+        exists = False
+        if ("add-to-cart" in folded and "/dp/" in self.url):
+            exists = True
+        elif "proceedtoretailcheckout" in folded and self.added and "/gp/cart/" in self.url:
+            exists = True
+        elif ("claimcode" in folded or "gcpromoinput" in folded) and "/gp/buy/spc/" in self.url:
+            exists = True
+        elif ("submit" in folded or "aplicar" in folded) and "/gp/buy/spc/" in self.url:
+            exists = True
+        elif "data-asin" in folded and self.added:
+            exists = True
+        elif ("excluir" in folded or "data-action=\"delete\"" in folded) and self.added:
+            exists = True
+        return _FakeAmazonLocator(self, selector, exists=exists)
+
+
 class MercadoLivreCheckoutAdapterTests(SimpleTestCase):
     def test_accepts_only_mercadolivre_https_product_urls(self):
         self.assertTrue(_valid_ml_product_url(
@@ -170,3 +222,49 @@ class MercadoLivreCheckoutAdapterTests(SimpleTestCase):
             result = validate_mercadolivre(validation)
         state.assert_not_called()
         self.assertEqual(result.reason_code, "invalid_input")
+
+
+class AmazonCheckoutAdapterTests(SimpleTestCase):
+    def test_accepts_only_canonical_amazon_product_urls(self):
+        self.assertTrue(_valid_amazon_product_url(
+            "https://www.amazon.com.br/dp/B012345678?tag=minha-20",
+        ))
+        self.assertFalse(_valid_amazon_product_url(
+            "https://amazon.com.br.evil.test/dp/B012345678",
+        ))
+        self.assertFalse(_valid_amazon_product_url("http://amazon.com.br/dp/B012345678"))
+        self.assertFalse(_valid_amazon_product_url("https://amazon.com.br/ofertas"))
+
+    def test_review_observes_reduction_and_never_places_order(self):
+        page = _FakeAmazonPage()
+        validation = SimpleNamespace(
+            pk=10, cupom=SimpleNamespace(codigo="AMAZON20"),
+            product_url="https://www.amazon.com.br/dp/B012345678",
+        )
+
+        result = _observe_amazon_checkout(page, validation)
+
+        self.assertEqual(result.status, "accepted")
+        self.assertEqual(result.subtotal_before, Decimal("100.00"))
+        self.assertEqual(result.subtotal_after, Decimal("80.00"))
+        self.assertTrue(result.evidence["checkout_review_only"])
+        self.assertTrue(result.evidence["cart_cleanup_verified"])
+        self.assertFalse(result.evidence["place_order_clicked"])
+        self.assertFalse(page.added)
+        self.assertFalse(any(
+            marker in selector for selector in page.clicked
+            for marker in ("place-order", "fazer pedido", "comprar agora", "payment")
+        ))
+
+    @patch("apps.scrapers.report_sessions.has_report_session", return_value=False)
+    def test_missing_shopper_session_fails_closed(self, _session):
+        validation = SimpleNamespace(
+            usuario=SimpleNamespace(id=7), cupom=SimpleNamespace(codigo="AMAZON20"),
+            product_url="https://www.amazon.com.br/dp/B012345678",
+        )
+
+        result = validate_amazon(validation)
+
+        self.assertEqual(result.status, "inconclusive")
+        self.assertEqual(result.reason_code, "session_required")
+        self.assertTrue(result.evidence["no_purchase_boundary"])
