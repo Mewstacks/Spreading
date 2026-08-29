@@ -164,6 +164,37 @@ class CouponValidationLedgerTests(TestCase):
         self.assertEqual(result["scheduled"], 1)
         self.assertEqual(CupomValidacao.objects.get().product_key, book.asin)
 
+    def test_scheduler_uses_only_product_explicitly_associated_by_source(self):
+        self.coupon.evidencia = {
+            "confianca_origem": "comunidade",
+            "association": "same_public_telegram_message",
+            "product_ids": ["B000000011"],
+        }
+        self.coupon.save(update_fields=("evidencia",))
+        CupomDisponibilidade.objects.create(
+            organization=organization_for_user(self.user), usuario=self.user,
+            cupom=self.coupon, channel="whatsapp", use_mode="code_notice",
+            stage="collected", category="waiting",
+            reason_code="community_uncorroborated",
+        )
+        expected = Produto.objects.create(
+            marketplace="amazon", nome="Produto associado", preco_sem_desconto=200,
+            preco_com_cupom=180, preco_efetivo=180,
+            link_produto="https://www.amazon.com.br/dp/B000000011",
+            asin="B000000011",
+        )
+        Produto.objects.create(
+            marketplace="amazon", nome="Produto aleatorio", preco_sem_desconto=300,
+            preco_com_cupom=250, preco_efetivo=250,
+            link_produto="https://www.amazon.com.br/dp/B000000012",
+            asin="B000000012",
+        )
+
+        result = agendar_lote_validacao(self.user, limite=5)
+
+        self.assertEqual(result["scheduled"], 1)
+        self.assertEqual(CupomValidacao.objects.get().product_key, expected.asin)
+
     def test_scheduler_never_builds_cart_for_aggregator_placeholder(self):
         self.coupon.codigo = "RESGATENOLINK"
         self.coupon.save(update_fields=("codigo",))

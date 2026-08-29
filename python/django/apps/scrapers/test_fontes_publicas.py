@@ -206,6 +206,18 @@ class TelegramPublicoTests(TestCase):
         self.assertEqual(fonte._baixar("cupombr"), "segunda")
         self.assertEqual(get.call_count, 2)
 
+    def test_redirect_repetido_usa_cache_do_worker(self):
+        fonte = TelegramPublicoSource()
+        with patch(
+                "apps.scrapers.sources.telegram_publico.resolver",
+                return_value="https://www.amazon.com.br/dp/B012345678") as resolve:
+            primeira = fonte._resolver_lote(["https://amzn.to/exemplo"])
+            segunda = fonte._resolver_lote(["https://amzn.to/exemplo"])
+
+        self.assertEqual(primeira, segunda)
+        self.assertEqual(resolve.call_count, 1)
+        self.assertEqual(fonte._last_redirect_cache_hits, 1)
+
     def test_ciclo_de_cupons_nao_resolve_ofertas_sem_uso(self):
         fonte = TelegramPublicoSource()
         with patch.object(fonte, "_carregar_canais") as carregar:
@@ -232,6 +244,88 @@ class TelegramPublicoTests(TestCase):
 
         self.assertEqual([item.coupon_code for item in itens], ["REAL10"])
         self.assertEqual(fonte.last_metrics["codigos_ruidosos_descartados"], 1)
+
+    def test_cupom_guarda_asin_da_mesma_mensagem_sem_tracking(self):
+        fonte = TelegramPublicoSource()
+        mensagem = (
+            "20% OFF com cupom REAL20 "
+            "https://www.amazon.com.br/dp/B012345678?tag=canal-20&ref_=x"
+        )
+        cupom = [{
+            "codigo": "REAL20", "loja": "amazon", "tipo": "porcentagem",
+            "valor": 20, "minimo": 0, "teto": 0, "escopo": "",
+        }]
+        with patch.object(
+                fonte, "_carregar_canais",
+                return_value=[("canalteste", "html", "")]), patch.object(
+                fonte, "_mensagens", return_value=[("canalteste/1", mensagem)]), patch(
+                "apps.scrapers.sources.telegram_publico.extrair", return_value=cupom):
+            itens = list(fonte.discover_coupons(canais=["canalteste"]))
+
+        self.assertEqual(len(itens), 1)
+        self.assertEqual(itens[0].canonical_url,
+                         "https://www.amazon.com.br/dp/B012345678")
+        self.assertEqual(itens[0].evidence["asins"], ["B012345678"])
+        self.assertEqual(
+            itens[0].evidence["association"], "same_public_telegram_message",
+        )
+
+    def test_href_oculto_atras_de_comprar_tambem_associa_produto(self):
+        fonte = TelegramPublicoSource()
+        corpo = """
+        <div class="tgme_widget_message" data-post="canalteste/7">
+          <div class="tgme_widget_message_text js-message_text">
+            15% OFF cupom LINK15
+            <a href="https://www.amazon.com.br/dp/B012345679?tag=canal-20">COMPRAR</a>
+          </div>
+        </div>
+        """
+        cupom = [{
+            "codigo": "LINK15", "loja": "amazon", "tipo": "porcentagem",
+            "valor": 15, "minimo": 0, "teto": 0, "escopo": "",
+        }]
+        with patch.object(
+                fonte, "_carregar_canais",
+                return_value=[("canalteste", corpo, "")]), patch(
+                "apps.scrapers.sources.telegram_publico.extrair", return_value=cupom):
+            itens = list(fonte.discover_coupons(canais=["canalteste"]))
+
+        self.assertEqual(itens[0].evidence["asins"], ["B012345679"])
+        self.assertEqual(
+            itens[0].canonical_url, "https://www.amazon.com.br/dp/B012345679",
+        )
+
+    def test_cupom_mescla_produto_de_ocorrencia_posterior(self):
+        fonte = TelegramPublicoSource()
+        cupom = [{
+            "codigo": "REAL20", "loja": "mercadolivre",
+            "tipo": "porcentagem", "valor": 20, "minimo": 0,
+            "teto": 0, "escopo": "",
+        }]
+        mensagens = [
+            ("canalteste/1", "20% OFF cupom REAL20"),
+            ("canalteste/2", "20% OFF cupom REAL20 https://meli.la/abc123"),
+        ]
+        with patch.object(
+                fonte, "_carregar_canais",
+                return_value=[("canalteste", "html", "")]), patch.object(
+                fonte, "_mensagens", return_value=mensagens), patch(
+                "apps.scrapers.sources.telegram_publico.extrair", return_value=cupom), patch(
+                "apps.scrapers.sources.telegram_publico.resolver",
+                return_value="https://produto.mercadolivre.com.br/MLB-123456-produto?matt_tool=x"):
+            itens = list(fonte.discover_coupons(canais=["canalteste"]))
+
+        self.assertEqual(len(itens), 1)
+        self.assertEqual(itens[0].evidence["item_ids"], ["MLB123456"])
+        self.assertNotIn("?", itens[0].canonical_url)
+
+    def test_host_parecido_com_marketplace_nao_e_aceito(self):
+        corpo = TG_HTML.replace(
+            "https://www.amazon.com.br/dp/B0ABCDEFGH",
+            "https://amazon.com.br.evil.test/dp/B0ABCDEFGH",
+        )
+        _, itens = self._coletar(corpo=corpo)
+        self.assertEqual([item.marketplace for item in itens], ["mercadolivre"])
 
 
 class PromobitTests(TestCase):

@@ -28,6 +28,7 @@ import re
 import time
 from datetime import datetime, timezone as dt_timezone
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit
 
 import requests
 from django.utils import timezone
@@ -45,6 +46,7 @@ _REDIRECT_TIMEOUT = (3, 7)
 _REDIRECT_WORKERS = 16
 _CHANNEL_WORKERS = 6
 _PAGE_CACHE_TTL_SECONDS = 120
+_REDIRECT_CACHE_TTL_SECONDS = 3600
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
 
@@ -58,6 +60,9 @@ _BLOCO_MENSAGEM = re.compile(
 _POST_ID = re.compile(r'data-post="([^"]+)"')
 _TAG = re.compile(r"<[^>]+>")
 _QUEBRA = re.compile(r"<br\s*/?>", re.I)
+_ANCORA = re.compile(
+    r'<a\b[^>]*\bhref=["\'](https?://[^"\']+)["\'][^>]*>(.*?)</a>', re.I | re.S,
+)
 
 _URL = re.compile(r"https?://[^\s<>\"']+")
 _PRECO = re.compile(r"R\$\s*([\d.]+,\d{2}|\d+,\d{2}|\d+)")
@@ -68,7 +73,9 @@ _CUPOM = re.compile(
 )
 
 _LOJAS = (
-    ("mercadolivre", ("mercadolivre.com", "mercadolibre.com", "meli.la")),
+    ("mercadolivre", (
+        "mercadolivre.com.br", "mercadolivre.com", "mercadolibre.com", "meli.la",
+    )),
     ("amazon", ("amazon.com.br", "amzn.to", "amzn.eu")),
     ("shopee", ("shopee.com.br", "s.shopee.com.br", "shope.ee")),
 )
@@ -92,17 +99,101 @@ _E_PRODUTO = {
     "shopee": ("-i.", "/product/"),
 }
 
+_AMAZON_ASIN = re.compile(r"/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})(?:[/?#]|$)", re.I)
+_ML_ITEM = re.compile(r"(?<![A-Z0-9])MLB[-_ ]?(\d{5,})(?!\d)", re.I)
+_SHOPEE_ITEM = (
+    re.compile(r"/product/(\d+)/(\d+)(?:[/?#]|$)", re.I),
+    re.compile(r"-i\.(\d+)\.(\d+)(?:[/?#]|$)", re.I),
+)
+
+
+def _host_em(host: str, dominio: str) -> bool:
+    host = str(host or "").casefold().rstrip(".")
+    dominio = str(dominio or "").casefold().rstrip(".")
+    return bool(host and (host == dominio or host.endswith(f".{dominio}")))
+
 
 def _marketplace(url: str) -> str:
-    texto = str(url or "").lower()
+    try:
+        host = (urlsplit(str(url or "")).hostname or "").casefold()
+    except ValueError:
+        return ""
     for slug, dominios in _LOJAS:
-        if any(d in texto for d in dominios):
+        if any(_host_em(host, dominio) for dominio in dominios):
             return slug
     return ""
 
 
+def _produto_canonico(url: str, slug: str):
+    """Devolve URL sem tracking e ids apenas para PDP reconhecida da loja."""
+    try:
+        parsed = urlsplit(str(url or ""))
+    except ValueError:
+        return "", []
+    if parsed.scheme.casefold() != "https" or _marketplace(url) != slug:
+        return "", []
+    path = parsed.path or "/"
+    if slug == "amazon":
+        match = _AMAZON_ASIN.search(path)
+        if not match:
+            return "", []
+        asin = match.group(1).upper()
+        return f"https://www.amazon.com.br/dp/{asin}", [asin]
+    if slug == "mercadolivre":
+        match = _ML_ITEM.search(path)
+        if not match:
+            return "", []
+        item_id = f"MLB{match.group(1)}"
+        return f"https://produto.mercadolivre.com.br/MLB-{match.group(1)}", [item_id]
+    if slug == "shopee":
+        match = next(
+            (found for pattern in _SHOPEE_ITEM if (found := pattern.search(path))),
+            None,
+        )
+        if not match:
+            return "", []
+        shop_id, item_id = match.groups()
+        return (
+            f"https://shopee.com.br/product/{shop_id}/{item_id}",
+            [item_id, f"{shop_id}_{item_id}"],
+        )
+    return "", []
+
+
+def _produtos_da_mensagem(texto: str, destinos=None):
+    """Produtos citados na mesma mensagem, agrupados por marketplace."""
+    destinos = destinos or {}
+    encontrados = {}
+    for bruto in _URL.findall(texto or ""):
+        bruto = bruto.rstrip(").,;")
+        slug = _marketplace(bruto)
+        if not slug:
+            continue
+        destino = bruto
+        try:
+            host = urlsplit(bruto).hostname
+        except ValueError:
+            host = ""
+        if any(_host_em(host, dominio) for dominio in _ENCURTADORES):
+            destino = destinos.get(bruto, "")
+            slug = _marketplace(destino) or slug
+        canonical, ids = _produto_canonico(destino, slug)
+        if not canonical or not ids:
+            continue
+        bucket = encontrados.setdefault(slug, {"urls": set(), "ids": set()})
+        bucket["urls"].add(canonical)
+        bucket["ids"].update(ids)
+    return encontrados
+
+
 def _texto_limpo(bruto: str) -> str:
-    return html.unescape(_TAG.sub("", _QUEBRA.sub("\n", bruto))).strip()
+    # Muitos canais exibem apenas "COMPRAR"; sem preservar o href, o produto some
+    # da mensagem e um cupom real fica sem alvo verificável.
+    com_links = _ANCORA.sub(
+        lambda match: f"{match.group(2)} {html.unescape(match.group(1))}",
+        bruto,
+    )
+    return html.unescape(_TAG.sub("", _QUEBRA.sub("\n", com_links))).strip()
 
 
 def e_pagina_de_produto(url: str, slug: str) -> bool:
@@ -194,6 +285,8 @@ class TelegramPublicoSource(SourceAdapter):
         self.last_metrics = {}
         self.last_health_status = "unknown"
         self._page_cache = {}
+        self._redirect_cache = {}
+        self._last_redirect_cache_hits = 0
 
     def _canais(self, handles=None):
         if handles:
@@ -237,6 +330,26 @@ class TelegramPublicoSource(SourceAdapter):
         ) as executor:
             return list(executor.map(carregar, alvos))
 
+    def _resolver_lote(self, urls):
+        """Resolve cada encurtador no máximo uma vez por hora por worker."""
+        now = time.monotonic()
+        result = {}
+        missing = []
+        for url in urls:
+            cached = self._redirect_cache.get(url)
+            if cached and now - cached[0] < _REDIRECT_CACHE_TTL_SECONDS:
+                result[url] = cached[1]
+            else:
+                missing.append(url)
+        self._last_redirect_cache_hits = len(urls) - len(missing)
+        if missing:
+            with ThreadPoolExecutor(max_workers=_REDIRECT_WORKERS) as executor:
+                resolved = dict(zip(missing, executor.map(resolver, missing)))
+            for url, destination in resolved.items():
+                self._redirect_cache[url] = (now, destination)
+                result[url] = destination
+        return result
+
     def _mensagens(self, corpo):
         """(post_id, texto) das mensagens da prévia, na ordem em que aparecem."""
         ids = _POST_ID.findall(corpo)
@@ -277,8 +390,7 @@ class TelegramPublicoSource(SourceAdapter):
                 if any(d in bruto.lower() for d in _ENCURTADORES):
                     encurtados.append(bruto)
         unicos = list(dict.fromkeys(encurtados))
-        with ThreadPoolExecutor(max_workers=_REDIRECT_WORKERS) as executor:
-            destinos = dict(zip(unicos, executor.map(resolver, unicos)))
+        destinos = self._resolver_lote(unicos)
 
         for handle, post, texto in mensagens:
                 preco_alegado = 0.0
@@ -337,6 +449,7 @@ class TelegramPublicoSource(SourceAdapter):
             "descartados": dict(descartados),
             "redirects_total": len(unicos),
             "redirects_resolvidos": sum(bool(url) for url in destinos.values()),
+            "redirects_cache_hits": self._last_redirect_cache_hits,
             # Nunca "completo": a prévia mostra só as mensagens recentes, então
             # ausência aqui não prova que a oferta sumiu e não pode expirar catálogo.
             "complete": False,
@@ -365,9 +478,9 @@ class TelegramPublicoSource(SourceAdapter):
             re.sub(r"[^A-Z0-9]", "", handle.upper()) for handle in handles
         }
         agora = timezone.now()
-        vistos = set()
+        candidatos = {}
         lidos = falhas = sem_valor = codigos_handle = 0
-
+        mensagens = []
         for handle, corpo, _erro in self._carregar_canais(handles):
             if not corpo:
                 falhas += 1
@@ -376,58 +489,110 @@ class TelegramPublicoSource(SourceAdapter):
             for post, texto in self._mensagens(corpo):
                 if not parece_ter_cupom(texto):
                     continue
-                # A loja do link acompanha a leitura como dica: quando a mensagem não
-                # nomeia a loja, o domínio do link resolve. Código anunciado na loja
-                # errada é o cupom que "não funciona" na mão de quem publicou.
-                loja_do_link = ""
-                for bruto in _URL.findall(texto):
-                    loja_do_link = _marketplace(bruto)
-                    if loja_do_link:
-                        break
-                achados = extrair(texto, loja_padrao=loja_do_link)
-                if not achados:
-                    sem_valor += 1
+                mensagens.append((handle, post, texto))
+
+        mensagens_validas = []
+        for handle, post, texto in mensagens:
+            loja_do_link = ""
+            for bruto in _URL.findall(texto):
+                loja_do_link = _marketplace(bruto)
+                if loja_do_link:
+                    break
+            achados = extrair(texto, loja_padrao=loja_do_link)
+            validos = []
+            for cupom in achados:
+                normalized_code = re.sub(
+                    r"[^A-Z0-9]", "", str(cupom.get("codigo") or "").upper(),
+                )
+                if (not codigo_plausivel(cupom.get("codigo"))
+                        or normalized_code in handle_codes):
+                    codigos_handle += 1
                     continue
+                validos.append(cupom)
+            if validos:
+                mensagens_validas.append((handle, post, texto, validos))
+            else:
+                sem_valor += 1
+
+        encurtados = []
+        for _handle, _post, texto, _cupons in mensagens_validas:
+            for bruto in _URL.findall(texto):
+                bruto = bruto.rstrip(").,;")
+                try:
+                    host = urlsplit(bruto).hostname
+                except ValueError:
+                    host = ""
+                if any(_host_em(host, dominio) for dominio in _ENCURTADORES):
+                    encurtados.append(bruto)
+        unicos = list(dict.fromkeys(encurtados))
+        destinos = self._resolver_lote(unicos)
+
+        for handle, post, texto, achados in mensagens_validas:
+                produtos = _produtos_da_mensagem(texto, destinos)
                 for cupom in achados:
-                    normalized_code = re.sub(
-                        r"[^A-Z0-9]", "", str(cupom.get("codigo") or "").upper(),
-                    )
-                    if (not codigo_plausivel(cupom.get("codigo"))
-                            or normalized_code in handle_codes):
-                        codigos_handle += 1
-                        continue
                     chave = f"telegram:{cupom['loja']}:{cupom['codigo']}"
-                    if chave in vistos:
-                        continue
-                    vistos.add(chave)
-                    regras = normalizar_regras_cupom({
-                        "tipo_desconto": cupom["tipo"],
-                        "valor_desconto": cupom["valor"],
-                        "valor_minimo": cupom["minimo"],
-                        "modo_resgate": "codigo",
-                        "escopo": cupom["escopo"],
-                    }, external_id=chave, codigo=cupom["codigo"])
-                    yield IngestedItem(
-                        external_id=chave[:160], marketplace=cupom["loja"],
-                        source=self.slug, kind="coupon", canonical_url="",
-                        title=f"Cupom {cupom['codigo']}"[:255],
-                        coupon_code=cupom["codigo"][:120], coupon_rules=regras,
-                        content_type="voucher", observed_at=agora,
-                        evidence={
-                            "transport": "telegram-preview-llm",
-                            "canal": handle,
-                            "post": post,
-                            "confianca_origem": "comunidade",
-                            "teto_desconto": cupom["teto"],
+                    registro = candidatos.get(chave)
+                    if registro is None:
+                        regras = normalizar_regras_cupom({
+                            "tipo_desconto": cupom["tipo"],
+                            "valor_desconto": cupom["valor"],
+                            "valor_minimo": cupom["minimo"],
+                            "modo_resgate": "codigo",
+                            "escopo": cupom["escopo"],
+                        }, external_id=chave, codigo=cupom["codigo"])
+                        registro = candidatos[chave] = {
+                            "cupom": cupom, "regras": regras, "urls": set(),
+                            "ids": set(), "canais": set(), "posts": [],
                             "trecho": texto[:300],
-                        },
-                    )
+                        }
+                    referencia = produtos.get(cupom["loja"], {})
+                    registro["urls"].update(referencia.get("urls") or set())
+                    registro["ids"].update(referencia.get("ids") or set())
+                    registro["canais"].add(handle)
+                    if post and len(registro["posts"]) < 5:
+                        registro["posts"].append(post)
+
+        for chave, registro in candidatos.items():
+            cupom = registro["cupom"]
+            urls = sorted(registro["urls"])
+            ids = sorted(registro["ids"])
+            evidence = {
+                "transport": "telegram-preview-parser",
+                "canal": sorted(registro["canais"])[0],
+                "canais": sorted(registro["canais"])[:5],
+                "posts": registro["posts"],
+                "confianca_origem": "comunidade",
+                "teto_desconto": cupom["teto"],
+                "trecho": registro["trecho"],
+            }
+            if ids:
+                evidence.update({
+                    "association": "same_public_telegram_message",
+                    "product_ids": ids,
+                })
+                if cupom["loja"] == "amazon":
+                    evidence["asins"] = ids
+                else:
+                    evidence["item_ids"] = ids
+            yield IngestedItem(
+                external_id=chave[:160], marketplace=cupom["loja"],
+                source=self.slug, kind="coupon",
+                canonical_url=(urls[0] if urls else ""),
+                title=f"Cupom {cupom['codigo']}"[:255],
+                coupon_code=cupom["codigo"][:120],
+                coupon_rules=registro["regras"], content_type="voucher",
+                observed_at=agora, evidence=evidence,
+            )
         self.last_health_status = "healthy" if lidos else "degraded"
         self.last_metrics = {
             **self.last_metrics,
             "canais_lidos": lidos,
             "canais_falhos": falhas,
-            "cupons": len(vistos),
+            "cupons": len(candidatos),
+            "cupons_com_produto": sum(bool(row["ids"]) for row in candidatos.values()),
+            "redirects_cupom_total": len(unicos),
+            "redirects_cupom_resolvidos": sum(bool(url) for url in destinos.values()),
+            "redirects_cupom_cache_hits": self._last_redirect_cache_hits,
             "sem_cupom_legivel": sem_valor,
             "codigos_ruidosos_descartados": codigos_handle,
             # Nunca completo: a prévia mostra só as mensagens recentes.

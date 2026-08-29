@@ -133,6 +133,9 @@ class ShopeeOffersSource(_ShopeeSourceBase):
                     observed_at=agora,
                     evidence={
                         "transport": "shopee-affiliate-api",
+                        "shop_id": loja_id,
+                        "item_id": item_id,
+                        "product_id": chave,
                         "shop_name": str(no.get("shopName") or "")[:180],
                         "commission_rate": _decimal(no.get("commissionRate")),
                         "sales": int(_decimal(no.get("sales"))),

@@ -84,6 +84,39 @@ def target_terms(cupom):
 
 
 def target_matches_coupon(cupom, product):
+    evidence = cupom.evidencia if isinstance(cupom.evidencia, dict) else {}
+    explicit_ids = set()
+    for key in ("product_ids", "asins", "item_ids"):
+        values = evidence.get(key) or []
+        if isinstance(values, str):
+            values = re.split(r"[,;\s]+", values)
+        if isinstance(values, (list, tuple, set)):
+            explicit_ids.update(
+                str(value).strip().upper()
+                for value in values if str(value).strip()
+            )
+    if explicit_ids:
+        product_ids = {str(product.asin or "").strip().upper()}
+        product_evidence = product.evidencia if isinstance(product.evidencia, dict) else {}
+        for key in ("product_id", "item_id", "external_id"):
+            value = str(product_evidence.get(key) or "").strip().upper()
+            if value:
+                product_ids.add(value)
+        url = str(product.link_produto or "")
+        product_ids.update(
+            match.upper().replace("-", "")
+            for match in re.findall(r"MLB-?\d{5,}", url, re.I)
+        )
+        shopee = re.search(
+            r"(?:/product/|-i\.)(\d+)[/.](\d+)(?:[/?#]|$)", url, re.I,
+        )
+        if shopee:
+            product_ids.update((
+                shopee.group(2), f"{shopee.group(1)}_{shopee.group(2)}",
+            ))
+        product_ids.discard("")
+        return bool(explicit_ids & product_ids)
+
     terms = target_terms(cupom)
     if not terms:
         return True
