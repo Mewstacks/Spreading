@@ -5,6 +5,7 @@ import re
 STRICT_TENANT_TABLES = (
     "accounts_perfil",
     "accounts_mercadolivresession",
+    "accounts_browsersession",
     "accounts_whatsappconnection",
     "accounts_organizationfeatureoverride",
     "scrapers_integracaoafiliado",

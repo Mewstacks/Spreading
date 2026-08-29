@@ -22,3 +22,17 @@ class EncryptedCharField(models.CharField):
     def get_prep_value(self, value):
         value = super().get_prep_value(value)
         return crypto.encrypt(value) if value else value
+
+
+class EncryptedTextField(models.TextField):
+    """TextField cifrado para payloads maiores, como storage_state do browser."""
+
+    def from_db_value(self, value, expression, connection):
+        return crypto.decrypt(value) if value is not None else value
+
+    def to_python(self, value):
+        return crypto.decrypt(value) if isinstance(value, str) else value
+
+    def get_prep_value(self, value):
+        value = super().get_prep_value(value)
+        return crypto.encrypt(value) if value else value

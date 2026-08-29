@@ -191,7 +191,10 @@ def _rodar_cupons(lote=40):
     # dos links. O adaptador só usa a sessão do próprio usuário, isola um carrinho
     # vazio e nunca avança para checkout/pagamento.
     from apps.scrapers.coupon_validation_adapters import CHECKOUT_VALIDATION_ADAPTERS
-    from apps.scrapers.coupon_validation_runner import run_validation_batch
+    from apps.scrapers.coupon_validation_runner import (
+        defer_missing_checkout_sessions, run_validation_batch,
+    )
+    resultado["validacoes_sem_sessao"] = defer_missing_checkout_sessions()
     resultado["validacoes_checkout"] = run_validation_batch(
         adapters=CHECKOUT_VALIDATION_ADAPTERS, limit=2,
     )

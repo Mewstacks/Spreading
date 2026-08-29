@@ -13,6 +13,7 @@ from typing import Callable, Mapping
 
 from django.db import transaction
 from django.db.models import Q
+from django.db.models import F
 from django.utils import timezone
 
 from .coupon_validation import registrar_resultado
@@ -34,6 +35,47 @@ class ValidationObservation:
 
 
 Validator = Callable[[CupomValidacao], ValidationObservation]
+
+
+def _checkout_session_available(user, marketplace):
+    if marketplace == "mercadolivre":
+        from apps.accounts.ml_sessions import has_storage_state
+        return has_storage_state(user)
+    if marketplace == "amazon":
+        from apps.scrapers.report_sessions import has_report_session
+        return has_report_session(user, "amazon_shop")
+    return True
+
+
+def defer_missing_checkout_sessions(*, now=None):
+    """Retira em lote da cabeça da fila quem exige login humano ausente."""
+    from django.contrib.auth import get_user_model
+
+    now = now or timezone.now()
+    retry_at = now + timezone.timedelta(hours=6)
+    pairs = list(CupomValidacao.objects.filter(
+        status="pending", marketplace__in=("mercadolivre", "amazon"),
+    ).values_list("usuario_id", "marketplace").distinct())
+    users = {
+        user.id: user for user in get_user_model().objects.filter(
+            id__in={user_id for user_id, _ in pairs}, is_active=True,
+        )
+    }
+    deferred = {}
+    for user_id, marketplace in pairs:
+        user = users.get(user_id)
+        if user is None or _checkout_session_available(user, marketplace):
+            continue
+        count = CupomValidacao.objects.filter(
+            usuario_id=user_id, marketplace=marketplace, status="pending",
+        ).update(
+            status="inconclusive", reason_code="session_required",
+            safe_detail="Conecte a conta da loja para validar no carrinho.",
+            verified_at=now, retry_at=retry_at, started_at=None,
+            attempts=F("attempts") + 1, no_purchase=True,
+        )
+        deferred[marketplace] = deferred.get(marketplace, 0) + count
+    return deferred
 
 
 def claim_pending_validations(*, marketplaces, limit=3, now=None):

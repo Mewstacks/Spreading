@@ -4,7 +4,7 @@ from unittest.mock import patch
 from unittest.mock import MagicMock
 
 from django.contrib.auth import get_user_model
-from django.db import OperationalError
+from django.db import OperationalError, connection
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
@@ -57,13 +57,64 @@ class ReportSessionTests(TestCase):
             self.assertFalse(has_report_session(second, "amazon"))
             self.assertNotEqual(encrypted_state_path(first, "amazon"), encrypted_state_path(second, "amazon"))
             self.assertEqual(load_report_state(first, "amazon"), state)
-            persisted = encrypted_state_path(first, "amazon").read_bytes()
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT encrypted_state FROM accounts_browsersession "
+                    "WHERE user_id = %s AND provider = %s",
+                    [first.id, "amazon"],
+                )
+                persisted = cursor.fetchone()[0].encode()
             self.assertNotIn(b"opaque", persisted)
             save_report_state(first, "amazon_shop", state)
             self.assertTrue(has_report_session(first, "amazon_shop"))
             delete_report_state(first, "amazon_shop")
             self.assertFalse(has_report_session(first, "amazon_shop"))
             self.assertTrue(has_report_session(first, "amazon"))
+
+    def test_legacy_file_is_migrated_once_to_shared_database(self):
+        import base64
+        import json
+        from apps.accounts.crypto import encrypt
+        from apps.accounts.models import BrowserSession
+        from apps.scrapers.report_sessions import (
+            encrypted_state_path, has_report_session, load_report_state,
+        )
+
+        user = get_user_model().objects.create_user("legacy-report-session")
+        state = {"cookies": [{"name": "legacy", "value": "secret"}], "origins": []}
+        with tempfile.TemporaryDirectory() as directory, override_settings(
+            ML_AUTH_DIR=directory,
+            SECRETS_FERNET_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ):
+            path = encrypted_state_path(user, "amazon", criar=True)
+            encoded = base64.b64encode(json.dumps(state).encode()).decode()
+            path.write_text(encrypt(encoded), encoding="utf-8")
+
+            self.assertTrue(has_report_session(user, "amazon"))
+            self.assertEqual(load_report_state(user, "amazon"), state)
+            self.assertTrue(BrowserSession.objects.filter(
+                user=user, provider="amazon",
+            ).exists())
+            self.assertFalse(path.exists())
+
+    def test_three_real_suspicions_request_reconnect_and_success_recovers(self):
+        from apps.scrapers.report_sessions import (
+            has_report_session, registrar_veredito, save_report_state,
+        )
+
+        user = get_user_model().objects.create_user("report-probe-policy")
+        with override_settings(
+            SECRETS_FERNET_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ):
+            save_report_state(user, "amazon_shop", {"cookies": [], "origins": []})
+            for attempt in range(1, 4):
+                snapshot = registrar_veredito(
+                    user, "amazon_shop", "suspeito", "session_expired",
+                )
+                self.assertEqual(snapshot["falhas"], attempt)
+                self.assertEqual(has_report_session(user, "amazon_shop"), attempt < 3)
+            registrar_veredito(user, "amazon_shop", "conectado", "checkout_opened")
+            self.assertTrue(has_report_session(user, "amazon_shop"))
 
     def test_report_parser_marks_login_page_as_reconnect_required(self):
         from apps.scrapers.relatorios import ReportSyncActionRequired, _extract_table_rows

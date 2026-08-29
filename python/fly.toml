@@ -39,8 +39,8 @@ kill_timeout = "30s"
 [deploy]
   release_command = "sh -c 'env RELEASE_COMMAND=1 python django/manage.py check --deploy && env RELEASE_COMMAND=1 python django/manage.py migrate --noinput && env RELEASE_COMMAND=1 python django/manage.py tenant_rls --enable && env TENANT_SYSTEM_PROCESS=1 python django/manage.py bootstrap_superuser'"
 
-# Volume persistente das sessões do ML (auth_{id}.json). Preso a UMA máquina:
-# por isso web + workers rodam juntos (honcho) e não escalamos horizontalmente.
+# Volume legado e estado local da máquina web. As credenciais ML e as sessões de
+# navegador novas ficam cifradas no PostgreSQL, pois o worker roda em outra VM.
 [[mounts]]
   source = "ml_data"
   destination = "/data"

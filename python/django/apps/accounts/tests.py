@@ -502,6 +502,7 @@ class MembershipRoleTests(TestCase):
 class RLSPolicyTests(SimpleTestCase):
     def test_session_tables_are_protected_and_force_rls_is_emitted(self):
         self.assertIn("accounts_mercadolivresession", STRICT_TENANT_TABLES)
+        self.assertIn("accounts_browsersession", STRICT_TENANT_TABLES)
         self.assertIn("accounts_whatsappconnection", STRICT_TENANT_TABLES)
         self.assertIn("accounts_perfil", STRICT_TENANT_TABLES)
         statements = policy_statements(

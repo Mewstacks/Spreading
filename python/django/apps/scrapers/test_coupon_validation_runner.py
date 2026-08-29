@@ -4,7 +4,8 @@ from django.utils import timezone
 
 from apps.scrapers.coupon_validation import agendar_validacao
 from apps.scrapers.coupon_validation_runner import (
-    ValidationObservation, claim_pending_validations, run_validation_batch,
+    ValidationObservation, claim_pending_validations,
+    defer_missing_checkout_sessions, run_validation_batch,
 )
 from apps.scrapers.models import CupomNormalizado, FonteIngestao
 
@@ -98,3 +99,25 @@ class CouponValidationRunnerTests(TestCase):
         validation.refresh_from_db()
         self.assertEqual(validation.status, "running")
         self.assertGreater(validation.started_at, timezone.now() - timezone.timedelta(minutes=1))
+
+    def test_missing_session_is_deferred_in_bulk_before_browser_lane(self):
+        from unittest.mock import patch
+        first = self._scheduled()
+        second, _ = agendar_validacao(
+            self.coupon, self.user, product_key="B000000002",
+            product_url="https://www.amazon.com.br/dp/B000000002",
+        )
+
+        with patch(
+            "apps.scrapers.coupon_validation_runner._checkout_session_available",
+            return_value=False,
+        ):
+            result = defer_missing_checkout_sessions()
+
+        self.assertEqual(result, {"amazon": 2})
+        for validation in (first, second):
+            validation.refresh_from_db()
+            self.assertEqual(validation.status, "inconclusive")
+            self.assertEqual(validation.reason_code, "session_required")
+            self.assertIsNotNone(validation.retry_at)
+            self.assertTrue(validation.no_purchase)

@@ -14,7 +14,7 @@ import uuid
 
 from contextlib import nullcontext
 
-from apps.accounts.fields import EncryptedCharField
+from apps.accounts.fields import EncryptedCharField, EncryptedTextField
 from apps.accounts.tenant import (
     actor_context, current_actor_id, in_system_context, organization_context,
 )
@@ -161,6 +161,54 @@ class MercadoLivreSession(models.Model):
 
     def __str__(self):
         return f"MLSession<{self.organization_id}>"
+
+
+class BrowserSession(models.Model):
+    """Sessão Playwright cifrada e compartilhada entre web e workers."""
+
+    PROVIDERS = [
+        ("amazon", "Amazon Relatórios"),
+        ("amazon_shop", "Amazon Compras"),
+        ("mercadolivre", "Mercado Livre Relatórios"),
+        ("shopee_shop", "Shopee Compras"),
+    ]
+    STATUS = [
+        ("active", "Ativa"),
+        ("suspect", "Suspeita"),
+        ("decrypt_error", "Erro de criptografia"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name="browser_sessions",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="browser_sessions",
+    )
+    provider = models.CharField(max_length=32, choices=PROVIDERS)
+    encrypted_state = EncryptedTextField()
+    status = models.CharField(max_length=24, choices=STATUS, default="active",
+                              db_index=True)
+    probe_failures = models.PositiveSmallIntegerField(default=0)
+    probe_result = models.CharField(max_length=24, blank=True, default="")
+    probe_reason = models.CharField(max_length=200, blank=True, default="")
+    last_probe_at = models.DateTimeField(null=True, blank=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("organization", "user", "provider"),
+                name="uniq_browser_session_org_user_provider",
+            ),
+        ]
+        indexes = [models.Index(fields=("user", "provider", "status"))]
+
+    def __str__(self):
+        return f"BrowserSession<{self.provider}:{self.user_id}>"
 
 
 class WhatsAppConnection(models.Model):
