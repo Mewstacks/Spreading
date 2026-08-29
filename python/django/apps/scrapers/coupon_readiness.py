@@ -119,6 +119,11 @@ def _preflight(cupom, usuario, *, corroboracoes=None, validacoes_checkout=None,
         categoria = "rejected" if cupom.estado in {"expirado", "inativo"} else "invalid"
         return _resultado("discarded", categoria, f"state_{cupom.estado}",
                           "Cupom fora do catálogo ativo.")
+    if str(cupom.codigo or "").strip() and not codigo_publicavel(cupom):
+        return _resultado(
+            "discarded", "invalid", "invalid_coupon_code",
+            "A fonte não forneceu um código digitável válido.",
+        )
     if cupom.owner_id and cupom.owner_id != usuario.pk:
         return _resultado("discarded", "rejected", "tenant_scope",
                           "Cupom pertence a outra organização.")

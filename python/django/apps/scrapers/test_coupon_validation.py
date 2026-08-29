@@ -184,6 +184,11 @@ class CouponValidationLedgerTests(TestCase):
 
         self.assertEqual(result["scheduled"], 0)
         self.assertFalse(CupomValidacao.objects.exists())
+        readiness = _preflight(
+            self.coupon, self.user, corroboracoes=set(), validacoes_checkout={},
+        )
+        self.assertEqual(readiness["stage"], "discarded")
+        self.assertEqual(readiness["reason_code"], "invalid_coupon_code")
 
     def test_category_match_does_not_use_substrings_or_override_known_macro(self):
         from .coupon_validation import target_matches_coupon
