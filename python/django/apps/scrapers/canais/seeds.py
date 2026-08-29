@@ -8,7 +8,7 @@ que uma oferta raspada por nós (destino vivo, preço conferido no momento do en
 desconto provado contra o histórico). O canal encurta a DESCOBERTA; ele não
 substitui a prova.
 
-Como esta lista foi montada (18/08/2026): abri a prévia pública `t.me/s/<canal>` de
+Como esta lista foi montada (28/08/2026): abri a prévia pública `t.me/s/<canal>` de
 cada candidato, contei quantos posts das 20 mensagens mais recentes carregavam link
 de loja e classifiquei por marketplace. Canal sem prévia pública, sem link de loja
 ou com nome que imita uma marca conhecida ficou de fora — dois casos concretos
@@ -106,6 +106,90 @@ CANAIS_SUGERIDOS = [
         "densidade": 20,
         "nota": "Citado na imprensa de nicho como canal de achadinhos da Amazon; "
                 "na medição os links eram de ML.",
+    },
+    {
+        "handle": "sddescontos",
+        "nome": "SD Descontos — cupons",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 88,
+        "nota": "Prévia pública diária com códigos estruturados e cupons relâmpago.",
+    },
+    {
+        "handle": "MercadoCuponsBR",
+        "nome": "Mercado Cupons BR",
+        "marketplaces": ["mercadolivre"],
+        "densidade": 82,
+        "nota": "Listas por categoria com código, mínimo, teto e link de produtos.",
+    },
+    {
+        "handle": "ofertasportateis",
+        "nome": "Ofertas Critical Hits",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 70,
+        "nota": "Cobertura multiloja recente, especialmente tecnologia e games.",
+    },
+    {
+        "handle": "promoatualizado",
+        "nome": "Promo Atualizado",
+        "marketplaces": ["amazon", "shopee"],
+        "densidade": 66,
+        "nota": "Códigos recentes de Amazon e Shopee na prévia pública.",
+    },
+    {
+        "handle": "ofertanasho",
+        "nome": "Oferta na Sho — cupons",
+        "marketplaces": ["amazon", "shopee"],
+        "densidade": 65,
+        "nota": "Canal focado em códigos Shopee, com sinais adicionais da Amazon.",
+    },
+    {
+        "handle": "tecnanofertas",
+        "nome": "Tecnan Ofertas",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 55,
+        "nota": "Fonte complementar de tecnologia e alertas de cupom ML.",
+    },
+    {
+        "handle": "ofertasamazonbr",
+        "nome": "Ofertas Amazon Brasil",
+        "marketplaces": ["amazon"],
+        "densidade": 78,
+        "nota": "Canal especializado em promoções e códigos da Amazon Brasil.",
+    },
+    {
+        "handle": "canalrodrigomoreira",
+        "nome": "Ofertas Rodrigo Moreira",
+        "marketplaces": ["amazon", "mercadolivre", "shopee"],
+        "densidade": 76,
+        "nota": "Alta frequência e códigos Amazon com mínimo e teto explícitos.",
+    },
+    {
+        "handle": "TJGOFERTASs",
+        "nome": "TJG Gaming — promoções",
+        "marketplaces": ["amazon", "mercadolivre", "shopee"],
+        "densidade": 74,
+        "nota": "Canal grande de tecnologia com listas de códigos Amazon.",
+    },
+    {
+        "handle": "escolhasegura",
+        "nome": "Escolha Segura — ofertas",
+        "marketplaces": ["amazon", "mercadolivre"],
+        "densidade": 72,
+        "nota": "Códigos Amazon frequentes e associação explícita a produtos.",
+    },
+    {
+        "handle": "CuponsDaSho",
+        "nome": "Cupons da Sho",
+        "marketplaces": ["amazon", "shopee"],
+        "densidade": 71,
+        "nota": "Canal de códigos digitáveis Shopee e Amazon em tempo real.",
+    },
+    {
+        "handle": "promotop",
+        "nome": "PromoTop",
+        "marketplaces": ["amazon", "mercadolivre", "shopee"],
+        "densidade": 70,
+        "nota": "Canal multiloja de grande volume, útil para cupons curtos.",
     },
 ]
 

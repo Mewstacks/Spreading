@@ -74,6 +74,11 @@ _CONTAINER = re.compile(r"https://lista\.mercadolivre\.com\.br/[^\s,;]+", re.I)
 # descrevem COMO usar e não são código nenhum. Publicar isso manda o grupo digitar
 # uma frase no checkout e não funcionar; é a definição de cupom que queima confiança.
 _CODIGO_OK = re.compile(r"^[A-Z0-9][A-Z0-9._-]{2,29}$")
+_SEM_CODIGO = re.compile(
+    r"(?:sem\s+(?:precisar\s+de\s+)?c[oó]digo|"
+    r"(?:benef[ií]cio|desconto)\s+(?:entra|aplicad[oa])\s+automaticamente)",
+    re.I,
+)
 
 
 def _codigo_valido(codigo: str) -> bool:
@@ -179,6 +184,12 @@ def _montar(marketplace, slug_loja, codigo, nome, descricao, validade, agora,
     if not _codigo_valido(codigo):
         return None
     texto_completo = f"{nome} {descricao}"
+    # O agregador às vezes preenche ``discountCode`` mesmo quando a própria regra
+    # diz que o benefício entra automaticamente, sem código digitável. A descrição
+    # vence o campo inconsistente: publicar esse token mandaria o usuário procurar
+    # um campo que a promoção explicitamente não usa.
+    if _SEM_CODIGO.search(texto_completo):
+        return None
     tipo, valor = _desconto(texto_completo)
     if not valor:
         return None

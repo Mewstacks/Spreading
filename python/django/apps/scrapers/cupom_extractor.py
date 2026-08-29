@@ -95,6 +95,7 @@ _NAO_CODIGOS = {
     "HOJE", "AGORA", "APENAS", "SOMENTE", "VALIDO", "VALIDA", "FRETE",
     "GRATIS", "CLIQUE", "ATIVE", "AQUI", "SELECIONADOS", "PRODUTOS",
     "ESTOQUE", "LOJA", "LOJAS", "OFICIAL", "OFICIAIS", "CANAL", "GRUPO",
+    "APLIQUE", "COMPRAS", "ESCRITO", "LIBERADO", "LIBERADA",
 }
 
 _PROMPT = """Extraia os cupons de desconto desta mensagem de um canal brasileiro de ofertas.
@@ -171,6 +172,25 @@ def _candidatos_codigo(linha: str) -> list[str]:
     return list(dict.fromkeys(candidatos))
 
 
+def _codigo_em_linha_isolada(linha: str) -> str:
+    """Código sozinho (eventualmente após ``Cupom:`` ou emoji de ticket).
+
+    Canais reais colocam ``🎟 CODIGO`` numa linha e só explicam o desconto na
+    seguinte. Aceitar qualquer token da linha anterior faria nome de produto virar
+    cupom; depois de remover o único candidato, portanto, só podem sobrar pontuação,
+    emoji/backticks e a palavra ``cupom``.
+    """
+    sem_url = _URL_NO_TEXTO.sub(" ", linha or "")
+    candidatos = _candidatos_codigo(sem_url)
+    if len(candidatos) != 1:
+        return ""
+    codigo = candidatos[0]
+    restante = re.sub(re.escape(codigo), " ", sem_url, flags=re.I)
+    restante = re.sub(r"\bcupom\b", " ", restante, flags=re.I)
+    restante = re.sub(r"[^A-Za-z0-9]+", "", restante)
+    return codigo if not restante else ""
+
+
 def codigo_plausivel(codigo: str) -> bool:
     """Filtro final comum ao parser local e à transcrição do modelo."""
     value = str(codigo or "").strip().upper()
@@ -212,8 +232,14 @@ def extrair_deterministico(texto: str, *, loja_padrao="") -> list[dict]:
             r":\s*([A-Z0-9][A-Z0-9._/-]{3,60})(?=\s|$|[,/])",
             linha_parse, re.I,
         ))
-        if ":" in linha_parse:
-            fragmentos.append(linha_parse.rsplit(":", 1)[1])
+        # O separador precisa vir DEPOIS do desconto. ``Regras: R$20 OFF para
+        # compras...`` e ``POR: R$ 1.662,30, aplique R$100 OFF`` têm dois-pontos,
+        # mas não apresentam código após o desconto; varrer o restante dessas linhas
+        # produzia COMPRAS/APLIQUE como cupons falsos.
+        desconto_fim = (percentual or fixo).end()
+        ultimo_dois_pontos = linha_parse.rfind(":")
+        if ultimo_dois_pontos >= desconto_fim:
+            fragmentos.append(linha_parse[ultimo_dois_pontos + 1:])
         depois_hifen = re.search(r"\)\s*[-–—]\s*(.+)$", linha_parse)
         if depois_hifen:
             fragmentos.append(depois_hifen.group(1))
@@ -222,6 +248,13 @@ def extrair_deterministico(texto: str, *, loja_padrao="") -> list[dict]:
         )
         if cupom_inline:
             fragmentos.append(cupom_inline.group(1))
+        # Formato medido em canais de Shopee: ``🎟 CODIGO`` numa linha, seguido de
+        # ``Regras: R$20 OFF...``. Só uma linha estruturalmente isolada é aceita.
+        for anterior in reversed(linhas[max(0, indice - 2):indice]):
+            isolado = _codigo_em_linha_isolada(anterior)
+            if isolado:
+                fragmentos.append(isolado)
+                break
         for proxima in linhas[indice + 1:indice + 3]:
             uso = re.search(
                 r"(?:usem?|digite|aplique)\s+(?:o\s+)?cupom\s*:\s*(.+)$",

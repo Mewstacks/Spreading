@@ -164,6 +164,27 @@ class CouponValidationLedgerTests(TestCase):
         self.assertEqual(result["scheduled"], 1)
         self.assertEqual(CupomValidacao.objects.get().product_key, book.asin)
 
+    def test_scheduler_never_builds_cart_for_aggregator_placeholder(self):
+        self.coupon.codigo = "RESGATENOLINK"
+        self.coupon.save(update_fields=("codigo",))
+        CupomDisponibilidade.objects.create(
+            organization=organization_for_user(self.user), usuario=self.user,
+            cupom=self.coupon, channel="whatsapp", use_mode="code_notice",
+            stage="collected", category="waiting",
+            reason_code="community_uncorroborated",
+        )
+        Produto.objects.create(
+            marketplace="amazon", nome="Produto", preco_sem_desconto=200,
+            preco_com_cupom=180, preco_efetivo=180,
+            link_produto="https://www.amazon.com.br/dp/B000000005",
+            asin="B000000005",
+        )
+
+        result = agendar_lote_validacao(self.user, limite=5)
+
+        self.assertEqual(result["scheduled"], 0)
+        self.assertFalse(CupomValidacao.objects.exists())
+
     def test_category_match_does_not_use_substrings_or_override_known_macro(self):
         from .coupon_validation import target_matches_coupon
 

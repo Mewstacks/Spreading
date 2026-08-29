@@ -14,6 +14,11 @@ from django.conf import settings
 
 
 _CODIGO_HUMANO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{2,39}$")
+_CODIGOS_PLACEHOLDER = frozenset({
+    "CUPOMNOLINK", "CUPOMAQUI", "DESCONTOAQUI", "DESCONTONOLINK",
+    "GARANTACUPOM", "PEGUECUPOM", "USECUPOM", "MAISCUPONS",
+    "RESGATENOLINK", "PEGUEAQUI", "ATIVEAQUI", "VEJANOLINK",
+})
 _ESCOPO_GENERICO = {
     "", "geral", "site inteiro", "todo o site", "toda a loja", "todos os produtos",
     "qualquer produto", "todas as categorias",
@@ -77,7 +82,9 @@ def tem_restricao_publico(texto) -> bool:
 
 def codigo_humano(valor) -> str:
     codigo = _texto(valor)
-    return codigo if _CODIGO_HUMANO.fullmatch(codigo) else ""
+    if not _CODIGO_HUMANO.fullmatch(codigo):
+        return ""
+    return "" if codigo.upper() in _CODIGOS_PLACEHOLDER else codigo
 
 
 def normalizar_regras_cupom(regras, *, external_id="", codigo="") -> dict:

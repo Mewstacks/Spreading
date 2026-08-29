@@ -275,6 +275,17 @@ class PromobitTests(TestCase):
         for codigo in codigos:
             self.assertNotIn(" ", codigo)
 
+    def test_campo_codigo_nao_vence_regra_que_diz_aplicacao_automatica(self):
+        corpo = """
+        <script type="application/ld+json">
+        {"@type":"ItemList","itemListElement":[{"@type":"Offer",
+         "name":"50% de desconto","description":"O benefício entra automaticamente, sem precisar de código",
+         "discountCode":"50NOW"}]}
+        </script>
+        """
+        _, itens = self._coletar(corpo=corpo)
+        self.assertEqual(itens, [])
+
     def test_nao_publica_a_url_de_redirect_do_promobit(self):
         _, itens = self._coletar()
         for item in itens:
@@ -377,6 +388,14 @@ class MeliuzCouponsTests(TestCase):
 
         self.assertEqual(source.last_metrics["rejected_by_reason"]["placeholder_code"], 1)
         self.assertNotIn("VELHO50", str(source.last_metrics))
+
+    def test_placeholders_de_resgate_nao_viram_codigo(self):
+        body = MELIUZ_HTML.replace("JARDIM30", "RESGATENOLINK")
+        source, items = self._collect(body=body)
+        self.assertEqual(items, [])
+        self.assertGreaterEqual(
+            source.last_metrics["rejected_by_reason"]["placeholder_code"], 2,
+        )
 
     def test_is_always_a_partial_radar(self):
         source, _ = self._collect()

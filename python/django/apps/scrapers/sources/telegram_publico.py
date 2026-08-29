@@ -217,7 +217,11 @@ class TelegramPublicoSource(SourceAdapter):
 
     def _carregar_canais(self, handles):
         """Baixa previews em paralelo, isolando timeout/falha por canal."""
-        alvos = list(handles)[:12]
+        # 24 fontes curadas: em 28/08 a passada completa ficou abaixo do orçamento
+        # do ciclo com seis downloads paralelos. O teto continua explícito para uma
+        # lista configurada no banco não transformar um radar barato em crawler sem
+        # limite.
+        alvos = list(handles)[:24]
 
         def carregar(handle):
             try:

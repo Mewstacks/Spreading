@@ -258,7 +258,7 @@ def veredito_para_cupom(cupom, validations):
 def agendar_lote_validacao(usuario, *, limite=30, alvos_por_cupom=1,
                             channel="whatsapp"):
     """Materializa carrinhos candidatos para claims comunitários ainda retidos."""
-    from apps.scrapers.coupon_rules import regras_do_cupom
+    from apps.scrapers.coupon_rules import codigo_publicavel, regras_do_cupom
     from apps.scrapers.maintenance import produtos_frescos_q
     from apps.scrapers.models import CupomDisponibilidade, Produto
 
@@ -298,6 +298,14 @@ def agendar_lote_validacao(usuario, *, limite=30, alvos_por_cupom=1,
     }
     invalid_pending = []
     for row in pending:
+        if not codigo_publicavel(row.cupom):
+            row.status = "inconclusive"
+            row.reason_code = "invalid_coupon_code"
+            row.safe_detail = "A fonte não forneceu um código digitável válido."
+            row.verified_at = timezone.now()
+            row.retry_at = None
+            invalid_pending.append(row)
+            continue
         product_id = (row.evidence.get("cart_context") or {}).get("product_id")
         product = products_by_id.get(product_id)
         if product is not None and not target_matches_coupon(row.cupom, product):
@@ -320,6 +328,8 @@ def agendar_lote_validacao(usuario, *, limite=30, alvos_por_cupom=1,
         if scheduled >= limite:
             break
         coupon = availability.cupom
+        if not codigo_publicavel(coupon):
+            continue
         rules = regras_do_cupom(coupon)
         minimum = _decimal(rules.get("valor_minimo")) or Decimal("0")
         candidates = []
