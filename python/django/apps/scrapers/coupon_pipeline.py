@@ -222,6 +222,7 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
     # publicar: coupon_rules exige corroboração independente antes da prontidão.
     _coletar_adaptador("promobit-cupons", resultado)
     _coletar_adaptador("meliuz-cupons", resultado)
+    _coletar_adaptador("pelando-cupons", resultado)
     # O ciclo de cupons nao resolve links de oferta: na medicao de producao, 124
     # redirects custaram ~9s e geraram zero produto, enquanto os mesmos textos
     # trouxeram 51 codigos. A coleta de ofertas segue disponivel sob demanda.

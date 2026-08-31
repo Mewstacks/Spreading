@@ -42,6 +42,7 @@ _SOURCE_PRECEDENCE = {
     # influenciador anunciar um código ao grupo dele.
     "promobit-cupons": 80,
     "meliuz-cupons": 85,
+    "pelando-cupons": 88,
     "telegram-publico": 90,
     "shopee-public-coupons": 10,
 }

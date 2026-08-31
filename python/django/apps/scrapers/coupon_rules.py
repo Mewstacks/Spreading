@@ -24,7 +24,7 @@ _ESCOPO_GENERICO = {
     "qualquer produto", "todas as categorias",
 }
 _CONDICAO_PUBLICO = re.compile(
-    r"\b(?:usu[aá]rios? selecionad|novos? clientes?|primeira compra|somente no app|"
+    r"\b(?:usu[aá]rios? selecionad|novos? clientes?|contas? novas?|primeira compra|somente no app|"
     r"apenas no app|cart[aã]o|pix)\b", re.I,
 )
 _NAO_PRODUTO = re.compile(
@@ -376,12 +376,12 @@ def site_wide_confiavel(cupom, *, codigos_contestados=None) -> bool:
 
 # Fontes cuja saída é ALEGAÇÃO de terceiro, não observação nossa.
 FONTES_COMUNIDADE = frozenset({
-    "promobit-cupons", "meliuz-cupons", "telegram-publico",
+    "promobit-cupons", "meliuz-cupons", "pelando-cupons", "telegram-publico",
     "promobit-community", "pelando-community",
 })
 # Telegram, agregadores e stubs são alegação de terceiro: nenhum lista sozinho.
 FONTES_COMUNIDADE_SEM_LISTAGEM = frozenset({
-    "promobit-cupons", "meliuz-cupons", "telegram-publico",
+    "promobit-cupons", "meliuz-cupons", "pelando-cupons", "telegram-publico",
     "promobit-community", "pelando-community",
 })
 

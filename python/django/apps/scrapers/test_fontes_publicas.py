@@ -502,6 +502,7 @@ class RegistroDeFontesTests(TestCase):
     def test_as_duas_fontes_estao_registradas(self):
         self.assertIn("promobit-cupons", SOURCES)
         self.assertIn("meliuz-cupons", SOURCES)
+        self.assertIn("pelando-cupons", SOURCES)
         self.assertIn("telegram-publico", SOURCES)
         self.assertIn("shopee-public-coupons", SOURCES)
         self.assertIn("ml-lightning-coupons", SOURCES)
@@ -512,7 +513,9 @@ class RegistroDeFontesTests(TestCase):
 
         oficial = _SOURCE_PRECEDENCE["ml-cupons-afiliados"]
         self.assertEqual(_SOURCE_PRECEDENCE["ml-lightning-coupons"], oficial)
-        for slug in ("promobit-cupons", "meliuz-cupons", "telegram-publico"):
+        for slug in (
+            "promobit-cupons", "meliuz-cupons", "pelando-cupons", "telegram-publico",
+        ):
             self.assertGreater(_SOURCE_PRECEDENCE[slug], oficial, slug)
 
     def test_esqueleto_antigo_do_promobit_continua_desabilitado(self):
@@ -534,6 +537,7 @@ class InventarioParcialTests(TestCase):
     def test_fontes_de_recorte_se_declaram_parciais(self):
         self.assertFalse(SOURCES["promobit-cupons"].inventario_completo)
         self.assertFalse(SOURCES["meliuz-cupons"].inventario_completo)
+        self.assertFalse(SOURCES["pelando-cupons"].inventario_completo)
         self.assertFalse(SOURCES["telegram-publico"].inventario_completo)
 
     def test_fonte_oficial_continua_cobrada_por_completude(self):

@@ -174,7 +174,9 @@ def descoberta_24h(*, agora=None, janela_horas=24):
 # As três classes que o contrato exige por marketplace. `classe_da_fonte` é a
 # fronteira única: sem ela, cada relatório inventava a própria taxonomia.
 CLASSES_DE_FONTE = ("oficial", "agregador", "comunidade")
-_FONTES_AGREGADOR = frozenset({"promobit-cupons", "meliuz-cupons"})
+_FONTES_AGREGADOR = frozenset({
+    "promobit-cupons", "meliuz-cupons", "pelando-cupons",
+})
 _FONTES_COMUNIDADE_DIRETA = frozenset({
     "telegram-publico", "promobit-community", "pelando-community",
 })
