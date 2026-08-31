@@ -122,6 +122,13 @@ COUPON_AFFILIATE_LINK_TTL_HOURS = max(
     1, int(os.getenv("COUPON_AFFILIATE_LINK_TTL_HOURS", "168")),
 )
 AMAZON_GENERAL_COUPONS_URL = os.getenv("AMAZON_GENERAL_COUPONS_URL", "").strip()
+# Meta de cupons distintos PRONTOS por loja (Mercado Livre, Amazon e Shopee), do
+# contrato de aceite. Nenhum total agregado compensa uma loja abaixo dela; ver
+# apps.scrapers.coupon_abundance.
+COUPON_ABUNDANCE_GOAL = int(os.getenv("COUPON_ABUNDANCE_GOAL", "100"))
+COUPON_DAILY_DISCOVERY_GOAL = int(
+    os.getenv("COUPON_DAILY_DISCOVERY_GOAL", "250")
+)
 # Sem default: o antigo apontava pra landing de afiliados (não um relatório), então o
 # sync raspava uma página sem tabela e reportava "erro" pra sempre. Vazio = a tela diz
 # "sincronização automática indisponível", que é a verdade, em vez de erro recorrente.

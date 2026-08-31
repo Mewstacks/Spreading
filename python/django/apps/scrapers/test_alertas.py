@@ -138,3 +138,92 @@ class ProjecaoDispararAlertaTests(TestCase):
         log_event("publicacao", "tick_erro", "Ciclo de envio falhou.", level="error")
         self.assertTrue(IncidenteSaude.objects.filter(status="aberto").exists())
         self.assertEqual(len(mail.outbox), 1)
+
+
+class AlertasAcionaveisDoFunilTests(TestCase):
+    """SLA acusa trabalho parado, não inventário retido por desenho."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from django.contrib.auth import get_user_model
+        from apps.accounts.models import (
+            ensure_personal_organization, organization_for_user,
+        )
+        from apps.scrapers.models import FonteIngestao
+
+        cls.user = get_user_model().objects.create_user("alerta-funil", password="x")
+        ensure_personal_organization(cls.user)
+        cls.org = organization_for_user(cls.user)
+        cls.fonte = FonteIngestao.objects.create(
+            slug="alerta-funil-fonte", marketplace="amazon",
+            nome="Fonte do alerta", status="ok",
+        )
+
+    def _projecao(self, *, stage="eligible", category="waiting",
+                  reason="preparation_pending", codigo="ALERTA"):
+        from datetime import timedelta
+        from apps.scrapers.models import CupomDisponibilidade, CupomNormalizado
+
+        cupom = CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id=f"ext-{codigo}", marketplace="amazon",
+            titulo=codigo, codigo=codigo, estado="ativo", redemption_mode="code",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 10},
+        )
+        antigo = timezone.now() - timedelta(hours=2)
+        CupomNormalizado.objects.filter(pk=cupom.pk).update(
+            primeira_observacao=antigo, ultima_observacao=timezone.now(),
+        )
+        projecao = CupomDisponibilidade.objects.create(
+            organization=self.org, usuario=self.user, cupom=cupom,
+            channel="whatsapp", use_mode="code_notice", stage=stage,
+            category=category, reason_code=reason,
+        )
+        CupomDisponibilidade.objects.filter(pk=projecao.pk).update(updated_at=antigo)
+        return cupom
+
+    def test_descartado_nao_e_codigo_travado(self):
+        from apps.scrapers.maintenance import diagnosticar_alertas_pipeline_cupons
+
+        self._projecao(stage="discarded", category="invalid",
+                       reason="invalid_coupon_code")
+        contas = diagnosticar_alertas_pipeline_cupons()
+        self.assertEqual(contas["projection_stale"], 0)
+        self.assertEqual(contas["code_not_ready_20m"], 0)
+
+    def test_espera_por_usuario_ou_corroboração_nao_e_fila_travada(self):
+        from apps.scrapers.maintenance import diagnosticar_alertas_pipeline_cupons
+
+        self._projecao(category="no_session", reason="ml_session_missing",
+                       codigo="SESSAO")
+        self._projecao(stage="collected", reason="community_uncorroborated",
+                       codigo="COMUNIDADE")
+        contas = diagnosticar_alertas_pipeline_cupons()
+        self.assertEqual(contas["projection_stale"], 0)
+        self.assertEqual(contas["code_not_ready_20m"], 0)
+
+    def test_trabalho_interno_antigo_continua_alertando(self):
+        from apps.scrapers.maintenance import diagnosticar_alertas_pipeline_cupons
+
+        self._projecao()
+        contas = diagnosticar_alertas_pipeline_cupons()
+        self.assertEqual(contas["projection_stale"], 1)
+        self.assertEqual(contas["code_not_ready_20m"], 1)
+
+    def test_browser_conta_apenas_preparo_pendente_e_fresco(self):
+        from datetime import timedelta
+        from apps.scrapers.maintenance import diagnosticar_alertas_pipeline_cupons
+        from apps.scrapers.models import CupomPreparacao
+
+        cupom_pendente = self._projecao(codigo="BROWSER1")
+        cupom_resolvido = self._projecao(codigo="BROWSER2")
+        antigo = timezone.now() - timedelta(hours=2)
+        CupomPreparacao.objects.create(
+            cupom=cupom_pendente, status="pendente",
+            reason_code="capacity_deferred", verificado_em=antigo,
+        )
+        CupomPreparacao.objects.create(
+            cupom=cupom_resolvido, status="pronto",
+            reason_code="capacity_deferred", verificado_em=antigo,
+        )
+        contas = diagnosticar_alertas_pipeline_cupons()
+        self.assertEqual(contas["browser_wait_over_60m"], 1)

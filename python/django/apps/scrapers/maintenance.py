@@ -106,6 +106,16 @@ def diagnosticar_alertas_pipeline_cupons(*, agora=None):
         agora=agora, prefix="cupom__",
     )
     projections = CupomDisponibilidade.objects.filter(active)
+    # Estados que dependem de uma nova evidência externa ou de ação explícita do
+    # dono da conta não são uma fila travada. Eles continuam visíveis no relatório
+    # de abundância, mas não podem acordar a operação a cada 20 minutos. Em
+    # produção, sessão ausente e comunidade sem corroboração respondiam por quase
+    # seis mil linhas e escondiam o backlog que o worker realmente pode resolver.
+    actionable = (
+        projections.exclude(stage__in=("ready", "discarded"))
+        .exclude(category="no_session")
+        .exclude(reason_code="community_uncorroborated")
+    )
     counts = {
         # Só conta projeção que AINDA DEVE MUDAR. `updated_at` é auto_now, então um
         # cupom que chegou a `ready` (ou foi descartado com veredito) para de ser
@@ -113,22 +123,25 @@ def diagnosticar_alertas_pipeline_cupons(*, agora=None):
         # justamente por estar saudável. Em produção isso inflava o número para a
         # casa dos dez mil e o alerta disparava em todo ciclo, escondendo os três
         # contadores vizinhos, que são reais. Alerta que sempre toca não é alerta.
-        "projection_stale": projections.exclude(
-            stage__in=("ready", "discarded"),
-        ).filter(updated_at__lt=cutoff_20m).count(),
-        "code_not_ready_20m": projections.filter(
+        "projection_stale": actionable.filter(
+            updated_at__lt=cutoff_20m,
+        ).count(),
+        "code_not_ready_20m": actionable.filter(
             use_mode="code_notice", cupom__primeira_observacao__lt=cutoff_20m,
-        ).exclude(stage="ready").count(),
-        "prepared_verified_not_ready_20m": projections.filter(
+        ).count(),
+        "prepared_verified_not_ready_20m": actionable.filter(
             use_mode="product_activation",
             cupom__produtos__status="confirmado",
             cupom__produtos__links_usuarios__usuario_id=F("usuario_id"),
             cupom__produtos__links_usuarios__verificado_ok=True,
             cupom__produtos__links_usuarios__verificado_em__gte=link_cutoff,
             updated_at__lt=cutoff_20m,
-        ).exclude(stage="ready").distinct().count(),
+        ).distinct().count(),
         "browser_wait_over_60m": CupomPreparacao.objects.filter(
-            reason_code="capacity_deferred", verificado_em__lt=cutoff_browser,
+            status="pendente", reason_code="capacity_deferred",
+            verificado_em__lt=cutoff_browser, cupom__estado="ativo",
+        ).filter(
+            cupons_frescos_q(agora=agora, prefix="cupom__"),
         ).count(),
     }
     # Fontes que NUNCA podem se declarar completas por construção (vitrine curada,
