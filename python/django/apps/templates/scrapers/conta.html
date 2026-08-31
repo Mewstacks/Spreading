@@ -114,6 +114,15 @@
         </div>
         <div class="row-item">
           <i data-lucide="message-circle" style="color:var(--muted);"></i>
+          <div class="row-main" style="font-size:13px;"><strong>Shopee · validação</strong></div>
+          <div class="row-side">
+            {% if shopee_shop_conectado %}<span class="badge badge-green"><span class="dot"></span>Conectada</span>
+            {% else %}<span class="badge badge-red"><span class="dot"></span>Não conectada</span>{% endif %}
+            <a class="btn-link btn-sm" href="{% url 'scraper-shopee-shop-conexao' %}">Gerenciar</a>
+          </div>
+        </div>
+        <div class="row-item">
+          <i data-lucide="message-circle" style="color:var(--muted);"></i>
           <div class="row-main" style="font-size:13px;"><strong>WhatsApp</strong></div>
           <div class="row-side"><a class="btn-link btn-sm" href="{% url 'scraper-whatsapp' %}">Gerenciar</a></div>
         </div>
@@ -184,6 +193,11 @@
       {% elif shopee_integracao %}<span class="badge badge-muted"><span class="dot"></span>{{ shopee_integracao.get_status_display }}</span>
       {% else %}<span class="badge badge-red"><span class="dot"></span>Não conectada</span>{% endif %}
     </span>
+  </div>
+  <div class="alert alert-info" style="margin:0 0 .9rem;">
+    <i data-lucide="badge-check"></i><div><strong>Validação no carrinho:</strong>
+    {% if shopee_shop_conectado %}sessão conectada.{% else %}conecte sua conta de compras para validar códigos sem efetuar pedidos.{% endif %}
+    <a class="link" href="{% url 'scraper-shopee-shop-conexao' %}">{% if shopee_shop_conectado %}Reconectar{% else %}Conectar agora{% endif %}</a></div>
   </div>
   {% if shopee_integracao and shopee_integracao.status == 'conectada' %}
     <p class="muted" style="font-size:13px;margin:0 0 .8rem;">App ID <strong>{{ shopee_integracao.identificador_conta }}</strong> · última sincronização {{ shopee_integracao.ultimo_sucesso|default:"ainda não concluída" }}.</p>

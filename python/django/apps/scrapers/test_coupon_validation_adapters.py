@@ -6,8 +6,9 @@ from django.test import SimpleTestCase
 
 from apps.scrapers.coupon_validation_adapters import (
     _cart_empty, _cart_total, _coupon_feedback, _observe_amazon_checkout,
-    _observe_ml_cart, _session_problem, _valid_amazon_product_url,
-    _valid_ml_product_url, validate_amazon, validate_mercadolivre,
+    _observe_ml_cart, _observe_shopee_checkout, _session_problem,
+    _valid_amazon_product_url, _valid_ml_product_url, _valid_shopee_product_url,
+    validate_amazon, validate_mercadolivre, validate_shopee,
 )
 
 
@@ -150,6 +151,57 @@ class _FakeAmazonPage(_FakePage):
         return _FakeAmazonLocator(self, selector, exists=exists)
 
 
+class _FakeShopeeLocator(_FakeLocator):
+    def click(self, timeout=None):
+        selector = self.selector.casefold()
+        self.page.clicked.append(selector)
+        if "adicionar ao carrinho" in selector:
+            self.page.added = True
+        elif "finalizar compra" in selector or "checkout-button" in selector:
+            self.page.url = "https://shopee.com.br/checkout"
+        elif "aplicar" in selector or "confirmar" in selector:
+            self.page.applied = True
+        elif "excluir" in selector or "remover" in selector:
+            self.page.added = False
+
+    def locator(self, selector):
+        if selector.startswith("xpath=ancestor"):
+            return _FakeShopeeLocator(self.page, "cart-item", exists=self.exists)
+        return self.page.locator(selector)
+
+
+class _FakeShopeePage(_FakePage):
+    def body(self):
+        if self.url.endswith("/cart"):
+            if not self.added:
+                return "Seu carrinho de compras está vazio"
+            return "Selecionar todos\nTotal\nR$ 100,00\nExcluir\nFinalizar compra"
+        if self.url.endswith("/checkout"):
+            total = "R$ 80,00" if self.applied else "R$ 100,00"
+            feedback = "Cupom aplicado\n" if self.applied else ""
+            return f"Revisão da compra\nCupom Shopee\n{feedback}Total\n{total}\nFazer pedido"
+        return "Produto disponível"
+
+    def locator(self, selector):
+        folded = selector.casefold()
+        if selector == "body":
+            return _FakeShopeeLocator(self, selector, exists=True)
+        exists = False
+        if "adicionar ao carrinho" in folded and "-i." in self.url:
+            exists = True
+        elif ("finalizar compra" in folded or "checkout-button" in folded) and self.added and self.url.endswith("/cart"):
+            exists = True
+        elif any(marker in folded for marker in ("voucher", "coupon", "code", "código", "cupom")) and "input" in folded and self.url.endswith("/checkout"):
+            exists = True
+        elif ("aplicar" in folded or "confirmar" in folded) and self.url.endswith("/checkout"):
+            exists = True
+        elif "href" in folded and "987654321" in folded and self.added:
+            exists = True
+        elif ("excluir" in folded or "remover" in folded) and self.added:
+            exists = True
+        return _FakeShopeeLocator(self, selector, exists=exists)
+
+
 class MercadoLivreCheckoutAdapterTests(SimpleTestCase):
     def test_accepts_only_mercadolivre_https_product_urls(self):
         self.assertTrue(_valid_ml_product_url(
@@ -264,6 +316,58 @@ class AmazonCheckoutAdapterTests(SimpleTestCase):
         )
 
         result = validate_amazon(validation)
+
+        self.assertEqual(result.status, "inconclusive")
+        self.assertEqual(result.reason_code, "session_required")
+        self.assertTrue(result.evidence["no_purchase_boundary"])
+
+
+class ShopeeCheckoutAdapterTests(SimpleTestCase):
+    def test_accepts_only_canonical_shopee_product_urls(self):
+        self.assertTrue(_valid_shopee_product_url(
+            "https://shopee.com.br/Fone-Bluetooth-i.123456789.987654321",
+        ))
+        self.assertTrue(_valid_shopee_product_url(
+            "https://shopee.com.br/product/123456789/987654321",
+        ))
+        self.assertFalse(_valid_shopee_product_url(
+            "https://shopee.com.br.evil.test/Fone-i.123.456",
+        ))
+        self.assertFalse(_valid_shopee_product_url(
+            "http://shopee.com.br/Fone-i.123.456",
+        ))
+        self.assertFalse(_valid_shopee_product_url("https://shopee.com.br/cart"))
+
+    def test_review_observes_reduction_cleans_cart_and_never_places_order(self):
+        page = _FakeShopeePage()
+        validation = SimpleNamespace(
+            pk=11, cupom=SimpleNamespace(codigo="SHOPEE20"),
+            product_url="https://shopee.com.br/Fone-i.123456789.987654321",
+        )
+
+        result = _observe_shopee_checkout(page, validation)
+
+        self.assertEqual(result.status, "accepted")
+        self.assertEqual(result.subtotal_before, Decimal("100.00"))
+        self.assertEqual(result.subtotal_after, Decimal("80.00"))
+        self.assertTrue(result.evidence["checkout_review_only"])
+        self.assertTrue(result.evidence["cart_cleanup_verified"])
+        self.assertFalse(result.evidence["place_order_clicked"])
+        self.assertFalse(page.added)
+        self.assertTrue(any("finalizar compra" in value for value in page.clicked))
+        self.assertFalse(any(
+            marker in selector for selector in page.clicked
+            for marker in ("fazer pedido", "comprar agora", "payment", "pagamento")
+        ))
+
+    @patch("apps.scrapers.report_sessions.has_report_session", return_value=False)
+    def test_missing_shopper_session_fails_closed(self, _session):
+        validation = SimpleNamespace(
+            usuario=SimpleNamespace(id=7), cupom=SimpleNamespace(codigo="SHOPEE20"),
+            product_url="https://shopee.com.br/Fone-i.123456789.987654321",
+        )
+
+        result = validate_shopee(validation)
 
         self.assertEqual(result.status, "inconclusive")
         self.assertEqual(result.reason_code, "session_required")

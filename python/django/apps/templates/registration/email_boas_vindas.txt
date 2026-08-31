@@ -1,6 +1,6 @@
 Bem-vindo ao Spreading, {{ user.get_username }}!
 
-Aqui você divulga ofertas de Mercado Livre e Amazon nos seus grupos com seu link
+Aqui você divulga ofertas e cupons de Mercado Livre, Amazon e Shopee nos seus grupos com seu link
 de afiliado — e recebe a comissão.
 
 Próximos passos:

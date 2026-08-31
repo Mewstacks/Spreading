@@ -284,7 +284,7 @@ class SourcePipelineTests(TestCase):
         AFFILIATE_FEED_TOKEN="secret-token",
     )
     @patch("apps.scrapers.sources.external_feed.requests.get")
-    def test_licensed_feed_ingests_only_ml_and_amazon_coupons(self, get):
+    def test_licensed_feed_ingests_ml_amazon_and_shopee_coupons(self, get):
         response = get.return_value
         response.json.return_value = {"items": [
             {
@@ -303,6 +303,13 @@ class SourcePipelineTests(TestCase):
                 "expires_at": "2099-12-31T23:00:00Z",
             },
             {
+                "type": "coupon", "id": "shopee-15", "store": "Shopee",
+                "title": "R$ 15 OFF", "code": "SHOPEE15",
+                "deeplink": "https://s.shopee.com.br/exemplo",
+                "discount_type": "fixo", "discount_value": 15,
+                "valid_until": "2099-12-31",
+            },
+            {
                 "type": "coupon", "id": "other-1", "store": "Outra Loja",
                 "code": "OUTRA10", "url": "https://afiliado.example/outra",
             },
@@ -316,7 +323,10 @@ class SourcePipelineTests(TestCase):
         from apps.scrapers.sources.external_feed import LicensedFeedSource
         coupons = list(LicensedFeedSource().discover_coupons())
 
-        self.assertEqual([coupon.marketplace for coupon in coupons], ["mercadolivre", "amazon"])
+        self.assertEqual(
+            [coupon.marketplace for coupon in coupons],
+            ["mercadolivre", "amazon", "shopee"],
+        )
         self.assertEqual(coupons[0].external_id, "licensed:mercadolivre:ml-10")
         self.assertEqual(coupons[0].coupon_rules["tipo_desconto"], "porcentagem")
         self.assertEqual(coupons[0].coupon_rules["valor_desconto"], 10.0)

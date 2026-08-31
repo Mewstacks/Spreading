@@ -1351,7 +1351,7 @@ class ConfiguracaoEnvio(models.Model):
         if self.tipo == self.TIPO_AVISO_CUPONS and self.ativo and not self.marketplace:
             from django.core.exceptions import ValidationError
             raise ValidationError({
-                "marketplace": "Escolha Mercado Livre ou Amazon para o aviso de cupons.",
+                "marketplace": "Escolha Mercado Livre, Amazon ou Shopee para o aviso de cupons.",
             })
 
     def dentro_da_janela(self, agora) -> bool:

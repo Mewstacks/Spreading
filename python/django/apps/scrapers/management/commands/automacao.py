@@ -189,7 +189,7 @@ def _rodar_cupons(lote=40):
     )
     # Lote deliberadamente pequeno: checkout disputa o mesmo Chromium das fontes e
     # dos links. O adaptador só usa a sessão do próprio usuário, isola um carrinho
-    # vazio e nunca avança para checkout/pagamento.
+    # vazio e nunca cruza a ação que cria/paga um pedido.
     from apps.scrapers.coupon_validation_adapters import CHECKOUT_VALIDATION_ADAPTERS
     from apps.scrapers.coupon_validation_runner import (
         defer_missing_checkout_sessions, run_validation_batch,

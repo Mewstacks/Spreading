@@ -587,6 +587,7 @@ def configurar_conta(request):
         return redirect("scraper-conta")
 
     from apps.scrapers.conexoes import estado_amazon_relatorios, estado_ml_relatorios
+    from apps.scrapers.report_sessions import has_report_session
     awin_integracao = IntegracaoAfiliado.objects.filter(
         owner=request.user, provedor="awin").first()
     shopee_integracao = IntegracaoAfiliado.objects.filter(
@@ -594,6 +595,7 @@ def configurar_conta(request):
     return render(request, "scrapers/conta.html", {
         "shopee_enabled": getattr(settings, "SHOPEE_INTEGRATION_ENABLED", False),
         "shopee_integracao": shopee_integracao,
+        "shopee_shop_conectado": has_report_session(request.user, "shopee_shop"),
         "perfil": perfil,
         "tem_secret": bool(perfil and perfil.amazon_credential_secret),
         "ml_sessao_ok": _tem_sessao_ml(request.user),
@@ -841,6 +843,8 @@ def _url_manual_valida(marketplace, url):
         return host == "mercadolivre.com.br" or host.endswith(".mercadolivre.com.br")
     if marketplace == "amazon":
         return host == "amazon.com.br" or host.endswith(".amazon.com.br")
+    if marketplace == "shopee":
+        return host == "shopee.com.br" or host.endswith(".shopee.com.br")
     return marketplace == "awin"
 
 
@@ -860,7 +864,7 @@ def cupom_manual_salvar(request, cupom_id=None):
         if not coupon:
             raise PermissionDenied("Cupom não pertence a esta conta.")
     marketplace = (request.POST.get("marketplace") or "").strip().lower()
-    if marketplace not in {"mercadolivre", "amazon", "awin"}:
+    if marketplace not in {"mercadolivre", "amazon", "shopee", "awin"}:
         messages.error(request, "Escolha uma loja conectada.")
         return redirect("scraper-top")
     original_url = (request.POST.get("url") or "").strip()
@@ -1221,6 +1225,86 @@ def amazon_shop_conexao_input(request):
     return JsonResponse(amazon_conexao.enfileirar_input(
         request.user.id, payload.get("session_id"), payload.get("events"),
         shopper=True,
+    ))
+
+
+def shopee_shop_conexao_painel(request):
+    """Sessão da Shopee usada exclusivamente para validar cupom sem comprar."""
+    from apps.scrapers import amazon_conexao
+    return render(request, "scrapers/ml_conexao.html", {
+        "status": amazon_conexao.status(request.user.id, shopper="shopee"),
+        "marketplace_nome": "Shopee Compras",
+        "conexao_prefix": "/scrapers/shopee-shop",
+        "checkout_validation": True, "marketplace_ml": False,
+    })
+
+
+@require_GET
+def shopee_shop_conexao_status_json(request):
+    from apps.scrapers import amazon_conexao
+    return JsonResponse(amazon_conexao.status(request.user.id, shopper="shopee"))
+
+
+@require_POST
+def shopee_shop_conexao_start(request):
+    from apps.scrapers import amazon_conexao
+    import json
+    if len(request.body or b"") > 4096:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        client = json.loads((request.body or b"{}").decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(amazon_conexao.criar_sessao(
+        request.user, client, shopper="shopee",
+    ))
+
+
+@require_POST
+def shopee_shop_conexao_salvar(request):
+    from apps.scrapers import amazon_conexao
+    amazon_conexao.salvar_agora(request.user.id, shopper="shopee")
+    return JsonResponse(amazon_conexao.status(request.user.id, shopper="shopee"))
+
+
+@require_POST
+def shopee_shop_conexao_cancelar(request):
+    from apps.scrapers import amazon_conexao
+    amazon_conexao.cancelar(request.user.id, shopper="shopee")
+    return JsonResponse({"ok": True})
+
+
+@require_POST
+def shopee_shop_conexao_desconectar(request):
+    from apps.scrapers import amazon_conexao
+    from apps.scrapers.report_sessions import delete_report_state
+    amazon_conexao.cancelar(request.user.id, shopper="shopee")
+    delete_report_state(request.user, "shopee_shop")
+    return JsonResponse({"ok": True})
+
+
+@throttle_sse(6)
+@require_GET
+def shopee_shop_conexao_frames(request):
+    from apps.scrapers import amazon_conexao
+    return _resposta_login_sse(amazon_conexao.frames(
+        request.user.id, request.GET.get("session_id"), shopper="shopee",
+    ))
+
+
+@require_POST
+def shopee_shop_conexao_input(request):
+    import json
+    from apps.scrapers import amazon_conexao
+    if len(request.body or b"") > 65536:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        payload = json.loads((request.body or b"").decode() or "{}")
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(amazon_conexao.enfileirar_input(
+        request.user.id, payload.get("session_id"), payload.get("events"),
+        shopper="shopee",
     ))
 
 
@@ -1609,11 +1693,11 @@ def configuracoes(request):
             )
             marketplace_regra = (request.POST.get("marketplace") or "").strip()[:20]
             if (tipo_regra == ConfiguracaoEnvio.TIPO_AVISO_CUPONS
-                    and marketplace_regra not in {"mercadolivre", "amazon"}):
+                    and marketplace_regra not in {"mercadolivre", "amazon", "shopee"}):
                 messages.error(
                     request,
-                    "Escolha Mercado Livre ou Amazon para o aviso de cupons. "
-                    "Crie duas regras para avisar as duas lojas.",
+                    "Escolha Mercado Livre, Amazon ou Shopee para o aviso de cupons. "
+                    "Crie uma regra por loja para manter o envio previsível.",
                 )
                 return redirect("scraper-configuracoes")
             campos = dict(
@@ -2055,8 +2139,8 @@ def enviar_aviso_cupons_stream(request):
         if not grupo_id:
             print("[ERRO] Nenhum destino informado (grupo/chat).")
             return
-        if marketplace not in ("mercadolivre", "amazon"):
-            print("[ERRO] Escolha a loja do aviso (Mercado Livre ou Amazon).")
+        if marketplace not in ("mercadolivre", "amazon", "shopee"):
+            print("[ERRO] Escolha a loja do aviso (Mercado Livre, Amazon ou Shopee).")
             return
         # Objeto solto no lugar da regra salva: o núcleo só lê estes campos, e o
         # disparo manual não deve depender de existir uma ConfiguracaoEnvio.

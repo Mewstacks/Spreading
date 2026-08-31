@@ -39,22 +39,38 @@ logger = logging.getLogger(__name__)
 LOGIN_URL = "https://associados.amazon.com.br/"
 REPORT_URL = "https://associados.amazon.com.br/home/reports"
 SHOP_URL = "https://www.amazon.com.br/gp/css/homepage.html"
+SHOPEE_PROFILE_URL = "https://shopee.com.br/user/account/profile"
 _threads = {}
 _lock = threading.Lock()
 _transport = LiveTransport("amazon_associados")
 _shop_transport = LiveTransport("amazon_loja")
+_shopee_transport = LiveTransport("shopee_loja")
+
+
+def _is_shopee(shopper):
+    return shopper == "shopee"
+
+
+def _store_name(shopper):
+    return "Shopee" if _is_shopee(shopper) else "Amazon"
 
 
 def _key(user_id, shopper=False):
+    if _is_shopee(shopper):
+        return f"shopee_shop_conexao:{user_id}"
     tipo = "shop" if shopper else "report"
     return f"amazon_{tipo}_conexao:{user_id}"
 
 
 def _live_transport(shopper=False):
+    if _is_shopee(shopper):
+        return _shopee_transport
     return _shop_transport if shopper else _transport
 
 
 def _session_provider(shopper=False):
+    if _is_shopee(shopper):
+        return "shopee_shop"
     return "amazon_shop" if shopper else "amazon"
 
 
@@ -93,6 +109,16 @@ def _logado(page, *, shopper=False) -> bool:
         value = (page.url or "").lower()
         if any(x in value for x in ("signin", "ap/signin", "login")):
             return False
+        if _is_shopee(shopper):
+            host = urlsplit(value).hostname or ""
+            return (
+                (host == "shopee.com.br" or host.endswith(".shopee.com.br"))
+                and "/user/account" in value
+                and "/verify/traffic" not in value
+                and page.locator(
+                    "input[type='password'], input[name*='password' i]",
+                ).count() == 0
+            )
         if shopper:
             host = urlsplit(value).hostname or ""
             return (
@@ -125,15 +151,16 @@ def _abrir_login(page, *, shopper=False):
     for tentativa in range(1, GOTO_TENTATIVAS + 1):
         try:
             page.goto(
-                SHOP_URL if shopper else LOGIN_URL,
+                (SHOPEE_PROFILE_URL if _is_shopee(shopper)
+                 else SHOP_URL if shopper else LOGIN_URL),
                 wait_until="commit", timeout=GOTO_TIMEOUT_MS,
             )
             return
         except PlaywrightTimeoutError:
-            logger.warning("Login Amazon: navegação estourou o tempo (tentativa %s/%s).",
-                           tentativa, GOTO_TENTATIVAS)
+            logger.warning("Login %s: navegação estourou o tempo (tentativa %s/%s).",
+                           _store_name(shopper), tentativa, GOTO_TENTATIVAS)
     raise RuntimeError(
-        "A Amazon demorou demais a responder a partir do servidor. "
+        f"A {_store_name(shopper)} demorou demais a responder a partir do servidor. "
         "Tente novamente em alguns instantes."
     )
 
@@ -193,7 +220,7 @@ def _worker(user, shopper=False):
                         break
                     current_page = active_page.current()
                     if current_page is None:
-                        raise RuntimeError("A janela da Amazon foi fechada.")
+                        raise RuntimeError(f"A janela da {_store_name(shopper)} foi fechada.")
                     houve_input = False
                     for _ in range(MAX_EVENTOS_POR_POST * 4):
                         try:
@@ -215,7 +242,8 @@ def _worker(user, shopper=False):
                         proxima_checagem = 0.0
                         try:
                             current_page.goto(
-                                SHOP_URL if shopper else REPORT_URL,
+                                (SHOPEE_PROFILE_URL if _is_shopee(shopper)
+                                 else SHOP_URL if shopper else REPORT_URL),
                                 wait_until="domcontentloaded",
                                               timeout=GOTO_TIMEOUT_MS)
                             transport.capture(runtime, current_page, active=True)
@@ -223,8 +251,8 @@ def _worker(user, shopper=False):
                             # Um "já entrei" prematuro (ou rede lenta) não pode
                             # encerrar a sessão: o usuário continua no login.
                             logger.warning(
-                                "Validação do login Amazon não navegou (user %s).",
-                                uid, exc_info=True)
+                                "Validação do login %s não navegou (user %s).",
+                                _store_name(shopper), uid, exc_info=True)
                             _set(uid, shopper=shopper, fase="aguardando_login",
                                  aviso="Ainda não foi possível confirmar o login. "
                                        "Conclua a etapa aberta e tente de novo.")
@@ -241,7 +269,8 @@ def _worker(user, shopper=False):
                             logged = True
                             logger.info(
                                 "ml_login_metric transport=%s user=%s validation=conectado",
-                                "amazon_loja" if shopper else "amazon_associados", uid,
+                                ("shopee_loja" if _is_shopee(shopper) else
+                                 "amazon_loja" if shopper else "amazon_associados"), uid,
                             )
                             break
                     aguardar_atividade(current_page, runtime)
@@ -253,15 +282,15 @@ def _worker(user, shopper=False):
                     estado_capturado = context.storage_state()
                 elif (cache.get(_key(uid, shopper)) or {}).get("fase") != "idle":
                     _set(uid, shopper=shopper, fase="erro",
-                         erro="Tempo esgotado esperando o login da Amazon.")
+                         erro=f"Tempo esgotado esperando o login da {_store_name(shopper)}.")
             finally:
                 # Em finally: solto no fim do bloco, o close nao era alcancado
                 # em nenhuma excecao e o Chromium ficava orfao.
                 try:
                     browser.close()
                 except Exception:
-                    logger.warning("Chromium do login Amazon não fechou limpo (user %s).",
-                                   uid, exc_info=True)
+                    logger.warning("Chromium do login %s não fechou limpo (user %s).",
+                                   _store_name(shopper), uid, exc_info=True)
 
         if estado_capturado is not None:
             save_report_state(user, _session_provider(shopper), estado_capturado)
@@ -269,9 +298,10 @@ def _worker(user, shopper=False):
                  salvar_agora=False)
     except Exception as exc:
         codigo = novo_codigo()
-        logger.exception("Conexão Amazon falhou (user=%s codigo=%s)", uid, codigo)
+        logger.exception("Conexão %s falhou (user=%s codigo=%s)",
+                         _store_name(shopper), uid, codigo)
         _set(uid, shopper=shopper, fase="erro", codigo_erro=codigo,
-             erro=mensagem_de_erro(exc, codigo, servico="A Amazon"))
+             erro=mensagem_de_erro(exc, codigo, servico=f"A {_store_name(shopper)}"))
     finally:
         transport.finish(uid, runtime)
         with _lock:
@@ -280,7 +310,9 @@ def _worker(user, shopper=False):
 
 def criar_sessao(user, client: dict | None = None, *, shopper=False):
     from apps.accounts.feature_flags import enabled_for_user
-    if not enabled_for_user("AMAZON_BROWSER_LOGIN_ENABLED", user):
+    flag = ("SHOPEE_BROWSER_LOGIN_ENABLED" if _is_shopee(shopper)
+            else "AMAZON_BROWSER_LOGIN_ENABLED")
+    if not enabled_for_user(flag, user):
         # Persistido, e não só retornado: o poll do front relê o cache e um estado
         # efêmero seria imediatamente apagado pela fase antiga — a tela repintava
         # "Conectado" sobre um login que nunca abriu (ver a mesma correção em
@@ -290,7 +322,7 @@ def criar_sessao(user, client: dict | None = None, *, shopper=False):
         return {
             **_set(user.id, shopper=shopper, fase="indisponivel", cancelar=False,
                    salvar_agora=False,
-                   erro="Login da Amazon por navegador está desativado para esta organização."),
+                   erro=f"Login da {_store_name(shopper)} por navegador está desativado para esta organização."),
             "auth_valido": False,
         }
     with _lock:

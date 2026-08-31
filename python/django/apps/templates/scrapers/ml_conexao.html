@@ -257,13 +257,13 @@
 <!-- Live view remota: peça central enquanto a conexão está em andamento -->
 <div id="live-area" class="panel" style="display:none;">
   <div class="live-toolbar">
-    <div class="live-title"><i data-lucide="monitor-smartphone"></i> Sessão remota · {% if marketplace_ml %}Mercado Livre{% else %}Amazon{% endif %}</div>
+    <div class="live-title"><i data-lucide="monitor-smartphone"></i> Sessão remota · {{ marketplace_nome|default:"Mercado Livre" }}</div>
     <div id="stream-badge" class="stream-badge is-wait" role="status" aria-live="polite">
       <span class="stream-dot"></span><span id="stream-txt">Preparando imagem…</span>
     </div>
   </div>
   <div id="live-frame-wrap">
-    <canvas id="live-canvas" width="1280" height="800" tabindex="0" aria-label="Janela interativa de login {% if marketplace_ml %}do Mercado Livre{% else %}da Amazon{% endif %}"></canvas>
+    <canvas id="live-canvas" width="1280" height="800" tabindex="0" aria-label="Janela interativa de login · {{ marketplace_nome|default:"Mercado Livre" }}"></canvas>
     <input id="live-kbd" type="text" inputmode="text" autocomplete="off" autocapitalize="off"
       autocorrect="off" spellcheck="false" aria-hidden="true" tabindex="-1">
     <div id="stream-overlay" class="stream-overlay" aria-hidden="true">
@@ -276,7 +276,7 @@
   </div>
   <div class="device-tip">
     <i data-lucide="lightbulb"></i>
-    <span id="device-tip-text">{% if marketplace_ml %}No celular, prefira SMS ou o aplicativo do Mercado Livre. No computador, você também pode escanear o QR Code com o telefone.{% else %}Conclua o login acima. Assim que a Amazon confirmar a conta, salve a sessão.{% endif %}</span>
+    <span id="device-tip-text">{% if marketplace_ml %}No celular, prefira SMS ou o aplicativo do Mercado Livre. No computador, você também pode escanear o QR Code com o telefone.{% else %}Conclua o login acima. Assim que a loja confirmar a conta, salve a sessão.{% endif %}</span>
   </div>
   <div class="live-controls">
     <button id="salvar-btn" class="btn btn-accent"><i data-lucide="badge-check"></i> {% if marketplace_ml %}Verificar conexão{% else %}Já entrei{% endif %}</button>
@@ -292,8 +292,8 @@
       <div class="panel-head">
         <span class="panel-ico"><i data-lucide="shield-check"></i></span>
         <div>
-          <strong>Conectar {% if marketplace_ml %}ao Mercado Livre{% else %}à Amazon{% endif %}</strong>
-          <p class="hint">O login {% if marketplace_ml %}do Mercado Livre será aberto aqui, no formato correto para este dispositivo{% else %}da Amazon será aberto nesta janela{% endif %}. Você entra direto no site oficial — o Spreading só retransmite a janela.</p>
+          <strong>Conectar · {{ marketplace_nome|default:"Mercado Livre" }}</strong>
+          <p class="hint">O login será aberto nesta janela, direto no site oficial. O Spreading só retransmite a janela e não armazena o que você digita.</p>
         </div>
       </div>
       <div class="actions">
@@ -358,7 +358,7 @@
         <li id="step-1" class="step">
           <span class="ball">1</span>
           <span class="step-txt">
-            <span class="lbl">Abrir {% if marketplace_ml %}o Mercado Livre{% else %}a Amazon{% endif %}</span>
+            <span class="lbl">Abrir {% if marketplace_ml %}o{% else %}a{% endif %} {{ marketplace_nome|default:"Mercado Livre" }}</span>
             <span class="step-desc">Janela oficial de login</span>
           </span>
         </li>
@@ -391,7 +391,7 @@
   <div class="panel">
     <span class="eyebrow">Conexão segura</span>
     <ul class="tips-list">
-      <li><i data-lucide="globe"></i><span>A janela remota mostra somente o site oficial {% if marketplace_ml %}do Mercado Livre{% else %}da Amazon{% endif %} — nunca um formulário do Spreading.</span></li>
+      <li><i data-lucide="globe"></i><span>A janela remota mostra somente o site oficial de {{ marketplace_nome|default:"Mercado Livre" }} — nunca um formulário do Spreading.</span></li>
       <li><i data-lucide="keyboard"></i><span>Teclas e cliques são retransmitidos apenas para essa janela e não ficam registrados.</span></li>
       <li><i data-lucide="unplug"></i><span>Você pode desconectar quando quiser — a sessão é apagada do servidor.</span></li>
     </ul>

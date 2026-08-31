@@ -44,6 +44,9 @@ def _checkout_session_available(user, marketplace):
     if marketplace == "amazon":
         from apps.scrapers.report_sessions import has_report_session
         return has_report_session(user, "amazon_shop")
+    if marketplace == "shopee":
+        from apps.scrapers.report_sessions import has_report_session
+        return has_report_session(user, "shopee_shop")
     return True
 
 
@@ -54,7 +57,7 @@ def defer_missing_checkout_sessions(*, now=None):
     now = now or timezone.now()
     retry_at = now + timezone.timedelta(hours=6)
     pairs = list(CupomValidacao.objects.filter(
-        status="pending", marketplace__in=("mercadolivre", "amazon"),
+        status="pending", marketplace__in=("mercadolivre", "amazon", "shopee"),
     ).values_list("usuario_id", "marketplace").distinct())
     users = {
         user.id: user for user in get_user_model().objects.filter(
