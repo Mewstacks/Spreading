@@ -1,4 +1,5 @@
 import re
+import time
 from contextlib import contextmanager
 from urllib.parse import quote_plus
 from django.conf import settings
@@ -9,6 +10,22 @@ from apps.scrapers.carga import BrowserResourceUnavailable, browser_resource
 from .base import IngestedItem, SourceAdapter, normalizar_dinheiro
 
 ASIN_RE = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})", re.I)
+
+
+def _termos_do_ciclo(terms, agora=None, limite=None):
+    """Seleciona uma fatia rotativa sem perder cobertura do catalogo."""
+    unicos = list(dict.fromkeys(str(term).strip() for term in terms if str(term).strip()))
+    if not unicos:
+        unicos = ["ofertas"]
+    limite = max(1, int(
+        limite or getattr(settings, "AMAZON_PUBLIC_TERMS_PER_CYCLE", 2)
+    ))
+    limite = min(limite, len(unicos))
+    agora = agora or timezone.now()
+    janela = int(agora.timestamp() // (3 * 60 * 60))
+    offset = (janela * limite) % len(unicos)
+    selecionados = [unicos[(offset + indice) % len(unicos)] for indice in range(limite)]
+    return selecionados, len(unicos), offset
 
 
 def _money(text):
@@ -63,45 +80,85 @@ class AmazonPublicSource(SourceAdapter):
     name = "Amazon — catálogo público"
     requires_chromium = True
 
+    def __init__(self):
+        self.last_metrics = {}
+        self.last_health_status = "healthy"
+
     def discover_offers(self, terms=None, **kwargs):
         terms = terms or getattr(settings, "AMAZON_FEED_KEYWORDS", []) or ["ofertas"]
+        selected, total_terms, offset = _termos_do_ciclo(terms)
+        started = time.monotonic()
+        processed = 0
+        failures = []
+        capacity_yielded = False
+        rows = 0
         seen = set()
-        with _browser_slot("amazon_public_offers"), \
-                iniciar_browser(headless=True) as (page, _):
-            for term in terms[:12]:
-                page.goto(f"https://www.amazon.com.br/s?k={quote_plus(term)}",
-                          wait_until="domcontentloaded", timeout=45000)
-                body = page.locator("body").inner_text(timeout=5000)
-                if "digite os caracteres" in body.lower():
-                    raise RuntimeError("captcha")
-                cards = page.locator("[data-component-type='s-search-result']")
-                for index in range(cards.count()):
-                    card = cards.nth(index)
+        try:
+            with _browser_slot("amazon_public_offers"), \
+                    iniciar_browser(headless=True) as (page, _):
+                for term in selected:
                     try:
-                        links = card.locator("a[href*='/dp/']")
-                        url = links.first.get_attribute("href", timeout=2000) if links.count() else ""
-                        match = ASIN_RE.search(url or "")
-                        if not match or match.group(1) in seen:
-                            continue
-                        asin = match.group(1).upper()
-                        title = card.locator("h2").first.inner_text(timeout=2000).strip()
-                        current = _money(card.locator(".a-price .a-offscreen").first.inner_text(timeout=2000))
-                        previous = 0
-                        old = card.locator(".a-price.a-text-price .a-offscreen")
-                        if old.count():
-                            previous = _money(old.first.inner_text(timeout=1000))
-                        if not _precos_publicaveis(current, previous):
-                            continue
-                        seen.add(asin)
-                        yield IngestedItem(
-                            external_id=asin, marketplace="amazon", source=self.slug,
-                            kind="offer", canonical_url=f"https://www.amazon.com.br/dp/{asin}",
-                            title=title[:255], current_price=current, reference_price=previous,
-                            observed_at=timezone.now(),
-                            evidence={"transport": "public-search", "term": term},
-                        )
-                    except Exception:
-                        continue
+                        page.goto(f"https://www.amazon.com.br/s?k={quote_plus(term)}",
+                                  wait_until="domcontentloaded", timeout=25000)
+                        body = page.locator("body").inner_text(timeout=5000)
+                        if "digite os caracteres" in body.lower():
+                            raise RuntimeError("captcha")
+                        cards = page.locator("[data-component-type='s-search-result']")
+                        for index in range(cards.count()):
+                            card = cards.nth(index)
+                            try:
+                                links = card.locator("a[href*='/dp/']")
+                                url = links.first.get_attribute("href", timeout=2000) if links.count() else ""
+                                match = ASIN_RE.search(url or "")
+                                if not match or match.group(1) in seen:
+                                    continue
+                                asin = match.group(1).upper()
+                                title = card.locator("h2").first.inner_text(timeout=2000).strip()
+                                current = _money(card.locator(".a-price .a-offscreen").first.inner_text(timeout=2000))
+                                previous = 0
+                                old = card.locator(".a-price.a-text-price .a-offscreen")
+                                if old.count():
+                                    previous = _money(old.first.inner_text(timeout=1000))
+                                if not _precos_publicaveis(current, previous):
+                                    continue
+                                seen.add(asin)
+                                rows += 1
+                                yield IngestedItem(
+                                    external_id=asin, marketplace="amazon", source=self.slug,
+                                    kind="offer", canonical_url=f"https://www.amazon.com.br/dp/{asin}",
+                                    title=title[:255], current_price=current, reference_price=previous,
+                                    observed_at=timezone.now(),
+                                    evidence={"transport": "public-search", "term": term},
+                                )
+                            except Exception:
+                                continue
+                        processed += 1
+                    except Exception as exc:
+                        failures.append({"term": term, "error": type(exc).__name__})
+                    from apps.scrapers.resource_control import interesse_pendente
+                    if interesse_pendente(
+                        "django_chromium", exceto=f"source_{self.slug}",
+                    ):
+                        capacity_yielded = True
+                        break
+        finally:
+            complete = processed == len(selected) and not failures and not capacity_yielded
+            self.last_metrics = {
+                "rows": rows,
+                "terms_total": total_terms,
+                "terms_selected": len(selected),
+                "terms_processed": processed,
+                "terms_offset": offset,
+                "failures": failures,
+                "capacity_yielded": capacity_yielded,
+                "complete": complete,
+                "duration_ms": round((time.monotonic() - started) * 1000),
+            }
+            self.last_health_status = (
+                "healthy_empty" if complete and not rows
+                else "healthy" if complete
+                else "degraded"
+            )
 
     def discover_coupons(self, **kwargs):
         return []

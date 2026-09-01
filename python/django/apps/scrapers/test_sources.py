@@ -712,6 +712,23 @@ class AmazonDiscountRecoveryTests(TestCase):
 
 
 class AmazonPublicPriceSanityTests(TestCase):
+    @override_settings(AMAZON_PUBLIC_TERMS_PER_CYCLE=2)
+    def test_rotates_small_term_slices_without_losing_catalog_coverage(self):
+        from apps.scrapers.sources.amazon_public import _termos_do_ciclo
+
+        terms = ["a", "b", "c", "d", "e", "f", "g", "a"]
+        now = timezone.now().replace(minute=0, second=0, microsecond=0)
+        first, total, _ = _termos_do_ciclo(terms, agora=now)
+        second, second_total, _ = _termos_do_ciclo(
+            terms, agora=now + timedelta(hours=3),
+        )
+
+        self.assertEqual(total, 7)
+        self.assertEqual(second_total, 7)
+        self.assertEqual(len(first), 2)
+        self.assertEqual(len(second), 2)
+        self.assertTrue(set(first).isdisjoint(second))
+
     def test_accepts_plausible_discount(self):
         from apps.scrapers.sources.amazon_public import _precos_publicaveis
 

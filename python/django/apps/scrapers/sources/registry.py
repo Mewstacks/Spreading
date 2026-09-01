@@ -66,15 +66,21 @@ def _ingestion_guard(slug, *, requires_chromium=False):
     capacidade justamente onde ele precisava ser visto.
     """
     if connection.vendor == "postgresql":
-        from apps.scrapers.resource_control import leased_resource
+        from apps.scrapers.resource_control import (
+            leased_resource, limpar_interesse_de_esteira,
+            sinalizar_interesse_de_esteira,
+        )
         if requires_chromium:
+            esteira = f"source_{slug}"
             # Ordem global em todo o projeto: capacidade antes da sessão/fonte.
             with leased_resource(
                 "django_chromium", owner_kind="source_ingest",
             ) as (browser_acquired, _browser_detail):
                 if not browser_acquired:
+                    sinalizar_interesse_de_esteira(esteira)
                     yield False, "capacity_deferred"
                     return
+                limpar_interesse_de_esteira(esteira)
                 with leased_resource(
                     f"source_ingest:{slug}", owner_kind="source_ingest",
                 ) as (source_acquired, _source_detail):

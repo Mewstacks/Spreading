@@ -472,6 +472,9 @@ AMAZON_MIN_SAVINGS_PCT = float(os.getenv("AMAZON_MIN_SAVINGS_PCT", "15"))
 # Cada página é uma chamada com throttle de ~1 TPS: subir muito alonga o ciclo.
 AMAZON_FEED_PAGES = int(os.getenv("AMAZON_FEED_PAGES", "5"))
 AMAZON_PUBLIC_FALLBACK = os.getenv("AMAZON_PUBLIC_FALLBACK", "1") == "1"
+AMAZON_PUBLIC_TERMS_PER_CYCLE = max(
+    1, int(os.getenv("AMAZON_PUBLIC_TERMS_PER_CYCLE", "2")),
+)
 AFFILIATE_FEED_URL = os.getenv("AFFILIATE_FEED_URL", "")
 AFFILIATE_FEED_TOKEN = os.getenv("AFFILIATE_FEED_TOKEN", "")
 AWIN_INTEGRATION_ENABLED = os.getenv("AWIN_INTEGRATION_ENABLED", "1") == "1"

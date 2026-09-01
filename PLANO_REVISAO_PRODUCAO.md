@@ -200,7 +200,12 @@ Fontes primárias consultadas:
   não contam como exposição A/B. Na conta `lules`, os dois portais passaram de
   `url_missing` para o preflight correto `session_missing`; ainda existem zero
   linhas de receita até a conexão das sessões exclusivas de relatório.
-- Testes automatizados: 1.386 testes Django e 169 testes Node aprovados; 24 testes
+- Contenção Amazon/Shopee: a busca HTML genérica da Amazon deixou de reservar o
+  único Chromium por até 12 termos consecutivos. Ela agora percorre duas categorias
+  rotativas por ciclo, usa timeout menor, cede entre termos para uma fonte em fila
+  e publica métricas de duração/completude. Fontes Chromium que perdem o lease
+  sinalizam a fila automaticamente; a validação de produção é o gate do deploy 284.
+- Testes automatizados: 1.391 testes Django e 169 testes Node aprovados; 24 testes
   direcionados de isolamento, permissões, CSRF, SQLi e XSS aprovados; nenhuma
   migração pendente e compilação limpa.
 - Auditoria de produção: papel runtime sem `SUPERUSER`, `BYPASSRLS` ou ownership

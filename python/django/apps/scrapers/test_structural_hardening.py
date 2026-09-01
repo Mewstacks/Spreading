@@ -553,6 +553,24 @@ class BrowserResourceContractTests(TestCase):
                 "django_chromium", "source_ingest:amazon-public-coupons",
             ])
 
+    def test_ingestao_sinaliza_fila_quando_chromium_esta_ocupado(self):
+        from apps.scrapers.sources.registry import _ingestion_guard
+
+        @contextmanager
+        def unavailable_lease(_resource_key, **_kwargs):
+            yield False, {"reason": "occupied"}
+
+        fake_connection = type("Connection", (), {"vendor": "postgresql"})()
+        with patch("apps.scrapers.sources.registry.connection", fake_connection), \
+                patch("apps.scrapers.resource_control.leased_resource", unavailable_lease), \
+                patch("apps.scrapers.resource_control.sinalizar_interesse_de_esteira") as signal:
+            with _ingestion_guard(
+                "shopee-public-coupons", requires_chromium=True,
+            ) as acquired:
+                self.assertEqual(acquired, (False, "capacity_deferred"))
+
+        signal.assert_called_once_with("source_shopee-public-coupons")
+
     def test_scrape_e_flash_nao_seguram_chromium_o_ciclo_inteiro(self):
         import inspect
         from apps.scrapers.management.commands.automacao import Command
