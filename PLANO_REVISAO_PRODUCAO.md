@@ -425,6 +425,14 @@ Fontes primárias consultadas:
   a aproximadamente R$287,90/mês. A compra é ação financeira no painel do titular e
   ainda não foi executada; portanto o gate de R$300 continua aberto até a reserva
   aparecer na cobrança real.
+- Deploy v311: o alerta de backlog deixou de contar `amazon_tag_missing`, pois a
+  tag é configuração da conta e não trabalho que o worker consiga concluir. O
+  teste de regressão entrou na suíte integral (1.445/1.445 Django; 169/169 Node).
+  Release, migrações, reforço de RLS e smoke checks passaram. Em produção,
+  `code_not_ready_20m` caiu de 128 para zero, `projection_stale` passou de 647 para
+  239 casos realmente acionáveis e `browser_wait_over_60m` de 26 para 25. A conta
+  `lules` preservou 1.576 projeções e 997 cupons prontos; `/healthz` respondeu 200,
+  web/worker v311 e todos os checks do PostgreSQL permaneceram verdes.
 
 ## Gates de deploy desta revisão
 
