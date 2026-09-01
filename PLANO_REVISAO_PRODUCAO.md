@@ -158,7 +158,9 @@ Fontes primárias consultadas:
   entradas inválidas e cinco duplicatas. Em produção, 13 códigos do ML coincidiram
   com fonte oficial; os demais permaneceram retidos para validação.
 - Promobit: 61–62 candidatos reais por ciclo em cerca de 4 segundos.
-- Telegram: 12/12 canais e 51 códigos distintos em produção; o ciclo específico
+- Telegram: 24/24 canais públicos e 64 códigos distintos por ciclo em produção;
+  duas execuções automáticas consecutivas começaram com intervalo de 5min05s e
+  terminaram saudáveis. O ciclo específico
   de cupons caiu de 11,1 s para 3,53 s ao deixar de resolver 124 redirecionamentos
   que não produziram nenhum produto. Cache de HTML agora vence em 120 segundos,
   portanto novas mensagens não dependem de reiniciar a VM.
@@ -170,6 +172,11 @@ Fontes primárias consultadas:
   cupons-relâmpago roda a cada cinco minutos e leva cerca de 2,35 s; na amostra de
   28/08, a página oficial servia cinco campanhas de 08/06 já encerradas, todas
   rejeitadas sem apagar o catálogo anterior.
+- Radar relâmpago em produção (versão 280): ML oficial, Pelando e Telegram
+  executaram dois ciclos consecutivos em aproximadamente cinco minutos. O novo
+  contrato `coupons-carousel` do ML expôs seis vouchers personalizados/opacos;
+  todos os seis foram rejeitados como `invalid_code`, sem fabricar códigos. O
+  Pelando aceitou oito cupons de três lojas em cada ciclo.
 - Snapshot `lules`/WhatsApp em 28/08 às 18h02 BRT: 4.489 estados projetados. O ML
   tinha 3.012 prontos e 138 comunitários retidos; a Amazon, quatro prontos e 44
   retidos; a Shopee, 79 comunitários retidos e oito vouchers oficiais aguardando
@@ -188,7 +195,12 @@ Fontes primárias consultadas:
   `InitPlan` por consulta, em vez de ser recalculada para cada linha. O plano real
   do PostgreSQL de produção confirmou `InitPlan` e `One-Time Filter`; o isolamento
   e a assinatura HMAC permanecem obrigatórios para dados privados.
-- Testes automatizados: 1.318 testes Django e 169 testes Node aprovados; 24 testes
+- Ranking e conversão (versão 281): métricas oficiais de ML/Amazon alimentam o
+  ranking por limite inferior de Wilson e confiança de amostra; falhas de envio
+  não contam como exposição A/B. Na conta `lules`, os dois portais passaram de
+  `url_missing` para o preflight correto `session_missing`; ainda existem zero
+  linhas de receita até a conexão das sessões exclusivas de relatório.
+- Testes automatizados: 1.386 testes Django e 169 testes Node aprovados; 24 testes
   direcionados de isolamento, permissões, CSRF, SQLi e XSS aprovados; nenhuma
   migração pendente e compilação limpa.
 - Auditoria de produção: papel runtime sem `SUPERUSER`, `BYPASSRLS` ou ownership

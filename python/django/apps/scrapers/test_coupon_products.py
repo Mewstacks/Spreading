@@ -514,6 +514,26 @@ class CouponPreparationTests(TestCase):
             antes + BACKOFF_TRANSPORTE + timezone.timedelta(minutes=1),
         )
 
+    def test_preflight_sem_sessao_nao_repete_coleta_remota(self):
+        """O lote detecta ausência de sessão uma vez e não abre 400 portas iguais."""
+        from apps.scrapers.coupon_products import (
+            ERRO_SESSAO_ML, preparar_cupom,
+        )
+
+        cupom = self._cupom_ml_de_container()
+        with patch("apps.scrapers.coupon_products._coletar_ml_remoto") as coletar:
+            self.assertEqual(preparar_cupom(
+                cupom, self.user, force=True,
+                sessao_ml_disponivel=False,
+                log_sessao_indisponivel=False,
+            ), [])
+
+        coletar.assert_not_called()
+        preparo = CupomPreparacao.objects.get(cupom=cupom)
+        self.assertEqual(preparo.reason_code,
+                         "ml_session_required_for_preparation")
+        self.assertEqual(preparo.erro, ERRO_SESSAO_ML)
+
     def test_container_vazio_comprovado_mantem_backoff_longo(self):
         from apps.scrapers.coupon_products import (
             BACKOFF_VAZIO, ERRO_CONTAINER_EMPTY_PROVEN, preparar_cupom,

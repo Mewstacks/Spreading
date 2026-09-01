@@ -713,7 +713,8 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
 
 def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
                    credenciais_alternativas=(), permitir_browser=True,
-                   source_run_id=""):
+                   source_run_id="", sessao_ml_disponivel=None,
+                   log_sessao_indisponivel=True):
     """Prepara e devolve ProdutoCupom confirmados, ou [] sem fallback inseguro.
 
     `credenciais_alternativas`: usuários cuja sessão do ML pode ler a listagem
@@ -766,6 +767,12 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
         coleta_ml = None
         if (not candidatos and permitir_rede
                 and str(cupom.marketplace).lower() == "mercadolivre"):
+            # O lote já verificou todas as organizações uma única vez. Sem esta
+            # pista, cada um dos até 400 cupons repetia consultas de sessão e
+            # tentava a mesma porta fechada. Nada foi observado, portanto o
+            # veredito continua sendo retomável e vínculos anteriores são mantidos.
+            if sessao_ml_disponivel is False:
+                raise SessaoMLIndisponivelError(ERRO_SESSAO_ML)
             # No catálogo compartilhado `contexto` é None (sessão de sistema).
             # `usuario` é só quem tornou este cupom elegível no lote — pode ser
             # justamente o dono da sessão morta, então ele entra na fila junto com
@@ -857,10 +864,11 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
         # Nenhuma observação foi feita: NÃO toque nos ProdutoCupom já confirmados e
         # não grave "vazio" — este cupom continua tão bom quanto era. Só registra
         # por que ninguém conseguiu olhar, com espera curta.
-        logger.warning(
-            "Preparo do cupom %s adiado: o Mercado Livre exigiu sessão para abrir "
-            "a listagem.", cupom.pk,
-        )
+        if log_sessao_indisponivel:
+            logger.warning(
+                "Preparo do cupom %s adiado: o Mercado Livre exigiu sessão para "
+                "abrir a listagem.", cupom.pk,
+            )
         _registrar_preparo(
             status="erro", reason_code="ml_session_required_for_preparation",
             detail=ERRO_SESSAO_ML, produtos_chave=chave,
@@ -1181,6 +1189,11 @@ def preparar_lote(
         usuarios if usuarios is not None
         else get_user_model().objects.filter(is_active=True)
     )
+    from apps.accounts.ml_sessions import has_storage_state
+    # Uma consulta por usuário/organização, uma vez por ciclo. O caminho antigo
+    # repetia a leitura de credenciais em cada cupom e gerava centenas de warnings
+    # idênticos quando nenhuma conta estava conectada.
+    ml_session_available = any(has_storage_state(user) for user in usuarios)
     from apps.accounts.models import organization_for_user
     usuarios_por_organizacao = defaultdict(list)
     for candidato in usuarios:
@@ -1261,6 +1274,12 @@ def preparar_lote(
             credenciais_alternativas=credenciais,
             permitir_browser=permitir_browser,
             source_run_id=latest_run_by_source.get(cupom.fonte_id, ""),
+            sessao_ml_disponivel=(
+                ml_session_available
+                if str(cupom.marketplace or "").lower() == "mercadolivre"
+                else None
+            ),
+            log_sessao_indisponivel=False,
         ):
             prontos += 1
             por_fonte[fonte]["prontos"] += 1
@@ -1292,6 +1311,15 @@ def preparar_lote(
         com_browser += 1
         _passar(cupom, usuario, permitir_browser=True)
     adiados = len(fila_do_browser)
+
+    if not ml_session_available and any(
+        str(cupom.marketplace or "").lower() == "mercadolivre"
+        for cupom in cupons
+    ):
+        logger.info(
+            "Preparo ML: nenhuma sessão utilizável; cupons sem associação local "
+            "foram preservados e aguardam reconexão."
+        )
 
     resultado = {
         "processados": feitos,
