@@ -389,7 +389,7 @@ FONTES_COMUNIDADE = frozenset({
     "promobit-cupons", "meliuz-cupons", "pelando-cupons", "bia-garimpa-cupons",
     "cupomspot-cupons", "telegram-publico",
     "prima-ryca-cupons", "discoup-cupons", "promomia-cupons",
-    "cuponation-cupons",
+    "cuponation-cupons", "cashbe-cupons",
     "linkerhub-cupons",
     "promobit-community", "pelando-community",
 })
@@ -398,7 +398,7 @@ FONTES_COMUNIDADE_SEM_LISTAGEM = frozenset({
     "promobit-cupons", "meliuz-cupons", "pelando-cupons", "bia-garimpa-cupons",
     "cupomspot-cupons", "telegram-publico",
     "prima-ryca-cupons", "discoup-cupons", "promomia-cupons",
-    "cuponation-cupons",
+    "cuponation-cupons", "cashbe-cupons",
     "linkerhub-cupons",
     "promobit-community", "pelando-community",
 })

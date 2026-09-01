@@ -51,6 +51,7 @@ _SOURCE_PRECEDENCE = {
     "discoup-cupons": 90,
     "promomia-cupons": 92,
     "cuponation-cupons": 93,
+    "cashbe-cupons": 94,
     "linkerhub-cupons": 91,
     "telegram-publico": 90,
     "shopee-public-coupons": 10,

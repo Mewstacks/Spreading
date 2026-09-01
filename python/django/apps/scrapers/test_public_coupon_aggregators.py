@@ -9,7 +9,8 @@ from apps.scrapers.coupon_rules import (
 )
 from apps.scrapers.sources.persistence import _SOURCE_PRECEDENCE
 from apps.scrapers.sources.public_coupon_aggregators import (
-    BiaGarimpaCouponsSource, CuponationShopeeCouponsSource,
+    BiaGarimpaCouponsSource, CashbeShopeeCouponsSource,
+    CuponationShopeeCouponsSource,
     CupomSpotCouponsSource, DiscoupShopeeCouponsSource, PrimaRycaCouponsSource,
     PromomiaShopeeCouponsSource,
 )
@@ -317,12 +318,70 @@ class CuponationShopeeCouponsTests(SimpleTestCase):
         })
 
 
+class CashbeShopeeCouponsTests(SimpleTestCase):
+    @staticmethod
+    def _card(title, code, expiry):
+        return f"""
+        <div class="card coupons__card">
+          <h3 class="card__name">{title}</h3>
+          <div class="card__info">{expiry}</div>
+          <div class="card__button-code">{code}</div>
+        </div>
+        """
+
+    def test_reads_public_card_rules_and_relative_expiry(self):
+        body = "".join((
+            self._card(
+                "Resgate o cupom de R$15 OFF em compras acima de R$69",
+                "T4FALXAND0AF", "Expira: em 23 dias",
+            ),
+            self._card(
+                "Economize R$35 em compras a partir de R$199",
+                "P4R4V0C3", "Expira: em 23 dias",
+            ),
+        ))
+        source = CashbeShopeeCouponsSource()
+        with patch(
+                "apps.scrapers.sources.public_coupon_aggregators._download",
+                return_value=body):
+            rows = list(source.discover_coupons(marketplaces=["shopee"]))
+
+        self.assertEqual(len(rows), 2)
+        coupon = rows[0]
+        self.assertEqual(coupon.coupon_code, "T4FALXAND0AF")
+        self.assertEqual(coupon.coupon_rules["valor_desconto"], 15.0)
+        self.assertEqual(coupon.coupon_rules["valor_minimo"], 69.0)
+        self.assertGreater(coupon.valid_until, coupon.observed_at)
+        self.assertEqual(coupon.canonical_url, "")
+        self.assertEqual(coupon.evidence["transport"], "cashbe-public-card")
+        self.assertEqual(rows[1].coupon_rules["valor_desconto"], 35.0)
+        self.assertEqual(rows[1].coupon_rules["valor_minimo"], 199.0)
+
+    def test_rejects_expired_missing_expiry_and_duplicate_cards(self):
+        body = "".join((
+            self._card("R$20 OFF acima de R$60", "OLD20", "Expira: há 8 horas"),
+            self._card("R$10 OFF", "NOEXP10", "Confira as regras"),
+            self._card("10% OFF", "SAME10", "Expira: em 3 horas"),
+            self._card("10% OFF", "SAME10", "Expira: em 3 horas"),
+        ))
+        source = CashbeShopeeCouponsSource()
+        with patch(
+                "apps.scrapers.sources.public_coupon_aggregators._download",
+                return_value=body):
+            rows = list(source.discover_coupons(marketplaces=["shopee"]))
+
+        self.assertEqual([row.coupon_code for row in rows], ["SAME10"])
+        self.assertEqual(source.last_metrics["rejected_by_reason"], {
+            "duplicate_code": 1, "expired": 1, "missing_expiry": 1,
+        })
+
+
 class PublicCouponAggregatorRegistrationTests(SimpleTestCase):
     def test_sources_are_registered_as_weak_independent_aggregators(self):
         for slug in (
             "bia-garimpa-cupons", "cupomspot-cupons", "prima-ryca-cupons",
             "discoup-cupons", "promomia-cupons", "cuponation-cupons",
-            "linkerhub-cupons",
+            "cashbe-cupons", "linkerhub-cupons",
         ):
             self.assertIn(slug, SOURCES)
             self.assertIn(slug, FONTES_COMUNIDADE)

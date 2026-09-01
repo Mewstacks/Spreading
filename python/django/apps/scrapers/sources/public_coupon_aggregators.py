@@ -17,7 +17,7 @@ import re
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, time as datetime_time
+from datetime import datetime, time as datetime_time, timedelta
 from urllib.parse import urlsplit
 
 import requests
@@ -47,6 +47,7 @@ _DISCOUP_WORKERS = 4
 _DISCOUP_CACHE_SECONDS = 30 * 60
 _PROMOMIA_URL = "https://promomia.com.br/cupons/shopee"
 _CUPONATION_URL = "https://www.cuponation.com.br/cupom-shopee"
+_CASHBE_URL = "https://cashbe.com.br/loja--cupom-shopee/61a9f2a423a1580d54098bb910/"
 
 # Next.js RSC serializes each card as an escaped, flat JSON object.  The object
 # currently has scalar/list/null fields only; requiring coupon_id and decoding
@@ -88,6 +89,19 @@ _NEXT_FLIGHT_SCRIPT = re.compile(
     r'<script>\s*(self\.__next_f\.push\(\[1,.*?)</script>', re.I | re.S,
 )
 _SCRIPT = re.compile(r"<script[^>]*>(.*?)</script>", re.I | re.S)
+_CASHBE_CARD = re.compile(
+    r'<div class="card coupons__card".*?'
+    r'(?=<div class="card coupons__card"|<div class="coupons__pagination"|$)',
+    re.I | re.S,
+)
+_CASHBE_TITLE = re.compile(
+    r'<h3 class="card__name"[^>]*>(.*?)</h3>', re.I | re.S,
+)
+_CASHBE_CODE = re.compile(
+    r'<div class="card__button-code"[^>]*>(.*?)</div>', re.I | re.S,
+)
+_CASHBE_SAVING = re.compile(rf"economize\s*R\$\s*{_MONEY_VALUE}", re.I)
+_HTML_TAG = re.compile(r"<[^>]+>")
 
 
 def _download(url):
@@ -136,6 +150,12 @@ def _discount(text, *, require_explicit_off=False):
 def _money_match(pattern, text):
     match = pattern.search(text or "")
     return normalizar_dinheiro(match.group(1)) if match else None
+
+
+def _plain_html(value):
+    return " ".join(
+        html.unescape(_HTML_TAG.sub(" ", str(value or ""))).split(),
+    )
 
 
 def _cents(value):
@@ -829,6 +849,110 @@ class CuponationShopeeCouponsSource(_PublicCatalogSource):
                     "transport": "cuponation-next-rsc",
                     "verified_at": str(row.get("verified") or "")[:40],
                 },
+            )
+            if item is None:
+                rejected["invalid_code_or_discount"] += 1
+                continue
+            if item.coupon_code in accepted:
+                rejected["duplicate_code"] += 1
+                continue
+            accepted.add(item.coupon_code)
+            yield item
+        self.last_health_status = "healthy"
+        self.last_metrics = {
+            "lojas_lidas": 1, "rows_seen": len(rows), "cupons": len(accepted),
+            "rejected_by_reason": dict(sorted(rejected.items())),
+            "complete": False,
+        }
+
+
+class CashbeShopeeCouponsSource(_PublicCatalogSource):
+    """Cards públicos da Cashbe com código, regra numérica e expiração relativa."""
+
+    slug = "cashbe-cupons"
+    name = "Cashbe - catálogo público de cupons Shopee"
+    marketplace = "shopee"
+
+    @staticmethod
+    def _rows(body):
+        for index, card in enumerate(_CASHBE_CARD.findall(body or ""), start=1):
+            title = _CASHBE_TITLE.search(card)
+            code = _CASHBE_CODE.search(card)
+            if not title or not code:
+                continue
+            yield {
+                "id": index,
+                "title": _plain_html(title.group(1)),
+                "code": _plain_html(code.group(1)),
+                "text": _plain_html(card),
+            }
+
+    @staticmethod
+    def _discount(text):
+        discount_type, discount = _discount(text, require_explicit_off=True)
+        if discount:
+            return discount_type, discount
+        saving = _CASHBE_SAVING.search(str(text or ""))
+        value = normalizar_dinheiro(saving.group(1)) if saving else 0.0
+        return ("fixo", value) if value > 0 else ("", 0.0)
+
+    @staticmethod
+    def _valid_until(text, observed_at):
+        folded = str(text or "").casefold()
+        if "expirado" in folded or re.search(r"expira:\s*h[áa]", folded):
+            return None, "expired"
+        relative = re.search(
+            r"expira:\s*em\s*(\d+)\s*(dias?|horas?|minutos?)", folded,
+        )
+        if relative:
+            amount = int(relative.group(1))
+            if amount <= 0:
+                return None, "expired"
+            unit = relative.group(2)
+            if unit.startswith("dia"):
+                delta = timedelta(days=amount)
+            elif unit.startswith("hora"):
+                delta = timedelta(hours=amount)
+            else:
+                delta = timedelta(minutes=amount)
+            return observed_at + delta, ""
+        return None, "missing_expiry"
+
+    def discover_coupons(self, marketplaces=None, **kwargs):
+        selected = set(marketplaces or ("shopee",))
+        if "shopee" not in selected:
+            self.last_health_status = "healthy"
+            self.last_metrics = {"lojas_lidas": 0, "cupons": 0, "complete": False}
+            return
+        observed_at = timezone.now()
+        rejected = defaultdict(int)
+        try:
+            body = _download(_CASHBE_URL)
+        except requests.RequestException as exc:
+            logger.info("%s unavailable (%s).", self.slug, type(exc).__name__)
+            body = ""
+        if not body:
+            self.last_health_status = "degraded"
+            self.last_metrics = {"lojas_lidas": 0, "cupons": 0, "complete": False}
+            return
+        rows = list(self._rows(body))
+        accepted = set()
+        for row in rows:
+            valid_until, expiry_error = self._valid_until(row["text"], observed_at)
+            if expiry_error:
+                rejected[expiry_error] += 1
+                continue
+            discount_type, discount = self._discount(row["title"])
+            item = _item(
+                source=self.slug, marketplace="shopee",
+                external_id=f"cashbe:shopee:{row['id']}:{row['code']}",
+                code=row["code"], discount_type=discount_type,
+                discount=discount, description=row["title"],
+                observed_at=observed_at, valid_until=valid_until,
+                minimum=_money_match(_MINIMUM, row["title"]),
+                maximum=_money_match(_MAXIMUM, row["title"]),
+                restricted=tem_restricao_publico(row["title"]),
+                evidence={"transport": "cashbe-public-card"},
             )
             if item is None:
                 rejected["invalid_code_or_discount"] += 1
