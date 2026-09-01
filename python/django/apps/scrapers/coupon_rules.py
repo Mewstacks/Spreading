@@ -386,12 +386,14 @@ def site_wide_confiavel(cupom, *, codigos_contestados=None) -> bool:
 
 # Fontes cuja saída é ALEGAÇÃO de terceiro, não observação nossa.
 FONTES_COMUNIDADE = frozenset({
-    "promobit-cupons", "meliuz-cupons", "pelando-cupons", "telegram-publico",
+    "promobit-cupons", "meliuz-cupons", "pelando-cupons", "bia-garimpa-cupons",
+    "cupomspot-cupons", "telegram-publico",
     "promobit-community", "pelando-community",
 })
 # Telegram, agregadores e stubs são alegação de terceiro: nenhum lista sozinho.
 FONTES_COMUNIDADE_SEM_LISTAGEM = frozenset({
-    "promobit-cupons", "meliuz-cupons", "pelando-cupons", "telegram-publico",
+    "promobit-cupons", "meliuz-cupons", "pelando-cupons", "bia-garimpa-cupons",
+    "cupomspot-cupons", "telegram-publico",
     "promobit-community", "pelando-community",
 })
 

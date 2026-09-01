@@ -44,6 +44,8 @@ _SOURCE_PRECEDENCE = {
     "promobit-cupons": 80,
     "meliuz-cupons": 85,
     "pelando-cupons": 88,
+    "bia-garimpa-cupons": 86,
+    "cupomspot-cupons": 87,
     "telegram-publico": 90,
     "shopee-public-coupons": 10,
 }

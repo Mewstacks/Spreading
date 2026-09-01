@@ -15,6 +15,9 @@ from .ml_lightning_coupons import MLLightningCouponsSource
 from .meliuz_coupons import MeliuzCouponsSource
 from .pelando_coupons import PelandoCouponsSource
 from .promobit import PromobitSource
+from .public_coupon_aggregators import (
+    BiaGarimpaCouponsSource, CupomSpotCouponsSource,
+)
 from .shopee import ShopeeCampaignsSource, ShopeeOffersSource
 from .shopee_public_coupons import ShopeePublicCouponsSource
 from .telegram_publico import TelegramPublicoSource
@@ -41,6 +44,8 @@ SOURCES = {
     # Promobit e Telegram são radares de descoberta. A prontidão exige
     # corroboração antes de qualquer publicação; ver coupon_rules.
     PromobitSource.slug: PromobitSource(),
+    BiaGarimpaCouponsSource.slug: BiaGarimpaCouponsSource(),
+    CupomSpotCouponsSource.slug: CupomSpotCouponsSource(),
     TelegramPublicoSource.slug: TelegramPublicoSource(),
 }
 
