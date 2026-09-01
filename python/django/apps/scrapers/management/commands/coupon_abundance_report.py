@@ -3,7 +3,8 @@
 Saída em TSV, como os outros relatórios do funil, para poder ser colada numa
 evidência de aceite sem reformatação.
 """
-from django.core.management.base import BaseCommand
+from django.contrib.auth import get_user_model
+from django.core.management.base import BaseCommand, CommandError
 
 from apps.scrapers.coupon_abundance import MARKETPLACES_META, relatorio_abundancia
 
@@ -17,20 +18,36 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--channel", default="whatsapp")
         parser.add_argument("--meta", type=int, default=None)
+        parser.add_argument(
+            "--username", default="",
+            help=(
+                "Mede prontidão e bloqueios somente para esta conta. Sem o "
+                "argumento, mantém a visão global deduplicada do catálogo."
+            ),
+        )
 
     def handle(self, *args, **options):
         from apps.accounts.tenant import system_context
 
         with system_context():
+            username = str(options.get("username") or "").strip()
+            usuario = None
+            if username:
+                usuario = get_user_model().objects.filter(username=username).first()
+                if usuario is None:
+                    raise CommandError(f"Usuário não encontrado: {username}")
             relatorio = relatorio_abundancia(
-                channel=options["channel"], meta=options["meta"],
+                channel=options["channel"], meta=options["meta"], usuario=usuario,
             )
+            relatorio["escopo_usuario"] = username or "global"
         self._imprimir(relatorio)
 
     def _imprimir(self, relatorio):
         self.stdout.write(
             f"META\tcupons_distintos_prontos={relatorio['meta']}\t"
-            f"canal={relatorio['canal']}\taprovado={int(relatorio['aprovado'])}"
+            f"canal={relatorio['canal']}\t"
+            f"usuario={relatorio.get('escopo_usuario', 'global')}\t"
+            f"aprovado={int(relatorio['aprovado'])}"
         )
         self.stdout.write(
             "marketplace\tprontos\tmeta\tdeficit\tveredito\tdescoberta_24h\t"

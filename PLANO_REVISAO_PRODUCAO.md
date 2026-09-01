@@ -296,6 +296,42 @@ Fontes primárias consultadas:
   `Observado na loja`, recência nos 20 itens e 14 badges de múltiplas fontes. No
   ML, a mesma deduplicação reduziu a fila `ml_session_expired` de 93 para 56 sem
   alterar os 892 cupons únicos prontos.
+- Novas fontes nos deploys v296/v297: Bia Garimpa e CupomSpot passaram a integrar
+  o radar comunitário; Prima Ryca entrou com filtro estrito de marketplace e
+  código. O Telegram permaneceu saudável em 24/24 canais, e o ciclo mais recente
+  observado trouxe 71 cupons. O catálogo fresco/publicável chegou a 1.498 cupons,
+  sem promover alegação comunitária isolada como prova.
+- Amazon sustentável no deploy v298: o catálogo passou a percorrer 37 categorias
+  amplas em rotação, quatro termos e até três páginas por ciclo. Isso aumenta a
+  cobertura ao longo do dia sem monopolizar o Chromium nem elevar a máquina.
+- Justiça de capacidade no deploy v299: indisponibilidade temporária do único
+  Chromium passou a ser `capacity_deferred`, sem degradar fonte ou catálogo. A
+  varredura completa do ML cede a vaga e retoma da página exata; no ciclo real,
+  coletou 38 ofertas/12 itens na página 1, e cinco minutos depois retomou somente
+  o ML na página 2, sem repetir Amazon e demais fontes já concluídas.
+- Fila de validação sem esconder estoque no deploy v300: a seleção agora aplica a
+  projeção `ready` antes do corte por recência. O defeito anterior tinha 1.498
+  cupons publicáveis e 53 prontos para `lules`, mas mostrava zero nas três regras
+  porque 80 recém-coletados pendentes ocupavam o recorte. Após a correção, as
+  regras 35/36/37 passaram respectivamente a 41/6/23 cupons candidatos, além dos
+  produtos de fallback.
+- Estratégia cupom-first no deploy v301: cupons validados passaram a preceder
+  promoções comuns; score, comissão e desempenho continuam ordenando apenas a
+  qualidade dentro de cada tipo. Os cinco primeiros itens das três regras reais
+  de `lules` passaram a ser cupons, sem remover o fallback de produtos quando o
+  estoque entra em cooldown.
+- Canário read-only nos deploys v302/v303: o diagnóstico usa o seletor e o
+  renderizador reais, mas não cria `Publicacao`, não abre navegador e não envia.
+  A v303 reproduz também o caminho correto das campanhas ML — container oficial
+  específico mais rastreio persistido da conta, sem cache redundante por campanha.
+  Em produção, as três regras de `lules` passaram: ML e grupo misto usaram
+  `_Container_13975432` com `matt_word=lpohoffmann&matt_tool=24634771`; Amazon usou
+  o ASIN escolhido com `tag=luizahfn-20`. Todas as mensagens continham link,
+  instrução explícita de resgate e tamanho válido para WhatsApp.
+- Produção v303: web e worker iniciados e saudáveis, check externo `/healthz` HTTP
+  200. A suíte completa passou em 1.424/1.424 testes Django. O envio confirmado ao
+  grupo ainda não foi executado porque o WhatsApp de `lules` está `inactive` em
+  `recuperacao_pausada`; o sistema corretamente não cria/publica nada nesse estado.
 
 ## Gates de deploy desta revisão
 
@@ -311,7 +347,8 @@ Fontes primárias consultadas:
 
 ## Condições externas para o canário final
 
-- Sessão do Mercado Livre da conta `lules` conectada.
+- Sessão do Mercado Livre da conta `lules` conectada para criar/renovar links;
+  campanhas que já possuem rastreio persistido continuam aptas sem Chromium.
 - WhatsApp da conta `lules` conectado e fora de `recuperacao_pausada`.
 - Destino Telegram de teste configurado.
 - Credencial de IA válida é opcional para formatos estruturados e necessária para

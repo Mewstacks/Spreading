@@ -6,8 +6,11 @@ daquela loja foram até o fim. Um déficit com fonte parada em `max_pages` não 
 "a loja não tem inventário", é "nós não terminamos de olhar".
 """
 from datetime import timedelta
+from io import StringIO
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -72,6 +75,29 @@ class AbundanciaTests(TestCase):
         self._projecao(cupom)
         self._projecao(cupom, usuario=self.outro, organization=self.org_outro)
         self.assertEqual(prontos_distintos()["amazon"]["total"], 1)
+
+    def test_relatorio_cli_pode_medir_uma_conta_sem_somar_a_outra(self):
+        cupom_user = self._cupom("amazon", "USER")
+        cupom_outro = self._cupom("amazon", "OUTRO")
+        self._projecao(cupom_user)
+        self._projecao(
+            cupom_outro, usuario=self.outro, organization=self.org_outro,
+        )
+        saida = StringIO()
+        call_command(
+            "coupon_abundance_report", username=self.user.username,
+            meta=10, stdout=saida, stderr=StringIO(),
+        )
+        texto = saida.getvalue()
+        self.assertIn("usuario=abundancia", texto)
+        self.assertIn("amazon\t1\t10\t9", texto)
+
+    def test_relatorio_cli_recusa_usuario_inexistente(self):
+        with self.assertRaises(CommandError):
+            call_command(
+                "coupon_abundance_report", username="nao-existe",
+                stdout=StringIO(), stderr=StringIO(),
+            )
 
     def test_modos_nao_somam_duas_vezes_o_mesmo_cupom(self):
         cupom = self._cupom("mercadolivre", "DOISMODOS")
