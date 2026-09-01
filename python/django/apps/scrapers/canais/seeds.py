@@ -199,11 +199,11 @@ CANAIS_SUGERIDOS = [
         "nota": "Previa ativa em 01/09/2026; codigos com desconto e minimo explicitos.",
     },
     {
-        "handle": "ofertasbrasi",
-        "nome": "Ofertas Brasil 2.0",
-        "marketplaces": ["mercadolivre", "shopee"],
-        "densidade": 64,
-        "nota": "Previa ativa em 01/09/2026; codigos Shopee recentes e digitaveis.",
+        "handle": "afiliadosshopeebroficial",
+        "nome": "Criadores e Afiliados Shopee Brasil Oficial",
+        "marketplaces": ["shopee"],
+        "densidade": 92,
+        "nota": "Canal oficial verificado; codigos e regras publicados para afiliados.",
     },
 ]
 

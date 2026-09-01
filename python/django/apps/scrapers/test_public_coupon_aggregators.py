@@ -9,8 +9,9 @@ from apps.scrapers.coupon_rules import (
 )
 from apps.scrapers.sources.persistence import _SOURCE_PRECEDENCE
 from apps.scrapers.sources.public_coupon_aggregators import (
-    BiaGarimpaCouponsSource, CupomSpotCouponsSource, DiscoupShopeeCouponsSource,
-    PrimaRycaCouponsSource, PromomiaShopeeCouponsSource,
+    BiaGarimpaCouponsSource, CuponationShopeeCouponsSource,
+    CupomSpotCouponsSource, DiscoupShopeeCouponsSource, PrimaRycaCouponsSource,
+    PromomiaShopeeCouponsSource,
 )
 from apps.scrapers.sources.registry import SOURCES
 
@@ -263,11 +264,65 @@ class PromomiaShopeeCouponsTests(SimpleTestCase):
         })
 
 
+class CuponationShopeeCouponsTests(SimpleTestCase):
+    @staticmethod
+    def _page(*rows):
+        flight = "4a:" + ",".join(json.dumps(row) for row in rows)
+        return "<script>self.__next_f.push(" + json.dumps([1, flight]) + ")</script>"
+
+    @staticmethod
+    def _row(**overrides):
+        row = {
+            "idPool": "voucher-1", "title": "R$20 OFF acima de R$60",
+            "caption1": "R$20", "caption2": "OFF", "voucherType": 0,
+            "endTime": "2099-09-24T02:59:00Z",
+            "startTime": "2099-09-01T10:00:00Z",
+            "verified": "2099-09-01T11:00:00Z", "published": True,
+            "code": "SHOPEE20", "termsAndConditions": "Compras acima de R$60",
+            "encryptedAffiliateUrl": "never-persist-this", "__typename": "Voucher",
+        }
+        row.update(overrides)
+        return row
+
+    def test_reads_complete_voucher_object_and_drops_affiliate_redirect(self):
+        source = CuponationShopeeCouponsSource()
+        with patch(
+                "apps.scrapers.sources.public_coupon_aggregators._download",
+                return_value=self._page(self._row())):
+            rows = list(source.discover_coupons(marketplaces=["shopee"]))
+
+        self.assertEqual(len(rows), 1)
+        coupon = rows[0]
+        self.assertEqual(coupon.coupon_code, "SHOPEE20")
+        self.assertEqual(coupon.coupon_rules["valor_desconto"], 20.0)
+        self.assertEqual(coupon.coupon_rules["valor_minimo"], 60.0)
+        self.assertEqual(coupon.canonical_url, "")
+        self.assertNotIn("encryptedAffiliateUrl", coupon.evidence)
+        self.assertEqual(coupon.evidence["transport"], "cuponation-next-rsc")
+
+    def test_cards_do_not_share_fields_and_deals_are_rejected(self):
+        source = CuponationShopeeCouponsSource()
+        body = self._page(
+            self._row(idPool="deal", voucherType=1, code="DEAL20"),
+            self._row(idPool="missing", code=None),
+        )
+        with patch(
+                "apps.scrapers.sources.public_coupon_aggregators._download",
+                return_value=body):
+            rows = list(source.discover_coupons(marketplaces=["shopee"]))
+
+        self.assertEqual(rows, [])
+        self.assertEqual(source.last_metrics["rejected_by_reason"], {
+            "invalid_code_or_discount": 1, "not_coupon": 1,
+        })
+
+
 class PublicCouponAggregatorRegistrationTests(SimpleTestCase):
     def test_sources_are_registered_as_weak_independent_aggregators(self):
         for slug in (
             "bia-garimpa-cupons", "cupomspot-cupons", "prima-ryca-cupons",
-            "discoup-cupons", "promomia-cupons", "linkerhub-cupons",
+            "discoup-cupons", "promomia-cupons", "cuponation-cupons",
+            "linkerhub-cupons",
         ):
             self.assertIn(slug, SOURCES)
             self.assertIn(slug, FONTES_COMUNIDADE)

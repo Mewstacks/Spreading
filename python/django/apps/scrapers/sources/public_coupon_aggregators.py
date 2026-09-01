@@ -46,6 +46,7 @@ _DISCOUP_POPUP = "https://www.discoup.com/br/api/offers/popup-{offer_id}"
 _DISCOUP_WORKERS = 4
 _DISCOUP_CACHE_SECONDS = 30 * 60
 _PROMOMIA_URL = "https://promomia.com.br/cupons/shopee"
+_CUPONATION_URL = "https://www.cuponation.com.br/cupom-shopee"
 
 # Next.js RSC serializes each card as an escaped, flat JSON object.  The object
 # currently has scalar/list/null fields only; requiring coupon_id and decoding
@@ -86,6 +87,7 @@ _DISCOUP_CODE = re.compile(r"\bcopy:'([^']{4,120})'", re.I)
 _NEXT_FLIGHT_SCRIPT = re.compile(
     r'<script>\s*(self\.__next_f\.push\(\[1,.*?)</script>', re.I | re.S,
 )
+_SCRIPT = re.compile(r"<script[^>]*>(.*?)</script>", re.I | re.S)
 
 
 def _download(url):
@@ -208,6 +210,33 @@ def _walk_schema_offers(value):
     elif isinstance(value, list):
         for child in value:
             yield from _walk_schema_offers(child)
+
+
+def _next_flight_json_objects(body):
+    """Extrai objetos JSON completos de payloads RSC sem cruzar cards."""
+    prefix = "self.__next_f.push("
+    decoder = json.JSONDecoder()
+    for script in _SCRIPT.findall(body or ""):
+        raw = script.strip()
+        if not raw.startswith(prefix) or not raw.endswith(")"):
+            continue
+        try:
+            payload = json.loads(raw[len(prefix):-1])
+        except (TypeError, ValueError):
+            continue
+        if (
+            not isinstance(payload, list) or len(payload) < 2
+            or not isinstance(payload[1], str)
+        ):
+            continue
+        text = payload[1]
+        for marker in re.finditer(r"(?=\{)", text):
+            try:
+                value, _end = decoder.raw_decode(text, marker.start())
+            except (TypeError, ValueError):
+                continue
+            if isinstance(value, dict):
+                yield value
 
 
 def _spot_rows(body):
@@ -699,6 +728,107 @@ class PromomiaShopeeCouponsSource(_PublicCatalogSource):
                 maximum=_money_match(_MAXIMUM, description),
                 restricted=tem_restricao_publico(description),
                 evidence={"transport": "promomia-next-rsc"},
+            )
+            if item is None:
+                rejected["invalid_code_or_discount"] += 1
+                continue
+            if item.coupon_code in accepted:
+                rejected["duplicate_code"] += 1
+                continue
+            accepted.add(item.coupon_code)
+            yield item
+        self.last_health_status = "healthy"
+        self.last_metrics = {
+            "lojas_lidas": 1, "rows_seen": len(rows), "cupons": len(accepted),
+            "rejected_by_reason": dict(sorted(rejected.items())),
+            "complete": False,
+        }
+
+
+class CuponationShopeeCouponsSource(_PublicCatalogSource):
+    """Cupons Shopee estruturados em objetos Voucher do RSC publico."""
+
+    slug = "cuponation-cupons"
+    name = "CupoNation - catalogo publico de cupons Shopee"
+    marketplace = "shopee"
+
+    @staticmethod
+    def _rows(body):
+        seen = set()
+        required = {
+            "idPool", "title", "voucherType", "endTime", "published", "code",
+        }
+        for row in _next_flight_json_objects(body):
+            if not required.issubset(row):
+                continue
+            row_id = str(row.get("idPool") or "")
+            if not row_id or row_id in seen:
+                continue
+            seen.add(row_id)
+            yield row
+
+    def discover_coupons(self, marketplaces=None, **kwargs):
+        selected = set(marketplaces or ("shopee",))
+        if "shopee" not in selected:
+            self.last_health_status = "healthy"
+            self.last_metrics = {"lojas_lidas": 0, "cupons": 0, "complete": False}
+            return
+        observed_at = timezone.now()
+        rejected = defaultdict(int)
+        try:
+            body = _download(_CUPONATION_URL)
+        except requests.RequestException as exc:
+            logger.info("%s unavailable (%s).", self.slug, type(exc).__name__)
+            body = ""
+        if not body:
+            self.last_health_status = "degraded"
+            self.last_metrics = {"lojas_lidas": 0, "cupons": 0, "complete": False}
+            return
+        rows = list(self._rows(body))
+        accepted = set()
+        for row in rows:
+            if not row.get("published"):
+                rejected["unpublished"] += 1
+                continue
+            try:
+                voucher_type = int(row.get("voucherType"))
+            except (TypeError, ValueError):
+                rejected["invalid_voucher_type"] += 1
+                continue
+            if voucher_type != 0:
+                rejected["not_coupon"] += 1
+                continue
+            valid_until = _when(row.get("endTime"))
+            if not valid_until or valid_until < observed_at:
+                rejected["expired_or_missing_expiry"] += 1
+                continue
+            description = " ".join(filter(None, (
+                str(row.get("title") or ""),
+                str(row.get("caption1") or ""),
+                str(row.get("caption2") or ""),
+                str(row.get("termsAndConditions") or ""),
+            )))
+            if re.search(r"\b(?:cashback|gift\s*card|moedas?)\b", description, re.I):
+                rejected["cashback_or_reward"] += 1
+                continue
+            discount_type, discount = _discount(
+                description, require_explicit_off=True,
+            )
+            item = _item(
+                source=self.slug, marketplace="shopee",
+                external_id=f"cuponation:shopee:{row['idPool']}",
+                code=row.get("code"), discount_type=discount_type,
+                discount=discount, description=description,
+                observed_at=observed_at,
+                valid_from=_when(row.get("startTime")),
+                valid_until=valid_until,
+                minimum=_money_match(_MINIMUM, description),
+                maximum=_money_match(_MAXIMUM, description),
+                restricted=tem_restricao_publico(description),
+                evidence={
+                    "transport": "cuponation-next-rsc",
+                    "verified_at": str(row.get("verified") or "")[:40],
+                },
             )
             if item is None:
                 rejected["invalid_code_or_discount"] += 1

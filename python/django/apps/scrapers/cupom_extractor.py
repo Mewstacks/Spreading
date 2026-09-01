@@ -95,7 +95,7 @@ _NAO_CODIGOS = {
     "HOJE", "AGORA", "APENAS", "SOMENTE", "VALIDO", "VALIDA", "FRETE",
     "GRATIS", "CLIQUE", "ATIVE", "AQUI", "SELECIONADOS", "PRODUTOS",
     "ESTOQUE", "LOJA", "LOJAS", "OFICIAL", "OFICIAIS", "CANAL", "GRUPO",
-    "APLIQUE", "COMPRAS", "ESCRITO", "LIBERADO", "LIBERADA",
+    "APLIQUE", "COMPRAS", "ESCRITO", "LIBERADO", "LIBERADA", "REGRAS",
 }
 
 _PROMPT = """Extraia os cupons de desconto desta mensagem de um canal brasileiro de ofertas.
@@ -228,6 +228,15 @@ def extrair_deterministico(texto: str, *, loja_padrao="") -> list[dict]:
         # da palavra cupom, ou na linha seguinte `Use o cupom: X`. Varrer a linha
         # inteira aceitava nome de produto como SMARTPHONE/MOTOROLA/100ML.
         fragmentos = []
+        # Formato oficial da Shopee: ``4F1L14D010: R$10 OFF ...``. O token
+        # imediatamente antes dos dois-pontos pertence ao mesmo desconto; palavras
+        # operacionais como ``Regras`` continuam bloqueadas por `_NAO_CODIGOS`.
+        codigo_antes = re.search(
+            r"([A-Z0-9][A-Z0-9._-]{3,29})\s*:\s*$",
+            linha_parse[:(percentual or fixo).start()], re.I,
+        )
+        if codigo_antes:
+            fragmentos.append(codigo_antes.group(1))
         fragmentos.extend(re.findall(
             r":\s*([A-Z0-9][A-Z0-9._/-]{3,60})(?=\s|$|[,/])",
             linha_parse, re.I,

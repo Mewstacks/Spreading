@@ -47,10 +47,17 @@ _REDIRECT_WORKERS = 16
 _CHANNEL_WORKERS = 6
 _PAGE_CACHE_TTL_SECONDS = 120
 _REDIRECT_CACHE_TTL_SECONDS = 3600
+_MAX_PAGES_PER_CHANNEL = 6
+_CHANNEL_PAGE_BUDGET_SECONDS = 12
 # A previa continua exibindo as ultimas mensagens mesmo quando o canal esta
 # parado. Baixar esse mesmo HTML outra vez nao e uma nova observacao.
 _MAX_MESSAGE_AGE = timedelta(hours=48)
 _MAX_FUTURE_SKEW = timedelta(minutes=5)
+_CANAL_LOJA_UNICA = {
+    str(row.get("handle") or "").casefold(): row["marketplaces"][0]
+    for row in CANAIS_SUGERIDOS
+    if len(row.get("marketplaces") or ()) == 1
+}
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
 
@@ -336,6 +343,7 @@ class TelegramPublicoSource(SourceAdapter):
         self._redirect_cache = {}
         self._last_redirect_cache_hits = 0
         self._timestamp_metrics = {}
+        self._pagination_by_channel = {}
 
     def _reset_timestamp_metrics(self):
         self._timestamp_metrics = {
@@ -345,25 +353,107 @@ class TelegramPublicoSource(SourceAdapter):
             "mensagens_futuras_descartadas": 0,
         }
 
+    def _pagination_metrics(self):
+        rows = list(self._pagination_by_channel.values())
+        reasons = {}
+        for row in rows:
+            reason = row.get("stop_reason") or "unknown"
+            reasons[reason] = reasons.get(reason, 0) + 1
+        return {
+            "paginas_lidas": sum(int(row.get("pages") or 0) for row in rows),
+            "paginacao_paradas": dict(sorted(reasons.items())),
+        }
+
     def _canais(self, handles=None):
         if handles:
             return [str(h).strip().lstrip("@") for h in handles if str(h).strip()]
         return [c["handle"] for c in CANAIS_SUGERIDOS]
 
-    def _baixar(self, handle):
+    def _baixar(self, handle, before=None):
         if not _HANDLE_OK.match(handle):
             logger.warning("Handle de canal recusado: %r", handle[:40])
             return ""
-        cached = self._page_cache.get(handle)
+        before = str(before or "").strip()
+        if before and (not before.isdigit() or int(before) <= 0):
+            logger.warning("Cursor de canal recusado: %r", before[:40])
+            return ""
+        cache_key = (handle, before)
+        cached = self._page_cache.get(cache_key)
         now = time.monotonic()
         if cached and now - cached[0] < _PAGE_CACHE_TTL_SECONDS:
             return cached[1]
         resposta = requests.get(
             f"{BASE}{handle}", timeout=_TIMEOUT, headers={"User-Agent": _UA},
+            params={"before": before} if before else None,
         )
         corpo = resposta.text or "" if resposta.status_code == 200 else ""
-        self._page_cache[handle] = (now, corpo)
+        self._page_cache[cache_key] = (now, corpo)
         return corpo
+
+    @staticmethod
+    def _data_publicacao(data_bruta):
+        try:
+            publicada_em = datetime.fromisoformat(
+                str(data_bruta or "").replace("Z", "+00:00"),
+            )
+            if publicada_em.tzinfo is None:
+                publicada_em = publicada_em.replace(tzinfo=dt_timezone.utc)
+            return publicada_em.astimezone(dt_timezone.utc)
+        except (TypeError, ValueError):
+            return None
+
+    def _paginar(self, handle):
+        """Le paginas anteriores ate cruzar 48h ou esgotar o orcamento seguro."""
+        paginas = []
+        before = ""
+        cursores = set()
+        motivo = "empty"
+        inicio = time.monotonic()
+        agora = timezone.now()
+        for _indice in range(_MAX_PAGES_PER_CHANNEL):
+            if paginas and time.monotonic() - inicio >= _CHANNEL_PAGE_BUDGET_SECONDS:
+                motivo = "time_budget"
+                break
+            corpo = self._baixar(handle, before=before)
+            if not corpo:
+                motivo = "unavailable"
+                break
+            parser = _TelegramPreviewParser()
+            parser.feed(corpo)
+            ids = []
+            for post, _texto, _data in parser.messages:
+                candidato = str(post or "").rsplit("/", 1)[-1]
+                if candidato.isdigit():
+                    ids.append(int(candidato))
+            proximo = str(min(ids)) if ids else ""
+            if before and (
+                not proximo or proximo in cursores or int(proximo) >= int(before)
+            ):
+                motivo = "cursor_repeated_or_missing"
+                break
+            paginas.append(corpo)
+            datadas = [
+                self._data_publicacao(data_bruta)
+                for _post, _texto, data_bruta in parser.messages
+            ]
+            datadas = [data for data in datadas if data is not None]
+            if not datadas:
+                motivo = "no_valid_timestamps"
+                break
+            if min(datadas) < agora - _MAX_MESSAGE_AGE:
+                motivo = "age_boundary"
+                break
+            if not proximo:
+                motivo = "cursor_repeated_or_missing"
+                break
+            cursores.add(proximo)
+            before = proximo
+        else:
+            motivo = "page_budget"
+        self._pagination_by_channel[handle] = {
+            "pages": len(paginas), "stop_reason": motivo,
+        }
+        return "\n".join(paginas)
 
     def _carregar_canais(self, handles):
         """Baixa previews em paralelo, isolando timeout/falha por canal."""
@@ -372,10 +462,11 @@ class TelegramPublicoSource(SourceAdapter):
         # lista configurada no banco não transformar um radar barato em crawler sem
         # limite.
         alvos = list(handles)[:32]
+        self._pagination_by_channel = {}
 
         def carregar(handle):
             try:
-                return handle, self._baixar(handle), ""
+                return handle, self._paginar(handle), ""
             except requests.RequestException as exc:
                 logger.info(
                     "Canal @%s indisponível (%s).", handle, type(exc).__name__,
@@ -418,14 +509,8 @@ class TelegramPublicoSource(SourceAdapter):
             if not data_bruta:
                 self._timestamp_metrics["mensagens_sem_data"] += 1
                 continue
-            try:
-                publicada_em = datetime.fromisoformat(
-                    data_bruta.replace("Z", "+00:00"),
-                )
-                if publicada_em.tzinfo is None:
-                    publicada_em = publicada_em.replace(tzinfo=dt_timezone.utc)
-                publicada_em = publicada_em.astimezone(dt_timezone.utc)
-            except (TypeError, ValueError):
+            publicada_em = self._data_publicacao(data_bruta)
+            if publicada_em is None:
                 self._timestamp_metrics["mensagens_sem_data"] += 1
                 continue
             self._timestamp_metrics["mensagens_com_data"] += 1
@@ -539,6 +624,7 @@ class TelegramPublicoSource(SourceAdapter):
             "redirects_total": len(unicos),
             "redirects_resolvidos": sum(bool(url) for url in destinos.values()),
             "redirects_cache_hits": self._last_redirect_cache_hits,
+            **self._pagination_metrics(),
             **self._timestamp_metrics,
             # Nunca "completo": a prévia mostra só as mensagens recentes, então
             # ausência aqui não prova que a oferta sumiu e não pode expirar catálogo.
@@ -590,6 +676,11 @@ class TelegramPublicoSource(SourceAdapter):
                 loja_do_link = _marketplace(bruto)
                 if loja_do_link:
                     break
+            if not loja_do_link:
+                # Canal curado e especializado e uma evidência de marketplace,
+                # mas somente quando a lista declara uma única loja. Canal misto
+                # sem link continua falhando fechado, sem adivinhar o destino.
+                loja_do_link = _CANAL_LOJA_UNICA.get(handle.casefold(), "")
             achados = extrair(texto, loja_padrao=loja_do_link)
             validos = []
             for cupom in achados:
@@ -695,6 +786,7 @@ class TelegramPublicoSource(SourceAdapter):
             "redirects_cupom_cache_hits": self._last_redirect_cache_hits,
             "sem_cupom_legivel": sem_valor,
             "codigos_ruidosos_descartados": codigos_handle,
+            **self._pagination_metrics(),
             **self._timestamp_metrics,
             # Nunca completo: a prévia mostra só as mensagens recentes.
             "complete": False,

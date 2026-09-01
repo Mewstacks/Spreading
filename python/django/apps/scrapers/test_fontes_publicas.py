@@ -5,7 +5,7 @@ Um "de R$ 500 por R$ 99" escrito por um canal desconhecido, se entrasse como pre
 referência, produziria um desconto falso com a assinatura de quem publica. Por isso
 várias asserções aqui verificam o que a fonte NÃO faz.
 """
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import requests
 from django.test import TestCase
@@ -202,6 +202,41 @@ class TelegramPublicoTests(TestCase):
             self.assertEqual(fonte._baixar("../etc/passwd"), "")
         get.assert_not_called()
 
+    def test_cursor_invalido_e_recusado_sem_requisicao(self):
+        fonte = TelegramPublicoSource()
+        with patch("apps.scrapers.sources.telegram_publico.requests.get") as get:
+            self.assertEqual(fonte._baixar("canalteste", before="../20"), "")
+        get.assert_not_called()
+
+    def test_paginacao_vai_ate_cruzar_janela_de_48_horas(self):
+        fonte = TelegramPublicoSource()
+        recente = timezone.now().isoformat()
+        antigo = (timezone.now() - timezone.timedelta(hours=49)).isoformat()
+
+        def pagina(post, data):
+            return (
+                f'<div class="tgme_widget_message" data-post="canalteste/{post}">'
+                f'<time datetime="{data}"></time>'
+                '<div class="tgme_widget_message_text">cupom REAL20 20% OFF</div>'
+                '</div>'
+            )
+
+        with patch.object(
+                fonte, "_baixar", side_effect=[pagina(120, recente), pagina(99, antigo)],
+        ) as baixar:
+            corpo = fonte._paginar("canalteste")
+
+        self.assertIn("canalteste/120", corpo)
+        self.assertIn("canalteste/99", corpo)
+        self.assertEqual(
+            baixar.call_args_list,
+            [call("canalteste", before=""), call("canalteste", before="120")],
+        )
+        self.assertEqual(
+            fonte._pagination_by_channel["canalteste"],
+            {"pages": 2, "stop_reason": "age_boundary"},
+        )
+
     def test_canal_fora_do_ar_nao_derruba_a_coleta(self):
         fonte = TelegramPublicoSource()
         with patch.object(TelegramPublicoSource, "_baixar",
@@ -267,6 +302,26 @@ class TelegramPublicoTests(TestCase):
 
         self.assertEqual([item.coupon_code for item in itens], ["REAL10"])
         self.assertEqual(fonte.last_metrics["codigos_ruidosos_descartados"], 1)
+
+    def test_canal_curado_de_loja_unica_define_loja_sem_link(self):
+        fonte = TelegramPublicoSource()
+        cupom = [{
+            "codigo": "SHOPEE20", "loja": "shopee", "tipo": "fixo",
+            "valor": 20, "minimo": 60, "teto": 0, "escopo": "",
+        }]
+        with patch.object(
+                fonte, "_carregar_canais",
+                return_value=[("cupom_shopee", "html", "")]), patch.object(
+                fonte, "_mensagens",
+                return_value=[("cupom_shopee/1", "SHOPEE20: R$20 OFF")]), patch(
+                "apps.scrapers.sources.telegram_publico.extrair",
+                return_value=cupom) as extrair_mock:
+            itens = list(fonte.discover_coupons(canais=["cupom_shopee"]))
+
+        self.assertEqual([item.coupon_code for item in itens], ["SHOPEE20"])
+        extrair_mock.assert_called_once_with(
+            "SHOPEE20: R$20 OFF", loja_padrao="shopee",
+        )
 
     def test_cupom_guarda_asin_da_mesma_mensagem_sem_tracking(self):
         fonte = TelegramPublicoSource()

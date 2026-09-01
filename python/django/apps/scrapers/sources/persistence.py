@@ -50,6 +50,7 @@ _SOURCE_PRECEDENCE = {
     "prima-ryca-cupons": 89,
     "discoup-cupons": 90,
     "promomia-cupons": 92,
+    "cuponation-cupons": 93,
     "linkerhub-cupons": 91,
     "telegram-publico": 90,
     "shopee-public-coupons": 10,

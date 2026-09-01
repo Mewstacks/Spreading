@@ -166,6 +166,17 @@ class RegraDeAceitacaoTests(TestCase):
         self.assertEqual([item["codigo"] for item in achados], ["99T3MTUD0N4SH0"])
         self.assertEqual(achados[0]["minimo"], 60.0)
 
+    def test_fallback_le_codigo_antes_do_desconto_na_mesma_linha(self):
+        texto = (
+            "Hora do cupom Shopee\n"
+            "🎟️ 4F1L14D010: R$10 OFF em compras acima de R$59"
+        )
+        achados = extrair_deterministico(texto)
+
+        self.assertEqual([item["codigo"] for item in achados], ["4F1L14D010"])
+        self.assertEqual(achados[0]["valor"], 10.0)
+        self.assertEqual(achados[0]["minimo"], 59.0)
+
     def test_fallback_nao_inventa_codigo_de_texto_operacional(self):
         casos = (
             "Cupom Mercado Livre de 20% OFF usando o cupom ESCRITO que será liberado",
