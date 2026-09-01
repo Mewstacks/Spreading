@@ -1120,6 +1120,7 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
     # listagem oficial do cupom. Ver `relatorio_de_link_com_cupom`.
     com_origem = [l for l in linhas if not _confiar_desconto(l.produto)]
     no_destino = [l for l in linhas if _confiar_desconto(l.produto)]
+    destinos_processados = 0
 
     if com_origem:
         from apps.scrapers.scraper_mercadolivre.link_http import (
@@ -1187,7 +1188,15 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
                     "Capacidade de browser ocupada; verificação será retomada."
                 )
             with iniciar_browser(headless=True) as (page, _ctx):
-                for linha in no_destino:
+                for indice, linha in enumerate(no_destino):
+                    if indice and interesse_pendente(
+                            "django_chromium", exceto="links_verify"):
+                        logger.info(
+                            "Verificacao de links cedeu o navegador apos %s de "
+                            "%s destino(s).", indice, len(no_destino),
+                        )
+                        break
+                    destinos_processados += 1
                     try:
                         relatorio = _relatorio_na_pagina(
                             page, linha.link_afiliado,
@@ -1204,7 +1213,7 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
     logger.info("Verificação de destino ML p/ %s: %s aprovado(s), %s reprovado(s), "
                 "%s transitório(s) — %s por origem, %s por destino",
                 usuario, aprovados, reprovados, transitorios,
-                len(com_origem), len(no_destino))
+                len(com_origem), destinos_processados)
     return {"aprovados": aprovados, "reprovados": reprovados,
             "transitorios": transitorios}
 

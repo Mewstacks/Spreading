@@ -206,8 +206,9 @@ Fontes primárias consultadas:
   e publica métricas de duração/completude. Fontes Chromium que perdem o lease
   sinalizam a fila automaticamente. O preparo caro de produtos também cede depois
   do primeiro item quando outra esteira aguarda, em vez de readquirir o slot até
-  12 vezes; a validação de produção é o gate dos deploys 284/285.
-- Testes automatizados: 1.392 testes Django e 169 testes Node aprovados; 24 testes
+  12 vezes. A verificação de até 20 destinos também cede entre links; a validação
+  de produção é o gate dos deploys 284/285/286.
+- Testes automatizados: 1.393 testes Django e 169 testes Node aprovados; 24 testes
   direcionados de isolamento, permissões, CSRF, SQLi e XSS aprovados; nenhuma
   migração pendente e compilação limpa.
 - Auditoria de produção: papel runtime sem `SUPERUSER`, `BYPASSRLS` ou ownership

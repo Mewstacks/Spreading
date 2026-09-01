@@ -4525,6 +4525,36 @@ class VerificarLinksPendentesTests(TestCase):
         self.assertEqual(linha.url_canonica, "https://meli.la/bom")
 
     @patch("apps.scrapers.scraper_mercadolivre.link._relatorio_na_pagina")
+    @patch("apps.scrapers.scraper_mercadolivre.link.interesse_pendente",
+           return_value=True)
+    def test_cede_browser_entre_destinos_quando_fonte_aguarda(self, pending, verify):
+        self.setUpBrowserFalso()
+        primeiro = self._produto("Primeiro destino")
+        segundo = self._produto("Segundo destino")
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=primeiro, afiliado_ok=True, estado="pronto",
+            link_afiliado="https://meli.la/primeiro", verificado_ok=None,
+        )
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=segundo, afiliado_ok=True, estado="pronto",
+            link_afiliado="https://meli.la/segundo", verificado_ok=None,
+        )
+        verify.return_value = {
+            "ok": True, "url_final": "https://produto.mercadolivre.com.br/MLB-1",
+        }
+
+        resultado = ml_link.verificar_links_pendentes(self.user, limite=10)
+
+        self.assertEqual(resultado["aprovados"], 1)
+        self.assertEqual(verify.call_count, 1)
+        self.assertEqual(
+            LinkAfiliadoUsuario.objects.filter(verificado_ok__isnull=True).count(), 1,
+        )
+        pending.assert_called_once_with(
+            "django_chromium", exceto="links_verify",
+        )
+
+    @patch("apps.scrapers.scraper_mercadolivre.link._relatorio_na_pagina")
     def test_aprova_grava_matt_word_da_url_final(self, verify):
         self.setUpBrowserFalso()
         produto = self._produto("Fone com rastreio")
