@@ -539,12 +539,28 @@ def _assinatura_desconto_corroboravel(regras):
     return tipo, str(valor)
 
 
+_FAMILIAS_EDITORIAIS = {
+    # Méliuz acquired 100% of Promobit. Two brands in the same data/editorial
+    # family are discovery channels, not two independent witnesses. Picodi is
+    # in the same group and is reserved here for any future adapter.
+    "meliuz-cupons": "grupo-meliuz",
+    "promobit-cupons": "grupo-meliuz",
+    "promobit-community": "grupo-meliuz",
+    "picodi-cupons": "grupo-meliuz",
+}
+
+
+def _familia_editorial(slug, fonte_id):
+    slug = _texto(slug).casefold()
+    return _FAMILIAS_EDITORIAIS.get(slug, f"fonte:{fonte_id}")
+
+
 def fontes_independentes_em_lote(cupons) -> dict[tuple[str, str], int]:
     """Conta consenso recente por loja+código, exigindo desconto compatível.
 
     Duas páginas que repetem o mesmo código mas discordam entre R$ 20 e 20% não
-    são confirmação. A contagem é por fonte, não por linha, e nunca cruza dados
-    privados ou organizações.
+    são confirmação. A contagem é por família editorial, não por marca/linha, e
+    nunca cruza dados privados ou organizações.
     """
     pares = {
         (str(getattr(c, "marketplace", "") or "").casefold(),
@@ -571,13 +587,13 @@ def fontes_independentes_em_lote(cupons) -> dict[tuple[str, str], int]:
     ).filter(
         codigo_normalizado__in=codigos,
     ).filter(cupons_frescos_q()).values_list(
-        "marketplace", "codigo_normalizado", "fonte_id", "regras",
+        "marketplace", "codigo_normalizado", "fonte_id", "fonte__slug", "regras",
     ))
-    for marketplace, codigo, fonte_id, regras in catalogo:
+    for marketplace, codigo, fonte_id, fonte_slug, regras in catalogo:
         par = (str(marketplace or "").casefold(), str(codigo or "").upper())
         assinatura = _assinatura_desconto_corroboravel(regras)
         if par in pares and assinatura:
-            grupos[(par, assinatura)].add(fonte_id)
+            grupos[(par, assinatura)].add(_familia_editorial(fonte_slug, fonte_id))
 
     cutoff = timezone.now() - timedelta(hours=COUPON_MAX_AGE_HOURS)
     observacoes = (CupomFonteObservacao.objects.filter(
@@ -588,13 +604,14 @@ def fontes_independentes_em_lote(cupons) -> dict[tuple[str, str], int]:
     ).filter(
         codigo_normalizado__in=codigos,
     ).filter(cupons_frescos_q(prefix="cupom__")).values_list(
-        "cupom__marketplace", "codigo_normalizado", "fonte_id", "cupom__regras",
+        "cupom__marketplace", "codigo_normalizado", "fonte_id", "fonte__slug",
+        "cupom__regras",
     ))
-    for marketplace, codigo, fonte_id, regras in observacoes:
+    for marketplace, codigo, fonte_id, fonte_slug, regras in observacoes:
         par = (str(marketplace or "").casefold(), str(codigo or "").upper())
         assinatura = _assinatura_desconto_corroboravel(regras)
         if par in pares and assinatura:
-            grupos[(par, assinatura)].add(fonte_id)
+            grupos[(par, assinatura)].add(_familia_editorial(fonte_slug, fonte_id))
 
     resultado = {}
     for (par, _assinatura), fontes in grupos.items():

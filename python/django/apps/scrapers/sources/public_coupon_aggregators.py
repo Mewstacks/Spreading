@@ -54,6 +54,12 @@ _LD_JSON = re.compile(
 _PERCENT = re.compile(r"(?<![\d.,])(\d{1,2}(?:[.,]\d{1,2})?)\s*%", re.I)
 _MONEY_VALUE = r"(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)"
 _MONEY = re.compile(rf"R\$\s*{_MONEY_VALUE}", re.I)
+_PERCENT_OFF = re.compile(
+    r"(?<![\d.,])(\d{1,2}(?:[.,]\d{1,2})?)\s*%\s*(?:off|de desconto)", re.I,
+)
+_MONEY_OFF = re.compile(
+    rf"R\$\s*{_MONEY_VALUE}\s*(?:off|de desconto)", re.I,
+)
 _MINIMUM = re.compile(
     rf"(?:acima de|a partir de|em compras? (?:acima )?de|m[ií]nim[oa](?: de)?|"
     rf"m[ií]n\.?|\bem)\s*"
@@ -96,14 +102,14 @@ def _when(value, *, end_of_day=False):
     return timezone.make_aware(datetime.combine(day, clock))
 
 
-def _discount(text):
+def _discount(text, *, require_explicit_off=False):
     text = html.unescape(str(text or ""))
-    percent = _PERCENT.search(text)
+    percent = (_PERCENT_OFF if require_explicit_off else _PERCENT).search(text)
     if percent:
         value = float(percent.group(1).replace(",", "."))
         if 0 < value < 100:
             return "porcentagem", value
-    money = _MONEY.search(text)
+    money = (_MONEY_OFF if require_explicit_off else _MONEY).search(text)
     if money:
         value = normalizar_dinheiro(money.group(1))
         if value > 0:
@@ -358,11 +364,19 @@ class CupomSpotCouponsSource(_PublicCatalogSource):
     def _parse(self, marketplace, body, observed_at):
         for row in _spot_rows(body):
             code = str(row.get("couponCode") or "").strip().upper()
+            benefit = str(row.get("discount") or "").strip()
             description = " ".join(filter(None, (
-                str(row.get("discount") or ""), str(row.get("name") or ""),
+                benefit, str(row.get("name") or ""),
                 str(row.get("description") or ""),
             )))
-            discount_type, discount = _discount(description)
+            # schema.org's dedicated ``discount`` field may legally be just
+            # ``20%``.  Free text is different: a product title/price such as
+            # ``Monitor 240 Hz — R$ 656`` is not a coupon benefit.  It must say
+            # OFF/de desconto or the row fails closed.
+            discount_type, discount = (
+                _discount(benefit) if benefit
+                else _discount(description, require_explicit_off=True)
+            )
             valid_until = _when(row.get("priceValidUntil"), end_of_day=True)
             if valid_until and valid_until < observed_at:
                 yield None, "expired"

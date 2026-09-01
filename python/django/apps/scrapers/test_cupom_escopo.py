@@ -690,11 +690,11 @@ class CupomDeComunidadeTests(TestCase):
         promobit = FonteIngestao.objects.create(
             slug="promobit-cupons", marketplace="multiloja", nome="Promobit",
         )
-        meliuz = FonteIngestao.objects.create(
-            slug="meliuz-cupons", marketplace="multiloja", nome="Méliuz",
+        cupomspot = FonteIngestao.objects.create(
+            slug="cupomspot-cupons", marketplace="multiloja", nome="CupomSpot",
         )
         primeiro = self._cupom(promobit, "CONSENSO20")
-        self._cupom(meliuz, "CONSENSO20")
+        self._cupom(cupomspot, "CONSENSO20")
 
         corroboracoes = corroboracoes_independentes_em_lote([primeiro])
 
@@ -703,6 +703,24 @@ class CupomDeComunidadeTests(TestCase):
         self.assertIsNone(_preflight(
             primeiro, self.usuario, corroboracoes=corroboracoes,
         ))
+
+    def test_duas_marcas_do_grupo_meliuz_nao_fingem_independencia(self):
+        from apps.scrapers.coupon_rules import (
+            comunidade_corroborada, corroboracoes_independentes_em_lote,
+        )
+        promobit = FonteIngestao.objects.create(
+            slug="promobit-cupons", marketplace="multiloja", nome="Promobit",
+        )
+        meliuz = FonteIngestao.objects.create(
+            slug="meliuz-cupons", marketplace="multiloja", nome="Méliuz",
+        )
+        primeiro = self._cupom(promobit, "MESMOGRUPO20")
+        self._cupom(meliuz, "MESMOGRUPO20")
+
+        corroboracoes = corroboracoes_independentes_em_lote([primeiro])
+
+        self.assertFalse(comunidade_corroborada(primeiro))
+        self.assertNotIn(("mercadolivre", "MESMOGRUPO20"), corroboracoes)
 
     def test_fontes_que_discordam_no_desconto_nao_corroboram(self):
         from apps.scrapers.coupon_rules import corroboracoes_independentes_em_lote

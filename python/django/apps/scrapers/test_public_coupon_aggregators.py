@@ -105,6 +105,23 @@ class CupomSpotCouponsTests(SimpleTestCase):
             {"invalid_code_or_discount": 1},
         )
 
+    def test_product_price_is_not_misread_as_fixed_coupon_discount(self):
+        body = """
+        <script type="application/ld+json">
+        {"@type":"Offer","name":"Cupom Amazon — Monitor Gamer — R$ 656",
+         "couponCode":"10OFFAGORAOU",
+         "description":"Preço atual do produto, sem desconto explícito"}
+        </script>
+        """
+        source = CupomSpotCouponsSource()
+        with patch.object(source, "_download", return_value=body):
+            rows = list(source.discover_coupons(marketplaces=["amazon"]))
+
+        self.assertEqual(rows, [])
+        self.assertEqual(source.last_metrics["rejected_by_reason"], {
+            "invalid_code_or_discount": 1,
+        })
+
 
 class PrimaRycaCouponsTests(SimpleTestCase):
     def _page(self, amazon_rows=(), shopee_rows=()):
