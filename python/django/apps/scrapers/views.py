@@ -2557,6 +2557,83 @@ def top_promocoes(request):
         cupons_lista.sort(key=lambda c: score_cupom(c, usuario=request.user), reverse=True)
         cupons_page = Paginator(cupons_lista, POR_PAGINA).get_page(pagina)
         cupons_catalogo = list(cupons_page)
+        if cupons_catalogo:
+            # A lista já contém apenas `ready`; agora explica POR QUE cada item
+            # merece confiança. Tudo é resolvido em lote para não reintroduzir o
+            # antigo N+1 que travava esta página com milhares de cupons.
+            from apps.scrapers.coupon_rules import (
+                corroboracoes_oficiais_em_lote, cupom_de_comunidade,
+            )
+            from apps.scrapers.maintenance import COUPON_MAX_AGE_HOURS
+            from apps.scrapers.models import CupomFonteObservacao, CupomValidacao
+
+            ids_pagina = [cupom.pk for cupom in cupons_catalogo]
+            checkout_confirmado = set(CupomValidacao.objects.filter(
+                organization=organization, usuario=request.user,
+                cupom_id__in=ids_pagina, status="accepted", no_purchase=True,
+                discount_amount__gt=0,
+            ).values_list("cupom_id", flat=True))
+            corroboracoes = corroboracoes_oficiais_em_lote(cupons_catalogo)
+            observadas_desde = timezone.now() - timezone.timedelta(
+                hours=COUPON_MAX_AGE_HOURS,
+            )
+            fontes_por_cupom = {
+                row["cupom_id"]: row["total"]
+                for row in CupomFonteObservacao.objects.filter(
+                    cupom_id__in=ids_pagina, outcome="accepted",
+                    observed_at__gte=observadas_desde,
+                ).values("cupom_id").annotate(
+                    total=Count("fonte_id", distinct=True),
+                )
+            }
+            fontes_diretas = {
+                "amazon-public-coupons", "amazon-public-web",
+                "ml-cupons-afiliados", "ml-lightning-coupons",
+                "ml-official-promotions", "shopee-campaigns",
+                "shopee-public-coupons", "licensed-affiliate-feed",
+            }
+            for cupom in cupons_catalogo:
+                evidencia = cupom.evidencia if isinstance(cupom.evidencia, dict) else {}
+                slug = str(cupom.fonte.slug or "")
+                chave = (
+                    str(cupom.marketplace or "").casefold(),
+                    str(cupom.codigo or "").strip().upper(),
+                )
+                cupom.evidencia_fontes = max(1, fontes_por_cupom.get(cupom.pk, 0))
+                if cupom.pk in checkout_confirmado:
+                    cupom.evidencia_rotulo = "Confirmado no carrinho"
+                    cupom.evidencia_detalhe = (
+                        "O desconto foi observado antes da compra; nenhuma compra foi concluída."
+                    )
+                    cupom.evidencia_css = "badge-green"
+                elif cupom_de_comunidade(cupom) and chave in corroboracoes:
+                    cupom.evidencia_rotulo = "Corroborado"
+                    cupom.evidencia_detalhe = (
+                        "O código da comunidade também foi observado em fonte direta e recente."
+                    )
+                    cupom.evidencia_css = "badge-green"
+                elif slug == "manual-private":
+                    cupom.evidencia_rotulo = "Privado"
+                    cupom.evidencia_detalhe = (
+                        "Cupom da sua organização, preparado com link verificado para envio."
+                    )
+                    cupom.evidencia_css = "badge-accent"
+                elif (
+                    slug in fontes_diretas
+                    or "official" in str(evidencia.get("association") or "").casefold()
+                    or "official" in str(evidencia.get("transport") or "").casefold()
+                ):
+                    cupom.evidencia_rotulo = "Observado na loja"
+                    cupom.evidencia_detalhe = (
+                        "A campanha e seu escopo foram observados em uma fonte direta da loja."
+                    )
+                    cupom.evidencia_css = "badge-green"
+                else:
+                    cupom.evidencia_rotulo = "Fonte estruturada"
+                    cupom.evidencia_detalhe = (
+                        "O cupom passou pelos gates de escopo, produto, preço e link de envio."
+                    )
+                    cupom.evidencia_css = "badge-muted"
     else:
         from apps.scrapers.ofertas import anotacao_preco_publicado
         qs = Produto.objects.filter(

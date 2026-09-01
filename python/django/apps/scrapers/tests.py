@@ -2138,6 +2138,11 @@ class TopPromocoesFilterTests(TestCase):
             {c.id for c in response.context["cupons_catalogo"]},
             {pronto.id},
         )
+        exibido = response.context["cupons_catalogo"][0]
+        self.assertEqual(exibido.evidencia_rotulo, "Fonte estruturada")
+        self.assertEqual(exibido.evidencia_fontes, 1)
+        self.assertContains(response, "Atualizado há")
+        self.assertContains(response, "gates de escopo, produto, preço e link")
         # Some da lista, mas não do conhecimento: vira contador.
         self.assertEqual(response.context["cupons_em_preparo"], 1)
 
