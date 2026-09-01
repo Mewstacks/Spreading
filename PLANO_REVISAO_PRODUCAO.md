@@ -356,6 +356,21 @@ Fontes primárias consultadas:
   meta e Shopee tem 40 corroborados, porém nenhum publicável sem sessão/afiliado.
   A regra de família editorial não derrubou os 975 prontos, demonstrando que o
   estoque atual não dependia de consenso duplicado entre empresas do mesmo grupo.
+- Retomada Amazon nos deploys v307/v308: a prova no Fly mostrou que a busca oficial
+  conseguia encontrar cupons, mas sob disputa sempre recomeçava na página 1. O novo
+  cursor é amarrado à fatia rotativa e persiste a página seguinte. O canário v307
+  encontrou quatro cupons na primeira página, mas reprovou porque tentou escrever o
+  cursor ainda dentro do contexto assíncrono interno do Playwright. Na v308 a escrita
+  passou a ocorrer somente depois de liberar navegador e lease; 1.438/1.438 testes
+  Django e 169/169 Node ficaram verdes.
+- Prova de produção v308: uma passada sem contenção concluiu 12/12 páginas em 51,9 s,
+  com 188 ofertas e 16 cupons oficiais. No canário controlado com fila, a primeira
+  execução registrou `cursor_start=0`/`cursor_next=1`; a seguinte iniciou em 1 e
+  registrou 2, confirmando avanço em vez de repetição do topo. Após reprojeção,
+  `lules` chegou a 995 cupons prontos: 894 ML, 102 Amazon e zero Shopee. Amazon passou
+  a meta mínima de 100 com 70 cupons de ativação e 32 avisos de código; Shopee segue
+  como o único déficit de abundância publicável, com 40 elegíveis bloqueados pela
+  integração desconectada.
 
 ## Gates de deploy desta revisão
 
