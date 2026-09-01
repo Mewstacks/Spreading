@@ -86,6 +86,7 @@ reciclando duplicatas, promoções sem cupom ou códigos não comprovados.
 | Cuponomia | Cupons/cashback no site, app e extensão contextual | Alerta ao navegar e ativação antes do fluxo de compra | Entregar o contexto completo direto no WhatsApp e revalidar antes do envio |
 | Honey | Códigos comunitários em milhares de lojas, teste automático e taxa de sucesso | Tentativas reais no checkout; sucesso = aplicações com redução / total de tentativas | Exibir taxa por cupom, não só por loja, condições do carrinho, recência e motivo de falha |
 | Capital One Shopping | Pesquisa, teste automático, melhor código e alerta de queda de preço | Dados de uso da comunidade e aplicação no checkout | Unir o melhor código comprovado a personalização e distribuição imediata por marketplace/categoria |
+| SimplyCodes | Transparência por código, teste no carrinho, consenso independente e confiança que decai com o tempo | Três camadas de verificação e placar público de saúde de 0 a 100 | Expor prova, recência, consenso e histórico por cupom; nunca usar o score comercial de ranking como selo de validade |
 
 Fontes primárias consultadas:
 
@@ -111,6 +112,9 @@ Fontes primárias consultadas:
   https://www.paypal.com/us/digital-wallet/ways-to-pay/paypal-honey
 - Capital One Shopping — teste, comunidade e alertas:
   https://capitaloneshopping.com/ai-instructions
+- SimplyCodes — processo de verificação e uso:
+  https://simplycodes.com/how-it-works
+  https://simplycodes.com/blog/simplycodes-getting-started
 
 ## Metas obrigatórias
 
@@ -169,8 +173,11 @@ Fontes primárias consultadas:
   de cupons caiu de 11,1 s para 3,53 s ao deixar de resolver 124 redirecionamentos
   que não produziram nenhum produto. Cache de HTML agora vence em 120 segundos,
   portanto novas mensagens não dependem de reiniciar a VM.
-- Amazon pública: 10 ofertas e 9 cupons distintos, inventário completo e zero
-  rejeições em 31,9 s na amostra real.
+- Amazon pública em 01/09: amostra real completa de cinco páginas com 10 ofertas de
+  ativação e 10 cupons com código, zero rejeições e primeira leitura em 13,54 s. A
+  execução persistida terminou em 35,9 s e reconciliou 80 entradas históricas
+  ausentes somente porque o ciclo foi saudável e completo. O catálogo ativo ficou
+  com 59 cupons Amazon: 49 códigos e 10 ativações oficiais.
 - Landing oficial do ML: seis regulamentos reconhecidos e corretamente rejeitados
   por estarem vencidos; parser pronto para novos códigos ativos.
 - ML afiliados: 29 códigos oficiais ativos aceitos em produção. O monitor HTTP de
@@ -182,12 +189,13 @@ Fontes primárias consultadas:
   contrato `coupons-carousel` do ML expôs seis vouchers personalizados/opacos;
   todos os seis foram rejeitados como `invalid_code`, sem fabricar códigos. O
   Pelando aceitou oito cupons de três lojas em cada ciclo.
-- Snapshot `lules`/WhatsApp em 28/08 às 18h02 BRT: 4.489 estados projetados. O ML
-  tinha 3.012 prontos e 138 comunitários retidos; a Amazon, quatro prontos e 44
-  retidos; a Shopee, 79 comunitários retidos e oito vouchers oficiais aguardando
-  integração própria. Havia 2.076 produtos frescos do ML, 754 da Amazon e 193 da
-  Shopee. Zero envio nas 24 horas anteriores confirmou que o WhatsApp desconectado
-  da conta `lules` é bloqueio real de conversão, e não falta de coleta.
+- Snapshot `lules`/WhatsApp em 01/09 após reconciliação saudável: 1.237 estados,
+  901 prontos, 256 coletados, 56 aguardando link e 24 descartados. Por marketplace,
+  o ML tem 892 prontos; a Amazon tem 10 prontos e 49 códigos comunitários retidos;
+  a Shopee tem 58 comunitários retidos. Os retidos não foram promovidos apenas por
+  coincidência entre Telegram/agregadores: faltou prova oficial fresca ou carrinho.
+  A redução em relação ao snapshot de 28/08 é reconciliação de catálogo ausente e
+  gates mais estritos, não perda silenciosa de coleta.
 - Validação sem compra: ledger com constraint PostgreSQL `no_purchase`, RLS por
   tenant, alvos por categoria e executor transacional. Em produção, 42 hipóteses
   incompatíveis foram encerradas com evidência e 163 tentativas coerentes ficaram
@@ -223,10 +231,21 @@ Fontes primárias consultadas:
   migração pendente e compilação limpa.
 - Auditoria de produção: papel runtime sem `SUPERUSER`, `BYPASSRLS` ou ownership
   indevido; nenhum token legado do Mercado Livre armazenado em texto puro.
-- Infraestrutura atual: web e worker com 2 shared CPUs/2 GB, WhatsApp com 2 shared
-  CPUs/4 GB e PostgreSQL com 1 shared CPU/1 GB. O custo-base oficial é cerca de
-  US$81,61/mês antes de tráfego e excede a meta de R$300; a topologia final ainda
-  depende do benchmark após o deploy e de migração/resize com restore ensaiado.
+- Infraestrutura após os deploys `spreading-wa` v89 e `spreading-web` v289: web com
+  2 shared CPUs/1 GB; worker e WhatsApp com 2 shared CPUs/2 GB; PostgreSQL com
+  1 shared CPU/1 GB; sete GB de volumes. Pela tabela oficial GRU, o custo-base caiu
+  de cerca de US$81,61 para US$57,37/mês (US$56,32 de compute + US$1,05 de volume),
+  sem crédito na organização. Pela cotação de R$5,185/USD observada em 01/09, são
+  cerca de R$297,45 antes de câmbio/tributos/tráfego: ainda não há margem suficiente
+  para marcar a meta de R$300 como cumprida. Uma reserva anual de máquina fornece
+  US$5/mês de crédito por US$36/ano e abre margem, mas é compra e depende de ação do
+  titular da cobrança; não será adquirida automaticamente.
+- Benchmark v289 da VM web reduzida: 100/100 health checks sequenciais com p95
+  161 ms; 200/200 sob 40 conexões simultâneas; tela autenticada `/scrapers/top/` da
+  conta `lules`, com 145 KB, respondeu 80/80 vezes sob oito conexões simultâneas,
+  p50 538 ms e p95 1,54 s. Um Chromium real abriu o Mercado Livre usando cerca de
+  542 MB e deixou aproximadamente 443 MB disponíveis. Após os testes, os checks
+  continuaram verdes, sem OOM, reinício ou pressão de memória.
 
 ## Gates de deploy desta revisão
 
