@@ -468,6 +468,30 @@ Fontes primárias consultadas:
   em 3/3 regras da `lules`: ML e mista escolheram cupom com container oficial e
   rastreio `lpohoffmann`; Amazon escolheu ASIN real com `tag=luizahfn-20`; todas as
   mensagens tinham link verificado, instrução explícita de resgate e tamanho válido.
+- Deploy v314: o coletor da prévia pública do Telegram deixou de tratar a leitura
+  repetida das 20 últimas mensagens como observação nova. Cada item agora carrega a
+  data original do post; mensagens sem data, futuras ou com mais de 48 horas falham
+  fechadas. Na medição dos 26 canais, 451 mensagens tinham data e 102 antigas foram
+  descartadas; 49 cupons atuais permaneceram. Discoup e Promomia entraram como
+  evidências comunitárias fracas, sem reaproveitar o link afiliado de terceiros:
+  produziram respectivamente quatro e dez códigos Shopee válidos. Em produção,
+  63/63 itens foram persistidos; a conta `lules` ficou em 895/116/0 prontos e
+  484/319/198 descobertas recentes para ML/Amazon/Shopee. Suítes integrais:
+  1.453/1.453 Django e 169/169 Node; release, RLS e checks do Fly passaram.
+- Deploy v315: a prévia do Telegram passou a paginar até a fronteira real de 48h,
+  com teto de seis páginas e 12 segundos por canal, cursor monotônico e métricas de
+  exaustão. A medição percorreu 85 páginas, descartou 230 posts antigos e extraiu
+  88 cupons atuais; canais curados de uma única loja agora fornecem somente esse
+  contexto quando a mensagem não traz link, enquanto canais mistos continuam sem
+  inferência. O canal oficial de afiliados Shopee foi incluído. CupoNation passou a
+  fornecer 18 códigos Shopee estruturados de 37 vouchers; ofertas, vencidos,
+  duplicatas e linhas sem benefício numérico foram rejeitados e nenhum redirect de
+  afiliado terceiro foi guardado. Em produção, 106/106 itens foram persistidos.
+  O relatório final ficou em ML 895 prontos/451 descobertas, Amazon 118/313 e Shopee
+  0/215: a meta de descoberta Shopee continua 35 abaixo e 41 cupons elegíveis seguem
+  bloqueados por `shopee_integration_disconnected`. O canário read-only da `lules`
+  passou novamente em 3/3 mensagens. Suítes integrais: 1.459/1.459 Django e 169/169
+  Node; web/worker v315, release, smoke checks e `/healthz` ficaram verdes.
 
 ## Gates de deploy desta revisão
 
