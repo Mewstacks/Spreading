@@ -9,7 +9,7 @@ from apps.scrapers.coupon_rules import (
 )
 from apps.scrapers.sources.persistence import _SOURCE_PRECEDENCE
 from apps.scrapers.sources.public_coupon_aggregators import (
-    BiaGarimpaCouponsSource, CupomSpotCouponsSource,
+    BiaGarimpaCouponsSource, CupomSpotCouponsSource, PrimaRycaCouponsSource,
 )
 from apps.scrapers.sources.registry import SOURCES
 
@@ -106,9 +106,61 @@ class CupomSpotCouponsTests(SimpleTestCase):
         )
 
 
+class PrimaRycaCouponsTests(SimpleTestCase):
+    def _page(self, amazon_rows=(), shopee_rows=()):
+        def section(name, rows):
+            cards = ",".join(
+                '[\\"$\\",\\"card\\",null,{\\"coupon\\":'
+                + json.dumps(row, separators=(",", ":")).replace('"', '\\"')
+                + "}]" for row in rows
+            )
+            return f'[\\"$\\",\\"section\\",\\"{name}\\",{{\\"children\\":[{cards}]}}]'
+        return section("amazon", amazon_rows) + section("shopee", shopee_rows)
+
+    def test_accepts_typed_current_card_and_never_keeps_affiliate_redirect(self):
+        body = self._page(shopee_rows=({
+            "id": "sh-1", "code": "SHOPEE15", "description": "Mín. R$79",
+            "discountType": "fixed", "discountValue": "15",
+            "scopeType": "marketplace", "expiresAt": "2099-09-30T23:59:00Z",
+            "eligibleProductsUrl": None,
+            "redeemUrl": "https://s.shopee.com.br/abc123",
+        },))
+        source = PrimaRycaCouponsSource()
+        with patch.object(source, "_download", return_value=body):
+            rows = list(source.discover_coupons(marketplaces=["shopee"]))
+
+        self.assertEqual(len(rows), 1)
+        coupon = rows[0]
+        self.assertEqual(coupon.coupon_code, "SHOPEE15")
+        self.assertEqual(coupon.coupon_rules["valor_minimo"], 79.0)
+        self.assertEqual(coupon.canonical_url, "")
+        self.assertTrue(coupon.evidence["has_public_marketplace_link"])
+
+    def test_rejects_explicitly_expired_and_cross_marketplace_cards(self):
+        body = self._page(shopee_rows=(
+            {"id": "old", "code": "OLD20",
+             "description": "válido até 31/08/2020", "discountType": "fixed",
+             "discountValue": "20", "expiresAt": None,
+             "redeemUrl": "https://s.shopee.com.br/old"},
+            {"id": "wrong", "code": "WRONG20", "description": "R$20 OFF",
+             "discountType": "fixed", "discountValue": "20", "expiresAt": None,
+             "redeemUrl": "https://produto.mercadolivre.com.br/MLB-123"},
+        ))
+        source = PrimaRycaCouponsSource()
+        with patch.object(source, "_download", return_value=body):
+            rows = list(source.discover_coupons(marketplaces=["shopee"]))
+
+        self.assertEqual(rows, [])
+        self.assertEqual(source.last_metrics["rejected_by_reason"], {
+            "expired_in_description": 1, "wrong_marketplace_url": 1,
+        })
+
+
 class PublicCouponAggregatorRegistrationTests(SimpleTestCase):
     def test_sources_are_registered_as_weak_independent_aggregators(self):
-        for slug in ("bia-garimpa-cupons", "cupomspot-cupons"):
+        for slug in (
+            "bia-garimpa-cupons", "cupomspot-cupons", "prima-ryca-cupons",
+        ):
             self.assertIn(slug, SOURCES)
             self.assertIn(slug, FONTES_COMUNIDADE)
             self.assertIn(slug, FONTES_COMUNIDADE_SEM_LISTAGEM)

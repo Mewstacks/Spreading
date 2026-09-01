@@ -17,6 +17,7 @@ import re
 import time
 from collections import defaultdict
 from datetime import datetime, time as datetime_time
+from urllib.parse import urlsplit
 
 import requests
 from django.utils import timezone
@@ -38,6 +39,7 @@ _UA = (
 _MARKETPLACES = ("amazon", "shopee")
 _BIA_URL = "https://biagarimpa.com/cupons/{marketplace}"
 _SPOT_URL = "https://cupomspot.com.br/cupons/{marketplace}"
+_PRIMA_URL = "https://primaryca.com.br/cupons"
 
 # Next.js RSC serializes each card as an escaped, flat JSON object.  The object
 # currently has scalar/list/null fields only; requiring coupon_id and decoding
@@ -53,12 +55,16 @@ _PERCENT = re.compile(r"(?<![\d.,])(\d{1,2}(?:[.,]\d{1,2})?)\s*%", re.I)
 _MONEY_VALUE = r"(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)"
 _MONEY = re.compile(rf"R\$\s*{_MONEY_VALUE}", re.I)
 _MINIMUM = re.compile(
-    rf"(?:acima de|a partir de|em compras? (?:acima )?de|m[ií]nim[oa](?: de)?|\bem)\s*"
+    rf"(?:acima de|a partir de|em compras? (?:acima )?de|m[ií]nim[oa](?: de)?|"
+    rf"m[ií]n\.?|\bem)\s*"
     rf"R\$\s*{_MONEY_VALUE}", re.I,
 )
 _MAXIMUM = re.compile(
     rf"(?:limite|limitad[oa](?: a)?|m[aá]ximo)(?: de)?\s*R\$\s*{_MONEY_VALUE}",
     re.I,
+)
+_EXPLICIT_DATE = re.compile(
+    r"(?<!\d)(\d{1,2})[/.](\d{1,2})(?:[/.](\d{2}|\d{4}))?(?!\d)",
 )
 
 
@@ -180,6 +186,47 @@ def _spot_rows(body):
         except (TypeError, ValueError):
             continue
         yield from _walk_offers(block)
+
+
+def _prima_sections(body):
+    """Coupon dictionaries grouped by the marketplace section rendered by RSC."""
+    decoded = (body or "").replace(r'\"', '"')
+    markers = list(re.finditer(r'"section","(amazon|mercadolivre|shopee)"', decoded))
+    for index, marker in enumerate(markers):
+        marketplace = marker.group(1)
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(decoded)
+        chunk = decoded[marker.start():end]
+        for raw in re.findall(r'"coupon":(\{"id":".*?\})\}', chunk, re.S):
+            try:
+                row = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(row, dict):
+                yield marketplace, row
+
+
+def _explicitly_expired(description, observed_at):
+    """Reject descriptions that still advertise a calendar date already past."""
+    today = timezone.localtime(observed_at).date()
+    dates = []
+    for day, month, year in _EXPLICIT_DATE.findall(description or ""):
+        year = int(year) if year else today.year
+        if year < 100:
+            year += 2000
+        try:
+            dates.append(datetime(year, int(month), int(day)).date())
+        except ValueError:
+            continue
+    return bool(dates and max(dates) < today)
+
+
+def _marketplace_host(url, marketplace):
+    try:
+        host = (urlsplit(str(url or "")).hostname or "").casefold()
+    except ValueError:
+        return False
+    domain = f"{marketplace}.com.br"
+    return host == domain or host.endswith(f".{domain}")
 
 
 class _PublicCatalogSource(SourceAdapter):
@@ -329,5 +376,70 @@ class CupomSpotCouponsSource(_PublicCatalogSource):
                 minimum=_money_match(_MINIMUM, description),
                 maximum=_money_match(_MAXIMUM, description),
                 evidence={"transport": "cupomspot-schema-org"},
+            )
+            yield item, "" if item else "invalid_code_or_discount"
+
+
+class PrimaRycaCouponsSource(_PublicCatalogSource):
+    slug = "prima-ryca-cupons"
+    name = "Prima Ryca — radar público de cupons"
+    url_template = _PRIMA_URL
+
+    def _download(self, marketplace):
+        # One page contains the marketplace sections; the base class cache is the
+        # adapter instance, so avoid two 1.3 MB transfers in the same collection.
+        if not hasattr(self, "_body_for_cycle"):
+            self._body_for_cycle = _download(self.url_template)
+        return self._body_for_cycle
+
+    def discover_coupons(self, marketplaces=None, **kwargs):
+        try:
+            yield from super().discover_coupons(marketplaces=marketplaces, **kwargs)
+        finally:
+            self.__dict__.pop("_body_for_cycle", None)
+
+    def _parse(self, marketplace, body, observed_at):
+        for section, row in _prima_sections(body):
+            if section != marketplace:
+                continue
+            code = str(row.get("code") or "").strip().upper()
+            description = str(row.get("description") or "").strip()
+            redeem_url = str(
+                row.get("redeemUrl") or row.get("eligibleProductsUrl") or ""
+            ).strip()
+            # A measured page bug places old Mercado Livre cards after the Shopee
+            # section.  A URL for another marketplace is therefore a hard reject;
+            # URL-less rows can still be Shopee codes explicitly grouped there.
+            if redeem_url and not _marketplace_host(redeem_url, marketplace):
+                yield None, "wrong_marketplace_url"
+                continue
+            if _explicitly_expired(description, observed_at):
+                yield None, "expired_in_description"
+                continue
+            kind = str(row.get("discountType") or "").casefold()
+            try:
+                discount = float(str(row.get("discountValue") or "").replace(",", "."))
+            except (TypeError, ValueError):
+                discount = 0.0
+            discount_type = (
+                "porcentagem" if kind == "percent" else "fixo" if kind == "fixed" else ""
+            )
+            valid_until = _when(row.get("expiresAt"))
+            if valid_until and valid_until < observed_at:
+                yield None, "expired"
+                continue
+            external_id = f"prima-ryca:{marketplace}:{row.get('id') or code}"
+            item = _item(
+                source=self.slug, marketplace=marketplace, external_id=external_id,
+                code=code, discount_type=discount_type, discount=discount,
+                description=description, observed_at=observed_at,
+                valid_until=valid_until,
+                minimum=_money_match(_MINIMUM, description),
+                maximum=_money_match(_MAXIMUM, description),
+                evidence={
+                    "transport": "prima-ryca-next-rsc",
+                    "scope_type_claim": str(row.get("scopeType") or "")[:40],
+                    "has_public_marketplace_link": bool(redeem_url),
+                },
             )
             yield item, "" if item else "invalid_code_or_discount"
