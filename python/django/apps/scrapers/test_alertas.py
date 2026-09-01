@@ -195,6 +195,8 @@ class AlertasAcionaveisDoFunilTests(TestCase):
 
         self._projecao(category="no_session", reason="ml_session_missing",
                        codigo="SESSAO")
+        self._projecao(category="no_link", reason="amazon_tag_missing",
+                       codigo="TAGAMAZON")
         self._projecao(stage="collected", reason="community_uncorroborated",
                        codigo="COMUNIDADE")
         contas = diagnosticar_alertas_pipeline_cupons()

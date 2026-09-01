@@ -114,7 +114,14 @@ def diagnosticar_alertas_pipeline_cupons(*, agora=None):
     actionable = (
         projections.exclude(stage__in=("ready", "discarded"))
         .exclude(category="no_session")
-        .exclude(reason_code="community_uncorroborated")
+        .exclude(reason_code__in=(
+            "community_uncorroborated",
+            # A tag pertence à conta do usuário. O worker não consegue criá-la e
+            # repetir a projeção não muda o veredito; contar essas linhas como fila
+            # travada gerava exatamente 128 alarmes permanentes em produção nas
+            # duas contas sem tag, embora a conta `lules` estivesse saudável.
+            "amazon_tag_missing",
+        ))
     )
     counts = {
         # Só conta projeção que AINDA DEVE MUDAR. `updated_at` é auto_now, então um
