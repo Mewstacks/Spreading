@@ -425,6 +425,16 @@ Fontes primárias consultadas:
   a aproximadamente R$287,90/mês. A compra é ação financeira no painel do titular e
   ainda não foi executada; portanto o gate de R$300 continua aberto até a reserva
   aparecer na cobrança real.
+- Revalidação de capacidade após v313: durante a raspagem real, a VM worker de
+  duas shared CPUs mostrou pressão de CPU `avg10=54,59`/`avg60=35,02`, 1,08 GiB de
+  memória anônima e apenas 714 MiB disponíveis. Reduzi-la para uma CPU ou 1 GiB
+  recriaria exatamente o gargalo/OOM que a revisão eliminou. A web tinha pressão
+  zero e 555 MiB disponíveis, mas é também o host do Chromium interativo; a redução
+  de uma CPU economizaria só cerca de US$1,12/mês em GRU e não fecharia o teto. O
+  WhatsApp, inativo, tinha 1,35 GiB disponível, mas o pico conectado já foi medido
+  em 1,17 GiB e o bootstrap depende das duas CPUs. Assim, a reserva shared/GRU é a
+  única redução atualmente comprovada que leva o custo abaixo de R$300 sem retirar
+  capacidade necessária.
 - Deploy v311: o alerta de backlog deixou de contar `amazon_tag_missing`, pois a
   tag é configuração da conta e não trabalho que o worker consiga concluir. O
   teste de regressão entrou na suíte integral (1.445/1.445 Django; 169/169 Node).
