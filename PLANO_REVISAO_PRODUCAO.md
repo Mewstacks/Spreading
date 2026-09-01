@@ -332,6 +332,30 @@ Fontes primárias consultadas:
   200. A suíte completa passou em 1.424/1.424 testes Django. O envio confirmado ao
   grupo ainda não foi executado porque o WhatsApp de `lules` está `inactive` em
   `recuperacao_pausada`; o sistema corretamente não cria/publica nada nesse estado.
+- Relatório por conta no deploy v304: o comando de abundância passou a projetar o
+  estoque com a configuração e as integrações reais de `lules`, evitando confundir
+  inventário global com cupom publicável. A linha de base verificável ficou em
+  892/83/0 cupons prontos para ML/Amazon/Shopee.
+- LinkerHub no deploy v305: o coletor público lê uma única página, não segue link
+  afiliado e só aceita código, marketplace, desconto e validade coerentes. Na prova
+  local, 101 cards produziram 53 candidatos conservadores (43 ML, quatro Amazon e
+  seis Shopee); foram rejeitados placeholders, código divergente, URL de outra loja,
+  produto sem desconto explícito e duplicatas. Os 53 foram persistidos em produção,
+  mas permaneceram sujeitos a corroboração ou checkout — a fonte não inflou o placar
+  de prontos. A reprojeção encontrou 40 cupons Shopee elegíveis, ainda bloqueados
+  pela integração desconectada.
+- Qualidade e independência no deploy v306: preço de produto em texto livre deixou
+  de ser interpretado como desconto, e o falso cupom Amazon `10OFFAGORAOU` (R$656 do
+  monitor) foi expirado em produção. Méliuz, Promobit e Picodi agora contam como uma
+  única família editorial no consenso, pois não constituem evidências independentes.
+  A suíte completa passou em 1.434/1.434 testes; web e worker v306 permaneceram
+  saudáveis e `/healthz` respondeu HTTP 200.
+- Reprojeção final v306, idêntica para WhatsApp e Telegram: 975 prontos, 40 elegíveis,
+  59 aguardando link, 210 coletados ainda sem prova suficiente e 272 descartados.
+  Por loja são 893/83/0 prontos para ML/Amazon/Shopee; Amazon continua 17 abaixo da
+  meta e Shopee tem 40 corroborados, porém nenhum publicável sem sessão/afiliado.
+  A regra de família editorial não derrubou os 975 prontos, demonstrando que o
+  estoque atual não dependia de consenso duplicado entre empresas do mesmo grupo.
 
 ## Gates de deploy desta revisão
 
