@@ -226,7 +226,7 @@ Fontes primárias consultadas:
   enxergava, porque consultava somente linhas duplicadas do catálogo. O livro de
   evidências agora também corrobora, limitado à mesma loja, inventário público,
   resultado aceito e janela fresca de 48 horas; evidência privada não cruza tenant.
-- Testes automatizados: 1.398 testes Django e 169 testes Node aprovados; 24 testes
+- Testes automatizados: 1.404 testes Django e 169 testes Node aprovados; 24 testes
   direcionados de isolamento, permissões, CSRF, SQLi e XSS aprovados; nenhuma
   migração pendente e compilação limpa.
 - Auditoria de produção: papel runtime sem `SUPERUSER`, `BYPASSRLS` ou ownership
@@ -254,6 +254,15 @@ Fontes primárias consultadas:
   candidatos observados em 24 h para ML/Amazon/Shopee; portanto Amazon e Shopee
   continuam abaixo das metas de abundância e descoberta.
 
+- Busca oficial Amazon (deploys v291/v292): o parser reconhece somente a frase
+  inequívoca do card `Você paga R$ X com o cupom`, associada a ASIN e preço final
+  plausível. Uma prova real local encontrou 36 ofertas e dois cupons oficiais em
+  uma página de `eletronicos`; produto que apenas contém “cupom” no título não
+  entra. A mesma URL em GRU e numa VM efêmera IAD do Fly devolveu HTTP 503/“Algo
+  deu errado”. Isso agora é falha técnica, nunca inventário vazio. Foi preparada
+  saída residencial PAYG exclusiva para páginas públicas, bloqueando imagens,
+  fontes e mídia para conter banda; cookies de compradores não passam pelo proxy.
+
 ## Gates de deploy desta revisão
 
 - [x] Suítes Django e Node integralmente verdes.
@@ -273,3 +282,8 @@ Fontes primárias consultadas:
 - Destino Telegram de teste configurado.
 - Credencial de IA válida é opcional para formatos estruturados e necessária para
   cobrir linguagem livre com maior recall; falha da IA usa parser local seguro.
+- Sessão de compras Shopee da conta `lules` conectada; a vitrine pública exige
+  autenticação no IP atual.
+- Para ampliar a Amazon fora da central oficial: credencial de proxy residencial
+  PAYG em `AMAZON_PUBLIC_PROXY_*`. A Creators API cobre catálogo e deals, mas o
+  `OffersV2` atual não expõe `Promotions`, então não substitui a busca de cupons.

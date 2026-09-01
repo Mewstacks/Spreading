@@ -91,6 +91,36 @@ def _preco_final_de_cupom(text, current):
     return final
 
 
+def _browser_context_options():
+    server = str(getattr(settings, "AMAZON_PUBLIC_PROXY_SERVER", "") or "").strip()
+    if not server:
+        return {}
+    if not re.match(r"^(?:https?|socks5)://", server, re.I):
+        raise ValueError("AMAZON_PUBLIC_PROXY_SERVER precisa incluir o protocolo")
+    proxy = {"server": server}
+    username = str(
+        getattr(settings, "AMAZON_PUBLIC_PROXY_USERNAME", "") or ""
+    ).strip()
+    password = str(
+        getattr(settings, "AMAZON_PUBLIC_PROXY_PASSWORD", "") or ""
+    ).strip()
+    if username:
+        proxy["username"] = username
+    if password:
+        proxy["password"] = password
+    return {"proxy": proxy}
+
+
+def _economizar_banda(page):
+    """O HTML preserva os atributos de imagem sem baixar seus binários."""
+    page.route(
+        "**/*",
+        lambda route: route.abort()
+        if route.request.resource_type in {"image", "media", "font"}
+        else route.continue_(),
+    )
+
+
 @contextmanager
 def _browser_slot(owner_kind):
     with browser_resource(owner_kind=owner_kind) as acquired:
@@ -104,7 +134,8 @@ def _browser_slot(owner_kind):
 def verify_product_url(url, nome_esperado=None):
     """Validação JIT pública usada antes de qualquer publicação Amazon."""
     with _browser_slot("amazon_product_verify"), \
-            iniciar_browser(headless=True) as (page, _):
+            iniciar_browser(headless=True, **_browser_context_options()) as (page, _):
+        _economizar_banda(page)
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
         body = page.locator("body").inner_text(timeout=5000)
         lower = body.lower()
@@ -152,7 +183,10 @@ class AmazonPublicSource(SourceAdapter):
         )
         try:
             with _browser_slot("amazon_public_offers"), \
-                    iniciar_browser(headless=True) as (page, _):
+                    iniciar_browser(
+                        headless=True, **_browser_context_options(),
+                    ) as (page, _):
+                _economizar_banda(page)
                 for term in selected:
                     term_complete = True
                     for page_number in range(1, pages_per_term + 1):
@@ -321,7 +355,10 @@ class AmazonPublicSource(SourceAdapter):
 
     def refresh_offer(self, item, **kwargs):
         with _browser_slot("amazon_offer_refresh"), \
-                iniciar_browser(headless=True) as (page, _):
+                iniciar_browser(
+                    headless=True, **_browser_context_options(),
+                ) as (page, _):
+            _economizar_banda(page)
             page.goto(item.canonical_url, wait_until="domcontentloaded", timeout=45000)
             body = page.locator("body").inner_text(timeout=5000).lower()
             if "não disponível" in body or "indisponível" in body:

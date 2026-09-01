@@ -781,6 +781,26 @@ class AmazonPublicPriceSanityTests(TestCase):
         )
         self.assertEqual(_page_failure(200, "Amazon.com.br", "Resultados"), "")
 
+    @override_settings(
+        AMAZON_PUBLIC_PROXY_SERVER="http://proxy.example:22225",
+        AMAZON_PUBLIC_PROXY_USERNAME="customer-zone-br",
+        AMAZON_PUBLIC_PROXY_PASSWORD="secret",
+    )
+    def test_builds_private_public_amazon_proxy_context(self):
+        from apps.scrapers.sources.amazon_public import _browser_context_options
+
+        self.assertEqual(_browser_context_options(), {"proxy": {
+            "server": "http://proxy.example:22225",
+            "username": "customer-zone-br",
+            "password": "secret",
+        }})
+
+    @override_settings(AMAZON_PUBLIC_PROXY_SERVER="")
+    def test_keeps_direct_browser_when_proxy_is_not_configured(self):
+        from apps.scrapers.sources.amazon_public import _browser_context_options
+
+        self.assertEqual(_browser_context_options(), {})
+
 
 class VerificacaoDeLinksEhLanePropriaTests(TestCase):
     """A verificação NÃO pode depender de haver link novo para gerar.

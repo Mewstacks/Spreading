@@ -481,6 +481,11 @@ AMAZON_PUBLIC_TERMS_PER_CYCLE = max(
 AMAZON_PUBLIC_PAGES_PER_TERM = max(
     1, int(os.getenv("AMAZON_PUBLIC_PAGES_PER_TERM", "3")),
 )
+# Saída opcional dedicada para páginas públicas da Amazon. O Fly recebe HTTP 503
+# da busca mesmo em regiões diferentes; credenciais ficam somente em secrets.
+AMAZON_PUBLIC_PROXY_SERVER = os.getenv("AMAZON_PUBLIC_PROXY_SERVER", "").strip()
+AMAZON_PUBLIC_PROXY_USERNAME = os.getenv("AMAZON_PUBLIC_PROXY_USERNAME", "").strip()
+AMAZON_PUBLIC_PROXY_PASSWORD = os.getenv("AMAZON_PUBLIC_PROXY_PASSWORD", "").strip()
 AFFILIATE_FEED_URL = os.getenv("AFFILIATE_FEED_URL", "")
 AFFILIATE_FEED_TOKEN = os.getenv("AFFILIATE_FEED_TOKEN", "")
 AWIN_INTEGRATION_ENABLED = os.getenv("AWIN_INTEGRATION_ENABLED", "1") == "1"
