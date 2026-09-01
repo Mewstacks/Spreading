@@ -397,6 +397,34 @@ Fontes primárias consultadas:
   saudáveis com `/healthz` HTTP 200. Sem credencial de afiliado e sem sessão/proxy da
   Shopee, os 40 candidatos corroborados ainda não podem virar links comissionados nem
   ser validados em checkout.
+- Escrita idempotente no deploy v310: a auditoria de `pg_stat_user_tables` mostrou
+  3.145.715 updates acumulados em `scrapers_cupomdisponibilidade`; numa amostra de
+  nove minutos antes da correção, 4.540 eram apenas toques sem mudança (~500/min).
+  A projeção deixou de tratar `updated_at` como heartbeat e a reconciliação completa
+  do ML deixou de reexpirar cupons/produtos já no mesmo veredito. Duas reprojeções
+  consecutivas da conta `lules`, com 1.575 estados cada, produziram delta zero nessa
+  tabela em produção. O inventário permaneceu em 895 cupons ML e 102 Amazon prontos;
+  Shopee permaneceu corretamente bloqueada na integração. A suíte integral passou em
+  1.445/1.445 testes Django e 169/169 Node; web/worker v310 e `/healthz` ficaram verdes.
+- PostgreSQL após v310: mesmo sem os updates inúteis, a VM de uma shared CPU voltou
+  a falhar no check por esperar CPU e mostrou PSI `avg10=29,50`/`avg60=35,98`.
+  Um snapshot fresco de 1,4 GiB foi concluído antes do resize e o mesmo primary/volume
+  passou para duas shared CPUs com 1 GB (+US$1,12/mês). Sob 100 health checks
+  sequenciais e 200 com concorrência 40, houve 300/300 respostas HTTP 200, p95 de
+  49,8 ms e 65,2 req/s; depois da carga o PSI caiu para `avg10=0,76`/`avg60=0,38`,
+  sem pressão de memória, e os três checks `pg`/`role`/`vm` permaneceram verdes.
+  A imagem do Flex Postgres também foi atualizada de 17.2/v0.1.0 para 17.7/v0.2.0;
+  depois do upgrade, os três checks continuaram verdes, `/healthz` respondeu 200 e
+  web/worker permaneceram no v310. Uma nova execução do probe de isolamento aprovou
+  RLS/FORCE RLS, bloqueio de escrita cruzada e inacessibilidade do segredo HMAC. A
+  consulta pós-upgrade da `lules` preservou 1.576 estados, dos quais 997 prontos.
+- Custo conservador da topologia estável: US$58,49/mês antes de câmbio/tributos.
+  Três blocos de reserva shared/GRU de US$36/ano (US$108 adiantados) dão US$15/mês
+  de crédito e custam US$9/mês amortizados, levando o custo econômico a US$52,49.
+  Pela PTAX de referência de setembro (R$5,2236/USD) mais margem de 5%, isso equivale
+  a aproximadamente R$287,90/mês. A compra é ação financeira no painel do titular e
+  ainda não foi executada; portanto o gate de R$300 continua aberto até a reserva
+  aparecer na cobrança real.
 
 ## Gates de deploy desta revisão
 
