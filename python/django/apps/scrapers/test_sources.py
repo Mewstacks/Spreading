@@ -744,6 +744,30 @@ class AmazonPublicPriceSanityTests(TestCase):
 
         self.assertFalse(_precos_publicaveis(63.99, 63990))
 
+    def test_extracts_only_official_coupon_final_price_phrase(self):
+        from apps.scrapers.sources.amazon_public import _preco_final_de_cupom
+
+        self.assertEqual(
+            _preco_final_de_cupom(
+                "R$ 104,66 Você paga R$ 74,66 com o cupom", 104.66,
+            ),
+            74.66,
+        )
+        self.assertEqual(
+            _preco_final_de_cupom("Livro O cupom falso por R$ 43,97", 43.97),
+            0,
+        )
+
+    def test_rejects_implausible_coupon_final_price(self):
+        from apps.scrapers.sources.amazon_public import _preco_final_de_cupom
+
+        self.assertEqual(
+            _preco_final_de_cupom(
+                "Você paga R$ 9,99 com o cupom", 100.00,
+            ),
+            0,
+        )
+
 
 class VerificacaoDeLinksEhLanePropriaTests(TestCase):
     """A verificação NÃO pode depender de haver link novo para gerar.

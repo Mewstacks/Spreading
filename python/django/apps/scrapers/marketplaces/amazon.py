@@ -213,7 +213,9 @@ class Amazon(Marketplace):
         from apps.scrapers.sources import run_source
         from apps.scrapers.sources.persistence import persist_items
         resultado = run_source("amazon-public-web", terms=termos)
-        persist_items(resultado.get("offers", []), owner=None)
+        persist_items(
+            resultado.get("offers", []) + resultado.get("coupons", []), owner=None,
+        )
 
     @staticmethod
     def _scrape_cupons_publicos(usuarios):

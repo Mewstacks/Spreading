@@ -280,7 +280,7 @@ def _usuario_do_preparo(cupom, usuario):
     public_amazon_inventory = (
         marketplace == "amazon"
         and getattr(getattr(cupom, "fonte", None), "slug", "")
-        == "amazon-public-coupons"
+        in {"amazon-public-coupons", "amazon-public-web"}
     )
     if ((marketplace == "mercadolivre" or public_amazon_inventory)
             and getattr(cupom, "owner_id", None) is None
@@ -1128,7 +1128,9 @@ def preparar_lote(
     # então não podem ser filtrados por `codigo__gt=""`.
     cupons = list(CupomNormalizado.objects.filter(estado="ativo").filter(
         Q(codigo__gt="")
-        | Q(fonte__slug__in=("amazon-public-coupons",) + _FONTES_ML_ATIVACAO)
+        | Q(fonte__slug__in=(
+            "amazon-public-coupons", "amazon-public-web",
+        ) + _FONTES_ML_ATIVACAO)
     ).filter(
         Q(validade__isnull=True) | Q(validade__gte=agora)
     ).order_by("-ultima_observacao"))

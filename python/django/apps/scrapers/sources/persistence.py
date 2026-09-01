@@ -35,6 +35,7 @@ _SOURCE_PRECEDENCE = {
     "ml-public-containers": 30,
     "licensed-affiliate-feed": 40,
     "amazon-public-coupons": 10,
+    "amazon-public-web": 10,
     "amazon-general-coupons": 10,
     # Menor é mais forte. Estas duas ficam no fim de propósito: são ALEGAÇÃO de
     # terceiro, não observação nossa. Servem para corroborar o que outra fonte já

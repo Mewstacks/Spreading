@@ -739,10 +739,16 @@ def ativacao_publicavel(cupom, usuario=None) -> bool:
     evidence = getattr(cupom, "evidencia", {}) or {}
     source = getattr(getattr(cupom, "fonte", None), "slug", "")
     return bool(
-        source == "amazon-public-coupons"
-        and evidence.get("association") == "amazon-official-coupon-page"
+        source in {"amazon-public-coupons", "amazon-public-web"}
+        and evidence.get("association") in {
+            "amazon-official-coupon-page", "amazon-official-search-coupon",
+        }
         and evidence.get("promotion_id")
         and evidence.get("asins")
+        and (
+            evidence.get("association") == "amazon-official-coupon-page"
+            or evidence.get("coupon_final_price") not in (None, "", 0)
+        )
     )
 
 

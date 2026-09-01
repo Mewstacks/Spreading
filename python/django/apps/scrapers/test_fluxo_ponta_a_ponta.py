@@ -125,6 +125,65 @@ class FluxoAmazonPontaAPontaTests(TestCase):
             "a Amazon precisa aparecer no contador por loja",
         )
 
+    def test_cupom_oficial_da_busca_tambem_chega_a_pronto(self):
+        """A frase/preço final no card oficial é prova de ativação por ASIN."""
+        from apps.scrapers.coupon_rules import normalizar_regras_cupom
+        from apps.scrapers.coupon_products import preparar_lote
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+        from apps.scrapers.sources.persistence import persist_items
+
+        now = timezone.now()
+        asin = "B0SEARCH01"
+        promotion_id = f"search:{asin}"
+        common_evidence = {
+            "transport": "amazon-official-search",
+            "association": "amazon-official-search-coupon",
+            "coupon_final_price": 75.0,
+        }
+        offer = IngestedItem(
+            external_id=asin, marketplace="amazon", source="amazon-public-web",
+            kind="offer", canonical_url=f"https://www.amazon.com.br/dp/{asin}",
+            title="Produto da busca com cupom", current_price=100.0,
+            effective_price=75.0, reference_price=100.0,
+            observed_at=now,
+            evidence={
+                **common_evidence,
+                "promotion": {"present": True, "coupon_confirmed": True,
+                              "id": promotion_id, "label": "25% off"},
+            },
+        )
+        coupon = IngestedItem(
+            external_id=f"amazon-search-coupon:{asin}", marketplace="amazon",
+            source="amazon-public-web", kind="coupon",
+            canonical_url=f"https://www.amazon.com.br/dp/{asin}",
+            title="Cupom Amazon — 25% OFF", content_type="promotion",
+            coupon_rules=normalizar_regras_cupom({
+                "tipo_desconto": "porcentagem", "valor_desconto": 25,
+                "modo_resgate": "ativacao", "escopo": "produto selecionado",
+            }, external_id=f"amazon-search-coupon:{asin}"),
+            observed_at=now,
+            evidence={
+                **common_evidence, "promotion_id": promotion_id, "asins": [asin],
+            },
+        )
+
+        persisted = persist_items([offer, coupon])
+        self.assertEqual(persisted["offers"], 1)
+        self.assertEqual(persisted["coupons"], 1)
+        preparar_lote(limite=10, usuarios=[self.user], permitir_rede=False)
+        result = projetar_disponibilidade_cupons(self.user)
+
+        normalized = CupomNormalizado.objects.get(
+            fonte__slug="amazon-public-web", external_id=coupon.external_id,
+        )
+        self.assertEqual(result["stages"].get("ready"), 1)
+        self.assertEqual(
+            CupomDisponibilidade.objects.get(
+                cupom=normalized, usuario=self.user,
+            ).stage,
+            "ready",
+        )
+
     def test_sem_tag_a_tela_mostra_a_acao_em_vez_de_fila(self):
         """Configuração da conta não pode virar centenas de falhas de produto."""
         from apps.scrapers.coupon_pipeline import afiliar_cupons
