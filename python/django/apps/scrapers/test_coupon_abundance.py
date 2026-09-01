@@ -127,6 +127,28 @@ class AbundanciaTests(TestCase):
             "bloqueada",
         )
 
+    def test_exaustao_consulta_somente_a_execucao_mais_recente(self):
+        antiga = self._execucao(
+            "amazon", metricas={"stop_reason": "no_new_items", "complete": True},
+            health="ok", status="ok",
+        )
+        ExecucaoIngestao.objects.filter(pk=antiga.pk).update(
+            iniciada_em=timezone.now() - timedelta(days=1),
+        )
+        recente = self._execucao(
+            "amazon", metricas={"stop_reason": "max_pages", "complete": False},
+            health="ok", status="ok",
+        )
+
+        item = next(
+            row for row in exaustao_das_fontes()["amazon"]
+            if row["fonte"] == self.fontes["amazon"].slug
+        )
+
+        self.assertEqual(item["exaustao"], "incompleta")
+        self.assertEqual(item["stop_reason"], "max_pages")
+        self.assertEqual(item["quando"], recente.finalizada_em)
+
     def test_uma_loja_abaixo_reprova_o_conjunto(self):
         for indice in range(2):
             self._projecao(self._cupom("mercadolivre", f"ML{indice}"))

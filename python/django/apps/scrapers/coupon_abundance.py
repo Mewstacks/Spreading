@@ -214,16 +214,28 @@ def _exaustao_da_execucao(execucao):
 
 def exaustao_das_fontes(*, marketplaces=MARKETPLACES_META):
     """Última execução de cada fonte habilitada, classificada por exaustão."""
+    from django.db.models import OuterRef, Subquery
     from apps.scrapers.models import ExecucaoIngestao, FonteIngestao
 
     fontes = FonteIngestao.objects.filter(
         marketplace__in=tuple(marketplaces) + ("multiloja",), habilitada=True,
     ).order_by("marketplace", "slug")
-    ultimas = {}
-    for execucao in ExecucaoIngestao.objects.filter(
-            fonte__in=fontes).select_related("fonte").order_by(
-            "fonte_id", "-iniciada_em"):
-        ultimas.setdefault(execucao.fonte_id, execucao)
+    # O histórico cresce a cada ciclo (flash: a cada cinco minutos). Ler todas as
+    # execuções, ordenar e descartar em Python levou 10,9 s em produção só para
+    # responder qual foi a última de cada fonte. O subselect correlacionado mantém
+    # a mesma semântica e traz no máximo uma linha por fonte.
+    ultima_id_da_fonte = (
+        ExecucaoIngestao.objects
+        .filter(fonte_id=OuterRef("fonte_id"))
+        .order_by("-iniciada_em", "-pk")
+        .values("pk")[:1]
+    )
+    ultimas = {
+        execucao.fonte_id: execucao
+        for execucao in ExecucaoIngestao.objects.filter(
+            fonte__in=fontes, pk=Subquery(ultima_id_da_fonte),
+        ).select_related("fonte")
+    }
 
     resultado = {marketplace: [] for marketplace in marketplaces}
     for fonte in fontes:
