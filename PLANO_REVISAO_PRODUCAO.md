@@ -213,7 +213,12 @@ Fontes primárias consultadas:
   do primeiro item quando outra esteira aguarda, em vez de readquirir o slot até
   12 vezes. A verificação de até 20 destinos também cede entre links; a validação
   de produção é o gate dos deploys 284/285/286.
-- Testes automatizados: 1.395 testes Django e 169 testes Node aprovados; 24 testes
+- Corroboração deduplicada: a auditoria de 01/09 encontrou 20 códigos comunitários
+  com observação aceita de fonte oficial nos sete dias anteriores que o gate não
+  enxergava, porque consultava somente linhas duplicadas do catálogo. O livro de
+  evidências agora também corrobora, limitado à mesma loja, inventário público,
+  resultado aceito e janela fresca de 48 horas; evidência privada não cruza tenant.
+- Testes automatizados: 1.397 testes Django e 169 testes Node aprovados; 24 testes
   direcionados de isolamento, permissões, CSRF, SQLi e XSS aprovados; nenhuma
   migração pendente e compilação limpa.
 - Auditoria de produção: papel runtime sem `SUPERUSER`, `BYPASSRLS` ou ownership

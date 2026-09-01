@@ -610,6 +610,45 @@ class CupomDeComunidadeTests(TestCase):
         self.assertTrue(comunidade_corroborada(cupom))
         self.assertIsNone(_preflight(cupom, self.usuario))
 
+    def test_observacao_oficial_deduplicada_tambem_corrobora(self):
+        from apps.scrapers.coupon_rules import (
+            aguarda_corroboracao_oficial, comunidade_corroborada,
+            corroboracoes_oficiais_em_lote,
+        )
+        from apps.scrapers.sources.persistence import record_coupon_observation
+
+        cupom = self._cupom(self.comunidade, "EVIDENCIAREAL")
+        record_coupon_observation(cupom, source=self.oficial, outcome="accepted")
+
+        self.assertTrue(comunidade_corroborada(cupom))
+        corroboracoes = corroboracoes_oficiais_em_lote([cupom])
+        self.assertFalse(aguarda_corroboracao_oficial(
+            cupom, corroboracoes=corroboracoes,
+        ))
+
+    def test_observacao_oficial_expirada_nao_corroborra(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from apps.scrapers.coupon_rules import (
+            aguarda_corroboracao_oficial, comunidade_corroborada,
+            corroboracoes_oficiais_em_lote,
+        )
+        from apps.scrapers.sources.persistence import record_coupon_observation
+
+        cupom = self._cupom(self.comunidade, "EVIDENCIAVELHA")
+        observacao, _ = record_coupon_observation(
+            cupom, source=self.oficial, outcome="accepted",
+        )
+        type(observacao).objects.filter(pk=observacao.pk).update(
+            observed_at=timezone.now() - timedelta(hours=49),
+        )
+
+        self.assertFalse(comunidade_corroborada(cupom))
+        corroboracoes = corroboracoes_oficiais_em_lote([cupom])
+        self.assertTrue(aguarda_corroboracao_oficial(
+            cupom, corroboracoes=corroboracoes,
+        ))
+
     def test_fonte_oficial_nunca_precisa_de_corroboracao(self):
         from apps.scrapers.coupon_readiness import _preflight
         from apps.scrapers.coupon_rules import cupom_de_comunidade

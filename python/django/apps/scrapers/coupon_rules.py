@@ -418,14 +418,37 @@ def comunidade_corroborada(cupom) -> bool:
     codigo = _texto(getattr(cupom, "codigo", "")).upper()
     if not codigo:
         return False
-    from apps.scrapers.models import CupomNormalizado
+    from datetime import timedelta
+    from django.utils import timezone
+    from apps.scrapers.maintenance import COUPON_MAX_AGE_HOURS, cupons_frescos_q
+    from apps.scrapers.models import CupomFonteObservacao, CupomNormalizado
 
-    return CupomNormalizado.objects.filter(
+    corroborada_no_catalogo = CupomNormalizado.objects.filter(
         marketplace=getattr(cupom, "marketplace", ""), estado="ativo",
+        organization_id=getattr(cupom, "organization_id", None),
+        owner__isnull=True,
         codigo__iexact=codigo,
     ).exclude(pk=getattr(cupom, "pk", None)).exclude(
         fonte__slug__in=FONTES_COMUNIDADE,
-    ).exists()
+    ).filter(cupons_frescos_q()).exists()
+    if corroborada_no_catalogo:
+        return True
+
+    # A persistência deduplica campanhas equivalentes e guarda cada testemunho no
+    # livro de observações. Consultar apenas CupomNormalizado perdia exatamente a
+    # prova oficial quando a linha sobrevivente continuava apontando para a fonte
+    # comunitária. Evidência antiga não vale: usa a mesma janela de 48h do catálogo.
+    cutoff = timezone.now() - timedelta(hours=COUPON_MAX_AGE_HOURS)
+    return CupomFonteObservacao.objects.filter(
+        organization_id=getattr(cupom, "organization_id", None),
+        cupom__marketplace=getattr(cupom, "marketplace", ""),
+        cupom__codigo__iexact=codigo,
+        cupom__estado="ativo",
+        outcome="accepted",
+        observed_at__gte=cutoff,
+    ).exclude(
+        fonte__slug__in=FONTES_COMUNIDADE,
+    ).filter(cupons_frescos_q(prefix="cupom__")).exists()
 
 
 def corroboracoes_oficiais_em_lote(cupons) -> set[tuple[str, str]]:
@@ -444,24 +467,49 @@ def corroboracoes_oficiais_em_lote(cupons) -> set[tuple[str, str]]:
     }
     if not pares:
         return set()
+    from datetime import timedelta
+    from django.utils import timezone
     from django.db.models.functions import Upper
-    from apps.scrapers.models import CupomNormalizado
+    from apps.scrapers.maintenance import COUPON_MAX_AGE_HOURS, cupons_frescos_q
+    from apps.scrapers.models import CupomFonteObservacao, CupomNormalizado
 
     marketplaces = {marketplace for marketplace, _ in pares}
     codigos = {codigo for _, codigo in pares}
     linhas = (CupomNormalizado.objects.filter(
-        marketplace__in=marketplaces, estado="ativo",
+        marketplace__in=marketplaces, estado="ativo", organization__isnull=True,
+        owner__isnull=True,
     ).exclude(
         fonte__slug__in=FONTES_COMUNIDADE,
     ).annotate(
         codigo_normalizado=Upper("codigo"),
     ).filter(
         codigo_normalizado__in=codigos,
-    ).values_list("marketplace", "codigo_normalizado"))
-    return {
+    ).filter(cupons_frescos_q()).values_list("marketplace", "codigo_normalizado"))
+    corroboradas = {
         (str(marketplace or "").casefold(), str(codigo or "").upper())
         for marketplace, codigo in linhas
     }
+    cutoff = timezone.now() - timedelta(hours=COUPON_MAX_AGE_HOURS)
+    observacoes = (CupomFonteObservacao.objects.filter(
+        organization__isnull=True,
+        cupom__marketplace__in=marketplaces,
+        cupom__estado="ativo",
+        outcome="accepted",
+        observed_at__gte=cutoff,
+    ).exclude(
+        fonte__slug__in=FONTES_COMUNIDADE,
+    ).annotate(
+        codigo_normalizado=Upper("cupom__codigo"),
+    ).filter(
+        codigo_normalizado__in=codigos,
+    ).filter(
+        cupons_frescos_q(prefix="cupom__"),
+    ).values_list("cupom__marketplace", "codigo_normalizado"))
+    corroboradas.update(
+        (str(marketplace or "").casefold(), str(codigo or "").upper())
+        for marketplace, codigo in observacoes
+    )
+    return corroboradas
 
 
 def aguarda_corroboracao_oficial(cupom, *, corroboracoes=None) -> bool:
