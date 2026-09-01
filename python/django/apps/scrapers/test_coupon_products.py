@@ -1353,6 +1353,47 @@ class MlCampanhaListagemReadySendTests(TestCase):
         stage = CupomDisponibilidade.objects.get(cupom=cupom, usuario=user)
         self.assertNotEqual(stage.stage, "ready")
 
+    def test_canario_monta_listagem_so_com_rastreio_persistido(self):
+        from unittest.mock import patch
+        from apps.scrapers.coupon_links import gerar_link_afiliado_listagem_ml
+        from apps.scrapers.models import (
+            CupomNormalizado, FonteIngestao, LinkAfiliadoCupomUsuario,
+        )
+
+        user = get_user_model().objects.create_user("ml-canario", password="test")
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-campanhas",
+            defaults={"marketplace": "mercadolivre", "nome": "ML campanhas"},
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:canario", marketplace="mercadolivre",
+            titulo="Campanha 25%", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 25, "is_mar_aberto": False,
+                    "container_url": "https://lista.mercadolivre.com.br/_Container_CANARY"},
+        )
+        LinkAfiliadoCupomUsuario.objects.create(
+            usuario=user, cupom=cupom,
+            url_origem="https://www.mercadolivre.com.br/x",
+            link_afiliado=(
+                "https://www.mercadolivre.com.br/x"
+                "?matt_word=canario&matt_tool=whatsapp"
+            ),
+            url_canonica=(
+                "https://www.mercadolivre.com.br/x"
+                "?matt_word=canario&matt_tool=whatsapp"
+            ),
+            verificado_ok=True, verificado_em=timezone.now(), estado="pronto",
+        )
+        with patch("apps.scrapers.coupon_links._expandir_encurtador_ml") as expand:
+            link = gerar_link_afiliado_listagem_ml(
+                cupom, user, somente_persistido_rapido=True,
+            )
+        expand.assert_not_called()
+        self.assertIn("_Container_CANARY", link)
+        self.assertIn("matt_word=canario", link)
+        self.assertIn("matt_tool=whatsapp", link)
+
     def test_worker_expande_meli_la_e_projecao_so_le_prova_persistida(self):
         from unittest.mock import patch
         from apps.scrapers.coupon_links import rastreio_afiliado_ml

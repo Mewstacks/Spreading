@@ -323,14 +323,22 @@ def colher_rastreio_ml_browser(usuario) -> dict:
     return achados
 
 
-def gerar_link_afiliado_listagem_ml(cupom, usuario=None) -> str:
-    """Listagem pública da campanha + tracking do usuário. Sem Chromium."""
+def gerar_link_afiliado_listagem_ml(
+        cupom, usuario=None, *, somente_persistido_rapido=False) -> str:
+    """Listagem pública da campanha + tracking do usuário. Sem Chromium.
+
+    ``somente_persistido_rapido`` é o modo de diagnóstico/projeção: consulta só
+    a prova de rastreio já materializada no banco. Assim um canário read-only não
+    expande encurtador por HTTP nem persiste uma URL canônica incidentalmente.
+    """
     from apps.scrapers.coupon_rules import listagem_publica_ml
 
     base = listagem_publica_ml(cupom)
     if not base:
         return ""
-    rastreio = rastreio_afiliado_ml(usuario)
+    rastreio = rastreio_afiliado_ml(
+        usuario, somente_persistido_rapido=somente_persistido_rapido,
+    )
     if not rastreio:
         return ""
     try:

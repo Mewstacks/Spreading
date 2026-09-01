@@ -392,9 +392,23 @@ class Command(BaseCommand):
                     continue
                 cupom = candidato.obj
                 marketplace = str(cupom.marketplace or "").casefold()
+                codigo = codigo_publicavel(cupom)
                 if marketplace == "amazon":
                     link = gerar_link_afiliado_cupom(cupom, config.owner)
                     link_ok = bool(link and "tag=" in link)
+                elif marketplace == "mercadolivre" and not codigo:
+                    # Campanha de ativação: o envio combina o container público
+                    # específico com o rastreio já comprovado da conta. Não exige
+                    # um cache redundante para cada campanha e não abre Chromium.
+                    from apps.scrapers.coupon_links import gerar_link_afiliado_listagem_ml
+                    from apps.scrapers.marketplaces.registry import get_marketplace
+
+                    link = gerar_link_afiliado_listagem_ml(
+                        cupom, config.owner, somente_persistido_rapido=True,
+                    )
+                    link_ok = bool(link) and get_marketplace(
+                        marketplace,
+                    ).verify_affiliate_tag(link, usuario=config.owner)
                 else:
                     cache = LinkAfiliadoCupomUsuario.objects.filter(
                         usuario=config.owner, cupom=cupom,
@@ -402,7 +416,6 @@ class Command(BaseCommand):
                     link_ok = coupon_link_verified_and_fresh(cache)
                     link = canonical_coupon_link(cache) if link_ok else ""
                 mensagem = montar_mensagem_cupom(cupom, link_afiliado=link)
-                codigo = codigo_publicavel(cupom)
                 checks = {
                     "cupom_first": True,
                     "link_verificado": bool(link_ok),
