@@ -856,6 +856,7 @@ class AmazonPublicPriceSanityTests(TestCase):
     def test_coleta_cedida_grava_a_pagina_seguinte(self):
         from apps.scrapers.sources.amazon_public import AmazonPublicSource
 
+        events = []
         page = MagicMock()
         response = MagicMock()
         response.status = 200
@@ -863,7 +864,10 @@ class AmazonPublicPriceSanityTests(TestCase):
 
         @contextmanager
         def browser(**_kwargs):
-            yield page, object()
+            try:
+                yield page, object()
+            finally:
+                events.append("browser_released")
 
         @contextmanager
         def slot(_owner_kind):
@@ -890,8 +894,10 @@ class AmazonPublicPriceSanityTests(TestCase):
         ), patch(
             "apps.scrapers.resource_control.interesse_pendente", return_value=True,
         ):
+            save_cursor.side_effect = lambda *_args: events.append("cursor_saved")
             self.assertEqual(list(source.discover_offers()), [])
 
+        self.assertEqual(events, ["browser_released", "cursor_saved"])
         save_cursor.assert_called_once_with(["casa"], 4, 3, 1)
         self.assertTrue(source.last_metrics["capacity_yielded"])
         self.assertEqual(source.last_metrics["cursor_next"], 1)

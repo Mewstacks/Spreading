@@ -432,13 +432,17 @@ class AmazonPublicSource(SourceAdapter):
                     ):
                         capacity_yielded = True
                         break
-                processed = len(completed_terms)
-                if capacity_yielded:
-                    _gravar_cursor_busca_amazon(
-                        selected, offset, pages_per_term, cursor_next,
-                    )
-                else:
-                    _gravar_cursor_busca_amazon(selected, offset, pages_per_term, 0)
+            # Playwright síncrono mantém um loop assíncrono interno enquanto o
+            # contexto está aberto. Persistir pelo ORM dentro dele dispara
+            # SynchronousOnlyOperation em produção. Primeiro devolvemos também o
+            # Chromium; só depois tocamos no estado compartilhado.
+            processed = len(completed_terms)
+            if capacity_yielded:
+                _gravar_cursor_busca_amazon(
+                    selected, offset, pages_per_term, cursor_next,
+                )
+            else:
+                _gravar_cursor_busca_amazon(selected, offset, pages_per_term, 0)
         finally:
             # É uma fatia rotativa e limitada por páginas, não prova exaustão do
             # catálogo inteiro da Amazon mesmo quando a fatia termina saudável.
