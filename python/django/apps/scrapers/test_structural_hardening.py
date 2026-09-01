@@ -1776,6 +1776,50 @@ class CouponReadinessReasonTests(TestCase):
                 ).exists(),
             )
 
+    def test_mudanca_de_publico_para_organizacao_encerra_projecao_antiga(self):
+        """Uma projeção criada antes da restrição não pode sobreviver entregável."""
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        coupon = self._code()
+        outsider = get_user_model().objects.create_user("escopo-antigo", password="x")
+        outsider_org = ensure_personal_organization(outsider)
+        with self._ml():
+            projetar_disponibilidade_cupons(outsider)
+        projection = CupomDisponibilidade.objects.get(
+            usuario=outsider, organization=outsider_org, cupom=coupon,
+        )
+        eventos_antes = CupomDisponibilidadeEvento.objects.filter(
+            disponibilidade=projection,
+        ).count()
+
+        coupon.audience_scope = "organization"
+        coupon.organization = self.organization
+        coupon.save(update_fields=["audience_scope", "organization"])
+        with self._ml():
+            resultado = projetar_disponibilidade_cupons(outsider)
+
+        projection.refresh_from_db()
+        self.assertEqual(resultado["total"], 0)
+        self.assertEqual(
+            (projection.stage, projection.category, projection.reason_code),
+            ("discarded", "rejected", "coupon_out_of_scope"),
+        )
+        self.assertEqual(
+            CupomDisponibilidadeEvento.objects.filter(
+                disponibilidade=projection,
+            ).count(),
+            eventos_antes + 1,
+        )
+        # Reconciliação idempotente: não reescreve nem duplica o evento.
+        with self._ml():
+            projetar_disponibilidade_cupons(outsider)
+        self.assertEqual(
+            CupomDisponibilidadeEvento.objects.filter(
+                disponibilidade=projection,
+            ).count(),
+            eventos_antes + 1,
+        )
+
     def test_cupom_de_codigo_do_ml_tem_quem_prepare_o_link(self):
         """Impasse fechado: o cupom aparecia na tela e nunca ficava disponível.
 

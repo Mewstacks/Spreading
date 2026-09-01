@@ -610,9 +610,68 @@ def _persistir_projecoes_em_lote(
             )
 
 
+def _encerrar_projecoes_fora_do_escopo(
+        usuario, organization, channel, cupons_visiveis, agora):
+    """Encerra estados antigos cujo cupom não pertence mais a esta conta.
+
+    Uma campanha pode nascer pública e depois ser corretamente vinculada à
+    organização que forneceu a sessão autenticada. O projetor antigo simplesmente
+    deixava de enxergá-la para as demais contas, mas preservava a projeção anterior
+    como ``eligible`` para sempre. Além de inflar os SLAs, isso deixava uma
+    referência lógica cruzada entre tenants. Preservamos o registro e o evento de
+    auditoria, mas ele deixa imediatamente de ser candidato a entrega.
+    """
+    with transaction.atomic():
+        obsoletas = list(
+            CupomDisponibilidade.objects.select_for_update().select_related(
+                "cupom", "cupom__fonte",
+            ).filter(
+                organization=organization, usuario=usuario, channel=channel,
+            ).exclude(
+                stage="discarded",
+            ).exclude(
+                cupom_id__in=cupons_visiveis.values("pk"),
+            )
+        )
+        if not obsoletas:
+            return 0
+        eventos = []
+        for projection in obsoletas:
+            anterior = projection.stage
+            projection.stage = "discarded"
+            projection.category = "rejected"
+            projection.reason_code = "coupon_out_of_scope"
+            projection.safe_detail = (
+                "O cupom expirou, foi desativado ou deixou de pertencer a esta conta."
+            )
+            projection.retry_at = None
+            projection.updated_at = agora
+            eventos.append(CupomDisponibilidadeEvento(
+                organization=organization, disponibilidade=projection,
+                from_stage=anterior, to_stage="discarded", category="rejected",
+                reason_code="coupon_out_of_scope",
+                marketplace=projection.cupom.marketplace,
+                source=getattr(projection.cupom.fonte, "slug", ""),
+                use_mode=projection.use_mode,
+                evidence_strength=(
+                    forca_evidencia(projection.cupom)
+                    if projection.use_mode == "product_activation"
+                    else "official_code"
+                ),
+            ))
+        CupomDisponibilidade.objects.bulk_update(
+            obsoletas,
+            ["stage", "category", "reason_code", "safe_detail", "retry_at",
+             "updated_at"],
+            batch_size=500,
+        )
+        CupomDisponibilidadeEvento.objects.bulk_create(eventos, batch_size=500)
+        return len(obsoletas)
+
+
 def _projetar_disponibilidade_cupons(usuario, organization, channel):
     agora = timezone.now()
-    cupons = list(
+    cupons_visiveis = (
         CupomNormalizado.objects.select_related("fonte", "programa", "integracao")
         .filter(
             Q(owner=usuario)
@@ -622,6 +681,9 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
         )
         .filter(estado="ativo")
         .filter(cupons_frescos_q(agora=agora))
+    )
+    cupons = list(
+        cupons_visiveis
         .annotate(_prio=Case(
             When(marketplace="amazon", then=Value(0)),
             When(marketplace="mercadolivre", then=Value(1)),
@@ -735,6 +797,9 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
         reasons[reason] = reasons.get(reason, 0) + 1
     _persistir_projecoes_em_lote(
         usuario, organization, channel, planejadas, preparos, agora,
+    )
+    _encerrar_projecoes_fora_do_escopo(
+        usuario, organization, channel, cupons_visiveis, agora,
     )
     return {"stages": stages, "reasons": reasons, "total": len(cupons)}
 
