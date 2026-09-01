@@ -226,6 +226,8 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
     _coletar_adaptador("bia-garimpa-cupons", resultado)
     _coletar_adaptador("cupomspot-cupons", resultado)
     _coletar_adaptador("prima-ryca-cupons", resultado)
+    _coletar_adaptador("discoup-cupons", resultado)
+    _coletar_adaptador("promomia-cupons", resultado)
     _coletar_adaptador("linkerhub-cupons", resultado)
     # O ciclo de cupons nao resolve links de oferta: na medicao de producao, 124
     # redirects custaram ~9s e geraram zero produto, enquanto os mesmos textos

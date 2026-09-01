@@ -22,12 +22,12 @@ Complementar, não substituto: o worker Telethon continua sendo o caminho para
 re-divulgar a mensagem original em tempo quase real. Esta fonte serve para o catálogo
 — e funciona hoje, sem esperar credencial nenhuma.
 """
-import html
 import logging
 import re
 import time
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 from concurrent.futures import ThreadPoolExecutor
+from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
 import requests
@@ -47,22 +47,16 @@ _REDIRECT_WORKERS = 16
 _CHANNEL_WORKERS = 6
 _PAGE_CACHE_TTL_SECONDS = 120
 _REDIRECT_CACHE_TTL_SECONDS = 3600
+# A previa continua exibindo as ultimas mensagens mesmo quando o canal esta
+# parado. Baixar esse mesmo HTML outra vez nao e uma nova observacao.
+_MAX_MESSAGE_AGE = timedelta(hours=48)
+_MAX_FUTURE_SKEW = timedelta(minutes=5)
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
 
 # Handle do Telegram: letras, números e _, de 5 a 32 caracteres. Restringir aqui é o
 # que impede um handle vindo do banco de virar caminho arbitrário na URL.
 _HANDLE_OK = re.compile(r"^[A-Za-z0-9_]{5,32}$")
-
-_BLOCO_MENSAGEM = re.compile(
-    r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', re.S,
-)
-_POST_ID = re.compile(r'data-post="([^"]+)"')
-_TAG = re.compile(r"<[^>]+>")
-_QUEBRA = re.compile(r"<br\s*/?>", re.I)
-_ANCORA = re.compile(
-    r'<a\b[^>]*\bhref=["\'](https?://[^"\']+)["\'][^>]*>(.*?)</a>', re.I | re.S,
-)
 
 _URL = re.compile(r"https?://[^\s<>\"']+")
 _PRECO = re.compile(r"R\$\s*([\d.]+,\d{2}|\d+,\d{2}|\d+)")
@@ -71,6 +65,70 @@ _PRECO = re.compile(r"R\$\s*([\d.]+,\d{2}|\d+,\d{2}|\d+)")
 _CUPOM = re.compile(
     r"cupom[:\s]+([A-Z0-9][A-Z0-9._-]{3,29})\b", re.I,
 )
+
+
+class _TelegramPreviewParser(HTMLParser):
+    """Associa texto, links e horario dentro do mesmo bloco de mensagem.
+
+    Listas de regex independentes se deslocam quando ha um post somente com
+    midia. O parser acompanha a arvore e impede que um cupom receba a data do post
+    seguinte.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.messages = []
+        self._current = None
+        self._div_depth = 0
+        self._text_depth = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = set(str(attrs.get("class") or "").split())
+        if (
+            self._current is None and tag == "div"
+            and "tgme_widget_message" in classes
+            and attrs.get("data-post")
+        ):
+            self._current = {
+                "post": str(attrs["data-post"]), "datetime": "", "parts": [],
+            }
+            self._div_depth = 1
+            self._text_depth = None
+            return
+        if self._current is None:
+            return
+        if tag == "div":
+            self._div_depth += 1
+            if "tgme_widget_message_text" in classes:
+                self._text_depth = self._div_depth
+        if tag == "time" and attrs.get("datetime"):
+            self._current["datetime"] = str(attrs["datetime"])
+        if self._text_depth is not None:
+            if tag == "br":
+                self._current["parts"].append("\n")
+            elif tag == "a" and str(attrs.get("href") or "").startswith(("http://", "https://")):
+                self._current["parts"].append(f" {attrs['href']} ")
+
+    def handle_endtag(self, tag):
+        if self._current is None or tag != "div":
+            return
+        if self._text_depth == self._div_depth:
+            self._text_depth = None
+        if self._div_depth == 1:
+            text = "".join(self._current["parts"])
+            self.messages.append((
+                self._current["post"], text.strip(), self._current["datetime"],
+            ))
+            self._current = None
+            self._div_depth = 0
+            self._text_depth = None
+            return
+        self._div_depth -= 1
+
+    def handle_data(self, data):
+        if self._current is not None and self._text_depth is not None:
+            self._current["parts"].append(data)
 
 _LOJAS = (
     ("mercadolivre", (
@@ -186,16 +244,6 @@ def _produtos_da_mensagem(texto: str, destinos=None):
     return encontrados
 
 
-def _texto_limpo(bruto: str) -> str:
-    # Muitos canais exibem apenas "COMPRAR"; sem preservar o href, o produto some
-    # da mensagem e um cupom real fica sem alvo verificável.
-    com_links = _ANCORA.sub(
-        lambda match: f"{match.group(2)} {html.unescape(match.group(1))}",
-        bruto,
-    )
-    return html.unescape(_TAG.sub("", _QUEBRA.sub("\n", com_links))).strip()
-
-
 def e_pagina_de_produto(url: str, slug: str) -> bool:
     """A URL aponta para um ANÚNCIO, não para uma vitrine?
 
@@ -287,6 +335,15 @@ class TelegramPublicoSource(SourceAdapter):
         self._page_cache = {}
         self._redirect_cache = {}
         self._last_redirect_cache_hits = 0
+        self._timestamp_metrics = {}
+
+    def _reset_timestamp_metrics(self):
+        self._timestamp_metrics = {
+            "mensagens_com_data": 0,
+            "mensagens_sem_data": 0,
+            "mensagens_antigas_descartadas": 0,
+            "mensagens_futuras_descartadas": 0,
+        }
 
     def _canais(self, handles=None):
         if handles:
@@ -310,11 +367,11 @@ class TelegramPublicoSource(SourceAdapter):
 
     def _carregar_canais(self, handles):
         """Baixa previews em paralelo, isolando timeout/falha por canal."""
-        # 24 fontes curadas: em 28/08 a passada completa ficou abaixo do orçamento
-        # do ciclo com seis downloads paralelos. O teto continua explícito para uma
+        # Fontes curadas: a passada completa fica abaixo do orçamento do ciclo com
+        # seis downloads paralelos. O teto continua explícito para uma
         # lista configurada no banco não transformar um radar barato em crawler sem
         # limite.
-        alvos = list(handles)[:24]
+        alvos = list(handles)[:32]
 
         def carregar(handle):
             try:
@@ -350,15 +407,41 @@ class TelegramPublicoSource(SourceAdapter):
                 result[url] = destination
         return result
 
-    def _mensagens(self, corpo):
-        """(post_id, texto) das mensagens da prévia, na ordem em que aparecem."""
-        ids = _POST_ID.findall(corpo)
-        blocos = _BLOCO_MENSAGEM.findall(corpo)
-        # As duas listas costumam ter o mesmo tamanho; quando não têm, o id é opcional
-        # e o texto é o que importa — melhor perder o id do que perder a mensagem.
-        for indice, bloco in enumerate(blocos):
-            post = ids[indice] if indice < len(ids) else ""
-            yield post, _texto_limpo(bloco)
+    def _mensagens(self, corpo, *, agora=None):
+        """(post_id, texto, data) atuais, na ordem em que aparecem na prévia."""
+        agora = agora or timezone.now()
+        parser = _TelegramPreviewParser()
+        parser.feed(corpo or "")
+        # Data ausente ou inválida falha fechada: um post antigo não pode parecer
+        # uma reobservação atual e manter um cupom vencido artificialmente vivo.
+        for post, texto, data_bruta in parser.messages:
+            if not data_bruta:
+                self._timestamp_metrics["mensagens_sem_data"] += 1
+                continue
+            try:
+                publicada_em = datetime.fromisoformat(
+                    data_bruta.replace("Z", "+00:00"),
+                )
+                if publicada_em.tzinfo is None:
+                    publicada_em = publicada_em.replace(tzinfo=dt_timezone.utc)
+                publicada_em = publicada_em.astimezone(dt_timezone.utc)
+            except (TypeError, ValueError):
+                self._timestamp_metrics["mensagens_sem_data"] += 1
+                continue
+            self._timestamp_metrics["mensagens_com_data"] += 1
+            if publicada_em > agora + _MAX_FUTURE_SKEW:
+                self._timestamp_metrics["mensagens_futuras_descartadas"] += 1
+                continue
+            if publicada_em < agora - _MAX_MESSAGE_AGE:
+                self._timestamp_metrics["mensagens_antigas_descartadas"] += 1
+                continue
+            yield post, texto, publicada_em
+
+    @staticmethod
+    def _partes_mensagem(linha, agora):
+        """Aceita pares legados de adaptadores/testes e triplas datadas."""
+        post, texto, *resto = linha
+        return post, texto, (resto[0] if resto else agora)
 
     def discover_offers(self, canais=None, include_offers=True, **kwargs):
         if not include_offers:
@@ -366,6 +449,7 @@ class TelegramPublicoSource(SourceAdapter):
             return
         handles = self._canais(canais)
         agora = timezone.now()
+        self._reset_timestamp_metrics()
         vistos = set()
         lidos = falhas = 0
         # Contadores de descarte: sem eles, uma fonte que rejeita tudo fica idêntica
@@ -378,13 +462,14 @@ class TelegramPublicoSource(SourceAdapter):
                 falhas += 1
                 continue
             lidos += 1
-            for post, texto in self._mensagens(corpo):
+            for linha in self._mensagens(corpo, agora=agora):
+                post, texto, publicada_em = self._partes_mensagem(linha, agora)
                 if not texto:
                     continue
-                mensagens.append((handle, post, texto))
+                mensagens.append((handle, post, texto, publicada_em))
 
         encurtados = []
-        for _handle, _post, texto in mensagens:
+        for _handle, _post, texto, _publicada_em in mensagens:
             for bruto in _URL.findall(texto):
                 bruto = bruto.rstrip(").,;")
                 if any(d in bruto.lower() for d in _ENCURTADORES):
@@ -392,7 +477,7 @@ class TelegramPublicoSource(SourceAdapter):
         unicos = list(dict.fromkeys(encurtados))
         destinos = self._resolver_lote(unicos)
 
-        for handle, post, texto in mensagens:
+        for handle, post, texto, publicada_em in mensagens:
                 preco_alegado = 0.0
                 achado_preco = _PRECO.search(texto)
                 if achado_preco:
@@ -431,7 +516,7 @@ class TelegramPublicoSource(SourceAdapter):
                         # desconto. Ele viaja em `evidence` para diagnóstico e o
                         # preço real vem da revalidação no envio.
                         current_price=0.0, reference_price=0.0,
-                        observed_at=agora,
+                        observed_at=publicada_em,
                         evidence={
                             "transport": "telegram-preview",
                             "canal": handle,
@@ -441,7 +526,11 @@ class TelegramPublicoSource(SourceAdapter):
                             "trecho": texto[:300],
                         },
                     )
-        self.last_health_status = "healthy" if lidos else "degraded"
+        timestamps_ok = (
+            self._timestamp_metrics["mensagens_com_data"] > 0
+            or self._timestamp_metrics["mensagens_sem_data"] == 0
+        )
+        self.last_health_status = "healthy" if lidos and timestamps_ok else "degraded"
         self.last_metrics = {
             "canais_lidos": lidos,
             "canais_falhos": falhas,
@@ -450,6 +539,7 @@ class TelegramPublicoSource(SourceAdapter):
             "redirects_total": len(unicos),
             "redirects_resolvidos": sum(bool(url) for url in destinos.values()),
             "redirects_cache_hits": self._last_redirect_cache_hits,
+            **self._timestamp_metrics,
             # Nunca "completo": a prévia mostra só as mensagens recentes, então
             # ausência aqui não prova que a oferta sumiu e não pode expirar catálogo.
             "complete": False,
@@ -478,6 +568,7 @@ class TelegramPublicoSource(SourceAdapter):
             re.sub(r"[^A-Z0-9]", "", handle.upper()) for handle in handles
         }
         agora = timezone.now()
+        self._reset_timestamp_metrics()
         candidatos = {}
         lidos = falhas = sem_valor = codigos_handle = 0
         mensagens = []
@@ -486,13 +577,14 @@ class TelegramPublicoSource(SourceAdapter):
                 falhas += 1
                 continue
             lidos += 1
-            for post, texto in self._mensagens(corpo):
+            for linha in self._mensagens(corpo, agora=agora):
+                post, texto, publicada_em = self._partes_mensagem(linha, agora)
                 if not parece_ter_cupom(texto):
                     continue
-                mensagens.append((handle, post, texto))
+                mensagens.append((handle, post, texto, publicada_em))
 
         mensagens_validas = []
-        for handle, post, texto in mensagens:
+        for handle, post, texto, publicada_em in mensagens:
             loja_do_link = ""
             for bruto in _URL.findall(texto):
                 loja_do_link = _marketplace(bruto)
@@ -510,12 +602,14 @@ class TelegramPublicoSource(SourceAdapter):
                     continue
                 validos.append(cupom)
             if validos:
-                mensagens_validas.append((handle, post, texto, validos))
+                mensagens_validas.append(
+                    (handle, post, texto, publicada_em, validos)
+                )
             else:
                 sem_valor += 1
 
         encurtados = []
-        for _handle, _post, texto, _cupons in mensagens_validas:
+        for _handle, _post, texto, _publicada_em, _cupons in mensagens_validas:
             for bruto in _URL.findall(texto):
                 bruto = bruto.rstrip(").,;")
                 try:
@@ -527,7 +621,7 @@ class TelegramPublicoSource(SourceAdapter):
         unicos = list(dict.fromkeys(encurtados))
         destinos = self._resolver_lote(unicos)
 
-        for handle, post, texto, achados in mensagens_validas:
+        for handle, post, texto, publicada_em, achados in mensagens_validas:
                 produtos = _produtos_da_mensagem(texto, destinos)
                 for cupom in achados:
                     chave = f"telegram:{cupom['loja']}:{cupom['codigo']}"
@@ -543,8 +637,10 @@ class TelegramPublicoSource(SourceAdapter):
                         registro = candidatos[chave] = {
                             "cupom": cupom, "regras": regras, "urls": set(),
                             "ids": set(), "canais": set(), "posts": [],
-                            "trecho": texto[:300],
+                            "trecho": texto[:300], "observed_at": publicada_em,
                         }
+                    elif publicada_em > registro["observed_at"]:
+                        registro["observed_at"] = publicada_em
                     referencia = produtos.get(cupom["loja"], {})
                     registro["urls"].update(referencia.get("urls") or set())
                     registro["ids"].update(referencia.get("ids") or set())
@@ -581,9 +677,13 @@ class TelegramPublicoSource(SourceAdapter):
                 title=f"Cupom {cupom['codigo']}"[:255],
                 coupon_code=cupom["codigo"][:120],
                 coupon_rules=registro["regras"], content_type="voucher",
-                observed_at=agora, evidence=evidence,
+                observed_at=registro["observed_at"], evidence=evidence,
             )
-        self.last_health_status = "healthy" if lidos else "degraded"
+        timestamps_ok = (
+            self._timestamp_metrics["mensagens_com_data"] > 0
+            or self._timestamp_metrics["mensagens_sem_data"] == 0
+        )
+        self.last_health_status = "healthy" if lidos and timestamps_ok else "degraded"
         self.last_metrics = {
             **self.last_metrics,
             "canais_lidos": lidos,
@@ -595,6 +695,7 @@ class TelegramPublicoSource(SourceAdapter):
             "redirects_cupom_cache_hits": self._last_redirect_cache_hits,
             "sem_cupom_legivel": sem_valor,
             "codigos_ruidosos_descartados": codigos_handle,
+            **self._timestamp_metrics,
             # Nunca completo: a prévia mostra só as mensagens recentes.
             "complete": False,
         }

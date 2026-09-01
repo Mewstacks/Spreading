@@ -16,7 +16,8 @@ from .meliuz_coupons import MeliuzCouponsSource
 from .pelando_coupons import PelandoCouponsSource
 from .promobit import PromobitSource
 from .public_coupon_aggregators import (
-    BiaGarimpaCouponsSource, CupomSpotCouponsSource, PrimaRycaCouponsSource,
+    BiaGarimpaCouponsSource, CupomSpotCouponsSource, DiscoupShopeeCouponsSource,
+    PrimaRycaCouponsSource, PromomiaShopeeCouponsSource,
 )
 from .linkerhub_coupons import LinkerHubCouponsSource
 from .shopee import ShopeeCampaignsSource, ShopeeOffersSource
@@ -48,6 +49,8 @@ SOURCES = {
     BiaGarimpaCouponsSource.slug: BiaGarimpaCouponsSource(),
     CupomSpotCouponsSource.slug: CupomSpotCouponsSource(),
     PrimaRycaCouponsSource.slug: PrimaRycaCouponsSource(),
+    DiscoupShopeeCouponsSource.slug: DiscoupShopeeCouponsSource(),
+    PromomiaShopeeCouponsSource.slug: PromomiaShopeeCouponsSource(),
     LinkerHubCouponsSource.slug: LinkerHubCouponsSource(),
     TelegramPublicoSource.slug: TelegramPublicoSource(),
 }

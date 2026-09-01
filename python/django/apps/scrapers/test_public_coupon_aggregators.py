@@ -9,7 +9,8 @@ from apps.scrapers.coupon_rules import (
 )
 from apps.scrapers.sources.persistence import _SOURCE_PRECEDENCE
 from apps.scrapers.sources.public_coupon_aggregators import (
-    BiaGarimpaCouponsSource, CupomSpotCouponsSource, PrimaRycaCouponsSource,
+    BiaGarimpaCouponsSource, CupomSpotCouponsSource, DiscoupShopeeCouponsSource,
+    PrimaRycaCouponsSource, PromomiaShopeeCouponsSource,
 )
 from apps.scrapers.sources.registry import SOURCES
 
@@ -173,11 +174,100 @@ class PrimaRycaCouponsTests(SimpleTestCase):
         })
 
 
+class DiscoupShopeeCouponsTests(SimpleTestCase):
+    ID = "019fa60c-df67-7f72-91cb-0a7efb3dfc49"
+
+    def _page(self, *, name="Cupom Shopee R$20 OFF",
+              description="Em compras acima de R$60"):
+        return f"""
+        <script type="application/ld+json">
+        {{"@context":"https://schema.org","@type":"ItemList",
+          "itemListElement":[{{"@type":"ListItem","item":{{
+            "@type":"Offer","@id":"https://discoup.test/p#{self.ID}",
+            "name":{json.dumps(name)},"description":{json.dumps(description)},
+            "validThrough":"2099-09-24T02:59:00Z"}}}}]}}
+        </script>
+        """
+
+    def test_reveals_public_code_and_keeps_no_outbound_affiliate_link(self):
+        source = DiscoupShopeeCouponsSource()
+        popup = """
+        <h3>Cupom Shopee R$20 OFF</h3>
+        <a onclick="Out.offer(this,{copy:&#39;SHOPEE20&#39;,attrs:{}})">Copiar</a>
+        """
+        with patch(
+                "apps.scrapers.sources.public_coupon_aggregators._download",
+                return_value=self._page()), patch.object(
+                source, "_download_popup", return_value=(popup, False)):
+            rows = list(source.discover_coupons(marketplaces=["shopee"]))
+
+        self.assertEqual(len(rows), 1)
+        coupon = rows[0]
+        self.assertEqual(coupon.coupon_code, "SHOPEE20")
+        self.assertEqual(coupon.coupon_rules["valor_desconto"], 20.0)
+        self.assertEqual(coupon.coupon_rules["valor_minimo"], 60.0)
+        self.assertEqual(coupon.canonical_url, "")
+        self.assertEqual(coupon.evidence["transport"], "discoup-schema-popup")
+
+    def test_rejects_cashback_even_when_popup_has_a_code(self):
+        source = DiscoupShopeeCouponsSource()
+        popup = "<a onclick=\"x({copy:&#39;MOEDAS20&#39;})\">Copiar</a>"
+        with patch(
+                "apps.scrapers.sources.public_coupon_aggregators._download",
+                return_value=self._page(
+                    name="20% cashback em moedas", description="limitado a R$20",
+                )), patch.object(
+                source, "_download_popup", return_value=(popup, False)):
+            rows = list(source.discover_coupons(marketplaces=["shopee"]))
+
+        self.assertEqual(rows, [])
+        self.assertEqual(source.last_metrics["rejected_by_reason"], {"cashback": 1})
+
+
+class PromomiaShopeeCouponsTests(SimpleTestCase):
+    def _page(self, *, discount="R$20", code="PROMO20", expired="false"):
+        return (
+            '<script>self.__next_f.push([1,"27:[\\"$\\",\\"card\\",null,'
+            '{\\"couponId\\":\\"coupon-1\\",\\"storeSlug\\":\\"shopee\\",'
+            f'\\"discountLabel\\":\\"{discount}\\",'
+            '\\"children\\":\\"ate 30/09/2099\\",'
+            '\\"children\\":\\"Cupom Shopee R$20 OFF em R$60\\",'
+            f'\\"couponCode\\":\\"{code}\\",\\"isExpired\\":{expired}'
+            '}]"])</script>'
+        )
+
+    def test_accepts_only_structured_numeric_coupon_card(self):
+        source = PromomiaShopeeCouponsSource()
+        with patch(
+                "apps.scrapers.sources.public_coupon_aggregators._download",
+                return_value=self._page()):
+            rows = list(source.discover_coupons(marketplaces=["shopee"]))
+
+        self.assertEqual(len(rows), 1)
+        coupon = rows[0]
+        self.assertEqual(coupon.coupon_code, "PROMO20")
+        self.assertEqual(coupon.coupon_rules["valor_desconto"], 20.0)
+        self.assertEqual(coupon.coupon_rules["valor_minimo"], 60.0)
+        self.assertEqual(coupon.canonical_url, "")
+
+    def test_rejects_card_without_numeric_benefit(self):
+        source = PromomiaShopeeCouponsSource()
+        with patch(
+                "apps.scrapers.sources.public_coupon_aggregators._download",
+                return_value=self._page(discount="$undefined")):
+            rows = list(source.discover_coupons(marketplaces=["shopee"]))
+
+        self.assertEqual(rows, [])
+        self.assertEqual(source.last_metrics["rejected_by_reason"], {
+            "invalid_code_or_discount": 1,
+        })
+
+
 class PublicCouponAggregatorRegistrationTests(SimpleTestCase):
     def test_sources_are_registered_as_weak_independent_aggregators(self):
         for slug in (
             "bia-garimpa-cupons", "cupomspot-cupons", "prima-ryca-cupons",
-            "linkerhub-cupons",
+            "discoup-cupons", "promomia-cupons", "linkerhub-cupons",
         ):
             self.assertIn(slug, SOURCES)
             self.assertIn(slug, FONTES_COMUNIDADE)

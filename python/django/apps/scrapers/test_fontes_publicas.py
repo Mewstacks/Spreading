@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import requests
 from django.test import TestCase
+from django.utils import timezone
 
 from apps.scrapers.sources.promobit import PromobitSource
 from apps.scrapers.sources.meliuz_coupons import MeliuzCouponsSource
@@ -22,22 +23,26 @@ from apps.scrapers.sources.shopee_public_coupons import (
 
 TG_HTML = """
 <div class="tgme_widget_message" data-post="canalteste/376">
+  <time datetime="__RECENT__"></time>
   <div class="tgme_widget_message_text js-message_text">
     🔥 Camiseta Tommy (Cupom MELIMODA)<br/>💰 R$ 113,00<br/>
     🔗 https://meli.la/21M8WPs?matt_word=ABC
   </div>
 </div>
 <div class="tgme_widget_message" data-post="canalteste/377">
+  <time datetime="__RECENT__"></time>
   <div class="tgme_widget_message_text js-message_text">
     Fone bom<br/>R$ 89,90<br/>https://www.amazon.com.br/dp/B0ABCDEFGH
   </div>
 </div>
 <div class="tgme_widget_message" data-post="canalteste/378">
+  <time datetime="__RECENT__"></time>
   <div class="tgme_widget_message_text js-message_text">
     Bom dia, pessoal! Sem link nenhum aqui.
   </div>
 </div>
 <div class="tgme_widget_message" data-post="canalteste/379">
+  <time datetime="__RECENT__"></time>
   <div class="tgme_widget_message_text js-message_text">
     Confira minha vitrine<br/>https://www.mercadolivre.com.br/social/lojinha
   </div>
@@ -110,6 +115,7 @@ MELIUZ_HTML = """
 class TelegramPublicoTests(TestCase):
     def _coletar(self, corpo=TG_HTML, canais=("canalteste",), destino=DESTINO_CURTO):
         fonte = TelegramPublicoSource()
+        corpo = corpo.replace("__RECENT__", timezone.now().isoformat())
         with patch.object(TelegramPublicoSource, "_baixar", return_value=corpo), \
                 patch("apps.scrapers.sources.telegram_publico.resolver",
                       return_value=destino):
@@ -174,6 +180,21 @@ class TelegramPublicoTests(TestCase):
         """A prévia só mostra as recentes; ausência aqui não expira catálogo."""
         fonte, _ = self._coletar()
         self.assertFalse(fonte.last_metrics["complete"])
+
+    def test_post_antigo_nao_e_reobservado_como_novo(self):
+        antigo = (timezone.now() - timezone.timedelta(hours=49)).isoformat()
+        fonte, itens = self._coletar(corpo=TG_HTML.replace("__RECENT__", antigo))
+
+        self.assertEqual(itens, [])
+        self.assertEqual(fonte.last_metrics["mensagens_antigas_descartadas"], 4)
+
+    def test_schema_sem_horario_falha_fechado(self):
+        fonte, itens = self._coletar(
+            corpo=TG_HTML.replace('<time datetime="__RECENT__"></time>', ""),
+        )
+
+        self.assertEqual(itens, [])
+        self.assertEqual(fonte.last_metrics["mensagens_sem_data"], 4)
 
     def test_handle_invalido_e_recusado_sem_requisicao(self):
         fonte = TelegramPublicoSource()
@@ -276,12 +297,14 @@ class TelegramPublicoTests(TestCase):
         fonte = TelegramPublicoSource()
         corpo = """
         <div class="tgme_widget_message" data-post="canalteste/7">
+          <time datetime="__RECENT__"></time>
           <div class="tgme_widget_message_text js-message_text">
             15% OFF cupom LINK15
             <a href="https://www.amazon.com.br/dp/B012345679?tag=canal-20">COMPRAR</a>
           </div>
         </div>
         """
+        corpo = corpo.replace("__RECENT__", timezone.now().isoformat())
         cupom = [{
             "codigo": "LINK15", "loja": "amazon", "tipo": "porcentagem",
             "valor": 15, "minimo": 0, "teto": 0, "escopo": "",

@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import re
+from datetime import timedelta
 
 from django.utils import timezone
 
@@ -47,6 +48,8 @@ _SOURCE_PRECEDENCE = {
     "bia-garimpa-cupons": 86,
     "cupomspot-cupons": 87,
     "prima-ryca-cupons": 89,
+    "discoup-cupons": 90,
+    "promomia-cupons": 92,
     "linkerhub-cupons": 91,
     "telegram-publico": 90,
     "shopee-public-coupons": 10,
@@ -249,6 +252,20 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
                           "estado": "ativo", "confianca": "media",
                           "evidencia": item.evidence},
             )
+            # ``auto_now`` marca quando o parser rodou. Para feeds com horario
+            # proprio (notadamente Telegram), isso renovava um post velho sempre
+            # que o mesmo HTML era baixado. Scrapers ao vivo continuam sem escrita
+            # adicional; so corrigimos instantes materialmente anteriores.
+            observado_em = item.observed_at or timezone.now()
+            if timezone.is_naive(observado_em):
+                observado_em = timezone.make_aware(observado_em)
+            agora = timezone.now()
+            observado_em = min(observado_em, agora)
+            if observado_em < agora - timedelta(minutes=1):
+                CupomNormalizado.objects.filter(pk=cupom_obj.pk).update(
+                    ultima_observacao=observado_em,
+                )
+                cupom_obj.ultima_observacao = observado_em
             from apps.scrapers.coupon_products import atualizar_chave_cupom
             atualizar_chave_cupom(cupom_obj)
             _enriquecer_codigos_heuristicos(cupom_obj)
@@ -270,7 +287,7 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
                         "has_promotion_id": bool(evidence.get("promotion_id")),
                         "product_ids": len(evidence.get("asins") or evidence.get("product_ids") or []),
                     },
-                    "observed_at": item.observed_at or timezone.now(),
+                    "observed_at": observado_em,
                 },
             )
             coupons += 1

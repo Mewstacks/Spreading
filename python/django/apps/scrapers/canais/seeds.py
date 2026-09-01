@@ -191,6 +191,20 @@ CANAIS_SUGERIDOS = [
         "densidade": 70,
         "nota": "Canal multiloja de grande volume, útil para cupons curtos.",
     },
+    {
+        "handle": "wolf_ofertas",
+        "nome": "Wolf Ofertas",
+        "marketplaces": ["amazon", "mercadolivre", "shopee"],
+        "densidade": 68,
+        "nota": "Previa ativa em 01/09/2026; codigos com desconto e minimo explicitos.",
+    },
+    {
+        "handle": "ofertasbrasi",
+        "nome": "Ofertas Brasil 2.0",
+        "marketplaces": ["mercadolivre", "shopee"],
+        "densidade": 64,
+        "nota": "Previa ativa em 01/09/2026; codigos Shopee recentes e digitaveis.",
+    },
 ]
 
 # Recusados de propósito, para que ninguém os re-adicione sem saber por quê.

@@ -388,7 +388,7 @@ def site_wide_confiavel(cupom, *, codigos_contestados=None) -> bool:
 FONTES_COMUNIDADE = frozenset({
     "promobit-cupons", "meliuz-cupons", "pelando-cupons", "bia-garimpa-cupons",
     "cupomspot-cupons", "telegram-publico",
-    "prima-ryca-cupons",
+    "prima-ryca-cupons", "discoup-cupons", "promomia-cupons",
     "linkerhub-cupons",
     "promobit-community", "pelando-community",
 })
@@ -396,7 +396,7 @@ FONTES_COMUNIDADE = frozenset({
 FONTES_COMUNIDADE_SEM_LISTAGEM = frozenset({
     "promobit-cupons", "meliuz-cupons", "pelando-cupons", "bia-garimpa-cupons",
     "cupomspot-cupons", "telegram-publico",
-    "prima-ryca-cupons",
+    "prima-ryca-cupons", "discoup-cupons", "promomia-cupons",
     "linkerhub-cupons",
     "promobit-community", "pelando-community",
 })

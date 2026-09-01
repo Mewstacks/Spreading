@@ -16,6 +16,7 @@ import logging
 import re
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time as datetime_time
 from urllib.parse import urlsplit
 
@@ -40,6 +41,11 @@ _MARKETPLACES = ("amazon", "shopee")
 _BIA_URL = "https://biagarimpa.com/cupons/{marketplace}"
 _SPOT_URL = "https://cupomspot.com.br/cupons/{marketplace}"
 _PRIMA_URL = "https://primaryca.com.br/cupons"
+_DISCOUP_URL = "https://www.discoup.com/br/ofertas-cupom-de-desconto-shopee.html"
+_DISCOUP_POPUP = "https://www.discoup.com/br/api/offers/popup-{offer_id}"
+_DISCOUP_WORKERS = 4
+_DISCOUP_CACHE_SECONDS = 30 * 60
+_PROMOMIA_URL = "https://promomia.com.br/cupons/shopee"
 
 # Next.js RSC serializes each card as an escaped, flat JSON object.  The object
 # currently has scalar/list/null fields only; requiring coupon_id and decoding
@@ -71,6 +77,14 @@ _MAXIMUM = re.compile(
 )
 _EXPLICIT_DATE = re.compile(
     r"(?<!\d)(\d{1,2})[/.](\d{1,2})(?:[/.](\d{2}|\d{4}))?(?!\d)",
+)
+_DISCOUP_ID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.I,
+)
+_DISCOUP_CODE = re.compile(r"\bcopy:'([^']{4,120})'", re.I)
+_NEXT_FLIGHT_SCRIPT = re.compile(
+    r'<script>\s*(self\.__next_f\.push\(\[1,.*?)</script>', re.I | re.S,
 )
 
 
@@ -183,6 +197,17 @@ def _walk_offers(value):
     elif isinstance(value, list):
         for child in value:
             yield from _walk_offers(child)
+
+
+def _walk_schema_offers(value):
+    if isinstance(value, dict):
+        if value.get("@type") == "Offer":
+            yield value
+        for child in value.values():
+            yield from _walk_schema_offers(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_schema_offers(child)
 
 
 def _spot_rows(body):
@@ -457,3 +482,235 @@ class PrimaRycaCouponsSource(_PublicCatalogSource):
                 },
             )
             yield item, "" if item else "invalid_code_or_discount"
+
+
+class DiscoupShopeeCouponsSource(_PublicCatalogSource):
+    """Catalogo Shopee cujo popup publico revela codigo e regras completas."""
+
+    slug = "discoup-cupons"
+    name = "Discoup - catalogo publico de cupons Shopee"
+    marketplace = "shopee"
+
+    def __init__(self):
+        super().__init__()
+        self._popup_cache = {}
+
+    def _catalog_rows(self, body):
+        seen = set()
+        for raw in _LD_JSON.findall(body or ""):
+            try:
+                block = json.loads(html.unescape(raw))
+            except (TypeError, ValueError):
+                continue
+            for row in _walk_schema_offers(block):
+                raw_id = str(row.get("@id") or "").rsplit("#", 1)[-1]
+                if not _DISCOUP_ID.fullmatch(raw_id) or raw_id in seen:
+                    continue
+                seen.add(raw_id)
+                yield raw_id, row
+
+    def _download_popup(self, offer_id):
+        now = time.monotonic()
+        cached = self._popup_cache.get(offer_id)
+        if cached and now - cached[0] < _DISCOUP_CACHE_SECONDS:
+            return cached[1], True
+        response = requests.get(
+            _DISCOUP_POPUP.format(offer_id=offer_id), timeout=_TIMEOUT,
+            headers={"User-Agent": _UA, "Referer": _DISCOUP_URL},
+        )
+        body = (
+            response.content.decode("utf-8", errors="replace")
+            if response.status_code == 200 else ""
+        )
+        if body:
+            self._popup_cache[offer_id] = (now, body)
+        return body, False
+
+    def discover_coupons(self, marketplaces=None, **kwargs):
+        selected = set(marketplaces or ("shopee",))
+        if "shopee" not in selected:
+            self.last_health_status = "healthy"
+            self.last_metrics = {"lojas_lidas": 0, "cupons": 0, "complete": False}
+            return
+        observed_at = timezone.now()
+        rejected = defaultdict(int)
+        try:
+            body = _download(_DISCOUP_URL)
+        except requests.RequestException as exc:
+            logger.info("%s unavailable (%s).", self.slug, type(exc).__name__)
+            body = ""
+        if not body:
+            self.last_health_status = "degraded"
+            self.last_metrics = {
+                "lojas_lidas": 0, "popup_total": 0, "popup_falhas": 0,
+                "cupons": 0, "complete": False,
+            }
+            return
+        catalog = list(self._catalog_rows(body))
+
+        def load(entry):
+            offer_id, row = entry
+            try:
+                popup, cache_hit = self._download_popup(offer_id)
+                return offer_id, row, popup, cache_hit
+            except requests.RequestException:
+                return offer_id, row, "", False
+
+        with ThreadPoolExecutor(
+            max_workers=min(_DISCOUP_WORKERS, max(1, len(catalog))),
+        ) as executor:
+            popups = list(executor.map(load, catalog))
+
+        accepted = set()
+        failures = cache_hits = 0
+        for offer_id, row, popup, cache_hit in popups:
+            cache_hits += int(cache_hit)
+            if not popup:
+                failures += 1
+                rejected["popup_unavailable"] += 1
+                continue
+            decoded = html.unescape(popup)
+            code_match = _DISCOUP_CODE.search(decoded)
+            code = code_match.group(1).strip().upper() if code_match else ""
+            description = " ".join(filter(None, (
+                str(row.get("name") or ""), str(row.get("description") or ""),
+            )))
+            if re.search(r"\b(?:cashback|moedas?)\b", description, re.I):
+                rejected["cashback"] += 1
+                continue
+            discount_type, discount = _discount(
+                description, require_explicit_off=True,
+            )
+            valid_until = _when(row.get("validThrough"))
+            if valid_until and valid_until < observed_at:
+                rejected["expired"] += 1
+                continue
+            item = _item(
+                source=self.slug, marketplace="shopee",
+                external_id=f"discoup:shopee:{offer_id}", code=code,
+                discount_type=discount_type, discount=discount,
+                description=description, observed_at=observed_at,
+                valid_from=_when(row.get("validFrom")), valid_until=valid_until,
+                minimum=_money_match(_MINIMUM, description),
+                maximum=_money_match(_MAXIMUM, description),
+                restricted=tem_restricao_publico(description),
+                evidence={
+                    "transport": "discoup-schema-popup",
+                    "public_offer_id": offer_id,
+                },
+            )
+            if item is None:
+                rejected["invalid_code_or_discount"] += 1
+                continue
+            if item.coupon_code in accepted:
+                rejected["duplicate_code"] += 1
+                continue
+            accepted.add(item.coupon_code)
+            yield item
+
+        self.last_health_status = (
+            "degraded" if failures > max(3, len(catalog) // 4) else "healthy"
+        )
+        self.last_metrics = {
+            "lojas_lidas": 1, "rows_seen": len(catalog),
+            "popup_total": len(catalog), "popup_falhas": failures,
+            "popup_cache_hits": cache_hits, "cupons": len(accepted),
+            "rejected_by_reason": dict(sorted(rejected.items())),
+            "complete": False,
+        }
+
+
+class PromomiaShopeeCouponsSource(_PublicCatalogSource):
+    """Cupons Shopee estruturados no RSC publico, nunca produtos promocionais."""
+
+    slug = "promomia-cupons"
+    name = "Promomia - catalogo publico de cupons Shopee"
+    marketplace = "shopee"
+
+    @staticmethod
+    def _rows(body):
+        for raw in _NEXT_FLIGHT_SCRIPT.findall(body or ""):
+            chunk = raw.replace(r'\"', '"')
+            coupon_id = re.search(r'"couponId":"([^"]+)"', chunk)
+            store = re.search(r'"storeSlug":"([^"]+)"', chunk)
+            code = re.search(r'"couponCode":"([A-Za-z0-9_-]{4,40})"', chunk)
+            discount = re.search(r'"discountLabel":"([^"]+)"', chunk)
+            expires = re.search(r'"children":"at[eé] (\d{2}/\d{2}/\d{4})"', chunk, re.I)
+            title = re.search(r'"children":"(Cupom[^"]*)"', chunk, re.I)
+            expired = re.search(r'"isExpired":(true|false)', chunk)
+            if not all((coupon_id, store, code, discount, expires, title, expired)):
+                continue
+            yield {
+                "id": coupon_id.group(1), "store": store.group(1),
+                "code": code.group(1), "discount": discount.group(1),
+                "expires": expires.group(1), "title": title.group(1),
+                "expired": expired.group(1) == "true",
+            }
+
+    def discover_coupons(self, marketplaces=None, **kwargs):
+        selected = set(marketplaces or ("shopee",))
+        if "shopee" not in selected:
+            self.last_health_status = "healthy"
+            self.last_metrics = {"lojas_lidas": 0, "cupons": 0, "complete": False}
+            return
+        observed_at = timezone.now()
+        rejected = defaultdict(int)
+        try:
+            body = _download(_PROMOMIA_URL)
+        except requests.RequestException as exc:
+            logger.info("%s unavailable (%s).", self.slug, type(exc).__name__)
+            body = ""
+        if not body:
+            self.last_health_status = "degraded"
+            self.last_metrics = {"lojas_lidas": 0, "cupons": 0, "complete": False}
+            return
+        rows = list(self._rows(body))
+        accepted = set()
+        for row in rows:
+            if row["store"].casefold() != "shopee":
+                rejected["wrong_marketplace"] += 1
+                continue
+            if row["expired"]:
+                rejected["expired"] += 1
+                continue
+            description = f"{row['discount']} {row['title']}"
+            if re.search(r"\b(?:cashback|moedas?)\b", description, re.I):
+                rejected["cashback"] += 1
+                continue
+            discount_type, discount = _discount(row["discount"])
+            try:
+                day = datetime.strptime(row["expires"], "%d/%m/%Y").date()
+                valid_until = timezone.make_aware(
+                    datetime.combine(day, datetime_time.max),
+                )
+            except ValueError:
+                rejected["invalid_expiry"] += 1
+                continue
+            if valid_until < observed_at:
+                rejected["expired"] += 1
+                continue
+            item = _item(
+                source=self.slug, marketplace="shopee",
+                external_id=f"promomia:shopee:{row['id']}", code=row["code"],
+                discount_type=discount_type, discount=discount,
+                description=description, observed_at=observed_at,
+                valid_until=valid_until,
+                minimum=_money_match(_MINIMUM, description),
+                maximum=_money_match(_MAXIMUM, description),
+                restricted=tem_restricao_publico(description),
+                evidence={"transport": "promomia-next-rsc"},
+            )
+            if item is None:
+                rejected["invalid_code_or_discount"] += 1
+                continue
+            if item.coupon_code in accepted:
+                rejected["duplicate_code"] += 1
+                continue
+            accepted.add(item.coupon_code)
+            yield item
+        self.last_health_status = "healthy"
+        self.last_metrics = {
+            "lojas_lidas": 1, "rows_seen": len(rows), "cupons": len(accepted),
+            "rejected_by_reason": dict(sorted(rejected.items())),
+            "complete": False,
+        }

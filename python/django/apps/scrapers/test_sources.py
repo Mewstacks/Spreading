@@ -84,6 +84,27 @@ class SourcePipelineTests(TestCase):
         self.assertEqual(resultado["offers"], 0)
         self.assertFalse(Produto.objects.filter(marketplace="amazon").exists())
 
+    def test_cupom_datado_preserva_horario_original_da_fonte(self):
+        publicado_em = timezone.now() - timedelta(hours=23)
+        item = IngestedItem(
+            external_id="telegram:shopee:DATA20", marketplace="shopee",
+            source="telegram-publico", kind="coupon", canonical_url="",
+            title="Cupom DATA20", coupon_code="DATA20",
+            coupon_rules={
+                "tipo_desconto": "porcentagem", "valor_desconto": 20,
+                "modo_resgate": "codigo", "escopo": "site",
+            },
+            observed_at=publicado_em,
+            evidence={"transport": "telegram-preview-parser"},
+        )
+
+        persist_items([item])
+
+        cupom = CupomNormalizado.objects.get(
+            fonte__slug="telegram-publico", external_id=item.external_id,
+        )
+        self.assertLess(abs((cupom.ultima_observacao - publicado_em).total_seconds()), 1)
+
     def test_amazon_coupon_source_groups_asins_and_preserves_final_price(self):
         from apps.scrapers.sources.amazon_coupons import AmazonCouponsSource
 
