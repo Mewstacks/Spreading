@@ -821,6 +821,133 @@ class AmazonDiscountRecoveryTests(TestCase):
 
 
 class AmazonPublicPriceSanityTests(TestCase):
+    def test_cursor_da_busca_retoma_apenas_na_mesma_fatia(self):
+        from apps.scrapers.sources.amazon_public import (
+            CURSOR_BUSCA_AMAZON, _assinatura_fatia_busca,
+            _ler_cursor_busca_amazon,
+        )
+
+        selected = ["casa", "beleza"]
+        payload = {
+            "signature": _assinatura_fatia_busca(selected, 4, 3),
+            "index": 2,
+        }
+        with patch(
+            "apps.scrapers.automacao_state.read_state",
+            return_value={CURSOR_BUSCA_AMAZON: payload},
+        ):
+            self.assertEqual(_ler_cursor_busca_amazon(selected, 4, 3), 2)
+            self.assertEqual(_ler_cursor_busca_amazon(selected, 8, 3), 0)
+
+    def test_cursor_da_busca_e_limpo_quando_fatia_termina(self):
+        from apps.scrapers.sources.amazon_public import (
+            CURSOR_BUSCA_AMAZON, _gravar_cursor_busca_amazon,
+        )
+
+        with patch("apps.scrapers.automacao_state.write_state") as write:
+            _gravar_cursor_busca_amazon(["casa", "beleza"], 4, 3, 2)
+            self.assertEqual(
+                write.call_args.kwargs[CURSOR_BUSCA_AMAZON]["index"], 2,
+            )
+            _gravar_cursor_busca_amazon(["casa", "beleza"], 4, 3, 6)
+            self.assertEqual(write.call_args.kwargs[CURSOR_BUSCA_AMAZON], {})
+
+    @override_settings(AMAZON_PUBLIC_PAGES_PER_TERM=3)
+    def test_coleta_cedida_grava_a_pagina_seguinte(self):
+        from apps.scrapers.sources.amazon_public import AmazonPublicSource
+
+        page = MagicMock()
+        response = MagicMock()
+        response.status = 200
+        page.goto.return_value = response
+
+        @contextmanager
+        def browser(**_kwargs):
+            yield page, object()
+
+        @contextmanager
+        def slot(_owner_kind):
+            yield
+
+        source = AmazonPublicSource()
+        with patch(
+            "apps.scrapers.sources.amazon_public._termos_do_ciclo",
+            return_value=(["casa"], 1, 4),
+        ), patch(
+            "apps.scrapers.sources.amazon_public._ler_cursor_busca_amazon",
+            return_value=0,
+        ), patch(
+            "apps.scrapers.sources.amazon_public._gravar_cursor_busca_amazon",
+        ) as save_cursor, patch(
+            "apps.scrapers.sources.amazon_public._browser_slot", slot,
+        ), patch(
+            "apps.scrapers.sources.amazon_public.iniciar_browser", browser,
+        ), patch(
+            "apps.scrapers.sources.amazon_public._economizar_banda",
+        ), patch(
+            "apps.scrapers.sources.amazon_public._pagina_atual_estruturada",
+            return_value={"title": "Amazon", "body": "", "rows": []},
+        ), patch(
+            "apps.scrapers.resource_control.interesse_pendente", return_value=True,
+        ):
+            self.assertEqual(list(source.discover_offers()), [])
+
+        save_cursor.assert_called_once_with(["casa"], 4, 3, 1)
+        self.assertTrue(source.last_metrics["capacity_yielded"])
+        self.assertEqual(source.last_metrics["cursor_next"], 1)
+        self.assertEqual(source.last_metrics["pages_processed"], 1)
+
+    @override_settings(AMAZON_PUBLIC_PAGES_PER_TERM=3)
+    def test_coleta_retomada_comeca_na_pagina_seguinte_e_finaliza_fatia(self):
+        from apps.scrapers.sources.amazon_public import AmazonPublicSource
+
+        page = MagicMock()
+        response = MagicMock()
+        response.status = 200
+        page.goto.return_value = response
+
+        @contextmanager
+        def browser(**_kwargs):
+            yield page, object()
+
+        @contextmanager
+        def slot(_owner_kind):
+            yield
+
+        empty = {"status": 200, "title": "Amazon", "body": "", "rows": []}
+        source = AmazonPublicSource()
+        with patch(
+            "apps.scrapers.sources.amazon_public._termos_do_ciclo",
+            return_value=(["casa"], 1, 4),
+        ), patch(
+            "apps.scrapers.sources.amazon_public._ler_cursor_busca_amazon",
+            return_value=1,
+        ), patch(
+            "apps.scrapers.sources.amazon_public._gravar_cursor_busca_amazon",
+        ) as save_cursor, patch(
+            "apps.scrapers.sources.amazon_public._browser_slot", slot,
+        ), patch(
+            "apps.scrapers.sources.amazon_public.iniciar_browser", browser,
+        ), patch(
+            "apps.scrapers.sources.amazon_public._economizar_banda",
+        ), patch(
+            "apps.scrapers.sources.amazon_public._pagina_atual_estruturada",
+            return_value=empty,
+        ), patch(
+            "apps.scrapers.sources.amazon_public._buscar_pagina_na_sessao",
+            return_value=empty,
+        ) as fetch, patch(
+            "apps.scrapers.resource_control.interesse_pendente", return_value=False,
+        ):
+            self.assertEqual(list(source.discover_offers()), [])
+
+        self.assertIn("page=2", page.goto.call_args.args[0])
+        self.assertIn("page=3", fetch.call_args.args[1])
+        self.assertEqual(source.last_metrics["cursor_start"], 1)
+        self.assertEqual(source.last_metrics["pages_processed"], 2)
+        self.assertTrue(source.last_metrics["slice_complete"])
+        save_cursor.assert_called_once_with(["casa"], 4, 3, 0)
+
     def test_extracts_current_search_page_in_one_browser_evaluation(self):
         from apps.scrapers.sources.amazon_public import _pagina_atual_estruturada
 

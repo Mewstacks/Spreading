@@ -60,6 +60,48 @@ def _termos_do_ciclo(terms, agora=None, limite=None):
     return selecionados, len(unicos), offset
 
 
+CURSOR_BUSCA_AMAZON = "cursor_busca_amazon_public"
+
+
+def _assinatura_fatia_busca(selected, offset, pages_per_term):
+    return f"{int(offset)}:{int(pages_per_term)}:" + "|".join(selected)
+
+
+def _ler_cursor_busca_amazon(selected, offset, pages_per_term):
+    """Retoma a página seguinte quando a coleta cede o Chromium.
+
+    A assinatura amarra o cursor à fatia rotativa atual. Se a janela de três horas
+    mudou, a nova fatia começa do topo em vez de aplicar um índice antigo a termos
+    diferentes.
+    """
+    from apps.scrapers import automacao_state as st
+
+    raw = st.read_state("scrape").get(CURSOR_BUSCA_AMAZON) or {}
+    if not isinstance(raw, dict) or raw.get("signature") != _assinatura_fatia_busca(
+        selected, offset, pages_per_term,
+    ):
+        return 0
+    try:
+        cursor = int(raw.get("index") or 0)
+    except (TypeError, ValueError):
+        return 0
+    total = len(selected) * pages_per_term
+    return cursor if 0 <= cursor < total else 0
+
+
+def _gravar_cursor_busca_amazon(selected, offset, pages_per_term, index):
+    from apps.scrapers import automacao_state as st
+
+    total = len(selected) * pages_per_term
+    payload = {}
+    if 0 < int(index) < total:
+        payload = {
+            "signature": _assinatura_fatia_busca(selected, offset, pages_per_term),
+            "index": int(index),
+        }
+    st.write_state("scrape", **{CURSOR_BUSCA_AMAZON: payload})
+
+
 def _money(text):
     return normalizar_dinheiro(text)
 
@@ -243,6 +285,17 @@ class AmazonPublicSource(SourceAdapter):
         pages_per_term = max(
             1, int(getattr(settings, "AMAZON_PUBLIC_PAGES_PER_TERM", 3)),
         )
+        planned_pages = [
+            (term, page_number)
+            for term in selected
+            for page_number in range(1, pages_per_term + 1)
+        ]
+        cursor_start = _ler_cursor_busca_amazon(
+            selected, offset, pages_per_term,
+        )
+        cursor_next = cursor_start
+        completed_terms = set()
+        failed_terms = set()
         try:
             with _browser_slot("amazon_public_offers"), \
                     iniciar_browser(
@@ -250,134 +303,142 @@ class AmazonPublicSource(SourceAdapter):
                     ) as (page, _):
                 _economizar_banda(page)
                 session_ready = False
-                for term in selected:
-                    term_complete = True
-                    for page_number in range(1, pages_per_term + 1):
-                        try:
-                            url = (
-                                f"https://www.amazon.com.br/s?k={quote_plus(term)}"
-                                f"&page={page_number}"
+                for planned_index in range(cursor_start, len(planned_pages)):
+                    term, page_number = planned_pages[planned_index]
+                    if term in failed_terms:
+                        cursor_next = planned_index + 1
+                        continue
+                    try:
+                        url = (
+                            f"https://www.amazon.com.br/s?k={quote_plus(term)}"
+                            f"&page={page_number}"
+                        )
+                        if session_ready:
+                            payload = _buscar_pagina_na_sessao(page, url)
+                            status = payload.get("status", 0)
+                            fetch_pages += 1
+                            fetched_bytes += int(payload.get("bytes", 0) or 0)
+                            fetch_duration_ms += int(
+                                payload.get("duration_ms", 0) or 0
                             )
-                            if session_ready:
-                                payload = _buscar_pagina_na_sessao(page, url)
-                                status = payload.get("status", 0)
-                                fetch_pages += 1
-                                fetched_bytes += int(payload.get("bytes", 0) or 0)
-                                fetch_duration_ms += int(
-                                    payload.get("duration_ms", 0) or 0
-                                )
-                            else:
-                                response = page.goto(
-                                    url, wait_until="domcontentloaded", timeout=25000,
-                                )
-                                navigation_pages += 1
-                                payload = _pagina_atual_estruturada(page)
-                                status = response.status if response else 0
-                            body = payload.get("body", "")
-                            failure = _page_failure(
-                                status, payload.get("title", ""), body,
+                        else:
+                            response = page.goto(
+                                url, wait_until="domcontentloaded", timeout=25000,
                             )
-                            if failure:
-                                raise AmazonPublicPageError(failure)
-                            session_ready = True
-                            pages_processed += 1
-                            for raw in payload.get("rows", []):
-                                try:
-                                    product_url = str(raw.get("url", "") or "")
-                                    asin = str(raw.get("asin", "") or "").upper()
-                                    match = ASIN_RE.search(product_url)
-                                    asin = asin or (match.group(1).upper() if match else "")
-                                    if not re.fullmatch(r"[A-Z0-9]{10}", asin) or asin in seen:
-                                        continue
-                                    title = str(raw.get("title", "") or "").strip()
-                                    current = _money(raw.get("current", ""))
-                                    previous = _money(raw.get("previous", ""))
-                                    card_text = str(raw.get("text", "") or "")
-                                    coupon_final = _preco_final_de_cupom(card_text, current)
-                                    if not coupon_final and not _precos_publicaveis(
-                                        current, previous,
-                                    ):
-                                        continue
-                                    image_url = str(raw.get("image_url", "") or "")
-                                    seen.add(asin)
-                                    rows += 1
-                                    observed = timezone.now()
-                                    canonical = f"https://www.amazon.com.br/dp/{asin}"
-                                    evidence = {
-                                        "transport": "amazon-official-search",
-                                        "term": term, "page": page_number,
-                                    }
-                                    effective = 0
-                                    reference = previous
-                                    if coupon_final:
-                                        discount = round(
-                                            (current - coupon_final) * 100 / current, 2,
-                                        )
-                                        promotion_id = f"search:{asin}"
-                                        evidence.update({
-                                            "association": "amazon-official-search-coupon",
-                                            "coupon_final_price": coupon_final,
-                                            "promotion": {
-                                                "present": True,
-                                                "coupon_confirmed": True,
-                                                "id": promotion_id,
-                                                "label": f"{discount:g}% off",
-                                            },
-                                        })
-                                        effective = coupon_final
-                                        reference = max(previous, current)
-                                        self._coupon_cache.append(IngestedItem(
-                                            external_id=f"amazon-search-coupon:{asin}",
-                                            marketplace="amazon", source=self.slug,
-                                            kind="coupon", canonical_url=canonical,
-                                            title=f"Cupom Amazon — {discount:g}% OFF em {title}"[:255],
-                                            coupon_rules=normalizar_regras_cupom({
-                                                "tipo_desconto": "porcentagem",
-                                                "valor_desconto": discount,
-                                                "modo_resgate": "ativacao",
-                                                "escopo": "produto selecionado",
-                                            }, external_id=f"amazon-search-coupon:{asin}"),
-                                            content_type="promotion", observed_at=observed,
-                                            evidence={
-                                                "transport": "amazon-official-search",
-                                                "association": "amazon-official-search-coupon",
-                                                "promotion_id": promotion_id,
-                                                "asins": [asin],
-                                                "coupon_final_price": coupon_final,
-                                                "term": term, "page": page_number,
-                                            },
-                                        ))
-                                        coupon_rows += 1
-                                    yield IngestedItem(
-                                        external_id=asin, marketplace="amazon",
-                                        source=self.slug, kind="offer",
-                                        canonical_url=canonical, title=title[:255],
-                                        current_price=current,
-                                        effective_price=effective,
-                                        reference_price=reference,
-                                        image_url=image_url[:1000],
-                                        observed_at=observed, evidence=evidence,
-                                    )
-                                except Exception:
+                            navigation_pages += 1
+                            payload = _pagina_atual_estruturada(page)
+                            status = response.status if response else 0
+                        body = payload.get("body", "")
+                        failure = _page_failure(
+                            status, payload.get("title", ""), body,
+                        )
+                        if failure:
+                            raise AmazonPublicPageError(failure)
+                        session_ready = True
+                        pages_processed += 1
+                        for raw in payload.get("rows", []):
+                            try:
+                                product_url = str(raw.get("url", "") or "")
+                                asin = str(raw.get("asin", "") or "").upper()
+                                match = ASIN_RE.search(product_url)
+                                asin = asin or (match.group(1).upper() if match else "")
+                                if not re.fullmatch(r"[A-Z0-9]{10}", asin) or asin in seen:
                                     continue
-                        except Exception as exc:
-                            failures.append({
-                                "term": term, "page": page_number,
-                                "error": getattr(exc, "reason", type(exc).__name__),
-                            })
-                            term_complete = False
-                            break
-                        from apps.scrapers.resource_control import interesse_pendente
-                        if interesse_pendente(
-                            "django_chromium", exceto=f"source_{self.slug}",
-                        ):
-                            capacity_yielded = True
-                            term_complete = False
-                            break
-                    if term_complete:
-                        processed += 1
-                    if capacity_yielded:
+                                title = str(raw.get("title", "") or "").strip()
+                                current = _money(raw.get("current", ""))
+                                previous = _money(raw.get("previous", ""))
+                                card_text = str(raw.get("text", "") or "")
+                                coupon_final = _preco_final_de_cupom(card_text, current)
+                                if not coupon_final and not _precos_publicaveis(
+                                    current, previous,
+                                ):
+                                    continue
+                                image_url = str(raw.get("image_url", "") or "")
+                                seen.add(asin)
+                                rows += 1
+                                observed = timezone.now()
+                                canonical = f"https://www.amazon.com.br/dp/{asin}"
+                                evidence = {
+                                    "transport": "amazon-official-search",
+                                    "term": term, "page": page_number,
+                                }
+                                effective = 0
+                                reference = previous
+                                if coupon_final:
+                                    discount = round(
+                                        (current - coupon_final) * 100 / current, 2,
+                                    )
+                                    promotion_id = f"search:{asin}"
+                                    evidence.update({
+                                        "association": "amazon-official-search-coupon",
+                                        "coupon_final_price": coupon_final,
+                                        "promotion": {
+                                            "present": True,
+                                            "coupon_confirmed": True,
+                                            "id": promotion_id,
+                                            "label": f"{discount:g}% off",
+                                        },
+                                    })
+                                    effective = coupon_final
+                                    reference = max(previous, current)
+                                    self._coupon_cache.append(IngestedItem(
+                                        external_id=f"amazon-search-coupon:{asin}",
+                                        marketplace="amazon", source=self.slug,
+                                        kind="coupon", canonical_url=canonical,
+                                        title=f"Cupom Amazon — {discount:g}% OFF em {title}"[:255],
+                                        coupon_rules=normalizar_regras_cupom({
+                                            "tipo_desconto": "porcentagem",
+                                            "valor_desconto": discount,
+                                            "modo_resgate": "ativacao",
+                                            "escopo": "produto selecionado",
+                                        }, external_id=f"amazon-search-coupon:{asin}"),
+                                        content_type="promotion", observed_at=observed,
+                                        evidence={
+                                            "transport": "amazon-official-search",
+                                            "association": "amazon-official-search-coupon",
+                                            "promotion_id": promotion_id,
+                                            "asins": [asin],
+                                            "coupon_final_price": coupon_final,
+                                            "term": term, "page": page_number,
+                                        },
+                                    ))
+                                    coupon_rows += 1
+                                yield IngestedItem(
+                                    external_id=asin, marketplace="amazon",
+                                    source=self.slug, kind="offer",
+                                    canonical_url=canonical, title=title[:255],
+                                    current_price=current,
+                                    effective_price=effective,
+                                    reference_price=reference,
+                                    image_url=image_url[:1000],
+                                    observed_at=observed, evidence=evidence,
+                                )
+                            except Exception:
+                                continue
+                        cursor_next = planned_index + 1
+                        if page_number == pages_per_term:
+                            completed_terms.add(term)
+                    except Exception as exc:
+                        failures.append({
+                            "term": term, "page": page_number,
+                            "error": getattr(exc, "reason", type(exc).__name__),
+                        })
+                        failed_terms.add(term)
+                        cursor_next = planned_index + 1
+                        continue
+                    from apps.scrapers.resource_control import interesse_pendente
+                    if cursor_next < len(planned_pages) and interesse_pendente(
+                        "django_chromium", exceto=f"source_{self.slug}",
+                    ):
+                        capacity_yielded = True
                         break
+                processed = len(completed_terms)
+                if capacity_yielded:
+                    _gravar_cursor_busca_amazon(
+                        selected, offset, pages_per_term, cursor_next,
+                    )
+                else:
+                    _gravar_cursor_busca_amazon(selected, offset, pages_per_term, 0)
         finally:
             # É uma fatia rotativa e limitada por páginas, não prova exaustão do
             # catálogo inteiro da Amazon mesmo quando a fatia termina saudável.
@@ -393,6 +454,9 @@ class AmazonPublicSource(SourceAdapter):
                 "fetched_bytes": fetched_bytes,
                 "fetch_duration_ms": fetch_duration_ms,
                 "pages_per_term": pages_per_term,
+                "pages_planned": len(planned_pages),
+                "cursor_start": cursor_start,
+                "cursor_next": cursor_next if capacity_yielded else 0,
                 "terms_total": total_terms,
                 "terms_selected": len(selected),
                 "terms_processed": processed,
