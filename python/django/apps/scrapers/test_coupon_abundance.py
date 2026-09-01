@@ -16,7 +16,8 @@ from django.utils import timezone
 
 from apps.accounts.models import ensure_personal_organization, organization_for_user
 from apps.scrapers.coupon_abundance import (
-    exaustao_das_fontes, prontos_distintos, relatorio_abundancia,
+    descoberta_24h, exaustao_das_fontes, prontos_distintos,
+    relatorio_abundancia,
 )
 from apps.scrapers.models import (
     CupomDisponibilidade, CupomFonteObservacao, CupomNormalizado,
@@ -236,3 +237,21 @@ class AbundanciaTests(TestCase):
             loja["classes_descoberta"], ["agregador", "comunidade", "oficial"],
         )
         self.assertTrue(loja["descoberta_atingida"])
+
+    def test_descoberta_nao_conta_codigo_de_interface_ou_texto_colado(self):
+        fonte = FonteIngestao.objects.create(
+            slug="radar-ruidoso", marketplace="shopee", nome="Radar ruidoso",
+            status="ok",
+        )
+        for indice, codigo in enumerate(("VALIDO20", "TECNOLOGIA", "9.9TEXTO")):
+            cupom = self._cupom("shopee", f"RUIDO{indice}")
+            CupomNormalizado.objects.filter(pk=cupom.pk).update(codigo=codigo)
+            CupomFonteObservacao.objects.create(
+                fonte=fonte, cupom=cupom, canonical_key=f"ruido:{indice}",
+                source_external_id=f"ruido:{indice}", observed_at=timezone.now(),
+            )
+
+        descoberta = descoberta_24h()["shopee"]
+
+        self.assertEqual(descoberta["candidatos"], 1)
+        self.assertEqual(descoberta["por_fonte"], {"radar-ruidoso": 1})

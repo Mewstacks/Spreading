@@ -20,7 +20,12 @@ _CODIGOS_PLACEHOLDER = frozenset({
     "CUPOMNOLINK", "CUPOMAQUI", "DESCONTOAQUI", "DESCONTONOLINK",
     "GARANTACUPOM", "PEGUECUPOM", "USECUPOM", "MAISCUPONS",
     "RESGATENOLINK", "PEGUEAQUI", "ATIVEAQUI", "VEJANOLINK",
+    "RESGATE", "RESGATAR", "EXCLUSIVO", "TECNOLOGIA", "ATUALIZADO",
+    "APROVEITE", "CONFIRA", "MELICUPONS",
 })
+# Relatórios SQL precisam aplicar a mesma fronteira sem materializar todo o
+# catálogo em Python. O alias público é imutável e evita duplicar a denylist.
+CODIGOS_NAO_PUBLICAVEIS = _CODIGOS_PLACEHOLDER
 _ESCOPO_GENERICO = {
     "", "geral", "site inteiro", "todo o site", "toda a loja", "todos os produtos",
     "qualquer produto", "todas as categorias",

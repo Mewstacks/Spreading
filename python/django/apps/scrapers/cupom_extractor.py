@@ -96,6 +96,8 @@ _NAO_CODIGOS = {
     "GRATIS", "CLIQUE", "ATIVE", "AQUI", "SELECIONADOS", "PRODUTOS",
     "ESTOQUE", "LOJA", "LOJAS", "OFICIAL", "OFICIAIS", "CANAL", "GRUPO",
     "APLIQUE", "COMPRAS", "ESCRITO", "LIBERADO", "LIBERADA", "REGRAS",
+    "RESGATE", "RESGATAR", "EXCLUSIVO", "TECNOLOGIA", "ATUALIZADO",
+    "APROVEITE", "CONFIRA", "MELICUPONS",
 }
 
 _PROMPT = """Extraia os cupons de desconto desta mensagem de um canal brasileiro de ofertas.
@@ -195,6 +197,11 @@ def codigo_plausivel(codigo: str) -> bool:
     """Filtro final comum ao parser local e à transcrição do modelo."""
     value = str(codigo or "").strip().upper()
     if not _CODIGO_OK.match(value) or value in _NAO_CODIGOS:
+        return False
+    # Os três marketplaces aceitam os códigos públicos observados como tokens
+    # alfanuméricos (eventualmente com hífen). Ponto/underscore aqui vieram de
+    # texto colado — por exemplo ``9.9CONSEGUEM`` — e nunca de um checkout.
+    if "." in value or "_" in value:
         return False
     if value.startswith(("HTTP", "WWW")) or value.endswith((".BR", ".COM")):
         return False

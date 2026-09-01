@@ -15,7 +15,8 @@ from django.core.cache import cache
 from django.test import TestCase, override_settings
 
 from apps.scrapers.cupom_extractor import (
-    _limpar, extrair, extrair_deterministico, parece_ter_cupom,
+    _limpar, codigo_plausivel, extrair, extrair_deterministico,
+    parece_ter_cupom,
 )
 from apps.scrapers.coupon_rules import codigo_humano
 
@@ -76,6 +77,26 @@ class RegraDeAceitacaoTests(TestCase):
              "tipo": "porcentagem", "valor": 10},
         ]})
         self.assertEqual(aceitos, [])
+
+    def test_palavras_de_interface_e_texto_colado_nao_viram_codigo(self):
+        for codigo in (
+            "RESGATE", "RESGATAR", "EXCLUSIVO", "TECNOLOGIA",
+            "ATUALIZADO", "MELICUPONS", "9.9CONSEGUEM",
+        ):
+            with self.subTest(codigo=codigo):
+                self.assertFalse(codigo_plausivel(codigo))
+                self.assertEqual(_limpar({"cupons": [{
+                    "codigo": codigo, "loja": "shopee",
+                    "tipo": "fixo", "valor": 20,
+                }]}), [])
+
+    def test_fallback_nao_inventa_codigo_com_rotulo_de_categoria(self):
+        texto = (
+            "CUPOM SHOPEE TECNOLOGIA\n"
+            "R$100 OFF em compras acima de R$999\n"
+            "Resgate aqui: https://s.shopee.com.br/abc"
+        )
+        self.assertEqual(extrair_deterministico(texto), [])
 
     def test_placeholder_de_agregador_nao_e_codigo_publicavel(self):
         for codigo in ("RESGATENOLINK", "PEGUEAQUI", "CUPOMNOLINK"):

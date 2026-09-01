@@ -140,6 +140,7 @@ def descoberta_24h(*, agora=None, janela_horas=24):
     from datetime import timedelta
 
     from apps.scrapers.models import CupomFonteObservacao
+    from apps.scrapers.coupon_rules import CODIGOS_NAO_PUBLICAVEIS
 
     agora = agora or timezone.now()
     corte = agora - timedelta(hours=max(1, int(janela_horas)))
@@ -147,12 +148,19 @@ def descoberta_24h(*, agora=None, janela_horas=24):
         marketplace: {"candidatos": 0, "por_fonte": {}, "classes": set()}
         for marketplace in MARKETPLACES_META
     }
-    linhas = (
+    observacoes = (
         CupomFonteObservacao.objects
         .filter(
             observed_at__gte=corte,
             cupom__marketplace__in=MARKETPLACES_META,
+            cupom__estado="ativo",
         )
+        .exclude(cupom__codigo__in=CODIGOS_NAO_PUBLICAVEIS)
+        .exclude(cupom__codigo__contains=".")
+        .exclude(cupom__codigo__contains="_")
+    )
+    linhas = (
+        observacoes
         .values("cupom__marketplace", "fonte__slug")
         .annotate(total=Count("canonical_key", distinct=True))
     )

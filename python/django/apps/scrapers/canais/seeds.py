@@ -205,6 +205,16 @@ CANAIS_SUGERIDOS = [
         "densidade": 92,
         "nota": "Canal oficial verificado; codigos e regras publicados para afiliados.",
     },
+    {
+        "handle": "smarteletrobarato",
+        "nome": "Cupons de Desconto do Pepe",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 84,
+        "nota": (
+            "Previa ativa em 01/09/2026; 20 codigos estruturados apos rejeitar "
+            "palavras de interface, com cobertura forte de Shopee."
+        ),
+    },
 ]
 
 # Recusados de propósito, para que ninguém os re-adicione sem saber por quê.
