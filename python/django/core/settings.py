@@ -479,12 +479,17 @@ AMAZON_PUBLIC_COUPON_TERMS = [
     k.strip() for k in os.getenv(
         "AMAZON_PUBLIC_COUPON_TERMS",
         "brinquedos,eletronicos,livros,beleza,casa,informatica,bebe,games,"
-        "ferramentas,cozinha,esportes,automotivo",
+        "ferramentas,cozinha,esportes,automotivo,pet shop,suplementos,vitaminas,"
+        "higiene,limpeza,lavanderia,decoracao,jardinagem,papelaria,escritorio,"
+        "celular,acessorios para celular,audio,fones de ouvido,climatizacao,"
+        "iluminacao,organizacao,cama mesa banho,moda feminina,moda masculina,"
+        "bolsas,construcao,bebidas,maquiagem,cuidados pessoais",
     ).split(",") if k.strip()
 ]
-# A busca oficial concentra mais cupons do que a central de ofertas. Quatro termos
-# rotativos por ciclo cobrem as 12 categorias em três coletas; páginas posteriores
-# reutilizam a sessão e não baixam mídia.
+# A busca oficial concentra mais cupons do que a central de ofertas. As 37 categorias
+# foram medidas na busca BR em 2026-09. Quatro termos rotativos por ciclo mantêm o
+# Chromium dentro da capacidade atual e percorrem o conjunto em no máximo dez
+# coletas; páginas posteriores reutilizam a sessão e não baixam mídia.
 AMAZON_PUBLIC_PAGES_PER_TERM = max(
     1, int(os.getenv("AMAZON_PUBLIC_PAGES_PER_TERM", "3")),
 )

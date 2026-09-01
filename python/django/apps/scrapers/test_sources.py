@@ -758,6 +758,24 @@ class AmazonPublicPriceSanityTests(TestCase):
         self.assertEqual(len(second), 2)
         self.assertTrue(set(first).isdisjoint(second))
 
+    @override_settings(AMAZON_PUBLIC_TERMS_PER_CYCLE=4)
+    def test_default_productive_catalog_is_covered_in_ten_three_hour_cycles(self):
+        from django.conf import settings
+        from apps.scrapers.sources.amazon_public import _termos_do_ciclo
+
+        terms = settings.AMAZON_PUBLIC_COUPON_TERMS
+        now = timezone.now().replace(minute=0, second=0, microsecond=0)
+        covered = set()
+        for cycle in range(10):
+            selected, total, _ = _termos_do_ciclo(
+                terms, agora=now + timedelta(hours=3 * cycle),
+            )
+            self.assertEqual(len(selected), min(4, total))
+            covered.update(selected)
+
+        self.assertEqual(total, 37)
+        self.assertEqual(covered, set(terms))
+
     def test_accepts_plausible_discount(self):
         from apps.scrapers.sources.amazon_public import _precos_publicaveis
 
