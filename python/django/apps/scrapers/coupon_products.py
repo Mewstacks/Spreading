@@ -1306,7 +1306,15 @@ def preparar_lote(
 
     # Passo caro, com o teto de sempre.
     com_browser = 0
+    cedeu_browser = False
     while fila_do_browser and com_browser < limite:
+        if com_browser:
+            from apps.scrapers.resource_control import interesse_pendente
+            if interesse_pendente(
+                "django_chromium", exceto="coupon_products",
+            ):
+                cedeu_browser = True
+                break
         cupom, usuario = fila_do_browser.popleft()
         com_browser += 1
         _passar(cupom, usuario, permitir_browser=True)
@@ -1325,6 +1333,7 @@ def preparar_lote(
         "processados": feitos,
         "prontos": prontos,
         "adiados_sem_browser": adiados,
+        "cedeu_browser": cedeu_browser,
     }
     if detalhado:
         resultado["por_fonte"] = dict(por_fonte)

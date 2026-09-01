@@ -204,8 +204,10 @@ Fontes primárias consultadas:
   único Chromium por até 12 termos consecutivos. Ela agora percorre duas categorias
   rotativas por ciclo, usa timeout menor, cede entre termos para uma fonte em fila
   e publica métricas de duração/completude. Fontes Chromium que perdem o lease
-  sinalizam a fila automaticamente; a validação de produção é o gate do deploy 284.
-- Testes automatizados: 1.391 testes Django e 169 testes Node aprovados; 24 testes
+  sinalizam a fila automaticamente. O preparo caro de produtos também cede depois
+  do primeiro item quando outra esteira aguarda, em vez de readquirir o slot até
+  12 vezes; a validação de produção é o gate dos deploys 284/285.
+- Testes automatizados: 1.392 testes Django e 169 testes Node aprovados; 24 testes
   direcionados de isolamento, permissões, CSRF, SQLi e XSS aprovados; nenhuma
   migração pendente e compilação limpa.
 - Auditoria de produção: papel runtime sem `SUPERUSER`, `BYPASSRLS` ou ownership

@@ -413,6 +413,43 @@ class CouponPreparationTests(TestCase):
 
         self.assertEqual(resultado["processados"], 1)
 
+    def test_lote_caro_cede_browser_para_fonte_que_esta_na_fila(self):
+        from apps.scrapers.coupon_products import (
+            BrowserNecessarioError, preparar_lote,
+        )
+
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-capacity-yield", marketplace="mercadolivre", nome="ML",
+        )
+        for indice in range(3):
+            CupomNormalizado.objects.create(
+                fonte=fonte, external_id=f"cede-{indice}",
+                marketplace="mercadolivre", titulo=f"Cupom {indice}",
+                codigo=f"CEDE{indice}00", estado="ativo",
+                regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                        "valor_desconto": 10},
+            )
+
+        chamadas_browser = []
+
+        def _preparar(cupom, **kwargs):
+            if not kwargs["permitir_browser"]:
+                raise BrowserNecessarioError(cupom.pk)
+            chamadas_browser.append(cupom.pk)
+            return [object()]
+
+        with patch("apps.scrapers.coupon_products.preparar_cupom", _preparar), \
+                patch("apps.scrapers.resource_control.interesse_pendente",
+                      return_value=True) as pending:
+            resultado = preparar_lote(limite=3, limite_http=3)
+
+        self.assertEqual(len(chamadas_browser), 1)
+        self.assertEqual(resultado["adiados_sem_browser"], 2)
+        self.assertTrue(resultado["cedeu_browser"])
+        pending.assert_called_once_with(
+            "django_chromium", exceto="coupon_products",
+        )
+
     @patch("apps.scrapers.auxiliar.iniciar_browser")
     @patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session")
     @patch("apps.scrapers.ml_auth.storage_state", return_value=None)
