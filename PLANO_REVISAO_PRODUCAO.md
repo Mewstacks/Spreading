@@ -226,7 +226,7 @@ Fontes primárias consultadas:
   enxergava, porque consultava somente linhas duplicadas do catálogo. O livro de
   evidências agora também corrobora, limitado à mesma loja, inventário público,
   resultado aceito e janela fresca de 48 horas; evidência privada não cruza tenant.
-- Testes automatizados: 1.397 testes Django e 169 testes Node aprovados; 24 testes
+- Testes automatizados: 1.398 testes Django e 169 testes Node aprovados; 24 testes
   direcionados de isolamento, permissões, CSRF, SQLi e XSS aprovados; nenhuma
   migração pendente e compilação limpa.
 - Auditoria de produção: papel runtime sem `SUPERUSER`, `BYPASSRLS` ou ownership
@@ -246,6 +246,13 @@ Fontes primárias consultadas:
   p50 538 ms e p95 1,54 s. Um Chromium real abriu o Mercado Livre usando cerca de
   542 MB e deixou aproximadamente 443 MB disponíveis. Após os testes, os checks
   continuaram verdes, sem OOM, reinício ou pressão de memória.
+- Relatório de abundância no deploy v290: a consulta de exaustão carregava todo o
+  histórico de execuções para usar somente a última linha por fonte e levou 10,88 s.
+  O subselect limitado a uma linha por fonte reduziu essa etapa para 145 ms (cerca
+  de 75 vezes) e o relatório completo para 186 ms no PostgreSQL de produção. O
+  resultado fresco e não inflado ficou em 983/10/0 cupons prontos e 452/152/59
+  candidatos observados em 24 h para ML/Amazon/Shopee; portanto Amazon e Shopee
+  continuam abaixo das metas de abundância e descoberta.
 
 ## Gates de deploy desta revisão
 
