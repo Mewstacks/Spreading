@@ -520,6 +520,45 @@ class SelecaoAutomaticaEquilibradaTests(TestCase):
 
         self.assertEqual([c.obj.pk for c in candidatos], [pronto.pk])
 
+    def test_selecao_tenta_cupom_validado_antes_de_produto_com_score_maior(self):
+        """A estrategia cupom-first nao pode ser desfeita por empate de score."""
+        from apps.scrapers.content_ranking import selecionar_conteudo_para_grupo
+
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML", "status": "ok"},
+        )
+        Produto.objects.create(
+            marketplace="mercadolivre", origem="oferta", nome="Produto com 70% OFF",
+            preco_sem_desconto=100, preco_com_cupom=30, estado="ativo",
+            link_produto="https://produto.mercadolivre.com.br/MLB-1234567890-item",
+            fonte="mercadolivre-web", confianca="alta",
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="ml-cupom-prioritario", marketplace="mercadolivre",
+            titulo="Cupom validado de 15%", codigo="VENDE15",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 15},
+        )
+        CupomDisponibilidade.objects.create(
+            organization=self.user.perfil.active_organization,
+            usuario=self.user, cupom=cupom, channel="whatsapp",
+            use_mode="code_notice", stage="ready",
+        )
+        config = SimpleNamespace(
+            owner=self.user, grupo_id="g@g.us", marketplace="mercadolivre",
+            macro_categoria="", termo_busca="", horas_cooldown=24,
+            min_desconto_percent=10, incluir_restritos=True,
+            incluir_sem_desconto=True,
+            programas=SimpleNamespace(values_list=lambda *a, **k: []),
+        )
+
+        candidatos = selecionar_conteudo_para_grupo(config, limit=2)
+
+        self.assertEqual(candidatos[0].kind, "coupon")
+        self.assertEqual(candidatos[0].obj, cupom)
+        self.assertEqual(candidatos[1].kind, "product")
+
     def test_comissao_shopee_nao_entra_no_ranking_como_desconto(self):
         from types import SimpleNamespace
         from apps.scrapers.content_ranking import _coupon_candidates

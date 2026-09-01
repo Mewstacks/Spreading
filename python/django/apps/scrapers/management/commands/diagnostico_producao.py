@@ -25,7 +25,7 @@ from django.utils import timezone
 
 from apps.accounts.tenant import system_context
 
-SECOES = ("catalogo", "amazon", "cupons", "envios", "eventos")
+SECOES = ("catalogo", "amazon", "cupons", "envios", "conexoes", "eventos")
 
 
 class Command(BaseCommand):
@@ -271,18 +271,21 @@ class Command(BaseCommand):
                     f"falhas={c.falhas_consecutivas} pausa={c.motivo_pausa[:50]!r}")
 
             self._sec("POOL DE CONTEUDO por regra ativa (produto vs cupom)")
-            from apps.scrapers.content_ranking import _coupon_candidates, _product_candidates
+            from apps.scrapers.content_ranking import (
+                _coupon_candidates, _product_candidates, selecionar_conteudo_para_grupo,
+            )
             for c in configs:
                 if not c.ativo:
                     continue
                 try:
                     produtos = _product_candidates(c, 8)
                     cupons_cand = _coupon_candidates(c, 8)
+                    efetivos = selecionar_conteudo_para_grupo(c, 8)
                 except Exception as exc:  # diagnóstico não pode derrubar o resto
                     self._linha(f"  config {c.id}: ERRO ao montar pool: {type(exc).__name__}: {exc}")
                     continue
                 self._linha(f"  config {c.id}: produtos={len(produtos)} cupons={len(cupons_cand)}")
-                for cand in sorted(produtos + cupons_cand, key=lambda x: -x.score)[:5]:
+                for cand in efetivos[:5]:
                     titulo = getattr(cand.obj, "titulo", "") or getattr(cand.obj, "nome", "")
                     self._linha(f"     {cand.kind:7} score={cand.score:6.2f} {titulo[:55]!r}")
 
@@ -299,6 +302,59 @@ class Command(BaseCommand):
                             f"prod={p.produto_id} erro={(p.erro or '')[:60]!r}")
             self._linha(f"  HistoricoEnvio total={HistoricoEnvio.objects.count()} "
                         f"janela={HistoricoEnvio.objects.filter(data_envio__gte=desde).count()}")
+
+        if "conexoes" in secoes:
+            # Sem segredos: este bloco existe para diferenciar "pipeline vazio" de
+            # "estoque pronto, mas a conta de teste nao autenticou o destino/loja".
+            # Antes era preciso montar um shell ad-hoc em producao, sujeito a vazar
+            # token por engano justamente durante o diagnostico de um incidente.
+            from apps.accounts.models import (
+                BrowserSession, MercadoLivreSession, WhatsAppConnection,
+            )
+            from apps.scrapers.models import IntegracaoAfiliado
+
+            self._sec("CONEXOES POR USUARIO (sem segredos)")
+            for u in usuarios:
+                perfil = Perfil.objects.filter(user=u).first()
+                org_id = getattr(perfil, "active_organization_id", None)
+                wa = WhatsAppConnection.objects.filter(organization_id=org_id).first()
+                ml = MercadoLivreSession.objects.filter(organization_id=org_id).first()
+                browser = list(
+                    BrowserSession.objects.filter(user=u, organization_id=org_id)
+                    .values("provider", "status", "probe_result", "probe_reason",
+                            "last_probe_at", "last_used_at")
+                )
+                afiliados = list(
+                    IntegracaoAfiliado.objects.filter(owner=u)
+                    .values("provedor", "status", "habilitada", "erro_publico",
+                            "ultimo_sucesso")
+                )
+                self._linha(
+                    f"  user={u.id} {u.get_username()!r} org={org_id} "
+                    f"amazon_tag={bool(getattr(perfil, 'afiliado_tag_amazon', ''))} "
+                    f"amazon_creators={bool(getattr(perfil, 'amazon_credential_id', '')) and bool(getattr(perfil, 'amazon_credential_secret', ''))} "
+                    f"amazon_elegivel={getattr(perfil, 'amazon_elegivel', None)} "
+                    f"telegram_destino={bool(getattr(perfil, 'telegram_bot_token', ''))}"
+                )
+                self._linha(
+                    "     whatsapp=" + (str({
+                        "status": wa.status, "phase": wa.phase,
+                        "last_event": wa.last_event, "last_event_at": wa.last_event_at,
+                        "unavailable_reason": wa.unavailable_reason,
+                        "consistency": wa.consistency_status,
+                    }) if wa else "ausente")
+                )
+                self._linha(
+                    "     mercado_livre=" + (str({
+                        "status": ml.status, "probe": ml.last_probe_result,
+                        "probe_reason": ml.probe_reason,
+                        "linkbuilder": ml.lb_readiness,
+                        "linkbuilder_reason": ml.lb_readiness_reason,
+                        "last_used_at": ml.last_used_at,
+                    }) if ml else "ausente")
+                )
+                self._linha(f"     browser_sessions={browser or 'nenhuma'}")
+                self._linha(f"     integracoes_afiliado={afiliados or 'nenhuma'}")
 
         if "eventos" in secoes:
             self._sec(f"EVENTOS ({dias}d) — contagem")

@@ -323,8 +323,14 @@ def _coupon_candidates(config, limit):
 def selecionar_conteudo_para_grupo(config, limit=8):
     candidates = _product_candidates(config, limit) + _coupon_candidates(config, limit)
     _aplicar_performance_marketplace(config.owner, candidates)
-    candidates.sort(key=lambda item: (-item.score, -item.commission,
-                                      item.kind, getattr(item.obj, "id", 0)))
+    # Estrategia editorial da operacao: cupom validado converte melhor que oferta
+    # comum e deve ser tentado primeiro. Score continua ordenando a qualidade
+    # DENTRO de cada tipo; quando o estoque de cupons entra em cooldown ou zera, os
+    # produtos voltam naturalmente para o topo. Antes, um produto com 0,01 ponto a
+    # mais escondia dezenas de cupons prontos e a automacao voltava a publicar o
+    # formato que a operacao explicitamente mediu como menos vendedor.
+    candidates.sort(key=lambda item: (item.kind != "coupon", -item.score,
+                                      -item.commission, getattr(item.obj, "id", 0)))
     return candidates[:limit]
 
 
