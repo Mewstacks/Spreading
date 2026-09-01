@@ -433,6 +433,15 @@ Fontes primárias consultadas:
   239 casos realmente acionáveis e `browser_wait_over_60m` de 26 para 25. A conta
   `lules` preservou 1.576 projeções e 997 cupons prontos; `/healthz` respondeu 200,
   web/worker v311 e todos os checks do PostgreSQL permaneceram verdes.
+- Pré-deploy v312: após a drenagem natural da fila, `projection_stale`,
+  `code_not_ready_20m` e `prepared_verified_not_ready_20m` chegaram a zero. Os 25
+  preparos antigos ainda rotulados como `capacity_deferred` foram decompostos até
+  suas projeções: nenhuma entrega acionável dependia deles — ativações estavam
+  prontas ou retidas por sessão externa, e avisos de código estavam prontos ou
+  descartados. O alerta de browser agora exige uma projeção de ativação pendente
+  que o worker possa promover. A regressão preserva um caso realmente bloqueado e
+  exclui código já pronto e falta de sessão. Suítes integrais: 1.445/1.445 Django e
+  169/169 Node.
 
 ## Gates de deploy desta revisão
 

@@ -160,7 +160,8 @@ class AlertasAcionaveisDoFunilTests(TestCase):
         )
 
     def _projecao(self, *, stage="eligible", category="waiting",
-                  reason="preparation_pending", codigo="ALERTA"):
+                  reason="preparation_pending", codigo="ALERTA",
+                  use_mode="code_notice"):
         from datetime import timedelta
         from apps.scrapers.models import CupomDisponibilidade, CupomNormalizado
 
@@ -175,7 +176,7 @@ class AlertasAcionaveisDoFunilTests(TestCase):
         )
         projecao = CupomDisponibilidade.objects.create(
             organization=self.org, usuario=self.user, cupom=cupom,
-            channel="whatsapp", use_mode="code_notice", stage=stage,
+            channel="whatsapp", use_mode=use_mode, stage=stage,
             category=category, reason_code=reason,
         )
         CupomDisponibilidade.objects.filter(pk=projecao.pk).update(updated_at=antigo)
@@ -216,8 +217,14 @@ class AlertasAcionaveisDoFunilTests(TestCase):
         from apps.scrapers.maintenance import diagnosticar_alertas_pipeline_cupons
         from apps.scrapers.models import CupomPreparacao
 
-        cupom_pendente = self._projecao(codigo="BROWSER1")
+        cupom_pendente = self._projecao(
+            codigo="BROWSER1", use_mode="product_activation")
         cupom_resolvido = self._projecao(codigo="BROWSER2")
+        cupom_codigo_pronto = self._projecao(
+            codigo="BROWSER3", stage="ready")
+        cupom_sem_sessao = self._projecao(
+            codigo="BROWSER4", use_mode="product_activation",
+            category="no_session", reason="ml_session_missing")
         antigo = timezone.now() - timedelta(hours=2)
         CupomPreparacao.objects.create(
             cupom=cupom_pendente, status="pendente",
@@ -225,6 +232,17 @@ class AlertasAcionaveisDoFunilTests(TestCase):
         )
         CupomPreparacao.objects.create(
             cupom=cupom_resolvido, status="pronto",
+            reason_code="capacity_deferred", verificado_em=antigo,
+        )
+        # Estes dois preparos continuam pendentes no banco, mas não bloqueiam
+        # trabalho interno: o aviso de código já está pronto e a ativação depende
+        # de autenticação humana da conta.
+        CupomPreparacao.objects.create(
+            cupom=cupom_codigo_pronto, status="pendente",
+            reason_code="capacity_deferred", verificado_em=antigo,
+        )
+        CupomPreparacao.objects.create(
+            cupom=cupom_sem_sessao, status="pendente",
             reason_code="capacity_deferred", verificado_em=antigo,
         )
         contas = diagnosticar_alertas_pipeline_cupons()

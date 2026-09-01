@@ -1,5 +1,5 @@
 from datetime import timedelta
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 
@@ -144,12 +144,27 @@ def diagnosticar_alertas_pipeline_cupons(*, agora=None):
             cupom__produtos__links_usuarios__verificado_em__gte=link_cutoff,
             updated_at__lt=cutoff_20m,
         ).distinct().count(),
+        # Um preparo antigo só é backlog se ainda bloquear uma projeção de
+        # ATIVAÇÃO que o worker consegue promover. O mesmo cupom também pode ter
+        # projeções de aviso de código já prontas/descartadas, ou projeções de
+        # ativação retidas por sessão da conta. Contar o CupomPreparacao sozinho
+        # acusava 25 itens em produção embora nenhuma entrega acionável dependesse
+        # deles (projection_stale=0).
         "browser_wait_over_60m": CupomPreparacao.objects.filter(
             status="pendente", reason_code="capacity_deferred",
             verificado_em__lt=cutoff_browser, cupom__estado="ativo",
         ).filter(
             cupons_frescos_q(agora=agora, prefix="cupom__"),
-        ).count(),
+        ).annotate(
+            bloqueia_entrega=Exists(
+                projections.filter(
+                    cupom_id=OuterRef("cupom_id"),
+                    use_mode="product_activation",
+                ).exclude(
+                    stage__in=("ready", "discarded"),
+                ).exclude(category="no_session")
+            ),
+        ).filter(bloqueia_entrega=True).count(),
     }
     # Fontes que NUNCA podem se declarar completas por construção (vitrine curada,
     # prévia de canal). Cobrar completude delas transforma este contador em ruído
