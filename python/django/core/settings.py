@@ -473,11 +473,18 @@ AMAZON_MIN_SAVINGS_PCT = float(os.getenv("AMAZON_MIN_SAVINGS_PCT", "15"))
 AMAZON_FEED_PAGES = int(os.getenv("AMAZON_FEED_PAGES", "5"))
 AMAZON_PUBLIC_FALLBACK = os.getenv("AMAZON_PUBLIC_FALLBACK", "1") == "1"
 AMAZON_PUBLIC_TERMS_PER_CYCLE = max(
-    1, int(os.getenv("AMAZON_PUBLIC_TERMS_PER_CYCLE", "2")),
+    1, int(os.getenv("AMAZON_PUBLIC_TERMS_PER_CYCLE", "4")),
 )
-# A busca oficial concentra mais cupons do que a central de ofertas. Três páginas
-# por termo, com dois termos rotativos por ciclo de 3h, dão cobertura progressiva
-# sem transformar o Chromium compartilhado em um crawler contínuo.
+AMAZON_PUBLIC_COUPON_TERMS = [
+    k.strip() for k in os.getenv(
+        "AMAZON_PUBLIC_COUPON_TERMS",
+        "brinquedos,eletronicos,livros,beleza,casa,informatica,bebe,games,"
+        "ferramentas,cozinha,esportes,automotivo",
+    ).split(",") if k.strip()
+]
+# A busca oficial concentra mais cupons do que a central de ofertas. Quatro termos
+# rotativos por ciclo cobrem as 12 categorias em três coletas; páginas posteriores
+# reutilizam a sessão e não baixam mídia.
 AMAZON_PUBLIC_PAGES_PER_TERM = max(
     1, int(os.getenv("AMAZON_PUBLIC_PAGES_PER_TERM", "3")),
 )

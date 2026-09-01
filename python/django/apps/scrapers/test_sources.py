@@ -1,5 +1,5 @@
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, TransactionTestCase, override_settings
@@ -712,6 +712,35 @@ class AmazonDiscountRecoveryTests(TestCase):
 
 
 class AmazonPublicPriceSanityTests(TestCase):
+    def test_extracts_current_search_page_in_one_browser_evaluation(self):
+        from apps.scrapers.sources.amazon_public import _pagina_atual_estruturada
+
+        page = MagicMock()
+        page.evaluate.return_value = {"title": "Amazon", "rows": [{"asin": "A"}]}
+
+        result = _pagina_atual_estruturada(page)
+
+        self.assertEqual(result["rows"], [{"asin": "A"}])
+        script = page.evaluate.call_args.args[0]
+        self.assertIn("querySelectorAll", script)
+        self.assertNotIn("eval(", script)
+
+    def test_fetches_next_search_page_inside_accepted_session(self):
+        from apps.scrapers.sources.amazon_public import _buscar_pagina_na_sessao
+
+        page = MagicMock()
+        page.evaluate.return_value = {"status": 200, "rows": []}
+        url = "https://www.amazon.com.br/s?k=casa&page=2"
+
+        result = _buscar_pagina_na_sessao(page, url)
+
+        self.assertEqual(result["status"], 200)
+        script, argument = page.evaluate.call_args.args
+        self.assertEqual(argument, url)
+        self.assertIn('fetch(url, {credentials: "include"})', script)
+        self.assertIn("DOMParser", script)
+        self.assertNotIn("eval(", script)
+
     @override_settings(AMAZON_PUBLIC_TERMS_PER_CYCLE=2)
     def test_rotates_small_term_slices_without_losing_catalog_coverage(self):
         from apps.scrapers.sources.amazon_public import _termos_do_ciclo

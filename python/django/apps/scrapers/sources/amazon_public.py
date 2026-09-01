@@ -121,6 +121,59 @@ def _economizar_banda(page):
     )
 
 
+_SEARCH_ROWS_JS = r"""
+(root) => Array.from(root.querySelectorAll(
+    "[data-component-type='s-search-result']"
+)).map((card) => {
+    const link = card.querySelector("a[href*='/dp/']");
+    const current = card.querySelector(".a-price .a-offscreen");
+    const previous = card.querySelector(".a-price.a-text-price .a-offscreen");
+    const image = card.querySelector("img.s-image");
+    return {
+        asin: card.getAttribute("data-asin") || "",
+        url: link ? (link.getAttribute("href") || "") : "",
+        title: (card.querySelector("h2") || {}).innerText || "",
+        current: current ? current.innerText : "",
+        previous: previous ? previous.innerText : "",
+        text: card.innerText || "",
+        image_url: image ? (image.getAttribute("src") || "") : "",
+    };
+})
+"""
+
+
+def _pagina_atual_estruturada(page):
+    script = """() => {
+        const extract = """ + _SEARCH_ROWS_JS + """;
+        return {
+            title: document.title || "",
+            body: (document.body ? document.body.innerText : "").slice(0, 5000),
+            rows: extract(document),
+        };
+    }"""
+    return page.evaluate(script)
+
+
+def _buscar_pagina_na_sessao(page, url):
+    """Busca paginação na sessão já aceita, sem nova navegação/round-trips DOM."""
+    script = """async (url) => {
+            const extract = """ + _SEARCH_ROWS_JS + """;
+            const started = Date.now();
+            const response = await fetch(url, {credentials: "include"});
+            const html = await response.text();
+            const doc = new DOMParser().parseFromString(html, "text/html");
+            return {
+                status: response.status,
+                title: doc.title || "",
+                body: (doc.body ? doc.body.innerText : "").slice(0, 5000),
+                rows: extract(doc),
+                bytes: html.length,
+                duration_ms: Date.now() - started,
+            };
+        }"""
+    return page.evaluate(script, url)
+
+
 @contextmanager
 def _browser_slot(owner_kind):
     with browser_resource(owner_kind=owner_kind) as acquired:
@@ -167,7 +220,12 @@ class AmazonPublicSource(SourceAdapter):
         self._coupon_cache = []
 
     def discover_offers(self, terms=None, **kwargs):
-        terms = terms or getattr(settings, "AMAZON_FEED_KEYWORDS", []) or ["ofertas"]
+        terms = (
+            terms
+            or getattr(settings, "AMAZON_PUBLIC_COUPON_TERMS", [])
+            or getattr(settings, "AMAZON_FEED_KEYWORDS", [])
+            or ["ofertas"]
+        )
         selected, total_terms, offset = _termos_do_ciclo(terms)
         started = time.monotonic()
         processed = 0
@@ -176,6 +234,10 @@ class AmazonPublicSource(SourceAdapter):
         rows = 0
         coupon_rows = 0
         pages_processed = 0
+        navigation_pages = 0
+        fetch_pages = 0
+        fetched_bytes = 0
+        fetch_duration_ms = 0
         seen = set()
         self._coupon_cache = []
         pages_per_term = max(
@@ -187,60 +249,56 @@ class AmazonPublicSource(SourceAdapter):
                         headless=True, **_browser_context_options(),
                     ) as (page, _):
                 _economizar_banda(page)
+                session_ready = False
                 for term in selected:
                     term_complete = True
                     for page_number in range(1, pages_per_term + 1):
                         try:
-                            response = page.goto(
+                            url = (
                                 f"https://www.amazon.com.br/s?k={quote_plus(term)}"
-                                f"&page={page_number}",
-                                wait_until="domcontentloaded", timeout=25000,
+                                f"&page={page_number}"
                             )
-                            body = page.locator("body").inner_text(timeout=5000)
+                            if session_ready:
+                                payload = _buscar_pagina_na_sessao(page, url)
+                                status = payload.get("status", 0)
+                                fetch_pages += 1
+                                fetched_bytes += int(payload.get("bytes", 0) or 0)
+                                fetch_duration_ms += int(
+                                    payload.get("duration_ms", 0) or 0
+                                )
+                            else:
+                                response = page.goto(
+                                    url, wait_until="domcontentloaded", timeout=25000,
+                                )
+                                navigation_pages += 1
+                                payload = _pagina_atual_estruturada(page)
+                                status = response.status if response else 0
+                            body = payload.get("body", "")
                             failure = _page_failure(
-                                response.status if response else 0,
-                                page.title(), body,
+                                status, payload.get("title", ""), body,
                             )
                             if failure:
                                 raise AmazonPublicPageError(failure)
-                            cards = page.locator("[data-component-type='s-search-result']")
+                            session_ready = True
                             pages_processed += 1
-                            for index in range(cards.count()):
-                                card = cards.nth(index)
+                            for raw in payload.get("rows", []):
                                 try:
-                                    links = card.locator("a[href*='/dp/']")
-                                    url = (
-                                        links.first.get_attribute("href", timeout=2000)
-                                        if links.count() else ""
-                                    )
-                                    asin = str(card.get_attribute("data-asin") or "").upper()
-                                    match = ASIN_RE.search(url or "")
+                                    product_url = str(raw.get("url", "") or "")
+                                    asin = str(raw.get("asin", "") or "").upper()
+                                    match = ASIN_RE.search(product_url)
                                     asin = asin or (match.group(1).upper() if match else "")
                                     if not re.fullmatch(r"[A-Z0-9]{10}", asin) or asin in seen:
                                         continue
-                                    title = card.locator("h2").first.inner_text(
-                                        timeout=2000,
-                                    ).strip()
-                                    current = _money(
-                                        card.locator(".a-price .a-offscreen").first.inner_text(
-                                            timeout=2000,
-                                        )
-                                    )
-                                    previous = 0
-                                    old = card.locator(".a-price.a-text-price .a-offscreen")
-                                    if old.count():
-                                        previous = _money(old.first.inner_text(timeout=1000))
-                                    card_text = card.inner_text(timeout=2500)
+                                    title = str(raw.get("title", "") or "").strip()
+                                    current = _money(raw.get("current", ""))
+                                    previous = _money(raw.get("previous", ""))
+                                    card_text = str(raw.get("text", "") or "")
                                     coupon_final = _preco_final_de_cupom(card_text, current)
                                     if not coupon_final and not _precos_publicaveis(
                                         current, previous,
                                     ):
                                         continue
-                                    image = card.locator("img.s-image")
-                                    image_url = (
-                                        image.first.get_attribute("src", timeout=1000)
-                                        if image.count() else ""
-                                    ) or ""
+                                    image_url = str(raw.get("image_url", "") or "")
                                     seen.add(asin)
                                     rows += 1
                                     observed = timezone.now()
@@ -330,6 +388,10 @@ class AmazonPublicSource(SourceAdapter):
                 "rows": rows,
                 "coupon_rows": coupon_rows,
                 "pages_processed": pages_processed,
+                "navigation_pages": navigation_pages,
+                "fetch_pages": fetch_pages,
+                "fetched_bytes": fetched_bytes,
+                "fetch_duration_ms": fetch_duration_ms,
                 "pages_per_term": pages_per_term,
                 "terms_total": total_terms,
                 "terms_selected": len(selected),
