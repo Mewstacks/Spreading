@@ -493,6 +493,29 @@ Fontes primárias consultadas:
   passou novamente em 3/3 mensagens. Suítes integrais: 1.459/1.459 Django e 169/169
   Node; web/worker v315, release, smoke checks e `/healthz` ficaram verdes.
 
+- Deploy v316: Cashbe entrou como fonte Shopee estruturada e conservadora. A página
+  pública expôs dez cards reais; oito passaram por código, benefício numérico,
+  validade, deduplicação e expiração, sem reutilizar link afiliado de terceiro. Os
+  oito foram persistidos em produção. A conta `lules` ficou em 895/124/0 cupons
+  prontos e 451/319/223 descobertas para ML/Amazon/Shopee; 44 cupons Shopee
+  elegíveis ainda dependiam da integração da conta. O canário read-only passou em
+  3/3 regras. Suítes integrais: 1.461/1.461 Django e 169/169 Node; web/worker v316
+  e `/healthz` ficaram verdes.
+- Deploy v317: o parser e o relatório de abundância passaram a rejeitar também
+  palavras de interface/categoria usadas como falsos códigos (`RESGATE`,
+  `RESGATAR`, `EXCLUSIVO`, `TECNOLOGIA`, `ATUALIZADO`, `MELICUPONS`) e fragmentos
+  de frase com ponto ou sublinhado. O canal público Cupons de Desconto do Pepe foi
+  incluído após teste de união, acrescentando três códigos Shopee que não existiam
+  no radar anterior. A coleta real em produção leu 27/27 canais, 87 páginas e
+  persistiu 89 cupons plausíveis; 233 mensagens antigas foram descartadas.
+  O relatório estrito da `lules` ficou em ML 895 prontos/239 descobertas, Amazon
+  124/229 e Shopee 0/223. Na Shopee, 49 cupons elegíveis estão bloqueados por
+  `shopee_integration_disconnected`, 98 aguardam corroboração e 84 são duplicatas
+  de menor precedência. O canário read-only passou em 3/3 regras com link
+  verificado, resgate explícito e tamanho válido. Suítes integrais: 1.464/1.464
+  Django e 169/169 Node; release, RLS, rolling deploy, web/worker v317 e
+  `/healthz` passaram.
+
 ## Gates de deploy desta revisão
 
 - [x] Suítes Django e Node integralmente verdes.
