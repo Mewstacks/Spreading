@@ -579,7 +579,7 @@ class BrowserResourceContractTests(TestCase):
         flash = inspect.getsource(Command._loop_scrape_rapido)
         self.assertNotIn("operacao_pesada", scrape)
         self.assertNotIn("operacao_pesada", flash)
-        self.assertIn("_rodar_scrape()", scrape)
+        self.assertIn("_rodar_scrape(", scrape)
         self.assertIn("_rodar_scrape_rapido()", flash)
 
 

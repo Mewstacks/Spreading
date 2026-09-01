@@ -94,6 +94,12 @@ class MercadoLivre(Marketplace):
         try:
             total = coletor() or 0
         except Exception as exc:
+            from apps.scrapers.afiliado import causa_de_capacidade
+
+            if causa_de_capacidade(exc):
+                # Não houve veredito da origem. Manter a última saúde é essencial:
+                # a disputa normal entre lanes não pode parecer quebra do ML.
+                raise
             cls._reportar_componente(
                 slug, total=0,
                 erro="Falha temporária na coleta; dados anteriores preservados.",
@@ -174,8 +180,20 @@ class MercadoLivre(Marketplace):
                 except Exception as e:
                     parciais.append("busca por termo")
                     logger.warning("Busca ML '%s' falhou: %s", t, e)
-        except Exception:
+        except Exception as exc:
             now = timezone.now()
+            from apps.scrapers.afiliado import causa_de_capacidade
+
+            if causa_de_capacidade(exc):
+                run.status, run.finalizada_em = "blocked", now
+                run.health_status = "capacity_deferred"
+                run.erro_publico = (
+                    "Coleta adiada por capacidade; catálogo anterior preservado."
+                )
+                run.save(update_fields=[
+                    "status", "finalizada_em", "health_status", "erro_publico",
+                ])
+                raise
             run.status, run.finalizada_em = "error", now
             run.erro_publico = "Falha temporária na coleta; dados anteriores preservados."
             run.save(update_fields=["status", "finalizada_em", "erro_publico"])

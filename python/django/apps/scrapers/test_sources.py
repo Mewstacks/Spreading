@@ -1,4 +1,5 @@
 from datetime import timedelta
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
@@ -494,8 +495,116 @@ class SourcePipelineTests(TestCase):
         with patch.object(marketplaces, "MARKETPLACES", {
                 "mercadolivre": Good(), "amazon": Bad()}):
             result = _rodar_scrape()
-        self.assertEqual(result, {"sucessos": 1, "falhas": ["amazon"]})
+        self.assertEqual(
+            result,
+            {"sucessos": 1, "falhas": ["amazon"], "adiados": []},
+        )
         expire.assert_called_once()
+
+    @patch("apps.scrapers.maintenance.expire_stale")
+    @patch("apps.scrapers.management.commands.automacao.log_event")
+    def test_full_cycle_preserves_health_when_marketplace_waits_for_capacity(
+        self, log_event, expire,
+    ):
+        from apps.scrapers.carga import BrowserResourceUnavailable
+        from apps.scrapers.management.commands.automacao import _rodar_scrape
+        from apps.scrapers.marketplaces import registry as marketplaces
+        from apps.scrapers.models import FonteIngestao
+
+        source = FonteIngestao.objects.create(
+            slug="ml-capacity-test", marketplace="mercadolivre", nome="ML teste",
+            status="ok", falhas_consecutivas=0,
+        )
+
+        class Busy:
+            def scrape_all(self, **kwargs):
+                raise BrowserResourceUnavailable("ocupado")
+
+        with patch.object(marketplaces, "MARKETPLACES", {"mercadolivre": Busy()}):
+            result = _rodar_scrape()
+
+        self.assertEqual(
+            result,
+            {"sucessos": 0, "falhas": [], "adiados": ["mercadolivre"]},
+        )
+        source.refresh_from_db()
+        self.assertEqual(source.status, "ok")
+        self.assertEqual(source.falhas_consecutivas, 0)
+        log_event.assert_not_called()
+        expire.assert_not_called()
+
+    @patch("apps.scrapers.maintenance.expire_stale")
+    def test_resume_targets_only_the_deferred_marketplace(self, expire):
+        from apps.scrapers.management.commands.automacao import _rodar_scrape
+        from apps.scrapers.marketplaces import registry as marketplaces
+
+        ml = MagicMock()
+        amazon = MagicMock()
+        with patch.object(marketplaces, "MARKETPLACES", {
+            "mercadolivre": ml, "amazon": amazon,
+        }):
+            result = _rodar_scrape(lojas_alvo={"mercadolivre"})
+
+        self.assertEqual(
+            result,
+            {"sucessos": 1, "falhas": [], "adiados": []},
+        )
+        ml.scrape_all.assert_called_once()
+        amazon.scrape_all.assert_not_called()
+        expire.assert_called_once()
+
+    def test_full_ml_feed_waits_briefly_for_the_holder_to_yield(self):
+        from apps.scrapers.carga import coordinated_ml_browser
+
+        attempts = iter([False, True])
+
+        @contextmanager
+        def fake_resource(**_kwargs):
+            yield next(attempts)
+
+        with patch("apps.scrapers.carga.browser_resource", fake_resource), \
+             patch("apps.scrapers.carga.time.sleep") as sleep:
+            with coordinated_ml_browser(owner_kind="ml_offers", wait_seconds=4):
+                acquired = True
+
+        self.assertTrue(acquired)
+        sleep.assert_called_once()
+
+    @patch(
+        "apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
+    )
+    def test_ml_capacity_deferral_preserves_component_and_aggregate_health(
+        self, mapear,
+    ):
+        from apps.scrapers.carga import BrowserResourceUnavailable
+        from apps.scrapers.marketplaces.mercadolivre import MercadoLivre
+        from apps.scrapers.models import ExecucaoIngestao
+
+        mapear.side_effect = BrowserResourceUnavailable("ocupado")
+        aggregate, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML"},
+        )
+        component, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-ofertas",
+            defaults={"marketplace": "mercadolivre", "nome": "Feed ML"},
+        )
+        FonteIngestao.objects.filter(pk__in=[aggregate.pk, component.pk]).update(
+            status="ok", falhas_consecutivas=0,
+        )
+
+        with self.assertRaises(BrowserResourceUnavailable):
+            MercadoLivre().scrape_all()
+
+        aggregate.refresh_from_db()
+        component.refresh_from_db()
+        self.assertEqual(aggregate.status, "ok")
+        self.assertEqual(component.status, "ok")
+        self.assertEqual(aggregate.falhas_consecutivas, 0)
+        self.assertEqual(component.falhas_consecutivas, 0)
+        run = ExecucaoIngestao.objects.filter(fonte=aggregate).latest("id")
+        self.assertEqual(run.status, "blocked")
+        self.assertEqual(run.health_status, "capacity_deferred")
 
 
 class CouponPagePayloadTests(TestCase):

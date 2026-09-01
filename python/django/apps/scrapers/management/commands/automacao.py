@@ -85,7 +85,8 @@ def _pausar_por_banco(job, erro, falhas: int):
     return proximo
 
 
-def _rodar_scrape():
+def _rodar_scrape(*, lojas_alvo=None):
+    from apps.scrapers.carga import BrowserResourceUnavailable
     from apps.scrapers.marketplaces.registry import MARKETPLACES
     from apps.scrapers.models import ConfiguracaoEnvio
 
@@ -94,9 +95,13 @@ def _rodar_scrape():
         .exclude(termo_busca="").values_list("termo_busca", flat=True)
     )
     lojas = list(MARKETPLACES.items())
+    if lojas_alvo:
+        alvos = set(lojas_alvo)
+        lojas = [(slug, mp) for slug, mp in lojas if slug in alvos]
     # Agnóstico de loja: cada marketplace raspa suas fontes. Habilitar Amazon/Shopee
     # depois não precisa editar este loop — basta registrar a loja no registry.
     falhas = []
+    adiados = []
     for i, (slug, mp) in enumerate(lojas):
         msg = f"[{timezone.now():%H:%M}] SCRAPE: {slug}..."
         logger.info(msg)
@@ -107,6 +112,16 @@ def _rodar_scrape():
         inicio_loja = timezone.now()
         try:
             mp.scrape_all(termos=termos)
+        except BrowserResourceUnavailable:
+            # O único Chromium está com outra lane. A fonte não respondeu mal: ela
+            # nem começou. Preservar o snapshot e retomar logo evita dois defeitos
+            # observados em produção: badge vermelho falso e espera de três horas
+            # quando a disputa aconteceu antes de o cursor sair da página 1.
+            adiados.append(slug)
+            logger.info(
+                "Scrape '%s' adiado por capacidade; catálogo anterior preservado.",
+                slug,
+            )
         except Exception as e:
             logger.exception("Scrape '%s' falhou", slug)
             # Por loja: uma fonte quebrada (seletor mudou, bloqueio) não derruba o
@@ -128,17 +143,19 @@ def _rodar_scrape():
                 status="degraded", ultima_tentativa=timezone.now(),
                 erro_publico="Falha temporária na coleta; dados anteriores preservados.")
             st.write_state("scrape", erro=ERRO_PUBLICO)
-    sucessos = len(lojas) - len(falhas)
+    sucessos = len(lojas) - len(falhas) - len(adiados)
     if sucessos:
         from apps.scrapers.maintenance import expire_stale
         expire_stale()
-    if not sucessos:
+    if not sucessos and falhas and not adiados:
         raise RuntimeError(f"Todas as fontes falharam: {', '.join(falhas)}")
     if falhas:
         logger.warning("SCRAPE concluído parcialmente; falharam: %s", ", ".join(falhas))
+    elif adiados:
+        logger.info("SCRAPE cedeu capacidade; retomarão: %s", ", ".join(adiados))
     else:
         logger.info("[%s] SCRAPE concluido", timezone.now().strftime("%H:%M"))
-    return {"sucessos": sucessos, "falhas": falhas}
+    return {"sucessos": sucessos, "falhas": falhas, "adiados": adiados}
 
 
 def _rodar_scrape_rapido(paginas=8):
@@ -742,6 +759,7 @@ class Command(BaseCommand):
         ciclos = 0
         proximo = timezone.now()  # vencido: raspa assim que ligarem
         falhas_banco = 0
+        retomar_lojas = set()
         while True:
             # Heartbeat também durante as horas de espera; sem isto o supervisor
             # considera o processo morto após 90s e pode iniciar workers duplicados.
@@ -762,11 +780,14 @@ class Command(BaseCommand):
                 # (ofertas + checkout + campanhas + Amazon HTTP) e o funil
                 # de cupons não gerava link.
                 with _heartbeat_durante("scrape"):
-                    resultado = _rodar_scrape()
+                    resultado = _rodar_scrape(
+                        lojas_alvo=retomar_lojas or None,
+                    )
                 falhas_banco = 0
                 ciclos += 1
                 fim = timezone.now()
                 degradado = bool(resultado["falhas"])
+                adiado = bool(resultado.get("adiados"))
                 # Passada interrompida no meio não pode esperar o intervalo cheio.
                 # A varredura agora cede o navegador para as esteiras que estão na
                 # fila (links, verificação, envio) e guarda a página em que parou;
@@ -774,8 +795,11 @@ class Command(BaseCommand):
                 # páginas por ciclo e o fundo do feed levaria dias para ser lido.
                 # Retomar em minutos mantém a cobertura E a cessão.
                 retomando = _resta_varredura()
+                retomar_lojas = set(resultado.get("adiados") or [])
+                if retomando:
+                    retomar_lojas.add("mercadolivre")
                 proximo = fim + (
-                    timedelta(minutes=RETOMADA_MINUTOS) if retomando
+                    timedelta(minutes=RETOMADA_MINUTOS) if retomando or adiado
                     else timedelta(minutes=30) if degradado
                     else timedelta(seconds=scrape_seg))
                 erro = ("Falha parcial: " + ", ".join(resultado["falhas"])
@@ -787,6 +811,8 @@ class Command(BaseCommand):
                     ultima_msg=(
                         f"Ciclo {ciclos} cedeu o navegador na página {retomando}; "
                         f"retoma em {RETOMADA_MINUTOS} min." if retomando
+                        else f"Ciclo {ciclos} aguardou capacidade; "
+                        f"retoma em {RETOMADA_MINUTOS} min." if adiado
                         else f"Ciclo {ciclos} parcial; nova tentativa em 30 min."
                         if degradado
                         else f"Ciclo {ciclos} concluído às {fim:%H:%M}."),

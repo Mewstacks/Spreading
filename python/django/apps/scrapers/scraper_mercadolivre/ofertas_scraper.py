@@ -571,6 +571,7 @@ def mapear_ofertas(max_paginas=40, substituir=True, usuario=None):
     with coordinated_ml_browser(
         usuario=usuario, authenticated=state is not None,
         owner_kind="ml_offers",
+        wait_seconds=45 if substituir else 0,
     ), iniciar_browser(storage_state=state, headless=True) as (page, context):
         for n in range(pagina_inicial, max_paginas + 1):
             # Alguém está esperando o navegador AGORA — uma pessoa logando ou uma
