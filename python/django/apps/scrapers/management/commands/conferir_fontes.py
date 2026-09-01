@@ -21,6 +21,7 @@ from apps.accounts.tenant import system_job
 # conectada e seriam "falha" aqui por motivo errado.
 FONTES = {
     "promobit-cupons": "coupons",
+    "linkerhub-cupons": "coupons",
     "telegram-publico": "offers",
     "ml-cupons-afiliados": "coupons",
 }

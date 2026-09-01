@@ -160,6 +160,7 @@ class PublicCouponAggregatorRegistrationTests(SimpleTestCase):
     def test_sources_are_registered_as_weak_independent_aggregators(self):
         for slug in (
             "bia-garimpa-cupons", "cupomspot-cupons", "prima-ryca-cupons",
+            "linkerhub-cupons",
         ):
             self.assertIn(slug, SOURCES)
             self.assertIn(slug, FONTES_COMUNIDADE)

@@ -47,6 +47,7 @@ _SOURCE_PRECEDENCE = {
     "bia-garimpa-cupons": 86,
     "cupomspot-cupons": 87,
     "prima-ryca-cupons": 89,
+    "linkerhub-cupons": 91,
     "telegram-publico": 90,
     "shopee-public-coupons": 10,
 }
