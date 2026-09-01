@@ -251,6 +251,9 @@ class PelandoCouponsSource(SourceAdapter):
         self.last_metrics = {
             "lojas_lidas": read, "lojas_falhas": failed,
             "cupons_vistos": coupons_seen, "cupons": len(seen),
+            # Chaves comuns consumidas pelo relatório operacional de abundância.
+            "items_seen": coupons_seen, "accepted": len(seen),
+            "pages_processed": read,
             "rejected_by_reason": dict(sorted(rejected.items())),
             "complete": False,
         }

@@ -142,8 +142,12 @@ def _rodar_scrape():
 
 
 def _rodar_scrape_rapido(paginas=8):
-    """LANE RÁPIDA/flash (B3): só o feed /ofertas do ML, poucas páginas, em UPSERT
-    (não zera o feed da lane lenta). Pega deals-relâmpago entre as raspagens completas."""
+    """Lane de 5 min: radares HTTP de cupom e poucas páginas do feed flash ML.
+
+    Telegram e Pelando entram somente como descoberta: os mesmos gates de
+    corroboração/checkout do ciclo central continuam obrigatórios. Não resolvemos
+    redirects nem abrimos Chromium para essas duas fontes aqui.
+    """
     from apps.scrapers.scraper_mercadolivre.ofertas_scraper import mapear_ofertas
     from apps.scrapers.coupon_pipeline import _coletar_adaptador, _metricas_vazias
     from apps.scrapers.models import FonteIngestao
@@ -151,6 +155,11 @@ def _rodar_scrape_rapido(paginas=8):
     # A agenda oficial e HTTP/SSR e deve rodar mesmo quando o Chromium do feed
     # estiver ocupado. Assim um cupom de uma hora nao espera o ciclo de 15 min.
     _coletar_adaptador("ml-lightning-coupons", _metricas_vazias())
+    _coletar_adaptador("pelando-cupons", _metricas_vazias())
+    _coletar_adaptador(
+        "telegram-publico", _metricas_vazias(), items=("coupons",),
+        include_offers=False,
+    )
     total = mapear_ofertas(max_paginas=paginas, substituir=False)
     now = timezone.now()
     fonte, _ = FonteIngestao.objects.get_or_create(

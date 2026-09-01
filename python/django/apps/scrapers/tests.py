@@ -2442,7 +2442,7 @@ class TopPromocoesFilterTests(TestCase):
     @patch("apps.scrapers.coupon_products.preparar_lote",
            return_value={"processados": 0, "prontos": 0})
     def test_flash_scrape_does_not_mask_full_mercado_livre_source(
-            self, _preparo, collect_lightning, _mapear):
+            self, _preparo, collect_radar, _mapear):
         source = FonteIngestao.objects.get(slug="mercadolivre-web")
         source.status = "degraded"
         source.falhas_consecutivas = 2
@@ -2451,7 +2451,13 @@ class TopPromocoesFilterTests(TestCase):
         from apps.scrapers.management.commands.automacao import _rodar_scrape_rapido
 
         self.assertEqual(_rodar_scrape_rapido(paginas=2), 12)
-        collect_lightning.assert_called_once()
+        self.assertEqual(
+            [call.args[0] for call in collect_radar.call_args_list],
+            ["ml-lightning-coupons", "pelando-cupons", "telegram-publico"],
+        )
+        telegram_call = collect_radar.call_args_list[-1]
+        self.assertEqual(telegram_call.kwargs["items"], ("coupons",))
+        self.assertFalse(telegram_call.kwargs["include_offers"])
         source.refresh_from_db()
         self.assertEqual(source.status, "degraded")
         self.assertEqual(source.falhas_consecutivas, 2)
