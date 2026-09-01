@@ -67,6 +67,39 @@ class CouponPersistenceRetryTests(TestCase):
         self.assertGreaterEqual(close.call_count, 2)
         self.assertTrue(Cupom.objects.filter(campanha_id="retry-1").exists())
 
+    def test_reconciliacao_completa_nao_regrava_expirados_inalterados(self):
+        from apps.scrapers.scraper_mercadolivre.scraper import (
+            _persistir_campanhas_cupons,
+        )
+
+        antigo = timezone.now() - timedelta(days=3)
+        motivo = "Cupom não observado na última sincronização"
+        cupom_morto = Cupom.objects.create(
+            campanha_id="dead-coupon", titulo="Já expirado",
+            valor_desconto=10, estado="expirado", ultima_verificacao=antigo,
+        )
+        produto_morto = Produto.objects.create(
+            marketplace="mercadolivre", origem="cupom",
+            campanha_id="dead-product", nome="Produto já expirado",
+            preco_sem_desconto=100, preco_com_cupom=90,
+            link_produto="https://produto.mercadolivre.com.br/MLB-1",
+            estado="expirado", falha_verificacao=motivo,
+            ultima_verificacao=antigo,
+        )
+        rows = [{
+            "campaignId": "live-coupon", "title": "Cupom vigente",
+            "desconto": {"tipo": "porcentagem", "valor": 10},
+            "valor_minimo": 0, "link_produtos": "https://lista.mercadolivre.com.br/",
+            "codigo": "", "estado": "ativo",
+        }]
+
+        _persistir_campanhas_cupons(rows, varredura_completa=True)
+
+        cupom_morto.refresh_from_db()
+        produto_morto.refresh_from_db()
+        self.assertEqual(cupom_morto.ultima_verificacao, antigo)
+        self.assertEqual(produto_morto.ultima_verificacao, antigo)
+
 
 class CouponContractsMigrationTests(TestCase):
     def test_backfill_preserva_observacao_de_fonte_independente(self):

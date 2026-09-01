@@ -246,7 +246,12 @@ def _persistir_campanhas_cupons(
                 if varredura_completa:
                     expirados = Cupom.objects.exclude(
                         campanha_id__in=ids_vistos,
+                    ).exclude(
+                        estado="expirado",
                     ).update(estado="expirado", ultima_verificacao=agora)
+                    motivo_produto_expirado = (
+                        "Cupom não observado na última sincronização"
+                    )
                     prods_expirados = (
                         Produto.objects
                         .filter(
@@ -254,11 +259,16 @@ def _persistir_campanhas_cupons(
                             origem="cupom",
                         )
                         .exclude(campanha_id__in=ids_ativos)
+                        # Reconciliação é idempotente: linhas já exatamente nesse
+                        # veredito não precisam de outro UPDATE/timestamp. O caminho
+                        # antigo regravava milhares delas em toda varredura completa.
+                        .exclude(
+                            estado="expirado",
+                            falha_verificacao=motivo_produto_expirado,
+                        )
                         .update(
                             estado="expirado",
-                            falha_verificacao=(
-                                "Cupom não observado na última sincronização"
-                            ),
+                            falha_verificacao=motivo_produto_expirado,
                             ultima_verificacao=agora,
                         )
                     )

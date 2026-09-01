@@ -562,7 +562,7 @@ def _persistir_projecoes_em_lote(
                 )
             }
 
-        alteradas, tocadas, eventos = [], [], []
+        alteradas, eventos = [], []
         for cupom, use_mode, outcome in planejadas:
             chave = (cupom.pk, use_mode)
             projection = existentes[chave]
@@ -578,8 +578,6 @@ def _persistir_projecoes_em_lote(
                     setattr(projection, field, value)
                 projection.updated_at = agora
                 alteradas.append(projection)
-            elif not criada:
-                tocadas.append(projection.pk)
             if mudou:
                 preparo = preparos.get(cupom.pk)
                 eventos.append(CupomDisponibilidadeEvento(
@@ -601,10 +599,11 @@ def _persistir_projecoes_em_lote(
             CupomDisponibilidade.objects.bulk_update(
                 alteradas, [*campos_estado, "updated_at"], batch_size=500,
             )
-        if tocadas:
-            CupomDisponibilidade.objects.filter(pk__in=tocadas).update(
-                updated_at=agora,
-            )
+        # ``updated_at`` representa a última MUDANÇA do veredito, não um heartbeat
+        # do projetor. Tocar toda linha inalterada a cada tick regravava milhares de
+        # projeções prontas/descartadas, gerava WAL continuamente e ainda mascarava
+        # ``projection_stale``: uma fila realmente parada nunca completava 20 min.
+        # O heartbeat do worker já vive em ``WorkerHeartbeat``.
         if eventos:
             CupomDisponibilidadeEvento.objects.bulk_create(
                 eventos, batch_size=500,

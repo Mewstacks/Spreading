@@ -1333,6 +1333,30 @@ class CouponReadinessReasonTests(TestCase):
             40,
         )
 
+    def test_reprojecao_identica_nao_regrava_disponibilidade(self):
+        """Tick sem mudança não gera WAL nem mascara uma projeção parada."""
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        coupon = self._code()
+        with self._ml(conectado=False, detalhe="sem_sessao"):
+            projetar_disponibilidade_cupons(self.user)
+
+        with self._ml(conectado=False, detalhe="sem_sessao"), \
+                CaptureQueriesContext(connection) as queries:
+            projetar_disponibilidade_cupons(self.user)
+
+        availability_table = CupomDisponibilidade._meta.db_table
+        writes = [
+            query["sql"] for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("UPDATE")
+            and availability_table in query["sql"]
+        ]
+        self.assertEqual(writes, [])
+        self.assertEqual(
+            CupomDisponibilidade.objects.get(cupom=coupon).reason_code,
+            "ml_session_missing",
+        )
+
     def test_cache_verificado_continua_ready_sem_sessao_e_cache_vencido_nao(self):
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
 

@@ -231,6 +231,17 @@ Fontes primárias consultadas:
   migração pendente e compilação limpa.
 - Auditoria de produção: papel runtime sem `SUPERUSER`, `BYPASSRLS` ou ownership
   indevido; nenhum token legado do Mercado Livre armazenado em texto puro.
+- Isolamento executado no deploy v309: o `tenant_isolation_probe` rodou com a role
+  mínima `spreading_runtime` e os tenants reais `lules`/`teste1`. UUID e GUC
+  falsificados enxergaram zero linhas privadas, `FORCE RLS` permaneceu ativo, o
+  segredo HMAC ficou inacessível e a tentativa de escrita cruzada foi bloqueada.
+- Restore ensaiado em 01/09 sem alterar a produção: o snapshot de 15 horas do volume
+  `vol_vwn1owm691gj6p8v` foi restaurado em um cluster isolado com a mesma imagem e
+  volume de 3 GB. O PostgreSQL recuperou o WAL e abriu `spreading_web` com 54 tabelas,
+  111 migrações, quatro tenants e 9.199 disponibilidades de `lules` no ponto do
+  snapshot. `pg_amcheck` verificou 533 relações/49.136 páginas sem erro; havia zero
+  índices inválidos e zero constraints não validadas. O cluster temporário foi
+  destruído após a prova para não gerar custo recorrente.
 - Infraestrutura após os deploys `spreading-wa` v89 e `spreading-web` v289: web com
   2 shared CPUs/1 GB; worker e WhatsApp com 2 shared CPUs/2 GB; PostgreSQL com
   1 shared CPU/1 GB; sete GB de volumes. Pela tabela oficial GRU, o custo-base caiu
@@ -394,9 +405,10 @@ Fontes primárias consultadas:
 - [x] Auditoria do papel runtime e de segredos legados em produção.
 - [x] Snapshot verificável dos volumes e comando de rollback anotado.
 - [x] Deploy canário da correção de RLS e benchmark comparativo em produção.
-- [ ] `tenant_isolation_probe` aprovado no código já implantado.
+- [x] `tenant_isolation_probe` aprovado no código já implantado.
 - [ ] Canário funcional pela conta `lules`, sem concluir compra.
-- [ ] Restore ensaiado e topologia 24/7 comprovadamente abaixo de R$300/mês.
+- [x] Restore de snapshot ensaiado em cluster isolado e verificado até as páginas.
+- [ ] Topologia 24/7 comprovadamente abaixo de R$300/mês com margem cambial/tributária.
 - [ ] Sete dias consecutivos de observação sem incidente crítico.
 
 ## Condições externas para o canário final
