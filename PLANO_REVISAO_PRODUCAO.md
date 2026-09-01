@@ -433,15 +433,28 @@ Fontes primárias consultadas:
   239 casos realmente acionáveis e `browser_wait_over_60m` de 26 para 25. A conta
   `lules` preservou 1.576 projeções e 997 cupons prontos; `/healthz` respondeu 200,
   web/worker v311 e todos os checks do PostgreSQL permaneceram verdes.
-- Pré-deploy v312: após a drenagem natural da fila, `projection_stale`,
-  `code_not_ready_20m` e `prepared_verified_not_ready_20m` chegaram a zero. Os 25
-  preparos antigos ainda rotulados como `capacity_deferred` foram decompostos até
-  suas projeções: nenhuma entrega acionável dependia deles — ativações estavam
-  prontas ou retidas por sessão externa, e avisos de código estavam prontos ou
-  descartados. O alerta de browser agora exige uma projeção de ativação pendente
-  que o worker possa promover. A regressão preserva um caso realmente bloqueado e
-  exclui código já pronto e falta de sessão. Suítes integrais: 1.445/1.445 Django e
-  169/169 Node.
+- Deploy v312: os 25 preparos antigos rotulados como `capacity_deferred` foram
+  decompostos até suas projeções: nenhuma entrega acionável dependia deles —
+  ativações estavam prontas ou retidas por sessão externa, e avisos de código
+  estavam prontos ou descartados. O alerta de browser passou a exigir uma projeção
+  de ativação pendente que o worker possa promover e caiu para zero em produção. A
+  primeira leitura de `projection_stale=0` foi invalidada porque ocorreu antes de
+  instalar o contexto system e a FORCE RLS ocultou as linhas; a leitura correta no
+  código implantado permaneceu em 239. A regressão preserva um caso realmente
+  bloqueado e exclui código já pronto e falta de sessão. Suítes integrais:
+  1.445/1.445 Django e 169/169 Node.
+- Deploy v313: as 239 projeções restantes eram todas da conta `g2rmano`, mas
+  apontavam para campanhas que hoje pertencem exclusivamente à organização
+  `lules`. O reconciliador só atualizava cupons atualmente visíveis e deixava o
+  estado antigo elegível depois de uma mudança de escopo. Agora ele encerra a
+  projeção anterior como `coupon_out_of_scope`, preserva o registro, grava evento
+  auditável e não repete a escrita. Após reconciliar quatro contas em WhatsApp e
+  Telegram, `projection_stale`, `code_not_ready_20m`,
+  `prepared_verified_not_ready_20m` e `browser_wait_over_60m` ficaram todos em zero;
+  resta apenas a fonte Shopee sem dois snapshots completos. A conta `lules` chegou
+  a 1.000 cupons prontos: 895 Mercado Livre e 105 Amazon. Suíte integral:
+  1.446/1.446 Django; release, smoke checks, web/worker v313, `/healthz` HTTP 200 e
+  checks do PostgreSQL ficaram verdes.
 
 ## Gates de deploy desta revisão
 
