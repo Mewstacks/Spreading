@@ -289,6 +289,13 @@ Fontes primárias consultadas:
   recentes e concordantes. Mesmo código com escopos descritos de forma diferente
   conta uma vez; discordância entre valor fixo e percentual continua bloqueada.
   A suíte completa passou em 1.408 testes e a regressão focada em mais 100 testes.
+- Consenso comprovado no deploy v295: a reprojeção da conta `lules` promoveu seis
+  códigos Amazon únicos e descartou sete duplicatas de menor precedência, levando
+  a loja de 34 para 40 cupons prontos (déficit 60), sem inflar o placar. A página
+  autenticada respondeu em 697 ms e exibiu seis selos `Corroborado`, dois
+  `Observado na loja`, recência nos 20 itens e 14 badges de múltiplas fontes. No
+  ML, a mesma deduplicação reduziu a fila `ml_session_expired` de 93 para 56 sem
+  alterar os 892 cupons únicos prontos.
 
 ## Gates de deploy desta revisão
 
