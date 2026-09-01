@@ -6394,6 +6394,39 @@ class CasarCuponsContainerTests(TestCase):
 
 
 class MensagemCupomTests(SimpleTestCase):
+    def test_nao_inventa_relampago_minimo_zero_ou_escopo_emoji(self):
+        from apps.scrapers.ofertas import montar_mensagem_cupom
+
+        observado = timezone.now() - timedelta(minutes=7)
+        cupom = SimpleNamespace(
+            marketplace="amazon", titulo="Cupom da torcida", codigo="TORCIDA30",
+            link="https://www.amazon.com.br/", validade=None, relampago=False,
+            ultima_observacao=observado,
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 30,
+                    "valor_minimo": 0, "modo_resgate": "codigo", "escopo": "🎟"},
+            restrito=False,
+        )
+
+        mensagem = montar_mensagem_cupom(cupom)
+
+        self.assertIn("*Cupom Amazon*", mensagem)
+        self.assertNotIn("⚡", mensagem)
+        self.assertNotIn("acima de R$ 0", mensagem)
+        self.assertNotIn("Válido para:", mensagem)
+        self.assertIn("Fonte checada em", mensagem)
+
+    def test_relampago_real_recebe_selo(self):
+        from apps.scrapers.ofertas import montar_mensagem_cupom
+
+        cupom = SimpleNamespace(
+            marketplace="shopee", titulo="R$ 20 OFF", codigo="FLASH20",
+            link="https://shopee.com.br/", validade=None, relampago=True,
+            regras={"tipo_desconto": "fixo", "valor_desconto": 20,
+                    "modo_resgate": "codigo"}, restrito=False,
+        )
+
+        self.assertIn("Cupom relâmpago ⚡", montar_mensagem_cupom(cupom))
+
     def test_informa_validade_exata_quando_a_fonte_fornece(self):
         from apps.scrapers.ofertas import montar_mensagem_cupom
 

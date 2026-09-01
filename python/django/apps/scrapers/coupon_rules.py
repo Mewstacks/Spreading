@@ -228,9 +228,15 @@ def extrair_escopo_produtos(titulo, escopo="") -> str:
     exemplo ``R$ 50 OFF em monitores Samsung selecionados``. Condições de público
     ou pagamento ficam de fora daqui e continuam sendo exibidas como condição.
     """
+    def informativo(valor):
+        # Fontes comunitárias às vezes deixam apenas um emoji/tag no campo de
+        # ação (ex.: "🎟"). Isso não descreve produto algum e polui a mensagem.
+        return bool(re.search(r"[^\W_]", valor, re.UNICODE))
+
     explicito = _texto(escopo).strip(" .:-")
     normalizado = explicito.casefold()
     if (normalizado not in _ESCOPO_GENERICO and explicito
+            and informativo(explicito)
             and not _CONDICAO_PUBLICO.search(explicito)):
         return explicito[:220]
 
@@ -242,7 +248,8 @@ def extrair_escopo_produtos(titulo, escopo="") -> str:
     matches = list(re.finditer(r"\b(?:em|para)\s+(.+)$", texto, re.I))
     if matches:
         candidato = matches[-1].group(1).strip(" .:-")
-        if (candidato and not _NAO_PRODUTO.search(candidato)
+        if (candidato and informativo(candidato)
+                and not _NAO_PRODUTO.search(candidato)
                 and not _CONDICAO_PUBLICO.search(candidato)
                 and candidato.casefold() not in _ESCOPO_GENERICO):
             return candidato[:220]
@@ -254,7 +261,8 @@ def extrair_escopo_produtos(titulo, escopo="") -> str:
             r"^(?:cupom\s+)?(?:R\$\s*[\d.,]+|[\d.,]+\s*%)\s*"
             r"(?:off|de\s+desconto)?\s*", "", texto, flags=re.I,
         ).strip(" .:-")
-        if candidato and not _CONDICAO_PUBLICO.search(candidato):
+        if (candidato and informativo(candidato)
+                and not _CONDICAO_PUBLICO.search(candidato)):
             return candidato[:220]
     return ""
 

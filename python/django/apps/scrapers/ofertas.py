@@ -674,6 +674,24 @@ def _linha_validade_cupom(cupom) -> str:
     return f"Válido até {local:%d/%m às %Hh%M}"
 
 
+def _linha_checagem_cupom(cupom, itens=None) -> str:
+    """Instante reproduzível da evidência, sem chamar descoberta de validação."""
+    momentos = []
+    for item in itens or ():
+        momento = getattr(item.get("relacao"), "verificado_em", None)
+        if momento:
+            momentos.append(momento)
+    momento = max(momentos) if momentos else getattr(cupom, "ultima_observacao", None)
+    if not momento:
+        return ""
+    try:
+        local = timezone.localtime(momento)
+    except (TypeError, ValueError):
+        return ""
+    rotulo = "Aplicação checada" if momentos else "Fonte checada"
+    return f"{rotulo} em {local:%d/%m às %Hh%M}"
+
+
 def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
     """Monta o texto de divulgação de um cupom (CupomNormalizado) p/ envio manual.
 
@@ -702,7 +720,12 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
         "mercadolivre", "mercado livre", "meli")
     loja = _nome_loja(getattr(cupom, "marketplace", ""), cupom=cupom)
 
-    linhas = [m.bold(f"Novo cupom ⚡️ {esc(loja)}"), ""]
+    cabecalho = (
+        f"Cupom relâmpago ⚡️ {esc(loja)}"
+        if getattr(cupom, "relampago", False)
+        else f"Cupom {esc(loja)}"
+    )
+    linhas = [m.bold(cabecalho), ""]
 
     # Linha do desconto: "🛒 15% DE DESCONTO acima de R$79 (limitado a R$60)"
     # Comissão Shopee não entra: não é abatimento na loja.
@@ -718,8 +741,9 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
     partes = []
     if valor:
         partes.append(f"{valor} DE DESCONTO")
-    minimo = formatar_numero(regras.get("valor_minimo"))
-    if minimo:
+    minimo_valor = regras.get("valor_minimo")
+    minimo = formatar_numero(minimo_valor)
+    if minimo and minimo_valor and minimo_valor > 0:
         partes.append(f"acima de R$ {minimo}")
     linha_desc = " ".join(partes).strip()
     desconto_max = formatar_numero(regras.get("desconto_maximo"))
@@ -751,6 +775,9 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
     validade = _linha_validade_cupom(cupom)
     if validade:
         linhas.append(f"⏳ {m.bold(esc(validade))}")
+    checagem = _linha_checagem_cupom(cupom)
+    if checagem:
+        linhas.append(f"🔎 {esc(checagem)}")
 
     link = str(link_afiliado or getattr(cupom, "link", "") or "").strip()
     if link:
@@ -1142,7 +1169,12 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
         # A chamada da IA é propositalmente texto puro; cabeçalho/código mantêm
         # o destaque próprio da mensagem de cupom.
         linhas += [esc(titulo_ia), ""]
-    linhas += [m.bold(f"Cupom {esc(loja)}"), ""]
+    cabecalho = (
+        f"Cupom relâmpago ⚡️ {esc(loja)}"
+        if getattr(cupom, "relampago", False)
+        else f"Cupom {esc(loja)}"
+    )
+    linhas += [m.bold(cabecalho), ""]
     for it in itens:
         p = it["produto"]
         relacao = it.get("relacao")
@@ -1177,6 +1209,9 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
     validade = _linha_validade_cupom(cupom)
     if validade:
         linhas.append(f"⏳ {m.bold(esc(validade))}")
+    checagem = _linha_checagem_cupom(cupom, itens)
+    if checagem:
+        linhas.append(f"🔎 {esc(checagem)}")
     return "\n".join(linhas).strip()
 
 
