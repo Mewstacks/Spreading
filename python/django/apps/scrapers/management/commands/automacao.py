@@ -149,6 +149,7 @@ def _rodar_scrape_rapido(paginas=8):
     redirects nem abrimos Chromium para essas duas fontes aqui.
     """
     from apps.scrapers.scraper_mercadolivre.ofertas_scraper import mapear_ofertas
+    from apps.scrapers.carga import BrowserResourceUnavailable
     from apps.scrapers.coupon_pipeline import _coletar_adaptador, _metricas_vazias
     from apps.scrapers.models import FonteIngestao
     logger.info("[%s] SCRAPE-FLASH: feed ML (%s paginas)", timezone.now().strftime("%H:%M"), paginas)
@@ -160,7 +161,16 @@ def _rodar_scrape_rapido(paginas=8):
         "telegram-publico", _metricas_vazias(), items=("coupons",),
         include_offers=False,
     )
-    total = mapear_ofertas(max_paginas=paginas, substituir=False)
+    try:
+        total = mapear_ofertas(max_paginas=paginas, substituir=False)
+    except BrowserResourceUnavailable:
+        # O Chromium e deliberadamente unico. A coleta HTTP acima ja terminou e a
+        # disputa esperada com scrape/link/login nao pode transformar o ciclo em
+        # incidente nem rebaixar o ultimo snapshot saudavel do feed flash.
+        logger.info(
+            "SCRAPE-FLASH: feed ML adiado; navegador ocupado e radares HTTP concluidos."
+        )
+        return None
     now = timezone.now()
     fonte, _ = FonteIngestao.objects.get_or_create(
         slug="mercadolivre-ofertas-flash",

@@ -15,6 +15,17 @@ def _payload(*coupons):
     }
 
 
+def _carousel(*coupons):
+    return {
+        "brickStack": {
+            "coupons-carousel-123": {
+                "ui_type": "coupons-carousel",
+                "data": {"coupons": list(coupons)},
+            },
+        },
+    }
+
+
 def _coupon(**overrides):
     row = {
         "campaign_id": "9988",
@@ -84,3 +95,34 @@ class MLLightningCouponsTests(SimpleTestCase):
         self.assertEqual(rows, [])
         self.assertFalse(metrics["contract_found"])
         self.assertEqual(health, "degraded")
+
+    def test_carrossel_novo_com_tokens_opacos_e_vazio_saudavel(self):
+        token = _coupon(
+            coupon_redeem_type=None, start_date=None,
+            code="opq4aijZ53ykxseCjd2_l_GNPhXIm4bTm0vAzGmeySQ==",
+        )
+
+        rows, metrics, health = extract_lightning_coupons(
+            _carousel(token), now=self.now,
+        )
+
+        self.assertEqual(rows, [])
+        self.assertTrue(metrics["contract_found"])
+        self.assertEqual(metrics["rejected_by_reason"], {"invalid_code": 1})
+        self.assertEqual(health, "healthy_empty")
+
+    def test_carrossel_novo_aceita_codigo_literal_sem_inventar_inicio(self):
+        literal = _coupon(
+            coupon_redeem_type=None, start_date=None, code="FLASH25",
+            expiration_date="2026-08-28T20:00:00Z",
+        )
+
+        rows, metrics, health = extract_lightning_coupons(
+            _carousel(literal), now=self.now,
+        )
+
+        self.assertEqual(health, "healthy")
+        self.assertEqual(metrics["accepted"], 1)
+        self.assertIsNone(rows[0].starts_at)
+        self.assertTrue(rows[0].flash)
+        self.assertTrue(rows[0].evidence["start_date_missing"])

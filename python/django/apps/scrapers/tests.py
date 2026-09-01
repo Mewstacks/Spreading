@@ -27,6 +27,7 @@ from django.utils import timezone
 from apps.accounts.tenant import organization_context
 from apps.scrapers import hooks, ofertas, whatsapp_client
 from apps.scrapers.afiliado import tag_ml
+from apps.scrapers.carga import BrowserResourceUnavailable
 from apps.scrapers.maintenance import reconciliar_publicacoes_orfas
 from apps.scrapers.management.commands.automacao import _rodar_links
 from apps.scrapers.marketplaces.registry import get_marketplace
@@ -2464,6 +2465,34 @@ class TopPromocoesFilterTests(TestCase):
         flash = FonteIngestao.objects.get(slug="mercadolivre-ofertas-flash")
         self.assertEqual(flash.status, "ok")
         self.assertEqual(flash.ultimo_total, 12)
+
+    @patch(
+        "apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
+        side_effect=BrowserResourceUnavailable("ocupado"),
+    )
+    @patch("apps.scrapers.coupon_pipeline._coletar_adaptador")
+    def test_flash_browser_ocupado_preserva_radares_e_snapshot(
+            self, collect_radar, _mapear):
+        flash, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-ofertas-flash",
+            defaults={
+                "marketplace": "mercadolivre", "nome": "Flash", "status": "ok",
+                "ultimo_total": 9,
+            },
+        )
+        flash.status = "ok"
+        flash.ultimo_total = 9
+        flash.save(update_fields=["status", "ultimo_total"])
+        from apps.scrapers.management.commands.automacao import _rodar_scrape_rapido
+
+        self.assertIsNone(_rodar_scrape_rapido(paginas=2))
+        self.assertEqual(
+            [call.args[0] for call in collect_radar.call_args_list],
+            ["ml-lightning-coupons", "pelando-cupons", "telegram-publico"],
+        )
+        flash.refresh_from_db()
+        self.assertEqual(flash.status, "ok")
+        self.assertEqual(flash.ultimo_total, 9)
 
 
 class AttributionWorkflowTests(TestCase):

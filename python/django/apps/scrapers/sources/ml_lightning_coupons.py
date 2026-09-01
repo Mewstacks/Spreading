@@ -45,7 +45,14 @@ def _money(value):
 
 
 def _lightning_contract(payload):
-    """Retorna os cards e se o bloco oficial foi reconhecido no payload."""
+    """Retorna os cards e se um carrossel oficial foi reconhecido no payload.
+
+    O ML migrou o brick de ``lightning-coupons-*`` para
+    ``ui_type=coupons-carousel`` em agosto/2026. O contrato novo mistura vouchers
+    de ativacao (token opaco) e eventuais codigos literais. Reconhecer o carrossel
+    prova apenas que a leitura funcionou; ``codigo_humano`` continua sendo o gate
+    que impede publicar o token personalizado como se fosse cupom.
+    """
     cards, seen = [], set()
     contract_found = False
 
@@ -57,12 +64,14 @@ def _lightning_contract(payload):
             return
         if not isinstance(value, dict):
             return
-        is_lightning = lightning_parent
+        is_lightning = (
+            lightning_parent
+            or str(value.get("ui_type") or "").lower() == "coupons-carousel"
+        )
         if is_lightning:
             contract_found = True
         signature = {
-            "campaign_id", "coupon_redeem_type", "start_date",
-            "expiration_date", "title",
+            "campaign_id", "expiration_date", "title", "status",
         }
         if is_lightning and signature <= set(value):
             campaign_id = str(value.get("campaign_id") or "").strip()
@@ -71,9 +80,9 @@ def _lightning_contract(payload):
                 cards.append(value)
             return
         for key, child in value.items():
-            child_is_lightning = is_lightning or str(key).startswith(
-                "lightning-coupons-"
-            )
+            child_is_lightning = is_lightning or str(key).startswith((
+                "lightning-coupons-", "coupons-carousel-",
+            ))
             if child_is_lightning:
                 contract_found = True
             visit(child, lightning_parent=child_is_lightning)
@@ -98,10 +107,11 @@ def extract_lightning_coupons(payload, *, now=None):
         if status in _TERMINAL or (expiration and expiration <= now):
             rejected["finished"] += 1
             continue
-        if start is None or expiration is None or expiration <= start:
+        if expiration is None or (start is not None and expiration <= start):
             rejected["invalid_window"] += 1
             continue
-        if str(raw.get("coupon_redeem_type") or "").upper() != "CODE":
+        redeem_type = str(raw.get("coupon_redeem_type") or "").upper()
+        if redeem_type and redeem_type != "CODE":
             rejected["not_a_code"] += 1
             continue
         code = codigo_humano(str(raw.get("code") or "").strip().upper())
@@ -132,6 +142,11 @@ def extract_lightning_coupons(payload, *, now=None):
                 "sr_label"
             ) or ""
         )
+        scarcity = raw.get("scarcity") or {}
+        is_flash = bool(
+            scarcity.get("time")
+            or expiration - (start or now) <= timedelta(hours=24)
+        )
         rules = normalizar_regras_cupom({
             "tipo_desconto": discount_type,
             "valor_desconto": discount,
@@ -140,7 +155,7 @@ def extract_lightning_coupons(payload, *, now=None):
             "modo_resgate": "codigo",
             "escopo": category,
             "is_mar_aberto": False,
-            "dia_inicio": start.isoformat(),
+            "dia_inicio": start.isoformat() if start else "",
             "dia_fim": expiration.isoformat(),
         }, external_id=f"ml-lightning:{raw['campaign_id']}", codigo=code)
         total_items = (raw.get("segmentations") or {}).get("total_items")
@@ -148,17 +163,21 @@ def extract_lightning_coupons(payload, *, now=None):
             external_id=f"ml-lightning:{raw['campaign_id']}"[:160],
             marketplace="mercadolivre", source="ml-lightning-coupons",
             kind="coupon", canonical_url=COUPONS_URL,
-            title=f"Cupom relampago {code} - {title_text} - {category}"[:255],
+            title=(
+                f"Cupom relampago {code} - {title_text} - {category}"
+                if is_flash else f"Cupom {code} - {title_text} - {category}"
+            )[:255],
             coupon_code=code, coupon_rules=rules, content_type="voucher",
             starts_at=start, valid_until=expiration,
-            restricted=tem_restricao_publico(conditions), flash=True,
+            restricted=tem_restricao_publico(conditions), flash=is_flash,
             observed_at=now,
             evidence={
-                "transport": "mercadolivre-official-lightning-payload",
+                "transport": "mercadolivre-official-coupon-payload",
                 "association": "mercadolivre-official-coupon-page",
                 "promotion_id": str(raw["campaign_id"]),
                 "status": status or "UNKNOWN",
                 "start_time": str(raw.get("start_time") or ""),
+                "start_date_missing": start is None,
                 "total_items": total_items,
             },
         ))
