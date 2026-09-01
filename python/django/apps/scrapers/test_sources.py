@@ -768,6 +768,19 @@ class AmazonPublicPriceSanityTests(TestCase):
             0,
         )
 
+    def test_classifies_amazon_error_responses_as_failure_not_empty_catalog(self):
+        from apps.scrapers.sources.amazon_public import _page_failure
+
+        self.assertEqual(
+            _page_failure(503, "Amazon.com.br Algo deu errado", ""),
+            "http_503_upstream_unavailable",
+        )
+        self.assertEqual(
+            _page_failure(200, "Amazon.com.br Algo deu errado", ""),
+            "amazon_error_page",
+        )
+        self.assertEqual(_page_failure(200, "Amazon.com.br", "Resultados"), "")
+
 
 class VerificacaoDeLinksEhLanePropriaTests(TestCase):
     """A verificação NÃO pode depender de haver link novo para gerar.

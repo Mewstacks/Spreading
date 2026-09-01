@@ -16,6 +16,34 @@ _FINAL_COUPON_RE = re.compile(
 )
 
 
+class AmazonPublicPageError(RuntimeError):
+    def __init__(self, reason):
+        self.reason = str(reason or "invalid_page")[:64]
+        super().__init__(self.reason)
+
+
+def _page_failure(status, title="", body=""):
+    """Classifica respostas que não representam um inventário Amazon válido."""
+    try:
+        status = int(status or 0)
+    except (TypeError, ValueError):
+        status = 0
+    if status == 429:
+        return "http_429_rate_limited"
+    if status >= 500:
+        return f"http_{status}_upstream_unavailable"
+    if status >= 400:
+        return f"http_{status}_error"
+    folded = f"{title}\n{body}".casefold()
+    if "algo deu errado" in folded:
+        return "amazon_error_page"
+    if any(marker in folded for marker in (
+        "digite os caracteres", "não é um robô", "not a robot",
+    )):
+        return "captcha_or_block"
+    return ""
+
+
 def _termos_do_ciclo(terms, agora=None, limite=None):
     """Seleciona uma fatia rotativa sem perder cobertura do catalogo."""
     unicos = list(dict.fromkeys(str(term).strip() for term in terms if str(term).strip()))
@@ -129,14 +157,18 @@ class AmazonPublicSource(SourceAdapter):
                     term_complete = True
                     for page_number in range(1, pages_per_term + 1):
                         try:
-                            page.goto(
+                            response = page.goto(
                                 f"https://www.amazon.com.br/s?k={quote_plus(term)}"
                                 f"&page={page_number}",
                                 wait_until="domcontentloaded", timeout=25000,
                             )
                             body = page.locator("body").inner_text(timeout=5000)
-                            if "digite os caracteres" in body.lower():
-                                raise RuntimeError("captcha")
+                            failure = _page_failure(
+                                response.status if response else 0,
+                                page.title(), body,
+                            )
+                            if failure:
+                                raise AmazonPublicPageError(failure)
                             cards = page.locator("[data-component-type='s-search-result']")
                             pages_processed += 1
                             for index in range(cards.count()):
@@ -239,7 +271,7 @@ class AmazonPublicSource(SourceAdapter):
                         except Exception as exc:
                             failures.append({
                                 "term": term, "page": page_number,
-                                "error": type(exc).__name__,
+                                "error": getattr(exc, "reason", type(exc).__name__),
                             })
                             term_complete = False
                             break
