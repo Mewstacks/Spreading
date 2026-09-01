@@ -2619,7 +2619,7 @@ class AttributionWorkflowTests(TestCase):
             response = self.client.get(reverse("home"))
 
         self.assertNotContains(response, "Traceback")
-        self.assertContains(response, "ML_AFFILIATE_REPORT_URL")
+        self.assertNotContains(response, "ML_AFFILIATE_REPORT_URL")
         self.assertNotContains(response, "getState")
         self.assertNotContains(response, "Sem botão")
         self.assertContains(response, "Falha temporária na leitura dos relatórios")
@@ -3162,6 +3162,49 @@ class RankingAndCooldownTests(TestCase):
         self.assertIn("percentile_cont(0.5)", sql)
         self.assertIn("CROSS JOIN LATERAL", sql)
         self.assertIn(product.link_produto, str(params))
+
+    def test_conversion_boost_uses_conservative_wilson_evidence(self):
+        from apps.scrapers.content_ranking import _pontuar_conversao_loja
+
+        self.assertLess(_pontuar_conversao_loja(1, 1), 2)
+        self.assertGreater(_pontuar_conversao_loja(100, 10), 2)
+        self.assertEqual(_pontuar_conversao_loja(100, 0), 0)
+
+    def test_official_marketplace_conversion_is_applied_to_ranking(self):
+        from apps.scrapers.content_ranking import (
+            ContentCandidate, _aplicar_performance_marketplace,
+        )
+
+        product = self._product("Historico que converte", 60)
+        ReceitaAfiliado.objects.create(
+            usuario=self.user, marketplace="mercadolivre",
+            data=timezone.localdate(), cliques=100, conversoes=10,
+            pedidos=10, receita=1000, comissao=100,
+            granularidade="dia", origem="auto", hash_origem="ranking-conversion",
+        )
+        candidate = ContentCandidate("product", product, 20, [])
+
+        _aplicar_performance_marketplace(self.user, [candidate])
+
+        self.assertGreater(candidate.score, 22)
+        self.assertIn("boa conversão", candidate.reasons[0])
+
+    def test_ab_variant_balances_only_messages_the_audience_may_have_seen(self):
+        from apps.scrapers.ofertas import _variante_para_envio
+
+        config = ConfiguracaoEnvio.objects.create(
+            owner=self.user, grupo_id=self.group_a, variante_template="alternar",
+        )
+        for status, variante in (
+            ("enviado", "A"), ("incerto", "A"),
+            ("enviado", "B"), ("falhou", "B"), ("falhou", "B"),
+        ):
+            Publicacao.objects.create(
+                usuario=self.user, configuracao=config, canal="whatsapp",
+                destino_id=self.group_a, status=status, variante=variante,
+            )
+
+        self.assertEqual(_variante_para_envio(config), "B")
 
 class MonitorCatalogMaintenanceTests(SimpleTestCase):
     @patch("apps.scrapers.maintenance.diagnosticar_alertas_pipeline_cupons",

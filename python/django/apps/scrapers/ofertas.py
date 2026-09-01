@@ -2740,6 +2740,25 @@ def _link_publicado(publicacao, link_afiliado: str) -> str:
     return link_afiliado
 
 
+def _variante_para_envio(configuracao) -> str:
+    """Escolhe A/B por exposicoes, sem deixar falhas enviesarem o teste."""
+    if not configuracao or configuracao.variante_template == "A":
+        return "A"
+    if configuracao.variante_template == "B":
+        return "B"
+    from django.db.models import Count
+
+    contagens = {
+        row["variante"]: row["total"]
+        for row in configuracao.publicacoes.filter(
+            status__in=("enviado", "incerto"), variante__in=("A", "B"),
+        ).values("variante").annotate(total=Count("id"))
+    }
+    # Empate comeca em A; depois escolhe a menos exposta. Falhas anteriores ao
+    # transporte nao contam porque o publico nunca viu aquela variante.
+    return "B" if contagens.get("A", 0) > contagens.get("B", 0) else "A"
+
+
 def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                              canal="whatsapp", usuario=None, configuracao=None,
                              destino_nome="", imagem_b64_custom=None,
@@ -3092,12 +3111,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                     campanha_id=produto.campanha_id, estado="ativo",
                 ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now())).first()
             cupom = _executar_orm(_cupom_da_campanha)
-        variante = "A"
-        if configuracao and configuracao.variante_template == "B":
-            variante = "B"
-        elif configuracao and configuracao.variante_template == "alternar":
-            variante = "B" if _executar_orm(
-                lambda: configuracao.publicacoes.count()) % 2 else "A"
+        variante = _executar_orm(_variante_para_envio, configuracao)
         link_publicado = _link_publicado(publicacao, link)
         if publicacao:
             publicacao.variante = variante

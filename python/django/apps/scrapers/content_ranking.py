@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import timedelta
 
-from django.db.models import Count, Q
+from django.db.models import Count, Q, Sum
 from django.utils import timezone
 
 from apps.scrapers.coupon_rules import regras_do_cupom
@@ -18,6 +18,71 @@ class ContentCandidate:
     score: float
     reasons: list[str]
     commission: float = 0.0
+
+
+def _pontuar_conversao_loja(clicks, conversions) -> float:
+    """Boost conservador pela conversao oficial dos ultimos 30 dias.
+
+    Usa o limite inferior de Wilson (95%), nao a taxa crua: 1 venda em 1 clique
+    jamais pode vencer um historico de centenas de visitas.
+    """
+    import math
+
+    try:
+        n = max(0, int(clicks or 0))
+        successes = max(0, min(n, int(conversions or 0)))
+    except (TypeError, ValueError):
+        return 0.0
+    if not n or not successes:
+        return 0.0
+    z = 1.96
+    rate = successes / n
+    denominator = 1 + (z * z / n)
+    centre = rate + (z * z / (2 * n))
+    margin = z * math.sqrt((rate * (1 - rate) + z * z / (4 * n)) / n)
+    lower = max(0.0, (centre - margin) / denominator)
+    # Wilson ainda e otimista em 1/1 (limite inferior ~20%). A confianca de
+    # amostra impede esse unico evento de valer mais que cem cliques observados.
+    sample_confidence = n / (n + 20.0)
+    return round(min(10.0, lower * 50.0 * sample_confidence), 2)
+
+
+def _aplicar_performance_marketplace(user, candidates):
+    """Realimenta o ranking com cliques/conversoes dos portais oficiais."""
+    marketplaces = {
+        str(getattr(candidate.obj, "marketplace", "") or "").lower()
+        for candidate in candidates
+        if getattr(candidate.obj, "marketplace", None)
+    }
+    if not user or not marketplaces:
+        return
+    from apps.scrapers.models import ReceitaAfiliado
+
+    since = timezone.localdate() - timedelta(days=30)
+    rows = (
+        ReceitaAfiliado.objects.filter(
+            usuario=user, marketplace__in=marketplaces, origem="auto",
+            granularidade="dia", data__gte=since,
+        )
+        .values("marketplace")
+        .annotate(clicks=Sum("cliques"), conversions=Sum("conversoes"))
+    )
+    scores = {
+        str(row["marketplace"] or "").lower(): _pontuar_conversao_loja(
+            row["clicks"], row["conversions"],
+        )
+        for row in rows
+    }
+    for candidate in candidates:
+        marketplace = str(
+            getattr(candidate.obj, "marketplace", "") or ""
+        ).lower()
+        boost = scores.get(marketplace, 0.0)
+        if boost:
+            candidate.score = round(candidate.score + boost, 2)
+            candidate.reasons.append(
+                "boa conversão da loja nos últimos 30 dias"
+            )
 
 
 def _freshness(observed):
@@ -243,6 +308,7 @@ def _coupon_candidates(config, limit):
 
 def selecionar_conteudo_para_grupo(config, limit=8):
     candidates = _product_candidates(config, limit) + _coupon_candidates(config, limit)
+    _aplicar_performance_marketplace(config.owner, candidates)
     candidates.sort(key=lambda item: (-item.score, -item.commission,
                                       item.kind, getattr(item.obj, "id", 0)))
     return candidates[:limit]

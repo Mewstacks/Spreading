@@ -132,12 +132,17 @@ COUPON_ABUNDANCE_GOAL = int(os.getenv("COUPON_ABUNDANCE_GOAL", "100"))
 COUPON_DAILY_DISCOVERY_GOAL = int(
     os.getenv("COUPON_DAILY_DISCOVERY_GOAL", "250")
 )
-# Sem default: o antigo apontava pra landing de afiliados (não um relatório), então o
-# sync raspava uma página sem tabela e reportava "erro" pra sempre. Vazio = a tela diz
-# "sincronização automática indisponível", que é a verdade, em vez de erro recorrente.
-# Preencha com a URL do relatório de verdade, já dentro da conta.
-ML_AFFILIATE_REPORT_URL = os.getenv("ML_AFFILIATE_REPORT_URL", "")
-AMAZON_ASSOCIATES_REPORT_URL = os.getenv("AMAZON_ASSOCIATES_REPORT_URL", "")
+# Portais autenticados reais, ainda sobrescrevíveis caso as lojas mudem a rota.
+# Sem sessão ambos redirecionam ao login, que o adapter classifica como ação do
+# usuário; uma instalação nova não deve nascer incapaz de medir conversão.
+ML_AFFILIATE_REPORT_URL = os.getenv(
+    "ML_AFFILIATE_REPORT_URL",
+    "https://www.mercadolivre.com.br/afiliados/dashboard",
+)
+AMAZON_ASSOCIATES_REPORT_URL = os.getenv(
+    "AMAZON_ASSOCIATES_REPORT_URL",
+    "https://associados.amazon.com.br/home/reports",
+)
 AMAZON_BROWSER_REPORTS_ENABLED = os.getenv(
     "AMAZON_BROWSER_REPORTS_ENABLED", "1",
 ) == "1"
