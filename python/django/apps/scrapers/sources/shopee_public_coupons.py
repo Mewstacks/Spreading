@@ -30,6 +30,19 @@ _MAXIMUM = re.compile(r"limitado a\s*R\$\s*([\d.,]+\s*(?:mil)?)", re.I)
 _EXPECTED_REJECTIONS = {"unavailable", "cashback_not_discount", "duplicate"}
 
 
+def _auth_required(url, body):
+    folded = str(body or "").casefold()
+    return bool(
+        "/verify/traffic/error" in str(url or "").casefold()
+        and (
+            "login necessário" in folded
+            or "login necessario" in folded
+            or "faça login para continuar" in folded
+            or "faca login para continuar" in folded
+        )
+    )
+
+
 def _money(text):
     raw = str(text or "").strip().casefold().replace(" ", "")
     multiplier = 1000 if raw.endswith("mil") else 1
@@ -120,11 +133,38 @@ class ShopeePublicCouponsSource(SourceAdapter):
         self.last_metrics = {}
         self.last_health_status = "unknown"
 
-    def discover_coupons(self, **kwargs):
+    def discover_coupons(self, usuario=None, **kwargs):
         rejected = defaultdict(int)
         accepted = []
         started = time.monotonic()
-        with iniciar_browser(headless=True) as (page, _):
+        state = None
+        if usuario is not None:
+            from apps.scrapers.report_sessions import (
+                has_report_session, load_report_state,
+            )
+            if not has_report_session(usuario, "shopee_shop"):
+                self.last_metrics = {
+                    "items_seen": 0, "accepted": 0, "rejected": 0,
+                    "complete": False, "reason_code": "auth_required",
+                    "pages_processed": 0,
+                    "duration_ms": round((time.monotonic() - started) * 1000),
+                }
+                self.last_health_status = "auth_required"
+                return
+            try:
+                state = load_report_state(usuario, "shopee_shop")
+            except ValueError:
+                self.last_metrics = {
+                    "items_seen": 0, "accepted": 0, "rejected": 0,
+                    "complete": False, "reason_code": "auth_required",
+                    "pages_processed": 0,
+                    "duration_ms": round((time.monotonic() - started) * 1000),
+                }
+                self.last_health_status = "auth_required"
+                return
+        refreshed_state = None
+        auth_required = False
+        with iniciar_browser(storage_state=state, headless=True) as (page, context):
             page.goto(COUPONS_URL, wait_until="domcontentloaded", timeout=45000)
             # O HTML inicial contem apenas o shell; os vouchers chegam no hydrate.
             # Esperar o contrato semantico evita declarar schema quebrado numa VM
@@ -141,6 +181,12 @@ class ShopeePublicCouponsSource(SourceAdapter):
                 pass
             body = page.locator("body").inner_text(timeout=10000)
             folded = body.casefold()
+            auth_required = _auth_required(page.url, body)
+            if auth_required:
+                capture_public_diagnostic(page, self.slug, "auth_required")
+                cards = []
+            else:
+                cards = None
             if any(marker in folded for marker in (
                     "verifique que voce e humano", "verifique que você é humano",
                     "access denied", "captcha")):
@@ -151,7 +197,8 @@ class ShopeePublicCouponsSource(SourceAdapter):
             # Classes CSS da Shopee sao ofuscadas e mudam a cada build. O contrato
             # estavel e o link publico dos termos; subimos ate o menor ancestral
             # que tambem contem desconto e estado do voucher.
-            cards = page.locator("a[href*='/voucher/details']").evaluate_all("""
+            if cards is None:
+                cards = page.locator("a[href*='/voucher/details']").evaluate_all("""
                 anchors => anchors.map(a => {
                   let node = a;
                   while (node && node !== document.body) {
@@ -179,18 +226,27 @@ class ShopeePublicCouponsSource(SourceAdapter):
                 seen.add(row["promotion_id"])
                 row["image"] = str(raw.get("image") or "").split("?", 1)[0][:1000]
                 accepted.append(row)
-            if not cards:
+            if not cards and not auth_required:
                 capture_public_diagnostic(page, self.slug, "voucher_cards_not_found")
+            if usuario is not None and not auth_required:
+                refreshed_state = context.storage_state()
+
+        if refreshed_state is not None:
+            from apps.scrapers.report_sessions import save_report_state
+            save_report_state(usuario, "shopee_shop", refreshed_state)
 
         complete, health, schema_errors = _snapshot_state(
             len(cards), len(accepted), rejected,
         )
+        if auth_required:
+            complete, health, schema_errors = False, "auth_required", 0
         self.last_metrics = {
             "items_seen": len(cards),
             "accepted": len(accepted),
             "rejected": sum(rejected.values()),
             "rejected_by_reason": dict(sorted(rejected.items())),
             "complete": complete,
+            "reason_code": "auth_required" if auth_required else "",
             "schema_errors": schema_errors,
             "pages_processed": 1,
             "duration_ms": round((time.monotonic() - started) * 1000),

@@ -15,7 +15,7 @@ from apps.scrapers.sources.meliuz_coupons import MeliuzCouponsSource
 from apps.scrapers.sources.registry import SOURCES
 from apps.scrapers.sources.telegram_publico import TelegramPublicoSource
 from apps.scrapers.sources.shopee_public_coupons import (
-    ShopeePublicCouponsSource, _parse_rendered_card, _snapshot_state,
+    ShopeePublicCouponsSource, _auth_required, _parse_rendered_card, _snapshot_state,
 )
 
 TG_HTML = """
@@ -596,6 +596,16 @@ class ShopeePublicCouponsTests(TestCase):
 
     def test_fonte_oficial_consume_slot_de_chromium(self):
         self.assertTrue(ShopeePublicCouponsSource.requires_chromium)
+
+    def test_login_exigido_na_fly_nao_e_classificado_como_inventario_vazio(self):
+        self.assertTrue(_auth_required(
+            "https://shopee.com.br/verify/traffic/error?type=4",
+            "Login Necessário. Faça login para continuar.",
+        ))
+        self.assertFalse(_auth_required(
+            "https://shopee.com.br/m/cupom-de-desconto",
+            "Cupons disponíveis hoje",
+        ))
 
     def test_snapshot_esgotado_e_cashback_pode_ser_vazio_saudavel(self):
         complete, health, schema_errors = _snapshot_state(

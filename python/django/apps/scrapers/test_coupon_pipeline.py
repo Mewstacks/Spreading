@@ -348,6 +348,27 @@ class CouponPipelineTests(TestCase):
 
 
 class AmazonPublicCouponsCadenceTests(TestCase):
+    @patch("apps.scrapers.report_sessions.has_report_session", return_value=True)
+    @patch("apps.scrapers.sources.run_source")
+    def test_shopee_oficial_usa_sessao_conectada_e_escopo_do_usuario(
+        self, run_source, _has_session,
+    ):
+        from apps.scrapers.coupon_pipeline import coletar_cupons
+
+        user = get_user_model().objects.create_user("pipe-shopee", password="x")
+        run_source.return_value = {
+            "status": "empty", "offers": [], "coupons": [],
+        }
+
+        coletar_cupons(usuarios=[user], incluir_awin=False)
+
+        shopee_calls = [
+            call for call in run_source.call_args_list
+            if call.args[0] == "shopee-public-coupons"
+        ]
+        self.assertEqual(len(shopee_calls), 1)
+        self.assertEqual(shopee_calls[0].kwargs["usuario"], user)
+
     def test_catalogo_fresco_pula_chromium(self):
         from apps.scrapers.coupon_pipeline import coletar_cupons
 

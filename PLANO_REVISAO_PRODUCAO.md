@@ -153,6 +153,11 @@ Fontes primárias consultadas:
 - Shopee oficial: 17 vouchers observados em produção, oito ativos aceitos, oito
   indisponíveis e um cashback corretamente rejeitado. Os oito ativos ficam
   elegíveis, mas não são enviados sem integração afiliada própria da conta.
+- Shopee/Fly em 01/09: a landing passou a redirecionar o IP da Fly para
+  `/verify/traffic/error` com “Login Necessário” antes de chamar a API de vouchers.
+  O estado agora é `auth_required`, nunca “inventário vazio”. Quando a sessão de
+  compras existe, a fonte usa o estado cifrado e persiste o resultado no escopo do
+  dono da sessão; a conta `lules` ainda precisa ser conectada para a prova real.
 - Méliuz: novo radar público sem Chromium encontrou 84 códigos distintos em 3,9 s
   (23 Amazon, 38 Mercado Livre e 23 Shopee), descartando 14 placeholders, sete
   entradas inválidas e cinco duplicatas. Em produção, 13 códigos do ML coincidiram
@@ -208,7 +213,7 @@ Fontes primárias consultadas:
   do primeiro item quando outra esteira aguarda, em vez de readquirir o slot até
   12 vezes. A verificação de até 20 destinos também cede entre links; a validação
   de produção é o gate dos deploys 284/285/286.
-- Testes automatizados: 1.393 testes Django e 169 testes Node aprovados; 24 testes
+- Testes automatizados: 1.395 testes Django e 169 testes Node aprovados; 24 testes
   direcionados de isolamento, permissões, CSRF, SQLi e XSS aprovados; nenhuma
   migração pendente e compilação limpa.
 - Auditoria de produção: papel runtime sem `SUPERUSER`, `BYPASSRLS` ou ownership

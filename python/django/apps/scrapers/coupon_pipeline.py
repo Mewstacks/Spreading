@@ -72,7 +72,7 @@ def _amazon_public_coupons_ainda_frescos() -> bool:
     ).filter(cupons_frescos_q()).exists()
 
 
-def _shopee_public_coupons_ainda_frescos() -> bool:
+def _shopee_public_coupons_ainda_frescos(owner=None) -> bool:
     from apps.scrapers.maintenance import cupons_frescos_q
 
     fonte = FonteIngestao.objects.filter(slug="shopee-public-coupons").first()
@@ -81,7 +81,7 @@ def _shopee_public_coupons_ainda_frescos() -> bool:
     if timezone.now() - fonte.ultimo_sucesso > SHOPEE_CUPONS_TTL_COLETA:
         return False
     return CupomNormalizado.objects.filter(
-        fonte=fonte, estado="ativo",
+        fonte=fonte, owner=owner, estado="ativo",
     ).filter(cupons_frescos_q()).exists()
 
 
@@ -233,7 +233,24 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
     # Inventario publico de vouchers de ativacao. A coleta usa o mesmo slot de
     # Chromium das demais fontes, por isso o snapshot saudavel e reutilizado por
     # 30 minutos; campanhas curtas continuam entrando no mesmo ciclo operacional.
-    if _shopee_public_coupons_ainda_frescos():
+    from apps.scrapers.report_sessions import has_report_session
+    sessoes_shopee = [
+        usuario for usuario in usuarios
+        if has_report_session(usuario, "shopee_shop")
+    ]
+    if sessoes_shopee:
+        for usuario in sessoes_shopee:
+            if _shopee_public_coupons_ainda_frescos(owner=usuario):
+                _fonte(
+                    resultado, "shopee-public-coupons", status="skipped",
+                    motivo="Catalogo da conta ainda fresco; Chromium reservado.",
+                )
+                continue
+            _coletar_adaptador(
+                "shopee-public-coupons", resultado,
+                owner=usuario, usuario=usuario,
+            )
+    elif _shopee_public_coupons_ainda_frescos(owner=None):
         _fonte(
             resultado, "shopee-public-coupons", status="skipped",
             motivo="Catalogo publico ainda fresco; Chromium reservado para o funil.",

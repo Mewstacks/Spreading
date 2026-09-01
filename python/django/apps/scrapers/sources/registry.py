@@ -168,6 +168,13 @@ def run_source(slug, **kwargs):
                     fonte.ultimo_sucesso = now
                     fonte.falhas_consecutivas = 0
                     fonte.erro_publico = ""
+                elif health == "auth_required":
+                    fonte.status = "degraded"
+                    fonte.falhas_consecutivas = 0
+                    fonte.erro_publico = (
+                        "A Shopee exige uma sessao de compras conectada para "
+                        "listar os vouchers oficiais."
+                    )
                 else:
                     fonte.status = "degraded"
                     fonte.erro_publico = (
@@ -176,7 +183,7 @@ def run_source(slug, **kwargs):
                 fonte.save()
             public_status = (
                 "degraded"
-                if health in {"blocked", "degraded", "partial"}
+                if health in {"blocked", "degraded", "partial", "auth_required"}
                 else run.status
             )
             return {
