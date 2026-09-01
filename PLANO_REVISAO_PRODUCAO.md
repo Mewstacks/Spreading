@@ -454,7 +454,10 @@ Fontes primárias consultadas:
   resta apenas a fonte Shopee sem dois snapshots completos. A conta `lules` chegou
   a 1.000 cupons prontos: 895 Mercado Livre e 105 Amazon. Suíte integral:
   1.446/1.446 Django; release, smoke checks, web/worker v313, `/healthz` HTTP 200 e
-  checks do PostgreSQL ficaram verdes.
+  checks do PostgreSQL ficaram verdes. O canário read-only pós-reconciliação passou
+  em 3/3 regras da `lules`: ML e mista escolheram cupom com container oficial e
+  rastreio `lpohoffmann`; Amazon escolheu ASIN real com `tag=luizahfn-20`; todas as
+  mensagens tinham link verificado, instrução explícita de resgate e tamanho válido.
 
 ## Gates de deploy desta revisão
 
