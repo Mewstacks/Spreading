@@ -7,12 +7,15 @@ mantem cashback separado de desconto: moedas futuras nunca viram ``OFF``.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import re
 import time
 from collections import defaultdict
-from urllib.parse import parse_qs, urljoin, urlsplit
+from datetime import datetime, timezone as datetime_timezone
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
+from django.conf import settings
 from django.utils import timezone
 
 from apps.scrapers.auxiliar import iniciar_browser
@@ -28,6 +31,8 @@ _OFF_FIXED = re.compile(r"R\$\s*([\d.,]+\s*(?:mil)?)\s*OFF\b", re.I)
 _MINIMUM = re.compile(r"(?:acima de|a partir de)\s*R\$\s*([\d.,]+\s*(?:mil)?)", re.I)
 _MAXIMUM = re.compile(r"limitado a\s*R\$\s*([\d.,]+\s*(?:mil)?)", re.I)
 _EXPECTED_REJECTIONS = {"unavailable", "cashback_not_discount", "duplicate"}
+_VOUCHER_API_PATH = "/api/v1/microsite/get_vouchers_by_collections"
+_SHOPEE_MONEY_SCALE = 100_000
 
 
 def _auth_required(url, body):
@@ -49,6 +54,37 @@ def _money(text):
     if multiplier > 1:
         raw = raw[:-3]
     return round(normalizar_dinheiro(raw) * multiplier, 2)
+
+
+def _browser_context_options():
+    server = str(
+        getattr(settings, "SHOPEE_PUBLIC_PROXY_SERVER", "") or ""
+    ).strip()
+    if not server:
+        return {}
+    if not re.match(r"^(?:https?|socks5)://", server, re.I):
+        raise ValueError("SHOPEE_PUBLIC_PROXY_SERVER precisa incluir o protocolo")
+    proxy = {"server": server}
+    username = str(
+        getattr(settings, "SHOPEE_PUBLIC_PROXY_USERNAME", "") or ""
+    ).strip()
+    password = str(
+        getattr(settings, "SHOPEE_PUBLIC_PROXY_PASSWORD", "") or ""
+    ).strip()
+    if username:
+        proxy["username"] = username
+    if password:
+        proxy["password"] = password
+    return {"proxy": proxy}
+
+
+def _economizar_banda(page):
+    page.route(
+        "**/*",
+        lambda route: route.abort()
+        if route.request.resource_type in {"image", "media", "font"}
+        else route.continue_(),
+    )
 
 
 def _parse_rendered_card(raw):
@@ -109,6 +145,155 @@ def _parse_rendered_card(raw):
     }, ""
 
 
+def _parse_api_voucher(raw, *, now_ts=None):
+    """Normaliza o contrato JSON que hidrata os cards oficiais.
+
+    A Shopee representa dinheiro em centésimos de milésimo de real (R$ 1 =
+    100.000) e separa desconto imediato (``reward_type=0``) de cashback em moedas.
+    O JSON também expõe validade e quota; por isso ele prevalece sobre o texto do
+    DOM quando ambos estão disponíveis.
+    """
+    voucher = (raw or {}).get("voucher") if isinstance(raw, dict) else None
+    voucher = voucher if isinstance(voucher, dict) else raw
+    if not isinstance(voucher, dict):
+        return None, "invalid_api_row"
+
+    identifier = voucher.get("voucher_identifier") or {}
+    reward = voucher.get("reward_info") or {}
+    info = voucher.get("info") or {}
+    timing = voucher.get("time_info") or {}
+    quota = voucher.get("quota_info") or {}
+    ui = voucher.get("ui_info") or {}
+    try:
+        promotion_id = str(int(identifier.get("promotion_id") or 0))
+        signature_source = int(identifier.get("signature_source") or 0)
+        status = int(info.get("status") or 0)
+        start_ts = int(timing.get("start_time") or 0)
+        end_ts = int(timing.get("end_time") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None, "invalid_api_identity"
+    signature = str(identifier.get("signature") or "").strip()
+    voucher_code = str(identifier.get("voucher_code") or "").strip()
+    if (
+        promotion_id == "0" or not voucher_code.isdigit()
+        or not re.fullmatch(r"[a-f0-9]{64}", signature, re.I)
+    ):
+        return None, "invalid_api_identity"
+
+    now_ts = int(time.time() if now_ts is None else now_ts)
+    unavailable = (
+        status != 1
+        or bool(timing.get("has_expired"))
+        or (start_ts and start_ts > now_ts)
+        or (end_ts and end_ts < now_ts)
+        or bool(quota.get("fully_redeemed"))
+        or bool(quota.get("fully_used"))
+        or bool(quota.get("disabled"))
+    )
+    if unavailable:
+        return None, "unavailable"
+    try:
+        reward_type = int(reward.get("reward_type") or 0)
+    except (TypeError, ValueError):
+        return None, "invalid_api_reward"
+    if reward_type != 0:
+        return None, "cashback_not_discount"
+
+    try:
+        percentage = float(reward.get("percentage") or 0)
+        fixed = float(reward.get("value") or 0) / _SHOPEE_MONEY_SCALE
+        minimum = float(reward.get("min_spend") or 0) / _SHOPEE_MONEY_SCALE
+        cap = float(reward.get("cap") or 0) / _SHOPEE_MONEY_SCALE
+    except (TypeError, ValueError, OverflowError):
+        return None, "invalid_api_reward"
+    if percentage > 0:
+        discount_type, discount = "porcentagem", percentage
+        maximum = cap or None
+        if discount >= 100:
+            return None, "implausible_discount"
+    elif fixed > 0:
+        discount_type, discount, maximum = "fixo", fixed, None
+    else:
+        return None, "missing_discount"
+
+    category = str(ui.get("icon_text") or "Todas as lojas").strip()
+    if not category:
+        category = "Todas as lojas"
+    evcode = base64.b64encode(voucher_code.encode("ascii")).decode("ascii")
+    query = urlencode({
+        "evcode": evcode,
+        "promotionId": promotion_id,
+        "signature": signature,
+        "source": signature_source,
+    })
+    label = (
+        f"{discount:g}% OFF" if discount_type == "porcentagem"
+        else f"R$ {discount:g} OFF"
+    )
+    starts_at = (
+        datetime.fromtimestamp(start_ts, tz=datetime_timezone.utc)
+        if start_ts else None
+    )
+    # 2147483640/2147483647 é o sentinela da plataforma para campanha sem fim
+    # materializado. Exibi-lo como "válido até 2038" seria uma promessa enganosa;
+    # a remoção é controlada pelo snapshot completo da fonte.
+    valid_until = (
+        datetime.fromtimestamp(end_ts, tz=datetime_timezone.utc)
+        if end_ts and end_ts < 2_147_400_000 else None
+    )
+    return {
+        "promotion_id": promotion_id,
+        "title": f"Cupom Shopee - {label} - {category}"[:255],
+        "url": f"https://shopee.com.br/voucher/details?{query}",
+        "category": category[:100],
+        "discount_type": discount_type,
+        "discount": round(discount, 2),
+        "minimum": round(minimum, 2) if minimum else None,
+        "maximum": round(maximum, 2) if maximum else None,
+        "restricted": bool(
+            voucher.get("exclusive_channel_type")
+            or ui.get("user_scope_error_message")
+        ),
+        "text": (
+            f"status={info.get('status')}; reward_type={reward_type}; "
+            f"claimed={quota.get('percentage_claimed')}; "
+            f"used={quota.get('percentage_used')}"
+        )[:1000],
+        "image": "",
+        "starts_at": starts_at,
+        "valid_until": valid_until,
+    }, ""
+
+
+def _api_voucher_entries(payloads):
+    """Extrai as linhas somente de respostas completas e sem erro da Shopee."""
+    entries = []
+    contract_seen = False
+    complete = True
+    for payload in payloads:
+        if not isinstance(payload, dict) or payload.get("error") not in (None, 0):
+            continue
+        collections = payload.get("data")
+        if not isinstance(collections, list):
+            continue
+        contract_seen = True
+        for collection in collections:
+            if isinstance(collection, dict):
+                rows = [
+                    row for row in (collection.get("vouchers") or [])
+                    if isinstance(row, dict)
+                ]
+                entries.extend(rows)
+                try:
+                    total = int(collection.get("total_count") or len(rows))
+                except (TypeError, ValueError):
+                    complete = False
+                else:
+                    if total > len(rows):
+                        complete = False
+    return entries, contract_seen, complete
+
+
 def _snapshot_state(cards_count, accepted_count, rejected):
     """Classifica o snapshot sem apagar inventario diante de quebra de schema."""
     schema_errors = sum(
@@ -164,7 +349,16 @@ class ShopeePublicCouponsSource(SourceAdapter):
                 return
         refreshed_state = None
         auth_required = False
-        with iniciar_browser(storage_state=state, headless=True) as (page, context):
+        api_responses = []
+        with iniciar_browser(
+            storage_state=state, headless=True, **_browser_context_options(),
+        ) as (page, context):
+            _economizar_banda(page)
+            page.on(
+                "response",
+                lambda response: api_responses.append(response)
+                if _VOUCHER_API_PATH in response.url else None,
+            )
             page.goto(COUPONS_URL, wait_until="domcontentloaded", timeout=45000)
             # O HTML inicial contem apenas o shell; os vouchers chegam no hydrate.
             # Esperar o contrato semantico evita declarar schema quebrado numa VM
@@ -182,9 +376,22 @@ class ShopeePublicCouponsSource(SourceAdapter):
             body = page.locator("body").inner_text(timeout=10000)
             folded = body.casefold()
             auth_required = _auth_required(page.url, body)
+            api_payloads = []
+            if not auth_required:
+                for response in api_responses:
+                    try:
+                        if response.status == 200:
+                            api_payloads.append(response.json())
+                    except Exception:
+                        continue
+            api_cards, api_contract_seen, api_complete = _api_voucher_entries(
+                api_payloads,
+            )
             if auth_required:
                 capture_public_diagnostic(page, self.slug, "auth_required")
                 cards = []
+            elif api_contract_seen:
+                cards = api_cards
             else:
                 cards = None
             if any(marker in folded for marker in (
@@ -216,7 +423,10 @@ class ShopeePublicCouponsSource(SourceAdapter):
             """)
             seen = set()
             for raw in cards:
-                row, reason = _parse_rendered_card(raw)
+                row, reason = (
+                    _parse_api_voucher(raw)
+                    if api_contract_seen else _parse_rendered_card(raw)
+                )
                 if row is None:
                     rejected[reason or "invalid"] += 1
                     continue
@@ -224,7 +434,8 @@ class ShopeePublicCouponsSource(SourceAdapter):
                     rejected["duplicate"] += 1
                     continue
                 seen.add(row["promotion_id"])
-                row["image"] = str(raw.get("image") or "").split("?", 1)[0][:1000]
+                if not api_contract_seen:
+                    row["image"] = str(raw.get("image") or "").split("?", 1)[0][:1000]
                 accepted.append(row)
             if not cards and not auth_required:
                 capture_public_diagnostic(page, self.slug, "voucher_cards_not_found")
@@ -238,6 +449,10 @@ class ShopeePublicCouponsSource(SourceAdapter):
         complete, health, schema_errors = _snapshot_state(
             len(cards), len(accepted), rejected,
         )
+        if api_contract_seen and not api_complete:
+            complete = False
+            health = "partial" if accepted else "degraded"
+            schema_errors += 1
         if auth_required:
             complete, health, schema_errors = False, "auth_required", 0
         self.last_metrics = {
@@ -277,6 +492,8 @@ class ShopeePublicCouponsSource(SourceAdapter):
                 content_type="promotion",
                 restricted=row["restricted"],
                 observed_at=observed,
+                starts_at=row.get("starts_at"),
+                valid_until=row.get("valid_until"),
                 evidence={
                     "transport": "shopee-official-coupon-page",
                     "association": "shopee-official-coupon-page",

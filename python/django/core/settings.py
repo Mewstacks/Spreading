@@ -498,6 +498,18 @@ AMAZON_PUBLIC_PAGES_PER_TERM = max(
 AMAZON_PUBLIC_PROXY_SERVER = os.getenv("AMAZON_PUBLIC_PROXY_SERVER", "").strip()
 AMAZON_PUBLIC_PROXY_USERNAME = os.getenv("AMAZON_PUBLIC_PROXY_USERNAME", "").strip()
 AMAZON_PUBLIC_PROXY_PASSWORD = os.getenv("AMAZON_PUBLIC_PROXY_PASSWORD", "").strip()
+# A mesma saída residencial PAYG pode atender Shopee e Amazon. Variáveis próprias
+# permitem separar provedores mais tarde; sem elas, reaproveitamos o proxy público
+# da Amazon para não duplicar mensalidade nem configuração.
+SHOPEE_PUBLIC_PROXY_SERVER = os.getenv(
+    "SHOPEE_PUBLIC_PROXY_SERVER", AMAZON_PUBLIC_PROXY_SERVER,
+).strip()
+SHOPEE_PUBLIC_PROXY_USERNAME = os.getenv(
+    "SHOPEE_PUBLIC_PROXY_USERNAME", AMAZON_PUBLIC_PROXY_USERNAME,
+).strip()
+SHOPEE_PUBLIC_PROXY_PASSWORD = os.getenv(
+    "SHOPEE_PUBLIC_PROXY_PASSWORD", AMAZON_PUBLIC_PROXY_PASSWORD,
+).strip()
 AFFILIATE_FEED_URL = os.getenv("AFFILIATE_FEED_URL", "")
 AFFILIATE_FEED_TOKEN = os.getenv("AFFILIATE_FEED_TOKEN", "")
 AWIN_INTEGRATION_ENABLED = os.getenv("AWIN_INTEGRATION_ENABLED", "1") == "1"

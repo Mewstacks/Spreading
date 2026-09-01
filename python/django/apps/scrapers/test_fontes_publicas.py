@@ -15,7 +15,9 @@ from apps.scrapers.sources.meliuz_coupons import MeliuzCouponsSource
 from apps.scrapers.sources.registry import SOURCES
 from apps.scrapers.sources.telegram_publico import TelegramPublicoSource
 from apps.scrapers.sources.shopee_public_coupons import (
-    ShopeePublicCouponsSource, _auth_required, _parse_rendered_card, _snapshot_state,
+    ShopeePublicCouponsSource, _api_voucher_entries, _auth_required,
+    _browser_context_options, _parse_api_voucher, _parse_rendered_card,
+    _snapshot_state,
 )
 
 TG_HTML = """
@@ -568,6 +570,112 @@ class ShopeePublicCouponsTests(TestCase):
         self.assertEqual(row["maximum"], 20)
         self.assertIn("promotionId=1496364873691136", row["url"])
 
+    def test_parseia_contrato_json_oficial_com_validade_e_quota(self):
+        row, reason = _parse_api_voucher({"voucher": {
+            "voucher_identifier": {
+                "promotion_id": 1492188714381312,
+                "voucher_code": "1433119157",
+                "signature": "a" * 64,
+                "signature_source": 0,
+            },
+            "info": {"status": 1},
+            "reward_info": {
+                "reward_type": 0, "min_spend": 19_900_000,
+                "value": 0, "percentage": 30, "cap": 2_500_000,
+            },
+            "time_info": {
+                "start_time": 1_700_000_000, "end_time": 1_900_000_000,
+                "has_expired": False,
+            },
+            "quota_info": {
+                "fully_redeemed": False, "fully_used": False,
+                "disabled": False, "percentage_claimed": 16,
+                "percentage_used": 42,
+            },
+            "ui_info": {"icon_text": "FULL"},
+            "exclusive_channel_type": 0,
+        }}, now_ts=1_800_000_000)
+
+        self.assertEqual(reason, "")
+        self.assertEqual(row["discount_type"], "porcentagem")
+        self.assertEqual(row["discount"], 30)
+        self.assertEqual(row["minimum"], 199)
+        self.assertEqual(row["maximum"], 25)
+        self.assertEqual(row["category"], "FULL")
+        self.assertEqual(int(row["valid_until"].timestamp()), 1_900_000_000)
+        self.assertIn("promotionId=1492188714381312", row["url"])
+        self.assertIn("evcode=", row["url"])
+
+        no_end = {"voucher": {
+            **({
+                "voucher_identifier": {
+                    "promotion_id": 2, "voucher_code": "456",
+                    "signature": "b" * 64, "signature_source": 0,
+                },
+                "info": {"status": 1},
+                "reward_info": {"reward_type": 0, "value": 2_000_000},
+                "time_info": {
+                    "start_time": 100, "end_time": 2_147_483_640,
+                    "has_expired": False,
+                },
+                "quota_info": {}, "ui_info": {},
+            })
+        }}
+        self.assertIsNone(
+            _parse_api_voucher(no_end, now_ts=200)[0]["valid_until"],
+        )
+
+    def test_json_oficial_rejeita_cashback_expirado_e_esgotado(self):
+        base = {
+            "voucher_identifier": {
+                "promotion_id": 1, "voucher_code": "123",
+                "signature": "c" * 64, "signature_source": 0,
+            },
+            "info": {"status": 1},
+            "reward_info": {
+                "reward_type": 1, "percentage": 20, "value": 0,
+            },
+            "time_info": {
+                "start_time": 100, "end_time": 300, "has_expired": False,
+            },
+            "quota_info": {"fully_redeemed": False, "disabled": False},
+            "ui_info": {},
+        }
+        row, reason = _parse_api_voucher({"voucher": base}, now_ts=200)
+        self.assertIsNone(row)
+        self.assertEqual(reason, "cashback_not_discount")
+
+        expired = {**base, "reward_info": {"reward_type": 0, "value": 2_000_000},
+                   "time_info": {**base["time_info"], "has_expired": True}}
+        self.assertEqual(
+            _parse_api_voucher({"voucher": expired}, now_ts=200)[1],
+            "unavailable",
+        )
+        exhausted = {**expired, "time_info": base["time_info"],
+                     "quota_info": {"fully_redeemed": True}}
+        self.assertEqual(
+            _parse_api_voucher({"voucher": exhausted}, now_ts=200)[1],
+            "unavailable",
+        )
+
+    def test_extrator_json_ignora_resposta_com_erro(self):
+        entries, seen, complete = _api_voucher_entries([
+            {"error": 90309999, "data": [{"vouchers": [{"voucher": {}}]}]},
+            {"error": None, "data": [{
+                "vouchers": [{"voucher": {"ok": 1}}], "total_count": 1,
+            }]},
+        ])
+
+        self.assertTrue(seen)
+        self.assertTrue(complete)
+        self.assertEqual(entries, [{"voucher": {"ok": 1}}])
+
+        _entries, _seen, complete = _api_voucher_entries([{
+            "error": None,
+            "data": [{"vouchers": [{"voucher": {}}], "total_count": 2}],
+        }])
+        self.assertFalse(complete)
+
     def test_parseia_percentual_e_milhar_brasileiro(self):
         row, _ = _parse_rendered_card(self._card(
             "MOVEIS\n12,5% OFF\nNas compras acima de R$1,6mil "
@@ -596,6 +704,24 @@ class ShopeePublicCouponsTests(TestCase):
 
     def test_fonte_oficial_consume_slot_de_chromium(self):
         self.assertTrue(ShopeePublicCouponsSource.requires_chromium)
+
+    def test_proxy_residencial_e_opcional_e_nao_vaza_credencial_na_url(self):
+        with self.settings(
+            SHOPEE_PUBLIC_PROXY_SERVER="https://proxy.example:8443",
+            SHOPEE_PUBLIC_PROXY_USERNAME="usuario",
+            SHOPEE_PUBLIC_PROXY_PASSWORD="segredo",
+        ):
+            self.assertEqual(_browser_context_options(), {"proxy": {
+                "server": "https://proxy.example:8443",
+                "username": "usuario", "password": "segredo",
+            }})
+        with self.settings(SHOPEE_PUBLIC_PROXY_SERVER=""):
+            self.assertEqual(_browser_context_options(), {})
+
+    def test_proxy_sem_protocolo_e_recusado(self):
+        with self.settings(SHOPEE_PUBLIC_PROXY_SERVER="proxy.example:8443"):
+            with self.assertRaisesRegex(ValueError, "incluir o protocolo"):
+                _browser_context_options()
 
     def test_login_exigido_na_fly_nao_e_classificado_como_inventario_vazio(self):
         self.assertTrue(_auth_required(
