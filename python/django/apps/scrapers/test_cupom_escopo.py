@@ -21,7 +21,8 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from apps.scrapers.models import (
-    CupomCodigo, CupomNormalizado, FonteIngestao, Produto, ProdutoCupom,
+    CupomCodigo, CupomDisponibilidade, CupomNormalizado, FonteIngestao, Produto,
+    ProdutoCupom,
 )
 
 # Um card SSR de vitrine: é o que /ofertas/cupons e a home entregam, e é o que o
@@ -681,6 +682,46 @@ class CupomDeComunidadeTests(TestCase):
         self.assertEqual(resultado["reason_code"], "community_uncorroborated")
         self.assertEqual(score_cupom(cupom), 0)
 
+    def test_duas_fontes_independentes_com_mesmo_desconto_corroboram(self):
+        from apps.scrapers.coupon_readiness import _preflight
+        from apps.scrapers.coupon_rules import (
+            comunidade_corroborada, corroboracoes_independentes_em_lote,
+        )
+        promobit = FonteIngestao.objects.create(
+            slug="promobit-cupons", marketplace="multiloja", nome="Promobit",
+        )
+        meliuz = FonteIngestao.objects.create(
+            slug="meliuz-cupons", marketplace="multiloja", nome="Méliuz",
+        )
+        primeiro = self._cupom(promobit, "CONSENSO20")
+        self._cupom(meliuz, "CONSENSO20")
+
+        corroboracoes = corroboracoes_independentes_em_lote([primeiro])
+
+        self.assertTrue(comunidade_corroborada(primeiro))
+        self.assertIn(("mercadolivre", "CONSENSO20"), corroboracoes)
+        self.assertIsNone(_preflight(
+            primeiro, self.usuario, corroboracoes=corroboracoes,
+        ))
+
+    def test_fontes_que_discordam_no_desconto_nao_corroboram(self):
+        from apps.scrapers.coupon_rules import corroboracoes_independentes_em_lote
+
+        promobit = FonteIngestao.objects.create(
+            slug="promobit-cupons", marketplace="multiloja", nome="Promobit",
+        )
+        meliuz = FonteIngestao.objects.create(
+            slug="meliuz-cupons", marketplace="multiloja", nome="Méliuz",
+        )
+        primeiro = self._cupom(promobit, "CONFLITO20")
+        segundo = self._cupom(meliuz, "CONFLITO20")
+        segundo.regras = {**segundo.regras, "valor_desconto": 15.0}
+        segundo.save(update_fields=["regras"])
+
+        corroboracoes = corroboracoes_independentes_em_lote([primeiro])
+
+        self.assertNotIn(("mercadolivre", "CONFLITO20"), corroboracoes)
+
     def test_corroboracao_em_lote_preserva_loja_e_codigo(self):
         from apps.scrapers.coupon_rules import (
             aguarda_corroboracao_oficial, corroboracoes_oficiais_em_lote,
@@ -746,3 +787,27 @@ class AvisoSemCodigoRepetidoTests(TestCase):
         self.assertEqual(codigos.count("CUPOMDOML"), 1)
         if escolhidos:
             self.assertEqual(escolhidos[0].id, oficial.id)
+
+    def test_escopos_descritos_diferente_nao_inflam_o_placar(self):
+        oficial = self._cupom(self.oficial)
+        comunidade = self._cupom(self.promobit)
+        comunidade.regras = {**comunidade.regras, "escopo": "produtos selecionados"}
+        comunidade.save(update_fields=["regras"])
+        from apps.scrapers.sources.persistence import record_coupon_observation
+
+        record_coupon_observation(oficial)
+        record_coupon_observation(comunidade)
+
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        projetar_disponibilidade_cupons(self.usuario)
+
+        projecoes = CupomDisponibilidade.objects.filter(
+            usuario=self.usuario, cupom__in=[oficial, comunidade],
+        )
+        self.assertEqual(
+            projecoes.filter(
+                stage="discarded", reason_code="lower_precedence_duplicate",
+            ).count(),
+            1,
+        )

@@ -21,7 +21,7 @@ from apps.scrapers.coupon_products import (
     mapa_relacoes_prontas,
 )
 from apps.scrapers.coupon_rules import (
-    codigo_publicavel, corroboracoes_oficiais_em_lote, coupon_mode_enabled,
+    codigo_publicavel, corroboracoes_independentes_em_lote, coupon_mode_enabled,
     cupom_publicavel, forca_evidencia, listagem_publica_ml, regras_do_cupom,
 )
 from apps.scrapers.coupon_links import coupon_link_verified_and_fresh
@@ -153,14 +153,14 @@ def _preflight(cupom, usuario, *, corroboracoes=None, validacoes_checkout=None,
     if checkout_status == "accepted":
         return None
     # Cupom de comunidade é alegação de terceiro — inclusive a leitura por IA de
-    # uma mensagem de canal. Ele soma evidência quando confirma o que uma fonte
-    # oficial já publicou; sozinho, não manda ninguém anunciar um código.
+    # uma mensagem de canal. Sozinho não publica; precisa de fonte direta, checkout
+    # ou consenso recente entre duas fontes independentes que concordem no desconto.
     from apps.scrapers.coupon_rules import aguarda_corroboracao_oficial
 
     if aguarda_corroboracao_oficial(cupom, corroboracoes=corroboracoes):
         return _resultado(
             "collected", "waiting", "community_uncorroborated",
-            "Cupom visto só em fonte de comunidade; aguardando confirmação oficial.",
+            "Cupom visto em uma só fonte; aguardando confirmação independente.",
         )
     return None
 
@@ -641,12 +641,30 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
         health_status__in=("healthy", "ok", "healthy_empty"),
     ).values_list("cupom_id", flat=True))
     winner_by_key = {}
+    winner_by_code = {}
     loser_coupon_ids = set()
+    coupons_by_id = {coupon.pk: coupon for coupon in cupons}
     for observation in observations:
         winner = winner_by_key.setdefault(
             observation.canonical_key, observation.cupom_id,
         )
         if winner != observation.cupom_id:
+            loser_coupon_ids.add(observation.cupom_id)
+        coupon = coupons_by_id.get(observation.cupom_id)
+        code = str(getattr(coupon, "codigo", "") or "").strip().upper()
+        if not code:
+            continue
+        # Um código digitável aparece com descrições de escopo diferentes em cada
+        # agregador. Para abundância e envio ele continua sendo UM código. A fonte
+        # de maior precedência (observations já está ordenada) representa o grupo;
+        # as demais viram evidência do consenso, não cupons extras no placar.
+        code_key = (
+            str(coupon.marketplace or "").casefold(), code,
+            coupon.owner_id,
+            coupon.organization_id if coupon.audience_scope == "organization" else None,
+        )
+        code_winner = winner_by_code.setdefault(code_key, observation.cupom_id)
+        if code_winner != observation.cupom_id:
             loser_coupon_ids.add(observation.cupom_id)
     preparadas, prontas = mapa_relacoes_prontas(usuario, ativacoes)
     preparos = {}
@@ -668,7 +686,7 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
     shopee_conectada = IntegracaoAfiliado.objects.filter(
         owner=usuario, provedor="shopee", habilitada=True, status="conectada",
     ).exists()
-    corroboracoes = corroboracoes_oficiais_em_lote(cupons)
+    corroboracoes = corroboracoes_independentes_em_lote(cupons)
     from apps.scrapers.coupon_validation import validacoes_recentes_por_codigo
     validacoes_checkout = validacoes_recentes_por_codigo(usuario, cupons)
     ml_tracking = None

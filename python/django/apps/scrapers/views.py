@@ -2562,7 +2562,8 @@ def top_promocoes(request):
             # merece confiança. Tudo é resolvido em lote para não reintroduzir o
             # antigo N+1 que travava esta página com milhares de cupons.
             from apps.scrapers.coupon_rules import (
-                corroboracoes_oficiais_em_lote, cupom_de_comunidade,
+                corroboracoes_independentes_em_lote, cupom_de_comunidade,
+                fontes_independentes_em_lote,
             )
             from apps.scrapers.maintenance import COUPON_MAX_AGE_HOURS
             from apps.scrapers.models import CupomFonteObservacao, CupomValidacao
@@ -2573,7 +2574,10 @@ def top_promocoes(request):
                 cupom_id__in=ids_pagina, status="accepted", no_purchase=True,
                 discount_amount__gt=0,
             ).values_list("cupom_id", flat=True))
-            corroboracoes = corroboracoes_oficiais_em_lote(cupons_catalogo)
+            fontes_independentes = fontes_independentes_em_lote(cupons_catalogo)
+            corroboracoes = corroboracoes_independentes_em_lote(
+                cupons_catalogo, fontes=fontes_independentes,
+            )
             observadas_desde = timezone.now() - timezone.timedelta(
                 hours=COUPON_MAX_AGE_HOURS,
             )
@@ -2599,7 +2603,10 @@ def top_promocoes(request):
                     str(cupom.marketplace or "").casefold(),
                     str(cupom.codigo or "").strip().upper(),
                 )
-                cupom.evidencia_fontes = max(1, fontes_por_cupom.get(cupom.pk, 0))
+                cupom.evidencia_fontes = max(
+                    1, fontes_por_cupom.get(cupom.pk, 0),
+                    fontes_independentes.get(chave, 0),
+                )
                 if cupom.pk in checkout_confirmado:
                     cupom.evidencia_rotulo = "Confirmado no carrinho"
                     cupom.evidencia_detalhe = (
@@ -2609,7 +2616,7 @@ def top_promocoes(request):
                 elif cupom_de_comunidade(cupom) and chave in corroboracoes:
                     cupom.evidencia_rotulo = "Corroborado"
                     cupom.evidencia_detalhe = (
-                        "O código da comunidade também foi observado em fonte direta e recente."
+                        "O código e o desconto concordam em fontes independentes e recentes."
                     )
                     cupom.evidencia_css = "badge-green"
                 elif slug == "manual-private":

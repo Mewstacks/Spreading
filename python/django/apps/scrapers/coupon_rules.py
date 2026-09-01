@@ -7,7 +7,9 @@ presume que um valor externo seja string.
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 
 from django.db.models import Q
 from django.conf import settings
@@ -405,7 +407,7 @@ def cupom_de_comunidade(cupom) -> bool:
 
 
 def comunidade_corroborada(cupom) -> bool:
-    """Outra fonte, fora da comunidade, publicou este mesmo código?
+    """Há fonte direta ou duas fontes independentes concordando no código?
 
     É a condição que o próprio projeto escreveu e nunca aplicou. Em produção,
     20/08/2026, o aviso em lote levaria ao grupo o código `TODOSITE100` —
@@ -439,7 +441,7 @@ def comunidade_corroborada(cupom) -> bool:
     # prova oficial quando a linha sobrevivente continuava apontando para a fonte
     # comunitária. Evidência antiga não vale: usa a mesma janela de 48h do catálogo.
     cutoff = timezone.now() - timedelta(hours=COUPON_MAX_AGE_HOURS)
-    return CupomFonteObservacao.objects.filter(
+    oficial_observada = CupomFonteObservacao.objects.filter(
         organization_id=getattr(cupom, "organization_id", None),
         cupom__marketplace=getattr(cupom, "marketplace", ""),
         cupom__codigo__iexact=codigo,
@@ -449,6 +451,12 @@ def comunidade_corroborada(cupom) -> bool:
     ).exclude(
         fonte__slug__in=FONTES_COMUNIDADE,
     ).filter(cupons_frescos_q(prefix="cupom__")).exists()
+    if oficial_observada:
+        return True
+    chave = (
+        str(getattr(cupom, "marketplace", "") or "").casefold(), codigo,
+    )
+    return fontes_independentes_em_lote([cupom]).get(chave, 0) >= 2
 
 
 def corroboracoes_oficiais_em_lote(cupons) -> set[tuple[str, str]]:
@@ -510,6 +518,94 @@ def corroboracoes_oficiais_em_lote(cupons) -> set[tuple[str, str]]:
         for marketplace, codigo in observacoes
     )
     return corroboradas
+
+
+def _assinatura_desconto_corroboravel(regras):
+    """Termos mínimos que duas fontes precisam afirmar de forma compatível."""
+    regras = regras if isinstance(regras, Mapping) else {}
+    tipo = _texto(regras.get("tipo_desconto")).casefold()
+    try:
+        valor = Decimal(str(regras.get("valor_desconto"))).quantize(Decimal("0.01"))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if tipo not in {"fixo", "porcentagem"} or valor <= 0:
+        return None
+    return tipo, str(valor)
+
+
+def fontes_independentes_em_lote(cupons) -> dict[tuple[str, str], int]:
+    """Conta consenso recente por loja+código, exigindo desconto compatível.
+
+    Duas páginas que repetem o mesmo código mas discordam entre R$ 20 e 20% não
+    são confirmação. A contagem é por fonte, não por linha, e nunca cruza dados
+    privados ou organizações.
+    """
+    pares = {
+        (str(getattr(c, "marketplace", "") or "").casefold(),
+         _texto(getattr(c, "codigo", "")).upper())
+        for c in cupons if getattr(c, "codigo", "")
+    }
+    if not pares:
+        return {}
+    from datetime import timedelta
+    from django.db.models.functions import Upper
+    from django.utils import timezone
+    from apps.scrapers.maintenance import COUPON_MAX_AGE_HOURS, cupons_frescos_q
+    from apps.scrapers.models import CupomFonteObservacao, CupomNormalizado
+
+    marketplaces = {marketplace for marketplace, _ in pares}
+    codigos = {codigo for _, codigo in pares}
+    grupos = defaultdict(set)
+
+    catalogo = (CupomNormalizado.objects.filter(
+        marketplace__in=marketplaces, estado="ativo", organization__isnull=True,
+        owner__isnull=True,
+    ).annotate(
+        codigo_normalizado=Upper("codigo"),
+    ).filter(
+        codigo_normalizado__in=codigos,
+    ).filter(cupons_frescos_q()).values_list(
+        "marketplace", "codigo_normalizado", "fonte_id", "regras",
+    ))
+    for marketplace, codigo, fonte_id, regras in catalogo:
+        par = (str(marketplace or "").casefold(), str(codigo or "").upper())
+        assinatura = _assinatura_desconto_corroboravel(regras)
+        if par in pares and assinatura:
+            grupos[(par, assinatura)].add(fonte_id)
+
+    cutoff = timezone.now() - timedelta(hours=COUPON_MAX_AGE_HOURS)
+    observacoes = (CupomFonteObservacao.objects.filter(
+        organization__isnull=True, cupom__marketplace__in=marketplaces,
+        cupom__estado="ativo", outcome="accepted", observed_at__gte=cutoff,
+    ).annotate(
+        codigo_normalizado=Upper("cupom__codigo"),
+    ).filter(
+        codigo_normalizado__in=codigos,
+    ).filter(cupons_frescos_q(prefix="cupom__")).values_list(
+        "cupom__marketplace", "codigo_normalizado", "fonte_id", "cupom__regras",
+    ))
+    for marketplace, codigo, fonte_id, regras in observacoes:
+        par = (str(marketplace or "").casefold(), str(codigo or "").upper())
+        assinatura = _assinatura_desconto_corroboravel(regras)
+        if par in pares and assinatura:
+            grupos[(par, assinatura)].add(fonte_id)
+
+    resultado = {}
+    for (par, _assinatura), fontes in grupos.items():
+        resultado[par] = max(resultado.get(par, 0), len(fontes))
+    return resultado
+
+
+def corroboracoes_independentes_em_lote(
+        cupons, *, fontes=None) -> set[tuple[str, str]]:
+    """Fonte direta OU consenso de duas fontes independentes e concordantes."""
+    oficiais = corroboracoes_oficiais_em_lote(cupons)
+    fontes = fontes if fontes is not None else fontes_independentes_em_lote(cupons)
+    consenso = {
+        par for par, total in fontes.items()
+        if total >= 2
+    }
+    return oficiais | consenso
 
 
 def aguarda_corroboracao_oficial(cupom, *, corroboracoes=None) -> bool:

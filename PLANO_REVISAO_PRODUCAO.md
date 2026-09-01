@@ -262,6 +262,33 @@ Fontes primárias consultadas:
   deu errado”. Isso agora é falha técnica, nunca inventário vazio. Foi preparada
   saída residencial PAYG exclusiva para páginas públicas, bloqueando imagens,
   fontes e mídia para conter banda; cookies de compradores não passam pelo proxy.
+- Acelerador Amazon e prova v294: depois da primeira navegação aceita, a paginação
+  usa a própria sessão Amazon e extrai cada página em uma única avaliação, sem
+  baixar imagens. Em amostra real local, três páginas de `casa` caíram para 4,70 s
+  e encontraram quatro cupons oficiais; 36 páginas em 12 categorias levaram 46,19 s,
+  com 739 ofertas e 28 cupons oficiais. A fatia padrão passou de dois termos de
+  produto para quatro categorias amplas, rotativas e específicas para cupons. A
+  suíte completa está verde em 1.406 testes. No primeiro canário Fly, a coleta
+  respeitou duas lanes já enfileiradas, cedeu após uma página em 3,46 s e ainda
+  persistiu 35 ofertas e dois cupons. Na janela seguinte, a fatia completa de 12
+  páginas terminou saudável em 17,13 s: 230 ofertas, 18 cupons oficiais, uma única
+  navegação e 11 paginações internas em 12,10 s. A conta `lules` subiu de 12 para
+  30 cupons Amazon prontos, sem proxy e sem custo adicional. Uma sonda mais funda
+  de dez páginas de `brinquedos` encontrou 13 cupons, mas apenas quatro eram novos,
+  elevando a conta a 34; a evidência de rendimento decrescente favorece ampliar
+  categorias antes de simplesmente aumentar profundidade.
+- Evidência visível v294: a vitrine final agrupa prova por cupom e mostra confirmação
+  no carrinho, corroboração, observação direta na loja ou fonte estruturada, além
+  da quantidade de fontes e da recência. A página real de `lules` respondeu HTTP
+  200 em 739 ms (244 KB); os 20 cupons exibidos tinham recência, três estavam
+  marcados como observados na loja e 17 como provenientes de fonte estruturada.
+- Consenso independente preparado para o próximo deploy: a auditoria dos códigos
+  retidos encontrou dez códigos Amazon repetidos em duas ou três fontes distintas;
+  todos os dez concordam também no tipo e valor do desconto. O gate agora aceita
+  fonte direta, checkout sem compra ou ao menos duas fontes públicas independentes,
+  recentes e concordantes. Mesmo código com escopos descritos de forma diferente
+  conta uma vez; discordância entre valor fixo e percentual continua bloqueada.
+  A suíte completa passou em 1.408 testes e a regressão focada em mais 100 testes.
 
 ## Gates de deploy desta revisão
 
