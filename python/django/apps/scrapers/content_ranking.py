@@ -188,6 +188,7 @@ def _coupon_candidates(config, limit):
     now = timezone.now()
     from apps.scrapers.coupon_rules import cupons_visiveis_q
     from apps.scrapers.maintenance import cupons_frescos_q
+    from apps.scrapers.models import CupomDisponibilidade
 
     query = CupomNormalizado.objects.select_related(
         "fonte", "integracao", "programa").filter(estado="ativo").filter(
@@ -221,6 +222,20 @@ def _coupon_candidates(config, limit):
         "cupom_normalizado_id", flat=True)
     query = query.exclude(id__in=sent_ids)
 
+    # Prontidao vem ANTES do recorte dos mais recentes. Em producao a ingestao
+    # costuma colocar dezenas de cupons novos na frente da fila enquanto a
+    # validacao/preparacao ainda os percorre. Recortar 80 primeiro e intersectar
+    # com ``ready`` depois fazia esse backlog ainda pendente expulsar todos os
+    # cupons ja comprovados do pool de envio (1.498 publicaveis e 53 prontos para
+    # uma conta, mas zero candidato). Quando ainda nao existe nenhuma projecao
+    # pronta no escopo, mantemos o fallback legado de ``ids_cupons_prontos``.
+    ready_scope = CupomDisponibilidade.objects.filter(
+        usuario=config.owner, channel="whatsapp", stage="ready",
+        cupom_id__in=query.values("id"),
+    )
+    if ready_scope.exists():
+        query = query.filter(id__in=ready_scope.values("cupom_id"))
+
     # POOL POR LOJA, e não os 80 mais recentes no geral. As campanhas do Mercado
     # Livre chegam aos milhares e são sempre as mais recentes: uma amostragem global
     # levava um pool inteiro de ML e nenhum cupom da Amazon chegava a ser pontuado —
@@ -244,7 +259,6 @@ def _coupon_candidates(config, limit):
         aguarda_corroboracao_oficial, corroboracoes_oficiais_em_lote,
         desconto_para_comprador,
     )
-    from apps.scrapers.models import CupomDisponibilidade
     prontos = ids_cupons_prontos(config.owner, pool)
     ready_ids = set(
         CupomDisponibilidade.objects.filter(

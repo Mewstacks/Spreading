@@ -478,6 +478,48 @@ class SelecaoAutomaticaEquilibradaTests(TestCase):
         self.assertIn("amazon", lojas)
         self.assertIn("mercadolivre", lojas)
 
+    def test_cupom_pronto_antigo_nao_e_expulso_por_backlog_pendente(self):
+        """A fila nova sem validacao nao pode esconder o estoque ja pronto."""
+        from apps.scrapers.content_ranking import _coupon_candidates
+
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML", "status": "ok"},
+        )
+        agora = timezone.now()
+        pronto = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="ml-pronto-antigo", marketplace="mercadolivre",
+            titulo="Cupom validado que deve ser enviado", codigo="PRONTO25",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 25},
+        )
+        CupomNormalizado.objects.filter(pk=pronto.pk).update(
+            ultima_observacao=agora - timezone.timedelta(hours=6),
+        )
+        for i in range(90):
+            CupomNormalizado.objects.create(
+                fonte=fonte, external_id=f"ml-pendente-{i}", marketplace="mercadolivre",
+                titulo=f"Cupom ainda pendente {i}", codigo=f"PEND{i:03d}",
+                regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                        "valor_desconto": 30},
+            )
+        CupomDisponibilidade.objects.create(
+            organization=self.user.perfil.active_organization,
+            usuario=self.user, cupom=pronto, channel="whatsapp",
+            use_mode="code_notice", stage="ready",
+        )
+        config = SimpleNamespace(
+            owner=self.user, grupo_id="g@g.us", marketplace="mercadolivre",
+            macro_categoria="", termo_busca="", horas_cooldown=24,
+            min_desconto_percent=10, incluir_restritos=True,
+            incluir_sem_desconto=True,
+            programas=SimpleNamespace(values_list=lambda *a, **k: []),
+        )
+
+        candidatos = _coupon_candidates(config, limit=8)
+
+        self.assertEqual([c.obj.pk for c in candidatos], [pronto.pk])
+
     def test_comissao_shopee_nao_entra_no_ranking_como_desconto(self):
         from types import SimpleNamespace
         from apps.scrapers.content_ranking import _coupon_candidates
