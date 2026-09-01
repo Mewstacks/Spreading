@@ -371,6 +371,21 @@ Fontes primárias consultadas:
   a meta mínima de 100 com 70 cupons de ativação e 32 avisos de código; Shopee segue
   como o único déficit de abundância publicável, com 40 elegíveis bloqueados pela
   integração desconectada.
+- Contrato oficial Shopee no deploy v309: a investigação de rede identificou o POST
+  `/api/v1/microsite/get_vouchers_by_collections`, que devolve `promotion_id`, tipo e
+  valor do benefício, mínimo, teto, validade, quota e assinatura pública. O coletor
+  agora prefere esse JSON ao texto visual, rejeita cashback, expirado, esgotado,
+  assinatura inválida e resposta truncada. Na prova residencial real, 14 vouchers
+  produziram nove a dez descontos válidos conforme a quota instantânea; datas-limite
+  artificiais de 2038 não são exibidas como promessa de validade.
+- Bloqueio Shopee comprovado: o mesmo endpoint oficial no worker GRU respondeu HTTP
+  403 com `error=90309999` e redirecionamento anti-tráfego. A v309 preserva o catálogo
+  nesse estado e aceita uma saída residencial opcional, compartilhada por padrão com
+  a Amazon; imagens, fontes e mídia são bloqueadas para reduzir banda. A suíte ficou
+  verde em 1.443/1.443 testes Django e 169/169 Node, e web/worker v309 permaneceram
+  saudáveis com `/healthz` HTTP 200. Sem credencial de afiliado e sem sessão/proxy da
+  Shopee, os 40 candidatos corroborados ainda não podem virar links comissionados nem
+  ser validados em checkout.
 
 ## Gates de deploy desta revisão
 
