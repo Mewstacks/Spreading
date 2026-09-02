@@ -7390,6 +7390,18 @@ class RenovacaoDeSessaoPersistidaTests(TestCase):
 
         self.assertNotIn("sessao_gravada", ordem)
 
+    def test_estado_entregue_diretamente_nao_e_capturado_duas_vezes(self):
+        """Amazon/Shopee persistem o contexto no proprio adaptador."""
+        from apps.scrapers.auxiliar import iniciar_browser
+
+        ordem = []
+        with self._cenario(ordem, None):
+            with iniciar_browser(storage_state={"cookies": []}) as (_p, contexto):
+                pass
+
+            contexto.storage_state.assert_not_called()
+        self.assertNotIn("sessao_gravada", ordem)
+
     def test_recusa_de_sessao_nao_sobrescreve_a_credencial(self):
         # A tela de login do portal limpa/rotaciona o SSO. Gravar os cookies que ela
         # deixou trocava a credencial boa pela degradada, e a corrida seguinte já

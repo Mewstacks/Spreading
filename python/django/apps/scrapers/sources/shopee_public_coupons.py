@@ -27,10 +27,14 @@ from .base import IngestedItem, SourceAdapter, normalizar_dinheiro
 
 COUPONS_URL = "https://shopee.com.br/m/cupom-de-desconto"
 # A Shopee troca o sufixo desta microsite sem redirecionar a rota anterior. A
-# vitrine publicada e indexada em 02/09/2026 é a v39; manter a v23 aqui fazia o
+# vitrine publicada e indexada em 02/09/2026 é a v98; manter a v39 aqui fazia o
 # Chromium autenticar normalmente, mas consultar uma coleção editorial antiga.
-DAILY_STORE_COUPONS_URL = "https://shopee.com.br/m/cupom-de-desconto-v39"
-COUPON_PAGES = (COUPONS_URL, DAILY_STORE_COUPONS_URL)
+DAILY_STORE_COUPONS_URL = "https://shopee.com.br/m/cupom-de-desconto-v98"
+# A rota diária é uma navegação de aquecimento barata: na Fly a Shopee por vezes
+# desafia a primeira página do contexto, mas reconhece a conta na seguinte. Abrir
+# a coleção de vendedores antes da vitrine geral reduz esse falso bloqueio sem
+# proxy e sem alterar a sessão persistida.
+COUPON_PAGES = (DAILY_STORE_COUPONS_URL, COUPONS_URL)
 _OFF_PERCENT = re.compile(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*%\s*OFF\b", re.I)
 _OFF_FIXED = re.compile(r"R\$\s*([\d.,]+\s*(?:mil)?)\s*OFF\b", re.I)
 _MINIMUM = re.compile(r"(?:acima de|a partir de)\s*R\$\s*([\d.,]+\s*(?:mil)?)", re.I)

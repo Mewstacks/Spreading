@@ -786,7 +786,7 @@ class ShopeePublicCouponsTests(TestCase):
         self.assertTrue(ShopeePublicCouponsSource.requires_chromium)
 
     def test_fonte_oficial_agrega_vitrine_geral_e_cupons_diarios(self):
-        self.assertTrue(DAILY_STORE_COUPONS_URL.endswith("-v39"))
+        self.assertTrue(DAILY_STORE_COUPONS_URL.endswith("-v98"))
 
         class Locator:
             def __init__(self, page, selector):
