@@ -17,7 +17,8 @@ from apps.scrapers.sources.meliuz_coupons import MeliuzCouponsSource
 from apps.scrapers.sources.registry import SOURCES
 from apps.scrapers.sources.telegram_publico import TelegramPublicoSource
 from apps.scrapers.sources.shopee_public_coupons import (
-    ShopeePublicCouponsSource, _api_voucher_entries, _auth_required,
+    DAILY_STORE_COUPONS_URL, ShopeePublicCouponsSource,
+    _api_voucher_entries, _auth_required,
     _browser_context_options, _parse_api_voucher, _parse_rendered_card,
     _snapshot_state,
 )
@@ -785,6 +786,8 @@ class ShopeePublicCouponsTests(TestCase):
         self.assertTrue(ShopeePublicCouponsSource.requires_chromium)
 
     def test_fonte_oficial_agrega_vitrine_geral_e_cupons_diarios(self):
+        self.assertTrue(DAILY_STORE_COUPONS_URL.endswith("-v39"))
+
         class Locator:
             def __init__(self, page, selector):
                 self.page = page

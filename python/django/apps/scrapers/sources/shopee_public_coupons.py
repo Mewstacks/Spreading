@@ -26,7 +26,10 @@ from .base import IngestedItem, SourceAdapter, normalizar_dinheiro
 
 
 COUPONS_URL = "https://shopee.com.br/m/cupom-de-desconto"
-DAILY_STORE_COUPONS_URL = "https://shopee.com.br/m/cupom-de-desconto-v23"
+# A Shopee troca o sufixo desta microsite sem redirecionar a rota anterior. A
+# vitrine publicada e indexada em 02/09/2026 é a v39; manter a v23 aqui fazia o
+# Chromium autenticar normalmente, mas consultar uma coleção editorial antiga.
+DAILY_STORE_COUPONS_URL = "https://shopee.com.br/m/cupom-de-desconto-v39"
 COUPON_PAGES = (COUPONS_URL, DAILY_STORE_COUPONS_URL)
 _OFF_PERCENT = re.compile(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*%\s*OFF\b", re.I)
 _OFF_FIXED = re.compile(r"R\$\s*([\d.,]+\s*(?:mil)?)\s*OFF\b", re.I)
