@@ -577,6 +577,22 @@ Fontes primárias consultadas:
   `shopee-public-coupons`, cujos dois ciclos falharam fechados como
   `auth_required`/`degraded`. O WhatsApp da `lules` está `inactive`, a sessão ML
   está expirada e a integração afiliada Shopee permanece ausente.
+- Deploy v322 / WhatsApp v90: as sessões de compras e relatórios Amazon/Shopee
+  passaram a contar no máximo uma suspeita a cada 15 minutos, sob lock de banco;
+  rajadas simultâneas de web/workers e resultados inconclusivos não consomem o
+  limite de três ciclos. Sincronizações autenticadas de relatório agora persistem
+  o `storage_state` renovado antes de fechar o Chromium. No WhatsApp, uma
+  credencial pareada que esgota a escada curta continua preservada e, depois de
+  15 minutos, o reconciliador assinado inicia automaticamente uma nova escada;
+  logout/revogação inequívoca continua exigindo QR. Suítes integrais:
+  1.473/1.473 Django e 170/170 Node.
+- Prova de produção v322/v90: releases completas, web/worker/WA iniciados, checks
+  do Fly verdes e `/healthz` HTTP 200. O canário read-only da `lules` aprovou
+  novamente 3/3 mensagens e os quatro alertas acionáveis do funil ficaram em
+  zero; somente a fonte oficial Shopee segue `auth_required`. A reconciliação
+  pós-deploy confirmou o registro WhatsApp consistente, mas sem credencial
+  pareada no volume (`inactive`); ML continua realmente expirado e a conta ainda
+  não possui sessões Amazon/Shopee nem integração afiliada Shopee.
 
 ## Gates de deploy desta revisão
 
