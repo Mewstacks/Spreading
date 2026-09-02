@@ -528,6 +528,21 @@ Fontes primárias consultadas:
   uma coleta cega nem expirar catálogo. A conferência posterior preservou 895/124/0
   cupons prontos para ML/Amazon/Shopee, 260/229/223 descobertas recentes e os 49
   cupons Shopee elegíveis bloqueados por `shopee_integration_disconnected`.
+- Deploy v319: as mensagens de cupom deixaram o CTA genérico “clique e navegue” e
+  passaram a dizer a ação reproduzível para cada resgate. Código digitável manda
+  aplicar no checkout; ativação manda ativar e ver os itens; mensagens com produtos
+  apontam para os links acima e exigem confirmação do desconto antes do pagamento.
+  Isso também remove a ambiguidade “ative no link” quando havia vários links de
+  produto. Suítes integrais: 1.466/1.466 Django e 169/169 Node.
+- Prova de produção v319: release, `check --deploy`, migrações, FORCE RLS nas 37
+  tabelas, rolling deploy, web/worker v319 e `/healthz` passaram. O canário
+  read-only da conta `lules` aprovou 3/3 regras (ML, Amazon e mista), sempre com
+  cupom em primeiro lugar, link afiliado verificado e presente, resgate explícito
+  e mensagem abaixo do limite do WhatsApp. O inventário ficou em 895/125/0 cupons
+  prontos e 269/230/223 descobertas em 24 h para ML/Amazon/Shopee. Os 49 cupons
+  Shopee elegíveis continuam bloqueados exclusivamente pela integração afiliada
+  desconectada da conta; o WhatsApp gerou QR novo, mas ainda aguarda leitura para
+  o canário de transporte real.
 
 ## Gates de deploy desta revisão
 
