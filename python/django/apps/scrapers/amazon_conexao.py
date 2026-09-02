@@ -32,7 +32,7 @@ from apps.scrapers.ml_live_transport import (
     pode_inspecionar,
 )
 from apps.scrapers.report_sessions import has_report_session, save_report_state
-from apps.accounts.tenant import organization_job_sem_transacao
+from apps.accounts.tenant import executar_no_tenant, organization_job_sem_transacao
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +165,26 @@ def _abrir_login(page, *, shopper=False):
     )
 
 
+def _salvar_estado_capturado(user, shopper, estado):
+    """Persiste a sessão reinstalando o tenant suspenso pelo live view.
+
+    O navegador roda numa thread própria por vários minutos e, de propósito, sem
+    transação aberta. Nesse modo o decorator deixa a organização apenas anotada;
+    toda ida ao ORM precisa passar por ``executar_no_tenant`` para reinstalar a
+    GUC usada pelas policies de RLS do PostgreSQL.
+
+    Sem essa ponte o login era validado pela Amazon/Shopee, o Chromium fechava e a
+    gravação de ``BrowserSession`` falhava com ``InsufficientPrivilege`` — ou seja,
+    o usuário concluía o login e mesmo assim recebia um código de erro.
+    """
+    return executar_no_tenant(
+        save_report_state,
+        user,
+        _session_provider(shopper),
+        estado,
+    )
+
+
 # Sem transação: organization_job envolveria os até 10 min do live view num
 # transaction.atomic(), deixando uma conexão `idle in transaction` enquanto o
 # usuário digita a senha.
@@ -293,7 +313,7 @@ def _worker(user, shopper=False):
                                    _store_name(shopper), uid, exc_info=True)
 
         if estado_capturado is not None:
-            save_report_state(user, _session_provider(shopper), estado_capturado)
+            _salvar_estado_capturado(user, shopper, estado_capturado)
             _set(uid, shopper=shopper, fase="conectado", erro="", aviso="",
                  salvar_agora=False)
     except Exception as exc:
