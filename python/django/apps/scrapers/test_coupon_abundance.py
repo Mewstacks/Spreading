@@ -127,6 +127,22 @@ class AbundanciaTests(TestCase):
         self.assertFalse(loja["deficit_provado"])
         self.assertIn("fonte-amazon", loja["fontes_nao_exauridas"])
 
+    def test_capacity_yielded_degradada_e_incompleta_nao_bloqueada(self):
+        """Ceder o Chromium prova cooperacao, nao bloqueio da origem."""
+        self._execucao(
+            "amazon",
+            metricas={"stop_reason": "capacity_yielded", "complete": False},
+            health="degraded", status="ok",
+        )
+
+        item = next(
+            row for row in exaustao_das_fontes()["amazon"]
+            if row["fonte"] == self.fontes["amazon"].slug
+        )
+
+        self.assertEqual(item["exaustao"], "incompleta")
+        self.assertEqual(item["stop_reason"], "capacity_yielded")
+
     def test_deficit_provado_exige_todas_as_fontes_exauridas(self):
         # A prova é global para a loja: desabilita as fontes multiloja sem
         # execução que o catálogo de teste já traz, deixando uma única fonte.

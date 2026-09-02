@@ -35,7 +35,9 @@ MARKETPLACES_META = ("mercadolivre", "amazon", "shopee")
 # que declarou vazio com schema íntegro.
 PARADAS_EXAUSTIVAS = frozenset({"no_new_items", "end_of_source", "healthy_empty"})
 # Motivos de parada que são orçamento nosso, não fim do inventário da loja.
-PARADAS_POR_ORCAMENTO = frozenset({"max_pages", "max_items", "max_seconds"})
+PARADAS_POR_ORCAMENTO = frozenset({
+    "max_pages", "max_items", "max_seconds", "capacity_yielded",
+})
 
 
 def meta_por_marketplace() -> int:
@@ -213,12 +215,14 @@ def _exaustao_da_execucao(execucao):
     metricas = execucao.metricas if isinstance(execucao.metricas, dict) else {}
     parada = str(metricas.get("stop_reason") or "")
     saude = str(execucao.health_status or "")
-    if saude in {"blocked", "degraded"} or execucao.status in {"error", "blocked"}:
+    if saude == "blocked" or execucao.status in {"error", "blocked"}:
         return "bloqueada", parada
     if metricas.get("complete") is True or parada in PARADAS_EXAUSTIVAS:
         return "exaurida", parada
     if parada in PARADAS_POR_ORCAMENTO:
         return "incompleta", parada
+    if saude == "degraded":
+        return "bloqueada", parada
     if saude == "healthy_empty":
         return "exaurida", parada or "healthy_empty"
     return "desconhecida", parada

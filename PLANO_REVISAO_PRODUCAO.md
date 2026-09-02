@@ -594,6 +594,19 @@ Fontes primárias consultadas:
   pareada no volume (`inactive`); ML continua realmente expirado e a conta ainda
   não possui sessões Amazon/Shopee nem integração afiliada Shopee.
 
+- Deploy v323: a busca pública Amazon deixou de aguardar o evento global
+  `DOMContentLoaded`, que ficava preso em scripts de terceiros mesmo depois de o
+  HTML útil chegar. A navegação agora confirma o `commit`, espera diretamente o
+  contrato dos cards e ainda lê título/corpo quando os cards não aparecem, para
+  CAPTCHA/429/página de erro continuarem falhando fechados. Duas execuções
+  persistentes no Fly processaram 15 produtos e encontraram dois cupons oficiais;
+  a melhor página caiu de 41,6 s para 5,4 s e a descoberta Amazon da `lules` subiu
+  de 233 para 235 em 24 h. A segunda página levou 30,2 s, mas concluiu sem falha e
+  cedeu o Chromium cooperativamente. O relatório de abundância passou a classificar
+  `capacity_yielded` como coleta incompleta, e não como origem bloqueada. Suíte
+  integral da mudança de transporte: 1.475/1.475 Django; teste direcionado da
+  classificação: 16/16.
+
 ## Gates de deploy desta revisão
 
 - [x] Suítes Django e Node integralmente verdes.
