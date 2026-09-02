@@ -19,6 +19,12 @@ from apps.accounts.models import BrowserSession, organization_for_user
 
 
 PROBE_FALHAS_PARA_DESCONECTAR = 3
+# Web e workers podem observar a mesma sessão ao mesmo tempo. Sem uma janela,
+# uma única tela de login/challenge vista por três processos consumia as três
+# suspeitas em segundos e fazia Amazon/Shopee parecerem "desconectadas sozinhas".
+# A política é a mesma da sessão ML: só ciclos temporalmente independentes
+# contam como novas evidências de expiração.
+PROBE_JANELA_S = 15 * 60
 VALID_PROVIDERS = frozenset(value for value, _ in BrowserSession.PROVIDERS)
 
 
@@ -132,16 +138,43 @@ def registrar_veredito(usuario, marketplace: str, resultado: str,
     with transaction.atomic():
         record = BrowserSession.objects.select_for_update().filter(
             organization=organization, user=usuario, provider=provider,
-        ).only("id", "probe_failures").first()
+        ).only(
+            "id", "status", "probe_failures", "probe_result",
+            "probe_reason", "last_probe_at",
+        ).first()
         if record is None:
             return {"falhas": 0, "resultado": "", "motivo": ""}
-        failures = 0 if resultado == "conectado" else int(record.probe_failures) + 1
+        agora = timezone.now()
+        failures = int(record.probe_failures or 0)
+        if resultado == "conectado":
+            failures = 0
+            status = "active"
+        elif resultado == "suspeito":
+            anterior = record.last_probe_at
+            if (
+                record.probe_result != "suspeito"
+                or anterior is None
+                or (agora - anterior).total_seconds() >= PROBE_JANELA_S
+            ):
+                failures += 1
+            status = "suspect" if failures else record.status
+        else:
+            # Timeout, CAPTCHA/challenge e falha de transporte não provam logout.
+            # Também não podem sobrescrever `last_probe_at/probe_result`: esses dois
+            # campos formam o debounce da última suspeita conclusiva. Se um challenge
+            # entrasse no meio, a suspeita seguinte pareceria um ciclo novo e a
+            # rajada voltaria a derrubar a sessão.
+            return {
+                "falhas": failures,
+                "resultado": str(record.probe_result or ""),
+                "motivo": str(record.probe_reason or ""),
+            }
         reason = redact_log_text(motivo or "")[:200]
         record.probe_failures = failures
         record.probe_result = str(resultado or "")[:24]
         record.probe_reason = reason
-        record.last_probe_at = timezone.now()
-        record.status = "active" if resultado == "conectado" else "suspect"
+        record.last_probe_at = agora
+        record.status = status
         record.save(update_fields=(
             "probe_failures", "probe_result", "probe_reason", "last_probe_at",
             "status", "updated_at",

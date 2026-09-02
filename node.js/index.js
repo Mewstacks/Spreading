@@ -15,6 +15,7 @@ const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 const {
     reconnectDelay, shouldPurgeAuth, reconnectAction, isRevokedReason, ocupaSlot,
+    deveReviverRecuperacaoPausada,
     groupRetryDelay, qrBootstrapOutcome, preAuthEventIsStale, estadoIndicaQueda,
     keepaliveIndicaQueda, KEEPALIVE_FALHAS_ATE_QUEDA,
     deveReciclarAposTimeoutDeEnvio, veredictoDeTimeoutDeEnvio, STALLS_ATE_RECICLAR,
@@ -187,6 +188,11 @@ const RECONNECT_MAX_DELAY_MS = parseInt(process.env.RECONNECT_MAX_DELAY_MS, 10) 
 // dois ciclos (retry -> purge -> retry) ~= 6,5min ate a sessao expirar de vez.
 // Sem teto, o contador so crescia e o usuario via "tentativa 38..." para sempre.
 const RECONNECT_MAX_ATTEMPTS = parseInt(process.env.RECONNECT_MAX_ATTEMPTS, 10) || 6;
+// Depois que uma credencial pareada esgota a escada curta, espera antes de uma
+// nova tentativa iniciada pelo reconciliador externo. Evita loop de CPU e, ao
+// mesmo tempo, recupera queda transitória sem exigir que o usuário abra a tela.
+const AUTO_REVIVE_PAUSED_AFTER_MS =
+    parseInt(process.env.WA_AUTO_REVIVE_PAUSED_AFTER_MS, 10) || 15 * 60 * 1000;
 const SESSION_START_STAGGER_MS = parseInt(process.env.SESSION_START_STAGGER_MS, 10) || 12000;
 const PUPPETEER_EXECUTABLE_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
 const WATCHDOG_TIMEOUT_MS = parseInt(process.env.WATCHDOG_TIMEOUT_MS, 10) || 45000;
@@ -2590,6 +2596,15 @@ app.post('/api/sessoes/reconcile',
         authPathDe(instanceId), organizationId, instanceId,
     );
     let session = findSession(instanceId, false);
+    if (binding.ok && session && deveReviverRecuperacaoPausada(
+        session.fase, hasStoredAuth(instanceId), session.lastRecoveryAt,
+        Date.now(), AUTO_REVIVE_PAUSED_AFTER_MS
+    )) {
+        registrarLifecycle(session, 'auto_revive_paused', {
+            cooldown_ms: AUTO_REVIVE_PAUSED_AFTER_MS,
+        });
+        reviveSession(session);
+    }
     // O boot nunca restaura um Chromium apenas porque encontrou um diretório no
     // volume. Esta capability foi emitida a partir da WhatsAppConnection vigente
     // no Django e é a prova de registry exigida antes de consumir capacidade.

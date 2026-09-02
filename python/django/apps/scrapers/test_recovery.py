@@ -1,4 +1,5 @@
 import tempfile
+from contextlib import contextmanager
 from datetime import date, timedelta
 from unittest.mock import patch
 from unittest.mock import MagicMock
@@ -99,7 +100,8 @@ class ReportSessionTests(TestCase):
 
     def test_three_real_suspicions_request_reconnect_and_success_recovers(self):
         from apps.scrapers.report_sessions import (
-            has_report_session, registrar_veredito, save_report_state,
+            PROBE_JANELA_S, has_report_session, registrar_veredito,
+            save_report_state,
         )
 
         user = get_user_model().objects.create_user("report-probe-policy")
@@ -108,6 +110,15 @@ class ReportSessionTests(TestCase):
         ):
             save_report_state(user, "amazon_shop", {"cookies": [], "origins": []})
             for attempt in range(1, 4):
+                if attempt > 1:
+                    from apps.accounts.models import BrowserSession
+                    BrowserSession.objects.filter(
+                        user=user, provider="amazon_shop",
+                    ).update(
+                        last_probe_at=timezone.now() - timedelta(
+                            seconds=PROBE_JANELA_S + 1,
+                        ),
+                    )
                 snapshot = registrar_veredito(
                     user, "amazon_shop", "suspeito", "session_expired",
                 )
@@ -115,6 +126,80 @@ class ReportSessionTests(TestCase):
                 self.assertEqual(has_report_session(user, "amazon_shop"), attempt < 3)
             registrar_veredito(user, "amazon_shop", "conectado", "checkout_opened")
             self.assertTrue(has_report_session(user, "amazon_shop"))
+
+    def test_parallel_suspicions_count_as_one_and_inconclusive_preserves_it(self):
+        from apps.accounts.models import BrowserSession
+        from apps.scrapers.report_sessions import (
+            has_report_session, registrar_veredito, save_report_state,
+        )
+
+        user = get_user_model().objects.create_user("report-probe-burst")
+        with override_settings(
+            SECRETS_FERNET_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ):
+            save_report_state(user, "shopee_shop", {"cookies": [], "origins": []})
+            for _attempt in range(5):
+                snapshot = registrar_veredito(
+                    user, "shopee_shop", "suspeito", "session_expired",
+                )
+            self.assertEqual(snapshot["falhas"], 1)
+            self.assertTrue(has_report_session(user, "shopee_shop"))
+
+            registrar_veredito(
+                user, "shopee_shop", "inconclusivo", "challenge",
+            )
+            record = BrowserSession.objects.get(
+                user=user, provider="shopee_shop",
+            )
+            self.assertEqual(record.probe_failures, 1)
+            self.assertEqual(record.status, "suspect")
+            self.assertEqual(record.probe_result, "suspeito")
+            self.assertTrue(has_report_session(user, "shopee_shop"))
+
+    def test_successful_report_sync_persists_refreshed_browser_state(self):
+        from apps.scrapers.relatorios import _fetch_browser_report
+        from apps.scrapers.report_sessions import load_report_state, save_report_state
+
+        user = get_user_model().objects.create_user("report-session-refresh")
+        initial = {"cookies": [{"name": "old", "value": "1"}], "origins": []}
+        refreshed = {"cookies": [{"name": "fresh", "value": "2"}], "origins": []}
+        page = MagicMock()
+        context = MagicMock()
+        context.new_page.return_value = page
+        context.storage_state.return_value = refreshed
+        browser = MagicMock()
+        browser.new_context.return_value = context
+        playwright = MagicMock()
+        playwright.chromium.launch.return_value = browser
+        manager = MagicMock()
+        manager.__enter__.return_value = playwright
+        manager.__exit__.return_value = False
+
+        @contextmanager
+        def acquired(**_kwargs):
+            yield True
+
+        with override_settings(
+            SECRETS_FERNET_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ):
+            save_report_state(user, "amazon", initial)
+            with patch("playwright.sync_api.sync_playwright", return_value=manager), \
+                 patch("apps.scrapers.carga.operacao_pesada", side_effect=acquired), \
+                 patch("apps.scrapers.relatorios._login_detected", return_value=False), \
+                 patch("apps.scrapers.relatorios._apply_period"), \
+                 patch("apps.scrapers.relatorios._download_delimited_report",
+                       return_value=None), \
+                 patch("apps.scrapers.relatorios._extract_paginated_table_rows",
+                       return_value=[]):
+                self.assertEqual(
+                    _fetch_browser_report(
+                        user, "amazon", "https://associados.amazon.com.br/", date.today(),
+                        date.today(),
+                    ),
+                    [],
+                )
+            self.assertEqual(load_report_state(user, "amazon"), refreshed)
+            browser.close.assert_called_once()
 
     def test_report_parser_marks_login_page_as_reconnect_required(self):
         from apps.scrapers.relatorios import ReportSyncActionRequired, _extract_table_rows
