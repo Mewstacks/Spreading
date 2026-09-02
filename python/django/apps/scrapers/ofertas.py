@@ -704,7 +704,7 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
         🛒 15% DE DESCONTO acima de R$79 (limitado a R$60)
         🎟 Use o cupom TAMOJUNTO
 
-        Clique no link e navegue na página do Meli:
+        Abra a loja e aplique o cupom no checkout:
 
         ➡️ https://mercadolivre.com/sec/2J8HDRK
     """
@@ -716,8 +716,6 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
     m = markup or WhatsAppMarkup()
     esc = m.escape
     regras = regras_do_cupom(cupom)
-    is_meli = str(getattr(cupom, "marketplace", "") or "").strip().lower() in (
-        "mercadolivre", "mercado livre", "meli")
     loja = _nome_loja(getattr(cupom, "marketplace", ""), cupom=cupom)
 
     cabecalho = (
@@ -781,8 +779,15 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
 
     link = str(link_afiliado or getattr(cupom, "link", "") or "").strip()
     if link:
-        onde = "na página do Meli" if is_meli else "na página da loja"
-        linhas += ["", f"Clique no link e navegue {onde}:", "", f"➡️ {esc(link)}"]
+        acao = (
+            "Abra a loja e aplique o cupom no checkout:"
+            if codigo else
+            "Ative o cupom e veja os itens participantes:"
+        )
+        # Um único CTA, específico para o modo real de resgate. "Navegue na
+        # página" não dizia o que fazer depois do clique e aumentava a chance de
+        # a pessoa abandonar antes do checkout.
+        linhas += ["", f"👉 {m.bold(esc(acao))}", f"➡️ {esc(link)}"]
 
     return "\n".join(linhas)
 
@@ -1201,8 +1206,15 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
     codigo = codigo_publicavel(cupom)
     if codigo:
         linhas.append(f"🎟 Use o cupom {m.bold(esc(codigo))}")
+        linhas.append("👉 Abra um produto acima e aplique o cupom no checkout.")
     else:
-        linhas.append(f"🎟 {m.bold('Ative o cupom no link')}")
+        # Os links de produto de campanhas ML carregam `coupon_campaign_id`; nas
+        # demais lojas a mensagem ainda manda conferir o abatimento antes de
+        # pagar, sem prometer que um simples clique validou o checkout.
+        linhas.append(f"🎟 {m.bold('Cupom de ativação')}")
+        linhas.append(
+            "👉 Abra um produto acima, ative o cupom e confirme o desconto antes de pagar."
+        )
     condicao = _condicao_do_cupom(cupom)
     if condicao:
         linhas.append(f"⚠️ {m.bold('Condição:')} {esc(condicao)}")

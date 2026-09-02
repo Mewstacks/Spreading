@@ -6449,6 +6449,8 @@ class MensagemCupomTests(SimpleTestCase):
         self.assertNotIn("acima de R$ 0", mensagem)
         self.assertNotIn("Válido para:", mensagem)
         self.assertIn("Fonte checada em", mensagem)
+        self.assertIn("Abra a loja e aplique o cupom no checkout:", mensagem)
+        self.assertNotIn("Clique no link e navegue", mensagem)
 
     def test_relampago_real_recebe_selo(self):
         from apps.scrapers.ofertas import montar_mensagem_cupom
@@ -6494,6 +6496,7 @@ class MensagemCupomTests(SimpleTestCase):
         self.assertIn("R$ 50 DE DESCONTO acima de R$ 649", mensagem)
         self.assertIn("Válido para:", mensagem)
         self.assertIn("monitores Samsung selecionados", mensagem)
+        self.assertIn("Ative o cupom e veja os itens participantes:", mensagem)
 
     def test_nao_rotula_condicao_de_publico_como_produto(self):
         from apps.scrapers.ofertas import montar_mensagem_cupom
@@ -6551,6 +6554,39 @@ class MensagemCupomTests(SimpleTestCase):
         cupom = SimpleNamespace(external_id="x", marketplace=None, codigo=None,
                                 link=None, regras=[1, 2, 3])
         self.assertIn("Ative o cupom", montar_mensagem_cupom(cupom))
+
+    def test_mensagem_com_produtos_da_instrucao_exata_para_cada_resgate(self):
+        from apps.scrapers.ofertas import montar_mensagem_cupom_produtos
+
+        produto = SimpleNamespace(
+            nome="Notebook confiável", nome_llm="", frase_llm="",
+            preco_com_cupom=900,
+        )
+        relacao = SimpleNamespace(
+            preco_atual=1000, preco_final=900, verificado_em=timezone.now(),
+        )
+        itens = [{
+            "produto": produto, "relacao": relacao,
+            "link": "https://meli.la/produto",
+        }]
+        base = {
+            "marketplace": "mercadolivre", "titulo": "10% OFF",
+            "validade": None, "relampago": False, "restrito": False,
+            "ultima_observacao": timezone.now(),
+        }
+
+        com_codigo = montar_mensagem_cupom_produtos(SimpleNamespace(
+            **base, codigo="NOTE10", regras={"modo_resgate": "codigo"},
+        ), itens)
+        ativacao = montar_mensagem_cupom_produtos(SimpleNamespace(
+            **base, codigo="", regras={"modo_resgate": "ativacao"},
+        ), itens)
+
+        self.assertIn("Abra um produto acima e aplique o cupom no checkout.", com_codigo)
+        self.assertNotIn("Cupom de ativação", com_codigo)
+        self.assertIn("Cupom de ativação", ativacao)
+        self.assertIn("confirme o desconto antes de pagar.", ativacao)
+        self.assertNotIn("Ative o cupom no link", ativacao)
 
 
 class EnvioCupomTests(TestCase):

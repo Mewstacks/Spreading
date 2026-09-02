@@ -805,7 +805,10 @@ class CouponMessageTests(SimpleTestCase):
         # anunciada tem que ser exatamente o que o cupom abate no checkout.
         self.assertIn("🛒 De R$100 por R$83,54", mensagem)
         self.assertIn("➡️ https://meli.la/1GWNQCg", mensagem)
-        self.assertTrue(mensagem.endswith("🎟 Use o cupom *PRESENTE*"))
+        self.assertIn("🎟 Use o cupom *PRESENTE*", mensagem)
+        self.assertTrue(mensagem.endswith(
+            "👉 Abra um produto acima e aplique o cupom no checkout."
+        ))
         self.assertEqual(mensagem.count("*"), 4)
 
     def test_cupom_inclui_chamada_ia_sem_negrito_e_nome_resumido(self):
