@@ -631,6 +631,13 @@ Fontes primárias consultadas:
   de código como `invalido`/baixa confiança e a manutenção corrige observações
   legadas; isso remove `MAISCUPONS` ativo em vez de apenas barrá-lo na publicação.
   Suítes integrais: 1.481/1.481 Django e 170/170 Node.
+- Prova de produção v326: release/RLS/rolling deploy concluídos, web/worker v326
+  com checks verdes e `/healthz` HTTP 200; WhatsApp v90 permaneceu 1/1. A
+  manutenção deixou zero `ANUNCIO`/`MAISCUPONS` ativo. A última ingestão
+  Telegram ficou `ok/healthy`, 68 cupons, 28/28 canais e 179/179 redirects
+  resolvidos via cache. Na `lules`, o inventário mensurável ficou em 894 ML e
+  128 Amazon prontos; Shopee segue em zero prontos porque a conta ainda não
+  conectou nem sessão de compra nem integração afiliada (49 elegíveis aguardam).
 
 ## Gates de deploy desta revisão
 
