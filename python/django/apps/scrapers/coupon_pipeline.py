@@ -498,6 +498,15 @@ def afiliar_cupons_de_codigo(usuario, cupons, *, limite=8):
             gerados += 1
             continue
         falhas += 1
+        if resolucao.get("indisponivel_ml"):
+            # O portal está temporariamente indisponível, mas a sessão continua
+            # válida. Repetir nos cupons seguintes gastaria um Chromium por item;
+            # interromper preserva capacidade sem mandar o usuário reconectar.
+            logger.info(
+                "Afiliação de cupons de código adiada: Link Builder temporariamente "
+                "indisponível (usuário %s).", usuario.pk,
+            )
+            break
         if resolucao.get("precisa_login_ml"):
             # A sessão caiu: as próximas tentativas dariam a mesma recusa e
             # custariam um Chromium cada. O ciclo seguinte retoma.

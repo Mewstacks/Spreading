@@ -571,6 +571,27 @@ class BrowserResourceContractTests(TestCase):
 
         signal.assert_called_once_with("source_shopee-public-coupons")
 
+    def test_ingestao_espera_holder_ceder_e_roda_no_mesmo_ciclo(self):
+        from apps.scrapers.sources.registry import _ingestion_guard
+
+        tentativas = iter((False, True, True))
+
+        @contextmanager
+        def lease_sequencial(_resource_key, **_kwargs):
+            yield next(tentativas), {"resource": _resource_key}
+
+        fake_connection = type("Connection", (), {"vendor": "postgresql"})()
+        with patch("apps.scrapers.sources.registry.connection", fake_connection), \
+                patch("apps.scrapers.resource_control.leased_resource", lease_sequencial), \
+                patch("apps.scrapers.resource_control.sinalizar_interesse_de_esteira") as signal, \
+                patch("apps.scrapers.sources.registry.time.sleep"):
+            with _ingestion_guard(
+                "shopee-public-coupons", requires_chromium=True, wait_seconds=1,
+            ) as acquired:
+                self.assertEqual(acquired, (True, ""))
+
+        signal.assert_called_once_with("source_shopee-public-coupons")
+
     def test_scrape_e_flash_nao_seguram_chromium_o_ciclo_inteiro(self):
         import inspect
         from apps.scrapers.management.commands.automacao import Command
@@ -1882,6 +1903,37 @@ class CouponReadinessReasonTests(TestCase):
             resultado = afiliar_cupons_de_codigo(self.user, cupons)
         self.assertEqual(len(chamadas), 1)
         self.assertEqual(resultado["gerados"], 0)
+
+    def test_link_builder_indisponivel_para_lote_sem_derrubar_sessao(self):
+        from apps.scrapers.coupon_pipeline import afiliar_cupons_de_codigo
+
+        cupons = [self._code()]
+        for indice in range(2):
+            cupons.append(CupomNormalizado.objects.create(
+                fonte=self.source, external_id=f"temporario:{indice}",
+                marketplace="mercadolivre", titulo=f"Temporário {indice}",
+                codigo=f"TEMPORARIO{indice}0",
+                link="https://lista.mercadolivre.com.br/z",
+                regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                        "valor_desconto": 10},
+            ))
+        chamadas = []
+
+        def _resolver(cupom, _usuario):
+            chamadas.append(cupom.pk)
+            return {
+                "sucesso": False,
+                "motivo": "Link Builder temporariamente indisponível.",
+                "precisa_login_ml": False,
+                "indisponivel_ml": True,
+            }
+
+        with patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True), \
+                patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom", _resolver):
+            resultado = afiliar_cupons_de_codigo(self.user, cupons)
+
+        self.assertEqual(len(chamadas), 1)
+        self.assertEqual(resultado["falhas"], 1)
 
     def test_navegador_ocupado_e_fila_e_nao_falha_de_preparo(self):
         """Contenção de capacidade não pode virar avaria na tela.

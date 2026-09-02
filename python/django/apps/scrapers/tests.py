@@ -35,7 +35,8 @@ from apps.scrapers.monitor_conexao import wa_conectado
 from apps.scrapers.models import (
     CliquePublicacao, ConfiguracaoEnvio, Cupom, CupomDisponibilidade,
     CupomNormalizado, FonteIngestao,
-    HistoricoEnvio, LinkAfiliadoUsuario, Produto, EventoOperacional, Publicacao,
+    HistoricoEnvio, IntegracaoAfiliado, LinkAfiliadoUsuario, Produto,
+    EventoOperacional, Publicacao,
     ReceitaAfiliado, RelatorioSync,
 )
 from apps.scrapers.precos import registrar as registrar_preco
@@ -5004,6 +5005,31 @@ class GeracaoDeLinksEmLoteTests(TestCase):
         enviados, _ = prefetch.call_args
         self.assertEqual(len(enviados[0]), 2)
 
+    @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=False)
+    @patch("apps.scrapers.marketplaces.shopee.Shopee.prefetch_links")
+    def test_shopee_gera_antes_do_gate_da_sessao_ml(self, prefetch, _conectado):
+        prefetch.return_value = (1, 0)
+        IntegracaoAfiliado.objects.create(
+            owner=self.user, provedor="shopee", identificador_conta="app-id",
+            habilitada=True, status="conectada",
+        )
+        produto = Produto.objects.create(
+            marketplace="shopee", nome="Cupom Shopee", origem="oferta",
+            preco_sem_desconto=100, preco_com_cupom=70,
+            link_produto="https://shopee.com.br/product/1/2",
+        )
+
+        resultado = _rodar_links(lote=40)
+
+        enviados, kwargs = prefetch.call_args
+        self.assertEqual([item.id for item in enviados[0]], [produto.id])
+        self.assertEqual(kwargs["usuario"], self.user)
+        self.assertEqual(resultado["gerados"], 1)
+        self.assertEqual(
+            resultado["por_marketplace"],
+            {"shopee": {"gerados": 1, "falhas": 0}},
+        )
+
     def test_lote_grava_o_link_sem_nenhum_bypass_de_async(self):
         """O lote persiste item a item sem tocar em DJANGO_ALLOW_ASYNC_UNSAFE.
 
@@ -6959,6 +6985,19 @@ class LinkAfiliadoCupomTests(TestCase):
 
         self.assertTrue(resultado["sucesso"])
         self.assertEqual(resultado["produto"], produto)
+
+    @patch("apps.scrapers.scraper_mercadolivre.link.afiliate_link_builder")
+    def test_link_builder_indisponivel_nao_inventa_sessao_expirada(self, builder):
+        from apps.scrapers.ofertas import resolver_link_afiliado_cupom
+        from apps.scrapers.scraper_mercadolivre.link import AuthError
+
+        builder.side_effect = AuthError("controles ainda não carregaram")
+        resultado = resolver_link_afiliado_cupom(self.cupom, self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertTrue(resultado["indisponivel_ml"])
+        self.assertFalse(resultado["precisa_login_ml"])
+        self.assertIn("temporariamente", resultado["motivo"])
 
 
 class SenderContractTests(SimpleTestCase):

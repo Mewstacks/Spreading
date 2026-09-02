@@ -278,6 +278,16 @@ def _rodar_links(lote=40):
             destino = por_marketplace.setdefault("amazon", {"gerados": 0, "falhas": 0})
             destino["gerados"] += g_amazon
             destino["falhas"] += f_amazon
+        # Shopee também usa HTTP puro (Open API) e não depende do login do ML.
+        # Ela precisa rodar antes do gate abaixo pelo mesmo motivo da Amazon: uma
+        # conta ML desconectada não pode paralisar outra loja perfeitamente pronta.
+        g_shopee, f_shopee = _gerar_links_shopee(user, lote=lote, agora=agora)
+        gerados += g_shopee
+        falhas += f_shopee
+        if g_shopee or f_shopee:
+            destino = por_marketplace.setdefault("shopee", {"gerados": 0, "falhas": 0})
+            destino["gerados"] += g_shopee
+            destino["falhas"] += f_shopee
         if not ml_conectado(user):
             # Antes isto era um `continue` mudo: o usuário simplesmente nunca gerava
             # link e nada em lugar nenhum dizia por quê. Agora a Saúde mostra.
@@ -396,6 +406,50 @@ def _gerar_links_amazon(user, *, lote, agora):
         return get_marketplace("amazon").prefetch_links(pendentes, usuario=user)
     except Exception as e:
         logger.warning("Geração de links Amazon falhou para %s: %s", user, e)
+        return (0, 0)
+
+
+def _gerar_links_shopee(user, *, lote, agora):
+    """Lote de links Shopee de UM usuário via API, sem Chromium.
+
+    A esteira geral tinha caminhos explícitos apenas para Amazon e Mercado Livre.
+    Produtos Shopee descobertos fora do pipeline de cupons ficavam pendentes para
+    sempre, embora o adaptador já soubesse gerar o short link oficial.
+    """
+    from django.db.models import Exists, OuterRef, Q
+
+    from apps.scrapers.marketplaces.registry import get_marketplace
+    from apps.scrapers.models import (
+        IntegracaoAfiliado, LinkAfiliadoUsuario, Produto,
+    )
+
+    if not IntegracaoAfiliado.objects.filter(
+        owner=user, provedor="shopee", habilitada=True,
+    ).exists():
+        return (0, 0)
+
+    fora_da_fila = LinkAfiliadoUsuario.objects.filter(
+        usuario=user, produto=OuterRef("pk"),
+    ).filter(
+        Q(estado__in=["nao_afiliavel", "erro"])
+        | Q(proxima_tentativa__gt=agora)
+        | (~Q(link_afiliado="") & Q(verificado_ok=True))
+    )
+    pendentes = list(
+        Produto.objects.filter(marketplace="shopee", preco_sem_desconto__gt=0)
+        .exclude(estado__in=["indisponivel", "invalido", "expirado", "stale"])
+        .filter(Q(owner__isnull=True) | Q(owner=user))
+        .exclude(Exists(fora_da_fila))
+        .order_by("-ultima_observacao")[:lote]
+    )
+    if not pendentes:
+        return (0, 0)
+    try:
+        return get_marketplace("shopee").prefetch_links(
+            pendentes, usuario=user,
+        )
+    except Exception as e:
+        logger.warning("Geração de links Shopee falhou para %s: %s", user, e)
         return (0, 0)
 
 

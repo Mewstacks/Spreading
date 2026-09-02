@@ -1430,7 +1430,22 @@ def resolver_link_afiliado_cupom(cupom, usuario):
         except Exception as exc:
             from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
             from apps.scrapers.auxiliar import SessaoExpirada
-            if isinstance(exc, (LoginError, AuthError, SessaoExpirada)):
+            if isinstance(exc, AuthError):
+                _registrar_falha_cache(
+                    "Link Builder temporariamente indisponível.",
+                    state="pendente", retry_minutes=5,
+                )
+                logger.info(
+                    "Link Builder temporariamente indisponível ao afiliar cupom %s: %s",
+                    cupom.pk, exc,
+                )
+                return {
+                    "sucesso": False,
+                    "motivo": "Link Builder temporariamente indisponível; nova tentativa agendada.",
+                    "precisa_login_ml": False,
+                    "indisponivel_ml": True,
+                }
+            if isinstance(exc, (LoginError, SessaoExpirada)):
                 _registrar_falha_cache(
                     "Sessão necessária para criar ou renovar o link afiliado.",
                     state="pendente", retry_minutes=15,
@@ -1458,7 +1473,22 @@ def resolver_link_afiliado_cupom(cupom, usuario):
         except Exception as exc:
             from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
             from apps.scrapers.auxiliar import SessaoExpirada
-            if isinstance(exc, (LoginError, AuthError, SessaoExpirada)):
+            if isinstance(exc, AuthError):
+                _registrar_falha_cache(
+                    "Link Builder temporariamente indisponível.",
+                    state="pendente", retry_minutes=5,
+                )
+                logger.info(
+                    "Link Builder temporariamente indisponível no fallback do cupom %s: %s",
+                    cupom.pk, exc,
+                )
+                return {
+                    "sucesso": False,
+                    "motivo": "Link Builder temporariamente indisponível; nova tentativa agendada.",
+                    "precisa_login_ml": False,
+                    "indisponivel_ml": True,
+                }
+            if isinstance(exc, (LoginError, SessaoExpirada)):
                 _registrar_falha_cache(
                     "Sessão necessária para criar ou renovar o link afiliado.",
                     state="pendente", retry_minutes=15,

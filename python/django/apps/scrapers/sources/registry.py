@@ -1,5 +1,8 @@
 import logging
+import time
 from contextlib import contextmanager
+
+from django.conf import settings
 from django.core.cache import cache
 from django.db import connection, transaction
 from django.utils import timezone
@@ -71,7 +74,7 @@ def _public_error(exc):
 
 
 @contextmanager
-def _ingestion_guard(slug, *, requires_chromium=False):
+def _ingestion_guard(slug, *, requires_chromium=False, wait_seconds=None):
     """Cede (adquiriu, motivo). O MOTIVO é o ponto: sem ele, ficar sem navegador
     era registrado como "esta fonte já está executando".
 
@@ -88,19 +91,33 @@ def _ingestion_guard(slug, *, requires_chromium=False):
         )
         if requires_chromium:
             esteira = f"source_{slug}"
-            # Ordem global em todo o projeto: capacidade antes da sessão/fonte.
-            with leased_resource(
-                "django_chromium", owner_kind="source_ingest",
-            ) as (browser_acquired, _browser_detail):
-                if not browser_acquired:
-                    sinalizar_interesse_de_esteira(esteira)
+            # A negativa sinaliza aos lotes longos que há uma esteira na fila.
+            # Esperar alguns segundos permite usar a cessão no MESMO ciclo; antes,
+            # o holder cedia no item seguinte, mas a fonte já tinha desistido e só
+            # tentava novamente 15 minutos depois.
+            if wait_seconds is None:
+                wait_seconds = 0 if getattr(settings, "RUNNING_TESTS", False) else 8
+            deadline = time.monotonic() + max(0.0, float(wait_seconds))
+            while True:
+                # Ordem global em todo o projeto: capacidade antes da sessão/fonte.
+                with leased_resource(
+                    "django_chromium", owner_kind="source_ingest",
+                ) as (browser_acquired, _browser_detail):
+                    if browser_acquired:
+                        limpar_interesse_de_esteira(esteira)
+                        with leased_resource(
+                            f"source_ingest:{slug}", owner_kind="source_ingest",
+                        ) as (source_acquired, _source_detail):
+                            yield (
+                                source_acquired,
+                                "" if source_acquired else "already_running",
+                            )
+                        return
+                sinalizar_interesse_de_esteira(esteira)
+                if time.monotonic() >= deadline:
                     yield False, "capacity_deferred"
                     return
-                limpar_interesse_de_esteira(esteira)
-                with leased_resource(
-                    f"source_ingest:{slug}", owner_kind="source_ingest",
-                ) as (source_acquired, _source_detail):
-                    yield source_acquired, "" if source_acquired else "already_running"
+                time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
         else:
             with leased_resource(
                 f"source_ingest:{slug}", owner_kind="source_ingest",

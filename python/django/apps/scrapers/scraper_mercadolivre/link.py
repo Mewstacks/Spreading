@@ -42,7 +42,11 @@ class LoginError(Exception):
     pass
 
 class AuthError(Exception):
-    """Exceção personalizada para erros de autenticação (ML bloqueou a sessão)."""
+    """Portal/controles indisponíveis sem prova de que a sessão expirou.
+
+    O nome é legado. Esta exceção é inconclusiva e nunca deve, sozinha, pedir
+    reconexão; somente ``LoginError`` prova que o portal exibiu a tela de login.
+    """
     pass
 
 
