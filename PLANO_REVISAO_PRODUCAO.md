@@ -558,6 +558,25 @@ Fontes primárias consultadas:
   125, pois códigos novos ainda precisam de corroboração. O canário read-only
   passou novamente em 3/3 regras; o WhatsApp permaneceu em `qr` aguardando a
   leitura da usuária.
+- Deploy v321: o parser do Telegram deixou de considerar qualquer texto depois do
+  último `:` como cupom e passou a rejeitar palavras operacionais observadas ao
+  vivo (`ATIVADO`, `ESGOTANDO`, `MOSTRAR`, `UTILIZADO`, `RESGATARAM`, variações de
+  `CORRE` e `CARRINHO`). A detecção explícita de loja não suportada agora vence o
+  fallback de canal de loja única, impedindo que oito códigos AliExpress fossem
+  atribuídos ao Mercado Livre. A mesma restrição vale para a extração assistida
+  por IA e a regra global de publicabilidade passou a rejeitar pontos no código.
+  Suítes integrais: 1.471/1.471 Django e 169/169 Node.
+- Prova de produção v321: release, migrações, RLS, rolling deploy, web/worker e
+  `/healthz` passaram. A coleta controlada percorreu 27/27 canais e 87 páginas,
+  leu 1.710 mensagens datadas, descartou 230 antigas, resolveu 175/176 redirects
+  e persistiu 72/72 candidatos honestos: 56 ML, 15 Shopee e um Amazon. A projeção
+  da `lules` ficou em ML 895 prontos/266 descobertos, Amazon 126/233 e Shopee
+  0/221. O canário read-only aprovou 3/3 mensagens com código primeiro, link
+  rastreado, instrução de resgate e tamanho válido. Os alertas acionáveis de
+  projeção, preparação, código e navegador ficaram em zero; o único alerta é
+  `shopee-public-coupons`, cujos dois ciclos falharam fechados como
+  `auth_required`/`degraded`. O WhatsApp da `lules` está `inactive`, a sessão ML
+  está expirada e a integração afiliada Shopee permanece ausente.
 
 ## Gates de deploy desta revisão
 
