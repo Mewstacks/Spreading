@@ -95,10 +95,23 @@ _NAO_CODIGOS = {
     "HOJE", "AGORA", "APENAS", "SOMENTE", "VALIDO", "VALIDA", "FRETE",
     "GRATIS", "CLIQUE", "ATIVE", "AQUI", "SELECIONADOS", "PRODUTOS",
     "ESTOQUE", "LOJA", "LOJAS", "OFICIAL", "OFICIAIS", "CANAL", "GRUPO",
-    "APLIQUE", "COMPRAS", "ESCRITO", "LIBERADO", "LIBERADA", "REGRAS",
+    "APLIQUE", "COMPRAS", "CARRINHO", "ESCRITO", "LIBERADO", "LIBERADA", "REGRAS",
     "RESGATE", "RESGATAR", "EXCLUSIVO", "TECNOLOGIA", "ATUALIZADO",
     "APROVEITE", "CONFIRA", "MELICUPONS",
+    # Estados/CTAs observados literalmente nas previews do Telegram. Eles
+    # apareciam perto de um desconto real e viravam um falso token de checkout.
+    "ATIVADO", "ESGOTANDO", "ESGOTANDOOO", "MOSTRAR", "UTILIZADO",
+    "RESGATARAM", "CORREEEEE", "CORREEEEEE",
 }
+
+# Um canal curado pode mudar de assunto. Em 02/09/2026, um canal marcado como
+# Mercado Livre publicou uma lista do AliExpress sem link resolvível; o fallback
+# do canal atribuiu os oito códigos ao ML. Menção explícita a outra loja precisa
+# vencer o palpite do canal e falhar fechado.
+_LOJAS_NAO_ACEITAS = re.compile(
+    r"\b(?:ali\s*express|aliexpress|temu|shein|magalu|magazine\s+luiza|"
+    r"casas\s+bahia|kabum|americanas|carrefour)\b", re.I,
+)
 
 _PROMPT = """Extraia os cupons de desconto desta mensagem de um canal brasileiro de ofertas.
 
@@ -149,6 +162,8 @@ def _loja_mencionada(texto: str, padrao="") -> str:
         return "amazon"
     if "shopee" in bruto or "shope.ee" in bruto:
         return "shopee"
+    if _LOJAS_NAO_ACEITAS.search(bruto):
+        return ""
     return padrao if padrao in LOJAS_ACEITAS else ""
 
 
@@ -248,14 +263,9 @@ def extrair_deterministico(texto: str, *, loja_padrao="") -> list[dict]:
             r":\s*([A-Z0-9][A-Z0-9._/-]{3,60})(?=\s|$|[,/])",
             linha_parse, re.I,
         ))
-        # O separador precisa vir DEPOIS do desconto. ``Regras: R$20 OFF para
-        # compras...`` e ``POR: R$ 1.662,30, aplique R$100 OFF`` têm dois-pontos,
-        # mas não apresentam código após o desconto; varrer o restante dessas linhas
-        # produzia COMPRAS/APLIQUE como cupons falsos.
-        desconto_fim = (percentual or fixo).end()
-        ultimo_dois_pontos = linha_parse.rfind(":")
-        if ultimo_dois_pontos >= desconto_fim:
-            fragmentos.append(linha_parse[ultimo_dois_pontos + 1:])
+        # Não varremos tudo após o último ``:``. A preview achatada contém rótulos
+        # posteriores como ``Carrinho: <url> ... CORREEEEE`` e isso promovia a CTA
+        # final. Os padrões explícitos acima já cobrem ``desconto: CODIGO``.
         depois_hifen = re.search(r"\)\s*[-–—]\s*(.+)$", linha_parse)
         if depois_hifen:
             fragmentos.append(depois_hifen.group(1))
@@ -396,7 +406,10 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
     texto = (texto or "").strip()
     if not texto or not parece_ter_cupom(texto):
         return []
-    fallback = extrair_deterministico(texto, loja_padrao=loja_padrao)
+    loja_detectada = _loja_mencionada(texto, loja_padrao)
+    if not loja_detectada:
+        return []
+    fallback = extrair_deterministico(texto, loja_padrao=loja_detectada)
     if not getattr(settings, "CUPOM_LLM_ATIVO", True):
         return fallback
     if not getattr(settings, "ANTHROPIC_API_KEY", ""):
@@ -435,7 +448,7 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
             # de sete, salvar seis é melhor que salvar zero, e cada objeto fechado
             # é um cupom inteiro — não há meio-cupom válido.
             dados = _resgatar_parcial(texto_resposta)
-        cupons = _limpar(dados, loja_padrao)
+        cupons = _limpar(dados, loja_detectada)
     except Exception as exc:
         motivo, ttl = _circuito_por_erro(exc)
         cache.set(_CHAVE_CIRCUITO, motivo, ttl)

@@ -81,10 +81,13 @@ class RegraDeAceitacaoTests(TestCase):
     def test_palavras_de_interface_e_texto_colado_nao_viram_codigo(self):
         for codigo in (
             "RESGATE", "RESGATAR", "EXCLUSIVO", "TECNOLOGIA",
-            "ATUALIZADO", "MELICUPONS", "9.9CONSEGUEM",
+            "ATUALIZADO", "MELICUPONS", "ATIVADO", "ESGOTANDO",
+            "ESGOTANDOOO", "MOSTRAR", "UTILIZADO", "RESGATARAM",
+            "CORREEEEE", "CORREEEEEE", "9.9CONSEGUEM",
         ):
             with self.subTest(codigo=codigo):
                 self.assertFalse(codigo_plausivel(codigo))
+                self.assertEqual(codigo_humano(codigo), "")
                 self.assertEqual(_limpar({"cupons": [{
                     "codigo": codigo, "loja": "shopee",
                     "tipo": "fixo", "valor": 20,
@@ -207,6 +210,47 @@ class RegraDeAceitacaoTests(TestCase):
         for texto in casos:
             with self.subTest(texto=texto):
                 self.assertEqual(extrair_deterministico(texto), [])
+
+    def test_fallback_nao_usa_cta_depois_de_link_como_codigo(self):
+        casos = (
+            (
+                "Cupom Mercado Livre 30% OFF max R$1.000: PROMOMELI30 "
+                "Lista: https://meli.la/abc Clique em Mostrar mais",
+                ["PROMOMELI30"],
+            ),
+            (
+                "Shopee R$20 OFF acima de R$79 Codigo: OFERTA20AF "
+                "Carrinho: https://s.shopee.com.br/abc Acaba rapido! CORREEEEE",
+                ["OFERTA20AF"],
+            ),
+            (
+                "Shopee R$20 OFF acima de R$60 Codigo: F3L1Z3SS876 "
+                "Carrinho: https://s.shopee.com.br/abc 75% UTILIZADO",
+                ["F3L1Z3SS876"],
+            ),
+        )
+        for texto, esperados in casos:
+            with self.subTest(texto=texto):
+                self.assertEqual(
+                    [row["codigo"] for row in extrair_deterministico(texto)],
+                    esperados,
+                )
+
+    def test_canal_de_loja_unica_nao_reclassifica_outra_loja(self):
+        texto = (
+            "Novo evento AliExpress Choice Day\n"
+            "R$12 OFF em R$90: BRFS1\nR$25 OFF em R$180: BRFS2"
+        )
+        self.assertEqual(
+            extrair_deterministico(texto, loja_padrao="mercadolivre"), [],
+        )
+
+    @override_settings(ANTHROPIC_API_KEY="chave-de-teste", CUPOM_LLM_ATIVO=True)
+    def test_loja_nao_aceita_nem_chega_ao_modelo(self):
+        texto = "AliExpress R$12 OFF em R$90: BRFS1"
+        with patch("apps.scrapers.llm._cliente") as cliente:
+            self.assertEqual(extrair(texto, loja_padrao="mercadolivre"), [])
+        cliente.assert_not_called()
 
     def test_dominio_transcrito_pelo_modelo_nao_e_codigo(self):
         self.assertEqual(_limpar({"cupons": [

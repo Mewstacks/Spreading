@@ -15,13 +15,18 @@ from django.db.models import Q
 from django.conf import settings
 
 
-_CODIGO_HUMANO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{2,39}$")
+# Os checkouts observados aceitam tokens alfanuméricos e hífen. Ponto apareceu
+# somente em texto colado (por exemplo ``9.9CONSEGUEM``) e permitir isso aqui
+# reabria, na projeção, um código que o coletor já havia recusado.
+_CODIGO_HUMANO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{2,39}$")
 _CODIGOS_PLACEHOLDER = frozenset({
     "CUPOMNOLINK", "CUPOMAQUI", "DESCONTOAQUI", "DESCONTONOLINK",
     "GARANTACUPOM", "PEGUECUPOM", "USECUPOM", "MAISCUPONS",
     "RESGATENOLINK", "PEGUEAQUI", "ATIVEAQUI", "VEJANOLINK",
-    "RESGATE", "RESGATAR", "EXCLUSIVO", "TECNOLOGIA", "ATUALIZADO",
+    "RESGATE", "RESGATAR", "CARRINHO", "EXCLUSIVO", "TECNOLOGIA", "ATUALIZADO",
     "APROVEITE", "CONFIRA", "MELICUPONS",
+    "ATIVADO", "ESGOTANDO", "ESGOTANDOOO", "MOSTRAR", "UTILIZADO",
+    "RESGATARAM", "CORREEEEE", "CORREEEEEE",
 })
 # Relatórios SQL precisam aplicar a mesma fronteira sem materializar todo o
 # catálogo em Python. O alias público é imutável e evita duplicar a denylist.
