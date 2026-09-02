@@ -19,7 +19,7 @@ from .public_coupon_aggregators import (
     BiaGarimpaCouponsSource, CashbeShopeeCouponsSource,
     CuponationShopeeCouponsSource,
     CupomSpotCouponsSource, DiscoupShopeeCouponsSource, PrimaRycaCouponsSource,
-    PromomiaShopeeCouponsSource,
+    PegueiBaratoAmazonCouponsSource, PromomiaShopeeCouponsSource,
 )
 from .linkerhub_coupons import LinkerHubCouponsSource
 from .shopee import ShopeeCampaignsSource, ShopeeOffersSource
@@ -55,6 +55,7 @@ SOURCES = {
     PromomiaShopeeCouponsSource.slug: PromomiaShopeeCouponsSource(),
     CuponationShopeeCouponsSource.slug: CuponationShopeeCouponsSource(),
     CashbeShopeeCouponsSource.slug: CashbeShopeeCouponsSource(),
+    PegueiBaratoAmazonCouponsSource.slug: PegueiBaratoAmazonCouponsSource(),
     LinkerHubCouponsSource.slug: LinkerHubCouponsSource(),
     TelegramPublicoSource.slug: TelegramPublicoSource(),
 }

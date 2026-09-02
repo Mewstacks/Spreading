@@ -12,7 +12,7 @@ from apps.scrapers.sources.public_coupon_aggregators import (
     BiaGarimpaCouponsSource, CashbeShopeeCouponsSource,
     CuponationShopeeCouponsSource,
     CupomSpotCouponsSource, DiscoupShopeeCouponsSource, PrimaRycaCouponsSource,
-    PromomiaShopeeCouponsSource,
+    PegueiBaratoAmazonCouponsSource, PromomiaShopeeCouponsSource,
 )
 from apps.scrapers.sources.registry import SOURCES
 
@@ -381,7 +381,7 @@ class PublicCouponAggregatorRegistrationTests(SimpleTestCase):
         for slug in (
             "bia-garimpa-cupons", "cupomspot-cupons", "prima-ryca-cupons",
             "discoup-cupons", "promomia-cupons", "cuponation-cupons",
-            "cashbe-cupons", "linkerhub-cupons",
+            "cashbe-cupons", "linkerhub-cupons", "peguei-barato-cupons",
         ):
             self.assertIn(slug, SOURCES)
             self.assertIn(slug, FONTES_COMUNIDADE)
@@ -389,3 +389,69 @@ class PublicCouponAggregatorRegistrationTests(SimpleTestCase):
             self.assertEqual(classe_da_fonte(slug), "agregador")
             self.assertGreater(_SOURCE_PRECEDENCE[slug], 10)
             self.assertFalse(SOURCES[slug].inventario_completo)
+
+
+class PegueiBaratoAmazonCouponsTests(SimpleTestCase):
+    @staticmethod
+    def _card(card_id, title, code, *, destination="https://www.amazon.com.br/deals"):
+        return f"""
+        <div id="{card_id}" class="coupon__item" data-coupon-id="{card_id}">
+          <h3 data-field="coupon-title">{title}</h3>
+          <div data-field="description">Regra pública do card</div>
+          <span class="coupon__code">{code}</span>
+          <div class="coupon__action coupon__action--coupon">
+            <a href="{destination}?tag=terceiro-20">Ver cupom</a>
+          </div>
+        </div>
+        """
+
+    def test_accepts_only_numeric_consistent_amazon_cards_without_third_party_link(self):
+        ids = [f"00000000-0000-0000-0000-{index:012d}" for index in range(1, 10)]
+        body = "".join((
+            self._card(ids[0], "10% OFF acima de R$150 em itens Growth", "GROWTH"),
+            self._card(ids[1], "R$350 OFF em smartphones selecionados", "350SMART"),
+            self._card(ids[2], "Até R$200 OFF no PlayStation 5", "APP200OFF"),
+            self._card(ids[3], "R$20 OFF na sua primeira compra no App Amazon",
+                       "COMPRANOAPP"),
+            # O índice mistura a porcentagem da vitrine com o código LEIA20. Não
+            # podemos anunciar 70% como benefício desse cupom.
+            self._card(ids[4], "Até 70% OFF nos livros mais vendidos", "LEIA20"),
+            self._card(ids[5], "Até 60% OFF nas ofertas 9.9", "COMPRANOAPP"),
+            self._card(ids[6], "Oferta especial no Kindle", "KINDLE10"),
+            self._card(ids[7], "R$40 OFF", "OUTRA40",
+                       destination="https://loja.example/cupom"),
+            self._card(ids[8], "R$350 OFF em smartphones selecionados", "350SMART"),
+        ))
+        source = PegueiBaratoAmazonCouponsSource()
+        with patch(
+                "apps.scrapers.sources.public_coupon_aggregators._download",
+                return_value=body):
+            rows = list(source.discover_coupons(marketplaces=["amazon"]))
+
+        self.assertEqual(
+            [row.coupon_code for row in rows],
+            ["350SMART", "APP200OFF", "COMPRANOAPP"],
+        )
+        self.assertTrue(all(row.canonical_url == "" for row in rows))
+        self.assertTrue(all(
+            row.evidence["transport"] == "peguei-barato-public-card"
+            for row in rows
+        ))
+        self.assertEqual(source.last_metrics["rejected_by_reason"], {
+            "code_discount_mismatch": 1,
+            "duplicate_code": 1,
+            "generic_code_on_offer": 1,
+            "invalid_code_or_discount": 1,
+            "missing_explicit_discount": 1,
+            "wrong_marketplace_url": 1,
+        })
+
+    def test_schema_without_cards_fails_health_closed(self):
+        source = PegueiBaratoAmazonCouponsSource()
+        with patch(
+                "apps.scrapers.sources.public_coupon_aggregators._download",
+                return_value="<html>layout mudou</html>"):
+            self.assertEqual(list(source.discover_coupons()), [])
+
+        self.assertEqual(source.last_health_status, "degraded")
+        self.assertEqual(source.last_metrics["rows_seen"], 0)

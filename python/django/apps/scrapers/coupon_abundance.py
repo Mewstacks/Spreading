@@ -187,7 +187,7 @@ _FONTES_AGREGADOR = frozenset({
     "bia-garimpa-cupons", "cupomspot-cupons",
     "prima-ryca-cupons",
     "discoup-cupons", "promomia-cupons", "cuponation-cupons", "cashbe-cupons",
-    "linkerhub-cupons",
+    "linkerhub-cupons", "peguei-barato-cupons",
 })
 _FONTES_COMUNIDADE_DIRETA = frozenset({
     "telegram-publico", "promobit-community", "pelando-community",

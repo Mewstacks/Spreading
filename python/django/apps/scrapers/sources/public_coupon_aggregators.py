@@ -48,6 +48,7 @@ _DISCOUP_CACHE_SECONDS = 30 * 60
 _PROMOMIA_URL = "https://promomia.com.br/cupons/shopee"
 _CUPONATION_URL = "https://www.cuponation.com.br/cupom-shopee"
 _CASHBE_URL = "https://cashbe.com.br/loja--cupom-shopee/61a9f2a423a1580d54098bb910/"
+_PEGUEI_BARATO_URL = "https://pegueibarato.com.br/cupom-desconto-amazon/"
 
 # Next.js RSC serializes each card as an escaped, flat JSON object.  The object
 # currently has scalar/list/null fields only; requiring coupon_id and decoding
@@ -101,6 +102,22 @@ _CASHBE_CODE = re.compile(
     r'<div class="card__button-code"[^>]*>(.*?)</div>', re.I | re.S,
 )
 _CASHBE_SAVING = re.compile(rf"economize\s*R\$\s*{_MONEY_VALUE}", re.I)
+_PEGUEI_CARD_START = re.compile(
+    r'<div\s+id="([0-9a-f-]{36})"\s+class="coupon__item"[^>]*>', re.I,
+)
+_PEGUEI_TITLE = re.compile(
+    r'<h3[^>]*data-field="coupon-title"[^>]*>(.*?)</h3>', re.I | re.S,
+)
+_PEGUEI_DESCRIPTION = re.compile(
+    r'<div[^>]*data-field="description"[^>]*>(.*?)</div>', re.I | re.S,
+)
+_PEGUEI_CODE = re.compile(
+    r'<span\s+class="coupon__code"[^>]*>(.*?)</span>', re.I | re.S,
+)
+_PEGUEI_DESTINATION = re.compile(
+    r'<div[^>]*class="[^"]*coupon__action[^"]*"[^>]*>.*?'
+    r'<a[^>]+href="([^"]+)"', re.I | re.S,
+)
 _HTML_TAG = re.compile(r"<[^>]+>")
 
 
@@ -965,6 +982,127 @@ class CashbeShopeeCouponsSource(_PublicCatalogSource):
         self.last_health_status = "healthy"
         self.last_metrics = {
             "lojas_lidas": 1, "rows_seen": len(rows), "cupons": len(accepted),
+            "rejected_by_reason": dict(sorted(rejected.items())),
+            "complete": False,
+        }
+
+
+class PegueiBaratoAmazonCouponsSource(_PublicCatalogSource):
+    """Radar Amazon cujo HTML público liga código, regra e destino da loja.
+
+    O catálogo também repete ``COMPRANOAPP`` em cards que são apenas ofertas.
+    Aceitamos esse código somente no card de primeira compra no app e rejeitamos
+    qualquer benefício numérico que contradiga o único número do próprio código.
+    O link de terceiro serve só para provar o host e nunca é persistido.
+    """
+
+    slug = "peguei-barato-cupons"
+    name = "Peguei Barato - radar público de cupons Amazon"
+    marketplace = "amazon"
+
+    @staticmethod
+    def _rows(body):
+        markers = list(_PEGUEI_CARD_START.finditer(body or ""))
+        for index, marker in enumerate(markers):
+            end = markers[index + 1].start() if index + 1 < len(markers) else len(body)
+            chunk = body[marker.start():end]
+            title = _PEGUEI_TITLE.search(chunk)
+            code = _PEGUEI_CODE.search(chunk)
+            destination = _PEGUEI_DESTINATION.search(chunk)
+            if not all((title, code, destination)):
+                yield None
+                continue
+            description = _PEGUEI_DESCRIPTION.search(chunk)
+            yield {
+                "id": marker.group(1).lower(),
+                "title": _plain_html(title.group(1)),
+                "description": _plain_html(description.group(1)) if description else "",
+                "code": _plain_html(code.group(1)).upper(),
+                "destination": html.unescape(destination.group(1)).strip(),
+            }
+
+    @staticmethod
+    def _discount_hint(code):
+        numbers = re.findall(r"\d+(?:[.,]\d+)?", str(code or ""))
+        if len(numbers) != 1:
+            return None
+        try:
+            value = float(numbers[0].replace(",", "."))
+        except ValueError:
+            return None
+        return value if value >= 5 else None
+
+    def discover_coupons(self, marketplaces=None, **kwargs):
+        selected = set(marketplaces or ("amazon",))
+        if "amazon" not in selected:
+            self.last_health_status = "healthy"
+            self.last_metrics = {"lojas_lidas": 0, "cupons": 0, "complete": False}
+            return
+        observed_at = timezone.now()
+        rejected = defaultdict(int)
+        try:
+            body = _download(_PEGUEI_BARATO_URL)
+        except requests.RequestException as exc:
+            logger.info("%s unavailable (%s).", self.slug, type(exc).__name__)
+            body = ""
+        if not body:
+            self.last_health_status = "degraded"
+            self.last_metrics = {"lojas_lidas": 0, "cupons": 0, "complete": False}
+            return
+
+        rows = list(self._rows(body))
+        accepted = set()
+        for row in rows:
+            if not row:
+                rejected["malformed_card"] += 1
+                continue
+            if not _marketplace_host(row["destination"], "amazon"):
+                rejected["wrong_marketplace_url"] += 1
+                continue
+            description = " ".join(filter(None, (row["title"], row["description"])))
+            discount_type, discount = _discount(
+                row["title"], require_explicit_off=True,
+            )
+            if not discount:
+                rejected["missing_explicit_discount"] += 1
+                continue
+            code = row["code"]
+            folded = description.casefold()
+            if code == "COMPRANOAPP" and not (
+                "primeira compra" in folded and "app" in folded
+                and discount_type == "fixo" and discount == 20
+            ):
+                rejected["generic_code_on_offer"] += 1
+                continue
+            hint = self._discount_hint(code)
+            if hint is not None and abs(hint - discount) > 0.001:
+                rejected["code_discount_mismatch"] += 1
+                continue
+            item = _item(
+                source=self.slug, marketplace="amazon",
+                external_id=f"pegueibarato:amazon:{row['id']}", code=code,
+                discount_type=discount_type, discount=discount,
+                description=description, observed_at=observed_at,
+                minimum=_money_match(_MINIMUM, description),
+                maximum=_money_match(_MAXIMUM, description),
+                restricted=tem_restricao_publico(description),
+                evidence={
+                    "transport": "peguei-barato-public-card",
+                    "destination_host_verified": True,
+                },
+            )
+            if item is None:
+                rejected["invalid_code_or_discount"] += 1
+                continue
+            if item.coupon_code in accepted:
+                rejected["duplicate_code"] += 1
+                continue
+            accepted.add(item.coupon_code)
+            yield item
+        self.last_health_status = "healthy" if rows else "degraded"
+        self.last_metrics = {
+            "lojas_lidas": int(bool(rows)), "rows_seen": len(rows),
+            "cupons": len(accepted),
             "rejected_by_reason": dict(sorted(rejected.items())),
             "complete": False,
         }

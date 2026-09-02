@@ -395,7 +395,7 @@ FONTES_COMUNIDADE = frozenset({
     "cupomspot-cupons", "telegram-publico",
     "prima-ryca-cupons", "discoup-cupons", "promomia-cupons",
     "cuponation-cupons", "cashbe-cupons",
-    "linkerhub-cupons",
+    "linkerhub-cupons", "peguei-barato-cupons",
     "promobit-community", "pelando-community",
 })
 # Telegram, agregadores e stubs são alegação de terceiro: nenhum lista sozinho.
@@ -404,7 +404,7 @@ FONTES_COMUNIDADE_SEM_LISTAGEM = frozenset({
     "cupomspot-cupons", "telegram-publico",
     "prima-ryca-cupons", "discoup-cupons", "promomia-cupons",
     "cuponation-cupons", "cashbe-cupons",
-    "linkerhub-cupons",
+    "linkerhub-cupons", "peguei-barato-cupons",
     "promobit-community", "pelando-community",
 })
 
