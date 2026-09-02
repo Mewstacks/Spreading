@@ -515,6 +515,19 @@ Fontes primárias consultadas:
   verificado, resgate explícito e tamanho válido. Suítes integrais: 1.464/1.464
   Django e 169/169 Node; release, RLS, rolling deploy, web/worker v317 e
   `/healthz` passaram.
+- Deploy v318: a fonte oficial Shopee passou a visitar, na mesma sessão de
+  Chromium, tanto a vitrine geral `/m/cupom-de-desconto` quanto a vitrine atual
+  de cupons diários de vendedores `/m/cupom-de-desconto-v23`. As duas usam o
+  contrato assinado da Shopee; os resultados são deduplicados por `promotion_id`
+  e o inventário só é considerado completo quando ambas as páginas terminam
+  saudáveis. A página de origem fica na evidência de cada voucher. Suítes
+  integrais: 1.465/1.465 Django e 169/169 Node.
+- Prova de produção v318: release, RLS, rolling deploy, web/worker e `/healthz`
+  passaram. A conta `lules` não possui sessão de compras Shopee; a nova fonte
+  respondeu `auth_required` em 25 ms, com zero item e `complete=false`, sem abrir
+  uma coleta cega nem expirar catálogo. A conferência posterior preservou 895/124/0
+  cupons prontos para ML/Amazon/Shopee, 260/229/223 descobertas recentes e os 49
+  cupons Shopee elegíveis bloqueados por `shopee_integration_disconnected`.
 
 ## Gates de deploy desta revisão
 
