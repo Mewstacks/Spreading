@@ -23,9 +23,16 @@ import tempfile
 import time
 
 from django.conf import settings
-from django.db import DatabaseError, transaction
+from django.db import DatabaseError, InterfaceError, transaction
 
 logger = logging.getLogger(__name__)
+
+# `InterfaceError` NÃO herda de `DatabaseError` — as duas são irmãs, filhas de
+# `Error`. Quem levanta InterfaceError é a conexão já fechada ("connection
+# already closed"), que é exatamente o cenário de socket morto que estes loops
+# enfrentam depois de horas dormindo. Capturar só DatabaseError deixava esse
+# caso escapar e matar o processo, e o honcho leva o grupo inteiro junto.
+_FALHA_DE_BANCO = (DatabaseError, InterfaceError)
 
 # Heartbeat: o loop grava estado a cada ~15s. Se o último estado é recente, existe
 # um worker vivo (honcho em prod, ou subprocess destacado em dev). > isto = morto.
@@ -155,7 +162,7 @@ def links_herda_scrape() -> bool:
     if _usa_banco():
         try:
             return not _registro("links").configured
-        except DatabaseError as exc:
+        except _FALHA_DE_BANCO as exc:
             _avisar_degradado("links", "links_herda_scrape", exc)
             return True  # comportamento pré-configuração: herda de "scrape"
     return not os.path.exists(configuredfile("links"))
@@ -179,7 +186,7 @@ def is_enabled(job: str) -> bool:
                 valor = registro.enabled
             _ULTIMO_ENABLED[job] = valor
             return valor
-        except DatabaseError as exc:
+        except _FALHA_DE_BANCO as exc:
             _avisar_degradado(job, "is_enabled", exc)
             if job in _ULTIMO_ENABLED:
                 return _ULTIMO_ENABLED[job]
@@ -242,7 +249,7 @@ def read_state(job: str) -> dict:
             estado = dict(_registro(job).state or {})
             _ULTIMO_ESTADO[job] = estado
             return estado
-        except DatabaseError as exc:
+        except _FALHA_DE_BANCO as exc:
             _avisar_degradado(job, "read_state", exc)
             base = dict(_ULTIMO_ESTADO.get(job) or _ESTADO_NAO_PERSISTIDO.get(job) or {})
             base["estado_degradado"] = True
@@ -285,7 +292,7 @@ def write_state(job: str, **campos) -> dict:
                 registro.save(update_fields=["state", "updated_at"])
             _ULTIMO_ESTADO[job] = estado
             return estado
-        except DatabaseError as exc:
+        except _FALHA_DE_BANCO as exc:
             _avisar_degradado(job, "write_state", exc)
             acumulado = _ESTADO_NAO_PERSISTIDO.setdefault(job, dict(_ULTIMO_ESTADO.get(job) or {}))
             acumulado.update(campos)
@@ -310,7 +317,7 @@ def clear_state(job: str):
         try:
             from apps.scrapers.models import AutomacaoEstado
             AutomacaoEstado.objects.filter(job=job).update(state={})
-        except DatabaseError as exc:
+        except _FALHA_DE_BANCO as exc:
             _avisar_degradado(job, "clear_state", exc)
         _ULTIMO_ESTADO.pop(job, None)
         _ESTADO_NAO_PERSISTIDO.pop(job, None)

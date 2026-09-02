@@ -18,7 +18,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html.parser import HTMLParser
 from urllib.parse import urlsplit, urlunsplit
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -702,7 +702,24 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
             # produtos provados de um mesmo cupom estavam fora da janela.
             produto.save(update_fields=list(campos) + ["ultima_observacao"])
         else:
-            produto = Produto.objects.create(marketplace="mercadolivre", **defaults)
+            # `create()` puro perdia a corrida: entre o filter acima e esta
+            # linha, outra lane pode gravar o mesmo anúncio, e desde a chave
+            # natural de Produto isso vira IntegrityError — que subiria até o
+            # loop de cupons e pausaria o ciclo inteiro por backoff de banco.
+            # A colisão significa "alguém já criou": buscar e atualizar.
+            try:
+                with transaction.atomic():
+                    produto = Produto.objects.create(
+                        marketplace="mercadolivre", **defaults)
+            except IntegrityError:
+                produto = Produto.objects.filter(
+                    marketplace="mercadolivre", owner__isnull=True,
+                    link_produto=link_produto).first()
+                if produto is None:
+                    raise
+                for key, value in defaults.items():
+                    setattr(produto, key, value)
+                produto.save()
         ProdutoCupom.objects.update_or_create(
             produto=produto, cupom=cupom,
             defaults={"status": "confirmado", "verificado_em": timezone.now(),

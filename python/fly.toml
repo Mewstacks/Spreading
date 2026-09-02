@@ -36,8 +36,17 @@ kill_timeout = "30s"
 # migra o banco a cada deploy, antes de trocar as máquinas.
 # (createcachetable saiu: o cache é LocMem por processo -- ver settings.py --, então
 # a tabela nunca foi lida por ninguém.)
+#
+# `tenant_constraints --ensure` entrou aqui em 02/09/2026 porque a ausência dele
+# deixou a produção derivar em silêncio: auditoria encontrou OITO CHECKs
+# `organization_required` que nunca foram instalados (browsersession,
+# organizationfeatureoverride, cupomdisponibilidade, cupomdisponibilidadeevento,
+# cupomvalidacao, linkafiliadoprodutocupomusuario, publicacaoevento,
+# publicacaotentativa). Não havia linha órfã — os signals de tenant seguraram —
+# mas a trava do banco não existia. Tabela nova nasce sem CHECK a menos que algo
+# no deploy garanta; agora garante.
 [deploy]
-  release_command = "sh -c 'env RELEASE_COMMAND=1 python django/manage.py check --deploy && env RELEASE_COMMAND=1 python django/manage.py migrate --noinput && env RELEASE_COMMAND=1 python django/manage.py tenant_rls --enable && env TENANT_SYSTEM_PROCESS=1 python django/manage.py bootstrap_superuser'"
+  release_command = "sh -c 'env RELEASE_COMMAND=1 python django/manage.py check --deploy && env RELEASE_COMMAND=1 python django/manage.py migrate --noinput && env RELEASE_COMMAND=1 python django/manage.py tenant_constraints --ensure && env RELEASE_COMMAND=1 python django/manage.py tenant_rls --enable && env TENANT_SYSTEM_PROCESS=1 python django/manage.py bootstrap_superuser'"
 
 # Volume legado e estado local da máquina web. As credenciais ML e as sessões de
 # navegador novas ficam cifradas no PostgreSQL, pois o worker roda em outra VM.

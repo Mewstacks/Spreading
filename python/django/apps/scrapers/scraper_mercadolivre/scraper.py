@@ -1094,6 +1094,14 @@ def _sincronizar_produtos_no_banco(cupons_com_produtos):
                 link = link_canonico("mercadolivre", p.get("link_produto") or "")
                 if not link:
                     continue
+                if link in por_chave:
+                    # Colisão dentro do lote: duas entradas do mesmo anúncio, ou
+                    # canonicalização apagando identidade (foi o que aconteceu com
+                    # as URLs mclics). Silenciar aqui esconderia perda de oferta.
+                    logger.warning(
+                        "Cupom %s: duas entradas com a mesma chave canônica (%s); "
+                        "mantida a última.", camp_id, link[:120],
+                    )
                 por_chave[link] = (p, link)
             Produto.objects.bulk_create([
                 Produto(
