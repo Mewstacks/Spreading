@@ -17,8 +17,9 @@ from apps.scrapers.sources.meliuz_coupons import MeliuzCouponsSource
 from apps.scrapers.sources.registry import SOURCES
 from apps.scrapers.sources.telegram_publico import TelegramPublicoSource
 from apps.scrapers.sources.shopee_public_coupons import (
-    DAILY_STORE_COUPONS_URL, ShopeePublicCouponsSource,
-    _api_voucher_entries, _auth_required,
+    COUPONS_URL, DAILY_STORE_COUPONS_URL, ShopeePublicCouponsSource,
+    _api_voucher_entries, _auth_required, _capture_source_diagnostic,
+    _challenge_required, _collection_state,
     _browser_context_options, _parse_api_voucher, _parse_rendered_card,
     _snapshot_state,
 )
@@ -885,6 +886,31 @@ class ShopeePublicCouponsTests(TestCase):
             "Cupons disponíveis hoje",
         ))
 
+    def test_verifique_para_continuar_e_challenge_nao_inventario_vazio(self):
+        self.assertTrue(_challenge_required("Carregando.. Verifique para continuar"))
+        self.assertFalse(_challenge_required("Cupons disponíveis hoje"))
+
+    def test_diagnostico_autenticado_nao_grava_texto_integral_nem_screenshot(self):
+        page = Mock(url="https://shopee.com.br/m/cupom-de-desconto?token=secreto")
+        page.locator.return_value.inner_text.return_value = (
+            "usuario-identificavel\nVerifique para continuar"
+        )
+        with patch(
+            "apps.scrapers.sources.shopee_public_coupons.capture_public_diagnostic",
+        ) as screenshot, patch(
+            "apps.scrapers.sources.shopee_public_coupons."
+            "capture_public_text_diagnostic",
+        ) as safe_text:
+            _capture_source_diagnostic(
+                page, "shopee-public-coupons", "blocked", authenticated=True,
+            )
+
+        screenshot.assert_not_called()
+        payload = safe_text.call_args.args[0]
+        self.assertNotIn("usuario-identificavel", payload)
+        self.assertNotIn("secreto", payload)
+        self.assertIn("challenge=True", payload)
+
     def test_snapshot_esgotado_e_cashback_pode_ser_vazio_saudavel(self):
         complete, health, schema_errors = _snapshot_state(
             4, 0, {"unavailable": 3, "cashback_not_discount": 1},
@@ -893,6 +919,19 @@ class ShopeePublicCouponsTests(TestCase):
         self.assertTrue(complete)
         self.assertEqual(health, "healthy_empty")
         self.assertEqual(schema_errors, 0)
+
+    def test_rota_editorial_vazia_nao_invalida_a_vitrine_geral(self):
+        complete, health, supplemental_incomplete = _collection_state([
+            {
+                "url": DAILY_STORE_COUPONS_URL, "complete": False,
+                "health": "degraded",
+            },
+            {"url": COUPONS_URL, "complete": True, "health": "healthy"},
+        ], 13)
+
+        self.assertTrue(complete)
+        self.assertEqual(health, "healthy")
+        self.assertEqual(supplemental_incomplete, 1)
 
     def test_quebra_de_schema_preserva_catalogo_anterior(self):
         complete, health, schema_errors = _snapshot_state(

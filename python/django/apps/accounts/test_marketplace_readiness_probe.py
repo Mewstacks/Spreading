@@ -60,6 +60,22 @@ class MarketplaceReadinessRulesTests(SimpleTestCase):
             (False, "linkbuilder=login_required"),
         )
 
+    def test_ml_live_connected_substitui_probe_http_inconclusivo(self):
+        state = {"cookies": [{"name": "ssid"}]}
+        record = SimpleNamespace(
+            status="active", probe_failures=0,
+            last_probe_result="inconclusivo", lb_readiness="ready",
+        )
+
+        self.assertEqual(
+            _ml_readiness(record, state),
+            (False, "probe=inconclusivo"),
+        )
+        self.assertEqual(
+            _ml_readiness(record, state, live_verdict="conectado"),
+            (True, "pronta_com_linkbuilder"),
+        )
+
     def test_shopee_requires_both_shopper_and_affiliate_credentials(self):
         integration = SimpleNamespace(
             habilitada=True, status="conectada",
@@ -89,4 +105,3 @@ class MarketplaceReadinessRulesTests(SimpleTestCase):
             _amazon_config_readiness(profile, require_creators=True),
             (False, "creators_conta_inelegivel"),
         )
-

@@ -51,7 +51,7 @@ def _browser_readiness(record) -> tuple[bool, str]:
     )
 
 
-def _ml_readiness(record, state) -> tuple[bool, str]:
+def _ml_readiness(record, state, *, live_verdict="") -> tuple[bool, str]:
     if record is None or state is None:
         return False, "sessao_ausente"
     if record.status not in {"active", "suspect"}:
@@ -59,8 +59,9 @@ def _ml_readiness(record, state) -> tuple[bool, str]:
     failures = int(record.probe_failures or 0)
     if failures >= ML_FAILURE_LIMIT:
         return False, f"suspeitas_conclusivas={failures}"
-    if record.last_probe_result != "conectado":
-        return False, f"probe={record.last_probe_result or 'nao_executado'}"
+    site_verdict = str(live_verdict or record.last_probe_result or "")
+    if site_verdict != "conectado":
+        return False, f"probe={site_verdict or 'nao_executado'}"
     if record.lb_readiness != "ready":
         return False, f"linkbuilder={record.lb_readiness or 'unknown'}"
     if not isinstance(state, dict) or not isinstance(state.get("cookies"), list):
@@ -192,10 +193,12 @@ class Command(BaseCommand):
             from apps.scrapers.conexoes import sondar_sessao_ml
 
             verdict, _reason = sondar_sessao_ml(ml_state)
-            previous_ok, previous_reason = results["mercadolivre"]
+            live_ok, live_reason = _ml_readiness(
+                ml_record, ml_state, live_verdict=verdict,
+            )
             results["mercadolivre"] = (
-                previous_ok and verdict == "conectado",
-                f"{previous_reason}; live={verdict}",
+                live_ok,
+                f"{live_reason}; live={verdict}",
             )
         if live and "shopee" in selected and shopee_integration is not None:
             from apps.scrapers.shopee import (
@@ -229,4 +232,3 @@ class Command(BaseCommand):
             f"Probe nominal concluído para {username!r}; "
             f"prontas={len(results) - len(failed)}/{len(results)}."
         ))
-

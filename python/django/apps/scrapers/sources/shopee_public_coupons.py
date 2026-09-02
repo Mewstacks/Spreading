@@ -20,7 +20,9 @@ from django.utils import timezone
 
 from apps.scrapers.auxiliar import iniciar_browser
 from apps.scrapers.coupon_rules import normalizar_regras_cupom, tem_restricao_publico
-from apps.scrapers.source_diagnostics import capture_public_diagnostic
+from apps.scrapers.source_diagnostics import (
+    capture_public_diagnostic, capture_public_text_diagnostic,
+)
 
 from .base import IngestedItem, SourceAdapter, normalizar_dinheiro
 
@@ -42,6 +44,9 @@ _MAXIMUM = re.compile(r"limitado a\s*R\$\s*([\d.,]+\s*(?:mil)?)", re.I)
 _EXPECTED_REJECTIONS = {"unavailable", "cashback_not_discount", "duplicate"}
 _VOUCHER_API_PATH = "/api/v1/microsite/get_vouchers_by_collections"
 _SHOPEE_MONEY_SCALE = 100_000
+_SCHEMA_FINGERPRINT = hashlib.sha256(
+    "voucher-details|discount|state|core-plus-supplemental-v3".encode("utf-8")
+).hexdigest()
 
 
 def _auth_required(url, body):
@@ -54,6 +59,39 @@ def _auth_required(url, body):
             or "faça login para continuar" in folded
             or "faca login para continuar" in folded
         )
+    )
+
+
+def _challenge_required(body):
+    folded = str(body or "").casefold()
+    return any(marker in folded for marker in (
+        "verifique para continuar",
+        "verifique que voce e humano",
+        "verifique que você é humano",
+        "access denied",
+        "captcha",
+    ))
+
+
+def _capture_source_diagnostic(page, slug, reason, *, authenticated=False):
+    """Nunca grava screenshot/texto integral de uma conta autenticada."""
+    if not authenticated:
+        return capture_public_diagnostic(page, slug, reason)
+    try:
+        body = page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        body = ""
+    path = urlsplit(str(getattr(page, "url", "") or "")).path[:300]
+    facts = {
+        "path": path,
+        "text_length": len(body),
+        "challenge": _challenge_required(body),
+        "auth_required": _auth_required(getattr(page, "url", ""), body),
+        "voucher_link_marker": "/voucher/details" in body,
+    }
+    return capture_public_text_diagnostic(
+        "\n".join(f"{key}={value}" for key, value in facts.items()),
+        slug, reason,
     )
 
 
@@ -317,6 +355,23 @@ def _snapshot_state(cards_count, accepted_count, rejected):
     return complete, health, schema_errors
 
 
+def _collection_state(page_snapshots, accepted_count):
+    """A vitrine geral e autoritativa; colecoes editoriais so enriquecem."""
+    core = next(
+        (row for row in page_snapshots if row.get("url") == COUPONS_URL), None,
+    )
+    complete = bool(core and core.get("complete"))
+    supplemental_incomplete = sum(
+        1 for row in page_snapshots
+        if row.get("url") != COUPONS_URL and not row.get("complete")
+    )
+    if accepted_count:
+        health = "healthy" if complete else "partial"
+    else:
+        health = "healthy_empty" if complete else "degraded"
+    return complete, health, supplemental_incomplete
+
+
 class ShopeePublicCouponsSource(SourceAdapter):
     slug = "shopee-public-coupons"
     marketplace = "shopee"
@@ -389,24 +444,60 @@ class ShopeePublicCouponsSource(SourceAdapter):
                 except Exception:
                     pass
                 body = page.locator("body").inner_text(timeout=10000)
-                folded = body.casefold()
                 page_auth_required = _auth_required(page.url, body)
                 if page_auth_required:
                     auth_required = True
-                    capture_public_diagnostic(page, self.slug, "auth_required")
+                    _capture_source_diagnostic(
+                        page, self.slug, "auth_required",
+                        authenticated=usuario is not None,
+                    )
                     page_snapshots.append({
                         "url": coupons_url, "items_seen": 0, "accepted": 0,
                         "complete": False, "health": "auth_required",
                         "schema_errors": 0,
                     })
                     break
-                if any(marker in folded for marker in (
-                        "verifique que voce e humano",
-                        "verifique que você é humano",
-                        "access denied", "captcha")):
-                    capture_public_diagnostic(page, self.slug, "captcha_or_block")
-                    self.last_health_status = "blocked"
-                    raise RuntimeError("captcha")
+                if _challenge_required(body):
+                    _capture_source_diagnostic(
+                        page, self.slug, "captcha_or_block",
+                        authenticated=usuario is not None,
+                    )
+                    page_snapshots.append({
+                        "url": coupons_url, "items_seen": 0, "accepted": 0,
+                        "complete": False, "health": "blocked",
+                        "schema_errors": 0,
+                    })
+                    # A primeira rota e apenas aquecimento e pode receber o
+                    # interstitial que libera a navegacao seguinte. Na vitrine
+                    # geral, porem, o mesmo texto significa coleta bloqueada.
+                    if coupons_url == COUPONS_URL:
+                        self.last_health_status = "blocked"
+                        self.last_metrics = {
+                            "items_seen": sum(
+                                row["items_seen"] for row in page_snapshots
+                            ),
+                            "accepted": len(accepted),
+                            "rejected": sum(rejected.values()),
+                            "rejected_by_reason": dict(sorted(rejected.items())),
+                            "complete": False,
+                            "reason_code": "captcha_or_block",
+                            "schema_errors": sum(
+                                row["schema_errors"] for row in page_snapshots
+                            ),
+                            "supplemental_incomplete": sum(
+                                1 for row in page_snapshots
+                                if row["url"] != COUPONS_URL
+                                and not row["complete"]
+                            ),
+                            "pages_processed": len(page_snapshots),
+                            "pages": page_snapshots,
+                            "duration_ms": round(
+                                (time.monotonic() - started) * 1000
+                            ),
+                            "schema_fingerprint": _SCHEMA_FINGERPRINT,
+                        }
+                        raise RuntimeError("captcha")
+                    continue
 
                 api_payloads = []
                 for response in api_responses[response_start:]:
@@ -480,8 +571,9 @@ class ShopeePublicCouponsSource(SourceAdapter):
                     "schema_errors": page_schema_errors,
                 })
                 if not cards:
-                    capture_public_diagnostic(
+                    _capture_source_diagnostic(
                         page, self.slug, "voucher_cards_not_found",
+                        authenticated=usuario is not None,
                     )
             if usuario is not None and not auth_required:
                 refreshed_state = context.storage_state()
@@ -490,17 +582,12 @@ class ShopeePublicCouponsSource(SourceAdapter):
             from apps.scrapers.report_sessions import save_report_state
             save_report_state(usuario, "shopee_shop", refreshed_state)
 
-        complete = bool(
-            len(page_snapshots) == len(self.coupon_pages)
-            and all(row["complete"] for row in page_snapshots)
+        complete, health, supplemental_incomplete = _collection_state(
+            page_snapshots, len(accepted),
         )
         schema_errors = sum(row["schema_errors"] for row in page_snapshots)
         if auth_required:
             complete, health, schema_errors = False, "auth_required", 0
-        elif accepted:
-            health = "healthy" if complete else "partial"
-        else:
-            health = "healthy_empty" if complete else "degraded"
         items_seen = sum(row["items_seen"] for row in page_snapshots)
         self.last_metrics = {
             "items_seen": items_seen,
@@ -510,12 +597,11 @@ class ShopeePublicCouponsSource(SourceAdapter):
             "complete": complete,
             "reason_code": "auth_required" if auth_required else "",
             "schema_errors": schema_errors,
+            "supplemental_incomplete": supplemental_incomplete,
             "pages_processed": len(page_snapshots),
             "pages": page_snapshots,
             "duration_ms": round((time.monotonic() - started) * 1000),
-            "schema_fingerprint": hashlib.sha256(
-                "voucher-details|discount|state|multi-page-v2".encode("utf-8")
-            ).hexdigest(),
+            "schema_fingerprint": _SCHEMA_FINGERPRINT,
         }
         self.last_health_status = health
         observed = timezone.now()
