@@ -36,6 +36,10 @@ SAIDA_MODELO = {"cupons": [
      "valor": 50, "minimo": 399, "teto": 0, "escopo": ""},
 ]}
 
+MENSAGEM_AMBIGUA = (
+    "Cupom Amazon CASA1508 com desconto especial para compras selecionadas"
+)
+
 
 class SinalDeCupomTests(TestCase):
     def test_mensagem_com_cupom_e_marcada(self):
@@ -271,19 +275,20 @@ class ExtracaoTests(TestCase):
         return _fake
 
     def test_le_a_mensagem_e_devolve_os_cupons(self):
-        with patch("apps.scrapers.llm._cliente"), \
+        with patch("apps.scrapers.llm._cliente") as cliente, \
                 patch("apps.scrapers.llm._texto_resposta", return_value="{}"), \
                 patch("apps.scrapers.llm._json_resposta", return_value=SAIDA_MODELO):
             achados = extrair(MENSAGEM_REAL)
-        self.assertEqual(len(achados), 2)
+        self.assertEqual(len(achados), 4)
+        cliente.assert_not_called()
 
     def test_a_mesma_mensagem_e_lida_uma_vez_so(self):
         """Cache por hash: a mensagem do canal é imutável, pagar duas vezes é desperdício."""
         with patch("apps.scrapers.llm._cliente") as cliente, \
                 patch("apps.scrapers.llm._texto_resposta", return_value="{}"), \
                 patch("apps.scrapers.llm._json_resposta", return_value=SAIDA_MODELO):
-            extrair(MENSAGEM_REAL)
-            extrair(MENSAGEM_REAL)
+            extrair(MENSAGEM_AMBIGUA)
+            extrair(MENSAGEM_AMBIGUA)
         self.assertEqual(cliente.call_count, 1)
 
     def test_mensagem_sem_cupom_nem_chega_ao_modelo(self):
@@ -291,25 +296,31 @@ class ExtracaoTests(TestCase):
             self.assertEqual(extrair("Bom dia, pessoal!"), [])
         cliente.assert_not_called()
 
+    def test_banner_sem_codigo_nao_gasta_ia_para_confirmar_vazio(self):
+        texto = "Cupom Amazon com 20% OFF para produtos selecionados"
+        with patch("apps.scrapers.llm._cliente") as cliente:
+            self.assertEqual(extrair(texto), [])
+        cliente.assert_not_called()
+
     def test_falha_do_modelo_devolve_vazio_e_nao_cacheia(self):
         """Erro não derruba a coleta nem congela a mensagem como vazia."""
         with patch("apps.scrapers.llm._cliente", side_effect=RuntimeError("api fora")):
-            self.assertEqual(len(extrair(MENSAGEM_REAL)), 4)
+            self.assertEqual(extrair(MENSAGEM_AMBIGUA), [])
         # Simula o TTL do circuito encerrado; a mensagem em si não foi cacheada.
         cache.delete("cupom-llm-circuit:anthropic")
         with patch("apps.scrapers.llm._cliente"), \
                 patch("apps.scrapers.llm._texto_resposta", return_value="{}"), \
                 patch("apps.scrapers.llm._json_resposta", return_value=SAIDA_MODELO):
-            self.assertEqual(len(extrair(MENSAGEM_REAL)), 2)
+            self.assertEqual(len(extrair(MENSAGEM_AMBIGUA)), 2)
 
     def test_erro_de_credito_abre_circuito_e_evita_tempestade_de_chamadas(self):
-        outra = MENSAGEM_REAL.replace("CASA1508", "CASA1509")
+        outra = MENSAGEM_AMBIGUA.replace("CASA1508", "CASA1509")
         with patch(
             "apps.scrapers.llm._cliente",
             side_effect=RuntimeError("Your credit balance is too low; billing"),
         ) as cliente:
-            self.assertEqual(len(extrair(MENSAGEM_REAL)), 4)
-            self.assertEqual(len(extrair(outra)), 4)
+            self.assertEqual(extrair(MENSAGEM_AMBIGUA), [])
+            self.assertEqual(extrair(outra), [])
 
         self.assertEqual(cliente.call_count, 1)
         self.assertEqual(cache.get("cupom-llm-circuit:anthropic"), "credential_or_credit")
@@ -331,7 +342,7 @@ class ExtracaoTests(TestCase):
         with patch("apps.scrapers.llm._cliente"), \
                 patch("apps.scrapers.llm._texto_resposta", return_value=truncada), \
                 patch("apps.scrapers.llm._json_resposta", return_value=None):
-            achados = extrair(MENSAGEM_REAL)
+            achados = extrair(MENSAGEM_AMBIGUA)
         self.assertEqual([c["codigo"] for c in achados],
                          ["TODOOSITE1308", "CASA1508"])
 

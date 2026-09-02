@@ -195,6 +195,26 @@ def _candidatos_codigo(linha: str) -> list[str]:
     return list(dict.fromkeys(candidatos))
 
 
+def _tem_candidato_plausivel(texto: str) -> bool:
+    """IA so pode ser paga se houver algo que possa virar codigo de checkout."""
+    sem_urls = _URL_NO_TEXTO.sub(" ", texto or "")
+    candidatos = [
+        codigo
+        for linha in sem_urls.splitlines()
+        for codigo in _candidatos_codigo(linha)
+        if codigo_plausivel(codigo)
+    ]
+    if any(any(char.isdigit() for char in codigo) for codigo in candidatos):
+        return True
+    # Codigos so de letras existem (ex.: OMELHOR), mas uma palavra longa de
+    # marketing nao basta. Exige posicao explicita de codigo e caixa alta no texto.
+    explicitos = re.findall(
+        r"(?:\bcupom\s*:?|:)\s*([A-Z][A-Z-]{6,29})(?=\s|$|[,/])",
+        sem_urls,
+    )
+    return any(codigo_plausivel(codigo) for codigo in explicitos)
+
+
 def _codigo_em_linha_isolada(linha: str) -> str:
     """Código sozinho (eventualmente após ``Cupom:`` ou emoji de ticket).
 
@@ -416,6 +436,21 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
     if not loja_detectada:
         return []
     fallback = extrair_deterministico(texto, loja_padrao=loja_detectada)
+    chave = _chave_cache(texto)
+    guardado = cache.get(chave)
+    if guardado is not None:
+        return guardado
+    # Mensagem estruturada ja foi compreendida integralmente por regras locais:
+    # pagar um Sonnet para transcrever os mesmos campos so aumenta custo/latencia.
+    if fallback:
+        cache.set(chave, fallback, _TTL_CACHE_S)
+        return fallback
+    # Desconto/banner sem nenhum token plausivel nao pode produzir cupom
+    # digitavel. O modelo foi instruido a nao inventar, portanto a chamada so pode
+    # confirmar vazio - dezenas delas eram feitas a cada restart do worker.
+    if not _tem_candidato_plausivel(texto):
+        cache.set(chave, [], _TTL_CACHE_S)
+        return []
     if not getattr(settings, "CUPOM_LLM_ATIVO", True):
         return fallback
     if not getattr(settings, "ANTHROPIC_API_KEY", ""):
@@ -423,11 +458,6 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
         return fallback
     if cache.get(_CHAVE_CIRCUITO):
         return fallback
-
-    chave = _chave_cache(texto)
-    guardado = cache.get(chave)
-    if guardado is not None:
-        return guardado
 
     try:
         from apps.scrapers.llm import _cliente, _json_resposta, _texto_resposta
