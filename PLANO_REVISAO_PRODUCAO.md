@@ -543,6 +543,21 @@ Fontes primárias consultadas:
   Shopee elegíveis continuam bloqueados exclusivamente pela integração afiliada
   desconectada da conta; o WhatsApp gerou QR novo, mas ainda aguarda leitura para
   o canário de transporte real.
+- Deploy v320: o radar Peguei Barato entrou como fonte comunitária fraca da
+  Amazon, sem Chromium, proxy ou link de afiliado de terceiro. O parser exige
+  card público com código, OFF numérico e destino `amazon.com.br`; rejeita
+  benefício que contradiz o número do código, cards genéricos associados ao
+  `COMPRANOAPP`, ofertas sem desconto explícito e host estranho. A fonte nunca
+  comprova um cupom sozinha e não declara inventário completo. Suítes integrais:
+  1.468/1.468 Django e 169/169 Node.
+- Prova de produção v320: release/RLS/rolling deploy, web/worker v320 e
+  `/healthz` passaram. A leitura controlada viu 16 cards, aceitou e persistiu
+  somente três (`350SMART`, `APP200OFF` e o `COMPRANOAPP` específico de primeira
+  compra no app), registrando as 13 rejeições por motivo. A descoberta Amazon da
+  `lules` subiu de 230 para 233 em 24 h e a prontidão permaneceu corretamente em
+  125, pois códigos novos ainda precisam de corroboração. O canário read-only
+  passou novamente em 3/3 regras; o WhatsApp permaneceu em `qr` aguardando a
+  leitura da usuária.
 
 ## Gates de deploy desta revisão
 
