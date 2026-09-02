@@ -685,6 +685,18 @@ Fontes primárias consultadas:
   `lules`; o gate de prontidão recusou honestamente a conta, ainda sem pareamento.
   Os logs do Node mostram somente renovações de QR e encerramento do Chromium
   ocioso, sem qualquer evento `authenticated`, `ready`, logout ou revogação.
+- Prova de produção v330: foi criado um gate nominal equivalente para ML,
+  Amazon e Shopee. Ele exige username, organização ativa e storage state cifrado
+  legível da conta correta; no ML exige ainda probe `conectado` e Link Builder
+  `ready`; na Amazon, Partner Tag e, opcionalmente, elegibilidade Creators; na
+  Shopee, combina sessão de compras com App ID/Secret afiliados conectados. O
+  modo `--live` ficou preparado para sondar o ML por HTTP e a API assinada da
+  Shopee sem abrir Chromium. Cinco testes direcionados e a suíte integral Django
+  1.489/1.489 passaram. Release/RLS/rolling deploy e smoke checks deixaram
+  web/worker v330 e `/healthz` verdes. O gate real da `lules`, exigindo Creators,
+  mediu 0/3: ML `status=expired`; Amazon sem sessão de compras e conta Creators
+  inelegível; Shopee sem sessão de compras e sem integração afiliada. Com
+  `--require-ready`, o comando recusou corretamente as três lojas.
 
 ## Gates de deploy desta revisão
 
