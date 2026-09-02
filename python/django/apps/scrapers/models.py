@@ -1110,6 +1110,14 @@ class IncidenteSaude(models.Model):
                                       null=True, blank=True, related_name="incidentes")
     confirmado_em = models.DateTimeField(null=True, blank=True, db_index=True)
     confirmacao = models.CharField(max_length=255, blank=True, default="")
+    # Janela de silêncio do alerta, movida do cache (LocMem por processo, sem
+    # Redis em produção — 10 processos deduplicavam localmente e mandavam até
+    # 10 mensagens do mesmo incidente) para a própria linha. `alertado_em` é a
+    # entrega confirmada; `alerta_tentado_em` é a reivindicação em andamento —
+    # duas colunas, não uma, porque cache.add fundia as duas coisas e o
+    # cache.delete de liberação (na falha de entrega) virava remendo.
+    alertado_em = models.DateTimeField(null=True, blank=True, db_index=True)
+    alerta_tentado_em = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [models.Index(fields=["status", "ultima_ocorrencia"])]

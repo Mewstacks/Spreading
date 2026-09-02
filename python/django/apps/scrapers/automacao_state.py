@@ -14,6 +14,7 @@ Windows (dev) e no container (prod), sem Popen/taskkill.
 """
 import atexit
 import json
+import logging
 import os
 import shutil
 import sys
@@ -22,7 +23,9 @@ import tempfile
 import time
 
 from django.conf import settings
-from django.db import transaction
+from django.db import DatabaseError, transaction
+
+logger = logging.getLogger(__name__)
 
 # Heartbeat: o loop grava estado a cada ~15s. Se o último estado é recente, existe
 # um worker vivo (honcho em prod, ou subprocess destacado em dev). > isto = morto.
@@ -56,6 +59,36 @@ _DIR = _diretorio_de_estado()
 os.makedirs(_DIR, exist_ok=True)
 
 JOBS = ("scrape", "envio", "links", "relatorios")
+
+# ── Fail-soft: banco fora não pode matar o loop, nem mentir "desligado" ───────
+#
+# Um blip de Postgres/proxy não pode derrubar o processo: honcho mata o grupo
+# inteiro quando um morre (8 workers ou o gunicorn, dependendo da VM). Mas
+# devolver False em is_enabled() por causa de um erro de banco DESLIGA a
+# esteira em silêncio — pior que crashar, porque ninguém percebe. O contrato
+# aqui é tri-estado: "ligado" / "desligado" / "não sei, mantenho o último
+# valor conhecido (ou o default)". Nunca "não sei" vira "desligado".
+#
+# Escrita de intenção do usuário (set_enabled) continua levantando: se alguém
+# clicou pra desligar e o banco engoliu o clique, quem chamou precisa saber.
+_ULTIMO_ENABLED: dict[str, bool] = {}
+_ULTIMO_ESTADO: dict[str, dict] = {}
+_ESTADO_NAO_PERSISTIDO: dict[str, dict] = {}
+_ULTIMO_AVISO_DEGRADADO: dict[str, float] = {}
+_AVISO_DEGRADADO_COOLDOWN_S = 60
+
+
+def _avisar_degradado(job: str, operacao: str, erro: Exception):
+    """Loga a degradação sem inundar: 1 warning por job/minuto, não por chamada."""
+    agora = time.time()
+    ultimo = _ULTIMO_AVISO_DEGRADADO.get(job, 0)
+    if agora - ultimo < _AVISO_DEGRADADO_COOLDOWN_S:
+        return
+    _ULTIMO_AVISO_DEGRADADO[job] = agora
+    logger.warning(
+        "%s degradado em '%s' por erro de banco: %s: %s",
+        operacao, job, type(erro).__name__, erro,
+    )
 
 
 def _usa_banco() -> bool:
@@ -120,18 +153,37 @@ def configuredfile(job: str) -> str:
 def links_herda_scrape() -> bool:
     """Compatibilidade até a lane receber sua primeira escolha explícita."""
     if _usa_banco():
-        return not _registro("links").configured
+        try:
+            return not _registro("links").configured
+        except DatabaseError as exc:
+            _avisar_degradado("links", "links_herda_scrape", exc)
+            return True  # comportamento pré-configuração: herda de "scrape"
     return not os.path.exists(configuredfile("links"))
 
 
 # ── Flag liga/desliga ─────────────────────────────────────────
 def is_enabled(job: str) -> bool:
-    """Ligado = arquivo-flag existe. Default DESLIGADO (nada roda até o usuário ligar)."""
+    """Ligado = arquivo-flag existe. Default DESLIGADO (nada roda até o usuário ligar).
+
+    Em erro de banco NUNCA devolve False por causa do erro: cai para o último
+    valor lido com sucesso e, na ausência total de histórico, para o default
+    operacional (AUTOMACAO_DEFAULT_ENABLED). "Não sei" não pode virar
+    "desligado" — ver o comentário de _ULTIMO_ENABLED acima.
+    """
     if _usa_banco():
-        registro = _registro(job)
-        if job == "links" and not registro.configured:
-            return _registro("scrape").enabled
-        return registro.enabled
+        try:
+            registro = _registro(job)
+            if job == "links" and not registro.configured:
+                valor = _registro("scrape").enabled
+            else:
+                valor = registro.enabled
+            _ULTIMO_ENABLED[job] = valor
+            return valor
+        except DatabaseError as exc:
+            _avisar_degradado(job, "is_enabled", exc)
+            if job in _ULTIMO_ENABLED:
+                return _ULTIMO_ENABLED[job]
+            return job in _defaults_ligados()
     if job == "links" and links_herda_scrape():
         return os.path.exists(enabledfile("scrape"))
     return os.path.exists(enabledfile(job))
@@ -178,9 +230,23 @@ def parar(job: str) -> bool:
 
 # ── Heartbeat / estado ────────────────────────────────────────
 def read_state(job: str) -> dict:
-    """Heartbeat do loop: fase atual, último/próximo ciclo, contadores."""
+    """Heartbeat do loop: fase atual, último/próximo ciclo, contadores.
+
+    Em erro de banco devolve o último estado conhecido (nunca {} — worker_alive
+    lê {} como "morto", o que é uma segunda mentira em cima da primeira) com
+    `estado_degradado=True` marcado, para a tela de Saúde distinguir "parado"
+    de "não consigo falar com o banco agora".
+    """
     if _usa_banco():
-        return dict(_registro(job).state or {})
+        try:
+            estado = dict(_registro(job).state or {})
+            _ULTIMO_ESTADO[job] = estado
+            return estado
+        except DatabaseError as exc:
+            _avisar_degradado(job, "read_state", exc)
+            base = dict(_ULTIMO_ESTADO.get(job) or _ESTADO_NAO_PERSISTIDO.get(job) or {})
+            base["estado_degradado"] = True
+            return base
     try:
         with open(statefile(job), encoding="utf-8") as f:
             return json.load(f)
@@ -189,20 +255,43 @@ def read_state(job: str) -> dict:
 
 
 def write_state(job: str, **campos) -> dict:
-    """Mescla campos no estado e grava atômico. Chamado pelo loop a cada fase."""
+    """Mescla campos no estado e grava atômico. Chamado pelo loop a cada fase.
+
+    NUNCA levanta no ramo de banco: é chamada de dentro dos loops de automação
+    e de _pausar_por_banco (o próprio tratamento de erro de banco), e uma
+    exceção aqui derrubaria o processo que está tentando se recuperar. Em
+    erro, acumula em memória (_ESTADO_NAO_PERSISTIDO) — a próxima escrita
+    bem-sucedida no mesmo job empurra o acumulado, porque a função já faz
+    merge. Não cai para o ramo de arquivo como fallback: o volume /data só
+    monta na VM "web", e o worker escreveria em diretório efêmero do
+    container, invisível para quem olha o estado — pior que não persistir.
+    """
     if _usa_banco():
-        from apps.scrapers.models import AutomacaoEstado
-        with transaction.atomic():
-            registro, _ = AutomacaoEstado.objects.select_for_update().get_or_create(
-                job=job,
-                defaults={"enabled": job in _defaults_ligados()},
-            )
-            estado = dict(registro.state or {})
-            estado.update(campos)
-            estado["atualizado_em"] = time.time()
-            registro.state = estado
-            registro.save(update_fields=["state", "updated_at"])
-        return estado
+        try:
+            from apps.scrapers.models import AutomacaoEstado
+            with transaction.atomic():
+                registro, _ = AutomacaoEstado.objects.select_for_update().get_or_create(
+                    job=job,
+                    defaults={"enabled": job in _defaults_ligados()},
+                )
+                estado = dict(registro.state or {})
+                estado.update(_ESTADO_NAO_PERSISTIDO.pop(job, {}))
+                estado.update(campos)
+                estado["atualizado_em"] = time.time()
+                # O banco respondeu: não estamos mais degradados, mesmo que o
+                # dict acumulado durante o blip tivesse marcado a flag.
+                estado.pop("estado_degradado", None)
+                registro.state = estado
+                registro.save(update_fields=["state", "updated_at"])
+            _ULTIMO_ESTADO[job] = estado
+            return estado
+        except DatabaseError as exc:
+            _avisar_degradado(job, "write_state", exc)
+            acumulado = _ESTADO_NAO_PERSISTIDO.setdefault(job, dict(_ULTIMO_ESTADO.get(job) or {}))
+            acumulado.update(campos)
+            acumulado["atualizado_em"] = time.time()
+            acumulado["estado_degradado"] = True
+            return acumulado
     estado = read_state(job)
     estado.update(campos)
     estado["atualizado_em"] = time.time()
@@ -218,8 +307,13 @@ def write_state(job: str, **campos) -> dict:
 
 def clear_state(job: str):
     if _usa_banco():
-        from apps.scrapers.models import AutomacaoEstado
-        AutomacaoEstado.objects.filter(job=job).update(state={})
+        try:
+            from apps.scrapers.models import AutomacaoEstado
+            AutomacaoEstado.objects.filter(job=job).update(state={})
+        except DatabaseError as exc:
+            _avisar_degradado(job, "clear_state", exc)
+        _ULTIMO_ESTADO.pop(job, None)
+        _ESTADO_NAO_PERSISTIDO.pop(job, None)
         return
     try:
         os.remove(statefile(job))

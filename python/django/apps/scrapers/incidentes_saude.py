@@ -116,8 +116,17 @@ def processar_evento(evento):
             "evento_origem", "level", "status", "confirmado_em", "confirmacao"])
     # Detectar não é avisar. Sem esta linha o incidente espera alguém abrir a tela de
     # Saúde — que é exatamente como a produção passou três dias fora do ar em agosto.
+    #
+    # on_commit em vez de chamada direta: reconciliar_pendentes roda isto dentro de
+    # transaction.atomic() por lote de até 500 eventos, e a reivindicação do alerta
+    # (UPDATE condicional em IncidenteSaude) tomaria o lock de linha pela duração do
+    # lote inteiro. Fora de um bloco atômico — o caso de log_event — on_commit
+    # dispara imediatamente, então o comportamento não muda para esse caminho.
+    from django.db import transaction
     from apps.scrapers.alertas import notificar_incidente
-    notificar_incidente(incidente, criado=criado, reaberto=reaberto)
+    transaction.on_commit(
+        lambda: notificar_incidente(incidente, criado=criado, reaberto=reaberto)
+    )
     return incidente
 
 

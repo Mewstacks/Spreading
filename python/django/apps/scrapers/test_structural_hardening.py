@@ -603,6 +603,45 @@ class BrowserResourceContractTests(TestCase):
         self.assertIn("_rodar_scrape(", scrape)
         self.assertIn("_rodar_scrape_rapido()", flash)
 
+    def test_boot_sobrevive_a_banco_fora_do_ar(self):
+        """Postgres indisponível no boot não pode matar o processo.
+
+        @system_job fazia SQL (checagem de role + set_config) antes do
+        primeiro ciclo do loop; sem retry, honcho derrubava o grupo inteiro
+        (8 workers, ou o gunicorn no Procfile.web) e a Fly reiniciava em
+        crash-loop. handle() precisa absorver DatabaseError no boot e tentar
+        de novo, sem propagar.
+        """
+        from django.db import DatabaseError
+        from apps.scrapers.management.commands.automacao import Command
+
+        cmd = Command()
+        chamadas = {"n": 0}
+
+        @contextmanager
+        def system_context_instavel():
+            chamadas["n"] += 1
+            if chamadas["n"] < 3:
+                raise DatabaseError("conexão fechada")
+            yield
+
+        with patch(
+            "apps.scrapers.management.commands.automacao.system_context",
+            system_context_instavel,
+        ), patch(
+            "apps.scrapers.management.commands.automacao.connections.close_all",
+        ), patch(
+            "apps.scrapers.management.commands.automacao.time.sleep",
+        ) as sleep_mock, patch.object(
+            Command, "_despachar", return_value="ok",
+        ) as despachar_mock:
+            resultado = cmd.handle(modo="scrape")
+
+        self.assertEqual(resultado, "ok")
+        self.assertEqual(chamadas["n"], 3)
+        despachar_mock.assert_called_once()
+        self.assertEqual(sleep_mock.call_count, 2)
+
 
 class WhatsAppReconcileSafetyTests(SimpleTestCase):
     def tearDown(self):

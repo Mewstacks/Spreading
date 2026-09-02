@@ -3,10 +3,10 @@
 Cada teste aqui corresponde a uma forma conhecida de o alerta virar inútil — ou por
 não tocar quando devia, ou por tocar tanto que se aprende a ignorá-lo.
 """
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.core import mail
-from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -34,7 +34,6 @@ def _incidente(**extra):
                    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 class AlertaDeIncidenteTests(TestCase):
     def setUp(self):
-        cache.clear()
         mail.outbox.clear()
 
     def test_incidente_novo_de_erro_avisa(self):
@@ -62,7 +61,13 @@ class AlertaDeIncidenteTests(TestCase):
         incidente = _incidente()
         notificar_incidente(incidente, criado=True)
         mail.outbox.clear()
-        cache.clear()  # simula a janela de silêncio vencendo
+        # Simula a janela de silêncio vencendo: a dedupe mora na própria linha
+        # (alertado_em/alerta_tentado_em), não mais num cache — empurra os dois
+        # carimbos pro passado, como o relógio real teria feito.
+        IncidenteSaude.objects.filter(pk=incidente.pk).update(
+            alertado_em=timezone.now() - timedelta(minutes=61),
+            alerta_tentado_em=timezone.now() - timedelta(minutes=61),
+        )
         self.assertTrue(notificar_incidente(incidente, criado=False, reaberto=True))
         self.assertEqual(len(mail.outbox), 1)
 
@@ -98,7 +103,6 @@ class AlertaDeIncidenteTests(TestCase):
                    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 class CanalDesligadoTests(TestCase):
     def setUp(self):
-        cache.clear()
         mail.outbox.clear()
 
     def test_sem_canal_configurado_nao_quebra(self):
@@ -106,12 +110,62 @@ class CanalDesligadoTests(TestCase):
         self.assertEqual(mail.outbox, [])
 
 
+@override_settings(ALERTA_TELEGRAM_CHAT_ID="", ALERTA_EMAILS="operacao@example.com",
+                   EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+class ReivindicacaoNoBancoTests(TestCase):
+    """A dedupe precisa valer entre processos e VMs, não só threads de um processo.
+
+    LocMemCache (produção, sem Redis) dedupava por processo: 10 workers no
+    mesmo Procfile mandavam até 10 mensagens do mesmo incidente. A
+    reivindicação agora é um UPDATE condicional em IncidenteSaude — o teste
+    de verdade dessa propriedade exige dois processos batendo no mesmo
+    Postgres ao mesmo tempo (TransactionTestCase + threads, só roda contra
+    PostgreSQL real). Aqui cobrimos o que é determinístico em SQLite: o
+    segundo pedido de reivindicação da MESMA linha, sem que a primeira tenha
+    confirmado ou liberado, não pode ganhar.
+    """
+
+    def test_segunda_reivindicacao_da_mesma_linha_nao_ganha_sem_liberacao(self):
+        from apps.scrapers.alertas import _reivindicar
+
+        incidente = _incidente()
+        self.assertTrue(_reivindicar(incidente))
+        # Ninguém confirmou nem liberou ainda — é exatamente a janela entre
+        # dois processos que reivindicam o mesmo evento ao mesmo tempo.
+        self.assertFalse(_reivindicar(incidente))
+
+    def test_apos_liberar_a_proxima_reivindicacao_ganha(self):
+        from apps.scrapers.alertas import _liberar_tentativa, _reivindicar
+
+        incidente = _incidente()
+        self.assertTrue(_reivindicar(incidente))
+        _liberar_tentativa(incidente)
+        self.assertTrue(_reivindicar(incidente))
+
+    def test_reivindicacao_orfa_expira_pelo_teto_de_tentativa(self):
+        """Processo morreu entre reivindicar e entregar: não pode calar pra sempre."""
+        from apps.scrapers.alertas import _TENTATIVA_TTL_MIN, _reivindicar
+
+        incidente = _incidente()
+        self.assertTrue(_reivindicar(incidente))
+        IncidenteSaude.objects.filter(pk=incidente.pk).update(
+            alerta_tentado_em=timezone.now() - timedelta(minutes=_TENTATIVA_TTL_MIN + 1),
+        )
+        self.assertTrue(_reivindicar(incidente))
+
+    def test_sem_canal_configurado_nao_segura_a_reivindicacao(self):
+        """Sem destino, não houve tentativa real — a janela não pode ficar presa."""
+        with override_settings(ALERTA_TELEGRAM_CHAT_ID="", ALERTA_EMAILS=""):
+            incidente = _incidente()
+            self.assertFalse(notificar_incidente(incidente, criado=True))
+            self.assertIsNone(
+                IncidenteSaude.objects.get(pk=incidente.pk).alerta_tentado_em,
+            )
+
+
 @override_settings(ALERTA_TELEGRAM_CHAT_ID="123", TELEGRAM_BOT_TOKEN="token",
                    ALERTA_EMAILS="", ALERTA_SILENCIO_MIN=60)
 class TelegramTests(TestCase):
-    def setUp(self):
-        cache.clear()
-
     def test_usa_telegram_quando_configurado(self):
         with patch("apps.scrapers.alertas._enviar_telegram",
                    return_value=True) as envio:
@@ -125,9 +179,6 @@ class TelegramTests(TestCase):
 class ProjecaoDispararAlertaTests(TestCase):
     """O gancho está no lugar certo: projetar um evento de erro alerta."""
 
-    def setUp(self):
-        cache.clear()
-
     @override_settings(ALERTA_EMAILS="operacao@example.com",
                        ALERTA_TELEGRAM_CHAT_ID="",
                        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
@@ -135,7 +186,14 @@ class ProjecaoDispararAlertaTests(TestCase):
         from apps.scrapers.eventos import log_event
 
         mail.outbox.clear()
-        log_event("publicacao", "tick_erro", "Ciclo de envio falhou.", level="error")
+        # processar_evento agora dispara o alerta via transaction.on_commit —
+        # necessário porque reconciliar_pendentes roda a projeção dentro de
+        # transaction.atomic() por lote, e a reivindicação (UPDATE condicional
+        # em IncidenteSaude) não pode segurar o lock de linha pelo lote
+        # inteiro. Django's TestCase nunca comita de verdade, então o hook só
+        # dispara dentro deste contexto.
+        with self.captureOnCommitCallbacks(execute=True):
+            log_event("publicacao", "tick_erro", "Ciclo de envio falhou.", level="error")
         self.assertTrue(IncidenteSaude.objects.filter(status="aberto").exists())
         self.assertEqual(len(mail.outbox), 1)
 

@@ -12,7 +12,7 @@ from datetime import timedelta
 from django.core.management.base import BaseCommand
 from django.db import DatabaseError, connections
 from django.utils import timezone
-from apps.accounts.tenant import system_job
+from apps.accounts.tenant import system_context
 
 from apps.scrapers import automacao_state as st
 from apps.scrapers.eventos import log_event
@@ -547,8 +547,32 @@ class Command(BaseCommand):
         parser.add_argument("--lote", type=int, default=40, help="Links gerados por ciclo, por usuário.")
         parser.add_argument("--scrape-horas", type=float, default=3.0, help="Horas entre raspagens completas.")
 
-    @system_job
     def handle(self, *args, **opts):
+        """Boot resiliente: banco fora na hora de subir não pode crashar o processo.
+
+        ``@system_job`` faz SQL (checagem de role + set_config) antes do primeiro
+        ciclo do loop escolhido. Sem retry aqui, um Postgres fora do ar bem na
+        hora do boot derrubava os 8 processos do grupo honcho antes mesmo de
+        eles começarem, e o Fly reiniciava a máquina — crash-loop com Chromium
+        frio a cada volta. ``connection_created`` já reinstala o contexto numa
+        conexão nova (tenant.py), então repetir após ``close_all()`` é seguro.
+        """
+        falhas = 0
+        while True:
+            try:
+                with system_context():
+                    return self._despachar(opts)
+            except DatabaseError as exc:
+                falhas += 1
+                espera = min(15 * (2 ** max(0, falhas - 1)), BACKOFF_BANCO_MAX_S)
+                logger.warning(
+                    "Boot do automacao (modo=%s) aguardando banco (tentativa %s): %s",
+                    opts.get("modo"), falhas, exc,
+                )
+                connections.close_all()
+                time.sleep(espera)
+
+    def _despachar(self, opts):
         if opts["modo"] == "scrape":
             self._loop_scrape(opts)
         elif opts["modo"] == "scrape_rapido":
