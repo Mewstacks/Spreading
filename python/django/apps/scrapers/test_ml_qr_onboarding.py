@@ -13,6 +13,36 @@ from django.test import Client, SimpleTestCase, TestCase
 from django.urls import reverse
 
 
+class PersistenciaDoPortalDeAfiliadosTests(TestCase):
+    """O relatório ML usa o mesmo limite thread/RLS dos logins de loja."""
+
+    def test_sessao_e_gravada_com_tenant_reinstalado(self):
+        from apps.accounts.tenant import current_organization_id, tenant_suspenso
+        from apps.scrapers import ml_relatorio_conexao
+
+        user = get_user_model().objects.create_user("ml-report-thread-tenant")
+        organization = user.personal_organization
+        observado = {}
+
+        def salvar(user_recebido, provider, estado):
+            observado.update(
+                user=user_recebido,
+                provider=provider,
+                estado=estado,
+                organization_id=current_organization_id(),
+            )
+
+        estado = {"cookies": [{"name": "ssid", "value": "opaco"}], "origins": []}
+        with tenant_suspenso(organization.pk, actor_id=user.pk), \
+             patch.object(ml_relatorio_conexao, "save_report_state", side_effect=salvar):
+            ml_relatorio_conexao._salvar_estado_capturado(user, estado)
+
+        self.assertEqual(observado["user"], user)
+        self.assertEqual(observado["provider"], "mercadolivre")
+        self.assertEqual(observado["estado"], estado)
+        self.assertEqual(observado["organization_id"], str(organization.pk))
+
+
 class DetectorDoDesafioDeCameraTests(SimpleTestCase):
     class Page:
         def __init__(self, url="https://www.mercadolivre.com.br/", texto=""):

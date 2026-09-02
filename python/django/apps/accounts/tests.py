@@ -664,6 +664,28 @@ class PonteORMForaDoLoopTests(TransactionTestCase):
         with self.assertRaises(ValueError):
             executar_no_tenant(lambda: None)
 
+    def test_tenant_suspenso_bloqueia_orm_direto_antes_da_rls(self):
+        from apps.accounts.tenant import TenantSuspensoORMError, tenant_suspenso
+
+        with tenant_suspenso(self.organization.pk, actor_id=self.user.pk):
+            with self.assertRaisesRegex(TenantSuspensoORMError, "executar_no_tenant"):
+                Produto.objects.filter(owner=self.user).exists()
+
+    def test_tenant_suspenso_permite_orm_pela_ponte(self):
+        from apps.accounts.tenant import tenant_suspenso
+
+        with tenant_suspenso(self.organization.pk, actor_id=self.user.pk):
+            produto = executar_no_tenant(
+                Produto.objects.create,
+                owner=self.user,
+                nome="Gravado sob tenant suspenso",
+                preco_sem_desconto=100,
+                preco_com_cupom=80,
+                marketplace="mercadolivre",
+                origem="oferta",
+            )
+        self.assertEqual(produto.organization_id, self.organization.pk)
+
 
 class EscopoAninhadoRestauraContextoTests(TestCase):
     """Sair de um escopo aninhado não pode apagar o escopo do chamador.

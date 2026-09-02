@@ -31,7 +31,7 @@ from apps.scrapers.ml_live_transport import (
     pode_inspecionar,
 )
 from apps.scrapers.report_sessions import has_report_session, save_report_state
-from apps.accounts.tenant import organization_job_sem_transacao
+from apps.accounts.tenant import executar_no_tenant, organization_job_sem_transacao
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +129,16 @@ def _logado(page) -> bool:
         # Consulta ao DOM durante uma navegação levanta; aqui isso significa
         # "ainda não confirmado", e não pode derrubar o worker.
         return False
+
+
+def _salvar_estado_capturado(user, estado):
+    """Grava a sessão depois do live view com a organização reinstalada."""
+    return executar_no_tenant(
+        save_report_state,
+        user,
+        "mercadolivre",
+        estado,
+    )
 
 
 # Sem transação: organization_job envolveria os até 10 min do live view num
@@ -326,7 +336,7 @@ def _worker(user):
                                    "limpo (user %s).", uid, exc_info=True)
 
         if estado_capturado is not None:
-            save_report_state(user, "mercadolivre", estado_capturado)
+            _salvar_estado_capturado(user, estado_capturado)
             desafio_concluido = (cache.get(_key(uid)) or {}).get("desafio")
             if isinstance(desafio_concluido, dict) and desafio_concluido.get("tipo"):
                 logger.info(
