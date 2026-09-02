@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from urllib.parse import quote_plus
 from django.conf import settings
 from django.utils import timezone
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from apps.scrapers.auxiliar import iniciar_browser
 from apps.scrapers.carga import BrowserResourceUnavailable, browser_resource
@@ -196,6 +197,29 @@ def _pagina_atual_estruturada(page):
     return page.evaluate(script)
 
 
+def _abrir_primeira_pagina_busca(page, url):
+    """Abre a busca sem depender do ``DOMContentLoaded`` da Amazon.
+
+    Em producao o HTML dos cards ja havia chegado, mas scripts de terceiros
+    mantinham o evento ``DOMContentLoaded`` pendente ate o timeout de 25 s. O
+    Playwright entao descartava uma resposta aproveitavel e repetia o mesmo
+    custo para cada termo. ``commit`` confirma a resposta HTTP; em seguida
+    esperamos somente pelo contrato que usamos (os cards de busca). Se os cards
+    nao aparecerem, ainda extraimos titulo/corpo para que CAPTCHA, 429 e paginas
+    de erro sejam classificados como falha, nunca como inventario vazio.
+    """
+    response = page.goto(url, wait_until="commit", timeout=15000)
+    try:
+        page.wait_for_selector(
+            "[data-component-type='s-search-result']",
+            state="attached",
+            timeout=10000,
+        )
+    except PlaywrightTimeoutError:
+        pass
+    return response, _pagina_atual_estruturada(page)
+
+
 def _buscar_pagina_na_sessao(page, url):
     """Busca paginação na sessão já aceita, sem nova navegação/round-trips DOM."""
     script = """async (url) => {
@@ -322,11 +346,10 @@ class AmazonPublicSource(SourceAdapter):
                                 payload.get("duration_ms", 0) or 0
                             )
                         else:
-                            response = page.goto(
-                                url, wait_until="domcontentloaded", timeout=25000,
+                            response, payload = _abrir_primeira_pagina_busca(
+                                page, url,
                             )
                             navigation_pages += 1
-                            payload = _pagina_atual_estruturada(page)
                             status = response.status if response else 0
                         body = payload.get("body", "")
                         failure = _page_failure(

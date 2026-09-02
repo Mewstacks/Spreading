@@ -988,6 +988,51 @@ class AmazonPublicPriceSanityTests(TestCase):
         self.assertIn("querySelectorAll", script)
         self.assertNotIn("eval(", script)
 
+    def test_first_search_page_waits_for_cards_not_domcontentloaded(self):
+        from apps.scrapers.sources.amazon_public import _abrir_primeira_pagina_busca
+
+        page = MagicMock()
+        response = MagicMock(status=200)
+        page.goto.return_value = response
+        page.evaluate.return_value = {
+            "title": "Amazon.com.br", "body": "Resultados", "rows": [{"asin": "A"}],
+        }
+
+        returned_response, payload = _abrir_primeira_pagina_busca(
+            page, "https://www.amazon.com.br/s?k=casa&page=1",
+        )
+
+        self.assertIs(returned_response, response)
+        self.assertEqual(payload["rows"], [{"asin": "A"}])
+        self.assertEqual(page.goto.call_args.kwargs, {
+            "wait_until": "commit", "timeout": 15000,
+        })
+        page.wait_for_selector.assert_called_once_with(
+            "[data-component-type='s-search-result']",
+            state="attached", timeout=10000,
+        )
+
+    def test_first_search_page_keeps_error_body_when_cards_timeout(self):
+        from apps.scrapers.sources.amazon_public import (
+            PlaywrightTimeoutError, _abrir_primeira_pagina_busca, _page_failure,
+        )
+
+        page = MagicMock()
+        page.goto.return_value = MagicMock(status=200)
+        page.wait_for_selector.side_effect = PlaywrightTimeoutError("late cards")
+        page.evaluate.return_value = {
+            "title": "Amazon.com.br Algo deu errado", "body": "", "rows": [],
+        }
+
+        _, payload = _abrir_primeira_pagina_busca(
+            page, "https://www.amazon.com.br/s?k=casa&page=1",
+        )
+
+        self.assertEqual(
+            _page_failure(200, payload["title"], payload["body"]),
+            "amazon_error_page",
+        )
+
     def test_fetches_next_search_page_inside_accepted_session(self):
         from apps.scrapers.sources.amazon_public import _buscar_pagina_na_sessao
 
