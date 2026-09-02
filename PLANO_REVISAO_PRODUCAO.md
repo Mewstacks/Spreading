@@ -655,6 +655,14 @@ Fontes primárias consultadas:
   `ESGOTANDOOO` já estava `invalido`; `VOLTANDO`, também palavra operacional de
   mensagem, foi acrescentado à fronteira global para ser invalidado na ingestão
   e pela manutenção, sem inflar a meta com ruído.
+- Prova de produção v327: testes direcionados 121/121, suítes integrais Django
+  1.481/1.481 e Node 170/170; release command, migrações, RLS, rolling deploy e
+  smoke checks concluídos. Web/worker v327, WhatsApp v90 e PostgreSQL ficaram
+  verdes, com `/healthz` HTTP 200. A manutenção confirmou `VOLTANDO` com zero
+  linha ativa e estado `invalido`. O canário read-only da `lules` passou em 3/3
+  regras com cupom primeiro, link afiliado verificado, instrução explícita de
+  resgate e tamanho válido. O transporte real permanece corretamente bloqueado
+  até a conta parear o WhatsApp; não existe credencial que possa ser simulada.
 
 ## Gates de deploy desta revisão
 
