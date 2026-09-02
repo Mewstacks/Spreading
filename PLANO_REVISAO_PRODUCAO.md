@@ -663,6 +663,17 @@ Fontes primárias consultadas:
   regras com cupom primeiro, link afiliado verificado, instrução explícita de
   resgate e tamanho válido. O transporte real permanece corretamente bloqueado
   até a conta parear o WhatsApp; não existe credencial que possa ser simulada.
+- Prova de produção v328: a rota editorial diária oficial da Shopee foi
+  atualizada de `cupom-de-desconto-v23` para a coleção atualmente indexada
+  `cupom-de-desconto-v39`, sem acrescentar uma terceira navegação Chromium.
+  Teste direcionado 65/65 e suíte integral Django 1.481/1.481 passaram; release,
+  migrações, RLS, rolling deploy e smoke checks também passaram. Web/worker v328,
+  WhatsApp v90 e PostgreSQL ficaram verdes, com `/healthz` HTTP 200, e o arquivo
+  dentro da VM confirmou a rota v39. O catálogo de produção tem 1.632 cupons
+  frescos/publicáveis (1.173 ML, 235 Amazon e 224 Shopee), mas a coleta oficial
+  Shopee da `lules` só pode ser comprovada depois do login: a conta continua sem
+  sessão Amazon/Shopee e sem integração afiliada Shopee. O WhatsApp gerou QR em
+  02/09/2026 03:04 UTC, mas ainda estava inativo; o ML continuava expirado.
 
 ## Gates de deploy desta revisão
 
