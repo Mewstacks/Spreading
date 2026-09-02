@@ -42,6 +42,8 @@ import re
 from django.conf import settings
 from django.core.cache import cache
 
+from apps.scrapers.coupon_rules import CODIGOS_NAO_PUBLICAVEIS
+
 logger = logging.getLogger(__name__)
 
 _MODELO_PADRAO = "claude-sonnet-5"
@@ -97,12 +99,16 @@ _NAO_CODIGOS = {
     "ESTOQUE", "LOJA", "LOJAS", "OFICIAL", "OFICIAIS", "CANAL", "GRUPO",
     "APLIQUE", "COMPRAS", "CARRINHO", "ESCRITO", "LIBERADO", "LIBERADA", "REGRAS",
     "RESGATE", "RESGATAR", "EXCLUSIVO", "TECNOLOGIA", "ATUALIZADO",
-    "APROVEITE", "CONFIRA", "MELICUPONS",
+    "APROVEITE", "CONFIRA", "MELICUPONS", "ANUNCIO",
     # Estados/CTAs observados literalmente nas previews do Telegram. Eles
     # apareciam perto de um desconto real e viravam um falso token de checkout.
     "ATIVADO", "ESGOTANDO", "ESGOTANDOOO", "MOSTRAR", "UTILIZADO",
     "RESGATARAM", "CORREEEEE", "CORREEEEEE",
 }
+# A fronteira final de publicacao e a extracao precisam recusar exatamente os
+# mesmos placeholders. Manter duas listas independentes deixou `MAISCUPONS`
+# atravessar o Telegram para so ser descartado muito depois no funil.
+_NAO_CODIGOS.update(CODIGOS_NAO_PUBLICAVEIS)
 
 # Um canal curado pode mudar de assunto. Em 02/09/2026, um canal marcado como
 # Mercado Livre publicou uma lista do AliExpress sem link resolvível; o fallback

@@ -215,6 +215,16 @@ CANAIS_SUGERIDOS = [
             "palavras de interface, com cobertura forte de Shopee."
         ),
     },
+    {
+        "handle": "cmdiasyoutube",
+        "nome": "CM Dias - cupons e promocoes",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 60,
+        "nota": (
+            "Previa ativa em 02/09/2026; codigos Shopee e Amazon corroborados "
+            "por fontes independentes, alem de alertas frequentes do ML."
+        ),
+    },
 ]
 
 # Recusados de propósito, para que ninguém os re-adicione sem saber por quê.

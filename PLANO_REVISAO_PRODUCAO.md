@@ -607,6 +607,17 @@ Fontes primárias consultadas:
   integral da mudança de transporte: 1.475/1.475 Django; teste direcionado da
   classificação: 16/16.
 
+- Preparação v325: a pesquisa ao vivo acrescentou o canal público
+  `@cmdiasyoutube`, ativo em 02/09/2026. Uma leitura isolada de 120 mensagens
+  recentes devolveu oito candidatos após filtragem: quatro Shopee
+  (`C0RR1D499`, `4F1L14D010`, `O1V0LT4MOS`, `OFERTA20AF`), o Amazon
+  `10OFFAGORA` e três ML. Os quatro Shopee foram corroborados pelo CupomSpot e o
+  Amazon por fontes públicas independentes. A amostra também revelou o falso
+  código `ANUNCIO`; ele passou a ser recusado tanto na extração determinística/IA
+  quanto na fronteira final. A denylist do extrator agora herda a denylist global,
+  fechando também a divergência que deixava `MAISCUPONS` atravessar a coleta.
+  Testes direcionados: 114/114; suíte integral: 1.476/1.476 Django.
+
 ## Gates de deploy desta revisão
 
 - [x] Suítes Django e Node integralmente verdes.

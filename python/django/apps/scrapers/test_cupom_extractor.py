@@ -83,7 +83,8 @@ class RegraDeAceitacaoTests(TestCase):
             "RESGATE", "RESGATAR", "EXCLUSIVO", "TECNOLOGIA",
             "ATUALIZADO", "MELICUPONS", "ATIVADO", "ESGOTANDO",
             "ESGOTANDOOO", "MOSTRAR", "UTILIZADO", "RESGATARAM",
-            "CORREEEEE", "CORREEEEEE", "9.9CONSEGUEM",
+            "CORREEEEE", "CORREEEEEE", "ANUNCIO", "MAISCUPONS",
+            "9.9CONSEGUEM",
         ):
             with self.subTest(codigo=codigo):
                 self.assertFalse(codigo_plausivel(codigo))
