@@ -5,6 +5,7 @@ from datetime import timedelta
 
 from django.utils import timezone
 
+from apps.scrapers.identidade_produto import link_canonico
 
 logger = logging.getLogger(__name__)
 _ASIN_EXATO = re.compile(r"^[A-Z0-9]{10}$", re.I)
@@ -306,6 +307,7 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
             continue
         lookup = {"marketplace": item.marketplace, "owner": owner}
         product_asin = ""
+        link_produto = item.canonical_url
         if item.marketplace == "amazon":
             product_asin = _amazon_asin(item)
             if not product_asin:
@@ -316,7 +318,18 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
                 continue
             lookup["asin"] = product_asin
         else:
-            lookup["link_produto"] = item.canonical_url
+            # Canonicaliza ANTES de usar como chave: sem isto, duas lanes
+            # gravando o mesmo anúncio com URLs de tracking diferentes
+            # (click1/mclics vs. limpa) viram duas linhas de Produto, porque
+            # não existe constraint de unicidade que pegasse a divergência.
+            link_produto = link_canonico(item.marketplace, item.canonical_url)
+            if not link_produto:
+                logger.warning(
+                    "Oferta descartada sem link canonicalizável (marketplace=%s, fonte=%s).",
+                    item.marketplace, str(item.source or "")[:80],
+                )
+                continue
+            lookup["link_produto"] = link_produto
         anterior = Produto.objects.filter(**lookup).values_list(
             "evidencia", flat=True).first()
         defaults = {
@@ -325,7 +338,7 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
             "preco_com_cupom": item.current_price,
             "preco_fonte": item.reference_price,
             "preco_efetivo": item.effective_price or item.current_price,
-            "link_produto": item.canonical_url, "fonte": item.source,
+            "link_produto": link_produto, "fonte": item.source,
             "estado": "ativo", "confianca": "media",
             "evidencia": evidencia_com_cupom_preservado(item.evidence, anterior),
             "valido_ate": item.valid_until, "falha_verificacao": "",
@@ -365,7 +378,7 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
         precos.registrar(
             item.marketplace,
             product_asin,
-            item.canonical_url,
+            link_produto,
             defaults["preco_efetivo"],
         )
         offers += 1

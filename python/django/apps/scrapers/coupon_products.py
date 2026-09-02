@@ -28,6 +28,7 @@ from apps.scrapers.models import (
 from apps.scrapers.carga import (
     BrowserResourceUnavailable, ml_site_browser_resource,
 )
+from apps.scrapers.identidade_produto import link_canonico
 
 logger = logging.getLogger(__name__)
 
@@ -659,7 +660,11 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
                 resultado = listar_itens_por_cupom(payload, page, max_paginas=2)
     total = 0
     for row in (resultado or {}).get("produtos_aplicaveis", []):
-        link_produto = str(row.get("link_produto") or "")[:1000]
+        # Canonicaliza ANTES do lookup: a mesma chave que sources/persistence.py
+        # usa para o mesmo Produto. Sem isto, o cupom e a raspagem de ofertas
+        # gravavam o mesmo anúncio com URLs de tracking diferentes e criavam
+        # duas linhas — não existe constraint de unicidade que pegasse isso.
+        link_produto = link_canonico("mercadolivre", str(row.get("link_produto") or ""))
         imagem = str(row.get("imagem_url") or "")[:1000]
         if not link_produto or not imagem:
             continue

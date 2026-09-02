@@ -15,6 +15,7 @@ from apps.scrapers.coupon_rules import (
     tem_restricao_publico)
 from apps.scrapers.scraper_mercadolivre.categorias_pagina import mapear_domain_ids
 from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
+from apps.scrapers.identidade_produto import link_canonico
 from apps.scrapers.models import (
     Cupom, CupomFonteObservacao, CupomNormalizado, FonteIngestao, Produto,
     normalizar_busca,
@@ -1080,6 +1081,20 @@ def _sincronizar_produtos_no_banco(cupons_com_produtos):
         )
         produtos = entrada.get("produtos_aplicaveis", [])
         if produtos:
+            # Canonicaliza e deduplica DENTRO do próprio lote antes do
+            # bulk_create: sem constraint de unicidade em Produto, duas
+            # entradas do mesmo produto nesta mesma resposta (URL de tracking
+            # diferente, ou o card repetido) viravam duas linhas novas a cada
+            # sincronização — a chave é a mesma que sources/persistence.py e
+            # coupon_products.py usam para o mesmo Produto. Não muda o padrão
+            # "marca antigo como stale, insere geração nova": isso é
+            # intencional aqui e o resto do código já exclui `estado=stale`.
+            por_chave = {}
+            for p in produtos:
+                link = link_canonico("mercadolivre", p.get("link_produto") or "")
+                if not link:
+                    continue
+                por_chave[link] = (p, link)
             Produto.objects.bulk_create([
                 Produto(
                     campanha_id=camp_id,
@@ -1101,7 +1116,7 @@ def _sincronizar_produtos_no_banco(cupons_com_produtos):
                     preco_com_cupom=float(p["preco_vitrine_atual"]),
                     preco_fonte=float(p["preco_vitrine_atual"]),
                     preco_efetivo=float(p["preco_vitrine_atual"]),
-                    link_produto=p.get("link_produto") or "",
+                    link_produto=link,
                     imagem_url=p.get("imagem_url") or "",
                     categoria=p.get("categoria", "DESCONHECIDO"),
                     marketplace="mercadolivre",
@@ -1109,7 +1124,7 @@ def _sincronizar_produtos_no_banco(cupons_com_produtos):
                     estado="ativo",
                     ultima_verificacao=timezone.now(),
                 )
-                for p in produtos
+                for p, link in por_chave.values()
             ])
         processados += 1
     return processados
