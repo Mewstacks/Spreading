@@ -91,10 +91,13 @@ class ParidadeTelaMensagemTests(TestCase):
             ("efetivo igual", 100.0),
             ("efetivo maior — dado corrompido", 150.0),
         ]
-        for rotulo, efetivo in casos:
+        for indice, (rotulo, efetivo) in enumerate(casos):
             with self.subTest(rotulo):
+                # ASIN por caso: a chave natural de Produto não aceita duas
+                # linhas do mesmo dono com o mesmo ASIN.
                 produto = Produto.objects.create(
-                    owner=self.user, marketplace="amazon", asin="B0PARIDADE",
+                    owner=self.user, marketplace="amazon",
+                    asin=f"B0PARIDAD{indice}",
                     nome=f"Item {efetivo}", origem="oferta", estado="ativo",
                     link_produto=f"https://www.amazon.com.br/dp/{efetivo}",
                     preco_sem_desconto=120.0, preco_com_cupom=100.0,

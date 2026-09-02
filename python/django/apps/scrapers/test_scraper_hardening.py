@@ -145,31 +145,39 @@ class ScraperPersistenceHardeningTests(TestCase):
         self.assertEqual(existente.preco_com_cupom, 80)
 
     def test_upsert_atualiza_a_observacao_mais_recente_se_ja_houver_duplicatas(self):
+        """Caminho legado, mantido como canário.
+
+        Desde a chave natural de `Produto` (4 constraints únicas parciais) o
+        banco não aceita mais duas linhas com a mesma identidade, então este
+        estado não pode ser montado de verdade — daí o mock. O tratamento
+        continua no código de propósito: se ele voltar a disparar em produção,
+        é sinal de que a constraint sumiu.
+        """
+        from unittest.mock import patch
+
         from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _upsert_resiliente
 
         url = "https://produto.mercadolivre.com.br/MLB-987654321"
-        antigo = Produto.objects.create(
-            marketplace="mercadolivre", owner=None, origem="cupom_codigo",
-            nome="Observação antiga", preco_sem_desconto=100,
-            preco_com_cupom=90, link_produto=url,
-        )
         recente = Produto.objects.create(
             marketplace="mercadolivre", owner=None, origem="oferta",
             nome="Observação recente", preco_sem_desconto=100,
             preco_com_cupom=85, link_produto=url,
         )
 
-        produto, criado = _upsert_resiliente(
-            marketplace="mercadolivre", owner=None, link_produto=url,
-            defaults={"origem": "oferta", "nome": "Atualizado",
-                      "preco_sem_desconto": 100, "preco_com_cupom": 80},
-        )
+        with patch.object(
+            Produto.objects, "update_or_create",
+            side_effect=Produto.MultipleObjectsReturned,
+        ):
+            produto, criado = _upsert_resiliente(
+                marketplace="mercadolivre", owner=None, link_produto=url,
+                defaults={"origem": "oferta", "nome": "Atualizado",
+                          "preco_sem_desconto": 100, "preco_com_cupom": 80},
+            )
 
         self.assertFalse(criado)
         self.assertEqual(produto.pk, recente.pk)
+        produto.refresh_from_db()
         self.assertEqual(produto.nome, "Atualizado")
-        antigo.refresh_from_db()
-        self.assertEqual(antigo.nome, "Observação antiga")
 
     def test_busca_vazia_preserva_catalogo(self):
         existente = Produto.objects.create(

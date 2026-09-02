@@ -3090,16 +3090,21 @@ class RankingAndCooldownTests(TestCase):
         self, get_marketplace
     ):
         get_marketplace.return_value = Mock(is_alive=Mock(return_value=True))
-        first = self._product("Top repetido", 30)
-        second = self._product("Top repetido", 35)
-        Produto.objects.filter(pk=first.pk).update(
-            link_produto=("https://produto.mercadolivre.com.br/MLB-3102506128-item"
-                          "?searchVariation=111"),
-            ultima_observacao=timezone.now() - timedelta(hours=1),
+        # Mesmo anúncio, mesmo título, variações diferentes: é isso que o
+        # ranking tem de colapsar. Nascem já com os links distintos porque a
+        # chave natural de Produto olha o link ARMAZENADO — estes dois diferem,
+        # então o banco aceita; o colapso aqui é do ranking, não do schema.
+        base = "https://produto.mercadolivre.com.br/MLB-3102506128-item"
+        comum = dict(
+            marketplace="mercadolivre", nome="Top repetido", origem="oferta",
+            macro_categoria="Casa", categoria="Casa", preco_sem_desconto=100,
         )
-        Produto.objects.filter(pk=second.pk).update(
-            link_produto=("https://produto.mercadolivre.com.br/MLB-3102506128-item"
-                          "?searchVariation=222"),
+        first = Produto.objects.create(
+            preco_com_cupom=30, link_produto=f"{base}?searchVariation=111", **comum)
+        second = Produto.objects.create(
+            preco_com_cupom=35, link_produto=f"{base}?searchVariation=222", **comum)
+        Produto.objects.filter(pk=first.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=1),
         )
         first.refresh_from_db()
         second.refresh_from_db()
@@ -4164,10 +4169,12 @@ class AfiliacaoPorMarketplaceTests(TestCase):
         self.assertTrue(mp.can_affiliate(produto, self.user))
 
     def _produto_ml(self, nome="Fone"):
+        # Link derivado do nome: a chave natural de Produto não aceita dois
+        # anúncios com a mesma identidade, e estes testes criam vários.
         return Produto.objects.create(
             marketplace="mercadolivre", nome=nome, origem="oferta",
             preco_sem_desconto=100, preco_com_cupom=50,
-            link_produto="https://example.com/fone",
+            link_produto=f"https://example.com/fone/{abs(hash(nome)) % 10**9}",
         )
 
     def test_mercadolivre_conta_o_link_do_proprio_usuario(self):
@@ -4513,10 +4520,12 @@ class VerificarLinksPendentesTests(TestCase):
         self.user = get_user_model().objects.create_user("aprovador", password="test")
 
     def _produto(self, nome):
+        # Link derivado do nome: a chave natural de Produto não aceita dois
+        # anúncios com a mesma identidade, e estes testes criam vários.
         return Produto.objects.create(
             marketplace="mercadolivre", nome=nome, origem="oferta",
             preco_sem_desconto=100, preco_com_cupom=60,
-            link_produto="https://www.mercadolivre.com.br/item",
+            link_produto=f"https://www.mercadolivre.com.br/item/{abs(hash(nome)) % 10**9}",
         )
 
     def setUpBrowserFalso(self):
@@ -4942,10 +4951,16 @@ class GeracaoDeLinksEmLoteTests(TestCase):
         self.user = get_user_model().objects.create_user("linkeiro", password="test")
 
     def _produto(self, nome="Fone", **extra):
+        # Link derivado do nome: a chave natural de Produto não aceita dois
+        # anúncios com a mesma identidade, e vários testes daqui criam mais
+        # de um produto no mesmo cenário.
+        extra.setdefault(
+            "link_produto",
+            f"https://produto.mercadolivre.com.br/MLB-{abs(hash(nome)) % 10**9}",
+        )
         return Produto.objects.create(
             marketplace="mercadolivre", nome=nome, origem="oferta",
-            preco_sem_desconto=100, preco_com_cupom=50,
-            link_produto="https://produto.mercadolivre.com.br/MLB-123456789", **extra)
+            preco_sem_desconto=100, preco_com_cupom=50, **extra)
 
     @patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True)
     @patch("apps.scrapers.marketplaces.mercadolivre.MercadoLivre.prefetch_links")

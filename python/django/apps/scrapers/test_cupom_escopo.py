@@ -501,6 +501,24 @@ class MigracaoAbreContextoDeSistemaTests(TestCase):
                 origem._system_context = real
             self.assertEqual(len(chamadas), 1, f"{nome} não abriu o contexto")
 
+    def test_fusao_de_produtos_abre_o_contexto_antes_de_consultar(self):
+        """Sem contexto, a fusão veria zero linha e o índice único da mesma
+        migração estouraria logo depois, abortando o deploy."""
+        from importlib import import_module
+
+        from django.apps import apps as registro
+
+        migracao = import_module(
+            "apps.scrapers.migrations.0072_produto_chave_natural")
+        chamadas = []
+        real = migracao._system_context
+        migracao._system_context = lambda editor: chamadas.append(editor)
+        try:
+            migracao.fundir_remanescentes(registro, _editor())
+        finally:
+            migracao._system_context = real
+        self.assertEqual(len(chamadas), 1, "0072 não abriu o contexto")
+
 
 class AvisoDeCuponsTests(TestCase):
     """O aviso em lote promete ESCOPO, então também não pode repetir a alegação.

@@ -8,10 +8,15 @@ de canonicalizar.
 
 Duas coisas acontecem aqui, nesta ordem, e a ordem importa:
 
-1. **Canonicalizar** o `link_produto` de todas as linhas. É isso que faz as
-   duplicatas convergirem para a mesma chave — antes disso elas nem parecem
-   duplicatas.
-2. **Fundir** cada grupo num vencedor e apagar os perdedores.
+1. **Fundir** cada grupo num vencedor e apagar os perdedores. `planejar()`
+   agrupa pela chave canônica calculada em memória, então não depende de o
+   banco já estar canonicalizado.
+2. **Canonicalizar** o `link_produto` das linhas que sobraram.
+
+Fundir primeiro não é detalhe: canonicalizar antes faria duas linhas
+convergirem para o mesmo valor, e com a constraint de unicidade já instalada
+esse UPDATE estouraria `IntegrityError`. Depois da fusão não existe mais para
+onde colidir.
 
 O que a fusão protege, em ordem de custo:
 

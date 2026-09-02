@@ -20,6 +20,16 @@ from apps.scrapers.models import (
 
 
 class FusaoDeProdutosTests(TestCase):
+    """Exercita o catálogo LEGADO: o mesmo anúncio gravado com formas
+    diferentes da URL. As linhas nascem legais para a constraint (os links
+    brutos DIFEREM) e só convergem na chave canônica — que é exatamente como a
+    duplicata entrou em produção."""
+
+    # Duas formas da mesma URL: o que difere é tracking, não o produto.
+    LINK = "https://www.mercadolivre.com.br/coisa/p/MLB123"
+    LINK_A = f"{LINK}?gclid=aaa"
+    LINK_B = f"{LINK}?gclid=bbb"
+
     @classmethod
     def setUpTestData(cls):
         cls.user = get_user_model().objects.create_user("fusao", password="x")
@@ -46,21 +56,22 @@ class FusaoDeProdutosTests(TestCase):
         )
 
     def test_canonicalizacao_faz_duplicatas_convergirem(self):
-        base = "https://www.mercadolivre.com.br/coisa/p/MLB123"
-        self._produto(f"{base}?gclid=abc")
-        self._produto(base)
+        self._produto(self.LINK_A)
+        self._produto(self.LINK_B)
 
+        # Agrupam pela chave canônica mesmo com o link bruto ainda divergente.
+        self.assertEqual(len(fusao_produtos.planejar()), 1)
+
+        fusao_produtos.executar()
         self.assertEqual(fusao_produtos.canonicalizar_links(), 1)
         self.assertEqual(
-            set(Produto.objects.values_list("link_produto", flat=True)), {base},
+            set(Produto.objects.values_list("link_produto", flat=True)), {self.LINK},
         )
-        self.assertEqual(len(fusao_produtos.planejar()), 1)
 
     def test_vence_a_observacao_mais_recente(self):
         agora = timezone.now()
-        link = "https://www.mercadolivre.com.br/coisa/p/MLB123"
-        velho = self._produto(link, quando=agora - timedelta(days=3), nome="Velho")
-        novo = self._produto(link, quando=agora, nome="Novo")
+        velho = self._produto(self.LINK_A, quando=agora - timedelta(days=3), nome="Velho")
+        novo = self._produto(self.LINK_B, quando=agora, nome="Novo")
 
         fusao_produtos.executar()
 
@@ -71,9 +82,8 @@ class FusaoDeProdutosTests(TestCase):
     def test_link_verificado_nunca_perde_para_vazio(self):
         """O caso caro: unique_together (usuario, produto) força escolher um."""
         agora = timezone.now()
-        link = "https://www.mercadolivre.com.br/coisa/p/MLB123"
-        perdedor = self._produto(link, quando=agora - timedelta(days=1))
-        vencedor = self._produto(link, quando=agora)
+        perdedor = self._produto(self.LINK_A, quando=agora - timedelta(days=1))
+        vencedor = self._produto(self.LINK_B, quando=agora)
 
         LinkAfiliadoUsuario.objects.create(
             usuario=self.user, produto=vencedor, verificado_ok=None,
@@ -93,9 +103,8 @@ class FusaoDeProdutosTests(TestCase):
 
     def test_historico_e_publicacao_sao_preservados(self):
         agora = timezone.now()
-        link = "https://www.mercadolivre.com.br/coisa/p/MLB123"
-        perdedor = self._produto(link, quando=agora - timedelta(days=1))
-        vencedor = self._produto(link, quando=agora)
+        perdedor = self._produto(self.LINK_A, quando=agora - timedelta(days=1))
+        vencedor = self._produto(self.LINK_B, quando=agora)
         HistoricoEnvio.objects.create(produto=perdedor, usuario=self.user)
 
         fusao_produtos.executar()
@@ -106,9 +115,8 @@ class FusaoDeProdutosTests(TestCase):
 
     def test_associacao_de_cupom_colidida_mantem_o_veredito_mais_forte(self):
         agora = timezone.now()
-        link = "https://www.mercadolivre.com.br/coisa/p/MLB123"
-        perdedor = self._produto(link, quando=agora - timedelta(days=1))
-        vencedor = self._produto(link, quando=agora)
+        perdedor = self._produto(self.LINK_A, quando=agora - timedelta(days=1))
+        vencedor = self._produto(self.LINK_B, quando=agora)
         cupom = self._cupom()
 
         ProdutoCupom.objects.create(produto=vencedor, cupom=cupom, status="provavel")
@@ -128,9 +136,8 @@ class FusaoDeProdutosTests(TestCase):
         """O FK é CASCADE: apagar a associação perdedora antes de mover o link
         destruiria um link de afiliado que custou Playwright para existir."""
         agora = timezone.now()
-        link = "https://www.mercadolivre.com.br/coisa/p/MLB123"
-        perdedor = self._produto(link, quando=agora - timedelta(days=1))
-        vencedor = self._produto(link, quando=agora)
+        perdedor = self._produto(self.LINK_A, quando=agora - timedelta(days=1))
+        vencedor = self._produto(self.LINK_B, quando=agora)
         cupom = self._cupom()
 
         ProdutoCupom.objects.create(produto=vencedor, cupom=cupom, status="provavel")
@@ -150,12 +157,11 @@ class FusaoDeProdutosTests(TestCase):
 
     def test_vencedor_absorve_campo_que_nao_tinha(self):
         agora = timezone.now()
-        link = "https://www.mercadolivre.com.br/coisa/p/MLB123"
         self._produto(
-            link, quando=agora - timedelta(days=1), nome_llm="Nome curto",
+            self.LINK_A, quando=agora - timedelta(days=1), nome_llm="Nome curto",
             categoria="ELETRONICOS",
         )
-        self._produto(link, quando=agora, nome_llm="", categoria="DESCONHECIDO")
+        self._produto(self.LINK_B, quando=agora, nome_llm="", categoria="DESCONHECIDO")
 
         fusao_produtos.executar()
 
@@ -166,9 +172,8 @@ class FusaoDeProdutosTests(TestCase):
 
     def test_e_idempotente(self):
         agora = timezone.now()
-        link = "https://www.mercadolivre.com.br/coisa/p/MLB123"
-        self._produto(link, quando=agora - timedelta(days=1))
-        self._produto(link, quando=agora)
+        self._produto(self.LINK_A, quando=agora - timedelta(days=1))
+        self._produto(self.LINK_B, quando=agora)
 
         primeiro = fusao_produtos.executar()
         segundo = fusao_produtos.executar()
@@ -179,17 +184,15 @@ class FusaoDeProdutosTests(TestCase):
 
     def test_dry_run_nao_grava_nada(self):
         agora = timezone.now()
-        link = "https://www.mercadolivre.com.br/coisa/p/MLB123"
-        self._produto(f"{link}?gclid=x", quando=agora - timedelta(days=1))
-        self._produto(link, quando=agora)
+        self._produto(self.LINK_A, quando=agora - timedelta(days=1))
+        self._produto(self.LINK_B, quando=agora)
 
-        fusao_produtos.canonicalizar_links(dry_run=True)
         resumo = fusao_produtos.executar(dry_run=True)
+        fusao_produtos.canonicalizar_links(dry_run=True)
 
         self.assertEqual(Produto.objects.count(), 2)
         self.assertEqual(resumo["produtos_apagados"], 0)
-        self.assertTrue(
-            Produto.objects.filter(link_produto=f"{link}?gclid=x").exists())
+        self.assertTrue(Produto.objects.filter(link_produto=self.LINK_A).exists())
 
     def test_produtos_distintos_nao_sao_fundidos(self):
         agora = timezone.now()
@@ -211,3 +214,57 @@ class FusaoDeProdutosTests(TestCase):
         fusao_produtos.executar()
 
         self.assertEqual(Produto.objects.count(), 2)
+
+
+class ChaveNaturalDeProdutoTests(TestCase):
+    """Depois da fusão, é o banco que impede a duplicata voltar — não o código.
+
+    Vale como prova só em PostgreSQL de verdade? Não: índice único PARCIAL
+    funciona no SQLite também, e foi por isso que a chave virou quatro
+    constraints parciais em vez de `nulls_distinct=False` — esta suíte
+    enforça a invariante de verdade.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user("chave", password="x")
+
+    def _ml(self, link, **extra):
+        return Produto.objects.create(
+            marketplace="mercadolivre", link_produto=link,
+            nome=extra.pop("nome", "Produto"), preco_sem_desconto=100,
+            preco_com_cupom=80, **extra,
+        )
+
+    def test_barra_duplicata_no_catalogo_compartilhado(self):
+        from django.db import IntegrityError, transaction
+
+        link = "https://www.mercadolivre.com.br/coisa/p/MLB123"
+        self._ml(link)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self._ml(link)
+
+    def test_nao_confunde_catalogo_compartilhado_com_privado(self):
+        """`owner` NULL é o pool compartilhado; com dono é outra identidade."""
+        link = "https://www.mercadolivre.com.br/coisa/p/MLB123"
+        self._ml(link)
+        self._ml(link, owner=self.user)
+        self.assertEqual(Produto.objects.count(), 2)
+
+    def test_amazon_e_chaveada_por_asin_e_nao_pela_url(self):
+        """Duas URLs com tags diferentes são o MESMO produto na Amazon."""
+        from django.db import IntegrityError, transaction
+
+        Produto.objects.create(
+            marketplace="amazon", asin="B000TEST", nome="A",
+            link_produto="https://www.amazon.com.br/dp/B000TEST?tag=x",
+            preco_sem_desconto=10, preco_com_cupom=9,
+        )
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Produto.objects.create(
+                    marketplace="amazon", asin="B000TEST", nome="B",
+                    link_produto="https://www.amazon.com.br/dp/B000TEST?tag=y",
+                    preco_sem_desconto=10, preco_com_cupom=9,
+                )

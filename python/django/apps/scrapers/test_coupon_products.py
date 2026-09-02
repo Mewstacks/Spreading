@@ -1918,9 +1918,13 @@ class MapaDeRelacoesEmLoteTests(TestCase):
         segundo = self._cupom_pronto("52")
         relacao = ProdutoCupom.objects.get(cupom=segundo)
         produto = relacao.produto
+        # Mesmo produto (mesmo nome), cupons independentes. O link continua
+        # distinto porque a chave natural de Produto não permite duas linhas
+        # com a mesma identidade — se fossem o mesmo anúncio, seria UMA linha
+        # com duas associações, e é justamente isso que não pode colapsar os
+        # dois cupons num só.
         produto.nome = ProdutoCupom.objects.get(cupom=primeiro).produto.nome
-        produto.link_produto = "https://www.mercadolivre.com.br/p/MLB51"
-        produto.save(update_fields=["nome", "link_produto"])
+        produto.save(update_fields=["nome"])
         CupomPreparacao.objects.filter(cupom=segundo).update(
             produtos_chave=chave_produtos_cupom(segundo))
 

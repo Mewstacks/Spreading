@@ -153,6 +153,41 @@ class Produto(models.Model):
                 name="scrapers_prod_lookup_idx",
             ),
         ]
+        # Identidade do produto, finalmente no schema. Até 09/2026 não havia
+        # NENHUMA constraint aqui, e o mesmo anúncio entrava várias vezes porque
+        # writers diferentes gravavam formas diferentes da mesma URL: 5.527
+        # grupos duplicados em 68 mil linhas quando isto foi medido.
+        #
+        # São quatro constraints parciais, e não `nulls_distinct=False`, por dois
+        # motivos: `owner` NULL significa "catálogo compartilhado" (NULL = NULL
+        # aqui, semanticamente), e índice parcial funciona no SQLite da suíte,
+        # enquanto `nulls_distinct` só existe no PostgreSQL — o Django pularia a
+        # constraint nos testes e a invariante ficaria sem cobertura.
+        #
+        # O par asin/link espelha a regra que os writers já aplicam: ASIN ganha
+        # da URL quando existe (ver identidade_produto.chave_natural).
+        constraints = [
+            models.UniqueConstraint(
+                fields=["marketplace", "asin"],
+                condition=models.Q(owner__isnull=True) & ~models.Q(asin=""),
+                name="uniq_produto_publico_asin",
+            ),
+            models.UniqueConstraint(
+                fields=["marketplace", "owner", "asin"],
+                condition=models.Q(owner__isnull=False) & ~models.Q(asin=""),
+                name="uniq_produto_privado_asin",
+            ),
+            models.UniqueConstraint(
+                fields=["marketplace", "link_produto"],
+                condition=models.Q(owner__isnull=True) & models.Q(asin=""),
+                name="uniq_produto_publico_link",
+            ),
+            models.UniqueConstraint(
+                fields=["marketplace", "owner", "link_produto"],
+                condition=models.Q(owner__isnull=False) & models.Q(asin=""),
+                name="uniq_produto_privado_link",
+            ),
+        ]
 
 
 class FonteIngestao(models.Model):

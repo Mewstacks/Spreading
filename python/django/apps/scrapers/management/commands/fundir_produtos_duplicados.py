@@ -33,9 +33,13 @@ class Command(BaseCommand):
         # Catálogo compartilhado é cross-tenant: sem este contexto o RLS
         # esconde as linhas e o comando "roda com sucesso" sem ver nada.
         with system_context():
+            # Fundir ANTES de canonicalizar: `planejar()` agrupa pela chave
+            # canônica calculada em memória, e canonicalizar primeiro faria duas
+            # linhas convergirem para o mesmo valor — UPDATE que estoura assim
+            # que a constraint de unicidade existir.
+            resumo = fusao_produtos.executar(lote=options["lote"], dry_run=dry)
             mudam = fusao_produtos.canonicalizar_links(dry_run=dry)
             self.stdout.write(f"LINKS\tcanonicalizados={mudam}\tdry_run={int(dry)}")
-            resumo = fusao_produtos.executar(lote=options["lote"], dry_run=dry)
         for chave in sorted(resumo):
             self.stdout.write(f"FUSAO\t{chave}={resumo[chave]}")
         if dry:
