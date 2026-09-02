@@ -3294,6 +3294,29 @@ class CouponCatalogFreshnessTests(TestCase):
             CupomNormalizado.objects.filter(pk=future.pk).filter(
                 cupons_frescos_q()).exists())
 
+    def test_cleanup_invalida_placeholder_legado_ativo(self):
+        from apps.scrapers.maintenance import expire_stale
+        from apps.scrapers.models import CupomFonteObservacao
+
+        placeholder = self._coupon(
+            self.public_source, "placeholder", codigo="MAISCUPONS",
+        )
+        observacao = CupomFonteObservacao.objects.create(
+            fonte=self.public_source, cupom=placeholder,
+            canonical_key="placeholder-key", source_external_id="placeholder",
+            outcome="accepted",
+        )
+
+        result = expire_stale()
+
+        placeholder.refresh_from_db()
+        observacao.refresh_from_db()
+        self.assertEqual(result["invalid_codes"], 1)
+        self.assertEqual(placeholder.estado, "invalido")
+        self.assertEqual(placeholder.confianca, "baixa")
+        self.assertEqual(observacao.outcome, "invalid")
+        self.assertEqual(observacao.reason_code, "invalid_coupon_code")
+
 
 class AmazonPipelineTests(TestCase):
     def setUp(self):
@@ -5701,6 +5724,26 @@ class IncidenteDeConexaoOrfaoTests(TestCase):
         with patch("apps.scrapers.conexoes.estado_ml",
                    return_value=_estado_caido("Mercado Livre", "sessão expirou")):
             self.assertEqual(fechar_conexoes_restabelecidas(), 0)
+
+    def test_fecha_incidente_orfao_de_sessao_de_compra(self):
+        from apps.scrapers.incidentes_saude import fechar_conexoes_restabelecidas
+        from apps.scrapers.models import IncidenteSaude
+
+        inc = IncidenteSaude.objects.create(
+            chave=uuid.uuid4().hex, causa="conexao_caiu", pipeline="conexao",
+            escopo="servico:Shopee Compras", usuario=self.user, level="error",
+            status="aberto", primeira_ocorrencia=timezone.now(),
+            ultima_ocorrencia=timezone.now(), ultima_mensagem="caiu",
+            contexto={"servico": "Shopee Compras", "provider": "shopee_shop"},
+        )
+
+        with patch(
+            "apps.scrapers.report_sessions.has_report_session", return_value=True,
+        ):
+            self.assertEqual(fechar_conexoes_restabelecidas(), 1)
+
+        inc.refresh_from_db()
+        self.assertEqual(inc.status, "concluido")
 
 
 class CatalogoDaSaudeTests(SimpleTestCase):

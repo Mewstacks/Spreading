@@ -156,6 +156,67 @@ class ReportSessionTests(TestCase):
             self.assertEqual(record.probe_result, "suspeito")
             self.assertTrue(has_report_session(user, "shopee_shop"))
 
+    def test_shop_session_emits_only_confirmed_drop_and_recovery(self):
+        from apps.accounts.models import BrowserSession
+        from apps.scrapers.models import EventoOperacional
+        from apps.scrapers.report_sessions import (
+            PROBE_JANELA_S, registrar_veredito, save_report_state,
+        )
+
+        user = get_user_model().objects.create_user("shop-session-transition")
+        with override_settings(
+            SECRETS_FERNET_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ):
+            save_report_state(
+                user, "shopee_shop", {"cookies": [], "origins": []},
+            )
+            for attempt in range(1, 4):
+                if attempt > 1:
+                    BrowserSession.objects.filter(
+                        user=user, provider="shopee_shop",
+                    ).update(
+                        last_probe_at=timezone.now() - timedelta(
+                            seconds=PROBE_JANELA_S + 1,
+                        ),
+                    )
+                registrar_veredito(
+                    user, "shopee_shop", "suspeito", "session_expired",
+                )
+                self.assertEqual(
+                    EventoOperacional.objects.filter(
+                        usuario=user, evento="conexao_caiu",
+                    ).count(),
+                    1 if attempt == 3 else 0,
+                )
+
+            save_report_state(
+                user, "shopee_shop", {"cookies": [], "origins": []},
+            )
+            voltou = EventoOperacional.objects.get(
+                usuario=user, evento="conexao_voltou",
+            )
+            self.assertEqual(voltou.contexto["servico"], "Shopee Compras")
+            self.assertEqual(voltou.contexto["provider"], "shopee_shop")
+
+    def test_inconclusive_shop_probe_never_emits_drop(self):
+        from apps.scrapers.models import EventoOperacional
+        from apps.scrapers.report_sessions import registrar_veredito, save_report_state
+
+        user = get_user_model().objects.create_user("shop-session-inconclusive")
+        with override_settings(
+            SECRETS_FERNET_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ):
+            save_report_state(
+                user, "amazon_shop", {"cookies": [], "origins": []},
+            )
+            for _attempt in range(10):
+                registrar_veredito(
+                    user, "amazon_shop", "inconclusivo", "challenge",
+                )
+        self.assertFalse(EventoOperacional.objects.filter(
+            usuario=user, evento="conexao_caiu",
+        ).exists())
+
     def test_successful_report_sync_persists_refreshed_browser_state(self):
         from apps.scrapers.relatorios import _fetch_browser_report
         from apps.scrapers.report_sessions import load_report_state, save_report_state

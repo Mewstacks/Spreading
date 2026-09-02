@@ -26,6 +26,47 @@ PROBE_FALHAS_PARA_DESCONECTAR = 3
 # contam como novas evidências de expiração.
 PROBE_JANELA_S = 15 * 60
 VALID_PROVIDERS = frozenset(value for value, _ in BrowserSession.PROVIDERS)
+_SERVICOS_COMPRA = {
+    "amazon_shop": "Amazon Compras",
+    "shopee_shop": "Shopee Compras",
+}
+
+
+def _registrar_transicao_compra(usuario, provider: str, *, conectado: bool,
+                                motivo: str = "") -> None:
+    """Torna queda/retorno das sessões de compra visível na Saúde.
+
+    Amazon/Shopee não têm um endpoint barato e estável para o watchdog sondar
+    continuamente. O veredito autoritativo nasce no uso real da sessão; antes ele
+    apenas mudava ``BrowserSession`` e a expiração ficava silenciosa fora da tela de
+    conexão. Emitimos somente a transição confirmada (3 ciclos independentes) e a
+    recuperação, nunca cada falha/timeout.
+    """
+    servico = _SERVICOS_COMPRA.get(provider)
+    if not servico:
+        return
+    from apps.scrapers.eventos import log_event
+
+    if conectado:
+        log_event(
+            "conexao", "conexao_voltou",
+            f"{servico} de {usuario.get_username()} reconectou.",
+            usuario=usuario,
+            contexto={"servico": servico, "provider": provider},
+        )
+        return
+    detalhe = str(motivo or "sessao_expirada")[:120]
+    log_event(
+        "conexao", "conexao_caiu",
+        f"{servico} de {usuario.get_username()} requer reconexão após "
+        f"{PROBE_FALHAS_PARA_DESCONECTAR} verificações independentes.",
+        level="error", usuario=usuario,
+        contexto={
+            "servico": servico, "provider": provider,
+            "motivo": detalhe, "detalhe": "sessao_expirada",
+            "availability_code": "login_required", "fonte": "browser_session",
+        },
+    )
 
 
 def _provider(value: str) -> str:
@@ -135,6 +176,7 @@ def registrar_veredito(usuario, marketplace: str, resultado: str,
     organization = organization_for_user(usuario)
     if organization is None:
         return {"falhas": 0, "resultado": "", "motivo": ""}
+    transicao = None
     with transaction.atomic():
         record = BrowserSession.objects.select_for_update().filter(
             organization=organization, user=usuario, provider=provider,
@@ -146,6 +188,10 @@ def registrar_veredito(usuario, marketplace: str, resultado: str,
             return {"falhas": 0, "resultado": "", "motivo": ""}
         agora = timezone.now()
         failures = int(record.probe_failures or 0)
+        estava_disponivel = (
+            record.status != "decrypt_error"
+            and failures < PROBE_FALHAS_PARA_DESCONECTAR
+        )
         if resultado == "conectado":
             failures = 0
             status = "active"
@@ -179,6 +225,15 @@ def registrar_veredito(usuario, marketplace: str, resultado: str,
             "probe_failures", "probe_result", "probe_reason", "last_probe_at",
             "status", "updated_at",
         ))
+        esta_disponivel = failures < PROBE_FALHAS_PARA_DESCONECTAR
+        if estava_disponivel and not esta_disponivel:
+            transicao = False
+        elif not estava_disponivel and esta_disponivel:
+            transicao = True
+    if transicao is not None:
+        _registrar_transicao_compra(
+            usuario, provider, conectado=transicao, motivo=reason,
+        )
     return {"falhas": failures, "resultado": str(resultado or "")[:24],
             "motivo": reason}
 
@@ -197,6 +252,16 @@ def save_report_state(usuario, marketplace: str, state: dict) -> None:
     if organization is None:
         raise ValueError("usuário sem organização ativa")
     raw = json.dumps(state, separators=(",", ":"), ensure_ascii=False)
+    provider = _provider(marketplace)
+    anterior = BrowserSession.objects.filter(
+        organization=organization, user=usuario, provider=provider,
+    ).only("status", "probe_failures").first()
+    estava_indisponivel = bool(
+        anterior and (
+            anterior.status == "decrypt_error"
+            or anterior.probe_failures >= PROBE_FALHAS_PARA_DESCONECTAR
+        )
+    )
     BrowserSession.objects.update_or_create(
         organization=organization, user=usuario, provider=_provider(marketplace),
         defaults={
@@ -205,9 +270,12 @@ def save_report_state(usuario, marketplace: str, state: dict) -> None:
             "last_used_at": timezone.now(),
         },
     )
+    if estava_indisponivel:
+        _registrar_transicao_compra(usuario, provider, conectado=True)
 
 
 def load_report_state(usuario, marketplace: str) -> dict | None:
+    provider = _provider(marketplace)
     try:
         record = _record_or_migrate(usuario, marketplace, state=True)
         if record is None:
@@ -217,7 +285,13 @@ def load_report_state(usuario, marketplace: str) -> dict | None:
             raise ValueError("conteúdo inválido")
     except Exception as exc:
         try:
-            _query(usuario, marketplace).update(status="decrypt_error")
+            mudou = _query(usuario, marketplace).exclude(
+                status="decrypt_error",
+            ).update(status="decrypt_error")
+            if mudou:
+                _registrar_transicao_compra(
+                    usuario, provider, conectado=False, motivo="decrypt_error",
+                )
         except Exception:
             pass
         raise ValueError("sessão de navegador ilegível; conecte novamente") from exc

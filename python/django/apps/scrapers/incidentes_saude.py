@@ -175,18 +175,31 @@ def fechar_conexoes_restabelecidas() -> int:
     queda está resolvido, independentemente de quem viu a transição.
     """
     from apps.scrapers.conexoes import estado_ml, estado_whatsapp
+    from apps.scrapers.report_sessions import has_report_session
     from apps.scrapers.models import IncidenteSaude
 
     fechados = 0
     abertos = (IncidenteSaude.objects.select_related("usuario")
                .filter(status="aberto", pipeline="conexao", usuario__isnull=False))
     for incidente in abertos:
-        servico = (incidente.contexto or {}).get("servico", "").lower()
+        contexto = incidente.contexto or {}
+        servico = contexto.get("servico", "").lower()
         try:
             if "whats" in servico:
                 est = estado_whatsapp(incidente.usuario)
             elif "mercado" in servico:
                 est = estado_ml(incidente.usuario)
+            elif contexto.get("provider") in {"amazon_shop", "shopee_shop"}:
+                if has_report_session(
+                    incidente.usuario, contexto["provider"],
+                ):
+                    confirmar(
+                        incidente,
+                        f"{contexto.get('servico') or 'Sessão de compra'} está "
+                        "conectada novamente.",
+                    )
+                    fechados += 1
+                continue
             else:
                 continue
         except Exception:

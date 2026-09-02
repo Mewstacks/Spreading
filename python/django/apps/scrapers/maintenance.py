@@ -61,7 +61,10 @@ def cupons_frescos_q(*, agora=None, max_age_hours=COUPON_MAX_AGE_HOURS,
 
 def expire_stale(max_age_hours=PRODUCT_MAX_AGE_HOURS):
     """Expiração gradual; não remove linhas nem histórico."""
-    from apps.scrapers.models import CupomNormalizado, Produto, ProdutoCupom
+    from apps.scrapers.coupon_rules import CODIGOS_NAO_PUBLICAVEIS
+    from apps.scrapers.models import (
+        CupomFonteObservacao, CupomNormalizado, Produto, ProdutoCupom,
+    )
     now = timezone.now()
     cutoff = now - timedelta(hours=max_age_hours)
     stale_products = Produto.objects.filter(
@@ -74,9 +77,27 @@ def expire_stale(max_age_hours=PRODUCT_MAX_AGE_HOURS):
             & ~Q(fonte__slug="manual-private")
         )
     ).update(estado="expirado")
+    placeholder_q = Q()
+    for codigo in CODIGOS_NAO_PUBLICAVEIS:
+        placeholder_q |= Q(codigo__iexact=codigo)
+    invalid_ids = list(
+        CupomNormalizado.objects.filter(estado="ativo").filter(
+            placeholder_q,
+        ).values_list("pk", flat=True)
+    )
+    invalid_codes = CupomNormalizado.objects.filter(pk__in=invalid_ids).update(
+        estado="invalido", confianca="baixa",
+    )
+    if invalid_ids:
+        CupomFonteObservacao.objects.filter(cupom_id__in=invalid_ids).update(
+            outcome="invalid", reason_code="invalid_coupon_code",
+        )
     ProdutoCupom.objects.filter(cupom__estado="expirado").exclude(
         status="expirado").update(status="expirado")
-    return {"products": stale_products, "coupons": expired_coupons}
+    return {
+        "products": stale_products, "coupons": expired_coupons,
+        "invalid_codes": invalid_codes,
+    }
 
 
 def purgar_eventos_cupons_antigos(dias=90):

@@ -226,7 +226,12 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
         )
         if item.kind == "coupon":
             from apps.scrapers.coupon_rules import (
-                classificar_contrato_cupom, derivar_categoria_cupom,
+                classificar_contrato_cupom, codigo_humano,
+                derivar_categoria_cupom,
+            )
+            codigo_bruto = str(item.coupon_code or "").strip()
+            codigo_invalido = bool(
+                codigo_bruto and not codigo_humano(codigo_bruto)
             )
             programa = None
             advertiser_id = str((item.evidence or {}).get("advertiser_id") or "")
@@ -252,7 +257,8 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
                           "link": item.canonical_url, "validade": item.valid_until,
                           "inicio": item.starts_at, "restrito": item.restricted,
                           "relampago": item.flash,
-                          "estado": "ativo", "confianca": "media",
+                          "estado": "invalido" if codigo_invalido else "ativo",
+                          "confianca": "baixa" if codigo_invalido else "media",
                           "evidencia": item.evidence},
             )
             # ``auto_now`` marca quando o parser rodou. Para feeds com horario
@@ -271,7 +277,8 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
                 cupom_obj.ultima_observacao = observado_em
             from apps.scrapers.coupon_products import atualizar_chave_cupom
             atualizar_chave_cupom(cupom_obj)
-            _enriquecer_codigos_heuristicos(cupom_obj)
+            if not codigo_invalido:
+                _enriquecer_codigos_heuristicos(cupom_obj)
             evidence = item.evidence if isinstance(item.evidence, dict) else {}
             CupomFonteObservacao.objects.update_or_create(
                 organization_id=cupom_obj.organization_id,
@@ -282,8 +289,10 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
                     "cupom": cupom_obj,
                     "precedence": _SOURCE_PRECEDENCE.get(item.source, 100),
                     "health_status": str(source_health or "unknown")[:24],
-                    "outcome": "accepted",
-                    "reason_code": "",
+                    "outcome": "invalid" if codigo_invalido else "accepted",
+                    "reason_code": (
+                        "invalid_coupon_code" if codigo_invalido else ""
+                    ),
                     # Somente prova tipada; nunca HTML, cookies ou query strings.
                     "evidence": {
                         "association": str(evidence.get("association") or "")[:80],

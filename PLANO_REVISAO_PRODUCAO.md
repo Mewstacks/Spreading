@@ -617,6 +617,20 @@ Fontes primárias consultadas:
   quanto na fronteira final. A denylist do extrator agora herda a denylist global,
   fechando também a divergência que deixava `MAISCUPONS` atravessar a coleta.
   Testes direcionados: 114/114; suíte integral: 1.476/1.476 Django.
+- Prova de produção v325: release/RLS/rolling deploy e `/healthz` passaram. A
+  coleta controlada percorreu 28/28 canais sem falha, 85 páginas e 1.671
+  mensagens datadas; descartou 217 mensagens antigas, resolveu 173/175 redirects
+  e persistiu 68 cupons. A fonte terminou `healthy`, sem depender da chave
+  Anthropic inválida: o circuito abriu por 15 minutos e o parser determinístico
+  continuou a extração.
+- Preparação v326: sessões Amazon Compras e Shopee Compras agora emitem queda
+  operacional somente quando cruzam o limite de três falhas conclusivas em ciclos
+  separados; timeout, CAPTCHA e challenge seguem inconclusivos. Reconexão grava
+  `conexao_voltou`, e o reconciliador fecha incidente órfão ao encontrar a sessão
+  restaurada. A persistência global também passou a marcar qualquer placeholder
+  de código como `invalido`/baixa confiança e a manutenção corrige observações
+  legadas; isso remove `MAISCUPONS` ativo em vez de apenas barrá-lo na publicação.
+  Suítes integrais: 1.481/1.481 Django e 170/170 Node.
 
 ## Gates de deploy desta revisão
 

@@ -105,6 +105,32 @@ class SourcePipelineTests(TestCase):
         )
         self.assertLess(abs((cupom.ultima_observacao - publicado_em).total_seconds()), 1)
 
+    def test_persistencia_global_marca_placeholder_como_invalido(self):
+        from apps.scrapers.models import CupomFonteObservacao
+
+        item = IngestedItem(
+            external_id="telegram:mercadolivre:MAISCUPONS",
+            marketplace="mercadolivre", source="telegram-publico",
+            kind="coupon", canonical_url="", title="Veja mais cupons",
+            coupon_code="MAISCUPONS",
+            coupon_rules={
+                "tipo_desconto": "porcentagem", "valor_desconto": 10,
+                "modo_resgate": "codigo", "escopo": "site",
+            },
+            observed_at=timezone.now(),
+        )
+
+        persist_items([item])
+
+        cupom = CupomNormalizado.objects.get(
+            fonte__slug="telegram-publico", external_id=item.external_id,
+        )
+        self.assertEqual(cupom.estado, "invalido")
+        self.assertEqual(cupom.confianca, "baixa")
+        observacao = CupomFonteObservacao.objects.get(cupom=cupom)
+        self.assertEqual(observacao.outcome, "invalid")
+        self.assertEqual(observacao.reason_code, "invalid_coupon_code")
+
     def test_amazon_coupon_source_groups_asins_and_preserves_final_price(self):
         from apps.scrapers.sources.amazon_coupons import AmazonCouponsSource
 
