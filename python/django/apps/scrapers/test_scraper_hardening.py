@@ -90,6 +90,27 @@ class ScraperPersistenceHardeningTests(TestCase):
         self.assertEqual(normalizada, "https://www.mercadolivre.com.br/ofertas")
         self.assertLessEqual(len(normalizada), 1000)
 
+    def test_tracking_sem_item_preserva_identidade_em_vez_de_colidir(self):
+        """Medido em produção (02/09/2026): 2.522 anúncios distintos colapsando.
+
+        Nessas URLs o item MLB não está em `item_id`/`wid`/path — vive dentro do
+        parâmetro opaco `?a=`. Tirar a query não normaliza: apaga a identidade e
+        faz produtos diferentes virarem a MESMA chave de upsert, o que
+        sobrescreve catálogo em vez de deduplicar.
+        """
+        from apps.scrapers.scraper_mercadolivre.ofertas_scraper import (
+            _normalizar_link_produto,
+        )
+
+        base = "https://click1.mercadolivre.com.br/mclics/clicks/external/MLB/count"
+        um = f"{base}?a=tjYhANxzFzE8Z4IQGfll7smbANMCfQZpa7wkJotHKSLa"
+        outro = f"{base}?a=AqPayHupoZaOYp7XfFPCIPUYwdUOwSYvJq2tN9yRt2b"
+
+        self.assertNotEqual(
+            _normalizar_link_produto(um), _normalizar_link_produto(outro),
+        )
+        self.assertEqual(_normalizar_link_produto(um), um)
+
     def test_lane_rapida_reutiliza_produto_ja_coletado_por_cupom(self):
         from unittest.mock import patch
         from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _upsert_ofertas
