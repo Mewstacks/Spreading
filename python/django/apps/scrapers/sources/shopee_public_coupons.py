@@ -26,6 +26,8 @@ from .base import IngestedItem, SourceAdapter, normalizar_dinheiro
 
 
 COUPONS_URL = "https://shopee.com.br/m/cupom-de-desconto"
+DAILY_STORE_COUPONS_URL = "https://shopee.com.br/m/cupom-de-desconto-v23"
+COUPON_PAGES = (COUPONS_URL, DAILY_STORE_COUPONS_URL)
 _OFF_PERCENT = re.compile(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*%\s*OFF\b", re.I)
 _OFF_FIXED = re.compile(r"R\$\s*([\d.,]+\s*(?:mil)?)\s*OFF\b", re.I)
 _MINIMUM = re.compile(r"(?:acima de|a partir de)\s*R\$\s*([\d.,]+\s*(?:mil)?)", re.I)
@@ -313,6 +315,9 @@ class ShopeePublicCouponsSource(SourceAdapter):
     marketplace = "shopee"
     name = "Shopee - cupons oficiais"
     requires_chromium = True
+    # Vouchers gerais e cupons diarios de vendedores vivem em colecoes oficiais
+    # diferentes. Ambos passam pelo mesmo contrato assinado e pelos mesmos gates.
+    coupon_pages = COUPON_PAGES
 
     def __init__(self):
         self.last_metrics = {}
@@ -331,7 +336,7 @@ class ShopeePublicCouponsSource(SourceAdapter):
                 self.last_metrics = {
                     "items_seen": 0, "accepted": 0, "rejected": 0,
                     "complete": False, "reason_code": "auth_required",
-                    "pages_processed": 0,
+                    "pages_processed": 0, "pages": [],
                     "duration_ms": round((time.monotonic() - started) * 1000),
                 }
                 self.last_health_status = "auth_required"
@@ -342,14 +347,17 @@ class ShopeePublicCouponsSource(SourceAdapter):
                 self.last_metrics = {
                     "items_seen": 0, "accepted": 0, "rejected": 0,
                     "complete": False, "reason_code": "auth_required",
-                    "pages_processed": 0,
+                    "pages_processed": 0, "pages": [],
                     "duration_ms": round((time.monotonic() - started) * 1000),
                 }
                 self.last_health_status = "auth_required"
                 return
+
         refreshed_state = None
         auth_required = False
         api_responses = []
+        page_snapshots = []
+        seen = set()
         with iniciar_browser(
             storage_state=state, headless=True, **_browser_context_options(),
         ) as (page, context):
@@ -359,86 +367,115 @@ class ShopeePublicCouponsSource(SourceAdapter):
                 lambda response: api_responses.append(response)
                 if _VOUCHER_API_PATH in response.url else None,
             )
-            page.goto(COUPONS_URL, wait_until="domcontentloaded", timeout=45000)
-            # O HTML inicial contem apenas o shell; os vouchers chegam no hydrate.
-            # Esperar o contrato semantico evita declarar schema quebrado numa VM
-            # que levou alguns segundos a mais para executar o bundle.
-            try:
-                page.wait_for_selector(
-                    "a[href*='/voucher/details']", timeout=12000,
+            for coupons_url in self.coupon_pages:
+                response_start = len(api_responses)
+                page.goto(
+                    coupons_url, wait_until="domcontentloaded", timeout=45000,
                 )
-                # O primeiro bloco aparece antes dos demais carrosseis. Uma curta
-                # janela de estabilizacao impede que 3 cards sejam tratados como
-                # inventario completo quando a pagina termina com 10+.
-                page.wait_for_timeout(3000)
-            except Exception:
-                pass
-            body = page.locator("body").inner_text(timeout=10000)
-            folded = body.casefold()
-            auth_required = _auth_required(page.url, body)
-            api_payloads = []
-            if not auth_required:
-                for response in api_responses:
+                # O HTML inicial contem apenas o shell; os vouchers chegam no
+                # hydrate. Esperar o contrato evita um falso erro de schema.
+                try:
+                    page.wait_for_selector(
+                        "a[href*='/voucher/details']", timeout=12000,
+                    )
+                    page.wait_for_timeout(3000)
+                except Exception:
+                    pass
+                body = page.locator("body").inner_text(timeout=10000)
+                folded = body.casefold()
+                page_auth_required = _auth_required(page.url, body)
+                if page_auth_required:
+                    auth_required = True
+                    capture_public_diagnostic(page, self.slug, "auth_required")
+                    page_snapshots.append({
+                        "url": coupons_url, "items_seen": 0, "accepted": 0,
+                        "complete": False, "health": "auth_required",
+                        "schema_errors": 0,
+                    })
+                    break
+                if any(marker in folded for marker in (
+                        "verifique que voce e humano",
+                        "verifique que você é humano",
+                        "access denied", "captcha")):
+                    capture_public_diagnostic(page, self.slug, "captcha_or_block")
+                    self.last_health_status = "blocked"
+                    raise RuntimeError("captcha")
+
+                api_payloads = []
+                for response in api_responses[response_start:]:
                     try:
                         if response.status == 200:
                             api_payloads.append(response.json())
                     except Exception:
                         continue
-            api_cards, api_contract_seen, api_complete = _api_voucher_entries(
-                api_payloads,
-            )
-            if auth_required:
-                capture_public_diagnostic(page, self.slug, "auth_required")
-                cards = []
-            elif api_contract_seen:
-                cards = api_cards
-            else:
-                cards = None
-            if any(marker in folded for marker in (
-                    "verifique que voce e humano", "verifique que você é humano",
-                    "access denied", "captcha")):
-                capture_public_diagnostic(page, self.slug, "captcha_or_block")
-                self.last_health_status = "blocked"
-                raise RuntimeError("captcha")
-
-            # Classes CSS da Shopee sao ofuscadas e mudam a cada build. O contrato
-            # estavel e o link publico dos termos; subimos ate o menor ancestral
-            # que tambem contem desconto e estado do voucher.
-            if cards is None:
-                cards = page.locator("a[href*='/voucher/details']").evaluate_all("""
-                anchors => anchors.map(a => {
-                  let node = a;
-                  while (node && node !== document.body) {
-                    const text = (node.innerText || '').trim();
-                    const hasDiscount = /(?:R\\$\\s*[\\d.,]+\\s*(?:mil)?\\s*OFF|[\\d.,]+\\s*%\\s*OFF|CASHBACK)/i.test(text);
-                    const hasState = /(?:Eu quero|Esgotado|J[aá] utilizado)/i.test(text);
-                    if (hasDiscount && hasState && text.length < 600) {
-                      const img = node.querySelector('img');
-                      return {text, href: a.getAttribute('href') || '', image: img ? (img.currentSrc || img.src || '') : ''};
-                    }
-                    node = node.parentElement;
-                  }
-                  return {text: '', href: a.getAttribute('href') || '', image: ''};
-                })
-            """)
-            seen = set()
-            for raw in cards:
-                row, reason = (
-                    _parse_api_voucher(raw)
-                    if api_contract_seen else _parse_rendered_card(raw)
+                api_cards, api_contract_seen, api_complete = _api_voucher_entries(
+                    api_payloads,
                 )
-                if row is None:
-                    rejected[reason or "invalid"] += 1
-                    continue
-                if row["promotion_id"] in seen:
-                    rejected["duplicate"] += 1
-                    continue
-                seen.add(row["promotion_id"])
-                if not api_contract_seen:
-                    row["image"] = str(raw.get("image") or "").split("?", 1)[0][:1000]
-                accepted.append(row)
-            if not cards and not auth_required:
-                capture_public_diagnostic(page, self.slug, "voucher_cards_not_found")
+                cards = api_cards if api_contract_seen else None
+                # Classes CSS sao ofuscadas; o fallback procura a menor caixa que
+                # contenha simultaneamente desconto, estado e link dos termos.
+                if cards is None:
+                    cards = page.locator(
+                        "a[href*='/voucher/details']",
+                    ).evaluate_all("""
+                    anchors => anchors.map(a => {
+                      let node = a;
+                      while (node && node !== document.body) {
+                        const text = (node.innerText || '').trim();
+                        const hasDiscount = /(?:R\\$\\s*[\\d.,]+\\s*(?:mil)?\\s*OFF|[\\d.,]+\\s*%\\s*OFF|CASHBACK)/i.test(text);
+                        const hasState = /(?:Eu quero|Esgotado|J[aá] utilizado)/i.test(text);
+                        if (hasDiscount && hasState && text.length < 600) {
+                          const img = node.querySelector('img');
+                          return {text, href: a.getAttribute('href') || '', image: img ? (img.currentSrc || img.src || '') : ''};
+                        }
+                        node = node.parentElement;
+                      }
+                      return {text: '', href: a.getAttribute('href') || '', image: ''};
+                    })
+                """)
+
+                page_rejected = defaultdict(int)
+                accepted_before = len(accepted)
+                for raw in cards:
+                    row, reason = (
+                        _parse_api_voucher(raw)
+                        if api_contract_seen else _parse_rendered_card(raw)
+                    )
+                    if row is None:
+                        reason = reason or "invalid"
+                        rejected[reason] += 1
+                        page_rejected[reason] += 1
+                        continue
+                    if row["promotion_id"] in seen:
+                        rejected["duplicate"] += 1
+                        page_rejected["duplicate"] += 1
+                        continue
+                    seen.add(row["promotion_id"])
+                    if not api_contract_seen:
+                        row["image"] = str(
+                            raw.get("image") or ""
+                        ).split("?", 1)[0][:1000]
+                    row["source_page"] = coupons_url
+                    accepted.append(row)
+
+                accepted_page = len(accepted) - accepted_before
+                page_complete, page_health, page_schema_errors = _snapshot_state(
+                    len(cards), accepted_page, page_rejected,
+                )
+                if api_contract_seen and not api_complete:
+                    page_complete = False
+                    page_health = "partial" if accepted_page else "degraded"
+                    page_schema_errors += 1
+                page_snapshots.append({
+                    "url": coupons_url, "items_seen": len(cards),
+                    "accepted": accepted_page, "complete": page_complete,
+                    "health": page_health,
+                    "schema_errors": page_schema_errors,
+                })
+                if not cards:
+                    capture_public_diagnostic(
+                        page, self.slug, "voucher_cards_not_found",
+                    )
             if usuario is not None and not auth_required:
                 refreshed_state = context.storage_state()
 
@@ -446,27 +483,31 @@ class ShopeePublicCouponsSource(SourceAdapter):
             from apps.scrapers.report_sessions import save_report_state
             save_report_state(usuario, "shopee_shop", refreshed_state)
 
-        complete, health, schema_errors = _snapshot_state(
-            len(cards), len(accepted), rejected,
+        complete = bool(
+            len(page_snapshots) == len(self.coupon_pages)
+            and all(row["complete"] for row in page_snapshots)
         )
-        if api_contract_seen and not api_complete:
-            complete = False
-            health = "partial" if accepted else "degraded"
-            schema_errors += 1
+        schema_errors = sum(row["schema_errors"] for row in page_snapshots)
         if auth_required:
             complete, health, schema_errors = False, "auth_required", 0
+        elif accepted:
+            health = "healthy" if complete else "partial"
+        else:
+            health = "healthy_empty" if complete else "degraded"
+        items_seen = sum(row["items_seen"] for row in page_snapshots)
         self.last_metrics = {
-            "items_seen": len(cards),
+            "items_seen": items_seen,
             "accepted": len(accepted),
             "rejected": sum(rejected.values()),
             "rejected_by_reason": dict(sorted(rejected.items())),
             "complete": complete,
             "reason_code": "auth_required" if auth_required else "",
             "schema_errors": schema_errors,
-            "pages_processed": 1,
+            "pages_processed": len(page_snapshots),
+            "pages": page_snapshots,
             "duration_ms": round((time.monotonic() - started) * 1000),
             "schema_fingerprint": hashlib.sha256(
-                "voucher-details|discount|state".encode("utf-8")
+                "voucher-details|discount|state|multi-page-v2".encode("utf-8")
             ).hexdigest(),
         }
         self.last_health_status = health
@@ -499,6 +540,7 @@ class ShopeePublicCouponsSource(SourceAdapter):
                     "association": "shopee-official-coupon-page",
                     "promotion_id": row["promotion_id"],
                     "availability": "claimable",
+                    "source_page": row.get("source_page") or COUPONS_URL,
                     "snapshot": row["text"],
                 },
             )

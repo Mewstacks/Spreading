@@ -5,6 +5,7 @@ Um "de R$ 500 por R$ 99" escrito por um canal desconhecido, se entrasse como pre
 referência, produziria um desconto falso com a assinatura de quem publica. Por isso
 várias asserções aqui verificam o que a fonte NÃO faz.
 """
+from contextlib import contextmanager
 from unittest.mock import Mock, call, patch
 
 import requests
@@ -782,6 +783,76 @@ class ShopeePublicCouponsTests(TestCase):
 
     def test_fonte_oficial_consume_slot_de_chromium(self):
         self.assertTrue(ShopeePublicCouponsSource.requires_chromium)
+
+    def test_fonte_oficial_agrega_vitrine_geral_e_cupons_diarios(self):
+        class Locator:
+            def __init__(self, page, selector):
+                self.page = page
+                self.selector = selector
+
+            def inner_text(self, timeout=None):
+                return "Cupons disponiveis hoje"
+
+            def evaluate_all(self, _script):
+                promotion = "111" if self.page.index == 0 else "222"
+                return [{
+                    "text": (
+                        "TODAS AS LOJAS\nR$20 OFF\n"
+                        "Nas compras acima de R$100\nCondicoes\nEu quero"
+                    ),
+                    "href": f"/voucher/details?promotionId={promotion}",
+                    "image": "",
+                }]
+
+        class Page:
+            def __init__(self):
+                self.url = ""
+                self.index = -1
+                self.visited = []
+
+            def on(self, *_args):
+                return None
+
+            def goto(self, url, **_kwargs):
+                self.url = url
+                self.visited.append(url)
+                self.index += 1
+
+            def wait_for_selector(self, *_args, **_kwargs):
+                return None
+
+            def wait_for_timeout(self, *_args, **_kwargs):
+                return None
+
+            def locator(self, selector):
+                return Locator(self, selector)
+
+        page = Page()
+
+        @contextmanager
+        def browser(**_kwargs):
+            yield page, object()
+
+        source = ShopeePublicCouponsSource()
+        with patch(
+            "apps.scrapers.sources.shopee_public_coupons.iniciar_browser",
+            browser,
+        ), patch(
+            "apps.scrapers.sources.shopee_public_coupons._economizar_banda",
+        ):
+            items = list(source.discover_coupons())
+
+        self.assertEqual(page.visited, list(source.coupon_pages))
+        self.assertEqual([item.external_id for item in items], [
+            "shopee-voucher:111", "shopee-voucher:222",
+        ])
+        self.assertEqual(source.last_metrics["pages_processed"], 2)
+        self.assertEqual(source.last_metrics["accepted"], 2)
+        self.assertTrue(source.last_metrics["complete"])
+        self.assertEqual(
+            [item.evidence["source_page"] for item in items],
+            list(source.coupon_pages),
+        )
 
     def test_proxy_residencial_e_opcional_e_nao_vaza_credencial_na_url(self):
         with self.settings(
