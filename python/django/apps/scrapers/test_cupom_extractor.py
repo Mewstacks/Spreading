@@ -82,7 +82,7 @@ class RegraDeAceitacaoTests(TestCase):
         for codigo in (
             "RESGATE", "RESGATAR", "EXCLUSIVO", "TECNOLOGIA",
             "ATUALIZADO", "MELICUPONS", "ATIVADO", "ESGOTANDO",
-            "ESGOTANDOOO", "MOSTRAR", "UTILIZADO", "RESGATARAM",
+            "ESGOTANDOOO", "MOSTRAR", "UTILIZADO", "RESGATARAM", "VOLTANDO",
             "CORREEEEE", "CORREEEEEE", "ANUNCIO", "MAISCUPONS",
             "9.9CONSEGUEM",
         ):

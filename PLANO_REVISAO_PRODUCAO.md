@@ -638,6 +638,23 @@ Fontes primárias consultadas:
   resolvidos via cache. Na `lules`, o inventário mensurável ficou em 894 ML e
   128 Amazon prontos; Shopee segue em zero prontos porque a conta ainda não
   conectou nem sessão de compra nem integração afiliada (49 elegíveis aguardam).
+- Auditoria de custo em 02/09/2026: a topologia real em `gru` soma dois presets
+  `shared-cpu-2x/1GB` (US$10,32 cada), dois `shared-cpu-2x/2GB` (US$18,40 cada)
+  e 7 GB de volumes (US$1,05), totalizando US$58,49/mês antes de egress. Não há
+  IPv4 dedicado. Na PTAX de venda de R$5,1570/US$, o piso é R$301,62 e, portanto,
+  não passa a meta sem desconto. Um bloco de reserva `Shared Machines` de
+  US$50/mês em `gru` custa US$360 antecipados por 12 meses, aplica crédito de
+  US$50/mês e reduz o custo amortizado desta topologia para US$38,49/mês
+  (R$198,50 antes de egress), sem retirar CPU ou memória dos navegadores. A compra
+  do bloco é uma ação financeira da titular da conta Fly e ainda precisa ser
+  confirmada no Cost Explorer da fatura seguinte.
+- Auditoria Shopee em 02/09/2026: os 93 códigos ativos ainda retidos por
+  corroboração tinham exatamente uma testemunha independente; os dois únicos
+  códigos repetidos em mais de uma fonte (`CUPOM60` e `CUPOM90`) discordavam entre
+  percentual e valor fixo e permaneceram bloqueados. O placeholder legado
+  `ESGOTANDOOO` já estava `invalido`; `VOLTANDO`, também palavra operacional de
+  mensagem, foi acrescentado à fronteira global para ser invalidado na ingestão
+  e pela manutenção, sem inflar a meta com ruído.
 
 ## Gates de deploy desta revisão
 
