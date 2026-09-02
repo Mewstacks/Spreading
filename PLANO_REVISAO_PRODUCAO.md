@@ -674,6 +674,17 @@ Fontes primárias consultadas:
   Shopee da `lules` só pode ser comprovada depois do login: a conta continua sem
   sessão Amazon/Shopee e sem integração afiliada Shopee. O WhatsApp gerou QR em
   02/09/2026 03:04 UTC, mas ainda estava inativo; o ML continuava expirado.
+- Prova de produção v329: o probe de capacidade WhatsApp passou a aceitar
+  `--username`, eliminando o falso verde em que o teste da `lules` poderia usar a
+  primeira conexão de outro tenant. Com `--require-ready`, ele também exige
+  `conectado=true` e fase `conectado`, portanto serve como gate nominal depois de
+  login, deploy e reinício. Os três testes novos e a suíte integral Django
+  1.484/1.484 passaram; release/RLS/rolling deploy e smoke checks deixaram
+  web/worker v329 e `/healthz` verdes. Em produção, o probe nominal comprovou
+  rede privada, negação sem token e aceitação da capability Ed25519 correta da
+  `lules`; o gate de prontidão recusou honestamente a conta, ainda sem pareamento.
+  Os logs do Node mostram somente renovações de QR e encerramento do Chromium
+  ocioso, sem qualquer evento `authenticated`, `ready`, logout ou revogação.
 
 ## Gates de deploy desta revisão
 
