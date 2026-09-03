@@ -40,6 +40,11 @@ from django.utils import timezone
 
 from apps.scrapers import precos
 
+# Quanto a medição do deal espera pelo Chromium antes de desistir. Precisa ser
+# maior que o intervalo entre as páginas de um lote longo (é aí que ele checa a
+# fila e cede), e menor que o tique de envio.
+PRECO_ESPERA_BROWSER_S = 60
+
 logger = logging.getLogger(__name__)
 
 # Abaixo disso a diferença é arredondamento de centavo, não mudança de preço.
@@ -150,7 +155,7 @@ def _preco_ml_navegador(produto, url="", usuario=None):
     mesmo lease que a raspagem já usa; nada de sessão nova.
     """
     from apps.scrapers.auxiliar import iniciar_browser
-    from apps.scrapers.carga import ml_site_browser_resource
+    from apps.scrapers.carga import BrowserResourceUnavailable, coordinated_ml_browser
     from apps.scrapers.ml_auth import storage_state
     from apps.scrapers.scraper_mercadolivre.link_http import preco_da_pdp
 
@@ -158,14 +163,23 @@ def _preco_ml_navegador(produto, url="", usuario=None):
     if not alvo:
         return None
     corpo = ""
-    with ml_site_browser_resource(usuario, owner_kind="preco_ao_vivo") as acquired:
-        if not acquired:
-            return None
-        with iniciar_browser(
-            storage_state=storage_state(usuario), headless=True,
-        ) as (page, _contexto):
-            page.goto(alvo, wait_until="domcontentloaded", timeout=25000)
-            corpo = page.content()
+    # `coordinated_ml_browser` com espera, e não o pega-ou-desiste: a negativa
+    # inscreve `preco_ao_vivo` na fila do Chromium, o lote longo que está com o
+    # recurso enxerga o marcador entre páginas e cede. Sem a espera, esta medição
+    # perdia a corrida para a varredura em TODA tentativa e o deal nunca publicava.
+    try:
+        with coordinated_ml_browser(
+            usuario=usuario, authenticated=True, owner_kind="preco_ao_vivo",
+            wait_seconds=PRECO_ESPERA_BROWSER_S,
+        ):
+            with iniciar_browser(
+                storage_state=storage_state(usuario), headless=True,
+            ) as (page, _contexto):
+                page.goto(alvo, wait_until="domcontentloaded", timeout=25000)
+                corpo = page.content()
+    except BrowserResourceUnavailable:
+        # Fila cheia agora. Transitório: o envio volta no próximo tique.
+        return None
     preco, preco_de = preco_da_pdp(corpo)
     if not preco or preco <= 0:
         return None
