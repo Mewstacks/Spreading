@@ -755,13 +755,56 @@ const agendarKeepalive = (session, client) => {
             agendarKeepalive(session, client);
             return;
         }
-        session.keepaliveEmVoo = false;
         session.keepaliveFalhas = 0;
-        if (session.client !== client) return;
+        if (session.client !== client) {
+            session.keepaliveEmVoo = false;
+            return;
+        }
         if (estadoIndicaQueda(estado)) {
+            session.keepaliveEmVoo = false;
             tratarQuedaDeEstado(session, client, estado, 'keepalive');
             return;
         }
+        // A trava `keepaliveEmVoo` segue de pé durante a sondagem do store: ela
+        // existe para impedir DUAS chamadas concorrentes contra a mesma página,
+        // que é justamente o que trava o Chromium. Liberá-la antes de sondar
+        // reabriria essa janela.
+        //
+        // getState responde pelo SOCKET; ele diz CONNECTED mesmo quando o bundle
+        // do WA Web recarregou e levou window.Store/WWebJS embora. Foi assim que
+        // uma sessao passou SETE HORAS anunciando "conectado" enquanto todo envio
+        // morria em verificar_store, sem nada escalar: o vigia nunca perguntou se
+        // a pagina ainda sabia enviar. Perguntar aqui transforma "descobrimos no
+        // proximo envio" (que pode ser so no dia seguinte) em "descobrimos em
+        // dois minutos".
+        try {
+            const storeOk = await sondarStore(session, 8000);
+            if (session.client !== client) {
+                session.keepaliveEmVoo = false;
+                return;
+            }
+            if (storeOk) {
+                marcarStorePronto(session);
+            } else {
+                registrarStoreIndisponivel(session);
+                if (deveReciclarStoreIndisponivel(session)) {
+                    console.error(
+                        `[${session.id}] Keepalive: store ausente alem do teto; reciclando.`
+                    );
+                    session.keepaliveEmVoo = false;
+                    recycleSession(session, 'store ausente no keepalive')
+                        .catch(() => undefined);
+                    return;
+                }
+                console.warn(`[${session.id}] Keepalive: store ausente; aguardando o teto.`);
+            }
+        } catch (err) {
+            // Sondagem e diagnostico, nunca veredito: uma leitura perdida aqui
+            // nao pode derrubar uma sessao saudavel.
+            console.warn(`[${session.id}] Keepalive nao sondou o store: ${err.message}`);
+        }
+        session.keepaliveEmVoo = false;
+        if (session.client !== client) return;
         agendarKeepalive(session, client);
     }, KEEPALIVE_INTERVAL_MS);
     session.keepaliveTimer.unref();

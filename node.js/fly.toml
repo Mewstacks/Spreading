@@ -104,11 +104,19 @@ kill_timeout = "90s"
 #
 # Memória: cada WhatsApp conectado = 1 Chromium. Medido com as 2 sessões da época de
 # MAX_WHATSAPP_SESSIONS=2: 1,77GB. O teto agora é UMA sessão e a medição conectada de
-# 18/08/2026 foi 1,17GB; 2GB ainda deixam cerca de 800MB para picos. Em 01/09, sem
-# sessão conectada, a máquina usava 390MB e tinha zero pressão de memória. Manter 4GB
-# para um segundo Chromium que o próprio gate proíbe era custo sem capacidade real.
+# 18/08/2026 foi 1,17GB.
+#
+# VOLTOU PARA 4GB em 03/09/2026, e a conta de 2GB estava errada por medir a máquina
+# ERRADA: "390MB em repouso" era a VM SEM sessão. Medido em 03/09 com a mesma VM em
+# 2GB e sem Chromium: 662MB usados de 1968MB totais. Somando o pico conectado de
+# 1,17GB dá ~1,83GB — cerca de 140MB de folga, não os 800MB que o texto anterior
+# prometia. Essa é exatamente a margem que a revisão de agosto marcou como causa do
+# travamento total de 08/08 ("não descer: tira a margem dos picos de Chromium").
+# São ~US$16/mês para não ficar derrubando a sessão do cliente; a decisão de custo
+# passou a ser "medir e declarar o teto real", não perseguir um número.
+#
 # As duas CPUs permanecem: o gargalo conhecido é cota de CPU, não RAM. Aceitar mais
 # números exige subir MAX_WHATSAPP_SESSIONS, CPU e memória juntos.
 [[vm]]
   size = "shared-cpu-2x"
-  memory = "2gb"
+  memory = "4gb"
