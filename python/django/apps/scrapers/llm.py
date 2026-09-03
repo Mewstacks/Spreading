@@ -67,29 +67,29 @@ Responda SOMENTE JSON:
 # vez por publicação: cada linha aqui é custo recorrente. A versão longa gastava 717
 # tokens só de instrução para produzir ~120 de saída. Regra prática: se o validador
 # em código já derruba a violação, o prompt não precisa explicá-la duas vezes.
-_PROMPT_DEAL = """Voce escreve UMA linha de apoio para um post de oferta em grupo
-de achados no Brasil. A mensagem ja mostra, em linhas proprias, o NOME do produto,
-o PRECO e o CUPOM. Sua linha nao repete nada disso.
+_PROMPT_DEAL = """Você escreve UMA linha de apoio para um post de oferta em grupo de
+achados no Brasil. A mensagem já mostra, em linhas próprias, o NOME do produto, o
+PREÇO e o CUPOM. Sua linha não repete nada disso.
 
 REGRAS:
-1. Nao escreva o nome, a marca nem o modelo do produto: eles ja estao logo acima.
+1. Não escreva o nome, a marca nem o modelo do produto: já estão logo acima.
 2. Diga o que a pessoa GANHA com ele — uso, tamanho, autonomia, para quem serve.
-3. So escreva numero que esteja em "Numeros liberados" ou no nome do produto.
-4. So afirme o que esta em "Pode afirmar". Fora dela, nada de menor preco, acaba
-   hoje, ultimas unidades ou frete gratis.
-5. Nao invente caracteristica que nao esteja no nome do produto.
-6. Ate 14 palavras, portugues do Brasil, sem jargao de anuncio. Um emoji no fim, no
-   maximo. Sem markdown.
-7. Se nao houver nada util a acrescentar, devolva "linha" vazia. Linha vazia e uma
-   resposta correta; encher linguica nao e.
+3. Só escreva número que esteja em "Números liberados" ou no nome do produto.
+4. Só afirme o que está em "Pode afirmar". Fora dela, nada de menor preço, acaba
+   hoje, últimas unidades ou frete grátis.
+5. Não invente característica que não esteja no nome do produto.
+6. Até 14 palavras, em português do Brasil CORRETO e ACENTUADO, sem jargão de
+   anúncio. No máximo um emoji, no fim. Sem markdown.
+7. Se não houver nada útil a acrescentar, devolva "linha" vazia. Linha vazia é uma
+   resposta correta; encher linguiça não é.
 8. Responda SOMENTE JSON: {{"linha":"..."}}
 
 Exemplo:
-Dados: Produto: Air Fryer Mondial Family 4L Preta | Preco final: R$ 249 | Numeros liberados: 4, 249
-Resposta: {{"linha":"Quatro litros dao conta da janta de duas ou tres pessoas"}}
+Dados: Produto: Air Fryer Mondial Family 4L Preta | Preço final: R$ 249 | Números liberados: 4, 249
+Resposta: {{"linha":"Quatro litros dão conta da janta de duas ou três pessoas"}}
 
 Exemplo:
-Dados: Produto: Cabo USB-C 1m Preto | Preco final: R$ 19 | Numeros liberados: 1, 19
+Dados: Produto: Cabo USB-C 1m Preto | Preço final: R$ 19 | Números liberados: 1, 19
 Resposta: {{"linha":""}}
 
 Agora:
