@@ -1278,6 +1278,36 @@ def _linha_prova_do_deal(deal) -> str:
     return ""
 
 
+def _fatos_do_deal(deal) -> dict:
+    """Números e alegações que o modelo pode usar — e só eles.
+
+    É a lista branca do `gerar_texto_deal`. O que sai daqui é exatamente o que a
+    mensagem vai imprimir logo abaixo, então o texto vendedor e o bloco de preço
+    nunca podem divergir. `provas` autoriza as afirmações fortes: "menor preço" só
+    entra quando o histórico sustenta, urgência só quando a validade é curta.
+    """
+    lista = float(getattr(deal.produto, "preco_sem_desconto", 0) or 0)
+    economia = lista - deal.preco_final if (
+        deal.desconto_comprovado and lista > deal.preco_final) else None
+    percentual = None
+    if economia and lista > 0:
+        percentual = round(economia / lista * 100)
+    provas = set()
+    prova = _linha_prova_do_deal(deal)
+    if prova.startswith("Menor preço"):
+        provas.add("minima")
+    validade = getattr(deal.cupom, "validade", None)
+    if validade and validade - timezone.now() <= timedelta(hours=12):
+        provas.add("urgencia")
+    return {
+        "preco_final": deal.preco_final,
+        "economia": economia,
+        "beneficio_cupom": deal.beneficio_rs or None,
+        "percentual": percentual,
+        "provas": provas,
+    }
+
+
 def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None,
                          configuracao=None) -> str:
     """Mensagem de um Deal: foto do produto, texto humano e números do código.
@@ -3406,6 +3436,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                 or getattr(produto, "categoria", "") or "",
                 motivo="; ".join(getattr(deal, "motivos", [])[:2]),
                 tem_cupom=bool(getattr(deal, "cupom", None)),
+                **_fatos_do_deal(deal),
             )
             mensagem = _executar_orm(
                 montar_mensagem_deal, deal, link_publicado,

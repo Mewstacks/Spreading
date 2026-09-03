@@ -308,13 +308,13 @@ class MensagemDealTests(BaseDeals):
         deal = self._deal()
         texto = montar_mensagem_deal(
             deal, "https://meli.la/abc", usuario=self.user,
-            texto_ia={"gancho": "FONE QUE AGUENTA O DIA",
-                      "produto": "Fone bluetooth de ouvir o dia inteiro.",
-                      "porque_vale": "O cupom desconta na hora de pagar."},
+            texto_ia={"gancho": "JBL TUNE 510BT A R$ 80 COM CUPOM",
+                      "produto": "Fone bluetooth dobrável, bateria longa.",
+                      "porque_vale": "São R$ 20 que o cupom tira no checkout."},
         )
-        self.assertIn("FONE QUE AGUENTA O DIA", texto)
-        self.assertIn("Fone bluetooth de ouvir o dia inteiro.", texto)
-        self.assertIn("O cupom desconta na hora de pagar.", texto)
+        self.assertIn("JBL TUNE 510BT A R$ 80 COM CUPOM", texto)
+        self.assertIn("Fone bluetooth dobrável, bateria longa.", texto)
+        self.assertIn("São R$ 20 que o cupom tira no checkout.", texto)
         self.assertIn("R$ 80", texto)
         self.assertIn("PRESENTE", texto)
         self.assertIn("https://meli.la/abc", texto)
@@ -338,23 +338,105 @@ class MensagemDealTests(BaseDeals):
 
 
 class TextoIATests(TestCase):
-    """O modelo escreve a frase; o número é sempre do código."""
+    """O modelo pode vender; não pode inventar número nem alegação."""
 
-    def test_frase_com_numero_e_recusada(self):
-        from apps.scrapers.llm import _frase_humana
+    PERMITIDOS = {"80", "20", "510"}
 
-        self.assertEqual(_frase_humana("Sai por R$ 80 hoje"), "")
-        self.assertEqual(_frase_humana("Fica 20% mais barato"), "")
-        self.assertEqual(_frase_humana("Menor preço em 90 dias"), "")
+    def _vendavel(self, texto, *, provas=()):
+        from apps.scrapers.llm import _frase_vendavel
 
-    def test_frase_com_jargao_de_anuncio_e_recusada(self):
-        from apps.scrapers.llm import _frase_humana
+        return _frase_vendavel(
+            texto, permitidos=self.PERMITIDOS, provas=set(provas))
 
-        self.assertEqual(_frase_humana("Imperdível, corre que acaba"), "")
-        self.assertEqual(_frase_humana("Não perca essa"), "")
+    def test_numero_da_lista_passa(self):
+        """O padrão do mercado põe o preço na frase. Isso é permitido."""
+        frase = "São R$ 20 que o cupom tira no checkout, confira antes de fechar."
+        self.assertEqual(self._vendavel(frase), frase)
 
-    def test_frase_humana_passa(self):
-        from apps.scrapers.llm import _frase_humana
+    def test_numero_fora_da_lista_derruba_a_frase(self):
+        """Preço inventado é o defeito mais caro do produto. Campo cai inteiro."""
+        self.assertEqual(self._vendavel("Sai por R$ 59 hoje"), "")
+        self.assertEqual(self._vendavel("Fica 45% mais barato"), "")
 
-        frase = "Fone bluetooth de ouvir o dia inteiro, dobrável pra mochila."
-        self.assertEqual(_frase_humana(frase), frase)
+    def test_numero_do_nome_do_produto_e_liberado_pelo_chamador(self):
+        from apps.scrapers.llm import numeros_do_texto
+
+        self.assertEqual(
+            numeros_do_texto("Fone JBL Tune 510BT"), {"510"})
+        self.assertEqual(numeros_do_texto("R$ 1.299,00"), {"1299"})
+        self.assertEqual(numeros_do_texto("R$ 80,50"), {"80.5"})
+
+    def test_menor_preco_sem_prova_e_recusado(self):
+        self.assertEqual(self._vendavel("O menor preço do ano nesse fone"), "")
+
+    def test_menor_preco_com_prova_passa(self):
+        frase = "O menor preço que a gente viu nele em 90 dias."
+        self.assertEqual(
+            self._vendavel(frase, provas=("minima",)),
+            "",  # 90 não está na lista de números liberados
+        )
+        curta = "É o menor preço que a gente já viu nele."
+        self.assertEqual(self._vendavel(curta, provas=("minima",)), curta)
+
+    def test_urgencia_e_estoque_sem_prova_sao_recusados(self):
+        self.assertEqual(self._vendavel("Última chance, acaba hoje"), "")
+        self.assertEqual(self._vendavel("Correndo, últimas unidades"), "")
+        self.assertEqual(self._vendavel("Ainda tem frete grátis"), "")
+
+    def test_jargao_de_palhacada_continua_barrado(self):
+        self.assertEqual(self._vendavel("Imperdível, corre que acaba"), "")
+        self.assertEqual(self._vendavel("Clique aqui e garanta já"), "")
+
+    def test_gancho_nomeia_produto_e_numero(self):
+        from apps.scrapers.llm import _gancho_de_venda
+
+        gancho = "JBL TUNE 510BT A R$ 80 COM CUPOM"
+        self.assertEqual(
+            _gancho_de_venda(gancho, self.PERMITIDOS, set()), gancho)
+
+    def test_gancho_com_preco_inventado_cai(self):
+        from apps.scrapers.llm import _gancho_de_venda
+
+        self.assertEqual(
+            _gancho_de_venda("FONE JBL POR R$ 59", self.PERMITIDOS, set()), "")
+
+    def test_gancho_curto_demais_cai(self):
+        from apps.scrapers.llm import _gancho_de_venda
+
+        self.assertEqual(_gancho_de_venda("FONE JBL", self.PERMITIDOS, set()), "")
+
+
+class FatosDoDealTests(BaseDeals):
+    """A lista branca entregue ao modelo é a mesma que a mensagem imprime."""
+
+    def _deal_com_minima(self):
+        produto = self._produto(preco=100.0)
+        self._observar(produto, 180.0, 175.0, 170.0)
+        self._cupom(percentual=20.0, teto=100.0)
+        return deals.gerar_deals(self._config(), limite=1)[0]
+
+    def test_fatos_liberam_exatamente_os_numeros_da_mensagem(self):
+        from apps.scrapers.ofertas import _fatos_do_deal
+
+        fatos = self._deal_com_minima()
+        dados = _fatos_do_deal(fatos)
+        self.assertEqual(dados["preco_final"], 80.0)
+        self.assertEqual(dados["beneficio_cupom"], 20.0)
+        self.assertEqual(dados["economia"], 120.0)
+        self.assertEqual(dados["percentual"], 60)
+
+    def test_minima_provada_autoriza_a_alegacao(self):
+        from apps.scrapers.ofertas import _fatos_do_deal
+
+        self.assertIn("minima", _fatos_do_deal(self._deal_com_minima())["provas"])
+
+    def test_sem_historico_nao_autoriza_alegacao_nenhuma(self):
+        from apps.scrapers.ofertas import _fatos_do_deal
+
+        deal = deals.DealCandidate(
+            produto=self._produto(), preco_vitrine=100.0, preco_final=100.0,
+            historico=None,
+        )
+        dados = _fatos_do_deal(deal)
+        self.assertEqual(dados["provas"], set())
+        self.assertIsNone(dados["economia"])

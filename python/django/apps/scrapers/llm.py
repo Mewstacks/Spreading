@@ -54,33 +54,42 @@ Responda SOMENTE JSON:
   loja ou categoria que não esteja no escopo original — só reescreva o que já existe.
 """
 
-_PROMPT_DEAL = """Você escreve o texto de um achado de desconto para grupo de WhatsApp
-no Brasil. Quem lê está no celular, passando o dedo, e decide em dois segundos.
+_PROMPT_DEAL = """Você escreve o post de uma oferta para grupo de achados no Brasil.
+Quem lê está no celular, passando o dedo entre dezenas de mensagens, e decide em dois
+segundos. O post existe para vender aquela oferta, não para descrever o produto.
 
-Você recebe fatos JÁ VERIFICADOS pelo sistema. Seu trabalho é só o texto humano em
-cima deles.
+O padrão desse mercado (Promobit, Pelando, grupos de achadinhos) é direto: o produto e
+o NÚMERO que interessa aparecem juntos, logo na primeira linha. "R$ 240 OFF: Vivo Fibra
+600 Mega por R$ 100/mês", "Fone a R$ 77", "Cupom Magalu - R$ 50 em R$ 120".
+
+Você recebe fatos JÁ VERIFICADOS. Escreva em cima deles.
 
 REGRAS OBRIGATÓRIAS:
-1. Nunca escreva algarismo, preço, percentual, "R$", "%" ou data. O sistema imprime os
-   números; se você escrever, a mensagem passa a mentir assim que o preço mudar.
-2. Não invente característica, marca, medida ou uso que não esteja nos dados.
-3. Português do Brasil, de pessoa real conversando. Sem jargão de anúncio: nada de
-   imperdível, corre, não perca, última chance, clique aqui, aproveite já.
-4. Sem emoji (o sistema põe os dele) e sem markdown.
-5. "gancho": 3 a 6 palavras, TUDO EM CAIXA ALTA, nomeia o ganho concreto de quem compra.
-6. "produto": UMA frase de até 18 palavras dizendo o que é e para quem serve.
-7. "porque_vale": UMA frase de até 18 palavras explicando por que o preço de hoje é bom,
-   em cima do motivo fornecido. Se o motivo citar cupom, diga que o abatimento sai no
-   checkout.
-8. Responda SOMENTE JSON: {{"gancho":"...","produto":"...","porque_vale":"..."}}
+1. Os únicos números que você pode escrever são os da lista "Números liberados" e os que
+   já aparecem no nome do produto. Inventar ou arredondar qualquer outro número faz a
+   mensagem mentir sobre um preço que o sistema acabou de verificar.
+2. Só use as afirmações da lista "Pode afirmar". O que não está nela, o sistema não
+   provou: não escreva menor preço, mínima histórica, últimas unidades, acaba hoje,
+   frete grátis nem nada parecido se não estiver liberado.
+3. Não invente característica, marca, medida ou uso que não esteja no nome do produto.
+4. Português do Brasil de pessoa real. Pode ser vendedor, não pode ser palhaço: nada de
+   "corre", "voa", "bora", "clique aqui", "imperdível".
+5. Sem emoji (o sistema põe os dele) e sem markdown.
+6. "gancho": 3 a 8 palavras, TUDO EM CAIXA ALTA. Nomeia o produto E o número que vende
+   (preço final, quanto sai de desconto, ou o que o cupom abate). É a linha que faz a
+   pessoa parar de rolar.
+7. "produto": UMA frase de até 18 palavras dizendo o que é e para quem serve.
+8. "porque_vale": UMA frase de até 20 palavras dizendo por que comprar HOJE, usando o
+   motivo fornecido. Se houver cupom, deixe claro que o abatimento sai no checkout.
+9. Responda SOMENTE JSON: {{"gancho":"...","produto":"...","porque_vale":"..."}}
 
 Exemplo:
-Dados: Produto: Air Fryer Mondial Family 4L Preta | Categoria: Eletrodomésticos | Motivo: preço no fundo do histórico de 90 dias
-Resposta: {{"gancho":"FRITURA SEM ÓLEO EM CASA","produto":"Air fryer de quatro litros, tamanho que dá conta da janta de duas ou três pessoas.","porque_vale":"É o preço mais baixo que a gente viu nessa air fryer nos últimos meses."}}
+Dados: Produto: Air Fryer Mondial Family 4L Preta | Categoria: Eletrodomésticos | Preço final: R$ 249 | Economia: R$ 150 | Sem cupom | Motivo: preço no fundo do histórico de 90 dias | Números liberados: 249, 150, 4 | Pode afirmar: menor preço observado em 90 dias
+Resposta: {{"gancho":"AIR FRYER MONDIAL 4L POR R$ 249","produto":"Air fryer de quatro litros, tamanho que dá conta da janta de duas ou três pessoas.","porque_vale":"É o menor preço que a gente viu nela em 90 dias, R$ 150 abaixo do que costuma sair."}}
 
 Exemplo:
-Dados: Produto: Fone Bluetooth JBL Tune 510BT | Categoria: Eletrônicos | Motivo: cupom abate um valor relevante neste item
-Resposta: {{"gancho":"FONE QUE AGUENTA O DIA","produto":"Fone bluetooth de ouvir o dia inteiro, com bateria longa e dobrável pra mochila.","porque_vale":"O cupom desconta na hora de pagar, e é ele que derruba o preço aqui."}}
+Dados: Produto: Fone Bluetooth JBL Tune 510BT | Categoria: Eletrônicos | Preço final: R$ 80 | Cupom abate: R$ 20 | Motivo: cupom derruba o preço neste item | Números liberados: 80, 20, 510 | Pode afirmar: nenhuma
+Resposta: {{"gancho":"JBL TUNE 510BT A R$ 80 COM CUPOM","produto":"Fone bluetooth dobrável, bateria longa, tamanho de jogar na mochila e esquecer.","porque_vale":"São R$ 20 que o cupom tira no checkout, então confira o valor antes de fechar."}}
 
 Agora:
 {contexto}
@@ -211,45 +220,97 @@ def gerar_conteudo(nome: str, timeout: int = 30, preco=None,
         return vazio
 
 
+# Palhaçada de anúncio. Não é purismo: é o que faz o grupo silenciar a lista.
 _FRASE_PROIBIDA = re.compile(
-    r"\b(?:imperd[ií]vel|oportunidade [úu]nica|corre|bora|clique aqui|"
-    r"n[ãa]o perca|[úu]ltima chance|aproveite j[áa]|garanta j[áa])\b",
+    r"\b(?:imperd[ií]vel|corre|voa|bora|clique aqui|"
+    r"aproveite j[áa]|garanta j[áa]|oportunidade [úu]nica)\b",
     re.I,
 )
 
+# Alegações que o sistema precisa TER PROVADO para deixar passar. A chave é o nome
+# da prova; o valor, o que o modelo não pode escrever sem ela.
+_ALEGACOES_CONTROLADAS = {
+    "minima": re.compile(
+        r"(?:menor pre[çc]o|pre[çc]o mais baixo|m[íi]nima hist[óo]rica|"
+        r"nunca (?:esteve|custou)|mais barato de todos)", re.I),
+    "urgencia": re.compile(
+        r"(?:[úu]ltima chance|acaba hoje|termina hoje|s[óo] hoje|"
+        r"[úu]ltimas horas|expira hoje)", re.I),
+    "estoque": re.compile(
+        r"(?:[úu]ltimas unidades|acabando|estoque limitado|poucas unidades)", re.I),
+    "frete": re.compile(r"frete gr[áa]tis", re.I),
+    "gratis": re.compile(r"\b(?:gr[áa]tis|de gra[çc]a)\b", re.I),
+}
 
-def _frase_humana(texto, limite=140) -> str:
-    """Frase de IA aceitável numa mensagem: sem número, sem jargão, sem markdown.
+_NUMERO = re.compile(r"\d+(?:[.,]\d+)*")
 
-    O veto a algarismo/`R$`/`%` não é estilo, é veracidade. O texto é escrito uma
-    vez e a mensagem é montada depois, com preço revalidado ao vivo: qualquer
-    número escrito pelo modelo vira uma afirmação que o sistema não consegue mais
-    garantir. Os números da mensagem saem SEMPRE do código.
+
+def _normalizar_numero(bruto: str) -> str:
+    """"R$ 1.299,00" e "1299" viram a mesma coisa. Ponto é milhar, vírgula é decimal."""
+    texto = str(bruto).replace(".", "")
+    if "," in texto:
+        inteiro, _, decimal = texto.partition(",")
+        decimal = decimal.rstrip("0")
+        return f"{inteiro}.{decimal}" if decimal else inteiro
+    return texto
+
+
+def numeros_do_texto(texto) -> set:
+    return {_normalizar_numero(m.group(0)) for m in _NUMERO.finditer(str(texto or ""))}
+
+
+def _frase_vendavel(texto, *, permitidos, provas, limite=160, palavras=26) -> str:
+    """Frase que pode vender, mas só pode afirmar o que o sistema mediu.
+
+    A versão anterior proibia QUALQUER número. Estava errada para este mercado: o
+    padrão do Promobit e do Pelando é o número no título ("Fone a R$ 77", "R$ 240
+    OFF"), e um gancho sem número não vende oferta nenhuma — foi o defeito apontado.
+
+    A trava certa não é proibir número, é conferir de ONDE ele veio: todo algarismo
+    escrito pelo modelo tem de estar na lista que o código passou (preço final,
+    economia, abatimento do cupom, percentual comprovado) ou já existir no nome do
+    produto. Qualquer outro é invenção e derruba o campo inteiro.
+
+    O mesmo vale para as alegações fortes: "menor preço" só passa quando o histórico
+    provou, "acaba hoje" só quando a validade é curta. Sem prova, o campo cai — a
+    mensagem sai sem a frase, nunca com a frase falsa.
     """
     limpo = _sem_formatacao(texto, limite)
     if not limpo:
         return ""
-    if re.search(r"\d|R\$|%", limpo):
-        return ""
     if _FRASE_PROIBIDA.search(limpo):
         return ""
-    if len(limpo.split()) > 24:
+    if len(limpo.split()) > palavras:
         return ""
+    if numeros_do_texto(limpo) - set(permitidos):
+        return ""
+    for nome, padrao in _ALEGACOES_CONTROLADAS.items():
+        if nome not in provas and padrao.search(limpo):
+            return ""
     return limpo
 
 
+def _frase_humana(texto, limite=140) -> str:
+    """Frase sem número nenhum. Mantida para chamadores que não têm fatos a liberar."""
+    return _frase_vendavel(texto, permitidos=set(), provas=set(), limite=limite)
+
+
 def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
-                     timeout: int = 20) -> dict:
-    """Texto humanizado de um deal: gancho, o que é o produto e por que vale.
+                     preco_final=None, economia=None, beneficio_cupom=None,
+                     percentual=None, provas=(), timeout: int = 20) -> dict:
+    """Post de venda de um deal: gancho com número, o que é o produto, por que hoje.
 
     Devolve sempre ``{"gancho","produto","porque_vale"}``; qualquer falha degrada
     para strings vazias e NUNCA impede o envio — a mensagem sem estes campos
     continua completa, porque preço, economia, cupom e prova são impressos pelo
     código.
 
-    Uma chamada por tentativa real de envio, como `avaliar_cupom_ia`. Não há cache
-    porque `porque_vale` depende do motivo daquele momento; o custo é uma chamada
-    curta por publicação, não por item de catálogo.
+    `provas` é o conjunto de alegações que o sistema mediu e portanto autoriza
+    ("minima", "urgencia"). O que não está lá, o validador derruba.
+
+    Uma chamada por tentativa real de envio, como `avaliar_cupom_ia`, e depois da
+    revalidação de preço — por isso os números passados aqui são os mesmos que a
+    mensagem vai imprimir. Sem cache: o texto depende do preço daquele momento.
     """
     vazio = {"gancho": "", "produto": "", "porque_vale": ""}
     if not getattr(settings, "LLM_ATIVO", False) or not nome:
@@ -257,19 +318,43 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
     if not getattr(settings, "ANTHROPIC_API_KEY", ""):
         logger.warning("LLM sem ANTHROPIC_API_KEY: texto do deal não será gerado")
         return vazio
+
+    fatos = {
+        "Preço final": preco_final,
+        "Economia": economia,
+        "Cupom abate": beneficio_cupom,
+        "Desconto": percentual,
+    }
+    permitidos = numeros_do_texto(nome)
     partes = [f"Produto: {nome}"]
     if categoria:
         partes.append(f"Categoria: {categoria}")
+    for rotulo, valor in fatos.items():
+        if valor in (None, "", 0, 0.0):
+            continue
+        formatado = formatar_valor_br(valor)
+        permitidos |= numeros_do_texto(formatado)
+        sufixo = "%" if rotulo == "Desconto" else ""
+        prefixo = "" if rotulo == "Desconto" else "R$ "
+        partes.append(f"{rotulo}: {prefixo}{formatado}{sufixo}")
     if motivo:
         partes.append(f"Motivo: {motivo}")
     partes.append(
         "Desconto sai por cupom no checkout." if tem_cupom
         else "Sem cupom: o preço já está aplicado na página."
     )
+    partes.append("Números liberados: " + (", ".join(sorted(permitidos)) or "nenhum"))
+    rotulos_prova = {
+        "minima": "menor preço observado em 90 dias",
+        "urgencia": "a oferta termina em poucas horas",
+    }
+    partes.append("Pode afirmar: " + (", ".join(
+        rotulos_prova[p] for p in provas if p in rotulos_prova) or "nenhuma"))
+
     try:
         resposta = _cliente(timeout).messages.create(
             model=getattr(settings, "LLM_MODELO", _MODELO_PADRAO),
-            max_tokens=300,
+            max_tokens=350,
             thinking={"type": "disabled"},
             messages=[{
                 "role": "user",
@@ -279,15 +364,47 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
         dados = _json_resposta(_texto_resposta(resposta))
         if not isinstance(dados, dict):
             return vazio
+        provas = set(provas)
         return {
-            "gancho": _titulo_chamada(dados.get("gancho")),
-            "produto": _frase_humana(dados.get("produto")),
-            "porque_vale": _frase_humana(dados.get("porque_vale")),
+            "gancho": _gancho_de_venda(dados.get("gancho"), permitidos, provas),
+            "produto": _frase_vendavel(
+                dados.get("produto"), permitidos=permitidos, provas=provas,
+                limite=140, palavras=22),
+            "porque_vale": _frase_vendavel(
+                dados.get("porque_vale"), permitidos=permitidos, provas=provas,
+                limite=160, palavras=26),
         }
     except Exception as exc:
         logger.warning("Falha ao gerar texto do deal: %s: %s",
                        type(exc).__name__, exc)
         return vazio
+
+
+def formatar_valor_br(valor) -> str:
+    """Mesmo formato do corpo da mensagem, para o modelo ver o número que vai sair."""
+    try:
+        numero = float(valor)
+    except (TypeError, ValueError):
+        return ""
+    texto = f"{numero:.2f}".rstrip("0").rstrip(".")
+    inteiro, _, decimal = texto.partition(".")
+    return f"{inteiro},{decimal}" if decimal else inteiro
+
+
+def _gancho_de_venda(texto, permitidos, provas) -> str:
+    """Chamada em caixa alta que nomeia produto e número. Pode conter R$ e %.
+
+    Diferente de `_titulo_chamada`, que serve ao formato antigo de produto e proíbe
+    OFERTA/DESCONTO/OFF: ali o bloco de preço logo abaixo é que vendia, e o título
+    era só a chamada. Aqui o gancho É o anúncio, e nesse mercado "OFF" e "por R$ X"
+    são vocabulário corrente, não ruído.
+    """
+    limpo = _sem_formatacao(texto, 90).upper()
+    palavras = [p for p in re.split(r"\s+", limpo) if p]
+    if not 3 <= len(palavras) <= 10:
+        return ""
+    return _frase_vendavel(
+        limpo, permitidos=permitidos, provas=provas, limite=90, palavras=10)
 
 
 def gerar_nomes_curtos(nomes, timeout: int = 10) -> list[str]:
