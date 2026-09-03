@@ -160,6 +160,10 @@ DEAL_COBERTURA_META_DIA = int(os.getenv("DEAL_COBERTURA_META_DIA", "10"))
 # minutos de observação, a vitrine dizia R$ 199,90 e o checkout cobrava R$ 249,50.
 # Com ~270 produtos ML relidos por hora, 90 minutos deixa estoque de sobra.
 DEAL_FRESCOR_MAXIMO_MIN = int(os.getenv("DEAL_FRESCOR_MAXIMO_MIN", "90"))
+# Quantas páginas da vitrine `/ofertas` a verificação de envio varre atrás do
+# card do item. É a única porta que este IP tem aberta no ML; cada página custa
+# um carregamento, então o teto existe para o envio não virar raspagem.
+PRECO_JIT_PAGINAS_OFERTAS = int(os.getenv("PRECO_JIT_PAGINAS_OFERTAS", "4"))
 # Shadow calcula o vencedor da camada Deal e registra a divergência SEM trocar o
 # envio. Live é o que troca, e nasce desligado: o rollback é apagar a flag, não
 # reverter migração.
