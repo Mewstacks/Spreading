@@ -106,17 +106,29 @@ kill_timeout = "90s"
 # MAX_WHATSAPP_SESSIONS=2: 1,77GB. O teto agora é UMA sessão e a medição conectada de
 # 18/08/2026 foi 1,17GB.
 #
-# VOLTOU PARA 4GB em 03/09/2026, e a conta de 2GB estava errada por medir a máquina
-# ERRADA: "390MB em repouso" era a VM SEM sessão. Medido em 03/09 com a mesma VM em
-# 2GB e sem Chromium: 662MB usados de 1968MB totais. Somando o pico conectado de
-# 1,17GB dá ~1,83GB — cerca de 140MB de folga, não os 800MB que o texto anterior
-# prometia. Essa é exatamente a margem que a revisão de agosto marcou como causa do
-# travamento total de 08/08 ("não descer: tira a margem dos picos de Chromium").
-# São ~US$16/mês para não ficar derrubando a sessão do cliente; a decisão de custo
-# passou a ser "medir e declarar o teto real", não perseguir um número.
+# Subiu para 4GB em 03/09/2026 depois de medir a margem real em 2GB: 662MB em repouso
+# (sem Chromium) + pico de 1,17GB = ~1,83GB, sobrando só ~140MB — a mesma margem fina
+# que a revisão de agosto ligou ao travamento total de 08/08. Mas o orçamento é
+# duro: R$300/mês. Com o WA em 4GB o total do projeto passa para ~US$74,65/mês
+# (R$385-390), estourando o teto. Com o WA em 2GB o total é US$58,49/mês
+# (R$301,81) — ainda ligeiramente acima de R$300, mas a diferença de infra é
+# pequena; o resto do estouro de agosto vinha do preset performance-2x, já corrigido.
+#
+# VOLTOU PARA 2GB em 03/09/2026 por decisão explícita do usuário (custo > margem).
+# A resposta certa ao aperto de memória não é comprar VM maior: é o Chromium
+# gastar menos. `index.js` ganhou no mesmo commit as flags que a comunidade
+# whatsapp-web.js documenta para isto — Site Isolation desligado
+# (--disable-features=IsolateOrigins,site-per-process) e --renderer-process-limit=1
+# cortam processo por origem numa automação de aba única, mais a bateria de
+# serviços de fundo (sync, extensions, hang-monitor, breakpad...). Ainda SEM
+# medição pós-flags do pico conectado real: a próxima sessão que conectar prova
+# o número. Se o pico continuar perto de 1,17GB mesmo com as flags, a memória
+# não é compressível por flag — Chromium com WhatsApp Web simplesmente pesa isso,
+# e o próximo lance de queda vai exigir decidir entre R$300 e estabilidade, não
+# entre "otimizado" e "não otimizado".
 #
 # As duas CPUs permanecem: o gargalo conhecido é cota de CPU, não RAM. Aceitar mais
 # números exige subir MAX_WHATSAPP_SESSIONS, CPU e memória juntos.
 [[vm]]
   size = "shared-cpu-2x"
-  memory = "4gb"
+  memory = "2gb"
