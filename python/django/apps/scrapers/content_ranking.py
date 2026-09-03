@@ -6,7 +6,7 @@ from datetime import timedelta
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
 
-from apps.scrapers.coupon_rules import regras_do_cupom
+from apps.scrapers.coupon_rules import cupom_e_lixo, regras_do_cupom
 from apps.scrapers.maintenance import freshness_points
 from apps.scrapers.models import CupomNormalizado, Publicacao
 
@@ -284,6 +284,13 @@ def _coupon_candidates(config, limit):
             coupon.integracao.habilitada and coupon.integracao.status == "conectada"):
             continue
         rules = regras_do_cupom(coupon)
+        # Segunda trava, não redundante: cupons que já ficaram `ready` ANTES
+        # deste filtro existir não são reavaliados na hora — o funil só passa
+        # por eles de novo no próximo ciclo de manutenção. Sem isto aqui, um
+        # cupom lixo pré-existente continuaria sendo escolhido para envio até
+        # a próxima varredura.
+        if cupom_e_lixo(rules):
+            continue
         discount = rules.get("valor_desconto") if desconto_para_comprador(coupon) else None
         kind = rules.get("tipo_desconto")
         if kind == "porcentagem" and discount is not None:

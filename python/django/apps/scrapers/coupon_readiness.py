@@ -22,7 +22,8 @@ from apps.scrapers.coupon_products import (
 )
 from apps.scrapers.coupon_rules import (
     codigo_publicavel, corroboracoes_independentes_em_lote, coupon_mode_enabled,
-    cupom_publicavel, forca_evidencia, listagem_publica_ml, regras_do_cupom,
+    cupom_e_lixo, cupom_publicavel, forca_evidencia, listagem_publica_ml,
+    regras_do_cupom,
 )
 from apps.scrapers.coupon_links import coupon_link_verified_and_fresh
 from apps.scrapers.maintenance import cupons_frescos_q
@@ -138,6 +139,14 @@ def _preflight(cupom, usuario, *, corroboracoes=None, validacoes_checkout=None,
     if regras.get("valor_desconto") in (None, "", 0):
         return _resultado("discarded", "invalid", "missing_discount",
                           "A fonte não comprovou o valor do desconto.")
+    # "50% OFF" com teto de R$1 é dado real da loja, não erro de leitura — e é
+    # lixo: o comprador nunca leva mais que o teto, por maior que seja o
+    # percentual anunciado. Medido em produção em 03/09/2026 (Glamour.div, ML).
+    if cupom_e_lixo(regras):
+        return _resultado(
+            "discarded", "invalid", "desconto_irrelevante",
+            "Benefício real abaixo do piso configurado (teto ou valor fixo pequeno demais).",
+        )
     from apps.scrapers.coupon_validation import veredito_para_cupom
 
     checkout_status, checkout_reason = veredito_para_cupom(

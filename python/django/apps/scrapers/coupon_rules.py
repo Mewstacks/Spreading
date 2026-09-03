@@ -900,6 +900,42 @@ def desconto_para_comprador(cupom) -> bool:
     return True
 
 
+def valor_maximo_desconto_reais(regras: Mapping):
+    """Benefício monetário REAL do cupom, quando dá para calcular. `None` = não
+    dá para julgar (sem teto nem valor fixo) — a chamada não deve filtrar por
+    engano nesse caso, só quando o valor é conhecido e é pequeno demais.
+
+    Cupom percentual com teto (`desconto_maximo`) nunca vale mais que o teto —
+    "50% OFF" com `desconto_maximo=1.0` dá no máximo R$1 no carrinho inteiro,
+    e é isso que interessa a quem compra, não o percentual anunciado. Cupom
+    fixo já É o valor.
+    """
+    tipo = str((regras or {}).get("tipo_desconto") or "")
+    if tipo == "porcentagem":
+        maximo = _numero((regras or {}).get("desconto_maximo"))
+        return float(maximo) if maximo is not None else None
+    if tipo == "fixo":
+        valor = _numero((regras or {}).get("valor_desconto"))
+        return float(valor) if valor is not None else None
+    return None
+
+
+def cupom_e_lixo(regras: Mapping) -> bool:
+    """True quando o benefício monetário real está abaixo do piso configurado.
+
+    Só decide quando o valor É calculável (`valor_maximo_desconto_reais` não
+    devolveu `None`); sem teto conhecido, deixa passar — a incerteza não pode
+    virar rejeição.
+    """
+    from django.conf import settings
+
+    valor = valor_maximo_desconto_reais(regras)
+    if valor is None:
+        return False
+    piso = float(getattr(settings, "COUPON_VALOR_MINIMO_RELEVANTE_REAIS", 10) or 10)
+    return valor < piso
+
+
 def formatar_numero(valor) -> str:
     numero = _numero(valor)
     if numero is None:

@@ -1358,6 +1358,44 @@ class CouponReadinessReasonTests(TestCase):
         projection.refresh_from_db()
         self.assertEqual(projection.stage, "ready")
 
+    def test_percentual_com_teto_irrisorio_e_rejeitado_como_lixo(self):
+        """'50% OFF' com teto de R$1 é dado real do ML, não bug de parser — e é
+        lixo: o comprador nunca leva mais que o teto. Achado em produção em
+        03/09/2026 (cupom "Glamour.div", 50% OFF, desconto_maximo=1.0)."""
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        cupom = CupomNormalizado.objects.create(
+            fonte=self.source, external_id="campanha:teto-irrisorio",
+            marketplace="mercadolivre", titulo="50% OFF Em produtos de Glamour.div",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 50.0,
+                    "desconto_maximo": 1.0, "valor_minimo": 1.0,
+                    "modo_resgate": "ativacao"},
+        )
+        with self._ml():
+            projetar_disponibilidade_cupons(self.user)
+        projection = CupomDisponibilidade.objects.get(cupom=cupom, usuario=self.user)
+        self.assertEqual(
+            (projection.stage, projection.category, projection.reason_code),
+            ("discarded", "invalid", "desconto_irrelevante"),
+        )
+
+    def test_percentual_com_teto_relevante_nao_e_afetado(self):
+        """Confirma que o piso não vira gatilho de falso positivo: um cupom com
+        teto de verdade (acima do piso configurado) segue o caminho normal."""
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        cupom = CupomNormalizado.objects.create(
+            fonte=self.source, external_id="campanha:teto-bom",
+            marketplace="mercadolivre", titulo="30% OFF loja boa",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 30.0,
+                    "desconto_maximo": 200.0, "valor_minimo": 100.0,
+                    "modo_resgate": "ativacao"},
+        )
+        with self._ml():
+            projetar_disponibilidade_cupons(self.user)
+        projection = CupomDisponibilidade.objects.get(cupom=cupom, usuario=self.user)
+        self.assertNotEqual(projection.reason_code, "desconto_irrelevante")
+
     def test_reconciliacao_em_lote_nao_cresce_queries_por_cupom(self):
         """Quarenta alegações não podem virar quarenta EXISTS/transações."""
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
@@ -2085,6 +2123,42 @@ class CouponReadinessReasonTests(TestCase):
             ).exists(),
         )
         self.assertIn("órfãs lote=1", saida.getvalue())
+
+
+class CupomLixoTests(SimpleTestCase):
+    """`cupom_e_lixo` decide pelo benefício REAL, não pelo percentual anunciado."""
+
+    def test_percentual_com_teto_baixo_e_lixo(self):
+        from apps.scrapers.coupon_rules import cupom_e_lixo
+        self.assertTrue(cupom_e_lixo(
+            {"tipo_desconto": "porcentagem", "valor_desconto": 50.0, "desconto_maximo": 1.0}))
+
+    def test_percentual_com_teto_alto_nao_e_lixo(self):
+        from apps.scrapers.coupon_rules import cupom_e_lixo
+        self.assertFalse(cupom_e_lixo(
+            {"tipo_desconto": "porcentagem", "valor_desconto": 30.0, "desconto_maximo": 200.0}))
+
+    def test_percentual_sem_teto_nao_e_julgavel_e_passa(self):
+        """Sem teto conhecido, a incerteza não pode virar rejeição."""
+        from apps.scrapers.coupon_rules import cupom_e_lixo
+        self.assertFalse(cupom_e_lixo(
+            {"tipo_desconto": "porcentagem", "valor_desconto": 50.0}))
+
+    def test_fixo_baixo_e_lixo(self):
+        from apps.scrapers.coupon_rules import cupom_e_lixo
+        self.assertTrue(cupom_e_lixo({"tipo_desconto": "fixo", "valor_desconto": 2.0}))
+
+    def test_fixo_alto_nao_e_lixo(self):
+        from apps.scrapers.coupon_rules import cupom_e_lixo
+        self.assertFalse(cupom_e_lixo({"tipo_desconto": "fixo", "valor_desconto": 50.0}))
+
+    def test_piso_e_configuravel_por_setting(self):
+        from apps.scrapers.coupon_rules import cupom_e_lixo
+        regras = {"tipo_desconto": "fixo", "valor_desconto": 12.0}
+        with override_settings(COUPON_VALOR_MINIMO_RELEVANTE_REAIS=5):
+            self.assertFalse(cupom_e_lixo(regras))
+        with override_settings(COUPON_VALOR_MINIMO_RELEVANTE_REAIS=20):
+            self.assertTrue(cupom_e_lixo(regras))
 
 
 class MarketplaceParserResilienceTests(SimpleTestCase):

@@ -129,6 +129,15 @@ AMAZON_GENERAL_COUPONS_URL = os.getenv("AMAZON_GENERAL_COUPONS_URL", "").strip()
 # contrato de aceite. Nenhum total agregado compensa uma loja abaixo dela; ver
 # apps.scrapers.coupon_abundance.
 COUPON_ABUNDANCE_GOAL = int(os.getenv("COUPON_ABUNDANCE_GOAL", "100"))
+# Piso do benefício monetário real de um cupom percentual/fixo, em reais. Existe
+# porque "50% OFF" com teto de R$1 (desconto_maximo=1.0) é dado real do
+# Mercado Livre, não bug de parser — e é lixo: o comprador nunca leva mais que
+# R$1, não importa o percentual anunciado. Medido em produção em 03/09/2026
+# (cupom Glamour.div: 50% OFF, desconto_maximo=1.0). R$10 é conservador o
+# bastante para não vetar categorias legítimas de ticket baixo.
+COUPON_VALOR_MINIMO_RELEVANTE_REAIS = float(
+    os.getenv("COUPON_VALOR_MINIMO_RELEVANTE_REAIS", "10") or "10"
+)
 COUPON_DAILY_DISCOVERY_GOAL = int(
     os.getenv("COUPON_DAILY_DISCOVERY_GOAL", "250")
 )
