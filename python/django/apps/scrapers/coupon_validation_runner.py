@@ -125,12 +125,33 @@ def _failure_observation(reason_code, safe_detail):
     )
 
 
+# Quanto tempo o lote fica em silêncio depois de a loja barrar tudo. Uma hora é
+# curto o bastante para voltar sozinho quando o bloqueio passar, e longo o
+# bastante para não desperdiçar o navegador a cada cinco minutos.
+_CHAVE_DISJUNTOR = "coupon-validation-circuit"
+_PAUSA_DISJUNTOR_S = 3600
+_MOTIVOS_DE_BLOQUEIO = frozenset({"challenge", "session_expired", "session_required"})
+
+
 def run_validation_batch(*, adapters: Mapping[str, Validator], limit=3):
     """Executa um lote pequeno; falha de uma loja não prende as demais."""
     normalized = {
         str(key or "").strip().casefold(): value
         for key, value in dict(adapters or {}).items() if callable(value)
     }
+    # Disjuntor. Quando a loja está barrando a página de produto, TODA validação
+    # volta `challenge` — e cada uma dessas custa uma abertura de Chromium e até
+    # 90s de fila, no mesmo navegador único de que a medição de preço do envio
+    # depende. Insistir não valida nada e ainda atrasa o que funciona. Medido em
+    # 03/09/2026: o Mercado Livre serve muro de CAPTCHA a este IP em toda PDP,
+    # inclusive navegando de dentro da vitrine.
+    from django.core.cache import caches
+
+    cache = caches["default"]
+    if cache.get(_CHAVE_DISJUNTOR):
+        return {"claimed": 0, "accepted": 0, "rejected": 0,
+                "inconclusive": 0, "adapter_errors": 0, "pausado": True}
+
     rows = claim_pending_validations(
         marketplaces=normalized.keys(), limit=limit,
     )
@@ -138,6 +159,7 @@ def run_validation_batch(*, adapters: Mapping[str, Validator], limit=3):
         "claimed": len(rows), "accepted": 0, "rejected": 0,
         "inconclusive": 0, "adapter_errors": 0,
     }
+    bloqueadas = 0
     for row in rows:
         adapter = normalized[row.marketplace]
         try:
@@ -169,4 +191,14 @@ def run_validation_batch(*, adapters: Mapping[str, Validator], limit=3):
             evidence=observation.evidence,
         )
         metrics[result.status] += 1
+        if observation.reason_code in _MOTIVOS_DE_BLOQUEIO:
+            bloqueadas += 1
+    # Lote inteiro barrado pela loja: nada aqui é sobre os cupons, é sobre o
+    # acesso. Cala a boca por uma hora em vez de queimar o navegador a cada tique.
+    if rows and bloqueadas == len(rows):
+        cache.set(_CHAVE_DISJUNTOR, "1", _PAUSA_DISJUNTOR_S)
+        logger.info(
+            "validacao de cupom pausada %ss: %s de %s tentativas barradas pela loja",
+            _PAUSA_DISJUNTOR_S, bloqueadas, len(rows),
+        )
     return metrics
