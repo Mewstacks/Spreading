@@ -33,6 +33,7 @@ apps/accounts/rls.py). Por isso o que a mensagem usa é o objeto MUTADO EM MEMÓ
 a persistência é um bônus best-effort.
 """
 import logging
+import re
 import time
 
 from django.conf import settings
@@ -145,26 +146,56 @@ def _preco_ml(produto, url="", usuario=None):
     }
 
 
+_ID_NO_HREF = re.compile(r'href="[^"]*?/(?:p/)?(MLB-?[0-9]{6,})', re.I)
+_PRECO_ARIA = re.compile(
+    r'aria-label="(Antes:\s*)?([0-9]+) reais(?: com ([0-9]{1,2}) centavos)?"', re.I)
+
+
+def _valor(reais, centavos) -> float:
+    return float(reais) + (float(centavos or 0) / 100.0)
+
+
+def cards_de_ofertas(html: str) -> dict:
+    """{item_id: (preco, preco_de)} a partir do HTML da vitrine `/ofertas`.
+
+    Le do `aria-label` e nao das classes CSS: "Antes: 157 reais com 98 centavos"
+    e um contrato de acessibilidade, muito mais estavel que nome de classe, e ja
+    vem sem separador de milhar.
+    """
+    mapa = {}
+    for bloco in html.split("poly-card")[1:]:
+        achado = _ID_NO_HREF.search(bloco)
+        if not achado:
+            continue
+        item = achado.group(1).upper().replace("-", "")
+        atual = anterior = 0.0
+        for antes, reais, centavos in _PRECO_ARIA.findall(bloco[:4000]):
+            valor = _valor(reais, centavos)
+            if antes:
+                anterior = anterior or valor
+            elif not atual:
+                atual = valor
+        if atual > 0:
+            mapa[item] = (atual, anterior)
+    return mapa
+
+
 def varrer_ofertas_ml(paginas=None):
-    """{item_id: (preco, preco_de)} lido AGORA da vitrine `/ofertas`.
+    """{item_id: (preco, preco_de)} lido AGORA da vitrine `/ofertas`, por HTTP.
 
-    Uma varredura por tique, nao uma por candidato. Cacar o item pagina a pagina
-    falhava a maior parte das vezes — `/ofertas` e vitrine rotativa e o item podia
-    simplesmente nao estar nas primeiras paginas naquele instante — e ainda pagava
-    o custo de navegacao a cada candidato.
+    Medido em 03/09/2026 deste IP: a PDP, as APIs publicas e a busca respondem
+    muro de CAPTCHA — mas `/ofertas` responde 200 a um GET com os cookies da
+    sessao, com os cards renderizados no servidor. Sem Chromium: a varredura caiu
+    de 655 segundos (quatro paginas no navegador, disputando o unico slot da
+    maquina) para poucos segundos.
 
-    O cache e curtissimo e proposital: dentro do mesmo tique o envio tenta varios
-    candidatos, e todos devem ser conferidos contra a MESMA leitura. Dois minutos
-    nao e "preco salvo": e a medicao deste envio, reaproveitada entre os candidatos
-    dele.
+    Uma varredura por tique, nao uma por candidato: dentro do mesmo envio varios
+    candidatos sao testados e todos devem ser conferidos contra a MESMA leitura.
+    O TTL curto existe para isso, nao para guardar preco entre tiques.
     """
     from django.core.cache import caches
 
-    from apps.scrapers.auxiliar import iniciar_browser
-    from apps.scrapers.carga import BrowserResourceUnavailable, coordinated_ml_browser
-    from apps.scrapers.ml_auth import storage_state
-    from apps.scrapers.scraper_mercadolivre.link import _extrair_item_id
-    from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _coletar_cards
+    from apps.scrapers.ml_auth import http_session, storage_state
 
     paginas = max(1, int(
         paginas or getattr(settings, "PRECO_JIT_PAGINAS_OFERTAS", 4)))
@@ -176,34 +207,23 @@ def varrer_ofertas_ml(paginas=None):
 
     mapa = {}
     try:
-        with coordinated_ml_browser(
-            usuario=None, authenticated=True, owner_kind="preco_ao_vivo",
-            wait_seconds=PRECO_ESPERA_BROWSER_S,
-        ):
-            with iniciar_browser(
-                storage_state=storage_state(None), headless=True,
-            ) as (page, _contexto):
-                for numero in range(1, paginas + 1):
-                    page.goto(
-                        f"https://www.mercadolivre.com.br/ofertas?page={numero}",
-                        wait_until="domcontentloaded", timeout=45000,
-                    )
-                    if "captcha" in page.url or "account-verification" in page.url:
-                        break
-                    for card in (_coletar_cards(page) or []):
-                        item = _extrair_item_id(str(card.get("link_produto") or ""))
-                        preco = float(card.get("preco_com_cupom") or 0)
-                        if item and preco > 0:
-                            mapa[item] = (
-                                preco, float(card.get("preco_sem_desconto") or 0))
-    except BrowserResourceUnavailable:
-        return {}
+        sessao = http_session(storage_state(None))
+        for numero in range(1, paginas + 1):
+            resposta = sessao.get(
+                f"https://www.mercadolivre.com.br/ofertas?page={numero}",
+                timeout=15, allow_redirects=False,
+            )
+            if resposta.status_code != 200:
+                # 302 para /captcha ou 403 do gateway: nao ha o que ler. Devolve o
+                # que ja tem; quem nao estiver no mapa simplesmente nao publica.
+                break
+            mapa.update(cards_de_ofertas(resposta.text))
     except Exception as exc:
         logger.info("varredura de ofertas falhou: %s", str(exc)[:120])
-        return {}
+        return mapa
     if mapa:
         cache.set(chave, mapa, PRECO_VARREDURA_TTL_S)
-    logger.info("varredura de ofertas ML: %s itens em %s pagina(s)",
+    logger.info("varredura de ofertas ML: %s itens em ate %s pagina(s)",
                 len(mapa), paginas)
     return mapa
 
