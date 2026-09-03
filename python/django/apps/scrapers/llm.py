@@ -230,9 +230,20 @@ _FRASE_PROIBIDA = re.compile(
 # Alegações que o sistema precisa TER PROVADO para deixar passar. A chave é o nome
 # da prova; o valor, o que o modelo não pode escrever sem ela.
 _ALEGACOES_CONTROLADAS = {
+    # Bloquear frases exatas não funciona: pedimos para o modelo não dizer "menor
+    # preço" e ele escreveu "menor cotação em 90 dias", que afirma exatamente a
+    # mesma coisa. A regra tem de pegar a AFIRMAÇÃO — superlativo de preço ou
+    # comparação com o passado — e não a redação escolhida.
     "minima": re.compile(
-        r"(?:menor pre[çc]o|pre[çc]o mais baixo|m[íi]nima hist[óo]rica|"
-        r"nunca (?:esteve|custou)|mais barato de todos)", re.I),
+        r"(?:"
+        r"(?:men[oa]r|mais baix[oa]|melhor)\s+(?:pre[çc]o|valor|cota[çc][ãa]o|oferta)"
+        r"|pre[çc]o\s+mais\s+baix[oa]"
+        r"|mais\s+barat[oa]"
+        r"|m[íi]nima\s+hist[óo]rica"
+        r"|nunca\s+(?:esteve|custou|foi|ficou)"
+        r"|hist[óo]ric[oa]\s+de\s+pre[çc]o"
+        r"|(?:em|nos\s+[úu]ltimos|dos\s+[úu]ltimos)\s+\d+\s*(?:dias|meses)"
+        r")", re.I),
     "urgencia": re.compile(
         r"(?:[úu]ltima chance|acaba hoje|termina hoje|s[óo] hoje|"
         r"[úu]ltimas horas|expira hoje)", re.I),

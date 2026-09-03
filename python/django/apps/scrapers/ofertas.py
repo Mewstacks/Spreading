@@ -1382,10 +1382,13 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
         else:
             linhas.append(f"🎟 {m.bold('Cupom de ativação')}{abate} — ative na página")
         # A condição só entra quando restringe DE VERDADE. O escopo padrão do ML
-        # repete o desconto e a validade que já estão duas linhas acima.
-        condicao = _condicao_do_cupom(deal.cupom)
-        if condicao:
-            linhas.append(f"⚠️ {esc(_condicao_legivel(condicao, limite=60))}")
+        # ("25% de Desconto ... Cupom válido a partir de...") repete o desconto e a
+        # validade que já estão nas linhas vizinhas, e cortado em 60 caracteres
+        # virava reticências no meio de uma frase. O que o leitor precisa saber é o
+        # que pode IMPEDIR o cupom de funcionar para ele: a compra mínima.
+        minimo = _aviso_minimo_nao_atingido(deal.cupom, produto)
+        if minimo:
+            linhas.append(f"⚠️ {esc(minimo.capitalize())}")
         validade = _linha_validade_cupom(deal.cupom)
         if validade:
             linhas.append(f"⏳ {esc(validade)}")
