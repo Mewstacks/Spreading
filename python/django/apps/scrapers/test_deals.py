@@ -309,12 +309,10 @@ class MensagemDealTests(BaseDeals):
         texto = montar_mensagem_deal(
             deal, "https://meli.la/abc", usuario=self.user,
             texto_ia={"gancho": "JBL TUNE 510BT A R$ 80 COM CUPOM",
-                      "produto": "Fone bluetooth dobrável, bateria longa.",
-                      "porque_vale": "São R$ 20 que o cupom tira no checkout."},
+                      "linha": "Fone bluetooth dobrável de bateria longa 🔥"},
         )
         self.assertIn("JBL TUNE 510BT A R$ 80 COM CUPOM", texto)
-        self.assertIn("Fone bluetooth dobrável, bateria longa.", texto)
-        self.assertIn("São R$ 20 que o cupom tira no checkout.", texto)
+        self.assertIn("Fone bluetooth dobrável de bateria longa 🔥", texto)
         self.assertIn("R$ 80", texto)
         self.assertIn("PRESENTE", texto)
         self.assertIn("https://meli.la/abc", texto)

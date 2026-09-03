@@ -644,6 +644,24 @@ else:
         }
     }
 
+# Cache que PRECISA sobreviver a restart. O `default` é LocMem em produção (não há
+# Redis), ou seja: morre a cada deploy e no desligamento noturno das 00:00, e nem é
+# compartilhado entre os processos do honcho. Para um cache de conveniência isso é
+# irrelevante; para o cache do `cupom_extractor` é dinheiro — a leitura de cada
+# mensagem de canal é uma chamada paga ao modelo, e o cache de 30 dias existe
+# exatamente para não pagar duas vezes pelo mesmo texto. Com LocMem, "30 dias" na
+# prática era "até o próximo restart".
+#
+# Postgres, não Redis: o banco já existe e não acrescenta um centavo à fatura.
+# Tabela criada por migração, portanto herda as DEFAULT PRIVILEGES de
+# `spreading_migration` (arwd para runtime e system).
+CACHES["persistente"] = CACHES["default"] if _REDIS_CACHE_URL else {
+    "BACKEND": "django.core.cache.backends.db.DatabaseCache",
+    "LOCATION": "spreading_cache",
+    "TIMEOUT": None,
+    "OPTIONS": {"MAX_ENTRIES": 50000, "CULL_FREQUENCY": 4},
+}
+
 
 # ─────────────────────────────────────────────────────────────
 # Autenticação — rotas de redirect

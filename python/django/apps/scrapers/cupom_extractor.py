@@ -40,7 +40,22 @@ import logging
 import re
 
 from django.conf import settings
-from django.core.cache import cache
+from django.core.cache import cache, caches
+
+
+def _cache_leitura():
+    """Cache que sobrevive a restart. É dinheiro, não conveniência.
+
+    Cada entrada aqui é uma chamada paga ao modelo que não precisou acontecer.
+    O cache `default` é LocMem em produção e morre no deploy e no desligamento
+    noturno, então a janela de 30 dias nunca era usada de verdade. O circuito
+    de falha continua no `default`: ele é curto (segundos a minutos) e deve
+    mesmo valer só para o processo que levou o erro.
+    """
+    try:
+        return caches["persistente"]
+    except Exception:
+        return cache
 
 from apps.scrapers.coupon_rules import CODIGOS_NAO_PUBLICAVEIS
 
@@ -441,19 +456,19 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
         return []
     fallback = extrair_deterministico(texto, loja_padrao=loja_detectada)
     chave = _chave_cache(texto)
-    guardado = cache.get(chave)
+    guardado = _cache_leitura().get(chave)
     if guardado is not None:
         return guardado
     # Mensagem estruturada ja foi compreendida integralmente por regras locais:
     # pagar um Sonnet para transcrever os mesmos campos so aumenta custo/latencia.
     if fallback:
-        cache.set(chave, fallback, _TTL_CACHE_S)
+        _cache_leitura().set(chave, fallback, _TTL_CACHE_S)
         return fallback
     # Desconto/banner sem nenhum token plausivel nao pode produzir cupom
     # digitavel. O modelo foi instruido a nao inventar, portanto a chamada so pode
     # confirmar vazio - dezenas delas eram feitas a cada restart do worker.
     if not _tem_candidato_plausivel(texto):
-        cache.set(chave, [], _TTL_CACHE_S)
+        _cache_leitura().set(chave, [], _TTL_CACHE_S)
         return []
     if not getattr(settings, "CUPOM_LLM_ATIVO", True):
         return fallback
@@ -502,5 +517,5 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
         return fallback
 
     resultado = cupons or fallback
-    cache.set(chave, resultado, _TTL_CACHE_S)
+    _cache_leitura().set(chave, resultado, _TTL_CACHE_S)
     return resultado

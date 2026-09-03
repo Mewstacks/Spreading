@@ -1336,6 +1336,12 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
     produto = deal.produto
     perfil = getattr(usuario, "perfil", None) if usuario else None
 
+    # Mensagem curta por decisão de produto. A versão longa trazia gancho, nome
+    # completo, frase do produto, De/Por, economia, abatimento do cupom, prova,
+    # código, instrução de uso, condição, validade e mais uma frase de fecho — no
+    # grupo isso vira parede e o dedo passa direto. Sai o que é redundante:
+    # o gancho já nomeia o produto, "economia" é a subtração que o leitor faz
+    # sozinho, e a instrução de checkout é óbvia.
     linhas = []
     if getattr(produto, "relampago", False) or getattr(deal.cupom, "relampago", False):
         linhas += [m.bold("⚡ OFERTA RELÂMPAGO"), ""]
@@ -1343,52 +1349,45 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
     if gancho:
         linhas += [esc(gancho), ""]
 
-    nome = (getattr(produto, "nome_llm", "") or "").strip() or _nome_principal_produto(
-        getattr(produto, "nome", ""))
-    linhas.append(f"{_emoji_produto(produto)} {m.bold(esc(nome))}")
-    frase_produto = _texto_ia_sem_formatacao(texto_ia.get("produto") or "", 160)
-    if frase_produto:
-        linhas.append(esc(frase_produto))
+    frase = _texto_ia_sem_formatacao(texto_ia.get("linha") or "", 110)
+    if frase:
+        linhas.append(f"{_emoji_produto(produto)} {esc(frase)}")
+    else:
+        # Sem IA a mensagem não pode ficar sem dizer o que é o produto.
+        nome = (getattr(produto, "nome_llm", "") or "").strip() or (
+            _nome_principal_produto(getattr(produto, "nome", ""), limite=60))
+        linhas.append(f"{_emoji_produto(produto)} {m.bold(esc(nome))}")
     linhas.append("")
 
-    # Bloco de preço. O "DE" só aparece com desconto COMPROVADO pelo nosso próprio
-    # histórico — riscar um preço que talvez nunca tenha existido é o falso positivo
-    # mais caro do produto, porque quem assina a mensagem é o creator.
+    # O "DE" só aparece com desconto COMPROVADO pelo nosso próprio histórico —
+    # riscar um preço que talvez nunca tenha existido é o falso positivo mais caro
+    # do produto, porque quem assina a mensagem é o creator.
     lista = float(getattr(produto, "preco_sem_desconto", 0) or 0)
     if deal.desconto_comprovado and lista > deal.preco_final:
         linhas.append(
             f"🔥 De R$ {_preco_br(lista)} por {m.bold('R$ ' + _preco_br(deal.preco_final))}")
-        linhas.append(f"🏷 Economia de R$ {_preco_br(lista - deal.preco_final)}")
     else:
         linhas.append(f"💰 {m.bold('R$ ' + _preco_br(deal.preco_final))}")
-    if deal.tem_cupom and deal.beneficio_rs > 0:
-        linhas.append(
-            f"🎟 O cupom abate R$ {_preco_br(deal.beneficio_rs)} "
-            f"(de R$ {_preco_br(deal.preco_vitrine)})")
-    prova = _linha_prova_do_deal(deal)
-    if prova:
-        linhas.append(f"📉 {esc(prova)}")
-    linhas.append("")
-
+    # A prova de histórico NÃO ganha linha própria: ela já chega ao leitor dentro da
+    # frase da IA, que só pode afirmá-la porque `provas` autorizou. Duas vezes a
+    # mesma informação é o que fazia a mensagem parecer formulário.
     if deal.tem_cupom:
         codigo = codigo_publicavel(deal.cupom)
+        abate = (f" abate R$ {_preco_br(deal.beneficio_rs)}"
+                 if deal.beneficio_rs > 0 else "")
         if codigo:
-            linhas.append(f"🎟 Use o cupom {m.bold(esc(codigo))}")
-            linhas.append("👉 Aplique no checkout antes de pagar.")
+            linhas.append(f"🎟 Cupom {m.bold(esc(codigo))}{abate}")
         else:
-            linhas.append(f"🎟 {m.bold('Cupom de ativação')}")
-            linhas.append("👉 Ative na página e confirme o desconto antes de pagar.")
+            linhas.append(f"🎟 {m.bold('Cupom de ativação')}{abate} — ative na página")
+        # A condição só entra quando restringe DE VERDADE. O escopo padrão do ML
+        # repete o desconto e a validade que já estão duas linhas acima.
         condicao = _condicao_do_cupom(deal.cupom)
         if condicao:
-            linhas.append(f"⚠️ {m.bold('Condição:')} {esc(condicao)}")
+            linhas.append(f"⚠️ {esc(_condicao_legivel(condicao, limite=60))}")
         validade = _linha_validade_cupom(deal.cupom)
         if validade:
             linhas.append(f"⏳ {esc(validade)}")
-        linhas.append("")
-
-    porque = _texto_ia_sem_formatacao(texto_ia.get("porque_vale") or "", 160)
-    if porque:
-        linhas += [esc(porque), ""]
+    linhas.append("")
 
     linhas.append(f"🔗 {esc(link)}")
     disclosure = (

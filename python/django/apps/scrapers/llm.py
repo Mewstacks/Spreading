@@ -80,14 +80,14 @@ REGRAS:
 4. Vendedor sem ser palhaço: nada de corre, voa, bora, clique aqui, imperdível.
 5. Emoji com parcimônia, no máximo um por campo. Sem markdown.
 6. "gancho": 3 a 8 palavras em CAIXA ALTA, com o produto e o número que vende.
-7. "produto": uma frase de até 18 palavras — o que é e para quem serve.
-8. "porque_vale": uma frase de até 20 palavras — por que comprar hoje. Havendo cupom,
-   diga que o abatimento sai no checkout.
-9. Responda SOMENTE JSON: {{"gancho":"...","produto":"...","porque_vale":"..."}}
+7. "linha": UMA frase de até 14 palavras que diz o que é o produto E por que vale
+   hoje. É a única frase corrida da mensagem: se não acrescenta nada ao gancho,
+   escreva só o que o produto é.
+8. Responda SOMENTE JSON: {{"gancho":"...","linha":"..."}}
 
 Exemplo:
 Dados: Produto: Air Fryer Mondial Family 4L Preta | Preço final: R$ 249 | Economia: R$ 150 | Números liberados: 4, 150, 249 | Pode afirmar: menor preço observado em 90 dias
-Resposta: {{"gancho":"AIR FRYER MONDIAL 4L POR R$ 249","produto":"Air fryer de quatro litros, dá conta da janta de duas ou três pessoas.","porque_vale":"Menor preço que vimos nela, R$ 150 abaixo do que costuma sair 🔥"}}
+Resposta: {{"gancho":"AIR FRYER MONDIAL 4L POR R$ 249","linha":"Air fryer de 4 litros pela menor cotação em 90 dias 🔥"}}
 
 Agora:
 {contexto}
@@ -297,7 +297,11 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
                      preco_final=None, economia=None, beneficio_cupom=None,
                      percentual=None, janela_dias=None, provas=(),
                      timeout: int = 20) -> dict:
-    """Post de venda de um deal: gancho com número, o que é o produto, por que hoje.
+    """Post de venda de um deal: um gancho com número e UMA frase de apoio.
+
+    Dois campos de texto viravam quatro linhas de prosa numa mensagem que já tem
+    preço, cupom, prova e validade. No grupo isso lê como parede. A frase única
+    obriga a escolher o que importa — e corta tokens de saída junto.
 
     Devolve sempre ``{"gancho","produto","porque_vale"}``; qualquer falha degrada
     para strings vazias e NUNCA impede o envio — a mensagem sem estes campos
@@ -311,7 +315,7 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
     revalidação de preço — por isso os números passados aqui são os mesmos que a
     mensagem vai imprimir. Sem cache: o texto depende do preço daquele momento.
     """
-    vazio = {"gancho": "", "produto": "", "porque_vale": ""}
+    vazio = {"gancho": "", "linha": ""}
     if not getattr(settings, "LLM_ATIVO", False) or not nome:
         return vazio
     if not getattr(settings, "ANTHROPIC_API_KEY", ""):
@@ -365,7 +369,7 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
     try:
         resposta = _cliente(timeout).messages.create(
             model=getattr(settings, "LLM_MODELO", _MODELO_PADRAO),
-            max_tokens=220,
+            max_tokens=160,
             thinking={"type": "disabled"},
             messages=[{
                 "role": "user",
@@ -378,12 +382,9 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
         provas = set(provas)
         texto = {
             "gancho": _gancho_de_venda(dados.get("gancho"), permitidos, provas),
-            "produto": _frase_vendavel(
-                dados.get("produto"), permitidos=permitidos, provas=provas,
-                limite=140, palavras=22),
-            "porque_vale": _frase_vendavel(
-                dados.get("porque_vale"), permitidos=permitidos, provas=provas,
-                limite=160, palavras=26),
+            "linha": _frase_vendavel(
+                dados.get("linha"), permitidos=permitidos, provas=provas,
+                limite=110, palavras=16),
         }
         # Só vale guardar o que sobreviveu ao validador; texto vazio significa que o
         # modelo violou uma regra, e uma nova tentativa pode acertar.
@@ -500,7 +501,7 @@ def avaliar_cupom_ia(*, escopo="", tipo_desconto="", valor_desconto=None,
         contexto = "\n".join(linhas)
         resposta = _cliente(timeout).messages.create(
             model=getattr(settings, "LLM_MODELO", _MODELO_PADRAO),
-            max_tokens=220,
+            max_tokens=160,
             thinking={"type": "disabled"},
             messages=[{
                 "role": "user",
