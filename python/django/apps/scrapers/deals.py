@@ -236,9 +236,16 @@ def _melhor_cupom_para(produto, *, confirmados, sitewide, com_checkout, usuario,
 
     preco_vitrine = float(getattr(produto, "preco_com_cupom", 0) or 0)
     marketplace = str(getattr(produto, "marketplace", "") or "").casefold()
-    candidatos = list(confirmados.get(getattr(produto, "pk", None), []))
-    candidatos = [(c, r, PROVA_CONFIRMADA) for c, r in candidatos]
-    candidatos += [(c, None, PROVA_SITEWIDE) for c in sitewide.get(marketplace, [])]
+    # Só cupom PROVADO NESTE PRODUTO entra na conta do preço. "Site inteiro" é
+    # alegação sobre a loja, não sobre o item: em 03/09/2026 um cupom sitewide do
+    # ML entrou num air fryer, a mensagem anunciou o abatimento dele, e no checkout
+    # o código estava ESGOTADO — o comprador viu um preço que ninguém cobrava.
+    # Um cupom sem prova pode continuar existindo no catálogo; o que ele não pode é
+    # mudar o número que a mensagem afirma.
+    candidatos = [
+        (c, r, PROVA_CONFIRMADA)
+        for c, r in confirmados.get(getattr(produto, "pk", None), [])
+    ]
     if not candidatos:
         rejeicoes[MOTIVO_SEM_CUPOM_APLICAVEL] += 1
         return None

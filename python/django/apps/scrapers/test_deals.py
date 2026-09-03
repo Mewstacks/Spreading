@@ -59,8 +59,14 @@ class BaseDeals(TestCase):
                 preco=preco,
             )
 
-    def _cupom(self, *, codigo="PRESENTE", percentual=20.0, teto=100.0,
+    def _cupom(self, *, produto=None, codigo="PRESENTE", percentual=20.0, teto=100.0,
                minimo=0.0, primeira=None, sitewide=True):
+        """Cupom + a prova de que ele se aplica AO PRODUTO.
+
+        Sem `ProdutoCupom` confirmado o cupom não entra mais na conta do preço:
+        "site inteiro" é alegação sobre a loja, não sobre o item, e foi assim que
+        um código esgotado foi anunciado num air fryer em produção.
+        """
         cupom = CupomNormalizado.objects.create(
             fonte=self.fonte, external_id=f"checkout:{codigo}",
             marketplace="mercadolivre", titulo=f"Cupom {codigo}", codigo=codigo,
@@ -75,6 +81,9 @@ class BaseDeals(TestCase):
             CupomNormalizado.objects.filter(pk=cupom.pk).update(
                 primeira_observacao=primeira)
             cupom.refresh_from_db()
+        if produto is not None:
+            ProdutoCupom.objects.get_or_create(
+                produto=produto, cupom=cupom, defaults={"status": "confirmado"})
         return cupom
 
 
@@ -84,7 +93,7 @@ class PrecoFinalCoerenteTests(BaseDeals):
     def test_preco_final_e_vitrine_menos_beneficio(self):
         produto = self._produto(preco=100.0)
         self._observar(produto, 180.0, 175.0, 170.0)
-        self._cupom(percentual=20.0, teto=100.0)
+        self._cupom(produto=produto, percentual=20.0, teto=100.0)
         resultado = deals.gerar_deals(self._config(), limite=5)
         self.assertTrue(resultado)
         deal = resultado[0]
@@ -97,7 +106,7 @@ class PrecoFinalCoerenteTests(BaseDeals):
         produto = self._produto(preco=400.0, de=800.0)
         self._observar(produto, 700.0, 690.0, 680.0)
         # Teto de R$ 60 sobre um item de R$ 400: 50% seriam R$ 200.
-        self._cupom(percentual=50.0, teto=60.0)
+        self._cupom(produto=produto, percentual=50.0, teto=60.0)
         resultado = deals.gerar_deals(self._config(), limite=5)
         deal = resultado[0]
         self.assertEqual(deal.beneficio_rs, 60.0)
@@ -107,7 +116,7 @@ class PrecoFinalCoerenteTests(BaseDeals):
     def test_prova_sempre_pertence_ao_conjunto_conhecido(self):
         produto = self._produto(preco=100.0)
         self._observar(produto, 180.0)
-        self._cupom()
+        self._cupom(produto=produto)
         for deal in deals.gerar_deals(self._config(), limite=None):
             self.assertIn(deal.prova, deals.PROVAS_VALIDAS)
             self.assertTrue(deal.coerente())
@@ -125,7 +134,7 @@ class CupomPereneTests(BaseDeals):
         produto = self._produto(preco=100.0)
         self._observar(produto, *self.SERIE)
         antigo = timezone.now() - timedelta(days=90)
-        self._cupom(percentual=20.0, teto=100.0, primeira=antigo)
+        self._cupom(produto=produto, percentual=20.0, teto=100.0, primeira=antigo)
         resultado = deals.gerar_deals(self._config(), limite=5)
         self.assertTrue(resultado)
         deal = resultado[0]
@@ -137,7 +146,7 @@ class CupomPereneTests(BaseDeals):
     def test_cupom_novo_credita_profundidade(self):
         produto = self._produto(preco=100.0)
         self._observar(produto, *self.SERIE)
-        self._cupom(percentual=20.0, teto=100.0, primeira=timezone.now())
+        self._cupom(produto=produto, percentual=20.0, teto=100.0, primeira=timezone.now())
         deal = deals.gerar_deals(self._config(), limite=5)[0]
         self.assertFalse(deal.cupom_perene)
         self.assertGreater(deal.componentes["valor_real"], 0.5)
@@ -175,7 +184,7 @@ class NichoTests(BaseDeals):
         """A faixa julga o que o comprador paga, não a vitrine."""
         produto = self._produto(preco=100.0)
         self._observar(produto, 180.0, 175.0, 170.0)
-        self._cupom(percentual=20.0, teto=100.0)   # final = 80
+        self._cupom(produto=produto, percentual=20.0, teto=100.0)   # final = 80
         config = self._config(preco_min=90.0)
         from collections import defaultdict
         rejeicoes = defaultdict(int)
@@ -198,7 +207,7 @@ class BeneficioNoItemTests(BaseDeals):
         produto = self._produto(preco=4000.0, de=6000.0)
         self._observar(produto, 5500.0, 5400.0, 5300.0)
         # R$ 20 num item de R$ 4.000 = 0,5%, abaixo do piso de 5%.
-        self._cupom(percentual=50.0, teto=20.0)
+        self._cupom(produto=produto, percentual=50.0, teto=20.0)
         deal = deals.gerar_deals(self._config(), limite=1)[0]
         self.assertIsNone(deal.cupom)
         self.assertEqual(deal.prova, deals.PROVA_SEM_CUPOM)
@@ -207,7 +216,7 @@ class BeneficioNoItemTests(BaseDeals):
     def test_mesmo_cupom_entra_num_item_de_ticket_baixo(self):
         produto = self._produto(nome="Caneca", preco=100.0, de=200.0)
         self._observar(produto, 180.0)
-        self._cupom(percentual=50.0, teto=20.0)   # R$ 20 = 20% de R$ 100
+        self._cupom(produto=produto, percentual=50.0, teto=20.0)   # R$ 20 = 20% de R$ 100
         deal = deals.gerar_deals(self._config(), limite=1)[0]
         self.assertIsNotNone(deal.cupom)
         self.assertEqual(deal.beneficio_rs, 20.0)
@@ -225,7 +234,7 @@ class OrdenacaoTests(BaseDeals):
         b = self._produto(nome="Produto B", preco=170.0, de=200.0,
                           link="https://produto.mercadolivre.com.br/MLB-B")
         self._observar(b, 200.0, 195.0, 190.0)
-        self._cupom(percentual=10.0, teto=100.0)
+        self._cupom(produto=b, percentual=10.0, teto=100.0)
         resultado = deals.gerar_deals(self._config(), limite=5)
         self.assertEqual(resultado[0].produto.pk, a.pk)
         self.assertGreater(resultado[0].score, resultado[1].score)
@@ -251,7 +260,7 @@ class RankingIntegradoTests(BaseDeals):
     def _cenario(self):
         produto = self._produto(preco=100.0)
         self._observar(produto, 180.0, 175.0, 170.0)
-        self._cupom(percentual=20.0, teto=100.0)
+        self._cupom(produto=produto, percentual=20.0, teto=100.0)
         return self._config()
 
     @override_settings(DEAL_LAYER_SHADOW=True, DEAL_LAYER_LIVE=False)
@@ -298,7 +307,7 @@ class MensagemDealTests(BaseDeals):
     def _deal(self, **kwargs):
         produto = self._produto(preco=100.0)
         self._observar(produto, 180.0, 175.0, 170.0)
-        self._cupom(percentual=20.0, teto=100.0)
+        self._cupom(produto=produto, percentual=20.0, teto=100.0)
         resultado = deals.gerar_deals(self._config(), limite=1)
         return resultado[0]
 
@@ -410,7 +419,7 @@ class FatosDoDealTests(BaseDeals):
     def _deal_com_minima(self):
         produto = self._produto(preco=100.0)
         self._observar(produto, 180.0, 175.0, 170.0)
-        self._cupom(percentual=20.0, teto=100.0)
+        self._cupom(produto=produto, percentual=20.0, teto=100.0)
         return deals.gerar_deals(self._config(), limite=1)[0]
 
     def test_fatos_liberam_exatamente_os_numeros_da_mensagem(self):
@@ -423,10 +432,15 @@ class FatosDoDealTests(BaseDeals):
         self.assertEqual(dados["economia"], 120.0)
         self.assertEqual(dados["percentual"], 60)
 
-    def test_minima_provada_autoriza_a_alegacao(self):
+    def test_minima_nunca_e_autorizada_como_alegacao(self):
+        """"Menor preço em 90 dias" saiu da mensagem — inclusive da frase da IA.
+
+        Removê-la só da linha própria e deixar o modelo dizer o mesmo dentro do
+        texto não é remover, é mudar de lugar.
+        """
         from apps.scrapers.ofertas import _fatos_do_deal
 
-        self.assertIn("minima", _fatos_do_deal(self._deal_com_minima())["provas"])
+        self.assertNotIn("minima", _fatos_do_deal(self._deal_com_minima())["provas"])
 
     def test_sem_historico_nao_autoriza_alegacao_nenhuma(self):
         from apps.scrapers.ofertas import _fatos_do_deal

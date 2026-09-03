@@ -1292,10 +1292,10 @@ def _fatos_do_deal(deal) -> dict:
     percentual = None
     if economia and lista > 0:
         percentual = round(economia / lista * 100)
+    # "menor preço em 90 dias" saiu da mensagem por decisão do usuário — e sair
+    # significa não aparecer TAMBÉM na frase da IA. Manter a prova aqui só mudava
+    # o lugar onde a mesma afirmação era feita, que é o oposto de removê-la.
     provas = set()
-    prova = _linha_prova_do_deal(deal)
-    if prova.startswith("Menor preço"):
-        provas.add("minima")
     validade = getattr(deal.cupom, "validade", None)
     if validade and validade - timezone.now() <= timedelta(hours=12):
         provas.add("urgencia")
@@ -1349,14 +1349,16 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
     if gancho:
         linhas += [esc(gancho), ""]
 
+    # O NOME REAL do catálogo continua na mensagem. Ele foi cortado numa tentativa
+    # de encurtar e a mensagem ficou curta e vazia: o gancho vende, mas quem decide
+    # comprar precisa saber exatamente qual item é — e o gancho pode usar o nome
+    # popular ("Air Fryer Midea") enquanto o anúncio se chama outra coisa.
+    nome = (getattr(produto, "nome_llm", "") or "").strip() or (
+        _nome_principal_produto(getattr(produto, "nome", ""), limite=64))
+    linhas.append(f"{_emoji_produto(produto)} {m.bold(esc(nome))}")
     frase = _texto_ia_sem_formatacao(texto_ia.get("linha") or "", 110)
     if frase:
-        linhas.append(f"{_emoji_produto(produto)} {esc(frase)}")
-    else:
-        # Sem IA a mensagem não pode ficar sem dizer o que é o produto.
-        nome = (getattr(produto, "nome_llm", "") or "").strip() or (
-            _nome_principal_produto(getattr(produto, "nome", ""), limite=60))
-        linhas.append(f"{_emoji_produto(produto)} {m.bold(esc(nome))}")
+        linhas.append(esc(frase))
     linhas.append("")
 
     # O "DE" só aparece com desconto COMPROVADO pelo nosso próprio histórico —
@@ -3432,6 +3434,19 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             if not checagem["ok"]:
                 return falhar(f"preço mudou antes do envio: {checagem['motivo']}",
                               link=link)
+            # Para o caminho de DEAL, "inconclusivo" não pode virar publicação.
+            # A política geral do preço ao vivo é deliberada — o ML devolve
+            # challenge em rajadas para o IP de datacenter da Fly, e tratar isso
+            # como reprovação pararia todos os envios. Mas ela foi escrita para
+            # decidir SE envia, não para autorizar a mensagem a AFIRMAR um preço.
+            # Um deal é exatamente uma afirmação de preço: "De R$ 289 por R$ 183,91"
+            # com o catálogo desatualizado saiu para o grupo em 03/09/2026 enquanto
+            # o checkout real cobrava R$ 249,50. Transitório de propósito: a
+            # próxima janela costuma medir, e a regra de envio não tem culpa.
+            if deal is not None and checagem.get("fonte") == "inconclusivo":
+                return falhar(
+                    "preço não confirmado ao vivo; deal não é publicado sem medir",
+                    classe=TRANSITORIO, link=link)
 
         # Ofertas (origem='oferta') não têm Cupom; só busca quando há campanha_id
         cupom = None
@@ -3444,7 +3459,8 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
         variante = _executar_orm(_variante_para_envio, configuracao)
         link_publicado = _link_publicado(publicacao, link)
         if deal is not None:
-            # A revalidação ao vivo acabou de reconfirmar a VITRINE. O deal foi
+            # A revalidação ao vivo confirmou a VITRINE (inconclusivo já abortou
+            # acima). O deal foi
             # montado com o preço do catálogo, que pode ter mudado no meio do tick,
             # e um cupom percentual escala com ele: recalcular aqui é o que mantém
             # `preco_final = vitrine - benefício` verdadeiro na hora do envio, e não

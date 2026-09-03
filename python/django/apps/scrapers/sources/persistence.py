@@ -26,6 +26,12 @@ def _amazon_asin(item):
     return str(match.group(1) or match.group(2) or "").upper()
 
 
+# As únicas lojas que o creator consegue afiliar hoje. Multiloja continua
+# valendo como MARKETPLACE DE FONTE (um agregador que cobre as três), mas o
+# item persistido precisa dizer a qual delas pertence.
+LOJAS_PERMITIDAS = frozenset({"mercadolivre", "amazon", "shopee"})
+
+
 _SOURCE_PRECEDENCE = {
     "ml-cupons-afiliados": 10,
     "ml-official-promotions": 10,
@@ -221,6 +227,17 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
     from apps.scrapers.scraper_mercadolivre.ofertas_scraper import classificar_oferta_por_nome
     offers = coupons = 0
     for item in items:
+        # Loja fora do programa não entra no banco — nem como cupom, nem como
+        # produto. Divulgar Casas Bahia, Magalu ou Americanas é trabalho para o
+        # creator e comissão para outra pessoa; e um catálogo que guarda o que não
+        # pode publicar só serve para poluir seleção, relatório e custo de leitura.
+        # AliExpress entra nesta lista no dia em que a afiliação dela existir.
+        if str(item.marketplace or "").casefold() not in LOJAS_PERMITIDAS:
+            logger.info(
+                "Item de %s descartado: loja %r fora do programa de afiliados.",
+                item.source, item.marketplace,
+            )
+            continue
         fonte, _ = FonteIngestao.objects.get_or_create(
             slug=item.source,
             defaults={"marketplace": item.marketplace, "nome": item.source},

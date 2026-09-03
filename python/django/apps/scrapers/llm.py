@@ -79,7 +79,9 @@ REGRAS:
 3. Não invente característica, marca ou medida que não esteja no nome.
 4. Vendedor sem ser palhaço: nada de corre, voa, bora, clique aqui, imperdível.
 5. Emoji com parcimônia, no máximo um por campo. Sem markdown.
-6. "gancho": 3 a 8 palavras em CAIXA ALTA, com o produto e o número que vende.
+6. "gancho": 3 a 8 palavras em CAIXA ALTA. Use SÓ palavras que já estão no nome
+   do produto, mais o número que vende. Não acrescente marca, modelo nem
+   característica que não esteja escrita no nome.
 7. "linha": UMA frase de até 14 palavras que diz o que é o produto E por que vale
    hoje. É a única frase corrida da mensagem: se não acrescenta nada ao gancho,
    escreva só o que o produto é.
@@ -381,7 +383,8 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
             return vazio
         provas = set(provas)
         texto = {
-            "gancho": _gancho_de_venda(dados.get("gancho"), permitidos, provas),
+            "gancho": _gancho_de_venda(
+                dados.get("gancho"), permitidos, provas, nome_produto=nome),
             "linha": _frase_vendavel(
                 dados.get("linha"), permitidos=permitidos, provas=provas,
                 limite=110, palavras=16),
@@ -408,7 +411,26 @@ def formatar_valor_br(valor) -> str:
     return f"{inteiro},{decimal}" if decimal else inteiro
 
 
-def _gancho_de_venda(texto, permitidos, provas) -> str:
+# Exigir que TODA palavra do gancho estivesse no nome do produto foi tentado e
+# revertido: o nome que a loja cadastra é frequentemente pior que a realidade
+# ("Fritadeira Air Fryer 4,5l Widemax" para uma Midea), e a trava rejeitava
+# ganchos corretos. Número continua sob lista branca; texto confia no modelo.
+_CONECTIVOS_GANCHO = {
+    "POR", "COM", "SEM", "DE", "DA", "DO", "DAS", "DOS", "E", "EM", "NO", "NA",
+    "A", "O", "AS", "OS", "OFF", "CUPOM", "ATE", "ATÉ", "SO", "SÓ", "HOJE",
+    "AGORA", "CADA", "LEVE", "PAGUE", "R$", "MENOS", "MAIS", "SAI", "FICA", "+",
+}
+
+
+def _tokens_do_nome(nome) -> set:
+    import unicodedata
+
+    cru = unicodedata.normalize("NFKD", str(nome or ""))
+    cru = "".join(c for c in cru if not unicodedata.combining(c)).upper()
+    return {t for t in re.split(r"[^A-Z0-9]+", cru) if t}
+
+
+def _gancho_de_venda(texto, permitidos, provas, nome_produto="") -> str:
     """Chamada em caixa alta que nomeia produto e número. Pode conter R$ e %.
 
     Diferente de `_titulo_chamada`, que serve ao formato antigo de produto e proíbe

@@ -151,12 +151,13 @@ class AwinCatalogTests(TestCase):
                                    "validDomains": [{"domain": "loja.example"}]}}),
         ]
         result = sincronizar_integracao(self.integration, forcar_programas=True)
-        self.assertEqual(result["coupons"], 1)
-        coupon = CupomNormalizado.objects.get(owner=self.user)
-        self.assertEqual(coupon.programa.external_id, "77")
-        self.assertTrue(coupon.restrito)
-        self.assertEqual(coupon.codigo, "APP30")
-        self.assertIn("awin1.com", coupon.link)
+        # O anunciante Awin é uma varejista fora do programa (não é Mercado Livre,
+        # Amazon nem Shopee). Guardar o cupom dele polui a seleção com algo que o
+        # creator não pode publicar, então a persistência recusa antes de gravar.
+        # A sincronização do PROGRAMA continua acontecendo — é ela que mantém
+        # comissão e domínios em dia para o dia em que a loja for afiliável.
+        self.assertEqual(result["coupons"], 0)
+        self.assertFalse(CupomNormalizado.objects.filter(owner=self.user).exists())
         self.program.refresh_from_db()
         self.assertEqual(self.program.comissao_max, 5)
         self.assertFalse(CupomNormalizado.objects.filter(owner=self.other).exists())
