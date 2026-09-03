@@ -900,7 +900,18 @@ def validate_mercadolivre(validation) -> ValidationObservation:
             safe_detail="Código ou URL de produto inválido para validação.",
             evidence={"no_purchase_boundary": True},
         )
-    state = ml_auth.storage_state_para(validation.usuario)
+    # Credencial do remetente primeiro; sem ela, a de sistema. O veredito de um
+    # carrinho é sobre o CÓDIGO, não sobre quem testa: se ele aplica desconto,
+    # aplica para qualquer conta. Medido em 03/09/2026: das 3.840 validações
+    # paradas em `session_required`, 3.021 eram de duas contas que simplesmente
+    # nunca conectaram o Mercado Livre — trabalho jogado fora todo ciclo, e a
+    # prova de checkout nunca acontecendo para ninguém. É o mesmo recuo que
+    # `preco_ao_vivo.sessao_ml` já faz e documenta pelo mesmo motivo.
+    dono_da_sessao = validation.usuario
+    state = ml_auth.storage_state_para(dono_da_sessao)
+    if state is None:
+        dono_da_sessao = None
+        state = ml_auth.storage_state(None)
     if state is None:
         return ValidationObservation(
             status="inconclusive", reason_code="session_required",
@@ -909,10 +920,10 @@ def validate_mercadolivre(validation) -> ValidationObservation:
         )
     try:
         with coordinated_ml_browser(
-            usuario=validation.usuario, authenticated=True,
+            usuario=dono_da_sessao, authenticated=True,
             owner_kind="coupon_checkout_validation",
         ), iniciar_browser(
-            storage_state=state, session_user=validation.usuario, headless=True,
+            storage_state=state, session_user=dono_da_sessao, headless=True,
         ) as (page, _context):
             return _observe_ml_cart(page, validation)
     except BrowserResourceUnavailable:

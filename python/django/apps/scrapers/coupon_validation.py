@@ -88,6 +88,15 @@ def has_testable_target(cupom, *, codigos_contestados=None):
     evidence = cupom.evidencia if isinstance(cupom.evidencia, dict) else {}
     if any(evidence.get(key) for key in ("product_ids", "asins", "item_ids")):
         return True
+    # Uma associação já CONFIRMADA é o melhor alvo que existe: a escada de prova de
+    # `coupon_products` disse que este cupom se aplica a este item exato, e testá-lo
+    # no carrinho é justamente o que transforma "associado" em "funciona e abate
+    # tanto". Sem isto, 1.600 validações morriam em `target_scope_missing` tendo um
+    # alvo perfeito guardado ao lado.
+    from apps.scrapers.models import ProdutoCupom
+
+    if ProdutoCupom.objects.filter(cupom=cupom, status="confirmado").exists():
+        return True
     if target_terms(cupom):
         return True
     from apps.scrapers.coupon_rules import site_wide_confiavel
@@ -95,6 +104,15 @@ def has_testable_target(cupom, *, codigos_contestados=None):
 
 
 def target_matches_coupon(cupom, product):
+    # Associação confirmada vence qualquer heurística: a escada de prova de
+    # `coupon_products` já disse que este código vale para ESTE item, e é
+    # exatamente esse par que vale a pena levar ao carrinho.
+    from apps.scrapers.models import ProdutoCupom
+
+    if getattr(product, "pk", None) and ProdutoCupom.objects.filter(
+        cupom=cupom, produto=product, status="confirmado",
+    ).exists():
+        return True
     evidence = cupom.evidencia if isinstance(cupom.evidencia, dict) else {}
     explicit_ids = set()
     for key in ("product_ids", "asins", "item_ids"):
