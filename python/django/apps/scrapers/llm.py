@@ -33,6 +33,27 @@ Agora:
 {contexto}
 Resposta:"""
 
+_PROMPT_AVALIACAO = """Você decide se um cupom vale publicar num grupo de WhatsApp de achados
+de desconto no Brasil. O piso automático já bloqueou cupons cujo benefício em reais é
+irrisório (teto ou valor fixo abaixo de um mínimo configurado) — isso NÃO chega até você.
+Sua função é a leitura que um número sozinho não pega: condição confusa, escopo ilegível,
+ou cheiro de isca (percentual chamativo com pegadinha na letra miúda).
+
+Rejeite só quando houver um motivo concreto e citável. Na dúvida, aceite — cupom real e
+comum não é "ruim" por não ser excepcional.
+
+Dados do cupom:
+{contexto}
+
+Responda SOMENTE JSON:
+{{"vale_a_pena": true ou false, "motivo": "...", "escopo_legivel": "..."}}
+- "motivo": até 12 palavras, em português, direto ao ponto.
+- "escopo_legivel": reescreva o campo Escopo de forma humana e curta para aparecer numa
+  mensagem de WhatsApp (ex.: "produtos de Glamour.div" vira "loja Glamour"; um handle cru
+  de loja vira nome legível). Se já estiver claro, repita como veio. Nunca invente marca,
+  loja ou categoria que não esteja no escopo original — só reescreva o que já existe.
+"""
+
 _PROMPT_NOMES = """Resuma nomes de produtos para mensagens de promoções.
 
 REGRAS:
@@ -194,3 +215,66 @@ def gerar_descricao(nome: str, timeout: int = 30, preco=None,
         nome, timeout=timeout, preco=preco,
         desconto_percent=desconto_percent, categoria=categoria,
     )["titulo"]
+
+
+def avaliar_cupom_ia(*, escopo="", tipo_desconto="", valor_desconto=None,
+                     desconto_maximo=None, valor_minimo=None, restrito=False,
+                     timeout: int = 15) -> dict:
+    """Segunda opinião sobre um cupom que JÁ passou pelo piso monetário fixo
+    (``coupon_rules.cupom_e_lixo``). O piso pega valor irrisório; isto pega o
+    que só leitura pega — condição confusa, escopo ilegível, cheiro de isca.
+
+    Chamada UMA VEZ por tentativa real de envio (dentro de ``enviar_cupom``),
+    nunca no funil de milhares de cupons — por isso pode ser um Sonnet completo
+    sem custar escala.
+
+    Fail-open por desenho: IA desligada ou fora do ar nunca bloqueia o envio
+    sozinha — degrada para ``vale_a_pena=True``. O piso monetário fixo já é
+    quem segura sozinho o caso claro; a IA é uma camada A MAIS, não a única
+    porta antes do envio.
+    """
+    escopo_limpo = str(escopo or "").strip()
+    vazio = {"vale_a_pena": True, "motivo": "", "escopo_legivel": escopo_limpo}
+    if not getattr(settings, "LLM_ATIVO", False):
+        return vazio
+    api_key = getattr(settings, "ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return vazio
+    try:
+        linhas = [f"Escopo: {escopo_limpo or '(não informado)'}"]
+        if tipo_desconto:
+            linhas.append(f"Tipo de desconto: {tipo_desconto}")
+        if valor_desconto is not None:
+            unidade = "%" if tipo_desconto == "porcentagem" else "R$"
+            linhas.append(f"Valor anunciado: {unidade}{float(valor_desconto):.0f}")
+        if desconto_maximo:
+            linhas.append(f"Teto do desconto: R${float(desconto_maximo):.2f}")
+        if valor_minimo:
+            linhas.append(f"Compra mínima: R${float(valor_minimo):.2f}")
+        if restrito:
+            linhas.append("Público restrito: sim")
+        contexto = "\n".join(linhas)
+        resposta = _cliente(timeout).messages.create(
+            model=getattr(settings, "LLM_MODELO", _MODELO_PADRAO),
+            max_tokens=220,
+            thinking={"type": "disabled"},
+            messages=[{
+                "role": "user",
+                "content": _PROMPT_AVALIACAO.format(contexto=contexto),
+            }],
+        )
+        dados = _json_resposta(_texto_resposta(resposta))
+        if not isinstance(dados, dict):
+            return vazio
+        vale = dados.get("vale_a_pena")
+        if not isinstance(vale, bool):
+            return vazio
+        escopo_legivel = _sem_formatacao(dados.get("escopo_legivel"), 120)
+        return {
+            "vale_a_pena": vale,
+            "motivo": _sem_formatacao(dados.get("motivo"), 140),
+            "escopo_legivel": escopo_legivel or escopo_limpo,
+        }
+    except Exception as exc:
+        logger.warning("Falha ao avaliar cupom por IA: %s: %s", type(exc).__name__, exc)
+        return vazio

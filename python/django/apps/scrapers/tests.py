@@ -6759,6 +6759,61 @@ class EnvioCupomTests(TestCase):
             Publicacao.objects.get(cupom_normalizado=self.cupom).status, "enviado",
         )
 
+    def test_ia_reprova_cupom_bloqueia_envio_e_nao_gasta_preparo(self):
+        """A IA roda ANTES do preparo caro: cupom reprovado nunca chega a
+        montar mensagem, colagem nem reservar Publicacao."""
+        from apps.scrapers.ofertas import enviar_cupom
+
+        sender = self._sender({"sucesso": True, "via": "whatsapp", "mensagem_id": "x"})
+        with patch(
+            "apps.scrapers.llm.avaliar_cupom_ia",
+            return_value={"vale_a_pena": False, "motivo": "Condição confusa, parece isca",
+                          "escopo_legivel": ""},
+        ), patch(
+            "apps.scrapers.ofertas._preparar_itens_cupom",
+            side_effect=AssertionError("não pode preparar um cupom já reprovado pela IA"),
+        ), patch(
+            "apps.scrapers.senders.registry.get_sender", return_value=sender,
+        ):
+            resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertEqual(resultado["motivo"], "Condição confusa, parece isca")
+        self.assertTrue(resultado.get("rejeitado_por_ia"))
+        sender.enviar_oferta.assert_not_called()
+        self.assertFalse(Publicacao.objects.filter(cupom_normalizado=self.cupom).exists())
+
+    def test_ia_aprovada_humaniza_o_escopo_na_mensagem_enviada(self):
+        """`escopo_legivel` da IA chega até o texto real que sai no WhatsApp —
+        é a correção direta de 'produtos de Glamour.div' na mensagem."""
+        from apps.scrapers.models import ProdutoCupom
+        from apps.scrapers.ofertas import enviar_cupom
+
+        ProdutoCupom.objects.filter(cupom=self.cupom).delete()
+        sender = self._sender({"sucesso": True, "via": "whatsapp", "mensagem_id": "y"})
+        with patch(
+            "apps.scrapers.ofertas.resolver_link_afiliado_cupom",
+            return_value={"sucesso": True, "link": "https://meli.la/codigo"},
+        ), patch(
+            "apps.scrapers.ofertas._preparar_itens_cupom",
+            side_effect=AssertionError("código não pode inventar associação a produto"),
+        ), patch(
+            "apps.scrapers.llm.avaliar_cupom_ia",
+            return_value={"vale_a_pena": True, "motivo": "",
+                          "escopo_legivel": "loja Testinho"},
+        ), patch(
+            "apps.scrapers.senders.registry.get_sender", return_value=sender,
+        ):
+            resultado = enviar_cupom(
+                self.cupom, "123@g.us", usuario=self.user,
+                imagem_b64_custom="aW1hZ2Vt",
+            )
+
+        self.assertTrue(resultado["sucesso"])
+        mensagem_enviada = sender.enviar_oferta.call_args[0][1]
+        self.assertIn("loja Testinho", mensagem_enviada)
+        self.assertNotIn(".div", mensagem_enviada)
+
     @patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom",
            return_value={"sucesso": True, "link": "https://meli.la/afiliado"})
     def test_sucesso_registra_e_bloqueia_mesmo_destino_por_24h(self, _link):

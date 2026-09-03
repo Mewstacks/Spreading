@@ -692,7 +692,8 @@ def _linha_checagem_cupom(cupom, itens=None) -> str:
     return f"{rotulo} em {local:%d/%m às %Hh%M}"
 
 
-def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
+def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None,
+                          escopo_override=None) -> str:
     """Monta o texto de divulgação de um cupom (CupomNormalizado) p/ envio manual.
 
     Usa o `Markup` do canal e os dados de `cupom.regras` (valor_desconto/discount_num,
@@ -713,6 +714,9 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
         codigo_publicavel, desconto_para_comprador, escopo_produtos_cupom,
         formatar_numero, regras_do_cupom,
     )
+    # `escopo_override` chega já reescrito pela avaliação de IA em enviar_cupom
+    # ("produtos de Glamour.div" -> "loja Glamour") — só quando ela rodou e
+    # respondeu. Nunca inventa aqui: sem override, cai no texto cru de sempre.
     m = markup or WhatsAppMarkup()
     esc = m.escape
     regras = regras_do_cupom(cupom)
@@ -751,7 +755,7 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
     if linha_desc:
         linhas.append(f"🛒 {m.bold(esc(linha_desc))}")
 
-    escopo_produtos = escopo_produtos_cupom(cupom)
+    escopo_produtos = escopo_override or escopo_produtos_cupom(cupom)
     if escopo_produtos:
         linhas.append(f"🏷️ {m.bold('Válido para:')} {esc(escopo_produtos)}")
 
@@ -1609,6 +1613,42 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 link_codigo = destino_ml
 
     aviso_sem_produto = modo_codigo or modo_link_direto
+
+    # Segunda opinião por IA: o piso monetário fixo (cupom_e_lixo) já barrou o
+    # caso claro — teto/valor irrisório — antes de o cupom chegar a "pronto".
+    # Isto pega o que só leitura pega: condição confusa, escopo ilegível,
+    # cheiro de isca. Uma chamada por TENTATIVA REAL de envio, não por cupom no
+    # catálogo — por isso pode usar o modelo cheio sem custar escala. Falha ou
+    # IA desligada nunca bloqueia sozinha (fail-open); só bloqueia quando a IA
+    # respondeu e disse explicitamente que não vale.
+    from apps.scrapers.coupon_rules import escopo_produtos_cupom, regras_do_cupom
+    from apps.scrapers.llm import avaliar_cupom_ia
+    regras_cupom = regras_do_cupom(cupom)
+    escopo_original = escopo_produtos_cupom(cupom) or str(regras_cupom.get("escopo") or "")
+    avaliacao_ia = avaliar_cupom_ia(
+        escopo=escopo_original,
+        tipo_desconto=regras_cupom.get("tipo_desconto") or "",
+        valor_desconto=regras_cupom.get("valor_desconto"),
+        desconto_maximo=regras_cupom.get("desconto_maximo"),
+        valor_minimo=regras_cupom.get("valor_minimo"),
+        restrito=bool(getattr(cupom, "restrito", False)),
+    )
+    if not avaliacao_ia["vale_a_pena"]:
+        _executar_orm(
+            log_event,
+            "publicacao", "coupon_rejected_by_ai",
+            f"Cupom recusado pela IA: {avaliacao_ia['motivo'] or 'sem motivo informado'}.",
+            level="info",
+            usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                       "destino": destino_nome or grupo_id,
+                                       "motivo_ia": avaliacao_ia["motivo"]},
+        )
+        return {
+            "sucesso": False,
+            "motivo": avaliacao_ia["motivo"] or "Este cupom não passou na avaliação de qualidade.",
+            "classe": "permanente", "rejeitado_por_ia": True,
+        }
+
     if not aviso_sem_produto and not relacoes_preparadas:
         _executar_orm(
             log_event,
@@ -1795,6 +1835,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
             link_registro = link_codigo
             mensagem = montar_mensagem_cupom(
                 cupom, link_afiliado=link_registro, markup=sender.markup,
+                escopo_override=avaliacao_ia["escopo_legivel"],
             )
             if imagem_b64_custom:
                 img_kwargs = {
