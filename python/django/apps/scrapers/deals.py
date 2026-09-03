@@ -452,6 +452,31 @@ def pontuar(deal, *, config, historico_90, performance, agora):
     return deal
 
 
+def _item_ml(produto) -> str:
+    from apps.scrapers.scraper_mercadolivre.link import _extrair_item_id
+
+    return _extrair_item_id(str(getattr(produto, "link_produto", "") or "")) or ""
+
+
+def _precos_medidos_agora(produtos) -> dict:
+    """Preços lidos AGORA da vitrine, para os produtos de Mercado Livre do pool."""
+    # A suíte não sai para a rede: sem esta guarda, a varredura real do Mercado
+    # Livre roda em cada teste e filtra todo produto fictício, transformando um
+    # teste de regra de negócio em teste de conectividade.
+    if getattr(settings, "RUNNING_TESTS", False):
+        return {}
+    if not any(str(getattr(p, "marketplace", "")).casefold() == "mercadolivre"
+               for p in produtos):
+        return {}
+    try:
+        from apps.scrapers.preco_ao_vivo import varrer_ofertas_ml
+
+        return varrer_ofertas_ml() or {}
+    except Exception:
+        logger.info("varredura de preços indisponível; seleção segue sem ela")
+        return {}
+
+
 def gerar_deals(config, limite=8, *, agora=None, incluir_sem_cupom=True,
                 rejeicoes=None):
     """Deals elegíveis para esta regra de envio, do melhor para o pior.
@@ -522,7 +547,9 @@ def gerar_deals(config, limite=8, *, agora=None, incluir_sem_cupom=True,
             performance[linha["produto_id"]] = linha
 
     minimo_config = float(getattr(config, "min_desconto_percent", 15.0) or 0)
-    frescor_max = max(1, int(getattr(settings, "DEAL_FRESCOR_MAXIMO_MIN", 90)))
+    # Vazio quando a vitrine não respondeu (ou em teste, sem rede): aí nenhum
+    # candidato é descartado por isto e o portão do envio continua sendo o juiz.
+    medidos = _precos_medidos_agora(produtos)
     deals = []
     for produto in produtos:
         if negativos and _casa_algum_termo(produto, negativos):
@@ -531,13 +558,17 @@ def gerar_deals(config, limite=8, *, agora=None, incluir_sem_cupom=True,
         preco_vitrine = float(getattr(produto, "preco_com_cupom", 0) or 0)
         if preco_vitrine <= 0:
             continue
-        # Preço velho é a origem da mentira mais cara que este sistema já publicou.
-        # Um deal AFIRMA um número; afirmar exige tê-lo observado há pouco numa
-        # página real da loja, não estar dentro da janela de exibição de 48 h.
-        observado = getattr(produto, "ultima_observacao", None)
-        if not observado or (agora - observado) > timedelta(minutes=frescor_max):
-            rejeicoes[MOTIVO_PRECO_VELHO] += 1
-            continue
+        # A medição do envio alimenta a SELEÇÃO, não só o portão final: se o preço
+        # deste item não está na varredura de agora, ele não pode ser afirmado, e
+        # não adianta pontuá-lo para descobrir isso só na hora de publicar. Quando
+        # há varredura, o preço dela substitui o do catálogo — é ele que a mensagem
+        # vai imprimir.
+        if medidos:
+            medido = medidos.get(_item_ml(produto))
+            if not medido:
+                rejeicoes[MOTIVO_PRECO_VELHO] += 1
+                continue
+            preco_vitrine = float(medido[0])
         escolha = _melhor_cupom_para(
             produto, confirmados=confirmados, sitewide=sitewide,
             com_checkout=com_checkout, usuario=usuario,
