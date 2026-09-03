@@ -44,6 +44,9 @@ from apps.scrapers import precos
 # maior que o intervalo entre as páginas de um lote longo (é aí que ele checa a
 # fila e cede), e menor que o tique de envio.
 PRECO_ESPERA_BROWSER_S = 60
+# Vida da varredura de ofertas. Curta de proposito: cobre os candidatos de UM
+# tique de envio, nao serve como preco guardado para o tique seguinte.
+PRECO_VARREDURA_TTL_S = 120
 
 logger = logging.getLogger(__name__)
 
@@ -142,33 +145,36 @@ def _preco_ml(produto, url="", usuario=None):
     }
 
 
-def _preco_ml_navegador(produto, url="", usuario=None):
-    """Mede o preço AGORA, relendo a vitrine de ofertas do Mercado Livre.
+def varrer_ofertas_ml(paginas=None):
+    """{item_id: (preco, preco_de)} lido AGORA da vitrine `/ofertas`.
 
-    Medido em 03/09/2026, deste IP de datacenter: a PDP, as APIs publicas e a
-    busca em `lista.mercadolivre.com.br` respondem muro de CAPTCHA mesmo com o
-    navegador logado. `/ofertas?page=N` responde normalmente — e por ela que a
-    raspagem continua lendo ~270 produtos por hora, e e a unica porta aberta.
+    Uma varredura por tique, nao uma por candidato. Cacar o item pagina a pagina
+    falhava a maior parte das vezes — `/ofertas` e vitrine rotativa e o item podia
+    simplesmente nao estar nas primeiras paginas naquele instante — e ainda pagava
+    o custo de navegacao a cada candidato.
 
-    Entao a verificacao de envio rele essa vitrine e procura o card do item.
-    Achou, o preco foi medido AGORA; nao achou, devolve None e o envio fica
-    transitorio. Nunca cai no valor do banco: preco salvo e a verificacao da
-    INGESTAO, nao a do envio, e foi confiar nele que fez a mensagem anunciar
-    R$ 199,90 num item que o checkout cobrava R$ 249,50.
-
-    Nenhum CAPTCHA e resolvido ou contornado. Sessao de sistema porque e a que a
-    raspagem usa para ler o catalogo compartilhado; ler nao altera estado.
+    O cache e curtissimo e proposital: dentro do mesmo tique o envio tenta varios
+    candidatos, e todos devem ser conferidos contra a MESMA leitura. Dois minutos
+    nao e "preco salvo": e a medicao deste envio, reaproveitada entre os candidatos
+    dele.
     """
+    from django.core.cache import caches
+
     from apps.scrapers.auxiliar import iniciar_browser
     from apps.scrapers.carga import BrowserResourceUnavailable, coordinated_ml_browser
     from apps.scrapers.ml_auth import storage_state
     from apps.scrapers.scraper_mercadolivre.link import _extrair_item_id
     from apps.scrapers.scraper_mercadolivre.ofertas_scraper import _coletar_cards
 
-    alvo_id = _extrair_item_id(str(getattr(produto, "link_produto", "") or ""))
-    if not alvo_id:
-        return None
-    paginas = max(1, int(getattr(settings, "PRECO_JIT_PAGINAS_OFERTAS", 4)))
+    paginas = max(1, int(
+        paginas or getattr(settings, "PRECO_JIT_PAGINAS_OFERTAS", 4)))
+    cache = caches["default"]
+    chave = f"ml-ofertas-jit:{paginas}"
+    guardado = cache.get(chave)
+    if guardado is not None:
+        return guardado
+
+    mapa = {}
     try:
         with coordinated_ml_browser(
             usuario=None, authenticated=True, owner_kind="preco_ao_vivo",
@@ -183,26 +189,47 @@ def _preco_ml_navegador(produto, url="", usuario=None):
                         wait_until="domcontentloaded", timeout=45000,
                     )
                     if "captcha" in page.url or "account-verification" in page.url:
-                        return None
+                        break
                     for card in (_coletar_cards(page) or []):
-                        bruto = str(card.get("link_produto") or "")
-                        if _extrair_item_id(bruto) != alvo_id:
-                            continue
+                        item = _extrair_item_id(str(card.get("link_produto") or ""))
                         preco = float(card.get("preco_com_cupom") or 0)
-                        if preco <= 0:
-                            return None
-                        return {
-                            "preco": preco,
-                            "preco_de": float(card.get("preco_sem_desconto") or 0),
-                            "fonte": "ml-ofertas-jit",
-                        }
+                        if item and preco > 0:
+                            mapa[item] = (
+                                preco, float(card.get("preco_sem_desconto") or 0))
     except BrowserResourceUnavailable:
-        return None
+        return {}
     except Exception as exc:
-        logger.info("preco_ao_vivo vitrine falhou id=%s: %s",
-                    getattr(produto, "pk", ""), str(exc)[:120])
+        logger.info("varredura de ofertas falhou: %s", str(exc)[:120])
+        return {}
+    if mapa:
+        cache.set(chave, mapa, PRECO_VARREDURA_TTL_S)
+    logger.info("varredura de ofertas ML: %s itens em %s pagina(s)",
+                len(mapa), paginas)
+    return mapa
+
+
+def _preco_ml_navegador(produto, url="", usuario=None):
+    """Preco medido AGORA, conferido contra a varredura da vitrine.
+
+    Medido em 03/09/2026 deste IP: PDP, APIs publicas e a busca em
+    `lista.mercadolivre.com.br` respondem muro de CAPTCHA mesmo com navegador
+    logado. `/ofertas` responde — e a porta por onde a raspagem continua lendo, e
+    a unica que sobrou. Nenhum CAPTCHA e resolvido ou contornado.
+
+    Sem o item na varredura, devolve None: o envio fica transitorio e tenta o
+    proximo candidato, que sera conferido contra a MESMA leitura. Nunca cai no
+    preco do banco — aquele e a verificacao da ingestao, nao a do envio.
+    """
+    from apps.scrapers.scraper_mercadolivre.link import _extrair_item_id
+
+    alvo = _extrair_item_id(str(getattr(produto, "link_produto", "") or ""))
+    if not alvo:
         return None
-    return None
+    achado = varrer_ofertas_ml().get(alvo)
+    if not achado:
+        return None
+    preco, preco_de = achado
+    return {"preco": preco, "preco_de": preco_de, "fonte": "ml-ofertas-jit"}
 
 
 # Uma fonte por marketplace. Sem entrada aqui = não revalidável (segue com o banco).
