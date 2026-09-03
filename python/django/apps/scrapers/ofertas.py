@@ -1305,6 +1305,11 @@ def _fatos_do_deal(deal) -> dict:
         "beneficio_cupom": deal.beneficio_rs or None,
         "percentual": percentual,
         "provas": provas,
+        # A janela do histórico é impressa pelo próprio código na linha de prova
+        # ("Menor preço que observamos em 90 dias"). Sem liberá-la, o modelo
+        # escrevia "em 90 dias" e o validador derrubava a frase inteira por um
+        # número que a mensagem já mostra.
+        "janela_dias": 90 if provas else None,
     }
 
 
@@ -2867,7 +2872,7 @@ def _condicao_do_cupom(cupom) -> str:
     escopo = ""
     if hasattr(cupom, "regras"):
         escopo = str(regras_do_cupom(cupom).get("escopo") or "")
-    return (escopo or "Consulte quem pode usar antes de comprar")[:220]
+    return _condicao_legivel(escopo or "Consulte quem pode usar antes de comprar")
 
 
 def _aviso_minimo_nao_atingido(cupom, produto) -> str:

@@ -301,7 +301,8 @@ def _frase_humana(texto, limite=140) -> str:
 
 def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
                      preco_final=None, economia=None, beneficio_cupom=None,
-                     percentual=None, provas=(), timeout: int = 20) -> dict:
+                     percentual=None, janela_dias=None, provas=(),
+                     timeout: int = 20) -> dict:
     """Post de venda de um deal: gancho com número, o que é o produto, por que hoje.
 
     Devolve sempre ``{"gancho","produto","porque_vale"}``; qualquer falha degrada
@@ -328,6 +329,7 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
         "Economia": economia,
         "Cupom abate": beneficio_cupom,
         "Desconto": percentual,
+        "Janela do histórico (dias)": janela_dias,
     }
     permitidos = numeros_do_texto(nome)
     partes = [f"Produto: {nome}"]
@@ -339,7 +341,7 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
         formatado = formatar_valor_br(valor)
         permitidos |= numeros_do_texto(formatado)
         sufixo = "%" if rotulo == "Desconto" else ""
-        prefixo = "" if rotulo == "Desconto" else "R$ "
+        prefixo = "" if rotulo in ("Desconto", "Janela do histórico (dias)") else "R$ "
         partes.append(f"{rotulo}: {prefixo}{formatado}{sufixo}")
     if motivo:
         partes.append(f"Motivo: {motivo}")
