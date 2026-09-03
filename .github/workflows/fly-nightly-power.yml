@@ -1,23 +1,44 @@
 name: Fly production power
 
-# O DESLIGAMENTO NOTURNO FOI REMOVIDO. Ele parava as três apps às 00:00 BRT e
-# tentava religar às 08:00, economizando cerca de um terço da fatura de máquinas
-# (~US$12/mês sobre ~US$38 de infra). O preço era alto demais:
+# Desligamento noturno: para às 01:00 BRT e religa às 07:45. Sete horas paradas
+# cortam cerca de 29% do custo de máquinas — a diferença entre ficar acima e
+# abaixo do teto de R$300/mês que o produto tem de respeitar.
 #
-#   - 8 horas por dia sem coletar cupom, sem enviar e sem verificar link;
-#   - a sessão de WhatsApp atravessava o ciclo e às vezes não voltava;
-#   - o religamento falhou em 16, 17 e 18/08/2026, e como à noite não sobra nada
-#     de pé (sem web não há vigia externo), a produção ficou fora do ar o dia
-#     inteiro até alguém perceber. Três interrupções totais em três dias.
+# Ele já existiu, foi removido, e o motivo importa mais que o horário: em 16, 17
+# e 18/08/2026 o RELIGAMENTO falhou e, como à noite não sobra nada de pé (sem web
+# não há vigia externo), a produção ficou fora do ar o dia inteiro até alguém
+# perceber. Três interrupções totais em três dias. A parada nunca foi o problema.
 #
-# Para um produto vendido por assinatura isso é inaceitável: o assinante paga o
-# mês inteiro e recebe dois terços dele. Economia de custo agora vem de consolidar
-# processos e tirar trabalho do navegador, não de desligar a operação.
+# O que mudou desde então, e é o que justifica religar:
+#
+#   - `deploy/fly-nightly-power.sh` ganhou `wait_until_healthy`, ordem de
+#     dependência (banco -> WhatsApp -> web) e filtro de checks — a regra antiga
+#     exigia TODOS os checks e era ela que matava o start;
+#   - há uma SEGUNDA tentativa de start às 08:20, porque `start` é idempotente e
+#     cobre exatamente o modo de falha que causou os três apagões;
+#   - religa 07:45, quinze minutos antes da janela de envio (08:00), para o
+#     WhatsApp terminar de autenticar (~50s) antes do primeiro tique.
+#
+# Nada se perde na parada: credencial do Mercado Livre está cifrada no Postgres
+# com a KEK em Fly secret, a sessão do WhatsApp mora no volume `wa_data`, e o
+# cache do leitor de cupons foi movido de LocMem para tabela no banco justamente
+# porque morria a cada ciclo.
 #
 # O acionamento manual continua aqui de propósito: é o botão de parada de
 # emergência e o de religar quando algo ficou preso.
 
 on:
+  # Horários em UTC. O Brasil não tem mais horário de verão, então BRT = UTC-3 o
+  # ano inteiro e o mapa abaixo não precisa de exceção sazonal.
+  schedule:
+    - cron: "0 4 * * *"    # 01:00 BRT — parada
+    - cron: "45 10 * * *"  # 07:45 BRT — religamento
+    # Rede de segurança. O que derrubou a produção em 16, 17 e 18/08/2026 não foi
+    # a parada: foi o religamento falhar sem ninguém de pé para perceber — sem web
+    # não há vigia externo, e o dia inteiro se perdeu. `start` é idempotente
+    # (máquina já ligada só revalida health), então uma segunda tentativa custa
+    # nada e cobre exatamente aquele modo de falha.
+    - cron: "20 11 * * *"  # 08:20 BRT — segunda tentativa
   workflow_dispatch:
     inputs:
       action:
@@ -46,15 +67,24 @@ jobs:
         id: action
         env:
           MANUAL_ACTION: ${{ inputs.action }}
+          SCHEDULE: ${{ github.event.schedule }}
         run: |
-          # Sem gatilho agendado, a única origem é o acionamento manual. O ramo
-          # que traduzia `github.event.schedule` saiu junto com o cron: manter um
-          # mapa de horários que nunca dispara é convite para religá-lo sem querer.
-          if [[ -z "$MANUAL_ACTION" ]]; then
-            echo "Nenhuma ação informada; este workflow é só manual." >&2
-            exit 1
+          # Manual vence o agendado: o botão é a parada de emergência.
+          if [[ -n "$MANUAL_ACTION" ]]; then
+            echo "action=$MANUAL_ACTION" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          echo "action=$MANUAL_ACTION" >> "$GITHUB_OUTPUT"
+          case "$SCHEDULE" in
+            "0 4 * * *")   ACAO=stop  ;;
+            "45 10 * * *") ACAO=start ;;
+            "20 11 * * *") ACAO=start ;;
+            *)
+              echo "Horário $SCHEDULE não está no mapa; nada a fazer." >&2
+              exit 1
+              ;;
+          esac
+          echo "Agendamento $SCHEDULE -> $ACAO"
+          echo "action=$ACAO" >> "$GITHUB_OUTPUT"
       - name: Start or stop Fly production
         env:
           FLY_TOKEN_WEB: ${{ secrets.FLY_TOKEN_WEB }}

@@ -1383,15 +1383,24 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
     if frase:
         linhas.append(esc(frase))
 
+    # Frete grátis é argumento de compra, não detalhe: os canais que convertem
+    # (Pechinchou e afins) põem essa linha antes do preço. O dado já existia em
+    # `Produto.frete_full` e a mensagem nunca o usava.
+    if getattr(produto, "frete_full", False):
+        linhas.append("📦 Frete grátis")
+
     # Preço: uma linha. O "de" só com desconto comprovado pelo nosso histórico —
     # riscar um preço que talvez nunca tenha existido é o falso positivo mais caro
     # do produto, porque quem assina a mensagem é o creator.
     lista = float(getattr(produto, "preco_sem_desconto", 0) or 0)
     preco = m.bold(f"R$ {_preco_br(deal.preco_final)}")
     if deal.desconto_comprovado and lista > deal.preco_final:
-        linhas.append(f"✅ {preco} (de R$ {_preco_br(lista)})")
+        linhas.append(f"🔥 {preco}  —  chega a custar R$ {_preco_br(lista)}")
     else:
-        linhas.append(f"✅ {preco}")
+        linhas.append(f"🔥 {preco}")
+    loja = _nome_loja(getattr(produto, "marketplace", ""))
+    if loja:
+        linhas.append(f"🏬 Achado no {esc(loja)}")
 
     if deal.tem_cupom:
         codigo = codigo_publicavel(deal.cupom)
