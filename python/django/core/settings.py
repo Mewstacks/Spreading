@@ -159,6 +159,15 @@ DEAL_COBERTURA_META_DIA = int(os.getenv("DEAL_COBERTURA_META_DIA", "10"))
 # reverter migração.
 DEAL_LAYER_SHADOW = os.getenv("DEAL_LAYER_SHADOW", "1") == "1"
 DEAL_LAYER_LIVE = os.getenv("DEAL_LAYER_LIVE", "0") == "1"
+# Allowlist PRÓPRIA do recurso. Sem ela, `enabled_for_user` cairia na lista geral
+# `PILOT_ORGANIZATION_IDS` e ligar a camada para uma conta de teste a ligaria para
+# todas as organizações do piloto de envio — que é exatamente o acidente que a
+# separação por recurso existe para impedir.
+DEAL_LAYER_LIVE_PILOT_ORGANIZATION_IDS = {
+    value.strip()
+    for value in os.getenv("DEAL_LAYER_LIVE_PILOT_ORGANIZATION_IDS", "").split(",")
+    if value.strip()
+}
 # Cupom sem produto só volta a concorrer no feed de ofertas quando não há nenhum
 # deal — e só se isto estiver ligado. O broadcast `aviso_cupons` não passa por aqui.
 DEAL_FALLBACK_CUPOM_SOLTO = os.getenv("DEAL_FALLBACK_CUPOM_SOLTO", "1") == "1"
