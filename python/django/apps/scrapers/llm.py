@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import re
@@ -11,6 +12,10 @@ logger = logging.getLogger(__name__)
 # mais por token e não escreve uma chamada de oferta melhor o bastante para
 # justificar a diferença. Trocável por LLM_MODELO quando houver motivo medido.
 _MODELO_PADRAO = "claude-haiku-4-5-20251001"
+
+# Seis horas: preço revalidado ao vivo muda a chave antes disso, e o cache
+# em produção é LocMem (morre no restart), então TTL longo não ajudaria.
+_TTL_TEXTO_DEAL_S = 6 * 3600
 
 _PROMPT = """Você escreve a chamada de um achado para grupo de WhatsApp no Brasil.
 Tom: assertivo, concreto, curto. Alguém que achou um desconto de verdade, não um influencer.
@@ -58,42 +63,31 @@ Responda SOMENTE JSON:
   loja ou categoria que não esteja no escopo original — só reescreva o que já existe.
 """
 
+# Enxuto de propósito. O prompt é pago por inteiro em TODA chamada, e este roda uma
+# vez por publicação: cada linha aqui é custo recorrente. A versão longa gastava 717
+# tokens só de instrução para produzir ~120 de saída. Regra prática: se o validador
+# em código já derruba a violação, o prompt não precisa explicá-la duas vezes.
 _PROMPT_DEAL = """Você escreve o post de uma oferta para grupo de achados no Brasil.
-Quem lê está no celular, passando o dedo entre dezenas de mensagens, e decide em dois
-segundos. O post existe para vender aquela oferta, não para descrever o produto.
+Quem lê está no celular e decide em dois segundos. O post VENDE a oferta; não descreve
+o produto. Padrão do mercado (Promobit, Pelando): produto e número juntos na primeira
+linha.
 
-O padrão desse mercado (Promobit, Pelando, grupos de achadinhos) é direto: o produto e
-o NÚMERO que interessa aparecem juntos, logo na primeira linha. "R$ 240 OFF: Vivo Fibra
-600 Mega por R$ 100/mês", "Fone a R$ 77", "Cupom Magalu - R$ 50 em R$ 120".
-
-Você recebe fatos JÁ VERIFICADOS. Escreva em cima deles.
-
-REGRAS OBRIGATÓRIAS:
-1. Os únicos números que você pode escrever são os da lista "Números liberados" e os que
-   já aparecem no nome do produto. Inventar ou arredondar qualquer outro número faz a
-   mensagem mentir sobre um preço que o sistema acabou de verificar.
-2. Só use as afirmações da lista "Pode afirmar". O que não está nela, o sistema não
-   provou: não escreva menor preço, mínima histórica, últimas unidades, acaba hoje,
-   frete grátis nem nada parecido se não estiver liberado.
-3. Não invente característica, marca, medida ou uso que não esteja no nome do produto.
-4. Português do Brasil de pessoa real. Pode ser vendedor, não pode ser palhaço: nada de
-   "corre", "voa", "bora", "clique aqui", "imperdível".
-5. Sem emoji (o sistema põe os dele) e sem markdown.
-6. "gancho": 3 a 8 palavras, TUDO EM CAIXA ALTA. Nomeia o produto E o número que vende
-   (preço final, quanto sai de desconto, ou o que o cupom abate). É a linha que faz a
-   pessoa parar de rolar.
-7. "produto": UMA frase de até 18 palavras dizendo o que é e para quem serve.
-8. "porque_vale": UMA frase de até 20 palavras dizendo por que comprar HOJE, usando o
-   motivo fornecido. Se houver cupom, deixe claro que o abatimento sai no checkout.
+REGRAS:
+1. Só escreva número que esteja em "Números liberados" ou já no nome do produto.
+2. Só afirme o que está em "Pode afirmar". Fora dela, nada de menor preço, acaba hoje,
+   últimas unidades ou frete grátis.
+3. Não invente característica, marca ou medida que não esteja no nome.
+4. Vendedor sem ser palhaço: nada de corre, voa, bora, clique aqui, imperdível.
+5. Emoji com parcimônia, no máximo um por campo. Sem markdown.
+6. "gancho": 3 a 8 palavras em CAIXA ALTA, com o produto e o número que vende.
+7. "produto": uma frase de até 18 palavras — o que é e para quem serve.
+8. "porque_vale": uma frase de até 20 palavras — por que comprar hoje. Havendo cupom,
+   diga que o abatimento sai no checkout.
 9. Responda SOMENTE JSON: {{"gancho":"...","produto":"...","porque_vale":"..."}}
 
 Exemplo:
-Dados: Produto: Air Fryer Mondial Family 4L Preta | Categoria: Eletrodomésticos | Preço final: R$ 249 | Economia: R$ 150 | Sem cupom | Motivo: preço no fundo do histórico de 90 dias | Números liberados: 249, 150, 4 | Pode afirmar: menor preço observado em 90 dias
-Resposta: {{"gancho":"AIR FRYER MONDIAL 4L POR R$ 249","produto":"Air fryer de quatro litros, tamanho que dá conta da janta de duas ou três pessoas.","porque_vale":"É o menor preço que a gente viu nela em 90 dias, R$ 150 abaixo do que costuma sair."}}
-
-Exemplo:
-Dados: Produto: Fone Bluetooth JBL Tune 510BT | Categoria: Eletrônicos | Preço final: R$ 80 | Cupom abate: R$ 20 | Motivo: cupom derruba o preço neste item | Números liberados: 80, 20, 510 | Pode afirmar: nenhuma
-Resposta: {{"gancho":"JBL TUNE 510BT A R$ 80 COM CUPOM","produto":"Fone bluetooth dobrável, bateria longa, tamanho de jogar na mochila e esquecer.","porque_vale":"São R$ 20 que o cupom tira no checkout, então confira o valor antes de fechar."}}
+Dados: Produto: Air Fryer Mondial Family 4L Preta | Preço final: R$ 249 | Economia: R$ 150 | Números liberados: 4, 150, 249 | Pode afirmar: menor preço observado em 90 dias
+Resposta: {{"gancho":"AIR FRYER MONDIAL 4L POR R$ 249","produto":"Air fryer de quatro litros, dá conta da janta de duas ou três pessoas.","porque_vale":"Menor preço que vimos nela, R$ 150 abaixo do que costuma sair 🔥"}}
 
 Agora:
 {contexto}
@@ -356,22 +350,33 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
     }
     partes.append("Pode afirmar: " + (", ".join(
         rotulos_prova[p] for p in provas if p in rotulos_prova) or "nenhuma"))
+    contexto = " | ".join(partes)
+
+    # Contexto igual, resposta igual: não há motivo para pagar de novo. A chave é o
+    # hash do contexto inteiro, então qualquer mudança de preço, cupom ou prova gera
+    # uma chave nova — o cache nunca devolve texto que descreva outro preço.
+    from django.core.cache import cache
+
+    chave = "deal-copy:" + hashlib.sha256(contexto.encode("utf-8")).hexdigest()[:32]
+    guardado = cache.get(chave)
+    if guardado is not None:
+        return guardado
 
     try:
         resposta = _cliente(timeout).messages.create(
             model=getattr(settings, "LLM_MODELO", _MODELO_PADRAO),
-            max_tokens=350,
+            max_tokens=220,
             thinking={"type": "disabled"},
             messages=[{
                 "role": "user",
-                "content": _PROMPT_DEAL.format(contexto=" | ".join(partes)),
+                "content": _PROMPT_DEAL.format(contexto=contexto),
             }],
         )
         dados = _json_resposta(_texto_resposta(resposta))
         if not isinstance(dados, dict):
             return vazio
         provas = set(provas)
-        return {
+        texto = {
             "gancho": _gancho_de_venda(dados.get("gancho"), permitidos, provas),
             "produto": _frase_vendavel(
                 dados.get("produto"), permitidos=permitidos, provas=provas,
@@ -380,6 +385,11 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
                 dados.get("porque_vale"), permitidos=permitidos, provas=provas,
                 limite=160, palavras=26),
         }
+        # Só vale guardar o que sobreviveu ao validador; texto vazio significa que o
+        # modelo violou uma regra, e uma nova tentativa pode acertar.
+        if any(texto.values()):
+            cache.set(chave, texto, _TTL_TEXTO_DEAL_S)
+        return texto
     except Exception as exc:
         logger.warning("Falha ao gerar texto do deal: %s: %s",
                        type(exc).__name__, exc)
