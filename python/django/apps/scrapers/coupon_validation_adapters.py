@@ -922,6 +922,12 @@ def validate_mercadolivre(validation) -> ValidationObservation:
         with coordinated_ml_browser(
             usuario=dono_da_sessao, authenticated=True,
             owner_kind="coupon_checkout_validation",
+            # Com espera, não pega-ou-desiste: a negativa inscreve esta esteira na
+            # fila do Chromium e o lote longo cede entre páginas. Sem isso a
+            # validação perdia a corrida para a raspagem em toda tentativa e
+            # morria em `browser_busy` — foi o que sobrou depois de resolver
+            # sessão e alvo.
+            wait_seconds=90,
         ), iniciar_browser(
             storage_state=state, session_user=dono_da_sessao, headless=True,
         ) as (page, _context):
