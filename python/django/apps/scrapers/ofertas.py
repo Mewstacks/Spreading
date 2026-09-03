@@ -2545,6 +2545,11 @@ def _nome_principal_produto(nome, limite=70) -> str:
     if len(texto) <= limite:
         return texto
     cortado = texto[:limite + 1].rsplit(" ", 1)[0].rstrip(" -–—,;|/")
+    # Parêntese aberto e não fechado: o corte por palavra respeitou o limite mas
+    # deixou "(8gb Ram+8gb Ram" pendurado no fim do nome. Descarta o trecho a
+    # partir da abertura órfã — o que estava lá dentro era detalhe, não o produto.
+    if cortado.count("(") > cortado.count(")"):
+        cortado = cortado[:cortado.rfind("(")].rstrip(" -–—,;|/")
     return _sem_cauda_pendurada(cortado) or texto[:limite]
 
 
