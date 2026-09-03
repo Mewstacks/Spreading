@@ -48,6 +48,9 @@ PRECO_ESPERA_BROWSER_S = 60
 # Vida da varredura de ofertas. Curta de proposito: cobre os candidatos de UM
 # tique de envio, nao serve como preco guardado para o tique seguinte.
 PRECO_VARREDURA_TTL_S = 120
+# Silêncio depois de um bloqueio. O ML limita por volume; retentar a cada
+# tique transforma um limite temporário em bloqueio prolongado.
+PRECO_RECUO_BLOQUEIO_S = 600
 
 logger = logging.getLogger(__name__)
 
@@ -214,9 +217,15 @@ def varrer_ofertas_ml(paginas=None):
                 timeout=15, allow_redirects=False,
             )
             if resposta.status_code != 200:
-                # 302 para /captcha ou 403 do gateway: nao ha o que ler. Devolve o
-                # que ja tem; quem nao estiver no mapa simplesmente nao publica.
-                break
+                # 302 para /captcha ou 403 do gateway. Insistir a cada tique é o
+                # que aprofunda o bloqueio: o ML limita por volume, e foi uma
+                # sequência de varreduras de teste que derrubou este caminho em
+                # 03/09/2026. Cala a boca por alguns minutos e devolve o que já
+                # tem — quem não estiver no mapa simplesmente não publica.
+                cache.set(chave, mapa, PRECO_RECUO_BLOQUEIO_S)
+                logger.info("vitrine de ofertas respondeu %s; recuando %ss",
+                            resposta.status_code, PRECO_RECUO_BLOQUEIO_S)
+                return mapa
             mapa.update(cards_de_ofertas(resposta.text))
     except Exception as exc:
         logger.info("varredura de ofertas falhou: %s", str(exc)[:120])
