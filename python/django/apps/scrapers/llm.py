@@ -67,29 +67,30 @@ Responda SOMENTE JSON:
 # vez por publicação: cada linha aqui é custo recorrente. A versão longa gastava 717
 # tokens só de instrução para produzir ~120 de saída. Regra prática: se o validador
 # em código já derruba a violação, o prompt não precisa explicá-la duas vezes.
-_PROMPT_DEAL = """Você escreve o post de uma oferta para grupo de achados no Brasil.
-Quem lê está no celular e decide em dois segundos. O post VENDE a oferta; não descreve
-o produto. Padrão do mercado (Promobit, Pelando): produto e número juntos na primeira
-linha.
+_PROMPT_DEAL = """Voce escreve UMA linha de apoio para um post de oferta em grupo
+de achados no Brasil. A mensagem ja mostra, em linhas proprias, o NOME do produto,
+o PRECO e o CUPOM. Sua linha nao repete nada disso.
 
 REGRAS:
-1. Só escreva número que esteja em "Números liberados" ou já no nome do produto.
-2. Só afirme o que está em "Pode afirmar". Fora dela, nada de menor preço, acaba hoje,
-   últimas unidades ou frete grátis.
-3. Não invente característica, marca ou medida que não esteja no nome.
-4. Vendedor sem ser palhaço: nada de corre, voa, bora, clique aqui, imperdível.
-5. Emoji com parcimônia, no máximo um por campo. Sem markdown.
-6. "gancho": 3 a 8 palavras em CAIXA ALTA. Use SÓ palavras que já estão no nome
-   do produto, mais o número que vende. Não acrescente marca, modelo nem
-   característica que não esteja escrita no nome.
-7. "linha": UMA frase de até 14 palavras que diz o que é o produto E por que vale
-   hoje. É a única frase corrida da mensagem: se não acrescenta nada ao gancho,
-   escreva só o que o produto é.
-8. Responda SOMENTE JSON: {{"gancho":"...","linha":"..."}}
+1. Nao escreva o nome, a marca nem o modelo do produto: eles ja estao logo acima.
+2. Diga o que a pessoa GANHA com ele — uso, tamanho, autonomia, para quem serve.
+3. So escreva numero que esteja em "Numeros liberados" ou no nome do produto.
+4. So afirme o que esta em "Pode afirmar". Fora dela, nada de menor preco, acaba
+   hoje, ultimas unidades ou frete gratis.
+5. Nao invente caracteristica que nao esteja no nome do produto.
+6. Ate 14 palavras, portugues do Brasil, sem jargao de anuncio. Um emoji no fim, no
+   maximo. Sem markdown.
+7. Se nao houver nada util a acrescentar, devolva "linha" vazia. Linha vazia e uma
+   resposta correta; encher linguica nao e.
+8. Responda SOMENTE JSON: {{"linha":"..."}}
 
 Exemplo:
-Dados: Produto: Air Fryer Mondial Family 4L Preta | Preço final: R$ 249 | Economia: R$ 150 | Números liberados: 4, 150, 249 | Pode afirmar: menor preço observado em 90 dias
-Resposta: {{"gancho":"AIR FRYER MONDIAL 4L POR R$ 249","linha":"Air fryer de 4 litros pela menor cotação em 90 dias 🔥"}}
+Dados: Produto: Air Fryer Mondial Family 4L Preta | Preco final: R$ 249 | Numeros liberados: 4, 249
+Resposta: {{"linha":"Quatro litros dao conta da janta de duas ou tres pessoas"}}
+
+Exemplo:
+Dados: Produto: Cabo USB-C 1m Preto | Preco final: R$ 19 | Numeros liberados: 1, 19
+Resposta: {{"linha":""}}
 
 Agora:
 {contexto}
@@ -328,7 +329,7 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
     revalidação de preço — por isso os números passados aqui são os mesmos que a
     mensagem vai imprimir. Sem cache: o texto depende do preço daquele momento.
     """
-    vazio = {"gancho": "", "linha": ""}
+    vazio = {"linha": ""}
     if not getattr(settings, "LLM_ATIVO", False) or not nome:
         return vazio
     if not getattr(settings, "ANTHROPIC_API_KEY", ""):
@@ -382,7 +383,7 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
     try:
         resposta = _cliente(timeout).messages.create(
             model=getattr(settings, "LLM_MODELO", _MODELO_PADRAO),
-            max_tokens=160,
+            max_tokens=90,
             thinking={"type": "disabled"},
             messages=[{
                 "role": "user",
@@ -394,8 +395,6 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
             return vazio
         provas = set(provas)
         texto = {
-            "gancho": _gancho_de_venda(
-                dados.get("gancho"), permitidos, provas, nome_produto=nome),
             "linha": _frase_vendavel(
                 dados.get("linha"), permitidos=permitidos, provas=provas,
                 limite=110, palavras=16),
@@ -534,7 +533,7 @@ def avaliar_cupom_ia(*, escopo="", tipo_desconto="", valor_desconto=None,
         contexto = "\n".join(linhas)
         resposta = _cliente(timeout).messages.create(
             model=getattr(settings, "LLM_MODELO", _MODELO_PADRAO),
-            max_tokens=160,
+            max_tokens=90,
             thinking={"type": "disabled"},
             messages=[{
                 "role": "user",

@@ -618,5 +618,9 @@ def gerar_deals(config, limite=8, *, agora=None, incluir_sem_cupom=True,
                 performance=performance, agora=agora)
         deals.append(deal)
 
-    deals.sort(key=lambda d: (-d.score, getattr(d.produto, "pk", 0)))
+    # Cupom primeiro, e não por empate: oferta sem cupom vende muito menos, então
+    # ela é o fundo da fila e não disputa posição com um par produto+cupom. O score
+    # continua ordenando DENTRO de cada grupo. É decisão de operação, medida no
+    # grupo, não estética de ranking.
+    deals.sort(key=lambda d: (not d.tem_cupom, -d.score, getattr(d.produto, "pk", 0)))
     return deals[:limite] if limite else deals

@@ -225,19 +225,29 @@ class BeneficioNoItemTests(BaseDeals):
 class OrdenacaoTests(BaseDeals):
     """M1 — cupom não tem privilégio: vence pelo preço final ou não vence."""
 
-    def test_produto_sem_cupom_pode_vencer_produto_com_cupom(self):
-        # A: sem cupom, mas colado na mínima de 90 dias.
+    def test_deal_com_cupom_vence_mesmo_com_score_menor(self):
+        """Oferta sem cupom é o fundo da fila, não concorrente.
+
+        Decisão de operação, medida no grupo: oferta sem cupom vende muito menos.
+        O score continua ordenando dentro de cada grupo, mas não promove um item
+        sem cupom acima de um par produto+cupom.
+        """
+        # A: sem cupom, colado na mínima de 90 dias — score alto.
         a = self._produto(nome="Produto A", preco=50.0, de=200.0,
                           link="https://produto.mercadolivre.com.br/MLB-A")
         self._observar(a, 200.0, 190.0, 180.0)
-        # B: tem cupom, mas o preço final continua perto do habitual.
+        # B: com cupom provado, mas preço bem menos impressionante.
         b = self._produto(nome="Produto B", preco=170.0, de=200.0,
                           link="https://produto.mercadolivre.com.br/MLB-B")
         self._observar(b, 200.0, 195.0, 190.0)
         self._cupom(produto=b, percentual=10.0, teto=100.0)
         resultado = deals.gerar_deals(self._config(), limite=5)
-        self.assertEqual(resultado[0].produto.pk, a.pk)
-        self.assertGreater(resultado[0].score, resultado[1].score)
+        self.assertEqual(resultado[0].produto.pk, b.pk)
+        self.assertTrue(resultado[0].tem_cupom)
+        self.assertFalse(resultado[1].tem_cupom)
+        # E o score do perdedor continua sendo maior: a ordem é por cupom, e a
+        # nota não foi adulterada para justificá-la.
+        self.assertGreater(resultado[1].score, resultado[0].score)
 
     def test_cupom_vence_quando_derruba_de_verdade_o_preco(self):
         a = self._produto(nome="Produto A", preco=150.0, de=200.0,
@@ -311,20 +321,27 @@ class MensagemDealTests(BaseDeals):
         resultado = deals.gerar_deals(self._config(), limite=1)
         return resultado[0]
 
-    def test_numeros_da_mensagem_vem_do_codigo(self):
+    def test_mensagem_nao_repete_o_nome_do_produto(self):
+        """Nome uma vez. Gancho + nome + frase diziam a mesma coisa três vezes."""
         from apps.scrapers.ofertas import montar_mensagem_deal
 
         deal = self._deal()
         texto = montar_mensagem_deal(
             deal, "https://meli.la/abc", usuario=self.user,
-            texto_ia={"gancho": "JBL TUNE 510BT A R$ 80 COM CUPOM",
-                      "linha": "Fone bluetooth dobrável de bateria longa 🔥"},
+            texto_ia={"linha": "Fone Bluetooth JBL para ouvir o dia inteiro"},
         )
-        self.assertIn("JBL TUNE 510BT A R$ 80 COM CUPOM", texto)
-        self.assertIn("Fone bluetooth dobrável de bateria longa 🔥", texto)
+        self.assertEqual(texto.count("Fone Bluetooth JBL"), 1)
         self.assertIn("R$ 80", texto)
         self.assertIn("PRESENTE", texto)
         self.assertIn("https://meli.la/abc", texto)
+
+    def test_frase_que_so_repete_o_nome_nao_entra(self):
+        from apps.scrapers.ofertas import _frase_acrescenta
+
+        nome = "Fone Bluetooth JBL Tune 510BT"
+        self.assertEqual(_frase_acrescenta("Fone bluetooth JBL Tune", nome), "")
+        frase = "Bateria longa e dobrável para jogar na mochila"
+        self.assertEqual(_frase_acrescenta(frase, nome), frase)
 
     def test_sem_texto_de_ia_a_mensagem_continua_completa(self):
         from apps.scrapers.ofertas import montar_mensagem_deal

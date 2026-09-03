@@ -1313,19 +1313,54 @@ def _fatos_do_deal(deal) -> dict:
     }
 
 
+def _frase_acrescenta(frase, nome, minimo_novas=3) -> str:
+    """A frase da IA só entra se disser algo que o nome do produto não diz.
+
+    Sem isto a mensagem repetia o título em prosa logo abaixo dele. A régua é
+    grosseira de propósito: contar quantas palavras de conteúdo a frase traz que
+    não estão no nome. Menos que três, ela é paráfrase e não vale a linha.
+    """
+    texto = _texto_ia_sem_formatacao(frase, 110)
+    if not texto:
+        return ""
+    from apps.scrapers.models import normalizar_busca
+
+    do_nome = {p for p in normalizar_busca(nome).split() if len(p) > 3}
+    palavras = [p for p in normalizar_busca(texto).split() if len(p) > 3]
+    if not palavras:
+        return ""
+    novas = [p for p in palavras if p not in do_nome]
+    if len(novas) < minimo_novas:
+        return ""
+    # E, mesmo trazendo palavras novas, a frase não pode REPRODUZIR o título:
+    # "Fone Bluetooth JBL para ouvir o dia inteiro" acrescenta três palavras e
+    # ainda assim imprime o nome do produto pela segunda vez na mesma tela.
+    if do_nome and len(do_nome & set(palavras)) / len(do_nome) > 0.5:
+        return ""
+    return texto
+
+
 def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None,
                          configuracao=None) -> str:
-    """Mensagem de um Deal: foto do produto, texto humano e números do código.
+    """Mensagem de um Deal, no formato que os canais de oferta usam de verdade.
 
-    A divisão de trabalho é rígida e existe por veracidade: o modelo escreve o
-    gancho, o que é o produto e por que vale; **nenhum número sai dele**. Preço,
-    economia, abatimento do cupom e a prova de histórico são impressos aqui, a
-    partir do que o sistema mediu. Assim o texto pode ser reaproveitado, revisado
-    ou falhar sem que a mensagem passe a afirmar um preço que não existe.
+    Anatomia copiada de quem vende (nerdofertas, promobit e afins no Telegram):
 
-    A foto é a do próprio produto e vem do caminho de envio de produto
-    (`enviar_oferta_de_produto`), que já baixa `imagem_url` e escolhe base64 ou URL
-    conforme o canal.
+        ➡️ Nome do produto
+        ✅ R$ 590  (de R$ 890)
+        🏷 Cupom: TEMNAAMZON
+        🛒 link
+
+    O NOME APARECE UMA VEZ. A versão anterior tinha gancho, nome e frase da IA
+    dizendo a mesma coisa em sequência — "ASPIRADOR PHILCO PAS4000V POR R$ 220,91"
+    / "Philco PAS4000V aspirador de pó 127 V" / "Aspirador de pó Philco 127 V com
+    42% de desconto". Três linhas, uma informação. Some o gancho: a linha do
+    produto já é a chamada, como nos canais que convertem.
+
+    A frase da IA é opcional e só entra quando acrescenta algo que o nome não diz;
+    `_frase_acrescenta` derruba a que só repete o título.
+
+    A foto do produto vai acima, pelo caminho de envio de produto.
     """
     from apps.scrapers.senders.base import WhatsAppMarkup
     from apps.scrapers.coupon_rules import codigo_publicavel
@@ -1336,65 +1371,44 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
     produto = deal.produto
     perfil = getattr(usuario, "perfil", None) if usuario else None
 
-    # Mensagem curta por decisão de produto. A versão longa trazia gancho, nome
-    # completo, frase do produto, De/Por, economia, abatimento do cupom, prova,
-    # código, instrução de uso, condição, validade e mais uma frase de fecho — no
-    # grupo isso vira parede e o dedo passa direto. Sai o que é redundante:
-    # o gancho já nomeia o produto, "economia" é a subtração que o leitor faz
-    # sozinho, e a instrução de checkout é óbvia.
     linhas = []
     if getattr(produto, "relampago", False) or getattr(deal.cupom, "relampago", False):
-        linhas += [m.bold("⚡ OFERTA RELÂMPAGO"), ""]
-    gancho = _texto_ia_sem_formatacao(texto_ia.get("gancho") or "", 80)
-    if gancho:
-        linhas += [esc(gancho), ""]
+        linhas.append(m.bold("⚡ RELÂMPAGO"))
 
-    # O NOME REAL do catálogo continua na mensagem. Ele foi cortado numa tentativa
-    # de encurtar e a mensagem ficou curta e vazia: o gancho vende, mas quem decide
-    # comprar precisa saber exatamente qual item é — e o gancho pode usar o nome
-    # popular ("Air Fryer Midea") enquanto o anúncio se chama outra coisa.
     nome = (getattr(produto, "nome_llm", "") or "").strip() or (
-        _nome_principal_produto(getattr(produto, "nome", ""), limite=64))
-    linhas.append(f"{_emoji_produto(produto)} {m.bold(esc(nome))}")
-    frase = _texto_ia_sem_formatacao(texto_ia.get("linha") or "", 110)
+        _nome_principal_produto(getattr(produto, "nome", ""), limite=72))
+    linhas.append(f"➡️ {m.bold(esc(nome))}")
+
+    frase = _frase_acrescenta(texto_ia.get("linha") or "", nome)
     if frase:
         linhas.append(esc(frase))
-    linhas.append("")
 
-    # O "DE" só aparece com desconto COMPROVADO pelo nosso próprio histórico —
+    # Preço: uma linha. O "de" só com desconto comprovado pelo nosso histórico —
     # riscar um preço que talvez nunca tenha existido é o falso positivo mais caro
     # do produto, porque quem assina a mensagem é o creator.
     lista = float(getattr(produto, "preco_sem_desconto", 0) or 0)
+    preco = m.bold(f"R$ {_preco_br(deal.preco_final)}")
     if deal.desconto_comprovado and lista > deal.preco_final:
-        linhas.append(
-            f"🔥 De R$ {_preco_br(lista)} por {m.bold('R$ ' + _preco_br(deal.preco_final))}")
+        linhas.append(f"✅ {preco} (de R$ {_preco_br(lista)})")
     else:
-        linhas.append(f"💰 {m.bold('R$ ' + _preco_br(deal.preco_final))}")
-    # A prova de histórico NÃO ganha linha própria: ela já chega ao leitor dentro da
-    # frase da IA, que só pode afirmá-la porque `provas` autorizou. Duas vezes a
-    # mesma informação é o que fazia a mensagem parecer formulário.
+        linhas.append(f"✅ {preco}")
+
     if deal.tem_cupom:
         codigo = codigo_publicavel(deal.cupom)
-        abate = (f" abate R$ {_preco_br(deal.beneficio_rs)}"
+        abate = (f" — abate R$ {_preco_br(deal.beneficio_rs)}"
                  if deal.beneficio_rs > 0 else "")
         if codigo:
-            linhas.append(f"🎟 Cupom {m.bold(esc(codigo))}{abate}")
+            linhas.append(f"🏷 Cupom: {m.bold(esc(codigo))}{abate}")
         else:
-            linhas.append(f"🎟 {m.bold('Cupom de ativação')}{abate} — ative na página")
-        # A condição só entra quando restringe DE VERDADE. O escopo padrão do ML
-        # ("25% de Desconto ... Cupom válido a partir de...") repete o desconto e a
-        # validade que já estão nas linhas vizinhas, e cortado em 60 caracteres
-        # virava reticências no meio de uma frase. O que o leitor precisa saber é o
-        # que pode IMPEDIR o cupom de funcionar para ele: a compra mínima.
+            linhas.append(f"🏷 {m.bold('Cupom de ativação')}{abate} — ative na página")
         minimo = _aviso_minimo_nao_atingido(deal.cupom, produto)
         if minimo:
             linhas.append(f"⚠️ {esc(minimo.capitalize())}")
         validade = _linha_validade_cupom(deal.cupom)
         if validade:
             linhas.append(f"⏳ {esc(validade)}")
-    linhas.append("")
 
-    linhas.append(f"🔗 {esc(link)}")
+    linhas.append(f"🛒 {esc(link)}")
     disclosure = (
         getattr(configuracao, "divulgacao_afiliado", "")
         or getattr(perfil, "divulgacao_afiliado", "") or ""
