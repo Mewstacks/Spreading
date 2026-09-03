@@ -20,10 +20,42 @@ const mensagemStoreIndisponivel = () => (
     'O WhatsApp Web ainda está preparando a sessão. Aguarde alguns instantes e tente novamente.'
 );
 
-const registrarStoreIndisponivel = (session) => {
+// Store ausente por SEGUNDOS é hidratação tardia — esperar resolve. Ausente por
+// MINUTOS é outra coisa: o bundle do WA Web recarregou dentro da página e levou
+// window.Store/WWebJS embora. Esse segundo caso NUNCA se resolve sozinho, e sem
+// teto a sessão fica "conectada" para sempre recusando todo envio.
+//
+// Incidente real (02/09/2026): sessão pareada às 16:09 com store_pronto=true;
+// às 23:28 todo envio falhava em `verificar_store`, a sessão seguia anunciando
+// `conectado`, o supervisor só vigia o HTTP do worker (que respondia) e nada
+// escalava. Sete horas de entrega bloqueada em silêncio, com o funil cheio.
+const STORE_INDISPONIVEL_RECYCLE_MS = parseInt(
+    process.env.STORE_INDISPONIVEL_RECYCLE_MS, 10,
+) || 120000;
+
+const marcarStorePronto = (session) => {
+    if (session) session.storeIndisponivelDesde = null;
+};
+
+const deveReciclarStoreIndisponivel = (
+    session, agora = Date.now(), tetoMs = STORE_INDISPONIVEL_RECYCLE_MS,
+) => {
+    if (!session || !session.isConnected) return false;
+    // Janela de pareamento/estabilização: aqui a ausência é esperada e reciclar
+    // custaria um QR novo. Mesma proteção de deveReciclarTimeoutPreflight.
+    if (session.preparando || Number(session.estabilizandoAte) > agora) return false;
+    const desde = Number(session.storeIndisponivelDesde);
+    return Boolean(desde) && (agora - desde) >= tetoMs;
+};
+
+const registrarStoreIndisponivel = (session, agora = Date.now()) => {
     if (session && session.isConnected) {
         session.fase = 'conectado';
         session.faseMsg = 'Conectado — WhatsApp Web ainda está preparando a sessão.';
+    }
+    // Carimba a PRIMEIRA ausência: é a partir dela que o teto conta.
+    if (session && !session.storeIndisponivelDesde) {
+        session.storeIndisponivelDesde = agora;
     }
     return mensagemStoreIndisponivel();
 };
@@ -70,6 +102,9 @@ module.exports = {
     mensagemPreflight,
     mensagemStoreIndisponivel,
     registrarStoreIndisponivel,
+    marcarStorePronto,
+    deveReciclarStoreIndisponivel,
+    STORE_INDISPONIVEL_RECYCLE_MS,
     mensagemEstabilizacao,
     deveReciclarTimeoutPreflight,
     iniciarRecuperacaoPreflight,

@@ -54,6 +54,7 @@ const {
 } = require('./send_deadline');
 const {
     timeoutPreflight, mensagemPreflight, registrarStoreIndisponivel,
+    marcarStorePronto, deveReciclarStoreIndisponivel,
     mensagemEstabilizacao, deveReciclarTimeoutPreflight, iniciarRecuperacaoPreflight,
 } = require('./preflight_recovery');
 const { aguardarStorePronto } = require('./store_ready');
@@ -2171,9 +2172,18 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         });
         if (!storePronto) {
             const mensagem = registrarStoreIndisponivel(session);
-            console.warn(`[${session.id}] Store do WhatsApp ainda indisponivel no preflight; mantendo a sessao ativa.`);
+            // Ausencia PERSISTENTE nao e hidratacao: o bundle do WA Web
+            // recarregou e levou window.Store/WWebJS embora. Reciclar reinjeta
+            // os modulos e NAO apaga credencial (purgeAuth=false por default).
+            if (deveReciclarStoreIndisponivel(session)) {
+                console.error(`[${session.id}] Store indisponivel alem do teto; reciclando o Chromium para reinjetar os modulos.`);
+                iniciarRecuperacaoPreflight(session, 'verificar_store', recycleSession);
+            } else {
+                console.warn(`[${session.id}] Store do WhatsApp ainda indisponivel no preflight; mantendo a sessao ativa.`);
+            }
             throw erroClassificado(mensagem, TRANSITORIO);
         }
+        marcarStorePronto(session);
 
         // Validate that the destination still exists in this account. This
         // rejects stale group IDs instead of reporting a false success.
@@ -2403,7 +2413,12 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             // apos `ready`; manter o Chromium evita perder a sessao por uma
             // condicao que costuma se resolver sozinha.
             const mensagem = registrarStoreIndisponivel(session);
-            console.warn(`[${session.id}] Store do WhatsApp indefinido durante envio; mantendo a sessao ativa.`);
+            if (deveReciclarStoreIndisponivel(session)) {
+                console.error(`[${session.id}] Store indefinido alem do teto durante envio; reciclando o Chromium.`);
+                iniciarRecuperacaoPreflight(session, 'verificar_store', recycleSession);
+            } else {
+                console.warn(`[${session.id}] Store do WhatsApp indefinido durante envio; mantendo a sessao ativa.`);
+            }
             return {
                 sucesso: false,
                 erro: mensagem,
