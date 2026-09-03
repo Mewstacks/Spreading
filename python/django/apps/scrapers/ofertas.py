@@ -2486,6 +2486,25 @@ _RUIDO_NOME_PRODUTO = re.compile(
 )
 
 
+# Palavras que não podem terminar uma linha: o corte em palavra respeita o limite
+# mas deixa a frase pendurada. Medido em produção em 03/09/2026: o nome saiu como
+# "...Fórmula com Máxima Concentração e" e a condição do cupom terminou em
+# "compra a partir de R$" — anunciando um mínimo sem dizer qual.
+_CAUDA_PENDURADA = re.compile(
+    r"[\s,;:|/–—-]*(?:\b(?:e|ou|de|da|do|das|dos|com|sem|para|por|at[ée]|em|no|na|"
+    r"nos|nas|a\s+partir\s+de)\b|R\$)\s*$",
+    re.I,
+)
+
+
+def _sem_cauda_pendurada(texto: str) -> str:
+    anterior = None
+    while texto != anterior:
+        anterior = texto
+        texto = _CAUDA_PENDURADA.sub("", texto).rstrip(" -–—,;:|/")
+    return texto
+
+
 def _nome_principal_produto(nome, limite=70) -> str:
     """Limpa ruido comercial e corta em palavra, sem depender de IA externa."""
     texto = re.sub(r"\s+", " ", str(nome or "")).strip(" -–—,;")
@@ -2494,7 +2513,31 @@ def _nome_principal_produto(nome, limite=70) -> str:
     if len(texto) <= limite:
         return texto
     cortado = texto[:limite + 1].rsplit(" ", 1)[0].rstrip(" -–—,;|/")
-    return cortado or texto[:limite]
+    return _sem_cauda_pendurada(cortado) or texto[:limite]
+
+
+def _condicao_legivel(texto, limite=180) -> str:
+    """Condição do cupom que termina numa frase inteira, sem repetir selo.
+
+    O escopo bruto do Mercado Livre repete o mesmo selo ("25% de Desconto 25% OFF
+    25% OFF produtos Mercado Livre"), e o corte cego em 220 caracteres cortava a
+    última oração no meio. Preferir o fim de frase e remover a repetição é o que
+    faz a linha ser lida como condição, não como sobra de raspagem.
+    """
+    limpo = re.sub(r"\s+", " ", str(texto or "")).strip()
+    if not limpo:
+        return ""
+    anterior = None
+    while limpo != anterior:
+        anterior = limpo
+        limpo = re.sub(r"\b(.{3,40}?)\s+\1\b", r"\1", limpo, flags=re.I).strip()
+    if len(limpo) <= limite:
+        return _sem_cauda_pendurada(limpo)
+    corte = limpo[:limite + 1]
+    fim = max(corte.rfind(". "), corte.rfind("; "))
+    if fim > limite * 0.4:
+        return corte[:fim].strip()
+    return _sem_cauda_pendurada(corte.rsplit(" ", 1)[0]) + "…"
 
 
 def _preco_br(valor) -> str:

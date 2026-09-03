@@ -6,7 +6,11 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
-_MODELO_PADRAO = "claude-sonnet-5"
+# Haiku por padrão: estas chamadas são curtas, estruturadas e de alto volume
+# (uma por mensagem de canal, uma por publicação). Sonnet custa muitas vezes
+# mais por token e não escreve uma chamada de oferta melhor o bastante para
+# justificar a diferença. Trocável por LLM_MODELO quando houver motivo medido.
+_MODELO_PADRAO = "claude-haiku-4-5-20251001"
 
 _PROMPT = """Você escreve a chamada de um achado para grupo de WhatsApp no Brasil.
 Tom: assertivo, concreto, curto. Alguém que achou um desconto de verdade, não um influencer.

@@ -1,0 +1,17 @@
+﻿{
+  "permissions": {
+    "allow": [
+      "Bash(fly status:*)",
+      "Bash(fly logs:*)",
+      "Bash(fly deploy:*)",
+      "Bash(fly ssh console:*)",
+      "Bash(fly secrets list:*)",
+      "Bash(fly secrets set:*)",
+      "Bash(fly secrets unset:*)",
+      "Bash(fly volumes list:*)",
+      "Bash(fly volumes snapshots list:*)",
+      "Bash(fly machine list:*)",
+      "Bash(fly machine status:*)"
+    ]
+  }
+}

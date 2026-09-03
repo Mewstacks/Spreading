@@ -46,7 +46,11 @@ from apps.scrapers.coupon_rules import CODIGOS_NAO_PUBLICAVEIS
 
 logger = logging.getLogger(__name__)
 
-_MODELO_PADRAO = "claude-sonnet-5"
+# Haiku por padrão: estas chamadas são curtas, estruturadas e de alto volume
+# (uma por mensagem de canal, uma por publicação). Sonnet custa muitas vezes
+# mais por token e não escreve uma chamada de oferta melhor o bastante para
+# justificar a diferença. Trocável por LLM_MODELO quando houver motivo medido.
+_MODELO_PADRAO = "claude-haiku-4-5-20251001"
 
 # 30 dias: um cupom lido hoje não muda de texto amanhã, e a mensagem do canal é
 # imutável. O cache existe para não pagar duas vezes pela mesma leitura.
