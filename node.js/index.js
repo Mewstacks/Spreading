@@ -1639,6 +1639,31 @@ const initializeSession = (session) => {
                 // OnDeviceHeadSuggestModel). Num volume de 1GB com dois perfis
                 // isso era um terco do disco, mais a CPU e a rede do download.
                 '--disable-component-update',
+                // Flags abaixo cortam RAM, não disco — os args de cima nunca
+                // tocaram o pico medido em produção (1,17GB conectado). Site
+                // Isolation é o maior item isolado: o Chrome sobe um processo
+                // OS por origem só por segurança entre abas — aqui há UMA aba
+                // controlada, sempre em web.whatsapp.com, então a isolação não
+                // compra nada e custa um processo renderer inteiro a mais.
+                '--disable-features=IsolateOrigins,site-per-process,TranslateUI,BackForwardCache,MediaRouter',
+                '--disable-site-isolation-trials',
+                '--renderer-process-limit=1',
+                '--disable-extensions',
+                '--disable-background-networking',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--disable-breakpad',
+                '--disable-client-side-phishing-detection',
+                '--disable-default-apps',
+                '--disable-hang-monitor',
+                '--disable-sync',
+                '--disable-translate',
+                '--mute-audio',
+                '--metrics-recording-only',
+                '--no-default-browser-check',
+                '--password-store=basic',
+                '--use-mock-keychain',
             ]
         }
     });
