@@ -420,10 +420,12 @@ def selecionar_conteudo_para_grupo(config, limit=8, *, registrar_shadow=True):
     legado = _candidatos_legado(config, limit)
     if shadow:
         _registrar_shadow(config, legado, deals)
-    if live and not deals and not getattr(
-            settings, "DEAL_FALLBACK_CUPOM_SOLTO", True):
-        # Organização em modo Deal estrito prefere não publicar a publicar cupom
-        # sem produto. Estoque vazio é transitório e resolve no próximo scrape.
+    if live:
+        # Sem deal, NÃO cai para o legado. O caminho antigo publica com o preço do
+        # catálogo e sem exigir medição no envio — foi exatamente por ele que uma
+        # mensagem saiu com "DE 1.305 | POR 479,24" sem ninguém ter conferido nada.
+        # Uma organização que ligou a camada escolheu não publicar o que não mediu;
+        # estoque vazio é transitório e resolve no próximo tique.
         return []
     return legado[:limit]
 

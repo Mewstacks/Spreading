@@ -178,9 +178,11 @@ DEAL_LAYER_LIVE_PILOT_ORGANIZATION_IDS = {
     for value in os.getenv("DEAL_LAYER_LIVE_PILOT_ORGANIZATION_IDS", "").split(",")
     if value.strip()
 }
-# Cupom sem produto só volta a concorrer no feed de ofertas quando não há nenhum
-# deal — e só se isto estiver ligado. O broadcast `aviso_cupons` não passa por aqui.
-DEAL_FALLBACK_CUPOM_SOLTO = os.getenv("DEAL_FALLBACK_CUPOM_SOLTO", "1") == "1"
+# Mantida como registro de uma ideia que se provou errada: quando a camada está
+# ligada, não existe "cai para o caminho antigo". O legado publica sem medir preço
+# no envio, então usá-lo como rede de segurança devolvia exatamente a mentira que a
+# camada existe para impedir. Sem deal, não se publica.
+DEAL_FALLBACK_CUPOM_SOLTO = False
 # Portais autenticados reais, ainda sobrescrevíveis caso as lojas mudem a rota.
 # Sem sessão ambos redirecionam ao login, que o adapter classifica como ação do
 # usuário; uma instalação nova não deve nascer incapaz de medir conversão.
