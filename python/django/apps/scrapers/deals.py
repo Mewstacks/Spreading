@@ -50,6 +50,7 @@ MOTIVO_SEM_HISTORICO = "sem_historico_de_preco"
 MOTIVO_PRECO_DE_SEMPRE = "preco_de_sempre"
 MOTIVO_ABAIXO_DO_MINIMO = "abaixo_do_minimo"
 MOTIVO_COOLDOWN = "cooldown"
+MOTIVO_PRECO_VELHO = "preco_nao_reobservado"
 MOTIVO_MINIMO_DE_COMPRA = "compra_minima_acima_do_preco"
 
 # Um cupom que existe há mais de 30 dias e continua ativo já está embutido na série
@@ -521,6 +522,7 @@ def gerar_deals(config, limite=8, *, agora=None, incluir_sem_cupom=True,
             performance[linha["produto_id"]] = linha
 
     minimo_config = float(getattr(config, "min_desconto_percent", 15.0) or 0)
+    frescor_max = max(1, int(getattr(settings, "DEAL_FRESCOR_MAXIMO_MIN", 90)))
     deals = []
     for produto in produtos:
         if negativos and _casa_algum_termo(produto, negativos):
@@ -528,6 +530,13 @@ def gerar_deals(config, limite=8, *, agora=None, incluir_sem_cupom=True,
             continue
         preco_vitrine = float(getattr(produto, "preco_com_cupom", 0) or 0)
         if preco_vitrine <= 0:
+            continue
+        # Preço velho é a origem da mentira mais cara que este sistema já publicou.
+        # Um deal AFIRMA um número; afirmar exige tê-lo observado há pouco numa
+        # página real da loja, não estar dentro da janela de exibição de 48 h.
+        observado = getattr(produto, "ultima_observacao", None)
+        if not observado or (agora - observado) > timedelta(minutes=frescor_max):
+            rejeicoes[MOTIVO_PRECO_VELHO] += 1
             continue
         escolha = _melhor_cupom_para(
             produto, confirmados=confirmados, sitewide=sitewide,

@@ -3448,9 +3448,19 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             # o checkout real cobrava R$ 249,50. Transitório de propósito: a
             # próxima janela costuma medir, e a regra de envio não tem culpa.
             if deal is not None and checagem.get("fonte") == "inconclusivo":
-                return falhar(
-                    "preço não confirmado ao vivo; deal não é publicado sem medir",
-                    classe=TRANSITORIO, link=link)
+                # O ML serve muro de CAPTCHA ao IP de datacenter da Fly, inclusive
+                # para o navegador logado (medido em 03/09/2026), então a medição
+                # JIT falha com frequência. A raspagem, essa, continua lendo as
+                # listagens: uma observação recente É um preço medido numa página
+                # real da loja. Aceitar a observação fresca mantém a exigência de
+                # ter medido; o que não se aceita é o preço de ontem.
+                observado = getattr(produto, "ultima_observacao", None)
+                limite = timedelta(minutes=max(1, int(getattr(
+                    settings, "DEAL_FRESCOR_MAXIMO_MIN", 90))))
+                if not observado or (timezone.now() - observado) > limite:
+                    return falhar(
+                        "preço não confirmado ao vivo nem reobservado a tempo",
+                        classe=TRANSITORIO, link=link)
 
         # Ofertas (origem='oferta') não têm Cupom; só busca quando há campanha_id
         cupom = None

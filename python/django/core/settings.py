@@ -154,6 +154,12 @@ DEAL_BENEFICIO_MINIMO_PERCENT = float(
 # Folga deliberada sobre os 3–10 publicáveis: cooldown, revalidação e falha de
 # link consomem candidatos entre a seleção e o envio.
 DEAL_COBERTURA_META_DIA = int(os.getenv("DEAL_COBERTURA_META_DIA", "10"))
+# Idade máxima da observação de preço que um deal aceita, em minutos. O catálogo
+# considera um produto "fresco" por 48 h — folga correta para EXIBIR, folga
+# absurda para AFIRMAR. Medido em 03/09/2026: a air fryer publicada tinha 1021
+# minutos de observação, a vitrine dizia R$ 199,90 e o checkout cobrava R$ 249,50.
+# Com ~270 produtos ML relidos por hora, 90 minutos deixa estoque de sobra.
+DEAL_FRESCOR_MAXIMO_MIN = int(os.getenv("DEAL_FRESCOR_MAXIMO_MIN", "90"))
 # Shadow calcula o vencedor da camada Deal e registra a divergência SEM trocar o
 # envio. Live é o que troca, e nasce desligado: o rollback é apagar a flag, não
 # reverter migração.
