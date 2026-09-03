@@ -143,47 +143,82 @@ def _preco_ml(produto, url="", usuario=None):
 
 
 def _preco_ml_navegador(produto, url="", usuario=None):
-    """Mede a PDP com o Chromium quando o HTTP volta bloqueado.
+    """Mede o preço agora, pela LISTAGEM — o único caminho que este IP consegue.
 
-    Medido em produção em 03/09/2026: o Mercado Livre responde 403 ao IP de
-    datacenter da Fly tanto na PDP quanto em `api.mercadolibre.com`. Com só o
-    caminho HTTP, TODA revalidação voltava `inconclusivo` — e foi assim que uma
-    mensagem anunciou R$ 183,91 num item que o checkout cobrava R$ 249,50.
+    Medido em 03/09/2026: o Mercado Livre serve muro de CAPTCHA ao IP de
+    datacenter da Fly em toda PDP e nas APIs públicas, mesmo com o navegador
+    logado. O que continua respondendo é a busca em `lista.mercadolivre.com.br`,
+    que é justamente por onde a raspagem lê ~270 produtos por hora. Então a
+    verificação de envio usa a mesma porta que funciona: procura o item na
+    listagem e lê o preço do card dele.
 
-    É o recurso mais caro da máquina, então só roda para o candidato VENCEDOR,
-    uma vez por publicação, e depois de o GET ter falhado. O mesmo Chromium e o
-    mesmo lease que a raspagem já usa; nada de sessão nova.
+    Sessão de SISTEMA de propósito: é a credencial que a raspagem usa para ler o
+    catálogo compartilhado, e ler não altera estado nenhum. A do remetente cai no
+    muro com muito mais frequência.
+
+    Nenhum CAPTCHA é resolvido ou contornado aqui. Se a listagem também vier
+    murada, a função devolve None e o envio fica transitório.
     """
     from apps.scrapers.auxiliar import iniciar_browser
     from apps.scrapers.carga import BrowserResourceUnavailable, coordinated_ml_browser
+    from apps.scrapers.identidade_produto import link_canonico
     from apps.scrapers.ml_auth import storage_state
-    from apps.scrapers.scraper_mercadolivre.link_http import preco_da_pdp
+    from apps.scrapers.scraper_mercadolivre.link import _extrair_item_id
+    from apps.scrapers.scraper_mercadolivre.ofertas_scraper import (
+        _coletar_cards, _slug_busca,
+    )
 
-    alvo = url or getattr(produto, "link_produto", "")
-    if not alvo:
+    nome = str(getattr(produto, "nome", "") or "").strip()
+    if not nome:
         return None
-    corpo = ""
-    # `coordinated_ml_browser` com espera, e não o pega-ou-desiste: a negativa
-    # inscreve `preco_ao_vivo` na fila do Chromium, o lote longo que está com o
-    # recurso enxerga o marcador entre páginas e cede. Sem a espera, esta medição
-    # perdia a corrida para a varredura em TODA tentativa e o deal nunca publicava.
+    # Termo curto: o nome inteiro do anúncio não devolve resultado nenhum.
+    termo = " ".join(nome.split()[:6])
+    alvo = link_canonico("mercadolivre", str(getattr(produto, "link_produto", "") or ""))
+    busca = f"https://lista.mercadolivre.com.br/{_slug_busca(termo)}"
+    cards = []
     try:
         with coordinated_ml_browser(
-            usuario=usuario, authenticated=True, owner_kind="preco_ao_vivo",
+            usuario=None, authenticated=True, owner_kind="preco_ao_vivo",
             wait_seconds=PRECO_ESPERA_BROWSER_S,
         ):
             with iniciar_browser(
-                storage_state=storage_state(usuario), headless=True,
+                storage_state=storage_state(None), headless=True,
             ) as (page, _contexto):
-                page.goto(alvo, wait_until="domcontentloaded", timeout=25000)
-                corpo = page.content()
+                page.goto(busca, wait_until="domcontentloaded", timeout=45000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+                if "captcha" in page.url or "account-verification" in page.url:
+                    return None
+                cards = _coletar_cards(page) or []
     except BrowserResourceUnavailable:
-        # Fila cheia agora. Transitório: o envio volta no próximo tique.
         return None
-    preco, preco_de = preco_da_pdp(corpo)
-    if not preco or preco <= 0:
+    except Exception as exc:
+        logger.info("preco_ao_vivo listagem falhou id=%s: %s",
+                    getattr(produto, "pk", ""), str(exc)[:120])
         return None
-    return {"preco": preco, "preco_de": preco_de or 0, "fonte": "ml-browser-pdp"}
+
+    # Pareamento pelo ID do anúncio primeiro: a URL da listagem carrega tracking
+    # que a canônica nem sempre reduz ao mesmo texto, e casar por string faria a
+    # verificação falhar num item que ESTÁ ali.
+    alvo_id = _extrair_item_id(getattr(produto, "link_produto", "") or "")
+    for card in cards:
+        bruto = str(card.get("link_produto") or "")
+        if alvo_id:
+            if _extrair_item_id(bruto) != alvo_id:
+                continue
+        elif link_canonico("mercadolivre", bruto) != alvo:
+            continue
+        preco = float(card.get("preco_com_cupom") or 0)
+        if preco <= 0:
+            return None
+        return {
+            "preco": preco,
+            "preco_de": float(card.get("preco_sem_desconto") or 0),
+            "fonte": "ml-listagem-jit",
+        }
+    return None
 
 
 # Uma fonte por marketplace. Sem entrada aqui = não revalidável (segue com o banco).
