@@ -3433,7 +3433,8 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             from apps.scrapers import preco_ao_vivo
             checagem = _executar_orm(
                 preco_ao_vivo.revalidar,
-                produto, usuario=usuario, configuracao=configuracao, url=link)
+                produto, usuario=usuario, configuracao=configuracao, url=link,
+                exigir_medicao=deal is not None)
             if not checagem["ok"]:
                 return falhar(f"preço mudou antes do envio: {checagem['motivo']}",
                               link=link)

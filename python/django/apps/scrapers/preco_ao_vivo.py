@@ -137,8 +137,45 @@ def _preco_ml(produto, url="", usuario=None):
     }
 
 
+def _preco_ml_navegador(produto, url="", usuario=None):
+    """Mede a PDP com o Chromium quando o HTTP volta bloqueado.
+
+    Medido em produção em 03/09/2026: o Mercado Livre responde 403 ao IP de
+    datacenter da Fly tanto na PDP quanto em `api.mercadolibre.com`. Com só o
+    caminho HTTP, TODA revalidação voltava `inconclusivo` — e foi assim que uma
+    mensagem anunciou R$ 183,91 num item que o checkout cobrava R$ 249,50.
+
+    É o recurso mais caro da máquina, então só roda para o candidato VENCEDOR,
+    uma vez por publicação, e depois de o GET ter falhado. O mesmo Chromium e o
+    mesmo lease que a raspagem já usa; nada de sessão nova.
+    """
+    from apps.scrapers.auxiliar import iniciar_browser
+    from apps.scrapers.carga import ml_site_browser_resource
+    from apps.scrapers.ml_auth import storage_state
+    from apps.scrapers.scraper_mercadolivre.link_http import preco_da_pdp
+
+    alvo = url or getattr(produto, "link_produto", "")
+    if not alvo:
+        return None
+    corpo = ""
+    with ml_site_browser_resource(usuario, owner_kind="preco_ao_vivo") as acquired:
+        if not acquired:
+            return None
+        with iniciar_browser(
+            storage_state=storage_state(usuario), headless=True,
+        ) as (page, _contexto):
+            page.goto(alvo, wait_until="domcontentloaded", timeout=25000)
+            corpo = page.content()
+    preco, preco_de = preco_da_pdp(corpo)
+    if not preco or preco <= 0:
+        return None
+    return {"preco": preco, "preco_de": preco_de or 0, "fonte": "ml-browser-pdp"}
+
+
 # Uma fonte por marketplace. Sem entrada aqui = não revalidável (segue com o banco).
 _FONTES = {"amazon": _preco_amazon, "mercadolivre": _preco_ml}
+# Segunda tentativa, cara, só para quem EXIGE medição (a camada Deal).
+_FONTES_EXIGENTES = {"mercadolivre": _preco_ml_navegador}
 
 
 def _desconto(preco_de, preco):
@@ -147,7 +184,8 @@ def _desconto(preco_de, preco):
     return (preco_de - preco) / preco_de * 100
 
 
-def revalidar(produto, usuario=None, configuracao=None, *, url="") -> dict:
+def revalidar(produto, usuario=None, configuracao=None, *, url="",
+              exigir_medicao=False) -> dict:
     """Confere o preço ao vivo e atualiza o produto. Ver política no topo.
 
     `url` é o link EFETIVAMENTE publicado; sem ela cai no `link_produto`.
@@ -184,6 +222,16 @@ def revalidar(produto, usuario=None, configuracao=None, *, url="") -> dict:
         return _resultado(True, atual, fonte="inconclusivo", motivo=str(exc)[:120])
 
     decorrido_ms = (time.monotonic() - inicio) * 1000
+    if vivo is None and exigir_medicao:
+        # Quem exige medição paga o preço dela. Sem esta passada, o bloqueio de IP
+        # do ML transforma "não consegui medir" em "publica com o preço velho".
+        cara = _FONTES_EXIGENTES.get(mkt)
+        if cara is not None:
+            try:
+                vivo = cara(produto, url=url, usuario=usuario)
+            except Exception as exc:
+                logger.info("preco_ao_vivo navegador falhou id=%s: %s",
+                            getattr(produto, "pk", ""), str(exc)[:120])
     if vivo is None:
         logger.info(
             "preco_ao_vivo %s id=%s fonte=inconclusivo ms=%.0f",
