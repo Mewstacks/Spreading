@@ -383,18 +383,22 @@ def _registrar_shadow(config, legado, deals):
         pass
 
 
-def selecionar_conteudo_para_grupo(config, limit=8):
+def selecionar_conteudo_para_grupo(config, limit=8, *, registrar_shadow=True):
     """Pool ordenado para esta regra. Camada Deal quando ligada, legado quando não.
 
     O shadow calcula os dois lados e registra a divergência sem trocar o vencedor,
     para que ligar a camada numa organização seja decisão com evidência.
+
+    `registrar_shadow=False` para chamadas de LEITURA (a prévia da tela). O shadow
+    existe para medir decisões de envio; deixá-lo ligado numa tela gravaria um
+    evento por regra a cada F5 e dobraria o custo do render sem medir nada novo.
     """
     from django.conf import settings
 
     from apps.accounts.feature_flags import deal_layer_live_enabled
 
     live = deal_layer_live_enabled(getattr(config, "owner", None))
-    shadow = bool(getattr(settings, "DEAL_LAYER_SHADOW", False))
+    shadow = bool(getattr(settings, "DEAL_LAYER_SHADOW", False)) and registrar_shadow
     deals = []
     if live or shadow:
         try:
@@ -424,23 +428,46 @@ def selecionar_conteudo_para_grupo(config, limit=8):
     return legado[:limit]
 
 
-def previa_melhor_conteudo(config):
+# A prévia é renderizada uma vez POR REGRA ATIVA a cada carregamento da tela de
+# configurações. Enquanto ela consultava só cupons isso era barato; agora ela roda o
+# mesmo seletor do envio, que monta um pool de centenas de produtos e duas consultas
+# de histórico. Sem cache, um F5 com cinco regras pagava cinco vezes o custo de um
+# tick inteiro — numa VM cuja cota de CPU já é o gargalo conhecido. Dois minutos é
+# curto o bastante para a tela não mentir e longo o bastante para absorver recarga.
+PREVIA_TTL_SEGUNDOS = 120
+
+
+def previa_melhor_conteudo(config, *, usar_cache=True):
     """O que a tela promete tem de ser o que o envio faz.
 
     A prévia consultava SÓ cupons, sem ordenar pelo score final e sem olhar
     produto: a tela dizia um vencedor e a automação publicava outro. Agora as duas
-    chamam o mesmo seletor, em modo leitura.
+    chamam o mesmo seletor, em modo leitura — sem gravar shadow, que é instrumento
+    de decisão de envio e não de render.
     """
-    candidates = selecionar_conteudo_para_grupo(config, limit=1)
+    from django.core.cache import cache
+
+    chave = f"previa-conteudo:{getattr(config, 'pk', '?')}"
+    if usar_cache:
+        memorizado = cache.get(chave)
+        if memorizado is not None:
+            return memorizado
+    candidates = selecionar_conteudo_para_grupo(
+        config, limit=1, registrar_shadow=False)
     if not candidates:
-        return {"tipo": "product", "titulo": "Melhor oferta disponível no envio",
-                "score": None, "motivos": ["desconto, urgência e histórico do destino"]}
-    candidate = candidates[0]
-    obj = candidate.obj
-    if candidate.kind == "deal":
-        titulo = getattr(obj.produto, "nome_llm", "") or getattr(
-            obj.produto, "nome", "")
+        previa = {"tipo": "product", "titulo": "Melhor oferta disponível no envio",
+                  "score": None,
+                  "motivos": ["desconto, urgência e histórico do destino"]}
     else:
-        titulo = getattr(obj, "titulo", "") or getattr(obj, "nome", "")
-    return {"tipo": candidate.kind, "titulo": titulo, "score": candidate.score,
-            "motivos": candidate.reasons}
+        candidate = candidates[0]
+        obj = candidate.obj
+        if candidate.kind == "deal":
+            titulo = getattr(obj.produto, "nome_llm", "") or getattr(
+                obj.produto, "nome", "")
+        else:
+            titulo = getattr(obj, "titulo", "") or getattr(obj, "nome", "")
+        previa = {"tipo": candidate.kind, "titulo": titulo,
+                  "score": candidate.score, "motivos": candidate.reasons}
+    if usar_cache:
+        cache.set(chave, previa, PREVIA_TTL_SEGUNDOS)
+    return previa
