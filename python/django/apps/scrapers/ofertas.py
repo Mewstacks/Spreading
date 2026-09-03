@@ -339,21 +339,21 @@ def _selecionar_item_legacy(macros_selecionadas=None, categorias_selecionadas=No
     return vencedores
 
 
-def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas=None,
-                               limite_envio=1, horas_cooldown=24,
+def pool_de_produtos_elegiveis(*, macros_selecionadas=None,
+                               categorias_selecionadas=None,
                                min_desconto_percent=15.0, termo=None,
-                               marketplace=None, usuario=None, grupo_id=None,
-                               verificar=True):
-    """Ranking determinístico, explicável e personalizado por desempenho.
+                               marketplace=None, usuario=None, teto=None):
+    """Pool bruto de produtos elegíveis: sem pontuação, sem rede, sem cooldown.
 
-    ``verificar=False`` só monta o shortlist. O pipeline v2 faz a confirmação
-    just-in-time em ``enviar_oferta_de_produto``; verificar também aqui duplicava
-    a mesma chamada externa e fazia um pool de oito itens consumir até oito
-    timeouts antes de sequer tentar o primeiro envio.
+    Extraído de `selecionar_item_para_grupo` para que a camada Deal
+    (`apps.scrapers.deals`) parta EXATAMENTE do mesmo conjunto que o envio de
+    produto sempre usou. Dois pools diferentes fariam a prévia e o envio
+    discordarem sobre o vencedor — que é o defeito que a camada Deal existe para
+    não repetir, não para reproduzir em outro lugar.
+
+    Devolve objetos já anotados com `economia_rs` e `desconto_percent` e
+    deduplicados por identidade de produto.
     """
-    from django.db.models import Q
-    from apps.scrapers.marketplaces.registry import get_marketplace
-
     qs = Produto.objects.exclude(origem="cupom").exclude(
         estado__in=["indisponivel", "invalido", "expirado", "stale"])
     from apps.scrapers.maintenance import produtos_frescos_q
@@ -396,8 +396,32 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
     # tick cresce com o catálogo — numa VM cuja cota de CPU já é o gargalo.
     # A ordem é por observação mais recente, então o corte tira o mais velho, que é
     # também o mais provável de já ter sido enviado ou de ter preço vencido.
-    elegiveis = deduplicar_por_produto(
-        elegiveis_qs.order_by("-ultima_observacao", "-id")[:TETO_CANDIDATOS]
+    return deduplicar_por_produto(
+        elegiveis_qs.order_by("-ultima_observacao", "-id")[
+            :(teto or TETO_CANDIDATOS)
+        ]
+    )
+
+
+def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas=None,
+                               limite_envio=1, horas_cooldown=24,
+                               min_desconto_percent=15.0, termo=None,
+                               marketplace=None, usuario=None, grupo_id=None,
+                               verificar=True):
+    """Ranking determinístico, explicável e personalizado por desempenho.
+
+    ``verificar=False`` só monta o shortlist. O pipeline v2 faz a confirmação
+    just-in-time em ``enviar_oferta_de_produto``; verificar também aqui duplicava
+    a mesma chamada externa e fazia um pool de oito itens consumir até oito
+    timeouts antes de sequer tentar o primeiro envio.
+    """
+    from apps.scrapers.marketplaces.registry import get_marketplace
+
+    elegiveis = pool_de_produtos_elegiveis(
+        macros_selecionadas=macros_selecionadas,
+        categorias_selecionadas=categorias_selecionadas,
+        min_desconto_percent=min_desconto_percent, termo=termo,
+        marketplace=marketplace, usuario=usuario,
     )
     historicos = _stats_preco_em_lote(elegiveis, dias=30)
     historicos_comprovacao = _stats_preco_em_lote(elegiveis, dias=90)
@@ -1228,6 +1252,116 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
     checagem = _linha_checagem_cupom(cupom, itens)
     if checagem:
         linhas.append(f"🔎 {esc(checagem)}")
+    return "\n".join(linhas).strip()
+
+
+def _linha_prova_do_deal(deal) -> str:
+    """Uma frase que o histórico SUSTENTA, ou nada.
+
+    Não é adjetivo de vendedor: ou existe série de 90 dias que prova a posição do
+    preço, ou a mensagem não afirma nada sobre "estar barato". Quando o cupom é
+    perene, a referência é a vitrine — o abatimento dele já convive com a série e
+    creditá-lo aqui faria todo item da loja virar "menor preço".
+    """
+    historico = getattr(deal, "historico", None) or {}
+    if not int(historico.get("n") or 0):
+        return ""
+    referencia = deal.preco_vitrine if deal.cupom_perene else deal.preco_final
+    minimo = float(historico.get("minimo") or 0)
+    mediana = float(historico.get("mediana") or 0)
+    if minimo > 0 and referencia <= minimo * FOLGA_MINIMA_HISTORICA:
+        return "Menor preço que observamos em 90 dias"
+    if mediana > 0 and referencia < mediana:
+        queda = (mediana - referencia) / mediana * 100
+        if queda >= 5:
+            return f"{queda:.0f}% abaixo do preço habitual de 90 dias"
+    return ""
+
+
+def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None,
+                         configuracao=None) -> str:
+    """Mensagem de um Deal: foto do produto, texto humano e números do código.
+
+    A divisão de trabalho é rígida e existe por veracidade: o modelo escreve o
+    gancho, o que é o produto e por que vale; **nenhum número sai dele**. Preço,
+    economia, abatimento do cupom e a prova de histórico são impressos aqui, a
+    partir do que o sistema mediu. Assim o texto pode ser reaproveitado, revisado
+    ou falhar sem que a mensagem passe a afirmar um preço que não existe.
+
+    A foto é a do próprio produto e vem do caminho de envio de produto
+    (`enviar_oferta_de_produto`), que já baixa `imagem_url` e escolhe base64 ou URL
+    conforme o canal.
+    """
+    from apps.scrapers.senders.base import WhatsAppMarkup
+    from apps.scrapers.coupon_rules import codigo_publicavel
+
+    m = markup or WhatsAppMarkup()
+    esc = m.escape
+    texto_ia = texto_ia or {}
+    produto = deal.produto
+    perfil = getattr(usuario, "perfil", None) if usuario else None
+
+    linhas = []
+    if getattr(produto, "relampago", False) or getattr(deal.cupom, "relampago", False):
+        linhas += [m.bold("⚡ OFERTA RELÂMPAGO"), ""]
+    gancho = _texto_ia_sem_formatacao(texto_ia.get("gancho") or "", 80)
+    if gancho:
+        linhas += [esc(gancho), ""]
+
+    nome = (getattr(produto, "nome_llm", "") or "").strip() or _nome_principal_produto(
+        getattr(produto, "nome", ""))
+    linhas.append(f"{_emoji_produto(produto)} {m.bold(esc(nome))}")
+    frase_produto = _texto_ia_sem_formatacao(texto_ia.get("produto") or "", 160)
+    if frase_produto:
+        linhas.append(esc(frase_produto))
+    linhas.append("")
+
+    # Bloco de preço. O "DE" só aparece com desconto COMPROVADO pelo nosso próprio
+    # histórico — riscar um preço que talvez nunca tenha existido é o falso positivo
+    # mais caro do produto, porque quem assina a mensagem é o creator.
+    lista = float(getattr(produto, "preco_sem_desconto", 0) or 0)
+    if deal.desconto_comprovado and lista > deal.preco_final:
+        linhas.append(
+            f"🔥 De R$ {_preco_br(lista)} por {m.bold('R$ ' + _preco_br(deal.preco_final))}")
+        linhas.append(f"🏷 Economia de R$ {_preco_br(lista - deal.preco_final)}")
+    else:
+        linhas.append(f"💰 {m.bold('R$ ' + _preco_br(deal.preco_final))}")
+    if deal.tem_cupom and deal.beneficio_rs > 0:
+        linhas.append(
+            f"🎟 O cupom abate R$ {_preco_br(deal.beneficio_rs)} "
+            f"(de R$ {_preco_br(deal.preco_vitrine)})")
+    prova = _linha_prova_do_deal(deal)
+    if prova:
+        linhas.append(f"📉 {esc(prova)}")
+    linhas.append("")
+
+    if deal.tem_cupom:
+        codigo = codigo_publicavel(deal.cupom)
+        if codigo:
+            linhas.append(f"🎟 Use o cupom {m.bold(esc(codigo))}")
+            linhas.append("👉 Aplique no checkout antes de pagar.")
+        else:
+            linhas.append(f"🎟 {m.bold('Cupom de ativação')}")
+            linhas.append("👉 Ative na página e confirme o desconto antes de pagar.")
+        condicao = _condicao_do_cupom(deal.cupom)
+        if condicao:
+            linhas.append(f"⚠️ {m.bold('Condição:')} {esc(condicao)}")
+        validade = _linha_validade_cupom(deal.cupom)
+        if validade:
+            linhas.append(f"⏳ {esc(validade)}")
+        linhas.append("")
+
+    porque = _texto_ia_sem_formatacao(texto_ia.get("porque_vale") or "", 160)
+    if porque:
+        linhas += [esc(porque), ""]
+
+    linhas.append(f"🔗 {esc(link)}")
+    disclosure = (
+        getattr(configuracao, "divulgacao_afiliado", "")
+        or getattr(perfil, "divulgacao_afiliado", "") or ""
+    ).strip()
+    if disclosure:
+        linhas.append(esc(disclosure))
     return "\n".join(linhas).strip()
 
 
@@ -2880,7 +3014,8 @@ def _variante_para_envio(configuracao) -> str:
 def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                              canal="whatsapp", usuario=None, configuracao=None,
                              destino_nome="", imagem_b64_custom=None,
-                             enqueue_only=False, _reserved_publication=None):
+                             enqueue_only=False, _reserved_publication=None,
+                             deal=None):
     """
     Núcleo de envio reutilizável e AGNÓSTICO de loja/canal:
       resolve marketplace (link afiliado + verificação) e sender (transporte) via registry.
@@ -3231,23 +3366,56 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             cupom = _executar_orm(_cupom_da_campanha)
         variante = _executar_orm(_variante_para_envio, configuracao)
         link_publicado = _link_publicado(publicacao, link)
+        if deal is not None:
+            # A revalidação ao vivo acabou de reconfirmar a VITRINE. O deal foi
+            # montado com o preço do catálogo, que pode ter mudado no meio do tick,
+            # e um cupom percentual escala com ele: recalcular aqui é o que mantém
+            # `preco_final = vitrine - benefício` verdadeiro na hora do envio, e não
+            # só na hora da seleção.
+            from apps.scrapers.deals import _beneficio_do_cupom
+            deal.preco_vitrine = round(float(preco_publicavel(produto)), 2)
+            if deal.cupom is not None:
+                deal.beneficio_rs = round(
+                    _beneficio_do_cupom(deal.cupom, deal.preco_vitrine), 2)
+            deal.preco_final = round(deal.preco_vitrine - deal.beneficio_rs, 2)
+
         if publicacao:
             publicacao.variante = variante
             publicacao.link_afiliado = link
             publicacao.link_rastreado = link_publicado
             publicacao.cupom = (
-                cupom.titulo if cupom else getattr(produto, "codigo_checkout", "") or "")
+                getattr(getattr(deal, "cupom", None), "titulo", "")
+                or (cupom.titulo if cupom else "")
+                or getattr(produto, "codigo_checkout", "") or "")
             # preco_final foi gravado antes da revalidação; realinhar aqui mantém
             # o registro igual ao número que a mensagem anuncia.
-            publicacao.preco_final = preco_publicavel(produto)
+            publicacao.preco_final = (
+                deal.preco_final if deal is not None else preco_publicavel(produto))
             publicacao.preco_original = produto.preco_sem_desconto
             _executar_orm(publicacao.save, update_fields=[
                 "variante", "link_afiliado", "link_rastreado", "cupom",
                 "preco_final", "preco_original"])
-        mensagem = _executar_orm(
-            montar_mensagem,
-            produto, link_publicado, cupom, markup=sender.markup, usuario=usuario,
-            configuracao=configuracao, variante=variante)
+        if deal is not None:
+            # Uma chamada de IA por tentativa REAL de envio, não por item de
+            # catálogo — mesmo critério de `avaliar_cupom_ia`. Falha degrada para
+            # texto vazio: preço, cupom e prova continuam impressos pelo código.
+            from apps.scrapers.llm import gerar_texto_deal
+            texto_ia = gerar_texto_deal(
+                nome=getattr(produto, "nome", ""),
+                categoria=getattr(produto, "macro_categoria", "")
+                or getattr(produto, "categoria", "") or "",
+                motivo="; ".join(getattr(deal, "motivos", [])[:2]),
+                tem_cupom=bool(getattr(deal, "cupom", None)),
+            )
+            mensagem = _executar_orm(
+                montar_mensagem_deal, deal, link_publicado,
+                markup=sender.markup, texto_ia=texto_ia, usuario=usuario,
+                configuracao=configuracao)
+        else:
+            mensagem = _executar_orm(
+                montar_mensagem,
+                produto, link_publicado, cupom, markup=sender.markup, usuario=usuario,
+                configuracao=configuracao, variante=variante)
         if publicacao:
             publicacao.mensagem = mensagem
             _executar_orm(publicacao.save, update_fields=["mensagem"])
@@ -3439,7 +3607,9 @@ def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
     ultimo = None
     for entry in pool:
         candidate = entry if hasattr(entry, "kind") else None
-        prod = candidate.obj if candidate else entry
+        deal_atual = candidate.obj if candidate and candidate.kind == "deal" else None
+        prod = deal_atual.produto if deal_atual else (
+            candidate.obj if candidate else entry)
         logger.debug(
             "Tentando enviar conteúdo id=%s origem=%s marketplace=%s",
             getattr(prod, "id", None), getattr(prod, "origem", "cupom"),
@@ -3458,7 +3628,7 @@ def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
             r = enviar_oferta_de_produto(
                 prod, grupo_id, verificar=verificar, dry_run=dry_run, canal=canal,
                 usuario=usuario, configuracao=configuracao, destino_nome=destino_nome,
-                enqueue_only=enqueue_only)
+                enqueue_only=enqueue_only, deal=deal_atual)
         if r.get("sucesso"):
             return r
         logger.debug("Produto id=%s reprovado no envio: %s", getattr(prod, "id", None), r.get("motivo"))

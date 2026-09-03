@@ -1,5 +1,6 @@
 """Ranking unico de produtos, cupons e promocoes por regra de envio."""
 
+import logging
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -9,6 +10,8 @@ from django.utils import timezone
 from apps.scrapers.coupon_rules import cupom_e_lixo, regras_do_cupom
 from apps.scrapers.maintenance import freshness_points
 from apps.scrapers.models import CupomNormalizado, Publicacao
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -327,28 +330,117 @@ def _coupon_candidates(config, limit):
     return candidates
 
 
-def selecionar_conteudo_para_grupo(config, limit=8):
+def _candidatos_legado(config, limit):
+    """Ranking anterior à camada Deal: produto e cupom como conteúdos rivais.
+
+    Continua vivo como referência do shadow e como caminho de rollback. A chave
+    `item.kind != "coupon"` fazia cupom validado vencer produto por decreto — o
+    defeito que a camada Deal existe para corrigir. Não replicar isto lá.
+    """
     candidates = _product_candidates(config, limit) + _coupon_candidates(config, limit)
     _aplicar_performance_marketplace(config.owner, candidates)
-    # Estrategia editorial da operacao: cupom validado converte melhor que oferta
-    # comum e deve ser tentado primeiro. Score continua ordenando a qualidade
-    # DENTRO de cada tipo; quando o estoque de cupons entra em cooldown ou zera, os
-    # produtos voltam naturalmente para o topo. Antes, um produto com 0,01 ponto a
-    # mais escondia dezenas de cupons prontos e a automacao voltava a publicar o
-    # formato que a operacao explicitamente mediu como menos vendedor.
     candidates.sort(key=lambda item: (item.kind != "coupon", -item.score,
                                       -item.commission, getattr(item.obj, "id", 0)))
-    return candidates[:limit]
+    return candidates
+
+
+def _rotulo(candidate) -> str:
+    obj = candidate.obj
+    if candidate.kind == "deal":
+        return f"deal:{getattr(obj.produto, 'pk', '?')}"
+    return f"{candidate.kind}:{getattr(obj, 'pk', '?')}"
+
+
+def _registrar_shadow(config, legado, deals):
+    """Grava a divergência entre o vencedor atual e o da camada Deal.
+
+    Nunca altera o envio. Existe para que a decisão de ligar `DEAL_LAYER_LIVE` numa
+    organização seja tomada sobre divergência observada, não sobre expectativa.
+    """
+    from apps.scrapers.eventos import log_event
+
+    vencedor_legado = _rotulo(legado[0]) if legado else ""
+    vencedor_deal = f"deal:{getattr(deals[0].produto, 'pk', '?')}" if deals else ""
+    try:
+        log_event(
+            "selecao", "deal_shadow",
+            f"legado={vencedor_legado or 'nenhum'} deal={vencedor_deal or 'nenhum'}",
+            usuario=getattr(config, "owner", None),
+            contexto={
+                "config_id": getattr(config, "pk", None),
+                "destino": getattr(config, "grupo_id", ""),
+                "vencedor_legado": vencedor_legado,
+                "vencedor_deal": vencedor_deal,
+                "divergiu": bool(vencedor_legado != vencedor_deal),
+                "deals_elegiveis": len(deals),
+                "legado_elegiveis": len(legado),
+                "score_deal": deals[0].score if deals else None,
+                "prova": deals[0].prova if deals else "",
+                "preco_final": deals[0].preco_final if deals else None,
+            },
+        )
+    except Exception:  # pragma: no cover - telemetria nunca derruba seleção
+        pass
+
+
+def selecionar_conteudo_para_grupo(config, limit=8):
+    """Pool ordenado para esta regra. Camada Deal quando ligada, legado quando não.
+
+    O shadow calcula os dois lados e registra a divergência sem trocar o vencedor,
+    para que ligar a camada numa organização seja decisão com evidência.
+    """
+    from django.conf import settings
+
+    from apps.accounts.feature_flags import deal_layer_live_enabled
+
+    live = deal_layer_live_enabled(getattr(config, "owner", None))
+    shadow = bool(getattr(settings, "DEAL_LAYER_SHADOW", False))
+    deals = []
+    if live or shadow:
+        try:
+            from apps.scrapers.deals import gerar_deals
+            deals = gerar_deals(config, limite=limit)
+        except Exception:
+            logger.exception("Camada Deal falhou; seguindo pelo ranking legado")
+            deals = []
+
+    if live and deals:
+        candidatos = [
+            ContentCandidate("deal", deal, deal.score, list(deal.motivos))
+            for deal in deals
+        ]
+        if shadow:
+            _registrar_shadow(config, _candidatos_legado(config, limit), deals)
+        return candidatos[:limit]
+
+    legado = _candidatos_legado(config, limit)
+    if shadow:
+        _registrar_shadow(config, legado, deals)
+    if live and not deals and not getattr(
+            settings, "DEAL_FALLBACK_CUPOM_SOLTO", True):
+        # Organização em modo Deal estrito prefere não publicar a publicar cupom
+        # sem produto. Estoque vazio é transitório e resolve no próximo scrape.
+        return []
+    return legado[:limit]
 
 
 def previa_melhor_conteudo(config):
-    # A tela de configuracao nao pode fazer verificacoes de rede por produto. Mostra
-    # a melhor campanha conhecida; produtos sao validados somente no tick de envio.
-    candidates = _coupon_candidates(config, limit=1)
+    """O que a tela promete tem de ser o que o envio faz.
+
+    A prévia consultava SÓ cupons, sem ordenar pelo score final e sem olhar
+    produto: a tela dizia um vencedor e a automação publicava outro. Agora as duas
+    chamam o mesmo seletor, em modo leitura.
+    """
+    candidates = selecionar_conteudo_para_grupo(config, limit=1)
     if not candidates:
-        return {"tipo": "product", "titulo": "Melhor oferta de produto disponível no envio",
+        return {"tipo": "product", "titulo": "Melhor oferta disponível no envio",
                 "score": None, "motivos": ["desconto, urgência e histórico do destino"]}
     candidate = candidates[0]
-    return {"tipo": candidate.kind, "titulo": getattr(candidate.obj, "titulo", "")
-            or getattr(candidate.obj, "nome", ""), "score": candidate.score,
+    obj = candidate.obj
+    if candidate.kind == "deal":
+        titulo = getattr(obj.produto, "nome_llm", "") or getattr(
+            obj.produto, "nome", "")
+    else:
+        titulo = getattr(obj, "titulo", "") or getattr(obj, "nome", "")
+    return {"tipo": candidate.kind, "titulo": titulo, "score": candidate.score,
             "motivos": candidate.reasons}

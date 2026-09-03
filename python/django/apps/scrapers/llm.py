@@ -54,6 +54,38 @@ Responda SOMENTE JSON:
   loja ou categoria que não esteja no escopo original — só reescreva o que já existe.
 """
 
+_PROMPT_DEAL = """Você escreve o texto de um achado de desconto para grupo de WhatsApp
+no Brasil. Quem lê está no celular, passando o dedo, e decide em dois segundos.
+
+Você recebe fatos JÁ VERIFICADOS pelo sistema. Seu trabalho é só o texto humano em
+cima deles.
+
+REGRAS OBRIGATÓRIAS:
+1. Nunca escreva algarismo, preço, percentual, "R$", "%" ou data. O sistema imprime os
+   números; se você escrever, a mensagem passa a mentir assim que o preço mudar.
+2. Não invente característica, marca, medida ou uso que não esteja nos dados.
+3. Português do Brasil, de pessoa real conversando. Sem jargão de anúncio: nada de
+   imperdível, corre, não perca, última chance, clique aqui, aproveite já.
+4. Sem emoji (o sistema põe os dele) e sem markdown.
+5. "gancho": 3 a 6 palavras, TUDO EM CAIXA ALTA, nomeia o ganho concreto de quem compra.
+6. "produto": UMA frase de até 18 palavras dizendo o que é e para quem serve.
+7. "porque_vale": UMA frase de até 18 palavras explicando por que o preço de hoje é bom,
+   em cima do motivo fornecido. Se o motivo citar cupom, diga que o abatimento sai no
+   checkout.
+8. Responda SOMENTE JSON: {{"gancho":"...","produto":"...","porque_vale":"..."}}
+
+Exemplo:
+Dados: Produto: Air Fryer Mondial Family 4L Preta | Categoria: Eletrodomésticos | Motivo: preço no fundo do histórico de 90 dias
+Resposta: {{"gancho":"FRITURA SEM ÓLEO EM CASA","produto":"Air fryer de quatro litros, tamanho que dá conta da janta de duas ou três pessoas.","porque_vale":"É o preço mais baixo que a gente viu nessa air fryer nos últimos meses."}}
+
+Exemplo:
+Dados: Produto: Fone Bluetooth JBL Tune 510BT | Categoria: Eletrônicos | Motivo: cupom abate um valor relevante neste item
+Resposta: {{"gancho":"FONE QUE AGUENTA O DIA","produto":"Fone bluetooth de ouvir o dia inteiro, com bateria longa e dobrável pra mochila.","porque_vale":"O cupom desconta na hora de pagar, e é ele que derruba o preço aqui."}}
+
+Agora:
+{contexto}
+Resposta:"""
+
 _PROMPT_NOMES = """Resuma nomes de produtos para mensagens de promoções.
 
 REGRAS:
@@ -176,6 +208,85 @@ def gerar_conteudo(nome: str, timeout: int = 30, preco=None,
         }
     except Exception as exc:
         logger.warning("Falha ao gerar conteúdo por IA: %s: %s", type(exc).__name__, exc)
+        return vazio
+
+
+_FRASE_PROIBIDA = re.compile(
+    r"\b(?:imperd[ií]vel|oportunidade [úu]nica|corre|bora|clique aqui|"
+    r"n[ãa]o perca|[úu]ltima chance|aproveite j[áa]|garanta j[áa])\b",
+    re.I,
+)
+
+
+def _frase_humana(texto, limite=140) -> str:
+    """Frase de IA aceitável numa mensagem: sem número, sem jargão, sem markdown.
+
+    O veto a algarismo/`R$`/`%` não é estilo, é veracidade. O texto é escrito uma
+    vez e a mensagem é montada depois, com preço revalidado ao vivo: qualquer
+    número escrito pelo modelo vira uma afirmação que o sistema não consegue mais
+    garantir. Os números da mensagem saem SEMPRE do código.
+    """
+    limpo = _sem_formatacao(texto, limite)
+    if not limpo:
+        return ""
+    if re.search(r"\d|R\$|%", limpo):
+        return ""
+    if _FRASE_PROIBIDA.search(limpo):
+        return ""
+    if len(limpo.split()) > 24:
+        return ""
+    return limpo
+
+
+def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
+                     timeout: int = 20) -> dict:
+    """Texto humanizado de um deal: gancho, o que é o produto e por que vale.
+
+    Devolve sempre ``{"gancho","produto","porque_vale"}``; qualquer falha degrada
+    para strings vazias e NUNCA impede o envio — a mensagem sem estes campos
+    continua completa, porque preço, economia, cupom e prova são impressos pelo
+    código.
+
+    Uma chamada por tentativa real de envio, como `avaliar_cupom_ia`. Não há cache
+    porque `porque_vale` depende do motivo daquele momento; o custo é uma chamada
+    curta por publicação, não por item de catálogo.
+    """
+    vazio = {"gancho": "", "produto": "", "porque_vale": ""}
+    if not getattr(settings, "LLM_ATIVO", False) or not nome:
+        return vazio
+    if not getattr(settings, "ANTHROPIC_API_KEY", ""):
+        logger.warning("LLM sem ANTHROPIC_API_KEY: texto do deal não será gerado")
+        return vazio
+    partes = [f"Produto: {nome}"]
+    if categoria:
+        partes.append(f"Categoria: {categoria}")
+    if motivo:
+        partes.append(f"Motivo: {motivo}")
+    partes.append(
+        "Desconto sai por cupom no checkout." if tem_cupom
+        else "Sem cupom: o preço já está aplicado na página."
+    )
+    try:
+        resposta = _cliente(timeout).messages.create(
+            model=getattr(settings, "LLM_MODELO", _MODELO_PADRAO),
+            max_tokens=300,
+            thinking={"type": "disabled"},
+            messages=[{
+                "role": "user",
+                "content": _PROMPT_DEAL.format(contexto=" | ".join(partes)),
+            }],
+        )
+        dados = _json_resposta(_texto_resposta(resposta))
+        if not isinstance(dados, dict):
+            return vazio
+        return {
+            "gancho": _titulo_chamada(dados.get("gancho")),
+            "produto": _frase_humana(dados.get("produto")),
+            "porque_vale": _frase_humana(dados.get("porque_vale")),
+        }
+    except Exception as exc:
+        logger.warning("Falha ao gerar texto do deal: %s: %s",
+                       type(exc).__name__, exc)
         return vazio
 
 

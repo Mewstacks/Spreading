@@ -141,6 +141,27 @@ COUPON_VALOR_MINIMO_RELEVANTE_REAIS = float(
 COUPON_DAILY_DISCOVERY_GOAL = int(
     os.getenv("COUPON_DAILY_DISCOVERY_GOAL", "250")
 )
+
+# --- Camada Deal (apps.scrapers.deals) ---------------------------------------
+# Quanto do preço o cupom precisa abater para o par produto+cupom virar mensagem.
+# `COUPON_VALOR_MINIMO_RELEVANTE_REAIS` julga o TETO genérico do cupom; este julga
+# o que ele vale NAQUELE item: R$ 20 OFF é ótimo num item de R$ 120 e irrelevante
+# num de R$ 4.000. Os dois pisos valem juntos, não alternadamente.
+DEAL_BENEFICIO_MINIMO_PERCENT = float(
+    os.getenv("DEAL_BENEFICIO_MINIMO_PERCENT", "5") or "5"
+)
+# Quantos deals elegíveis por dia uma regra precisa ter para a cobertura passar.
+# Folga deliberada sobre os 3–10 publicáveis: cooldown, revalidação e falha de
+# link consomem candidatos entre a seleção e o envio.
+DEAL_COBERTURA_META_DIA = int(os.getenv("DEAL_COBERTURA_META_DIA", "10"))
+# Shadow calcula o vencedor da camada Deal e registra a divergência SEM trocar o
+# envio. Live é o que troca, e nasce desligado: o rollback é apagar a flag, não
+# reverter migração.
+DEAL_LAYER_SHADOW = os.getenv("DEAL_LAYER_SHADOW", "1") == "1"
+DEAL_LAYER_LIVE = os.getenv("DEAL_LAYER_LIVE", "0") == "1"
+# Cupom sem produto só volta a concorrer no feed de ofertas quando não há nenhum
+# deal — e só se isto estiver ligado. O broadcast `aviso_cupons` não passa por aqui.
+DEAL_FALLBACK_CUPOM_SOLTO = os.getenv("DEAL_FALLBACK_CUPOM_SOLTO", "1") == "1"
 # Portais autenticados reais, ainda sobrescrevíveis caso as lojas mudem a rota.
 # Sem sessão ambos redirecionam ao login, que o adapter classifica como ação do
 # usuário; uma instalação nova não deve nascer incapaz de medir conversão.

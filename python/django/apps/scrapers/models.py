@@ -1325,6 +1325,15 @@ class ConfiguracaoEnvio(models.Model):
     # soma 395 caracteres de termos. Não há índice nem unicidade sobre esta coluna,
     # então soltar o tamanho não custa nada no banco.
     termo_busca = models.TextField(blank=True, default="")
+    # Termos que ELIMINAM o item, mesma semântica de vírgula do `termo_busca`.
+    # Sem isto o nicho só sabia incluir: "fone" trazia capinha de fone, película de
+    # fone e suporte de fone, e a regra não tinha como dizer que não.
+    termos_negativos = models.TextField(blank=True, default="")
+    # Faixa de preço do nicho, avaliada sobre o preço FINAL (já com cupom), não
+    # sobre a vitrine — é o valor que o comprador vê no checkout que define se o
+    # item pertence àquele grupo.
+    preco_min = models.FloatField(null=True, blank=True)
+    preco_max = models.FloatField(null=True, blank=True)
     # Canal de envio: 'whatsapp' (grupo @g.us) | 'telegram' (chat/channel id).
     canal = models.CharField(max_length=20, default="whatsapp")
     # Filtro opcional de marketplace ('' = qualquer). Ex: só 'mercadolivre'.
