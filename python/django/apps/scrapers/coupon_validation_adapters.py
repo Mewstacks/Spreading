@@ -27,6 +27,12 @@ _LOGIN_PATHS = ("/login", "/lgz/", "/registration", "loginhub")
 _CHALLENGE_MARKERS = (
     "/gz/account-verification", "captcha", "não sou um robô", "nao sou um robo",
     "verifique que você é humano", "verifique que voce e humano",
+    # O muro do ML para IP de datacenter, visto em produção em 04/09/2026:
+    # /captcha/wall/logged, título "Seguridad — Mercado Libre", corpo "Por
+    # segurança, complete esta etapa". Só "captcha" já casa nesta URL, mas o texto
+    # entra porque a mesma tela também é servida em rotas sem a palavra.
+    "/captcha/wall", "complete esta etapa", "não consigo resolver o desafio",
+    "nao consigo resolver o desafio",
 )
 _MONEY_RE = re.compile(r"R\$\s*([0-9][0-9.]*)(?:,([0-9]{1,2}))?", re.I)
 _PRODUCT_TOKEN_RE = re.compile(r"\bMLB\d{6,}\b", re.I)
@@ -777,6 +783,21 @@ def _observe_ml_cart(page, validation) -> ValidationObservation:
         '[aria-label*="adicionar ao carrinho" i]',
     ))
     if not added:
+        # Reler a página antes de culpar o seletor. O muro do ML aparece DEPOIS do
+        # goto — a checagem lá em cima passou e, quando o clique foi procurar o
+        # botão, a URL já era /captcha/wall/logged com título "Seguridad". Sem esta
+        # releitura o veredito saía `add_to_cart_control_missing`, que manda quem
+        # for investigar caçar seletor de botão enquanto o problema é reputação de
+        # IP — e, pior, não conta como `challenge`, então o disjuntor que existe
+        # justamente para parar de queimar o navegador contra o muro nunca arma.
+        # Medido em 04/09/2026: 6.134 validações ML, nenhuma com veredito.
+        atrasado = _session_problem(page.url, _safe_body(page))
+        if atrasado:
+            return ValidationObservation(
+                status="inconclusive", reason_code=atrasado,
+                safe_detail="A loja exigiu verificação antes de montar o carrinho.",
+                evidence=evidence,
+            )
         feedback = _fold(product_body)
         reason = "product_unavailable" if any(marker in feedback for marker in (
             "produto indisponivel", "anuncio pausado", "estoque esgotado",

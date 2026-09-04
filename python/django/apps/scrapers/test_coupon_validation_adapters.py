@@ -226,6 +226,41 @@ class MercadoLivreCheckoutAdapterTests(SimpleTestCase):
         self.assertEqual(_coupon_feedback("Cupom aplicado. Você economizou"), "applied")
         self.assertEqual(_coupon_feedback("Tente novamente"), "")
 
+    def test_muro_tardio_nao_vira_botao_ausente(self):
+        """O muro do ML sobe DEPOIS do goto, e era classificado como seletor.
+
+        Medido em 04/09/2026: 6.134 validacoes de Mercado Livre, nenhuma com
+        veredito. A ultima leva dizia `add_to_cart_control_missing`, que manda
+        quem investiga cacar seletor de botao — mas a pagina em que o clique
+        procurava o botao ja era /captcha/wall/logged, titulo "Seguridad". Como
+        nao contava como `challenge`, o disjuntor que existe para parar de
+        queimar o navegador contra o muro nunca armava.
+        """
+        class _PaginaComMuro(_FakePage):
+            def locator(self, selector):
+                if "adicionar ao carrinho" in selector.casefold():
+                    # O muro subiu enquanto o clique era tentado.
+                    self.url = ("https://www.mercadolivre.com.br/captcha/wall/"
+                                "logged?go_url=https%3A%2F%2Fexemplo")
+                    return _FakeLocator(self, selector, exists=False)
+                return super().locator(selector)
+
+        page = _PaginaComMuro()
+        validation = SimpleNamespace(
+            pk=11, cupom=SimpleNamespace(codigo="TESTE20"),
+            product_url="https://www.mercadolivre.com.br/p/MLB12345678",
+        )
+        observacao = _observe_ml_cart(page, validation)
+        self.assertEqual(observacao.reason_code, "challenge")
+        self.assertNotEqual(observacao.reason_code, "add_to_cart_control_missing")
+
+    def test_reconhece_o_muro_pelo_texto_alem_da_url(self):
+        self.assertEqual(
+            _session_problem("https://www.mercadolivre.com.br/qualquer",
+                             "Por seguranca, complete esta etapa"),
+            "challenge",
+        )
+
     def test_detects_login_and_challenge(self):
         self.assertEqual(_session_problem(
             "https://www.mercadolivre.com.br/login", ""), "session_expired"
