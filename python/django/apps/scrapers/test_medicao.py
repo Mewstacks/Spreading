@@ -81,3 +81,60 @@ class TopNaoEscalaComOCatalogoTests(TestCase):
             com_200, com_10 + 5,
             f"20x mais cupons custou {com_200 - com_10} queries a mais: o N+1 voltou.",
         )
+
+
+class TopClassificaAJanelaInteiraTests(TestCase):
+    """A varredura de prontidão não pode parar ao encher a página pedida.
+
+    `pendentes_ocultos`, o funil por loja, a promoção da loja menor e o total de
+    páginas descrevem a JANELA INTEIRA, não os 20 cards. Enquanto a varredura
+    parava cedo, um catálogo com muita oferta de uma loja e pouca de outra media,
+    em 25/08/2026: zero Amazon na primeira página, Amazon fora do funil, o aviso
+    de tag Amazon ausente sumido, 5 páginas oferecidas de 27 e `pendentes_ocultos`
+    em 0 de 60. Ou seja: a loja menor desaparecia atrás do volume da maior — que é
+    exatamente o oposto do que a tela existe para fazer.
+    """
+
+    def _produto(self, usuario, marketplace, i, *, pronto, preco):
+        produto = Produto.objects.create(
+            marketplace=marketplace, nome=f"{marketplace} {i}", origem="oferta",
+            preco_sem_desconto=200, preco_com_cupom=preco,
+            link_produto=f"https://example.com/{marketplace}/{i}")
+        registrar(marketplace, "", produto.link_produto, preco)
+        if pronto:
+            LinkAfiliadoUsuario.objects.create(
+                usuario=usuario, produto=produto,
+                link_afiliado=f"https://loja.com/sec/{marketplace}{i}",
+                afiliado_ok=True, verificado_ok=True)
+        return produto
+
+    def test_loja_menor_nao_some_atras_do_volume_da_maior(self):
+        cache.clear()
+        user = get_user_model().objects.create_user("janela", password="x")
+        user.perfil.marcar_verificado()
+        # A ordenação é por desconto, então a loja grande com desconto alto ocupa
+        # todo o começo do ranking e a loja pequena cai depois da posição 100 — a
+        # fronteira do primeiro lote. Era exatamente aí que a varredura parava.
+        for i in range(120):
+            self._produto(user, "mercadolivre", i, pronto=True, preco=100)
+        for i in range(5):
+            self._produto(user, "amazon", i, pronto=True, preco=190)
+        for i in range(7):
+            self._produto(user, "amazon", 100 + i, pronto=False, preco=190)
+
+        self.client.force_login(user)
+        resposta = self.client.get(reverse("scraper-top"))
+        self.assertEqual(resposta.status_code, 200)
+
+        lojas = {linha["slug"]: linha for linha in resposta.context["prontos_por_loja"]}
+        self.assertIn("amazon", lojas, "A Amazon sumiu do funil por loja.")
+        self.assertEqual(lojas["amazon"]["prontos"], 5)
+        self.assertEqual(lojas["amazon"]["pendentes"], 7)
+        # A contagem de pendentes descreve a janela, não o pedaço varrido.
+        self.assertEqual(resposta.context["pendentes_ocultos"], 7)
+        # E a loja menor aparece na PRIMEIRA página, que é o que
+        # equilibrar_primeira_pagina existe para garantir.
+        self.assertTrue(
+            any(p.marketplace == "amazon" for p in resposta.context["produtos"]),
+            "Nenhum item da loja menor na primeira página.",
+        )

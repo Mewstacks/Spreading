@@ -2776,28 +2776,26 @@ def top_promocoes(request):
             # Resolver o catálogo inteiro exigia validar milhares de linhas sob RLS
             # antes de mostrar 20 cards. Também não podemos usar EXISTS correlacionado:
             # a política de tenant é deliberadamente cara e seria reavaliada quatro
-            # vezes por produto. Caminhamos pelo ranking em lotes pequenos e paramos
-            # assim que há itens suficientes para a página pedida + prova de próxima.
-            try:
-                pagina_pedida = max(1, int(pagina or 1))
-            except (TypeError, ValueError):
-                pagina_pedida = 1
-            necessarios = pagina_pedida * POR_PAGINA + 1
-            tamanho_lote = 100
+            # vezes por produto. Caminhamos pelo ranking em lotes: o IN volta pequeno
+            # e `limite_catalogo` já limita quanto se percorre.
+            #
+            # O que NÃO pode existir aqui é parada antecipada ao encher a página
+            # pedida. `pendentes_ocultos`, o funil por loja, a promoção da loja
+            # menor (equilibrar_primeira_pagina) e o total de páginas descrevem a
+            # JANELA INTEIRA, não os 20 cards. Medido contra 500 ofertas ML e 30
+            # Amazon prontas, o corte antecipado dava: zero Amazon na primeira
+            # página, Amazon fora do funil, o aviso de tag ausente sumido, 5
+            # páginas oferecidas de 27 e `pendentes_ocultos` em 0 de 60 — ou seja,
+            # a loja menor desaparecia atrás do volume da maior.
+            tamanho_lote = 500
             prontos, pendentes = [], []
             for inicio in range(0, len(candidatos), tamanho_lote):
                 lote = candidatos[inicio:inicio + tamanho_lote]
                 _preparar(lote)
-                prontos.extend(
-                    produto for produto in lote
-                    if getattr(produto, "afiliado_pronto", False)
-                )
-                pendentes.extend(
-                    produto for produto in lote
-                    if not getattr(produto, "afiliado_pronto", False)
-                )
-                if len(prontos) >= necessarios:
-                    break
+                for produto in lote:
+                    alvo = (prontos if getattr(produto, "afiliado_pronto", False)
+                            else pendentes)
+                    alvo.append(produto)
             pendentes_ocultos = len(pendentes)
             pendentes_por_loja = contar_por_marketplace(pendentes)
             candidatos = prontos
