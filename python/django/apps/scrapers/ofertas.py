@@ -1264,7 +1264,11 @@ def _linha_prova_do_deal(deal) -> str:
     creditá-lo aqui faria todo item da loja virar "menor preço".
     """
     historico = getattr(deal, "historico", None) or {}
-    if not int(historico.get("n") or 0):
+    # Cinco observações, não uma. O `pontuar` pode se apoiar no que houver — é um
+    # número interno que só ordena. Isto aqui vira uma AFIRMAÇÃO pública assinada
+    # pelo creator, e "menor preço em 90 dias" apoiado em duas leituras é a mesma
+    # classe de erro que mandou "De R$ 289 por R$ 183,91" para o grupo.
+    if int(historico.get("n") or 0) < 5:
         return ""
     referencia = deal.preco_vitrine if deal.cupom_perene else deal.preco_final
     minimo = float(historico.get("minimo") or 0)
@@ -1395,9 +1399,14 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
     lista = float(getattr(produto, "preco_sem_desconto", 0) or 0)
     preco = m.bold(f"R$ {_preco_br(deal.preco_final)}")
     if deal.desconto_comprovado and lista > deal.preco_final:
-        linhas.append(f"🔥 {preco}  —  chega a custar R$ {_preco_br(lista)}")
+        # "(de R$ 1.399)" e não "chega a custar R$ 1.399": a segunda lê como se o
+        # preço fosse SUBIR, e é a forma que todo canal de oferta usa.
+        linhas.append(f"🔥 {preco}  (de R$ {_preco_br(lista)})")
     else:
         linhas.append(f"🔥 {preco}")
+    prova = _linha_prova_do_deal(deal)
+    if prova:
+        linhas.append(f"📉 {esc(prova)}")
     loja = _nome_loja(getattr(produto, "marketplace", ""))
     if loja:
         linhas.append(f"🏬 Achado no {esc(loja)}")
@@ -2523,8 +2532,12 @@ _RUIDO_NOME_PRODUTO = re.compile(
 # "...Fórmula com Máxima Concentração e" e a condição do cupom terminou em
 # "compra a partir de R$" — anunciando um mínimo sem dizer qual.
 _CAUDA_PENDURADA = re.compile(
-    r"[\s,;:|/–—-]*(?:\b(?:e|ou|de|da|do|das|dos|com|sem|para|por|at[ée]|em|no|na|"
-    r"nos|nas|a\s+partir\s+de)\b|R\$)\s*$",
+    # `à` e `ao` faltavam, e é neles que o nome do ML costuma quebrar:
+    # "Smartwatch ... Bluetooth Ip68 À" — o "À Prova D'água" ficou do outro lado do
+    # corte. `+` e `&` entram porque "8gb +" e "Notebook &" penduram igual.
+    r"[\s,;:|/–—+&-]*(?:\b(?:e|ou|de|da|do|das|dos|com|sem|para|por|at[ée]|em|no|na|"
+    r"nos|nas|[àá]|ao|aos|[àá]s|sob|sobre|"
+    r"a\s+partir\s+de)\b|R\$)\s*$",
     re.I,
 )
 
@@ -2538,13 +2551,33 @@ def _sem_cauda_pendurada(texto: str) -> str:
 
 
 def _nome_principal_produto(nome, limite=70) -> str:
-    """Limpa ruido comercial e corta em palavra, sem depender de IA externa."""
+    """Limpa ruido comercial e corta em SEGMENTO, sem depender de IA externa.
+
+    Nome de marketplace é lista de specs separada por vírgula — "Celular Samsung
+    Galaxy A17 Com Ia, 128gb, 4gb Ram, Câm De 50mp, Tela De 6.7 , Nfc, Ip54 -
+    Preto". Cortar na palavra mais próxima do limite parava no meio de uma spec, e
+    o grupo lia "…Câm De 50mp, Tela": a frase morre no ar e parece raspagem
+    quebrada — o oposto do que um canal que converte publica.
+
+    Quando há vírgula suficientemente adiante, ela é o corte certo, porque cada
+    segmento é uma spec inteira. Sem vírgula, volta ao corte por palavra.
+    """
     texto = re.sub(r"\s+", " ", str(nome or "")).strip(" -–—,;")
     texto = _RUIDO_NOME_PRODUTO.sub("", texto)
+    # O ML emite " ," de verdade ("Tela De 6.7 , Nfc"); sem normalizar, o corte por
+    # segmento enxerga um segmento vazio e erra a fronteira.
+    texto = re.sub(r"\s+([,;])", r"\1", texto)
     texto = re.sub(r"\s{2,}", " ", texto).strip(" -–—,;")
     if len(texto) <= limite:
         return texto
-    cortado = texto[:limite + 1].rsplit(" ", 1)[0].rstrip(" -–—,;|/")
+    janela = texto[:limite + 1]
+    virgula = max(janela.rfind(","), janela.rfind(";"))
+    # 55% do limite: abaixo disso sobra nome de menos para identificar o produto,
+    # e aí vale mais cortar na palavra do que num segmento inicial solto.
+    if virgula >= limite * 0.55:
+        return (_sem_cauda_pendurada(janela[:virgula].rstrip(" -–—,;|/"))
+                or janela[:virgula])
+    cortado = janela.rsplit(" ", 1)[0].rstrip(" -–—,;|/")
     # Parêntese aberto e não fechado: o corte por palavra respeitou o limite mas
     # deixou "(8gb Ram+8gb Ram" pendurado no fim do nome. Descarta o trecho a
     # partir da abertura órfã — o que estava lá dentro era detalhe, não o produto.

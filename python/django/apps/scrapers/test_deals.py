@@ -360,6 +360,53 @@ class MensagemDealTests(BaseDeals):
         )
         self.assertEqual(_linha_prova_do_deal(deal), "")
 
+    def test_serie_curta_nao_sustenta_afirmacao_publica(self):
+        """Duas leituras nao autorizam dizer "menor preco em 90 dias".
+
+        O score pode se apoiar no que houver: e numero interno, so ordena. Esta
+        linha vai assinada pelo creator no grupo, e e a mesma classe de erro que
+        mandou "De R$ 289 por R$ 183,91" para um grupo real em 03/09.
+        """
+        from apps.scrapers.ofertas import _linha_prova_do_deal
+
+        produto = self._produto()
+        curto = deals.DealCandidate(
+            produto=produto, preco_vitrine=80.0, preco_final=80.0,
+            historico={"n": 2, "mediana": 160.0, "minimo": 80.0},
+        )
+        self.assertEqual(_linha_prova_do_deal(curto), "")
+
+        sustentado = deals.DealCandidate(
+            produto=produto, preco_vitrine=80.0, preco_final=80.0,
+            historico={"n": 9, "mediana": 160.0, "minimo": 80.0},
+        )
+        self.assertEqual(
+            _linha_prova_do_deal(sustentado),
+            "Menor preco que observamos em 90 dias".replace("preco", "preço"),
+        )
+
+    def test_a_prova_de_preco_chega_na_mensagem(self):
+        """A funcao existia, era testada, e nenhuma mensagem a chamava.
+
+        E a unica frase da mensagem que espelhador e formatador nao conseguem
+        escrever: eles repassam o que a loja diz, sem serie propria de preco.
+        """
+        from apps.scrapers.ofertas import montar_mensagem_deal
+
+        deal = self._deal()
+        deal.historico = {"n": 9, "mediana": 160.0, "minimo": 80.0}
+        texto = montar_mensagem_deal(deal, "https://meli.la/abc", usuario=self.user)
+        self.assertIn("90 dias", texto)
+
+    def test_o_preco_antigo_nao_e_anunciado_como_alta(self):
+        """"chega a custar R$ X" le como se o preco fosse SUBIR."""
+        from apps.scrapers.ofertas import montar_mensagem_deal
+
+        deal = self._deal()
+        deal.desconto_comprovado = True
+        texto = montar_mensagem_deal(deal, "https://meli.la/abc", usuario=self.user)
+        self.assertNotIn("chega a custar", texto)
+
 
 class TextoIATests(TestCase):
     """O modelo pode vender; não pode inventar número nem alegação."""
