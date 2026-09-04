@@ -404,9 +404,28 @@ def selecionar_conteudo_para_grupo(config, limit=8, *, registrar_shadow=True):
         try:
             from apps.scrapers.deals import gerar_deals
             deals = gerar_deals(config, limite=limit)
-        except Exception:
+        except Exception as exc:
             logger.exception("Camada Deal falhou; seguindo pelo ranking legado")
             deals = []
+            if live:
+                # Com a camada ligada, uma exceção aqui não degrada: o `return []`
+                # lá embaixo para de publicar para esta regra. Parar é a decisão
+                # certa; parar em silêncio não é. `log_event` com level="error"
+                # projeta IncidenteSaude e dispara o canal de alerta, então a
+                # organização descobre em minutos em vez de estranhar o silêncio.
+                from apps.scrapers.eventos import log_event
+
+                log_event(
+                    "selecao", "deal_layer_falhou",
+                    "Camada Deal falhou com a flag ligada; nada será publicado por esta regra.",
+                    level="error",
+                    usuario=getattr(config, "owner", None),
+                    contexto={
+                        "config_id": getattr(config, "pk", None),
+                        "destino": getattr(config, "grupo_id", ""),
+                    },
+                    exc=exc,
+                )
 
     if live and deals:
         candidatos = [

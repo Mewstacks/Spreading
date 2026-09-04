@@ -14,35 +14,53 @@ Two Fly apps in region **gru** (São Paulo):
 > Fill placeholders in `.env.fly` first. Logged in as `pedro@mewstack.com.br`
 > (`fly auth whoami`), org `germano-argenta`.
 
-## Custo (medido em 09/08/2026, tabela da região `gru`)
+## Custo (lido de `fly machine list` em 03/09/2026, tabela da região `gru`)
 
 `gru` tem markup de ~1,55× sobre a tabela base do Fly — o mesmo preset custa bem mais
-em São Paulo do que em `ams`. Valores por mês:
+em São Paulo do que em `ams`. São QUATRO máquinas, não três: `spreading-web` tem dois
+process groups (`web` e `worker`) e cada um é uma máquina própria desde o split de
+workers. Valores por mês:
 
-| Item | US$/mês |
-|---|---|
-| `spreading-web` — `shared-cpu-2x` 2GB | 18,40 |
-| `spreading-wa` — `shared-cpu-2x` 4GB | 34,56 |
-| `spreading-db` — `shared-cpu-1x` 1GB | 9,20 |
-| Volumes (7GB × US$0,15) | 1,05 |
-| **Total** | **~63,21** + egress (~US$0,04/GB na América do Sul) |
+| Máquina | Preset | US$/mês |
+|---|---|---|
+| `spreading-web` / `web` | `shared-cpu-2x` 1GB | 10,32 |
+| `spreading-web` / `worker` | `shared-cpu-2x` 2GB | 18,40 |
+| `spreading-wa` | `shared-cpu-2x` 4GB | 34,56 |
+| `spreading-db` | `shared-cpu-2x` 1GB | 10,32 |
+| Volumes: `ml_data` 1GB + `wa_data` 3GB + `pg_data` 3GB | 7GB × US$0,15 | 1,05 |
+| **Compute** | | **73,60** |
+
+| Cenário | US$/mês | R$/mês (a R$5,16) |
+|---|---|---|
+| 24/7 | 74,65 | R$385 — **acima do teto** |
+| Com o desligamento noturno abaixo | **53,97** | **R$278** |
+
+O teto do produto é **R$300/mês**, e é o desligamento noturno que o faz caber. Egress
+na América do Sul é ~US$0,04/GB e não move a conta neste volume.
 
 Não há homologação: foi destruída em 09/08/2026 para cortar custo.
 
 ### Desligamento noturno
 
-A produção é parada diariamente à **00:00** e religada às **08:00**, no horário de
-São Paulo, pelo workflow `.github/workflows/fly-nightly-power.yml`. O desligamento
-ocorre na ordem `web -> WhatsApp -> Postgres`; a inicialização usa a ordem inversa
-e só avança quando os health checks da dependência estão passando.
+A produção é parada diariamente à **01:00** e religada às **07:45**, no horário de
+São Paulo, pelo workflow `.github/workflows/fly-nightly-power.yml`, com uma segunda
+tentativa de start às **08:20**. As 6h45 paradas cortam 28,1% do custo de máquina —
+é a diferença entre R$385 e R$278. O desligamento ocorre na ordem
+`web -> WhatsApp -> Postgres`; a inicialização usa a ordem inversa e só avança quando
+os health checks da dependência estão passando (`wait_until_healthy`).
+
+Em 16, 17 e 18/08/2026 o RELIGAMENTO falhou e a produção ficou fora do ar o dia
+inteiro — à noite não sobra nada de pé, então não há vigia externo para perceber. O
+`wait_until_healthy`, a ordem de dependência, o filtro de checks do Postgres e o
+segundo start das 08:20 existem por causa disso.
 
 O workflow também aceita execução manual com `start` ou `stop`. Ele usa três
 deploy tokens restritos a um único app, armazenados nos secrets do repositório:
 `FLY_TOKEN_WEB`, `FLY_TOKEN_WA` e `FLY_TOKEN_DB`. Os tokens atuais expiram em um
 ano e devem ser rotacionados antes de agosto de 2027.
 
-**Antes de mexer em `[[vm]]`, saiba o preço.** Trocar os dois serviços para
-`performance-2x`/4gb leva a conta de ~US$63 para ~US$210/mês. O passo intermediário
+**Antes de mexer em `[[vm]]`, saiba o preço, e pergunte.** Trocar os dois serviços
+para `performance-2x`/4gb leva a conta para ~US$210/mês. O passo intermediário
 barato é `shared-cpu-4x` (+US$2,24/mês por VM), que dobra vCPU e cota de baseline.
 Há ainda reservation blocks do Fly: 40% de desconto em compute, com pagamento anual
 adiantado (levaria o compute de ~US$62 para ~US$40/mês).

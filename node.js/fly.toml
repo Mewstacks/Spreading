@@ -114,21 +114,26 @@ kill_timeout = "90s"
 # (R$301,81) — ainda ligeiramente acima de R$300, mas a diferença de infra é
 # pequena; o resto do estouro de agosto vinha do preset performance-2x, já corrigido.
 #
-# VOLTOU PARA 2GB em 03/09/2026 por decisão explícita do usuário (custo > margem).
-# A resposta certa ao aperto de memória não é comprar VM maior: é o Chromium
-# gastar menos. `index.js` ganhou no mesmo commit as flags que a comunidade
-# whatsapp-web.js documenta para isto — Site Isolation desligado
-# (--disable-features=IsolateOrigins,site-per-process) e --renderer-process-limit=1
-# cortam processo por origem numa automação de aba única, mais a bateria de
-# serviços de fundo (sync, extensions, hang-monitor, breakpad...). Ainda SEM
-# medição pós-flags do pico conectado real: a próxima sessão que conectar prova
-# o número. Se o pico continuar perto de 1,17GB mesmo com as flags, a memória
-# não é compressível por flag — Chromium com WhatsApp Web simplesmente pesa isso,
-# e o próximo lance de queda vai exigir decidir entre R$300 e estabilidade, não
-# entre "otimizado" e "não otimizado".
+# VOLTOU PARA 4GB em 03/09/2026, por decisão explícita do usuário, com o número na
+# mão. A conta de US$74,65/mês (R$385) citada acima estava errada: era a topologia
+# 24/7. Com o desligamento noturno 01:00->07:45 que já está no ar, o compute cai
+# 28,1% e as quatro máquinas + 7GB de volume somam:
+#
+#   hoje, WA em 2GB ....... US$42,35/mês = R$219
+#   com o WA em 4GB ....... US$53,97/mês = R$278   (+US$11,62 = +R$59/mês)
+#
+# a R$5,16/US$ — ou seja, R$22 ABAIXO do teto de R$300, e ainda aguenta o dólar
+# até ~R$5,56. O trade-off que parecia "R$300 ou estabilidade" não existia: existia
+# porque a conta foi feita sem o desligamento.
+#
+# As flags de Chromium do commit anterior ficam (Site Isolation desligado,
+# --renderer-process-limit=1, serviços de fundo cortados) — elas reduzem o pico de
+# verdade e continuam valendo. O que muda é parar de apostar a sessão do cliente
+# numa margem de 140MB enquanto a medição pós-flags do pico conectado real não
+# existe. Quando essa medição existir, e só então, cabe reavaliar 2GB.
 #
 # As duas CPUs permanecem: o gargalo conhecido é cota de CPU, não RAM. Aceitar mais
 # números exige subir MAX_WHATSAPP_SESSIONS, CPU e memória juntos.
 [[vm]]
   size = "shared-cpu-2x"
-  memory = "2gb"
+  memory = "4gb"

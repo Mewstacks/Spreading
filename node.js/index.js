@@ -2586,6 +2586,17 @@ process.on('unhandledRejection', (reason) => {
 
 // Liveness público p/ o load balancer: sem contadores (evita vazar quantas sessões
 // existem/estão conectadas a quem não tem a API key). Detalhes ficam em /api/status.
+//
+// `ok` é LIVENESS DO PROCESSO e nada mais. Não transformar em "a sessão está boa":
+// este mesmo path é o [checks.health] da Fly (15s) E o `wait_until_healthy` do
+// religamento noturno. Um `ok:false` porque ninguém pareou o QR faria a máquina
+// nunca subir de manhã — exatamente o apagão de 16, 17 e 18/08.
+//
+// O supervisor externo precisava distinguir "processo mudo" de "sessão quebrada" e
+// só tinha o primeiro. Os contadores abaixo dão o segundo sem mexer no `ok`: fase
+// terminal (`expirado`, `falha_auth`, `recuperacao_pausada`) e inconsistência são
+// estados dos quais a sessão NÃO sai sozinha. São contagens, não identidades —
+// nada de telefone, id ou organização nesta rota sem capability.
 app.get('/health', (req, res) => {
     let orphaned = 0;
     try {
@@ -2594,11 +2605,17 @@ app.get('/health', (req, res) => {
             && sessionManifest.isQuarantined(path.join(authRootPath, entry.name))
         )).length;
     } catch (_) { orphaned = 0; }
+    const todas = Array.from(sessions.values());
     res.json({
         ok: true,
         worker: process.env.FLY_MACHINE_ID || process.env.HOSTNAME || 'local',
         capacity: { used: sessoesOcupandoSlot(), max: MAX_WHATSAPP_SESSIONS },
         orphaned_sessions: orphaned,
+        sessions_total: todas.length,
+        sessions_ready: todas.filter((s) => s.fase === 'conectado' && s.isConnected).length,
+        sessions_stuck: todas.filter((s) => (
+            FASES_TERMINAIS.has(s.fase) || s.fase === 'inconsistente'
+        )).length,
     });
 });
 

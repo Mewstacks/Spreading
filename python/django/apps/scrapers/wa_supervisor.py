@@ -36,6 +36,13 @@ logger = logging.getLogger(__name__)
 
 _FALHAS_KEY = "wa_supervisor_falhas"
 _COOLDOWN_KEY = "wa_supervisor_cooldown"
+# Sessão travada não se resolve com restart — `expirado`, `falha_auth` e
+# `recuperacao_pausada` são estados dos quais a sessão não sai sozinha e que só
+# um humano reconecta. Por isso este caso NÃO entra no contador de falhas: ele
+# vira incidente, que é o que chama alguém. Uma hora de silêncio por chave evita
+# encher EventoOperacional a cada sonda enquanto ninguém reconecta.
+_TRAVADA_KEY = "wa_supervisor_sessao_travada_avisada"
+_TRAVADA_SILENCIO_S = 3600
 # O contador expira sozinho: se o monitor morrer no meio de uma sequência de
 # falhas, a contagem velha não pode viver para sempre e assombrar o processo novo.
 _FALHAS_TTL_S = 600
@@ -51,6 +58,8 @@ _ESTADOS_EM_TRANSICAO = frozenset(
     {"created", "starting", "stopping", "replacing", "destroying"}
 )
 _avisou_sem_token = False
+# Último corpo do /health, preenchido por _sonda_saudavel (ver docstring de lá).
+_ULTIMO_CORPO: dict = {}
 
 
 def decidir_acao(*, token: str, falhas_seguidas: int, em_cooldown: bool,
@@ -87,14 +96,68 @@ def gesto_para_estado(estado: str) -> str:
 
 
 def _sonda_saudavel() -> bool:
+    """Liveness do processo, e só isso. Continua sendo o gatilho do restart.
+
+    O corpo da resposta fica em `_ULTIMO_CORPO` porque ele carrega uma informação
+    de outra natureza — o estado das sessões — que exige outro tipo de resposta
+    (avisar um humano, não reiniciar a VM). Guardar em vez de devolver mantém a
+    assinatura que o resto do módulo e os testes já usam, e evita uma segunda
+    requisição a cada sonda de 15s só para ler dois contadores.
+    """
+    global _ULTIMO_CORPO
     # timeout=(connect, read): com a VM travada o connect ainda completa rápido
     # (é o kernel que aceita); quem delata o travamento é o READ não responder.
     url = f"{settings.WHATSAPP_API_URL.rstrip('/')}/health"
+    _ULTIMO_CORPO = {}
     try:
         resp = requests.get(url, timeout=(2, 5))
-        return resp.status_code == 200
+        if resp.status_code != 200:
+            return False
+        try:
+            corpo = resp.json()
+        except ValueError:
+            corpo = {}
+        if isinstance(corpo, dict):
+            _ULTIMO_CORPO = corpo
+        return True
     except requests.RequestException:
         return False
+
+
+def _avisar_sessao_travada(corpo: dict) -> None:
+    """O worker responde, mas a sessão está num estado do qual não sai sozinha.
+
+    Era o buraco do vigia: `/health` só dizia se o processo estava mudo, então
+    sessão expirada ou em `recuperacao_pausada` podia durar horas sem ninguém
+    saber — a tela de Saúde mostrava, e ninguém abre a tela de Saúde. Restart
+    aqui seria pior que inútil (a sessão volta no mesmo estado e o loop recomeça),
+    então o gesto certo é abrir incidente, que é o que aciona o canal de alerta.
+    """
+    try:
+        travadas = int(corpo.get("sessions_stuck") or 0)
+    except (TypeError, ValueError):
+        return
+    if travadas <= 0:
+        cache.delete(_TRAVADA_KEY)
+        return
+    if cache.get(_TRAVADA_KEY):
+        return
+    cache.set(_TRAVADA_KEY, True, timeout=_TRAVADA_SILENCIO_S)
+    logger.error(
+        "wa_supervisor: %s sessão(ões) WhatsApp em estado terminal; precisa de reconexão manual.",
+        travadas,
+    )
+    log_event(
+        "whatsapp", "sessao_travada",
+        f"{travadas} sessão(ões) WhatsApp em estado terminal (expirado/falha_auth/"
+        f"recuperacao_pausada). O worker responde, mas não envia: precisa reconectar.",
+        level="error",
+        contexto={
+            "sessions_stuck": travadas,
+            "sessions_ready": corpo.get("sessions_ready"),
+            "sessions_total": corpo.get("sessions_total"),
+        },
+    )
 
 
 def _armar_cooldown(segundos: int) -> None:
@@ -167,6 +230,7 @@ def verificar() -> str:
     try:
         if _sonda_saudavel():
             cache.set(_FALHAS_KEY, 0, timeout=_FALHAS_TTL_S)
+            _avisar_sessao_travada(_ULTIMO_CORPO)
             return "ok"
         falhas = cache.get(_FALHAS_KEY, 0) + 1
         cache.set(_FALHAS_KEY, falhas, timeout=_FALHAS_TTL_S)

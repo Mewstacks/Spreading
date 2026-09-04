@@ -600,9 +600,12 @@ TELEGRAM_SESSION = os.getenv("TELEGRAM_SESSION", "")  # StringSession do userbot
 # ─────────────────────────────────────────────────────────────
 LLM_ATIVO = os.getenv("LLM_ATIVO", "1") == "1"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-# Sonnet é o padrão para títulos e nomes curtos. A variável continua permitindo
-# fixar outro snapshot sem alterar código em ambientes específicos.
-LLM_MODELO = os.getenv("LLM_MODELO", "claude-sonnet-5")
+# Haiku é o padrão. Os call sites em llm.py e cupom_extractor.py já declaravam
+# Haiku como _MODELO_PADRAO, mas todos leem getattr(settings, "LLM_MODELO", ...)
+# e esta linha SEMPRE define a setting — então o default deles nunca era usado e
+# cada chamada saía em Sonnet. A variável continua permitindo fixar outro
+# snapshot sem alterar código, quando houver motivo medido.
+LLM_MODELO = os.getenv("LLM_MODELO", "claude-haiku-4-5-20251001")
 
 
 # ─────────────────────────────────────────────────────────────
