@@ -108,6 +108,14 @@ _TERMOS_MORTO = ("anúncio pausado", "página não encontrada", "estoque indispo
 _RE_CUPOM = re.compile(r"com\s+cupom|cupom\s+de\s+r?\$|%\s*off\s*com\s*cupom|aplicar\s+cupom")
 _RE_PRECO = re.compile(
     r'andes-money-amount__fraction[^>]*>\s*([\d][\d.  ]{0,12})\s*<')
+_VALOR_CUPOM = r"(\d+(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:\.\d{1,2})?)"
+_RE_PRECO_CUPOM = (
+    re.compile(rf"r\$\s*{_VALOR_CUPOM}\s*com\s+cupom", re.I),
+    re.compile(
+        rf"(?:pre[çc]o\s+)?com\s+cupom[^\d]{{0,40}}r\$\s*{_VALOR_CUPOM}",
+        re.I,
+    ),
+)
 # Marcadores de que veio uma página real do ML (e não um interstitial de challenge).
 _MARCADORES_ML = ("andes-", "ui-pdp", "nav-header", "mercadolivre")
 
@@ -174,7 +182,7 @@ def _preco_riscado_no_buybox(corpo: str) -> bool:
     return bool(fatia) and "andes-money-amount--previous" in fatia
 
 
-def _fatia_do_buybox(corpo: str) -> str:
+def _fatia_do_buybox(corpo: str, limite: int = 8000) -> str:
     """Trecho do HTML que começa no bloco de preço do produto.
 
     Mesma intenção de sempre: NÃO olhar os cards da vitrine /social/ nem os
@@ -185,7 +193,61 @@ def _fatia_do_buybox(corpo: str) -> str:
         inicio = corpo.find("ui-pdp-container")
     if inicio < 0:
         return ""
-    return corpo[inicio:inicio + 8000]
+    return corpo[inicio:inicio + limite]
+
+
+class _TextoVisivelParser(HTMLParser):
+    """Texto e rótulos acessíveis de um trecho HTML, sem dependência externa."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.partes = []
+
+    def handle_starttag(self, _tag, attrs):
+        atributos = dict(attrs)
+        for nome in ("aria-label", "title"):
+            valor = str(atributos.get(nome) or "").strip()
+            if valor and "cupom" in valor.casefold():
+                self.partes.append(valor)
+
+    def handle_data(self, data):
+        texto = str(data or "").strip()
+        if texto:
+            self.partes.append(texto)
+
+
+def preco_com_cupom_do_texto(texto: str, preco_vitrine: float = 0.0) -> float:
+    """Extrai ``R$ X com Cupom`` sem confundir percentual ou parcelamento.
+
+    O ML alterna o valor entre texto corrido, filhos ``span`` e ``aria-label``.
+    Normalizar o espaço em torno de ponto/vírgula faz os três formatos convergirem.
+    Quando a vitrine é conhecida, só aceita um valor realmente menor.
+    """
+    limpo = " ".join(str(texto or "").replace("\xa0", " ").split())
+    limpo = re.sub(r"\s*([.,])\s*", r"\1", limpo)
+    for padrao in _RE_PRECO_CUPOM:
+        for match in padrao.finditer(limpo):
+            valor = normalizar_dinheiro(match.group(1))
+            if valor <= 0:
+                continue
+            if preco_vitrine > 0 and valor >= preco_vitrine:
+                continue
+            return valor
+    return 0.0
+
+
+def preco_com_cupom_da_pdp(corpo: str, preco_vitrine: float = 0.0) -> float:
+    """Preço pós-cupom explicitamente renderizado no buybox da PDP."""
+    fatia = _fatia_do_buybox(corpo, limite=16000)
+    if not fatia or "cupom" not in fatia.casefold():
+        return 0.0
+    parser = _TextoVisivelParser()
+    try:
+        parser.feed(fatia)
+    except Exception:
+        logger.debug("Parser do preço com cupom da PDP falhou", exc_info=True)
+        return 0.0
+    return preco_com_cupom_do_texto(" ".join(parser.partes), preco_vitrine)
 
 
 class _PrecoBuyboxParser(HTMLParser):
@@ -423,7 +485,10 @@ def relatorio_de_preco(link: str, *, sessao=None, timeout=None) -> dict:
     `bloqueio` não-vazio significa INCONCLUSIVO, nunca "o preço está errado":
     challenge do anti-bot não pode virar veredito sobre a oferta.
     """
-    resultado = {"preco": 0.0, "preco_de": 0.0, "url_final": "", "bloqueio": ""}
+    resultado = {
+        "preco": 0.0, "preco_de": 0.0, "preco_cupom": 0.0,
+        "cupom_detectado": False, "url_final": "", "bloqueio": "",
+    }
     if not link:
         resultado["bloqueio"] = "link vazio"
         return resultado
@@ -447,6 +512,12 @@ def relatorio_de_preco(link: str, *, sessao=None, timeout=None) -> dict:
         return resultado
 
     resultado["preco"], resultado["preco_de"] = preco_da_pdp(corpo)
+    resultado["preco_cupom"] = preco_com_cupom_da_pdp(
+        corpo, resultado["preco"],
+    )
+    resultado["cupom_detectado"] = bool(
+        resultado["preco_cupom"] or _RE_CUPOM.search(corpo)
+    )
     if resultado["preco"] <= 0:
         # Página abriu e não é challenge, mas o preço não saiu: layout novo ou
         # bloco fora da fatia. Também é inconclusivo — jamais um preço zero.

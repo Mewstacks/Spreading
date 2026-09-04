@@ -387,12 +387,30 @@ def _coletar_cards(page):
             except Exception:
                 pass
 
+            preco_cupom = 0.0
+            try:
+                rotulos_cupom = card.get_by_text(
+                    re.compile(r"com\s+cupom", re.I),
+                )
+                if rotulos_cupom.count() > 0:
+                    from apps.scrapers.scraper_mercadolivre.link_http import (
+                        preco_com_cupom_do_texto,
+                    )
+                    preco_cupom = preco_com_cupom_do_texto(
+                        card.inner_text(timeout=500), por,
+                    )
+            except Exception:
+                # O card continua sendo uma oferta válida. A revalidação da PDP
+                # tenta novamente antes do envio.
+                pass
+
             link_normalizado = _normalizar_link_produto(link)
             out.append({
                 "nome": nome[:255],
                 "link_produto": link_normalizado,
                 "preco_sem_desconto": de,
                 "preco_com_cupom": por,
+                "preco_com_cupom_ativado": preco_cupom,
                 "imagem_url": imagem[:1000],
                 "frete_full": full,
                 "relampago": relampago,
@@ -449,6 +467,27 @@ def _taxonomia(coletado, macro_fixa, defaults):
     }
 
 
+def _preco_efetivo_oferta(coletado):
+    """Preço pago após cupom, somente quando o próprio card o comprovou."""
+    preco_cupom = float(coletado.get("preco_com_cupom_ativado") or 0)
+    vitrine = float(coletado.get("preco_com_cupom") or 0)
+    return preco_cupom if 0 < preco_cupom < vitrine else vitrine
+
+
+def _evidencia_oferta(coletado):
+    evidencia = {"transport": "public-web"}
+    preco_cupom = _preco_efetivo_oferta(coletado)
+    vitrine = float(coletado.get("preco_com_cupom") or 0)
+    if 0 < preco_cupom < vitrine:
+        evidencia["promotion"] = {
+            "present": True,
+            "coupon_confirmed": True,
+            "coupon_final_price": preco_cupom,
+            "source": "offer-card",
+        }
+    return evidencia
+
+
 def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):
     """Upsert não destrutivo. Uma coleta parcial nunca apaga o catálogo anterior."""
     _reconectar_db()  # conexão fresca: a fase de browser pode ter matado o socket
@@ -466,12 +505,12 @@ def _salvar(coletados, origem, codigo_checkout="", macro_fixa=None):
                     "nome": o["nome"], "preco_sem_desconto": o["preco_sem_desconto"],
                     "preco_com_cupom": o["preco_com_cupom"],
                     "preco_fonte": o["preco_sem_desconto"],
-                    "preco_efetivo": o["preco_com_cupom"],
+                    "preco_efetivo": _preco_efetivo_oferta(o),
                     "estado": "invalido" if catalogo else "ativo",
                     "falha_verificacao": (
                         "Catálogo universal sem anúncio individual afiliável."
                         if catalogo else ""), "falhas_consecutivas": 0,
-                    "confianca": "media", "evidencia": {"transport": "public-web"},
+                    "confianca": "media", "evidencia": _evidencia_oferta(o),
                     "imagem_url": o["imagem_url"], "frete_full": o["frete_full"],
                     "relampago": o.get("relampago", False)}
         produto, _ = _upsert_resiliente(
@@ -510,7 +549,7 @@ def _upsert_ofertas(coletados):
                 "preco_sem_desconto": o["preco_sem_desconto"],
                 "preco_com_cupom": o["preco_com_cupom"],
                 "preco_fonte": o["preco_sem_desconto"],
-                "preco_efetivo": o["preco_com_cupom"],
+                "preco_efetivo": _preco_efetivo_oferta(o),
                 "fonte": "mercadolivre-web",
                 "estado": "invalido" if catalogo else "ativo",
                 "falha_verificacao": (
@@ -519,6 +558,7 @@ def _upsert_ofertas(coletados):
                 "imagem_url": o["imagem_url"],
                 "frete_full": o["frete_full"],
                 "relampago": o.get("relampago", False),
+                "evidencia": _evidencia_oferta(o),
             }),
         )
         if catalogo:

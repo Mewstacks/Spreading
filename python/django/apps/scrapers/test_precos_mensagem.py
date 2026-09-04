@@ -159,6 +159,48 @@ class MensagemDeProdutoDeCupomMLTests(TestCase):
         # O antigo pós-cupom duplamente descontado (20% de 80) não pode aparecer.
         self.assertNotIn("64", texto)
 
+    def test_oferta_com_preco_de_cupom_observado_anuncia_valor_pago(self):
+        produto = Produto.objects.create(
+            owner=None, marketplace="mercadolivre", nome="Câmera Wi-Fi 4K",
+            origem="oferta", fonte="mercadolivre-web", estado="ativo",
+            link_produto="https://ml.com.br/camera/p/MLB2",
+            preco_sem_desconto=399.0, preco_com_cupom=113.74,
+            preco_efetivo=98.77,
+            evidencia={
+                "promotion": {
+                    "present": True, "coupon_confirmed": True,
+                    "coupon_final_price": 98.77, "source": "pdp-live",
+                },
+            },
+        )
+        from apps.scrapers.models import PrecoHistorico
+        from apps.scrapers.precos import chave_produto
+
+        PrecoHistorico.objects.create(
+            marketplace=produto.marketplace, chave=chave_produto(produto),
+            preco=399.0,
+        )
+
+        texto = montar_mensagem(produto, "https://meli.la/camera", None)
+
+        self.assertIn("POR 98,77", texto)
+        self.assertNotIn("POR 113,74", texto)
+        self.assertIn("CUPOM: ative na página do Mercado Livre", texto)
+
+    def test_preco_efetivo_ml_sem_prova_direta_nao_e_publicado(self):
+        produto = Produto.objects.create(
+            owner=None, marketplace="mercadolivre", nome="Câmera sem prova",
+            origem="oferta", fonte="mercadolivre-web", estado="ativo",
+            link_produto="https://ml.com.br/camera/p/MLB3",
+            preco_sem_desconto=399.0, preco_com_cupom=113.74,
+            preco_efetivo=98.77, evidencia={},
+        )
+
+        texto = montar_mensagem(produto, "https://meli.la/camera", None)
+
+        self.assertIn("POR 113,74", texto)
+        self.assertNotIn("CUPOM: ative na página do Mercado Livre", texto)
+
 
 class NormalizacaoDinheiroTests(TestCase):
     def test_money_aceita_ponto_decimal_e_ponto_de_milhar(self):

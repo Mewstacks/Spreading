@@ -87,9 +87,9 @@ class Produto(models.Model):
     #   preco_com_cupom:    a VITRINE, ou seja, o "POR" que a página mostra ao abrir
     #                       o link. O nome é legado e engana: NÃO é o preço depois
     #                       de aplicar cupom nenhum.
-    #   preco_efetivo:      o que o cliente realmente paga. Só difere da vitrine em
-    #                       fonte de cupom-de-ativação (hoje a página oficial de
-    #                       cupons da Amazon), onde o abatimento já está garantido.
+    #   preco_efetivo:      o que o cliente realmente paga. Só difere da vitrine
+    #                       quando a fonte observou o terceiro preço pós-cupom:
+    #                       cupons oficiais da Amazon ou badge "com Cupom" do ML.
     # Havia dois produtores gravando significados diferentes em preco_com_cupom: o
     # caminho de cupom do ML salvava aqui o preço JÁ descontado, e coupon_products
     # .calcular_precos descontava o cupom de novo em cima — a mensagem anunciava um

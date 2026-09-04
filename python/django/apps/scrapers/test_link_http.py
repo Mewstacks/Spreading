@@ -292,6 +292,29 @@ class PrecoDaPdpTests(SimpleTestCase):
         self.assertEqual(link_http.preco_da_pdp("<html><body>nada</body></html>"),
                          (0.0, 0.0))
 
+    def test_extrai_terceiro_preco_com_cupom(self):
+        cupom = (
+            '<div class="ui-pdp-coupon">'
+            'R$ <span>98</span><span>,77</span> com Cupom</div>'
+        )
+        corpo = _buybox(
+            riscado="399", preco="113", cents="74", extra=cupom,
+        )
+        self.assertEqual(
+            link_http.preco_com_cupom_da_pdp(corpo, 113.74),
+            98.77,
+        )
+
+    def test_preco_com_cupom_nao_aceita_valor_maior_que_a_vitrine(self):
+        corpo = _buybox(
+            riscado="399", preco="113", cents="74",
+            extra='<div>R$ 150,00 com Cupom</div>',
+        )
+        self.assertEqual(
+            link_http.preco_com_cupom_da_pdp(corpo, 113.74),
+            0.0,
+        )
+
 
 class RelatorioDePrecoTests(SimpleTestCase):
     URL = "https://meli.la/abc"
@@ -302,6 +325,17 @@ class RelatorioDePrecoTests(SimpleTestCase):
         self.assertEqual(r["preco"], 1799.90)
         self.assertEqual(r["preco_de"], 2499.00)
         self.assertFalse(r["bloqueio"])
+
+    def test_relatorio_inclui_preco_com_cupom(self):
+        cupom = '<div aria-label="R$ 98,77 com Cupom"></div>'
+        corpo = _buybox(
+            riscado="399", preco="113", cents="74", extra=cupom,
+        ) + "x" * 25000
+        with _get(RespostaFalsa(URL_PDP, corpo)):
+            r = link_http.relatorio_de_preco(self.URL)
+        self.assertEqual(r["preco"], 113.74)
+        self.assertEqual(r["preco_cupom"], 98.77)
+        self.assertTrue(r["cupom_detectado"])
 
     def test_challenge_e_bloqueio_nunca_preco_zero_valido(self):
         with _get(RespostaFalsa(

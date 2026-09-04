@@ -2591,14 +2591,37 @@ def _preco_br(valor) -> str:
 def preco_publicavel(produto) -> float:
     """Preço que o cliente realmente paga na página.
 
-    `preco_com_cupom` guarda a vitrine; em fontes onde o desconto só se aplica ao
-    ativar um cupom (página oficial de cupons da Amazon), o valor pago fica em
-    `preco_efetivo`. Anunciar a vitrine junto de "ative o cupom" faz a mensagem
-    prometer um número que a página não cobra.
+    `preco_com_cupom` guarda a vitrine; quando a fonte comprova um terceiro preço
+    ativável (cupons oficiais da Amazon ou badge "com Cupom" do ML), o valor pago
+    fica em `preco_efetivo`. No ML ele só é aceito junto da evidência direta do
+    card/PDP, para não confundir cálculo de campanha com preço observado.
     """
     atual = getattr(produto, "preco_com_cupom", 0) or 0
+    if getattr(produto, "marketplace", "") == "mercadolivre":
+        inline = _preco_cupom_inline_ml(produto)
+        return inline or atual
     efetivo = getattr(produto, "preco_efetivo", 0) or 0
     return efetivo if 0 < efetivo < atual else atual
+
+
+def _preco_cupom_inline_ml(produto) -> float:
+    """Terceiro preço comprovado diretamente no card/PDP do Mercado Livre."""
+    if getattr(produto, "marketplace", "") != "mercadolivre":
+        return 0.0
+    atual = getattr(produto, "preco_com_cupom", 0) or 0
+    efetivo = getattr(produto, "preco_efetivo", 0) or 0
+    promocao = (getattr(produto, "evidencia", {}) or {}).get("promotion") or {}
+    if not promocao.get("coupon_confirmed"):
+        return 0.0
+    if promocao.get("source") not in {"offer-card", "pdp-live"}:
+        return 0.0
+    try:
+        observado = float(promocao.get("coupon_final_price") or efetivo)
+    except (TypeError, ValueError):
+        return 0.0
+    if 0 < observado < atual and abs(observado - float(efetivo or 0)) < 0.011:
+        return observado
+    return 0.0
 
 
 def anotacao_preco_publicado():
@@ -2821,6 +2844,8 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     elif (getattr(produto, "marketplace", "") == "amazon"
           and (getattr(produto, "evidencia", {}) or {}).get("promotion", {}).get("coupon_confirmed")):
         linha_cupom = f"🎟️ {m.bold('CUPOM: ative na página da Amazon')}"
+    elif _preco_cupom_inline_ml(produto):
+        linha_cupom = f"🎟️ {m.bold('CUPOM: ative na página do Mercado Livre')}"
     else:
         # Códigos genéricos (CupomCodigo) são de checkout do ML — NÃO valem na Amazon.
         mkt = getattr(produto, "marketplace", "mercadolivre")
@@ -3513,9 +3538,20 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             publicacao.link_afiliado = link
             publicacao.link_rastreado = link_publicado
             publicacao.cupom = (
+                # Precedência: o cupom do deal manda, porque é ele que a
+                # mensagem anuncia e é sobre ele que o preço final foi calculado.
+                # Depois o cupom da campanha, depois o código de checkout, e por
+                # último o rótulo de ativação inline do ML — que veio de
+                # `ad46360` e cobre o caso em que o desconto existe na página e
+                # não há código nenhum para citar.
                 getattr(getattr(deal, "cupom", None), "titulo", "")
                 or (cupom.titulo if cupom else "")
-                or getattr(produto, "codigo_checkout", "") or "")
+                or getattr(produto, "codigo_checkout", "")
+                or (
+                    "Ative na página do Mercado Livre"
+                    if _preco_cupom_inline_ml(produto) else ""
+                )
+            )
             # preco_final foi gravado antes da revalidação; realinhar aqui mantém
             # o registro igual ao número que a mensagem anuncia.
             publicacao.preco_final = (
