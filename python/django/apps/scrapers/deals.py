@@ -45,6 +45,12 @@ PROVAS_VALIDAS = frozenset({
 MOTIVO_TERMO_NEGATIVO = "termo_negativo"
 MOTIVO_FORA_DA_FAIXA = "fora_da_faixa_de_preco"
 MOTIVO_SEM_CUPOM_APLICAVEL = "sem_cupom_aplicavel"
+# Sub-motivos de `sem_cupom_aplicavel`. O nome antigo dizia "este produto não tem
+# cupom" para quatro situações diferentes, três delas com par CONFIRMADO no banco.
+MOTIVO_SEM_PAR_CONFIRMADO = "sem_par_confirmado"        # nenhum ProdutoCupom confirmado
+MOTIVO_AGUARDA_CORROBORACAO = "aguarda_corroboracao"    # par existe, prova única
+MOTIVO_REGRA_ILEGIVEL = "regra_do_cupom_ilegivel"       # par existe, regra é lixo
+MOTIVO_BENEFICIO_ZERO = "beneficio_zero_neste_item"     # par existe, não abate nada
 MOTIVO_BENEFICIO = "beneficio_irrelevante"
 MOTIVO_SEM_HISTORICO = "sem_historico_de_preco"
 MOTIVO_PRECO_DE_SEMPRE = "preco_de_sempre"
@@ -248,16 +254,24 @@ def _melhor_cupom_para(produto, *, confirmados, sitewide, com_checkout, usuario,
         for c, r in confirmados.get(getattr(produto, "pk", None), [])
     ]
     if not candidatos:
-        rejeicoes[MOTIVO_SEM_CUPOM_APLICAVEL] += 1
+        rejeicoes[MOTIVO_SEM_PAR_CONFIRMADO] += 1
         return None
 
     melhor = melhor_chave = None
     beneficio_baixo = False
     for cupom, relacao, prova in candidatos:
+        # Os três `continue` abaixo eram mudos, e o item caía no
+        # MOTIVO_SEM_CUPOM_APLICAVEL lá no fim — que se lê como "este produto não
+        # tem cupom". Não é o que aconteceu: ele TEM par confirmado, e o par foi
+        # descartado por um motivo com nome. Medido em 04/09/2026: 3.416 pares
+        # confirmados com cupom ativo cobrindo 3.177 produtos, e 5 deals com cupom
+        # saindo do outro lado. Um déficit sem endereço não é diagnóstico.
         if aguarda_corroboracao_oficial(cupom, corroboracoes=corroboracoes):
+            rejeicoes[MOTIVO_AGUARDA_CORROBORACAO] += 1
             continue
         regras = regras_do_cupom(cupom)
         if cupom_e_lixo(regras):
+            rejeicoes[MOTIVO_REGRA_ILEGIVEL] += 1
             continue
         minimo = float(regras.get("valor_minimo") or 0)
         if minimo and minimo > preco_vitrine:
@@ -265,6 +279,7 @@ def _melhor_cupom_para(produto, *, confirmados, sitewide, com_checkout, usuario,
             continue
         beneficio = _beneficio_do_cupom(cupom, preco_vitrine)
         if beneficio <= 0:
+            rejeicoes[MOTIVO_BENEFICIO_ZERO] += 1
             continue
         # O portão que faltava: benefício real NESTE item, não o teto do cupom.
         if (beneficio < _beneficio_minimo_reais()
