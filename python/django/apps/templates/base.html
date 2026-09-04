@@ -790,8 +790,19 @@
   Servir um arquivo local pelo WhiteNoise seria melhor ainda (uma requisição externa
   a menos), mas exige STATICFILES_DIRS e um passo de vendor no Dockerfile — o projeto
   hoje não tem diretório de estáticos próprio.
+
+  `integrity` enquanto o arquivo for de terceiro. A versão fixa impede o unpkg de
+  ENTREGAR outra versão; não impede o unpkg de entregar outros BYTES sob a mesma
+  versão. O CSP libera este host para `script-src`, então quem controlasse esses
+  bytes executaria JavaScript em toda página autenticada de um painel que guarda
+  sessão do Mercado Livre e do WhatsApp. Com o hash, bytes trocados são recusados
+  pelo navegador; o pior caso vira ícone que não desenha, porque todo uso passa por
+  `if (window.lucide)`. Trocar a versão exige recalcular:
+      curl -sL <url> | openssl dgst -sha384 -binary | openssl base64 -A
   {% endcomment %}
-  <script src="https://unpkg.com/lucide@1.27.0/dist/umd/lucide.min.js"></script>
+  <script src="https://unpkg.com/lucide@1.27.0/dist/umd/lucide.min.js"
+          integrity="sha384-iGjGimQxA1QCAbLRiSWPFc+KsjPW3kLS/2Cub+yRgYfd4EUEx/dxoJ0MKyEsbjop"
+          crossorigin="anonymous"></script>
   <script>
     function renderIcons() { if (window.lucide) lucide.createIcons(); }
     function toggleNav() {

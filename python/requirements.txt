@@ -1,6 +1,6 @@
 # Dependencias Python (pip). NAO instala Ollama nem o navegador do Playwright:
 # rode  ../setup.ps1  para deps nativas (Ollama model, chromium, npm do node.js).
-Django==6.0.7
+Django==6.0.8
 requests==2.33.0
 urllib3==2.7.0
 idna==3.15
