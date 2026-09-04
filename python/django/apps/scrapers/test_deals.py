@@ -516,3 +516,77 @@ class FatosDoDealTests(BaseDeals):
         dados = _fatos_do_deal(deal)
         self.assertEqual(dados["provas"], set())
         self.assertIsNone(dados["economia"])
+
+
+class PoolReservaFatiaParaCupomTests(BaseDeals):
+    """Produto com cupom provado nao pode ser cortado por ser menos recente.
+
+    O pool ordenava so por observacao mais recente e cortava no teto. Produto com
+    par confirmado costuma ser mais velho no catalogo, entao caia fora antes de
+    ser avaliado. Medido em producao em 04/09/2026: 3.183 produtos com par
+    confirmado e cupom ativo, pool de 400, interseccao de 20 — o sistema tinha a
+    materia-prima do proprio produto e a descartava por recencia.
+    """
+
+    def _envelhecer(self, produto, horas):
+        Produto.objects.filter(pk=produto.pk).update(
+            ultima_observacao=timezone.now() - timedelta(hours=horas))
+
+    @override_settings()
+    def test_item_com_cupom_entra_mesmo_fora_do_teto_de_recencia(self):
+        from apps.scrapers import ofertas
+
+        # Dois produtos recentes ocupam um teto de dois lugares.
+        for i in range(2):
+            recente = self._produto(nome=f"Recente {i}", preco=100.0, de=200.0,
+                                    link=f"https://produto.mercadolivre.com.br/R{i}")
+            self._observar(recente, 190.0, 185.0, 180.0)
+            self._envelhecer(recente, 1)
+
+        antigo = self._produto(nome="Antigo com cupom", preco=100.0, de=200.0,
+                               link="https://produto.mercadolivre.com.br/ANTIGO")
+        self._observar(antigo, 190.0, 185.0, 180.0)
+        self._envelhecer(antigo, 20)
+        self._cupom(produto=antigo, codigo="COMCUPOM", percentual=20.0, teto=100.0)
+
+        original = ofertas.TETO_CANDIDATOS
+        try:
+            ofertas.TETO_CANDIDATOS = 2   # os dois recentes enchem o teto
+            ids = {p.pk for p in ofertas.pool_de_produtos_elegiveis(usuario=self.user)}
+        finally:
+            ofertas.TETO_CANDIDATOS = original
+
+        self.assertIn(
+            antigo.pk, ids,
+            "Produto com par confirmado foi cortado do pool por ser menos recente.",
+        )
+
+    def test_a_fatia_de_cupom_tem_teto_proprio(self):
+        """Encher um lado nao pode esvaziar o outro."""
+        from apps.scrapers import ofertas
+
+        recente = self._produto(nome="So preco", preco=100.0, de=200.0,
+                                link="https://produto.mercadolivre.com.br/SOPRECO")
+        self._observar(recente, 190.0, 185.0, 180.0)
+        self._envelhecer(recente, 1)
+
+        for i in range(3):
+            item = self._produto(nome=f"Com cupom {i}", preco=100.0, de=200.0,
+                                 link=f"https://produto.mercadolivre.com.br/C{i}")
+            self._observar(item, 190.0, 185.0, 180.0)
+            self._envelhecer(item, 20 + i)
+            self._cupom(produto=item, codigo=f"CUP{i}", percentual=20.0, teto=100.0)
+
+        original_teto = ofertas.TETO_CANDIDATOS
+        original_cupom = ofertas.TETO_CANDIDATOS_COM_CUPOM
+        try:
+            ofertas.TETO_CANDIDATOS = 1
+            ofertas.TETO_CANDIDATOS_COM_CUPOM = 2
+            ids = {p.pk for p in ofertas.pool_de_produtos_elegiveis(usuario=self.user)}
+        finally:
+            ofertas.TETO_CANDIDATOS = original_teto
+            ofertas.TETO_CANDIDATOS_COM_CUPOM = original_cupom
+
+        # O de preco puro continua no pool, e a fatia de cupom respeita o proprio teto.
+        self.assertIn(recente.pk, ids)
+        self.assertEqual(len(ids), 3)

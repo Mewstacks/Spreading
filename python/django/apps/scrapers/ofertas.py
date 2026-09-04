@@ -396,11 +396,35 @@ def pool_de_produtos_elegiveis(*, macros_selecionadas=None,
     # tick cresce com o catálogo — numa VM cuja cota de CPU já é o gargalo.
     # A ordem é por observação mais recente, então o corte tira o mais velho, que é
     # também o mais provável de já ter sido enviado ou de ter preço vencido.
-    return deduplicar_por_produto(
-        elegiveis_qs.order_by("-ultima_observacao", "-id")[
-            :(teto or TETO_CANDIDATOS)
-        ]
+    limite = teto or TETO_CANDIDATOS
+    recentes = list(elegiveis_qs.order_by("-ultima_observacao", "-id")[:limite])
+
+    # Fatia reservada para quem TEM cupom provado neste item.
+    #
+    # Ordenar só por observação recente parecia neutro e não era: produto com par
+    # confirmado costuma ser mais velho no catálogo, então caía fora do teto antes
+    # de ser avaliado. Medido em 04/09/2026 — 3.183 produtos com par confirmado e
+    # cupom ativo, pool de 400, interseção de 20. O sistema tinha a matéria-prima
+    # do seu próprio produto e a cortava por critério de recência.
+    #
+    # A unidade que este produto publica é produto + cupom que se aplica a ele
+    # (ver o topo de `deals.py`); um candidato com par confirmado é o mais valioso
+    # que existe, não o mais descartável. Ele continua passando por TODOS os
+    # portões — frescor, preço medido, corroboração, benefício mínimo. O que muda
+    # é só ter a chance de ser avaliado.
+    #
+    # O custo é limitado por teto próprio, e não some dentro do outro: se dividisse
+    # o mesmo teto, encher a fatia de cupom esvaziaria a de preço puro.
+    ids_recentes = {p.pk for p in recentes}
+    com_cupom = list(
+        elegiveis_qs.filter(
+            cupons_normalizados__status="confirmado",
+            cupons_normalizados__cupom__estado="ativo",
+        ).exclude(pk__in=ids_recentes)
+        .distinct()
+        .order_by("-ultima_observacao", "-id")[:TETO_CANDIDATOS_COM_CUPOM]
     )
+    return deduplicar_por_produto(recentes + com_cupom)
 
 
 def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas=None,
@@ -2689,6 +2713,12 @@ PISO_DESCONTO_BRUTO = 5.0
 # proporcional ao catálogo. Folgado de propósito: o envio escolhe 1 ou 2 itens, e
 # 400 candidatos ordenados por observação recente cobrem qualquer nicho com sobra.
 TETO_CANDIDATOS = 400
+# Fatia PRÓPRIA para candidatos que já têm par confirmado com cupom ativo. Teto
+# separado de propósito: dentro do mesmo, encher um lado esvaziaria o outro. 300
+# cobre a folga real — dos 3.183 produtos com par, 330 foram observados nas
+# últimas 48h, que é o que o filtro de frescor deixa passar de qualquer forma.
+TETO_CANDIDATOS_COM_CUPOM = int(
+    os.getenv("TETO_CANDIDATOS_COM_CUPOM", "300"))
 
 
 def _no_fundo_do_historico(produto, preco_final: float, historico) -> bool:
