@@ -145,6 +145,13 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
         # Compatibilidade local durante a migração; nunca resolve outro usuário.
         storage_state = auth_path
     tinha_auth = storage_state is not None
+    # Quem entrega ``storage_state`` diretamente tambem assume a persistencia
+    # (Amazon/Shopee usam repositorios de sessao proprios). Capturar o estado uma
+    # segunda vez no ``finally`` nao teria onde grava-lo e, em paginas anti-bot,
+    # pode ficar preso esperando um contexto que ja deixou de responder.
+    deve_renovar_aqui = bool(
+        tinha_auth and (session_user is not None or auth_path)
+    )
 
     if precisa_logar:
         # O login é feito pela web (Conexão Mercado Livre, browser remoto com live
@@ -197,7 +204,7 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
             finally:
                 # Persiste cookies renovados SÓ se já havia sessão salva — um contexto
                 # anônimo (sem auth) não pode criar uma sessão fantasma.
-                if tinha_auth and not sessao_recusada:
+                if deve_renovar_aqui and not sessao_recusada:
                     try:
                         estado_renovado = context.storage_state()
                         if session_user is None and auth_path:

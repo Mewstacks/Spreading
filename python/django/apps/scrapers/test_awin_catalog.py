@@ -151,12 +151,13 @@ class AwinCatalogTests(TestCase):
                                    "validDomains": [{"domain": "loja.example"}]}}),
         ]
         result = sincronizar_integracao(self.integration, forcar_programas=True)
-        self.assertEqual(result["coupons"], 1)
-        coupon = CupomNormalizado.objects.get(owner=self.user)
-        self.assertEqual(coupon.programa.external_id, "77")
-        self.assertTrue(coupon.restrito)
-        self.assertEqual(coupon.codigo, "APP30")
-        self.assertIn("awin1.com", coupon.link)
+        # O anunciante Awin é uma varejista fora do programa (não é Mercado Livre,
+        # Amazon nem Shopee). Guardar o cupom dele polui a seleção com algo que o
+        # creator não pode publicar, então a persistência recusa antes de gravar.
+        # A sincronização do PROGRAMA continua acontecendo — é ela que mantém
+        # comissão e domínios em dia para o dia em que a loja for afiliável.
+        self.assertEqual(result["coupons"], 0)
+        self.assertFalse(CupomNormalizado.objects.filter(owner=self.user).exists())
         self.program.refresh_from_db()
         self.assertEqual(self.program.comissao_max, 5)
         self.assertFalse(CupomNormalizado.objects.filter(owner=self.other).exists())
@@ -270,9 +271,12 @@ class AwinCatalogTests(TestCase):
         self._marcar_pronto(strong)
         config = ConfiguracaoEnvio.objects.create(
             owner=self.user, grupo_id="group", min_desconto_percent=0,
-            incluir_restritos=True, incluir_sem_desconto=True)
+            marketplace="awin", incluir_restritos=True,
+            incluir_sem_desconto=True)
         from apps.scrapers.content_ranking import selecionar_conteudo_para_grupo
-        candidates = selecionar_conteudo_para_grupo(config, limit=2)
+        # Inclui também os produtos comprovados que materializam os dois cupons.
+        # O foco desta asserção é a ordem relativa dos cupons, não excluir produtos.
+        candidates = selecionar_conteudo_para_grupo(config, limit=4)
         self.assertEqual(candidates[0].obj, strong)
         self.assertIn(weak, [item.obj for item in candidates])
         from apps.scrapers.ofertas import montar_mensagem_cupom

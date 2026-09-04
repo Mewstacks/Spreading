@@ -42,7 +42,11 @@ class LoginError(Exception):
     pass
 
 class AuthError(Exception):
-    """Exceção personalizada para erros de autenticação (ML bloqueou a sessão)."""
+    """Portal/controles indisponíveis sem prova de que a sessão expirou.
+
+    O nome é legado. Esta exceção é inconclusiva e nunca deve, sozinha, pedir
+    reconexão; somente ``LoginError`` prova que o portal exibiu a tela de login.
+    """
     pass
 
 
@@ -1018,7 +1022,11 @@ def verificar_e_aprovar(usuario, produto, link_afiliado, url_isca="") -> str:
         link_afiliado, nome_esperado=getattr(produto, "nome", None),
         confiar_desconto=confiar, usuario=usuario)
     if relatorio.get("ok"):
-        registrar_aprovacao(usuario, produto, link_afiliado, url_canonica=link_afiliado)
+        from apps.scrapers.coupon_links import url_canonica_com_rastreio
+        registrar_aprovacao(
+            usuario, produto, link_afiliado,
+            url_canonica=url_canonica_com_rastreio(relatorio, link_afiliado),
+        )
         return "aprovado"
     # Não abriu o link (rede/timeout) => transitório: mantém o veredito pendente.
     if any("Falha ao abrir link" in str(e) for e in relatorio.get("erros", [])):
@@ -1088,8 +1096,14 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
     def _julgar(linha, relatorio, confiar):
         nonlocal aprovados, reprovados, transitorios
         if relatorio.get("ok"):
-            _no_tenant(registrar_aprovacao, usuario, linha.produto,
-                       linha.link_afiliado, url_canonica=linha.link_afiliado)
+            from apps.scrapers.coupon_links import url_canonica_com_rastreio
+            _no_tenant(
+                registrar_aprovacao, usuario, linha.produto,
+                linha.link_afiliado,
+                url_canonica=url_canonica_com_rastreio(
+                    relatorio, linha.link_afiliado,
+                ),
+            )
             aprovados += 1
         elif any("Falha ao abrir link" in str(e)
                  for e in relatorio.get("erros", [])):
@@ -1110,6 +1124,7 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
     # listagem oficial do cupom. Ver `relatorio_de_link_com_cupom`.
     com_origem = [l for l in linhas if not _confiar_desconto(l.produto)]
     no_destino = [l for l in linhas if _confiar_desconto(l.produto)]
+    destinos_processados = 0
 
     if com_origem:
         from apps.scrapers.scraper_mercadolivre.link_http import (
@@ -1177,7 +1192,15 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
                     "Capacidade de browser ocupada; verificação será retomada."
                 )
             with iniciar_browser(headless=True) as (page, _ctx):
-                for linha in no_destino:
+                for indice, linha in enumerate(no_destino):
+                    if indice and interesse_pendente(
+                            "django_chromium", exceto="links_verify"):
+                        logger.info(
+                            "Verificacao de links cedeu o navegador apos %s de "
+                            "%s destino(s).", indice, len(no_destino),
+                        )
+                        break
+                    destinos_processados += 1
                     try:
                         relatorio = _relatorio_na_pagina(
                             page, linha.link_afiliado,
@@ -1194,7 +1217,7 @@ def verificar_links_pendentes(usuario, limite=20, produto_ids=None) -> dict:
     logger.info("Verificação de destino ML p/ %s: %s aprovado(s), %s reprovado(s), "
                 "%s transitório(s) — %s por origem, %s por destino",
                 usuario, aprovados, reprovados, transitorios,
-                len(com_origem), len(no_destino))
+                len(com_origem), destinos_processados)
     return {"aprovados": aprovados, "reprovados": reprovados,
             "transitorios": transitorios}
 

@@ -1,3 +1,4 @@
+from datetime import timedelta
 from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -65,6 +66,39 @@ class CouponPersistenceRetryTests(TestCase):
         self.assertEqual(len(calls), 2)
         self.assertGreaterEqual(close.call_count, 2)
         self.assertTrue(Cupom.objects.filter(campanha_id="retry-1").exists())
+
+    def test_reconciliacao_completa_nao_regrava_expirados_inalterados(self):
+        from apps.scrapers.scraper_mercadolivre.scraper import (
+            _persistir_campanhas_cupons,
+        )
+
+        antigo = timezone.now() - timedelta(days=3)
+        motivo = "Cupom não observado na última sincronização"
+        cupom_morto = Cupom.objects.create(
+            campanha_id="dead-coupon", titulo="Já expirado",
+            valor_desconto=10, estado="expirado", ultima_verificacao=antigo,
+        )
+        produto_morto = Produto.objects.create(
+            marketplace="mercadolivre", origem="cupom",
+            campanha_id="dead-product", nome="Produto já expirado",
+            preco_sem_desconto=100, preco_com_cupom=90,
+            link_produto="https://produto.mercadolivre.com.br/MLB-1",
+            estado="expirado", falha_verificacao=motivo,
+            ultima_verificacao=antigo,
+        )
+        rows = [{
+            "campaignId": "live-coupon", "title": "Cupom vigente",
+            "desconto": {"tipo": "porcentagem", "valor": 10},
+            "valor_minimo": 0, "link_produtos": "https://lista.mercadolivre.com.br/",
+            "codigo": "", "estado": "ativo",
+        }]
+
+        _persistir_campanhas_cupons(rows, varredura_completa=True)
+
+        cupom_morto.refresh_from_db()
+        produto_morto.refresh_from_db()
+        self.assertEqual(cupom_morto.ultima_verificacao, antigo)
+        self.assertEqual(produto_morto.ultima_verificacao, antigo)
 
 
 class CouponContractsMigrationTests(TestCase):
@@ -344,3 +378,73 @@ class CouponPipelineTests(TestCase):
         # E o ciclo chegou ao fim: fontes que não passam por `run_source` continuam
         # sendo reportadas depois das que falharam.
         self.assertIn("manual-private", result["fontes"])
+
+
+class AmazonPublicCouponsCadenceTests(TestCase):
+    @patch("apps.scrapers.report_sessions.has_report_session", return_value=True)
+    @patch("apps.scrapers.sources.run_source")
+    def test_shopee_oficial_usa_sessao_conectada_e_escopo_do_usuario(
+        self, run_source, _has_session,
+    ):
+        from apps.scrapers.coupon_pipeline import coletar_cupons
+
+        user = get_user_model().objects.create_user("pipe-shopee", password="x")
+        run_source.return_value = {
+            "status": "empty", "offers": [], "coupons": [],
+        }
+
+        coletar_cupons(usuarios=[user], incluir_awin=False)
+
+        shopee_calls = [
+            call for call in run_source.call_args_list
+            if call.args[0] == "shopee-public-coupons"
+        ]
+        self.assertEqual(len(shopee_calls), 1)
+        self.assertEqual(shopee_calls[0].kwargs["usuario"], user)
+
+    def test_catalogo_fresco_pula_chromium(self):
+        from apps.scrapers.coupon_pipeline import coletar_cupons
+
+        get_user_model().objects.create_user("pipe-az", password="x")
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="amazon-public-coupons",
+            defaults={"marketplace": "amazon", "nome": "Amazon cupons"},
+        )
+        fonte.ultimo_sucesso = timezone.now()
+        fonte.save(update_fields=["ultimo_sucesso"])
+        CupomNormalizado.objects.create(
+            fonte=fonte, external_id="az-1", marketplace="amazon",
+            titulo="Cupom Amazon", estado="ativo",
+            regras={"modo_resgate": "ativacao"},
+        )
+        with patch(
+            "apps.scrapers.sources.run_source",
+            return_value={"status": "empty", "offers": [], "coupons": []},
+        ) as run:
+            result = coletar_cupons(incluir_awin=False)
+        slugs = [call.args[0] for call in run.call_args_list]
+        self.assertNotIn("amazon-public-coupons", slugs)
+        self.assertEqual(result["fontes"]["amazon-public-coupons"]["status"], "skipped")
+
+    def test_catalogo_velho_coleta_de_novo(self):
+        from apps.scrapers.coupon_pipeline import coletar_cupons
+
+        get_user_model().objects.create_user("pipe-az-old", password="x")
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="amazon-public-coupons",
+            defaults={"marketplace": "amazon", "nome": "Amazon cupons"},
+        )
+        fonte.ultimo_sucesso = timezone.now() - timedelta(hours=7)
+        fonte.save(update_fields=["ultimo_sucesso"])
+        CupomNormalizado.objects.create(
+            fonte=fonte, external_id="az-old", marketplace="amazon",
+            titulo="Cupom velho", estado="ativo",
+            regras={"modo_resgate": "ativacao"},
+        )
+        with patch(
+            "apps.scrapers.sources.run_source",
+            return_value={"status": "empty", "offers": [], "coupons": []},
+        ) as run:
+            coletar_cupons(incluir_awin=False)
+        slugs = [call.args[0] for call in run.call_args_list]
+        self.assertIn("amazon-public-coupons", slugs)

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-
+from datetime import timedelta
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db.models import Q
@@ -51,6 +51,38 @@ def _usuarios_ativos(usuarios=None):
         return list(get_user_model().objects.filter(is_active=True))
     ids = [getattr(user, "id", user) for user in usuarios]
     return list(get_user_model().objects.filter(is_active=True, id__in=ids))
+
+
+# A página de cupons Amazon é Chromium. Rodá-la a cada 15 min disputa o slot
+# com preparo/links do ML; 6h mantém o catálogo fresco sem bloquear o funil.
+AMAZON_CUPONS_TTL_COLETA = timedelta(hours=6)
+SHOPEE_CUPONS_TTL_COLETA = timedelta(minutes=30)
+
+
+def _amazon_public_coupons_ainda_frescos() -> bool:
+    from apps.scrapers.maintenance import cupons_frescos_q
+
+    fonte = FonteIngestao.objects.filter(slug="amazon-public-coupons").first()
+    if fonte is None or fonte.ultimo_sucesso is None:
+        return False
+    if timezone.now() - fonte.ultimo_sucesso > AMAZON_CUPONS_TTL_COLETA:
+        return False
+    return CupomNormalizado.objects.filter(
+        fonte=fonte, estado="ativo",
+    ).filter(cupons_frescos_q()).exists()
+
+
+def _shopee_public_coupons_ainda_frescos(owner=None) -> bool:
+    from apps.scrapers.maintenance import cupons_frescos_q
+
+    fonte = FonteIngestao.objects.filter(slug="shopee-public-coupons").first()
+    if fonte is None or fonte.ultimo_sucesso is None:
+        return False
+    if timezone.now() - fonte.ultimo_sucesso > SHOPEE_CUPONS_TTL_COLETA:
+        return False
+    return CupomNormalizado.objects.filter(
+        fonte=fonte, owner=owner, estado="ativo",
+    ).filter(cupons_frescos_q()).exists()
 
 
 def _materializar_ausencias_saudaveis(slug, payload, rows, *, owner=None):
@@ -183,13 +215,57 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
     usuarios = _usuarios_ativos(usuarios)
 
     _coletar_adaptador("ml-cupons-afiliados", resultado)
+    _coletar_adaptador("ml-official-promotions", resultado)
+    _coletar_adaptador("ml-lightning-coupons", resultado)
 
-    # Segunda e terceira fontes públicas, ambas por HTTP puro: rodam mesmo com o
-    # Chromium ocupado e existem justamente para o Mercado Livre deixar de depender
-    # de um único site de terceiro. Entram com precedência baixa (ver
-    # `_SOURCE_PRECEDENCE`): corroboram e descobrem, não decidem sozinhas.
+    # Promobit e Telegram servem como radares comunitários. Encontrar não é
+    # publicar: coupon_rules exige corroboração independente antes da prontidão.
     _coletar_adaptador("promobit-cupons", resultado)
-    _coletar_adaptador("telegram-publico", resultado, items=("offers", "coupons"))
+    _coletar_adaptador("meliuz-cupons", resultado)
+    _coletar_adaptador("pelando-cupons", resultado)
+    _coletar_adaptador("bia-garimpa-cupons", resultado)
+    _coletar_adaptador("cupomspot-cupons", resultado)
+    _coletar_adaptador("prima-ryca-cupons", resultado)
+    _coletar_adaptador("discoup-cupons", resultado)
+    _coletar_adaptador("promomia-cupons", resultado)
+    _coletar_adaptador("cuponation-cupons", resultado)
+    _coletar_adaptador("cashbe-cupons", resultado)
+    _coletar_adaptador("peguei-barato-cupons", resultado)
+    _coletar_adaptador("linkerhub-cupons", resultado)
+    # O ciclo de cupons nao resolve links de oferta: na medicao de producao, 124
+    # redirects custaram ~9s e geraram zero produto, enquanto os mesmos textos
+    # trouxeram 51 codigos. A coleta de ofertas segue disponivel sob demanda.
+    _coletar_adaptador(
+        "telegram-publico", resultado, items=("coupons",), include_offers=False,
+    )
+
+    # Inventario publico de vouchers de ativacao. A coleta usa o mesmo slot de
+    # Chromium das demais fontes, por isso o snapshot saudavel e reutilizado por
+    # 30 minutos; campanhas curtas continuam entrando no mesmo ciclo operacional.
+    from apps.scrapers.report_sessions import has_report_session
+    sessoes_shopee = [
+        usuario for usuario in usuarios
+        if has_report_session(usuario, "shopee_shop")
+    ]
+    if sessoes_shopee:
+        for usuario in sessoes_shopee:
+            if _shopee_public_coupons_ainda_frescos(owner=usuario):
+                _fonte(
+                    resultado, "shopee-public-coupons", status="skipped",
+                    motivo="Catalogo da conta ainda fresco; Chromium reservado.",
+                )
+                continue
+            _coletar_adaptador(
+                "shopee-public-coupons", resultado,
+                owner=usuario, usuario=usuario,
+            )
+    elif _shopee_public_coupons_ainda_frescos(owner=None):
+        _fonte(
+            resultado, "shopee-public-coupons", status="skipped",
+            motivo="Catalogo publico ainda fresco; Chromium reservado para o funil.",
+        )
+    else:
+        _coletar_adaptador("shopee-public-coupons", resultado)
 
     if getattr(settings, "AMAZON_GENERAL_COUPONS_URL", ""):
         _coletar_adaptador("amazon-general-coupons", resultado)
@@ -199,9 +275,16 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
             motivo="Fonte oficial/licenciada de códigos gerais não configurada.",
         )
 
-    # A fonte é pública e existe independentemente de alguma conta já possuir tag.
-    # O vínculo de afiliado continua por usuário na etapa de link/envio.
-    payload = _coletar_adaptador("amazon-public-coupons", resultado, items=())
+    # A fonte pública existe independentemente de alguma conta possuir tag; a
+    # afiliação continua individual na etapa de link/envio.
+    if _amazon_public_coupons_ainda_frescos():
+        _fonte(
+            resultado, "amazon-public-coupons", status="skipped",
+            motivo="Catálogo público ainda fresco; Chromium reservado para o funil.",
+        )
+        payload = {"offers": [], "coupons": []}
+    else:
+        payload = _coletar_adaptador("amazon-public-coupons", resultado, items=())
     rows = payload.get("offers", []) + payload.get("coupons", [])
     if rows:
         from apps.scrapers.sources.persistence import persist_items
@@ -211,9 +294,6 @@ def coletar_cupons(*, usuarios=None, incluir_awin=True):
             )
             counts = persist_items(rows, owner=None, **health_kwargs)
             persistidos = counts["offers"] + counts["coupons"]
-            # A Amazon é persistida fora de ``_coletar_adaptador`` porque ofertas
-            # e cupons compartilham o mesmo snapshot. Compare ausências somente
-            # agora, com todas as linhas do inventário já gravadas.
             _materializar_ausencias_saudaveis(
                 "amazon-public-coupons", payload, rows, owner=None,
             )
@@ -341,15 +421,29 @@ def afiliar_cupons_de_codigo(usuario, cupons, *, limite=8):
     interrompe o lote em vez de gastar as tentativas restantes contra a mesma
     recusa.
     """
-    from apps.scrapers.coupon_rules import codigo_publicavel
+    from apps.scrapers.coupon_rules import (
+        aguarda_corroboracao_oficial, ativacao_publicavel, codigo_publicavel,
+    )
     from apps.scrapers.models import LinkAfiliadoCupomUsuario
     from apps.scrapers.ofertas import resolver_link_afiliado_cupom
 
-    candidatos = [
-        cupom for cupom in cupons
-        if str(cupom.marketplace or "").lower() == "mercadolivre"
-        and codigo_publicavel(cupom)
-    ]
+    shopee_conectada = IntegracaoAfiliado.objects.filter(
+        owner=usuario, provedor="shopee", habilitada=True, status="conectada",
+    ).exists()
+
+    candidatos = []
+    for cupom in cupons:
+        marketplace = str(cupom.marketplace or "").lower()
+        tem_codigo = bool(codigo_publicavel(cupom))
+        if tem_codigo and aguarda_corroboracao_oficial(cupom):
+            continue
+        if (
+            (marketplace == "mercadolivre" and tem_codigo)
+            or (marketplace == "shopee" and shopee_conectada and (
+                tem_codigo or ativacao_publicavel(cupom, usuario=usuario)
+            ))
+        ):
+            candidatos.append(cupom)
     if not candidatos:
         return {"gerados": 0, "falhas": 0, "pendentes": 0}
     from apps.scrapers.monitor_conexao import ml_conectado
@@ -379,10 +473,17 @@ def afiliar_cupons_de_codigo(usuario, cupons, *, limite=8):
     }
     com_cache = [c for c in pendentes if c.pk in cache_link_ids]
     sem_cache = [c for c in pendentes if c.pk not in cache_link_ids]
-    if not ml_conectado(usuario):
-        pendentes = com_cache
-    else:
-        pendentes = com_cache + sem_cache
+    sem_cache_ml = [
+        c for c in sem_cache
+        if str(c.marketplace or "").lower() == "mercadolivre"
+    ]
+    sem_cache_http = [
+        c for c in sem_cache
+        if str(c.marketplace or "").lower() != "mercadolivre"
+    ]
+    pendentes = com_cache + sem_cache_http
+    if ml_conectado(usuario):
+        pendentes += sem_cache_ml
 
     gerados = falhas = 0
     for cupom in pendentes[:max(0, limite)]:
@@ -397,6 +498,15 @@ def afiliar_cupons_de_codigo(usuario, cupons, *, limite=8):
             gerados += 1
             continue
         falhas += 1
+        if resolucao.get("indisponivel_ml"):
+            # O portal está temporariamente indisponível, mas a sessão continua
+            # válida. Repetir nos cupons seguintes gastaria um Chromium por item;
+            # interromper preserva capacidade sem mandar o usuário reconectar.
+            logger.info(
+                "Afiliação de cupons de código adiada: Link Builder temporariamente "
+                "indisponível (usuário %s).", usuario.pk,
+            )
+            break
         if resolucao.get("precisa_login_ml"):
             # A sessão caiu: as próximas tentativas dariam a mesma recusa e
             # custariam um Chromium cada. O ciclo seguinte retoma.
@@ -720,6 +830,16 @@ def executar_pipeline_cupons(
         ):
             resultado[key] += int(afiliacao.get(key, 0) or 0)
         try:
+            from apps.scrapers.coupon_links import (
+                colher_rastreio_ml_browser, rastreio_afiliado_ml,
+            )
+            if not rastreio_afiliado_ml(usuario):
+                colher_rastreio_ml_browser(usuario)
+        except Exception:
+            logger.exception(
+                "Colheita de rastreio ML falhou para usuário %s", usuario.pk,
+            )
+        try:
             from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
             por_canal = {
                 channel: projetar_disponibilidade_cupons(usuario, channel=channel)
@@ -727,6 +847,10 @@ def executar_pipeline_cupons(
             }
             afiliacao["disponibilidade"] = por_canal["whatsapp"]
             afiliacao["disponibilidade_por_canal"] = por_canal
+            from apps.scrapers.coupon_validation import agendar_lote_validacao
+            afiliacao["validacao_checkout"] = agendar_lote_validacao(
+                usuario, limite=30, channel="whatsapp",
+            )
         except Exception:
             resultado["falhos"] += 1
             logger.exception(

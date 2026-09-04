@@ -28,6 +28,40 @@ _system_context = ContextVar("tenant_system_context", default=False)
 _tenant_suspenso = ContextVar("tenant_suspenso", default=None)  # (org_id, actor_id)
 
 
+class TenantSuspensoORMError(RuntimeError):
+    """ORM usado sem reinstalar o tenant de um job longo."""
+
+
+def _bloquear_orm_com_tenant_apenas_suspenso(execute, sql, params, many, context):
+    """Transforma uma futura violação de RLS num erro local e determinístico.
+
+    ``tenant_suspenso`` existe justamente para jobs que não podem manter uma
+    transação aberta. Portanto, enquanto ele estiver ativo, SQL de negócio só é
+    seguro dentro de ``organization_context``/``system_context`` — normalmente
+    instalados por ``executar_no_tenant``. Antes desta guarda, o SQLite dos testes
+    aceitava um acesso acidental e apenas o PostgreSQL de produção o recusava.
+
+    As instruções assinadas de infraestrutura que instalam/restauram os próprios
+    GUCs são permitidas; elas não leem nem alteram tabelas de negócio.
+    """
+    sql_normalizado = " ".join(str(sql or "").lower().split())
+    instalando_contexto = sql_normalizado.startswith("select set_config(")
+    controle_de_transacao = sql_normalizado.startswith((
+        "begin", "commit", "rollback", "savepoint", "release savepoint",
+    ))
+    if (
+        _tenant_suspenso.get()
+        and not current_organization_id()
+        and not in_system_context()
+        and not instalando_contexto
+        and not controle_de_transacao
+    ):
+        raise TenantSuspensoORMError(
+            "ORM executado com tenant apenas suspenso; use executar_no_tenant()."
+        )
+    return execute(sql, params, many, context)
+
+
 def current_organization_id():
     return _current_organization_id.get()
 
@@ -343,7 +377,11 @@ def tenant_suspenso(organization_id, actor_id=None):
         raise ValueError("organização é obrigatória para suspender o tenant")
     token = _tenant_suspenso.set((str(organization_id), str(actor_id or "") or None))
     try:
-        yield
+        # A guarda torna o contrato observável também no SQLite da suíte: uma
+        # query direta não pode mais parecer correta localmente e falhar só na RLS
+        # do PostgreSQL em produção.
+        with connection.execute_wrapper(_bloquear_orm_com_tenant_apenas_suspenso):
+            yield
     finally:
         _tenant_suspenso.reset(token)
 

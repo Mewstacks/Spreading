@@ -1,37 +1,51 @@
-"""Promobit e Telegram público: as duas fontes que tiram o ML de fonte única.
+"""Promobit e Telegram público: radares comunitários sujeitos a validação.
 
 O eixo de todos estes testes é o mesmo: **alegação de terceiro não pode virar preço**.
 Um "de R$ 500 por R$ 99" escrito por um canal desconhecido, se entrasse como preço de
 referência, produziria um desconto falso com a assinatura de quem publica. Por isso
 várias asserções aqui verificam o que a fonte NÃO faz.
 """
-from unittest.mock import patch
+from contextlib import contextmanager
+from unittest.mock import Mock, call, patch
 
 import requests
 from django.test import TestCase
+from django.utils import timezone
 
 from apps.scrapers.sources.promobit import PromobitSource
+from apps.scrapers.sources.meliuz_coupons import MeliuzCouponsSource
 from apps.scrapers.sources.registry import SOURCES
 from apps.scrapers.sources.telegram_publico import TelegramPublicoSource
+from apps.scrapers.sources.shopee_public_coupons import (
+    COUPONS_URL, DAILY_STORE_COUPONS_URL, ShopeePublicCouponsSource,
+    _api_voucher_entries, _auth_required, _capture_source_diagnostic,
+    _challenge_required, _collection_state,
+    _browser_context_options, _parse_api_voucher, _parse_rendered_card,
+    _snapshot_state,
+)
 
 TG_HTML = """
 <div class="tgme_widget_message" data-post="canalteste/376">
+  <time datetime="__RECENT__"></time>
   <div class="tgme_widget_message_text js-message_text">
     🔥 Camiseta Tommy (Cupom MELIMODA)<br/>💰 R$ 113,00<br/>
     🔗 https://meli.la/21M8WPs?matt_word=ABC
   </div>
 </div>
 <div class="tgme_widget_message" data-post="canalteste/377">
+  <time datetime="__RECENT__"></time>
   <div class="tgme_widget_message_text js-message_text">
     Fone bom<br/>R$ 89,90<br/>https://www.amazon.com.br/dp/B0ABCDEFGH
   </div>
 </div>
 <div class="tgme_widget_message" data-post="canalteste/378">
+  <time datetime="__RECENT__"></time>
   <div class="tgme_widget_message_text js-message_text">
     Bom dia, pessoal! Sem link nenhum aqui.
   </div>
 </div>
 <div class="tgme_widget_message" data-post="canalteste/379">
+  <time datetime="__RECENT__"></time>
   <div class="tgme_widget_message_text js-message_text">
     Confira minha vitrine<br/>https://www.mercadolivre.com.br/social/lojinha
   </div>
@@ -61,10 +75,50 @@ PROMOBIT_HTML = """
 </script>
 """
 
+PROMOBIT_NEXT = """
+<script id="__NEXT_DATA__" type="application/json">
+{"props":{"pageProps":{"serverCoupons":{"coupons":[
+  {"couponCode":"EXTRA15","couponTitle":"Extra Amazon",
+   "couponDiscountValue":"15% de Desconto","couponDiscountOn":"selecao",
+   "couponStatusName":"APPROVED","couponUntil":"2028-01-01T20:59:59-0300",
+   "couponUrl":"https://www.promobit.com.br/Redirect/cupom/1"},
+  {"couponCode":"VELHO10","couponTitle":"Expirado",
+   "couponDiscountValue":"10% de Desconto","couponStatusName":"APPROVED",
+   "couponUntil":"2020-01-01T20:59:59-0300"},
+  {"couponCode":"NOVO20","couponTitle":"Pendente",
+   "couponDiscountValue":"20% de Desconto","couponStatusName":"PENDING"},
+  {"couponCode":"","couponTitle":"Sem codigo",
+   "couponDiscountValue":"30% de Desconto","couponStatusName":"APPROVED"}
+],"couponsRelated":[
+  {"couponCode":"AUDIO400","couponTitle":"Magalu",
+   "couponDiscountValue":"R$ 400 de Desconto","couponStatusName":"APPROVED"}
+]}}}}
+</script>
+"""
+
+MELIUZ_HTML = """
+<div class="cpn-layout offer-cpn" data-offer-id="308750"
+ data-offer-code="JARDIM30" data-offer-title="Jardim com 30% OFF">
+ <span class="offer-cpn__offer-summary"><strong>30%</strong></span>
+ <div class="cpn-layout__rules" hidden>Em compras acima de R$200, limitado a R$80.</div>
+</div>
+<div class="cpn-layout offer-cpn" data-offer-id="308751"
+ data-offer-code="CUPOMNOLINK" data-offer-title="Veja o cupom no link">
+ <span class="offer-cpn__offer-summary"><strong>20%</strong></span>
+ <div class="cpn-layout__rules" hidden>Confira os produtos.</div>
+</div>
+<h2>Cupons expirados de Amazon</h2>
+<div class="cpn-layout offer-cpn" data-offer-id="antigo"
+ data-offer-code="VELHO50" data-offer-title="Cupom antigo">
+ <span class="offer-cpn__offer-summary"><strong>50%</strong></span>
+</div>
+"""
+
 
 class TelegramPublicoTests(TestCase):
     def _coletar(self, corpo=TG_HTML, canais=("canalteste",), destino=DESTINO_CURTO):
         fonte = TelegramPublicoSource()
+        corpo = corpo.replace("__RECENT__", timezone.now().isoformat())
         with patch.object(TelegramPublicoSource, "_baixar", return_value=corpo), \
                 patch("apps.scrapers.sources.telegram_publico.resolver",
                       return_value=destino):
@@ -130,11 +184,61 @@ class TelegramPublicoTests(TestCase):
         fonte, _ = self._coletar()
         self.assertFalse(fonte.last_metrics["complete"])
 
+    def test_post_antigo_nao_e_reobservado_como_novo(self):
+        antigo = (timezone.now() - timezone.timedelta(hours=49)).isoformat()
+        fonte, itens = self._coletar(corpo=TG_HTML.replace("__RECENT__", antigo))
+
+        self.assertEqual(itens, [])
+        self.assertEqual(fonte.last_metrics["mensagens_antigas_descartadas"], 4)
+
+    def test_schema_sem_horario_falha_fechado(self):
+        fonte, itens = self._coletar(
+            corpo=TG_HTML.replace('<time datetime="__RECENT__"></time>', ""),
+        )
+
+        self.assertEqual(itens, [])
+        self.assertEqual(fonte.last_metrics["mensagens_sem_data"], 4)
+
     def test_handle_invalido_e_recusado_sem_requisicao(self):
         fonte = TelegramPublicoSource()
         with patch("apps.scrapers.sources.telegram_publico.requests.get") as get:
             self.assertEqual(fonte._baixar("../etc/passwd"), "")
         get.assert_not_called()
+
+    def test_cursor_invalido_e_recusado_sem_requisicao(self):
+        fonte = TelegramPublicoSource()
+        with patch("apps.scrapers.sources.telegram_publico.requests.get") as get:
+            self.assertEqual(fonte._baixar("canalteste", before="../20"), "")
+        get.assert_not_called()
+
+    def test_paginacao_vai_ate_cruzar_janela_de_48_horas(self):
+        fonte = TelegramPublicoSource()
+        recente = timezone.now().isoformat()
+        antigo = (timezone.now() - timezone.timedelta(hours=49)).isoformat()
+
+        def pagina(post, data):
+            return (
+                f'<div class="tgme_widget_message" data-post="canalteste/{post}">'
+                f'<time datetime="{data}"></time>'
+                '<div class="tgme_widget_message_text">cupom REAL20 20% OFF</div>'
+                '</div>'
+            )
+
+        with patch.object(
+                fonte, "_baixar", side_effect=[pagina(120, recente), pagina(99, antigo)],
+        ) as baixar:
+            corpo = fonte._paginar("canalteste")
+
+        self.assertIn("canalteste/120", corpo)
+        self.assertIn("canalteste/99", corpo)
+        self.assertEqual(
+            baixar.call_args_list,
+            [call("canalteste", before=""), call("canalteste", before="120")],
+        )
+        self.assertEqual(
+            fonte._pagination_by_channel["canalteste"],
+            {"pages": 2, "stop_reason": "age_boundary"},
+        )
 
     def test_canal_fora_do_ar_nao_derruba_a_coleta(self):
         fonte = TelegramPublicoSource()
@@ -147,6 +251,164 @@ class TelegramPublicoTests(TestCase):
 
     def test_nao_pede_navegador(self):
         self.assertFalse(getattr(TelegramPublicoSource, "requires_chromium", False))
+
+    @patch("apps.scrapers.sources.telegram_publico.time.monotonic",
+           side_effect=[100, 110, 221])
+    @patch("apps.scrapers.sources.telegram_publico.requests.get")
+    def test_cache_expira_e_novas_mensagens_voltam_a_ser_lidas(self, get, _clock):
+        get.side_effect = [
+            Mock(status_code=200, text="primeira"),
+            Mock(status_code=200, text="segunda"),
+        ]
+        fonte = TelegramPublicoSource()
+
+        self.assertEqual(fonte._baixar("cupombr"), "primeira")
+        self.assertEqual(fonte._baixar("cupombr"), "primeira")
+        self.assertEqual(fonte._baixar("cupombr"), "segunda")
+        self.assertEqual(get.call_count, 2)
+
+    def test_redirect_repetido_usa_cache_do_worker(self):
+        fonte = TelegramPublicoSource()
+        with patch(
+                "apps.scrapers.sources.telegram_publico.resolver",
+                return_value="https://www.amazon.com.br/dp/B012345678") as resolve:
+            primeira = fonte._resolver_lote(["https://amzn.to/exemplo"])
+            segunda = fonte._resolver_lote(["https://amzn.to/exemplo"])
+
+        self.assertEqual(primeira, segunda)
+        self.assertEqual(resolve.call_count, 1)
+        self.assertEqual(fonte._last_redirect_cache_hits, 1)
+
+    def test_ciclo_de_cupons_nao_resolve_ofertas_sem_uso(self):
+        fonte = TelegramPublicoSource()
+        with patch.object(fonte, "_carregar_canais") as carregar:
+            self.assertEqual(list(fonte.discover_offers(include_offers=False)), [])
+        carregar.assert_not_called()
+
+    def test_handle_do_canal_nunca_vira_codigo_de_cupom(self):
+        fonte = TelegramPublicoSource()
+        cupons = [
+            {"codigo": "TVCASASBAHIA", "loja": "mercadolivre",
+             "tipo": "porcentagem", "valor": 10, "minimo": 0, "teto": 0,
+             "escopo": ""},
+            {"codigo": "REAL10", "loja": "mercadolivre",
+             "tipo": "porcentagem", "valor": 10, "minimo": 0, "teto": 0,
+             "escopo": ""},
+        ]
+        with patch.object(fonte, "_carregar_canais",
+                          return_value=[("TVCASASBAHIA", "html", "")]), \
+                patch.object(fonte, "_mensagens",
+                             return_value=[("post-1", "10% OFF")]), \
+                patch("apps.scrapers.sources.telegram_publico.extrair",
+                      return_value=cupons):
+            itens = list(fonte.discover_coupons(canais=["TVCASASBAHIA"]))
+
+        self.assertEqual([item.coupon_code for item in itens], ["REAL10"])
+        self.assertEqual(fonte.last_metrics["codigos_ruidosos_descartados"], 1)
+
+    def test_canal_curado_de_loja_unica_define_loja_sem_link(self):
+        fonte = TelegramPublicoSource()
+        cupom = [{
+            "codigo": "SHOPEE20", "loja": "shopee", "tipo": "fixo",
+            "valor": 20, "minimo": 60, "teto": 0, "escopo": "",
+        }]
+        with patch.object(
+                fonte, "_carregar_canais",
+                return_value=[("cupom_shopee", "html", "")]), patch.object(
+                fonte, "_mensagens",
+                return_value=[("cupom_shopee/1", "SHOPEE20: R$20 OFF")]), patch(
+                "apps.scrapers.sources.telegram_publico.extrair",
+                return_value=cupom) as extrair_mock:
+            itens = list(fonte.discover_coupons(canais=["cupom_shopee"]))
+
+        self.assertEqual([item.coupon_code for item in itens], ["SHOPEE20"])
+        extrair_mock.assert_called_once_with(
+            "SHOPEE20: R$20 OFF", loja_padrao="shopee",
+        )
+
+    def test_cupom_guarda_asin_da_mesma_mensagem_sem_tracking(self):
+        fonte = TelegramPublicoSource()
+        mensagem = (
+            "20% OFF com cupom REAL20 "
+            "https://www.amazon.com.br/dp/B012345678?tag=canal-20&ref_=x"
+        )
+        cupom = [{
+            "codigo": "REAL20", "loja": "amazon", "tipo": "porcentagem",
+            "valor": 20, "minimo": 0, "teto": 0, "escopo": "",
+        }]
+        with patch.object(
+                fonte, "_carregar_canais",
+                return_value=[("canalteste", "html", "")]), patch.object(
+                fonte, "_mensagens", return_value=[("canalteste/1", mensagem)]), patch(
+                "apps.scrapers.sources.telegram_publico.extrair", return_value=cupom):
+            itens = list(fonte.discover_coupons(canais=["canalteste"]))
+
+        self.assertEqual(len(itens), 1)
+        self.assertEqual(itens[0].canonical_url,
+                         "https://www.amazon.com.br/dp/B012345678")
+        self.assertEqual(itens[0].evidence["asins"], ["B012345678"])
+        self.assertEqual(
+            itens[0].evidence["association"], "same_public_telegram_message",
+        )
+
+    def test_href_oculto_atras_de_comprar_tambem_associa_produto(self):
+        fonte = TelegramPublicoSource()
+        corpo = """
+        <div class="tgme_widget_message" data-post="canalteste/7">
+          <time datetime="__RECENT__"></time>
+          <div class="tgme_widget_message_text js-message_text">
+            15% OFF cupom LINK15
+            <a href="https://www.amazon.com.br/dp/B012345679?tag=canal-20">COMPRAR</a>
+          </div>
+        </div>
+        """
+        corpo = corpo.replace("__RECENT__", timezone.now().isoformat())
+        cupom = [{
+            "codigo": "LINK15", "loja": "amazon", "tipo": "porcentagem",
+            "valor": 15, "minimo": 0, "teto": 0, "escopo": "",
+        }]
+        with patch.object(
+                fonte, "_carregar_canais",
+                return_value=[("canalteste", corpo, "")]), patch(
+                "apps.scrapers.sources.telegram_publico.extrair", return_value=cupom):
+            itens = list(fonte.discover_coupons(canais=["canalteste"]))
+
+        self.assertEqual(itens[0].evidence["asins"], ["B012345679"])
+        self.assertEqual(
+            itens[0].canonical_url, "https://www.amazon.com.br/dp/B012345679",
+        )
+
+    def test_cupom_mescla_produto_de_ocorrencia_posterior(self):
+        fonte = TelegramPublicoSource()
+        cupom = [{
+            "codigo": "REAL20", "loja": "mercadolivre",
+            "tipo": "porcentagem", "valor": 20, "minimo": 0,
+            "teto": 0, "escopo": "",
+        }]
+        mensagens = [
+            ("canalteste/1", "20% OFF cupom REAL20"),
+            ("canalteste/2", "20% OFF cupom REAL20 https://meli.la/abc123"),
+        ]
+        with patch.object(
+                fonte, "_carregar_canais",
+                return_value=[("canalteste", "html", "")]), patch.object(
+                fonte, "_mensagens", return_value=mensagens), patch(
+                "apps.scrapers.sources.telegram_publico.extrair", return_value=cupom), patch(
+                "apps.scrapers.sources.telegram_publico.resolver",
+                return_value="https://produto.mercadolivre.com.br/MLB-123456-produto?matt_tool=x"):
+            itens = list(fonte.discover_coupons(canais=["canalteste"]))
+
+        self.assertEqual(len(itens), 1)
+        self.assertEqual(itens[0].evidence["item_ids"], ["MLB123456"])
+        self.assertNotIn("?", itens[0].canonical_url)
+
+    def test_host_parecido_com_marketplace_nao_e_aceito(self):
+        corpo = TG_HTML.replace(
+            "https://www.amazon.com.br/dp/B0ABCDEFGH",
+            "https://amazon.com.br.evil.test/dp/B0ABCDEFGH",
+        )
+        _, itens = self._coletar(corpo=corpo)
+        self.assertEqual([item.marketplace for item in itens], ["mercadolivre"])
 
 
 class PromobitTests(TestCase):
@@ -190,10 +452,70 @@ class PromobitTests(TestCase):
         for codigo in codigos:
             self.assertNotIn(" ", codigo)
 
+    def test_campo_codigo_nao_vence_regra_que_diz_aplicacao_automatica(self):
+        corpo = """
+        <script type="application/ld+json">
+        {"@type":"ItemList","itemListElement":[{"@type":"Offer",
+         "name":"50% de desconto","description":"O benefício entra automaticamente, sem precisar de código",
+         "discountCode":"50NOW"}]}
+        </script>
+        """
+        _, itens = self._coletar(corpo=corpo)
+        self.assertEqual(itens, [])
+
     def test_nao_publica_a_url_de_redirect_do_promobit(self):
         _, itens = self._coletar()
         for item in itens:
             self.assertNotIn("promobit.com.br", item.canonical_url)
+
+    def test_next_data_traz_codigo_que_o_schema_org_nao_lista(self):
+        _, itens = self._coletar(corpo=PROMOBIT_HTML + PROMOBIT_NEXT)
+        codigos = sorted(i.coupon_code for i in itens)
+        self.assertEqual(codigos, ["EXTRA15", "LISTA25"])
+        extra = next(i for i in itens if i.coupon_code == "EXTRA15")
+        self.assertEqual(extra.evidence["transport"], "promobit-next-data")
+        self.assertIsNotNone(extra.valid_until)
+        self.assertNotIn("promobit.com.br", extra.canonical_url)
+
+    def test_next_data_ignora_expirado_pendente_e_loja_relacionada(self):
+        _, itens = self._coletar(corpo=PROMOBIT_NEXT)
+        self.assertEqual([i.coupon_code for i in itens], ["EXTRA15"])
+
+    def test_corrige_percentual_impossivel_sem_perder_condicoes_reais(self):
+        corpo = """
+        <script id="__NEXT_DATA__" type="application/json">
+        {"props":{"pageProps":{"serverCoupons":{"coupons":[{
+          "couponCode":"MELHORPROMO",
+          "couponTitle":"Economize 20000% no Mercado Livre",
+          "couponDiscountValue":"20000% de Desconto",
+          "couponDiscount":"Desconto de R$200 para compras a partir de R$4.999, limitado a R$200",
+          "couponDiscountOn":"https://lista.mercadolivre.com.br/_Container_200-smf",
+          "couponStatusName":"APPROVED"
+        }]}}}}
+        </script>
+        """
+        _, itens = self._coletar(corpo=corpo, lojas=("mercado-livre",))
+
+        self.assertEqual(len(itens), 1)
+        item = itens[0]
+        self.assertEqual(item.title, "Cupom MELHORPROMO — R$ 200,00 OFF")
+        self.assertNotIn("20000%", item.coupon_rules["escopo"])
+        self.assertEqual(item.coupon_rules["tipo_desconto"], "fixo")
+        self.assertEqual(item.coupon_rules["valor_desconto"], 200.0)
+        self.assertEqual(item.coupon_rules["valor_minimo"], 4999.0)
+        self.assertEqual(item.coupon_rules["desconto_maximo"], 200.0)
+        self.assertEqual(
+            item.coupon_rules["container_url"],
+            "https://lista.mercadolivre.com.br/_Container_200-smf",
+        )
+
+    def test_preserva_percentual_decimal_valido_na_descricao(self):
+        corpo = PROMOBIT_NEXT.replace("15%", "12,5%").replace("EXTRA15", "EXTRA125")
+        _, itens = self._coletar(corpo=corpo)
+
+        self.assertEqual(len(itens), 1)
+        self.assertEqual(itens[0].coupon_rules["valor_desconto"], 12.5)
+        self.assertIn("12,5%", itens[0].coupon_rules["escopo"])
 
     def test_marca_a_origem_como_comunidade(self):
         _, itens = self._coletar()
@@ -216,17 +538,67 @@ class PromobitTests(TestCase):
         baixar.assert_not_called()
 
 
+class MeliuzCouponsTests(TestCase):
+    def _collect(self, body=MELIUZ_HTML):
+        source = MeliuzCouponsSource()
+        with patch.object(MeliuzCouponsSource, "_download", return_value=body):
+            items = list(source.discover_coupons(marketplaces=["amazon"]))
+        return source, items
+
+    def test_extracts_only_real_active_code(self):
+        source, items = self._collect()
+
+        self.assertEqual([item.coupon_code for item in items], ["JARDIM30"])
+        self.assertEqual(items[0].coupon_rules["valor_desconto"], 30)
+        self.assertEqual(items[0].coupon_rules["valor_minimo"], 200)
+        self.assertEqual(items[0].coupon_rules["desconto_maximo"], 80)
+        self.assertEqual(source.last_metrics["cards_seen"], 2)
+
+    def test_does_not_reuse_aggregator_affiliate_redirect(self):
+        _, items = self._collect()
+
+        self.assertEqual(items[0].canonical_url, "")
+        self.assertEqual(items[0].evidence["confianca_origem"], "comunidade")
+
+    def test_placeholder_and_expired_section_are_rejected(self):
+        source, _ = self._collect()
+
+        self.assertEqual(source.last_metrics["rejected_by_reason"]["placeholder_code"], 1)
+        self.assertNotIn("VELHO50", str(source.last_metrics))
+
+    def test_placeholders_de_resgate_nao_viram_codigo(self):
+        body = MELIUZ_HTML.replace("JARDIM30", "RESGATENOLINK")
+        source, items = self._collect(body=body)
+        self.assertEqual(items, [])
+        self.assertGreaterEqual(
+            source.last_metrics["rejected_by_reason"]["placeholder_code"], 2,
+        )
+
+    def test_is_always_a_partial_radar(self):
+        source, _ = self._collect()
+
+        self.assertFalse(source.last_metrics["complete"])
+        self.assertEqual(source.last_health_status, "healthy")
+
+
 class RegistroDeFontesTests(TestCase):
     def test_as_duas_fontes_estao_registradas(self):
         self.assertIn("promobit-cupons", SOURCES)
+        self.assertIn("meliuz-cupons", SOURCES)
+        self.assertIn("pelando-cupons", SOURCES)
         self.assertIn("telegram-publico", SOURCES)
+        self.assertIn("shopee-public-coupons", SOURCES)
+        self.assertIn("ml-lightning-coupons", SOURCES)
 
     def test_precedencia_baixa_para_alegacao_de_terceiro(self):
         """Comunidade corrobora; não decide sozinha contra uma fonte oficial."""
         from apps.scrapers.sources.persistence import _SOURCE_PRECEDENCE
 
         oficial = _SOURCE_PRECEDENCE["ml-cupons-afiliados"]
-        for slug in ("promobit-cupons", "telegram-publico"):
+        self.assertEqual(_SOURCE_PRECEDENCE["ml-lightning-coupons"], oficial)
+        for slug in (
+            "promobit-cupons", "meliuz-cupons", "pelando-cupons", "telegram-publico",
+        ):
             self.assertGreater(_SOURCE_PRECEDENCE[slug], oficial, slug)
 
     def test_esqueleto_antigo_do_promobit_continua_desabilitado(self):
@@ -247,11 +619,328 @@ class InventarioParcialTests(TestCase):
 
     def test_fontes_de_recorte_se_declaram_parciais(self):
         self.assertFalse(SOURCES["promobit-cupons"].inventario_completo)
+        self.assertFalse(SOURCES["meliuz-cupons"].inventario_completo)
+        self.assertFalse(SOURCES["pelando-cupons"].inventario_completo)
         self.assertFalse(SOURCES["telegram-publico"].inventario_completo)
 
     def test_fonte_oficial_continua_cobrada_por_completude(self):
         """A página oficial ou lista tudo, ou está quebrada — e isso tem de aparecer."""
         self.assertTrue(SOURCES["ml-cupons-afiliados"].inventario_completo)
+
+
+class ShopeePublicCouponsTests(TestCase):
+    def _card(self, text, promotion="1496364873691136"):
+        return {
+            "text": text,
+            "href": (
+                "/voucher/details?evcode=MTIz&promotionId="
+                f"{promotion}&signature=publica"
+            ),
+        }
+
+    def test_parseia_voucher_fixo_disponivel(self):
+        row, reason = _parse_rendered_card(self._card(
+            "TODAS AS LOJAS\nR$20 OFF\nNas compras acima de R$159\n"
+            "Limitado a R$20\nCondicoes\nEu quero"
+        ))
+
+        self.assertEqual(reason, "")
+        self.assertEqual(row["discount_type"], "fixo")
+        self.assertEqual(row["discount"], 20)
+        self.assertEqual(row["minimum"], 159)
+        self.assertEqual(row["maximum"], 20)
+        self.assertIn("promotionId=1496364873691136", row["url"])
+
+    def test_parseia_contrato_json_oficial_com_validade_e_quota(self):
+        row, reason = _parse_api_voucher({"voucher": {
+            "voucher_identifier": {
+                "promotion_id": 1492188714381312,
+                "voucher_code": "1433119157",
+                "signature": "a" * 64,
+                "signature_source": 0,
+            },
+            "info": {"status": 1},
+            "reward_info": {
+                "reward_type": 0, "min_spend": 19_900_000,
+                "value": 0, "percentage": 30, "cap": 2_500_000,
+            },
+            "time_info": {
+                "start_time": 1_700_000_000, "end_time": 1_900_000_000,
+                "has_expired": False,
+            },
+            "quota_info": {
+                "fully_redeemed": False, "fully_used": False,
+                "disabled": False, "percentage_claimed": 16,
+                "percentage_used": 42,
+            },
+            "ui_info": {"icon_text": "FULL"},
+            "exclusive_channel_type": 0,
+        }}, now_ts=1_800_000_000)
+
+        self.assertEqual(reason, "")
+        self.assertEqual(row["discount_type"], "porcentagem")
+        self.assertEqual(row["discount"], 30)
+        self.assertEqual(row["minimum"], 199)
+        self.assertEqual(row["maximum"], 25)
+        self.assertEqual(row["category"], "FULL")
+        self.assertEqual(int(row["valid_until"].timestamp()), 1_900_000_000)
+        self.assertIn("promotionId=1492188714381312", row["url"])
+        self.assertIn("evcode=", row["url"])
+
+        no_end = {"voucher": {
+            **({
+                "voucher_identifier": {
+                    "promotion_id": 2, "voucher_code": "456",
+                    "signature": "b" * 64, "signature_source": 0,
+                },
+                "info": {"status": 1},
+                "reward_info": {"reward_type": 0, "value": 2_000_000},
+                "time_info": {
+                    "start_time": 100, "end_time": 2_147_483_640,
+                    "has_expired": False,
+                },
+                "quota_info": {}, "ui_info": {},
+            })
+        }}
+        self.assertIsNone(
+            _parse_api_voucher(no_end, now_ts=200)[0]["valid_until"],
+        )
+
+    def test_json_oficial_rejeita_cashback_expirado_e_esgotado(self):
+        base = {
+            "voucher_identifier": {
+                "promotion_id": 1, "voucher_code": "123",
+                "signature": "c" * 64, "signature_source": 0,
+            },
+            "info": {"status": 1},
+            "reward_info": {
+                "reward_type": 1, "percentage": 20, "value": 0,
+            },
+            "time_info": {
+                "start_time": 100, "end_time": 300, "has_expired": False,
+            },
+            "quota_info": {"fully_redeemed": False, "disabled": False},
+            "ui_info": {},
+        }
+        row, reason = _parse_api_voucher({"voucher": base}, now_ts=200)
+        self.assertIsNone(row)
+        self.assertEqual(reason, "cashback_not_discount")
+
+        expired = {**base, "reward_info": {"reward_type": 0, "value": 2_000_000},
+                   "time_info": {**base["time_info"], "has_expired": True}}
+        self.assertEqual(
+            _parse_api_voucher({"voucher": expired}, now_ts=200)[1],
+            "unavailable",
+        )
+        exhausted = {**expired, "time_info": base["time_info"],
+                     "quota_info": {"fully_redeemed": True}}
+        self.assertEqual(
+            _parse_api_voucher({"voucher": exhausted}, now_ts=200)[1],
+            "unavailable",
+        )
+
+    def test_extrator_json_ignora_resposta_com_erro(self):
+        entries, seen, complete = _api_voucher_entries([
+            {"error": 90309999, "data": [{"vouchers": [{"voucher": {}}]}]},
+            {"error": None, "data": [{
+                "vouchers": [{"voucher": {"ok": 1}}], "total_count": 1,
+            }]},
+        ])
+
+        self.assertTrue(seen)
+        self.assertTrue(complete)
+        self.assertEqual(entries, [{"voucher": {"ok": 1}}])
+
+        _entries, _seen, complete = _api_voucher_entries([{
+            "error": None,
+            "data": [{"vouchers": [{"voucher": {}}], "total_count": 2}],
+        }])
+        self.assertFalse(complete)
+
+    def test_parseia_percentual_e_milhar_brasileiro(self):
+        row, _ = _parse_rendered_card(self._card(
+            "MOVEIS\n12,5% OFF\nNas compras acima de R$1,6mil "
+            "Limitado a R$200\nCondicoes\nEu quero"
+        ))
+
+        self.assertEqual(row["discount_type"], "porcentagem")
+        self.assertEqual(row["discount"], 12.5)
+        self.assertEqual(row["minimum"], 1600)
+
+    def test_nao_confunde_cashback_com_desconto(self):
+        row, reason = _parse_rendered_card(self._card(
+            "CUPOM\n20% DE CASHBACK\nLimitado a R$20\nCondicoes\nEu quero"
+        ))
+
+        self.assertIsNone(row)
+        self.assertEqual(reason, "cashback_not_discount")
+
+    def test_esgotado_nao_entra(self):
+        row, reason = _parse_rendered_card(self._card(
+            "TODAS AS LOJAS\nR$20 OFF\nCondicoes\nEsgotado"
+        ))
+
+        self.assertIsNone(row)
+        self.assertEqual(reason, "unavailable")
+
+    def test_fonte_oficial_consume_slot_de_chromium(self):
+        self.assertTrue(ShopeePublicCouponsSource.requires_chromium)
+
+    def test_fonte_oficial_agrega_vitrine_geral_e_cupons_diarios(self):
+        self.assertTrue(DAILY_STORE_COUPONS_URL.endswith("-v98"))
+
+        class Locator:
+            def __init__(self, page, selector):
+                self.page = page
+                self.selector = selector
+
+            def inner_text(self, timeout=None):
+                return "Cupons disponiveis hoje"
+
+            def evaluate_all(self, _script):
+                promotion = "111" if self.page.index == 0 else "222"
+                return [{
+                    "text": (
+                        "TODAS AS LOJAS\nR$20 OFF\n"
+                        "Nas compras acima de R$100\nCondicoes\nEu quero"
+                    ),
+                    "href": f"/voucher/details?promotionId={promotion}",
+                    "image": "",
+                }]
+
+        class Page:
+            def __init__(self):
+                self.url = ""
+                self.index = -1
+                self.visited = []
+
+            def on(self, *_args):
+                return None
+
+            def goto(self, url, **_kwargs):
+                self.url = url
+                self.visited.append(url)
+                self.index += 1
+
+            def wait_for_selector(self, *_args, **_kwargs):
+                return None
+
+            def wait_for_timeout(self, *_args, **_kwargs):
+                return None
+
+            def locator(self, selector):
+                return Locator(self, selector)
+
+        page = Page()
+
+        @contextmanager
+        def browser(**_kwargs):
+            yield page, object()
+
+        source = ShopeePublicCouponsSource()
+        with patch(
+            "apps.scrapers.sources.shopee_public_coupons.iniciar_browser",
+            browser,
+        ), patch(
+            "apps.scrapers.sources.shopee_public_coupons._economizar_banda",
+        ):
+            items = list(source.discover_coupons())
+
+        self.assertEqual(page.visited, list(source.coupon_pages))
+        self.assertEqual([item.external_id for item in items], [
+            "shopee-voucher:111", "shopee-voucher:222",
+        ])
+        self.assertEqual(source.last_metrics["pages_processed"], 2)
+        self.assertEqual(source.last_metrics["accepted"], 2)
+        self.assertTrue(source.last_metrics["complete"])
+        self.assertEqual(
+            [item.evidence["source_page"] for item in items],
+            list(source.coupon_pages),
+        )
+
+    def test_proxy_residencial_e_opcional_e_nao_vaza_credencial_na_url(self):
+        with self.settings(
+            SHOPEE_PUBLIC_PROXY_SERVER="https://proxy.example:8443",
+            SHOPEE_PUBLIC_PROXY_USERNAME="usuario",
+            SHOPEE_PUBLIC_PROXY_PASSWORD="segredo",
+        ):
+            self.assertEqual(_browser_context_options(), {"proxy": {
+                "server": "https://proxy.example:8443",
+                "username": "usuario", "password": "segredo",
+            }})
+        with self.settings(SHOPEE_PUBLIC_PROXY_SERVER=""):
+            self.assertEqual(_browser_context_options(), {})
+
+    def test_proxy_sem_protocolo_e_recusado(self):
+        with self.settings(SHOPEE_PUBLIC_PROXY_SERVER="proxy.example:8443"):
+            with self.assertRaisesRegex(ValueError, "incluir o protocolo"):
+                _browser_context_options()
+
+    def test_login_exigido_na_fly_nao_e_classificado_como_inventario_vazio(self):
+        self.assertTrue(_auth_required(
+            "https://shopee.com.br/verify/traffic/error?type=4",
+            "Login Necessário. Faça login para continuar.",
+        ))
+        self.assertFalse(_auth_required(
+            "https://shopee.com.br/m/cupom-de-desconto",
+            "Cupons disponíveis hoje",
+        ))
+
+    def test_verifique_para_continuar_e_challenge_nao_inventario_vazio(self):
+        self.assertTrue(_challenge_required("Carregando.. Verifique para continuar"))
+        self.assertFalse(_challenge_required("Cupons disponíveis hoje"))
+
+    def test_diagnostico_autenticado_nao_grava_texto_integral_nem_screenshot(self):
+        page = Mock(url="https://shopee.com.br/m/cupom-de-desconto?token=secreto")
+        page.locator.return_value.inner_text.return_value = (
+            "usuario-identificavel\nVerifique para continuar"
+        )
+        with patch(
+            "apps.scrapers.sources.shopee_public_coupons.capture_public_diagnostic",
+        ) as screenshot, patch(
+            "apps.scrapers.sources.shopee_public_coupons."
+            "capture_public_text_diagnostic",
+        ) as safe_text:
+            _capture_source_diagnostic(
+                page, "shopee-public-coupons", "blocked", authenticated=True,
+            )
+
+        screenshot.assert_not_called()
+        payload = safe_text.call_args.args[0]
+        self.assertNotIn("usuario-identificavel", payload)
+        self.assertNotIn("secreto", payload)
+        self.assertIn("challenge=True", payload)
+
+    def test_snapshot_esgotado_e_cashback_pode_ser_vazio_saudavel(self):
+        complete, health, schema_errors = _snapshot_state(
+            4, 0, {"unavailable": 3, "cashback_not_discount": 1},
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual(health, "healthy_empty")
+        self.assertEqual(schema_errors, 0)
+
+    def test_rota_editorial_vazia_nao_invalida_a_vitrine_geral(self):
+        complete, health, supplemental_incomplete = _collection_state([
+            {
+                "url": DAILY_STORE_COUPONS_URL, "complete": False,
+                "health": "degraded",
+            },
+            {"url": COUPONS_URL, "complete": True, "health": "healthy"},
+        ], 13)
+
+        self.assertTrue(complete)
+        self.assertEqual(health, "healthy")
+        self.assertEqual(supplemental_incomplete, 1)
+
+    def test_quebra_de_schema_preserva_catalogo_anterior(self):
+        complete, health, schema_errors = _snapshot_state(
+            5, 2, {"unavailable": 2, "missing_discount": 1},
+        )
+
+        self.assertFalse(complete)
+        self.assertEqual(health, "partial")
+        self.assertEqual(schema_errors, 1)
 
     def test_alerta_ignora_as_parciais(self):
         from apps.scrapers.maintenance import diagnosticar_alertas_pipeline_cupons

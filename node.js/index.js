@@ -15,6 +15,7 @@ const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 const {
     reconnectDelay, shouldPurgeAuth, reconnectAction, isRevokedReason, ocupaSlot,
+    deveReviverRecuperacaoPausada,
     groupRetryDelay, qrBootstrapOutcome, preAuthEventIsStale, estadoIndicaQueda,
     keepaliveIndicaQueda, KEEPALIVE_FALHAS_ATE_QUEDA,
     deveReciclarAposTimeoutDeEnvio, veredictoDeTimeoutDeEnvio, STALLS_ATE_RECICLAR,
@@ -53,6 +54,7 @@ const {
 } = require('./send_deadline');
 const {
     timeoutPreflight, mensagemPreflight, registrarStoreIndisponivel,
+    marcarStorePronto, deveReciclarStoreIndisponivel,
     mensagemEstabilizacao, deveReciclarTimeoutPreflight, iniciarRecuperacaoPreflight,
 } = require('./preflight_recovery');
 const { aguardarStorePronto } = require('./store_ready');
@@ -187,6 +189,11 @@ const RECONNECT_MAX_DELAY_MS = parseInt(process.env.RECONNECT_MAX_DELAY_MS, 10) 
 // dois ciclos (retry -> purge -> retry) ~= 6,5min ate a sessao expirar de vez.
 // Sem teto, o contador so crescia e o usuario via "tentativa 38..." para sempre.
 const RECONNECT_MAX_ATTEMPTS = parseInt(process.env.RECONNECT_MAX_ATTEMPTS, 10) || 6;
+// Depois que uma credencial pareada esgota a escada curta, espera antes de uma
+// nova tentativa iniciada pelo reconciliador externo. Evita loop de CPU e, ao
+// mesmo tempo, recupera queda transitória sem exigir que o usuário abra a tela.
+const AUTO_REVIVE_PAUSED_AFTER_MS =
+    parseInt(process.env.WA_AUTO_REVIVE_PAUSED_AFTER_MS, 10) || 15 * 60 * 1000;
 const SESSION_START_STAGGER_MS = parseInt(process.env.SESSION_START_STAGGER_MS, 10) || 12000;
 const PUPPETEER_EXECUTABLE_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
 const WATCHDOG_TIMEOUT_MS = parseInt(process.env.WATCHDOG_TIMEOUT_MS, 10) || 45000;
@@ -748,13 +755,56 @@ const agendarKeepalive = (session, client) => {
             agendarKeepalive(session, client);
             return;
         }
-        session.keepaliveEmVoo = false;
         session.keepaliveFalhas = 0;
-        if (session.client !== client) return;
+        if (session.client !== client) {
+            session.keepaliveEmVoo = false;
+            return;
+        }
         if (estadoIndicaQueda(estado)) {
+            session.keepaliveEmVoo = false;
             tratarQuedaDeEstado(session, client, estado, 'keepalive');
             return;
         }
+        // A trava `keepaliveEmVoo` segue de pé durante a sondagem do store: ela
+        // existe para impedir DUAS chamadas concorrentes contra a mesma página,
+        // que é justamente o que trava o Chromium. Liberá-la antes de sondar
+        // reabriria essa janela.
+        //
+        // getState responde pelo SOCKET; ele diz CONNECTED mesmo quando o bundle
+        // do WA Web recarregou e levou window.Store/WWebJS embora. Foi assim que
+        // uma sessao passou SETE HORAS anunciando "conectado" enquanto todo envio
+        // morria em verificar_store, sem nada escalar: o vigia nunca perguntou se
+        // a pagina ainda sabia enviar. Perguntar aqui transforma "descobrimos no
+        // proximo envio" (que pode ser so no dia seguinte) em "descobrimos em
+        // dois minutos".
+        try {
+            const storeOk = await sondarStore(session, 8000);
+            if (session.client !== client) {
+                session.keepaliveEmVoo = false;
+                return;
+            }
+            if (storeOk) {
+                marcarStorePronto(session);
+            } else {
+                registrarStoreIndisponivel(session);
+                if (deveReciclarStoreIndisponivel(session)) {
+                    console.error(
+                        `[${session.id}] Keepalive: store ausente alem do teto; reciclando.`
+                    );
+                    session.keepaliveEmVoo = false;
+                    recycleSession(session, 'store ausente no keepalive')
+                        .catch(() => undefined);
+                    return;
+                }
+                console.warn(`[${session.id}] Keepalive: store ausente; aguardando o teto.`);
+            }
+        } catch (err) {
+            // Sondagem e diagnostico, nunca veredito: uma leitura perdida aqui
+            // nao pode derrubar uma sessao saudavel.
+            console.warn(`[${session.id}] Keepalive nao sondou o store: ${err.message}`);
+        }
+        session.keepaliveEmVoo = false;
+        if (session.client !== client) return;
         agendarKeepalive(session, client);
     }, KEEPALIVE_INTERVAL_MS);
     session.keepaliveTimer.unref();
@@ -1589,6 +1639,31 @@ const initializeSession = (session) => {
                 // OnDeviceHeadSuggestModel). Num volume de 1GB com dois perfis
                 // isso era um terco do disco, mais a CPU e a rede do download.
                 '--disable-component-update',
+                // Flags abaixo cortam RAM, não disco — os args de cima nunca
+                // tocaram o pico medido em produção (1,17GB conectado). Site
+                // Isolation é o maior item isolado: o Chrome sobe um processo
+                // OS por origem só por segurança entre abas — aqui há UMA aba
+                // controlada, sempre em web.whatsapp.com, então a isolação não
+                // compra nada e custa um processo renderer inteiro a mais.
+                '--disable-features=IsolateOrigins,site-per-process,TranslateUI,BackForwardCache,MediaRouter',
+                '--disable-site-isolation-trials',
+                '--renderer-process-limit=1',
+                '--disable-extensions',
+                '--disable-background-networking',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--disable-breakpad',
+                '--disable-client-side-phishing-detection',
+                '--disable-default-apps',
+                '--disable-hang-monitor',
+                '--disable-sync',
+                '--disable-translate',
+                '--mute-audio',
+                '--metrics-recording-only',
+                '--no-default-browser-check',
+                '--password-store=basic',
+                '--use-mock-keychain',
             ]
         }
     });
@@ -2165,9 +2240,18 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         });
         if (!storePronto) {
             const mensagem = registrarStoreIndisponivel(session);
-            console.warn(`[${session.id}] Store do WhatsApp ainda indisponivel no preflight; mantendo a sessao ativa.`);
+            // Ausencia PERSISTENTE nao e hidratacao: o bundle do WA Web
+            // recarregou e levou window.Store/WWebJS embora. Reciclar reinjeta
+            // os modulos e NAO apaga credencial (purgeAuth=false por default).
+            if (deveReciclarStoreIndisponivel(session)) {
+                console.error(`[${session.id}] Store indisponivel alem do teto; reciclando o Chromium para reinjetar os modulos.`);
+                iniciarRecuperacaoPreflight(session, 'verificar_store', recycleSession);
+            } else {
+                console.warn(`[${session.id}] Store do WhatsApp ainda indisponivel no preflight; mantendo a sessao ativa.`);
+            }
             throw erroClassificado(mensagem, TRANSITORIO);
         }
+        marcarStorePronto(session);
 
         // Validate that the destination still exists in this account. This
         // rejects stale group IDs instead of reporting a false success.
@@ -2397,7 +2481,12 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             // apos `ready`; manter o Chromium evita perder a sessao por uma
             // condicao que costuma se resolver sozinha.
             const mensagem = registrarStoreIndisponivel(session);
-            console.warn(`[${session.id}] Store do WhatsApp indefinido durante envio; mantendo a sessao ativa.`);
+            if (deveReciclarStoreIndisponivel(session)) {
+                console.error(`[${session.id}] Store indefinido alem do teto durante envio; reciclando o Chromium.`);
+                iniciarRecuperacaoPreflight(session, 'verificar_store', recycleSession);
+            } else {
+                console.warn(`[${session.id}] Store do WhatsApp indefinido durante envio; mantendo a sessao ativa.`);
+            }
             return {
                 sucesso: false,
                 erro: mensagem,
@@ -2497,6 +2586,17 @@ process.on('unhandledRejection', (reason) => {
 
 // Liveness público p/ o load balancer: sem contadores (evita vazar quantas sessões
 // existem/estão conectadas a quem não tem a API key). Detalhes ficam em /api/status.
+//
+// `ok` é LIVENESS DO PROCESSO e nada mais. Não transformar em "a sessão está boa":
+// este mesmo path é o [checks.health] da Fly (15s) E o `wait_until_healthy` do
+// religamento noturno. Um `ok:false` porque ninguém pareou o QR faria a máquina
+// nunca subir de manhã — exatamente o apagão de 16, 17 e 18/08.
+//
+// O supervisor externo precisava distinguir "processo mudo" de "sessão quebrada" e
+// só tinha o primeiro. Os contadores abaixo dão o segundo sem mexer no `ok`: fase
+// terminal (`expirado`, `falha_auth`, `recuperacao_pausada`) e inconsistência são
+// estados dos quais a sessão NÃO sai sozinha. São contagens, não identidades —
+// nada de telefone, id ou organização nesta rota sem capability.
 app.get('/health', (req, res) => {
     let orphaned = 0;
     try {
@@ -2505,11 +2605,17 @@ app.get('/health', (req, res) => {
             && sessionManifest.isQuarantined(path.join(authRootPath, entry.name))
         )).length;
     } catch (_) { orphaned = 0; }
+    const todas = Array.from(sessions.values());
     res.json({
         ok: true,
         worker: process.env.FLY_MACHINE_ID || process.env.HOSTNAME || 'local',
         capacity: { used: sessoesOcupandoSlot(), max: MAX_WHATSAPP_SESSIONS },
         orphaned_sessions: orphaned,
+        sessions_total: todas.length,
+        sessions_ready: todas.filter((s) => s.fase === 'conectado' && s.isConnected).length,
+        sessions_stuck: todas.filter((s) => (
+            FASES_TERMINAIS.has(s.fase) || s.fase === 'inconsistente'
+        )).length,
     });
 });
 
@@ -2590,6 +2696,15 @@ app.post('/api/sessoes/reconcile',
         authPathDe(instanceId), organizationId, instanceId,
     );
     let session = findSession(instanceId, false);
+    if (binding.ok && session && deveReviverRecuperacaoPausada(
+        session.fase, hasStoredAuth(instanceId), session.lastRecoveryAt,
+        Date.now(), AUTO_REVIVE_PAUSED_AFTER_MS
+    )) {
+        registrarLifecycle(session, 'auto_revive_paused', {
+            cooldown_ms: AUTO_REVIVE_PAUSED_AFTER_MS,
+        });
+        reviveSession(session);
+    }
     // O boot nunca restaura um Chromium apenas porque encontrou um diretório no
     // volume. Esta capability foi emitida a partir da WhatsAppConnection vigente
     // no Django e é a prova de registry exigida antes de consumir capacidade.

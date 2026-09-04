@@ -7,19 +7,36 @@ presume que um valor externo seja string.
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 
 from django.db.models import Q
 from django.conf import settings
 
 
-_CODIGO_HUMANO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{2,39}$")
+# Os checkouts observados aceitam tokens alfanuméricos e hífen. Ponto apareceu
+# somente em texto colado (por exemplo ``9.9CONSEGUEM``) e permitir isso aqui
+# reabria, na projeção, um código que o coletor já havia recusado.
+_CODIGO_HUMANO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{2,39}$")
+_CODIGOS_PLACEHOLDER = frozenset({
+    "CUPOMNOLINK", "CUPOMAQUI", "DESCONTOAQUI", "DESCONTONOLINK",
+    "GARANTACUPOM", "PEGUECUPOM", "USECUPOM", "MAISCUPONS",
+    "RESGATENOLINK", "PEGUEAQUI", "ATIVEAQUI", "VEJANOLINK",
+    "RESGATE", "RESGATAR", "CARRINHO", "EXCLUSIVO", "TECNOLOGIA", "ATUALIZADO",
+    "APROVEITE", "CONFIRA", "MELICUPONS", "ANUNCIO",
+    "ATIVADO", "ESGOTANDO", "ESGOTANDOOO", "MOSTRAR", "UTILIZADO", "VOLTANDO",
+    "RESGATARAM", "CORREEEEE", "CORREEEEEE",
+})
+# Relatórios SQL precisam aplicar a mesma fronteira sem materializar todo o
+# catálogo em Python. O alias público é imutável e evita duplicar a denylist.
+CODIGOS_NAO_PUBLICAVEIS = _CODIGOS_PLACEHOLDER
 _ESCOPO_GENERICO = {
     "", "geral", "site inteiro", "todo o site", "toda a loja", "todos os produtos",
     "qualquer produto", "todas as categorias",
 }
 _CONDICAO_PUBLICO = re.compile(
-    r"\b(?:usu[aá]rios? selecionad|novos? clientes?|primeira compra|somente no app|"
+    r"\b(?:usu[aá]rios? selecionad|novos? clientes?|contas? novas?|primeira compra|somente no app|"
     r"apenas no app|cart[aã]o|pix)\b", re.I,
 )
 _NAO_PRODUTO = re.compile(
@@ -77,7 +94,9 @@ def tem_restricao_publico(texto) -> bool:
 
 def codigo_humano(valor) -> str:
     codigo = _texto(valor)
-    return codigo if _CODIGO_HUMANO.fullmatch(codigo) else ""
+    if not _CODIGO_HUMANO.fullmatch(codigo):
+        return ""
+    return "" if codigo.upper() in _CODIGOS_PLACEHOLDER else codigo
 
 
 def normalizar_regras_cupom(regras, *, external_id="", codigo="") -> dict:
@@ -221,9 +240,15 @@ def extrair_escopo_produtos(titulo, escopo="") -> str:
     exemplo ``R$ 50 OFF em monitores Samsung selecionados``. Condições de público
     ou pagamento ficam de fora daqui e continuam sendo exibidas como condição.
     """
+    def informativo(valor):
+        # Fontes comunitárias às vezes deixam apenas um emoji/tag no campo de
+        # ação (ex.: "🎟"). Isso não descreve produto algum e polui a mensagem.
+        return bool(re.search(r"[^\W_]", valor, re.UNICODE))
+
     explicito = _texto(escopo).strip(" .:-")
     normalizado = explicito.casefold()
     if (normalizado not in _ESCOPO_GENERICO and explicito
+            and informativo(explicito)
             and not _CONDICAO_PUBLICO.search(explicito)):
         return explicito[:220]
 
@@ -235,7 +260,8 @@ def extrair_escopo_produtos(titulo, escopo="") -> str:
     matches = list(re.finditer(r"\b(?:em|para)\s+(.+)$", texto, re.I))
     if matches:
         candidato = matches[-1].group(1).strip(" .:-")
-        if (candidato and not _NAO_PRODUTO.search(candidato)
+        if (candidato and informativo(candidato)
+                and not _NAO_PRODUTO.search(candidato)
                 and not _CONDICAO_PUBLICO.search(candidato)
                 and candidato.casefold() not in _ESCOPO_GENERICO):
             return candidato[:220]
@@ -247,7 +273,8 @@ def extrair_escopo_produtos(titulo, escopo="") -> str:
             r"^(?:cupom\s+)?(?:R\$\s*[\d.,]+|[\d.,]+\s*%)\s*"
             r"(?:off|de\s+desconto)?\s*", "", texto, flags=re.I,
         ).strip(" .:-")
-        if candidato and not _CONDICAO_PUBLICO.search(candidato):
+        if (candidato and informativo(candidato)
+                and not _CONDICAO_PUBLICO.search(candidato)):
             return candidato[:220]
     return ""
 
@@ -267,6 +294,7 @@ def codigo_publicavel(cupom) -> str:
 
 _FONTES_ML_ATIVACAO = (
     "mercadolivre-web", "mercadolivre-campanhas", "ml-cupons-afiliados",
+    "ml-official-promotions",
 )
 
 # Subdomínio de LISTAGEM do ML. Por construção toda URL aqui é uma lista de anúncios
@@ -366,12 +394,23 @@ def site_wide_confiavel(cupom, *, codigos_contestados=None) -> bool:
     ).exists()
 
 
-# Fontes cuja saída é ALEGAÇÃO de terceiro, não observação nossa. O adaptador do
-# Promobit já dizia isto na própria docstring: cupom de comunidade "soma evidência
-# e corrobora o que outra fonte já viu, mas não deveria, sozinho, mandar um
-# influenciador anunciar um código para o grupo dele". Faltava o portão.
+# Fontes cuja saída é ALEGAÇÃO de terceiro, não observação nossa.
 FONTES_COMUNIDADE = frozenset({
-    "promobit-cupons", "telegram-publico", "promobit-community", "pelando-community",
+    "promobit-cupons", "meliuz-cupons", "pelando-cupons", "bia-garimpa-cupons",
+    "cupomspot-cupons", "telegram-publico",
+    "prima-ryca-cupons", "discoup-cupons", "promomia-cupons",
+    "cuponation-cupons", "cashbe-cupons",
+    "linkerhub-cupons", "peguei-barato-cupons",
+    "promobit-community", "pelando-community",
+})
+# Telegram, agregadores e stubs são alegação de terceiro: nenhum lista sozinho.
+FONTES_COMUNIDADE_SEM_LISTAGEM = frozenset({
+    "promobit-cupons", "meliuz-cupons", "pelando-cupons", "bia-garimpa-cupons",
+    "cupomspot-cupons", "telegram-publico",
+    "prima-ryca-cupons", "discoup-cupons", "promomia-cupons",
+    "cuponation-cupons", "cashbe-cupons",
+    "linkerhub-cupons", "peguei-barato-cupons",
+    "promobit-community", "pelando-community",
 })
 
 
@@ -386,7 +425,7 @@ def cupom_de_comunidade(cupom) -> bool:
 
 
 def comunidade_corroborada(cupom) -> bool:
-    """Outra fonte, fora da comunidade, publicou este mesmo código?
+    """Há fonte direta ou duas fontes independentes concordando no código?
 
     É a condição que o próprio projeto escreveu e nunca aplicou. Em produção,
     20/08/2026, o aviso em lote levaria ao grupo o código `TODOSITE100` —
@@ -399,14 +438,227 @@ def comunidade_corroborada(cupom) -> bool:
     codigo = _texto(getattr(cupom, "codigo", "")).upper()
     if not codigo:
         return False
-    from apps.scrapers.models import CupomNormalizado
+    from datetime import timedelta
+    from django.utils import timezone
+    from apps.scrapers.maintenance import COUPON_MAX_AGE_HOURS, cupons_frescos_q
+    from apps.scrapers.models import CupomFonteObservacao, CupomNormalizado
 
-    return CupomNormalizado.objects.filter(
+    corroborada_no_catalogo = CupomNormalizado.objects.filter(
         marketplace=getattr(cupom, "marketplace", ""), estado="ativo",
+        organization_id=getattr(cupom, "organization_id", None),
+        owner__isnull=True,
         codigo__iexact=codigo,
     ).exclude(pk=getattr(cupom, "pk", None)).exclude(
         fonte__slug__in=FONTES_COMUNIDADE,
-    ).exists()
+    ).filter(cupons_frescos_q()).exists()
+    if corroborada_no_catalogo:
+        return True
+
+    # A persistência deduplica campanhas equivalentes e guarda cada testemunho no
+    # livro de observações. Consultar apenas CupomNormalizado perdia exatamente a
+    # prova oficial quando a linha sobrevivente continuava apontando para a fonte
+    # comunitária. Evidência antiga não vale: usa a mesma janela de 48h do catálogo.
+    cutoff = timezone.now() - timedelta(hours=COUPON_MAX_AGE_HOURS)
+    oficial_observada = CupomFonteObservacao.objects.filter(
+        organization_id=getattr(cupom, "organization_id", None),
+        cupom__marketplace=getattr(cupom, "marketplace", ""),
+        cupom__codigo__iexact=codigo,
+        cupom__estado="ativo",
+        outcome="accepted",
+        observed_at__gte=cutoff,
+    ).exclude(
+        fonte__slug__in=FONTES_COMUNIDADE,
+    ).filter(cupons_frescos_q(prefix="cupom__")).exists()
+    if oficial_observada:
+        return True
+    chave = (
+        str(getattr(cupom, "marketplace", "") or "").casefold(), codigo,
+    )
+    return fontes_independentes_em_lote([cupom]).get(chave, 0) >= 2
+
+
+def corroboracoes_oficiais_em_lote(cupons) -> set[tuple[str, str]]:
+    """Pares ``(marketplace, codigo)`` corroborados, em uma consulta.
+
+    O ranking avalia dezenas de cupons por regra. Chamar
+    ``comunidade_corroborada`` dentro desse laço fazia um ``EXISTS`` por código e,
+    no banco pequeno da produção, somava mais de dez segundos a cada tick. O
+    resultado continua sendo exatamente a mesma prova: mesma loja e mesmo código
+    em uma fonte fora da comunidade.
+    """
+    pares = {
+        (str(getattr(c, "marketplace", "") or "").casefold(),
+         _texto(getattr(c, "codigo", "")).upper())
+        for c in cupons if cupom_de_comunidade(c) and getattr(c, "codigo", "")
+    }
+    if not pares:
+        return set()
+    from datetime import timedelta
+    from django.utils import timezone
+    from django.db.models.functions import Upper
+    from apps.scrapers.maintenance import COUPON_MAX_AGE_HOURS, cupons_frescos_q
+    from apps.scrapers.models import CupomFonteObservacao, CupomNormalizado
+
+    marketplaces = {marketplace for marketplace, _ in pares}
+    codigos = {codigo for _, codigo in pares}
+    linhas = (CupomNormalizado.objects.filter(
+        marketplace__in=marketplaces, estado="ativo", organization__isnull=True,
+        owner__isnull=True,
+    ).exclude(
+        fonte__slug__in=FONTES_COMUNIDADE,
+    ).annotate(
+        codigo_normalizado=Upper("codigo"),
+    ).filter(
+        codigo_normalizado__in=codigos,
+    ).filter(cupons_frescos_q()).values_list("marketplace", "codigo_normalizado"))
+    corroboradas = {
+        (str(marketplace or "").casefold(), str(codigo or "").upper())
+        for marketplace, codigo in linhas
+    }
+    cutoff = timezone.now() - timedelta(hours=COUPON_MAX_AGE_HOURS)
+    observacoes = (CupomFonteObservacao.objects.filter(
+        organization__isnull=True,
+        cupom__marketplace__in=marketplaces,
+        cupom__estado="ativo",
+        outcome="accepted",
+        observed_at__gte=cutoff,
+    ).exclude(
+        fonte__slug__in=FONTES_COMUNIDADE,
+    ).annotate(
+        codigo_normalizado=Upper("cupom__codigo"),
+    ).filter(
+        codigo_normalizado__in=codigos,
+    ).filter(
+        cupons_frescos_q(prefix="cupom__"),
+    ).values_list("cupom__marketplace", "codigo_normalizado"))
+    corroboradas.update(
+        (str(marketplace or "").casefold(), str(codigo or "").upper())
+        for marketplace, codigo in observacoes
+    )
+    return corroboradas
+
+
+def _assinatura_desconto_corroboravel(regras):
+    """Termos mínimos que duas fontes precisam afirmar de forma compatível."""
+    regras = regras if isinstance(regras, Mapping) else {}
+    tipo = _texto(regras.get("tipo_desconto")).casefold()
+    try:
+        valor = Decimal(str(regras.get("valor_desconto"))).quantize(Decimal("0.01"))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if tipo not in {"fixo", "porcentagem"} or valor <= 0:
+        return None
+    return tipo, str(valor)
+
+
+_FAMILIAS_EDITORIAIS = {
+    # Méliuz acquired 100% of Promobit. Two brands in the same data/editorial
+    # family are discovery channels, not two independent witnesses. Picodi is
+    # in the same group and is reserved here for any future adapter.
+    "meliuz-cupons": "grupo-meliuz",
+    "promobit-cupons": "grupo-meliuz",
+    "promobit-community": "grupo-meliuz",
+    "picodi-cupons": "grupo-meliuz",
+}
+
+
+def _familia_editorial(slug, fonte_id):
+    slug = _texto(slug).casefold()
+    return _FAMILIAS_EDITORIAIS.get(slug, f"fonte:{fonte_id}")
+
+
+def fontes_independentes_em_lote(cupons) -> dict[tuple[str, str], int]:
+    """Conta consenso recente por loja+código, exigindo desconto compatível.
+
+    Duas páginas que repetem o mesmo código mas discordam entre R$ 20 e 20% não
+    são confirmação. A contagem é por família editorial, não por marca/linha, e
+    nunca cruza dados privados ou organizações.
+    """
+    pares = {
+        (str(getattr(c, "marketplace", "") or "").casefold(),
+         _texto(getattr(c, "codigo", "")).upper())
+        for c in cupons if getattr(c, "codigo", "")
+    }
+    if not pares:
+        return {}
+    from datetime import timedelta
+    from django.db.models.functions import Upper
+    from django.utils import timezone
+    from apps.scrapers.maintenance import COUPON_MAX_AGE_HOURS, cupons_frescos_q
+    from apps.scrapers.models import CupomFonteObservacao, CupomNormalizado
+
+    marketplaces = {marketplace for marketplace, _ in pares}
+    codigos = {codigo for _, codigo in pares}
+    grupos = defaultdict(set)
+
+    catalogo = (CupomNormalizado.objects.filter(
+        marketplace__in=marketplaces, estado="ativo", organization__isnull=True,
+        owner__isnull=True,
+    ).annotate(
+        codigo_normalizado=Upper("codigo"),
+    ).filter(
+        codigo_normalizado__in=codigos,
+    ).filter(cupons_frescos_q()).values_list(
+        "marketplace", "codigo_normalizado", "fonte_id", "fonte__slug", "regras",
+    ))
+    for marketplace, codigo, fonte_id, fonte_slug, regras in catalogo:
+        par = (str(marketplace or "").casefold(), str(codigo or "").upper())
+        assinatura = _assinatura_desconto_corroboravel(regras)
+        if par in pares and assinatura:
+            grupos[(par, assinatura)].add(_familia_editorial(fonte_slug, fonte_id))
+
+    cutoff = timezone.now() - timedelta(hours=COUPON_MAX_AGE_HOURS)
+    observacoes = (CupomFonteObservacao.objects.filter(
+        organization__isnull=True, cupom__marketplace__in=marketplaces,
+        cupom__estado="ativo", outcome="accepted", observed_at__gte=cutoff,
+    ).annotate(
+        codigo_normalizado=Upper("cupom__codigo"),
+    ).filter(
+        codigo_normalizado__in=codigos,
+    ).filter(cupons_frescos_q(prefix="cupom__")).values_list(
+        "cupom__marketplace", "codigo_normalizado", "fonte_id", "fonte__slug",
+        "cupom__regras",
+    ))
+    for marketplace, codigo, fonte_id, fonte_slug, regras in observacoes:
+        par = (str(marketplace or "").casefold(), str(codigo or "").upper())
+        assinatura = _assinatura_desconto_corroboravel(regras)
+        if par in pares and assinatura:
+            grupos[(par, assinatura)].add(_familia_editorial(fonte_slug, fonte_id))
+
+    resultado = {}
+    for (par, _assinatura), fontes in grupos.items():
+        resultado[par] = max(resultado.get(par, 0), len(fontes))
+    return resultado
+
+
+def corroboracoes_independentes_em_lote(
+        cupons, *, fontes=None) -> set[tuple[str, str]]:
+    """Fonte direta OU consenso de duas fontes independentes e concordantes."""
+    oficiais = corroboracoes_oficiais_em_lote(cupons)
+    fontes = fontes if fontes is not None else fontes_independentes_em_lote(cupons)
+    consenso = {
+        par for par, total in fontes.items()
+        if total >= 2
+    }
+    return oficiais | consenso
+
+
+def aguarda_corroboracao_oficial(cupom, *, corroboracoes=None) -> bool:
+    """True quando o cupom ainda não pode ir sozinho para a lista.
+
+    Telegram, agregadores e stubs exigem a mesma chave numa fonte oficial ou
+    licenciada. O fato de um terceiro exibir um código não prova sua aplicação.
+    """
+    slug = str(getattr(getattr(cupom, "fonte", None), "slug", "") or "")
+    if corroboracoes is not None and cupom_de_comunidade(cupom):
+        chave = (
+            str(getattr(cupom, "marketplace", "") or "").casefold(),
+            _texto(getattr(cupom, "codigo", "")).upper(),
+        )
+        return chave not in corroboracoes
+    if slug in FONTES_COMUNIDADE_SEM_LISTAGEM:
+        return not comunidade_corroborada(cupom)
+    return cupom_de_comunidade(cupom) and not comunidade_corroborada(cupom)
 
 
 def escopo_delimitado(cupom, *, codigos_contestados=None) -> bool:
@@ -561,6 +813,27 @@ def _ativacao_ml_publicavel(cupom, regras, usuario=None) -> bool:
     return regras.get("valor_desconto") not in (None, "", 0)
 
 
+def _ativacao_link_https_publicavel(cupom, regras, *, fonte_slug) -> bool:
+    """Awin: a API já devolve o destino afiliado. Sem Chromium, sem produto.
+
+    Sem isto `ativacao_publicavel` só aceitava ML e Amazon — campanhas HTTP
+    (Shopee GraphQL, Awin) caíam em `activation_evidence_incomplete` e nunca
+    apareciam na lista, mesmo com `offerLink`/`destinationUrl` válido.
+    """
+    source = str(getattr(getattr(cupom, "fonte", None), "slug", "") or "")
+    if source != fonte_slug:
+        return False
+    from urllib.parse import urlsplit
+
+    try:
+        partes = urlsplit(str(getattr(cupom, "link", "") or ""))
+    except ValueError:
+        return False
+    if partes.scheme != "https" or not partes.netloc:
+        return False
+    return regras.get("valor_desconto") not in (None, "", 0)
+
+
 def ativacao_publicavel(cupom, usuario=None) -> bool:
     """Aceita ativação quando a loja prova promoção + produtos.
 
@@ -568,6 +841,7 @@ def ativacao_publicavel(cupom, usuario=None) -> bool:
     preço final depois da ativação.
     Mercado Livre: campanha com container público — ver `_ativacao_ml_publicavel`,
     atrás da flag ML_CUPONS_ATIVACAO_ENABLED.
+    Awin: link HTTPS da própria API de promoções.
     """
     regras = regras_do_cupom(cupom)
     if regras["modo_resgate"] != "ativacao":
@@ -575,20 +849,91 @@ def ativacao_publicavel(cupom, usuario=None) -> bool:
     marketplace = str(getattr(cupom, "marketplace", "") or "").casefold()
     if marketplace == "mercadolivre":
         return _ativacao_ml_publicavel(cupom, regras, usuario=usuario)
+    if marketplace == "awin":
+        return _ativacao_link_https_publicavel(
+            cupom, regras, fonte_slug="awin-offers-api",
+        )
+    if marketplace == "shopee":
+        evidence = getattr(cupom, "evidencia", {}) or {}
+        source = getattr(getattr(cupom, "fonte", None), "slug", "")
+        return bool(
+            source == "shopee-public-coupons"
+            and evidence.get("association") == "shopee-official-coupon-page"
+            and evidence.get("promotion_id")
+            and evidence.get("availability") == "claimable"
+            and _ativacao_link_https_publicavel(
+                cupom, regras, fonte_slug="shopee-public-coupons",
+            )
+        )
     if marketplace != "amazon":
         return False
     evidence = getattr(cupom, "evidencia", {}) or {}
     source = getattr(getattr(cupom, "fonte", None), "slug", "")
     return bool(
-        source == "amazon-public-coupons"
-        and evidence.get("association") == "amazon-official-coupon-page"
+        source in {"amazon-public-coupons", "amazon-public-web"}
+        and evidence.get("association") in {
+            "amazon-official-coupon-page", "amazon-official-search-coupon",
+        }
         and evidence.get("promotion_id")
         and evidence.get("asins")
+        and (
+            evidence.get("association") == "amazon-official-coupon-page"
+            or evidence.get("coupon_final_price") not in (None, "", 0)
+        )
     )
 
 
 def cupom_publicavel(cupom, usuario=None) -> bool:
     return bool(codigo_publicavel(cupom) or ativacao_publicavel(cupom, usuario=usuario))
+
+
+def desconto_para_comprador(cupom) -> bool:
+    """False quando `valor_desconto` é comissão de afiliado, não abatimento na loja.
+
+    Campanhas Shopee (`evidencia.transport=shopee-affiliate-api`) gravam a taxa
+    do publisher em `regras.valor_desconto`. Anunciar isso como "% DE DESCONTO"
+    mente para quem compra.
+    """
+    evidencia = getattr(cupom, "evidencia", None)
+    if isinstance(evidencia, Mapping):
+        return evidencia.get("transport") != "shopee-affiliate-api"
+    return True
+
+
+def valor_maximo_desconto_reais(regras: Mapping):
+    """Benefício monetário REAL do cupom, quando dá para calcular. `None` = não
+    dá para julgar (sem teto nem valor fixo) — a chamada não deve filtrar por
+    engano nesse caso, só quando o valor é conhecido e é pequeno demais.
+
+    Cupom percentual com teto (`desconto_maximo`) nunca vale mais que o teto —
+    "50% OFF" com `desconto_maximo=1.0` dá no máximo R$1 no carrinho inteiro,
+    e é isso que interessa a quem compra, não o percentual anunciado. Cupom
+    fixo já É o valor.
+    """
+    tipo = str((regras or {}).get("tipo_desconto") or "")
+    if tipo == "porcentagem":
+        maximo = _numero((regras or {}).get("desconto_maximo"))
+        return float(maximo) if maximo is not None else None
+    if tipo == "fixo":
+        valor = _numero((regras or {}).get("valor_desconto"))
+        return float(valor) if valor is not None else None
+    return None
+
+
+def cupom_e_lixo(regras: Mapping) -> bool:
+    """True quando o benefício monetário real está abaixo do piso configurado.
+
+    Só decide quando o valor É calculável (`valor_maximo_desconto_reais` não
+    devolveu `None`); sem teto conhecido, deixa passar — a incerteza não pode
+    virar rejeição.
+    """
+    from django.conf import settings
+
+    valor = valor_maximo_desconto_reais(regras)
+    if valor is None:
+        return False
+    piso = float(getattr(settings, "COUPON_VALOR_MINIMO_RELEVANTE_REAIS", 10) or 10)
+    return valor < piso
 
 
 def formatar_numero(valor) -> str:
@@ -657,6 +1002,8 @@ def score_cupom(cupom, usuario=None) -> float:
     confianca. A recencia fica como desempate no `order_by`, nao aqui.
     """
     from django.utils import timezone
+    if aguarda_corroboracao_oficial(cupom):
+        return 0.0
     regras = regras_do_cupom(cupom)
     score = 0.0
     if codigo_publicavel(cupom):
@@ -664,14 +1011,22 @@ def score_cupom(cupom, usuario=None) -> float:
     elif ativacao_publicavel(cupom, usuario=usuario):
         score += 25.0
     valor = _numero(regras.get("valor_desconto"))
-    if valor is not None:
-        if regras.get("tipo_desconto") == "porcentagem":
+    tipo = regras.get("tipo_desconto")
+    if valor is not None and desconto_para_comprador(cupom):
+        if tipo == "porcentagem":
             score += min(valor, 60.0)
-        else:  # desconto fixo em R$
+        elif tipo == "fixo":
             score += min(valor / 2.0, 40.0)
     validade = getattr(cupom, "validade", None)
     if validade and validade >= timezone.now():
         score += 10.0
-    confianca = getattr(cupom, "confianca", "")
-    score += {"alta": 15.0, "media": 5.0}.get(confianca, 0.0)
+    confianca = getattr(cupom, "confianca", "") or ""
+    score += {"alta": 15.0, "media": 5.0, "baixa": 3.0}.get(confianca, 3.0)
+    if getattr(cupom, "restrito", False):
+        score -= 8.0
+    from apps.scrapers.maintenance import freshness_points
+    score += freshness_points(getattr(cupom, "ultima_observacao", None))
+    fonte = getattr(cupom, "fonte", None)
+    if fonte is not None and getattr(fonte, "status", "") == "ok":
+        score += 5.0
     return round(score, 2)

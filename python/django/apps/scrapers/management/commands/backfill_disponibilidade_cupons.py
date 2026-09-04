@@ -24,9 +24,15 @@ qualquer momento -- o worker `cupons` continua de onde parou no próximo tick.
 """
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
+from django.db import connection
 from django.db.models import Q
 
 from apps.accounts.tenant import system_context
+
+# Produção: um DELETE único de órfãs + cascade de eventos estoura o
+# statement_timeout (30 min medidos em 2026-08-26) e o comando morre ANTES de
+# projetar. A tela fica em ready=0 mesmo com catálogo cheio.
+ORPHAN_BATCH = 200
 
 
 class Command(BaseCommand):
@@ -41,25 +47,30 @@ class Command(BaseCommand):
             "--todas", action="store_true",
             help="Reprojeta também quem já tem linhas (padrão: só quem está zerado).",
         )
+        parser.add_argument(
+            "--skip-orphans", action="store_true",
+            help="Não apaga projeções de cupons expirados; só materializa/atualiza.",
+        )
 
     def handle(self, *args, **opts):
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
         from apps.scrapers.maintenance import cupons_frescos_q
-        from apps.scrapers.models import CupomDisponibilidade
+        from apps.scrapers.models import CupomDisponibilidade, CupomDisponibilidadeEvento
 
         # Cross-tenant por natureza: o catálogo de cupons do ML é pool compartilhado
         # e o backfill atende várias organizações numa passada. Sem system_context a
         # RLS devolve zero linha e o comando "termina" sem escrever nada.
         with system_context():
-            orfas = CupomDisponibilidade.objects.exclude(
-                Q(cupom__estado="ativo") & cupons_frescos_q(prefix="cupom__")
-            )
-            total_orfas = orfas.count()
-            if total_orfas:
-                orfas.delete()
-            self.stdout.write(
-                f"Projeções órfãs removidas: {total_orfas}."
-            )
+            if connection.vendor == "postgresql":
+                with connection.cursor() as cursor:
+                    cursor.execute("SET statement_timeout = 0")
+            if not opts["skip_orphans"]:
+                removidas = self._apagar_orfas(
+                    cupons_frescos_q, CupomDisponibilidade, CupomDisponibilidadeEvento,
+                )
+                self.stdout.write(f"Projeções órfãs removidas: {removidas}.")
+            else:
+                self.stdout.write("Projeções órfãs: puladas.")
             usuarios = self._alvos(opts["usuarios"])
             if not opts["todas"]:
                 com_linhas = set(
@@ -73,6 +84,7 @@ class Command(BaseCommand):
             for usuario in usuarios:
                 # Uma conta sem organização (ou com catálogo vazio) não pode
                 # interromper o backfill das demais.
+                self.stdout.write(f"{usuario.username}: projetando...")
                 try:
                     resumo = projetar_disponibilidade_cupons(usuario)
                 except Exception as exc:
@@ -87,6 +99,24 @@ class Command(BaseCommand):
                 self.stdout.write(
                     f"{usuario.username}: {resumo['total']} cupons ({estagios})"
                 )
+
+    def _apagar_orfas(self, cupons_frescos_q, CupomDisponibilidade,
+                      CupomDisponibilidadeEvento):
+        removidas = 0
+        while True:
+            ids = list(
+                CupomDisponibilidade.objects.exclude(
+                    Q(cupom__estado="ativo") & cupons_frescos_q(prefix="cupom__")
+                ).values_list("pk", flat=True)[:ORPHAN_BATCH]
+            )
+            if not ids:
+                return removidas
+            CupomDisponibilidadeEvento.objects.filter(
+                disponibilidade_id__in=ids,
+            ).delete()
+            deleted, _ = CupomDisponibilidade.objects.filter(pk__in=ids).delete()
+            removidas += deleted
+            self.stdout.write(f"órfãs lote={len(ids)} acumulado={removidas}")
 
     def _alvos(self, referencias):
         usuarios = get_user_model().objects.filter(is_active=True)

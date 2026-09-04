@@ -1,5 +1,5 @@
 from datetime import timedelta
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 
@@ -22,6 +22,19 @@ def produtos_frescos_q(*, agora=None, max_age_hours=PRODUCT_MAX_AGE_HOURS,
             Q(**{f"{prefix}valido_ate__isnull": True})
             | Q(**{f"{prefix}valido_ate__gte": agora})
         )
+    )
+
+
+def freshness_points(observed, *, agora=None, max_age_hours=COUPON_MAX_AGE_HOURS,
+                     max_points=10.0):
+    """Pontos de recência: 0 depois de `max_age_hours`. Mesma janela do TTL (48h)."""
+    agora = agora or timezone.now()
+    if not observed:
+        return 0.0
+    hours = max(0.0, (agora - observed).total_seconds() / 3600)
+    return max(
+        0.0,
+        max_points * (1.0 - min(hours, float(max_age_hours)) / float(max_age_hours)),
     )
 
 
@@ -48,7 +61,10 @@ def cupons_frescos_q(*, agora=None, max_age_hours=COUPON_MAX_AGE_HOURS,
 
 def expire_stale(max_age_hours=PRODUCT_MAX_AGE_HOURS):
     """Expiração gradual; não remove linhas nem histórico."""
-    from apps.scrapers.models import CupomNormalizado, Produto, ProdutoCupom
+    from apps.scrapers.coupon_rules import CODIGOS_NAO_PUBLICAVEIS
+    from apps.scrapers.models import (
+        CupomFonteObservacao, CupomNormalizado, Produto, ProdutoCupom,
+    )
     now = timezone.now()
     cutoff = now - timedelta(hours=max_age_hours)
     stale_products = Produto.objects.filter(
@@ -61,9 +77,27 @@ def expire_stale(max_age_hours=PRODUCT_MAX_AGE_HOURS):
             & ~Q(fonte__slug="manual-private")
         )
     ).update(estado="expirado")
+    placeholder_q = Q()
+    for codigo in CODIGOS_NAO_PUBLICAVEIS:
+        placeholder_q |= Q(codigo__iexact=codigo)
+    invalid_ids = list(
+        CupomNormalizado.objects.filter(estado="ativo").filter(
+            placeholder_q,
+        ).values_list("pk", flat=True)
+    )
+    invalid_codes = CupomNormalizado.objects.filter(pk__in=invalid_ids).update(
+        estado="invalido", confianca="baixa",
+    )
+    if invalid_ids:
+        CupomFonteObservacao.objects.filter(cupom_id__in=invalid_ids).update(
+            outcome="invalid", reason_code="invalid_coupon_code",
+        )
     ProdutoCupom.objects.filter(cupom__estado="expirado").exclude(
         status="expirado").update(status="expirado")
-    return {"products": stale_products, "coupons": expired_coupons}
+    return {
+        "products": stale_products, "coupons": expired_coupons,
+        "invalid_codes": invalid_codes,
+    }
 
 
 def purgar_eventos_cupons_antigos(dias=90):
@@ -93,6 +127,23 @@ def diagnosticar_alertas_pipeline_cupons(*, agora=None):
         agora=agora, prefix="cupom__",
     )
     projections = CupomDisponibilidade.objects.filter(active)
+    # Estados que dependem de uma nova evidência externa ou de ação explícita do
+    # dono da conta não são uma fila travada. Eles continuam visíveis no relatório
+    # de abundância, mas não podem acordar a operação a cada 20 minutos. Em
+    # produção, sessão ausente e comunidade sem corroboração respondiam por quase
+    # seis mil linhas e escondiam o backlog que o worker realmente pode resolver.
+    actionable = (
+        projections.exclude(stage__in=("ready", "discarded"))
+        .exclude(category="no_session")
+        .exclude(reason_code__in=(
+            "community_uncorroborated",
+            # A tag pertence à conta do usuário. O worker não consegue criá-la e
+            # repetir a projeção não muda o veredito; contar essas linhas como fila
+            # travada gerava exatamente 128 alarmes permanentes em produção nas
+            # duas contas sem tag, embora a conta `lules` estivesse saudável.
+            "amazon_tag_missing",
+        ))
+    )
     counts = {
         # Só conta projeção que AINDA DEVE MUDAR. `updated_at` é auto_now, então um
         # cupom que chegou a `ready` (ou foi descartado com veredito) para de ser
@@ -100,23 +151,41 @@ def diagnosticar_alertas_pipeline_cupons(*, agora=None):
         # justamente por estar saudável. Em produção isso inflava o número para a
         # casa dos dez mil e o alerta disparava em todo ciclo, escondendo os três
         # contadores vizinhos, que são reais. Alerta que sempre toca não é alerta.
-        "projection_stale": projections.exclude(
-            stage__in=("ready", "discarded"),
-        ).filter(updated_at__lt=cutoff_20m).count(),
-        "code_not_ready_20m": projections.filter(
+        "projection_stale": actionable.filter(
+            updated_at__lt=cutoff_20m,
+        ).count(),
+        "code_not_ready_20m": actionable.filter(
             use_mode="code_notice", cupom__primeira_observacao__lt=cutoff_20m,
-        ).exclude(stage="ready").count(),
-        "prepared_verified_not_ready_20m": projections.filter(
+        ).count(),
+        "prepared_verified_not_ready_20m": actionable.filter(
             use_mode="product_activation",
             cupom__produtos__status="confirmado",
             cupom__produtos__links_usuarios__usuario_id=F("usuario_id"),
             cupom__produtos__links_usuarios__verificado_ok=True,
             cupom__produtos__links_usuarios__verificado_em__gte=link_cutoff,
             updated_at__lt=cutoff_20m,
-        ).exclude(stage="ready").distinct().count(),
+        ).distinct().count(),
+        # Um preparo antigo só é backlog se ainda bloquear uma projeção de
+        # ATIVAÇÃO que o worker consegue promover. O mesmo cupom também pode ter
+        # projeções de aviso de código já prontas/descartadas, ou projeções de
+        # ativação retidas por sessão da conta. Contar o CupomPreparacao sozinho
+        # acusava 25 itens em produção embora nenhuma entrega acionável dependesse
+        # deles (projection_stale=0).
         "browser_wait_over_60m": CupomPreparacao.objects.filter(
-            reason_code="capacity_deferred", verificado_em__lt=cutoff_browser,
-        ).count(),
+            status="pendente", reason_code="capacity_deferred",
+            verificado_em__lt=cutoff_browser, cupom__estado="ativo",
+        ).filter(
+            cupons_frescos_q(agora=agora, prefix="cupom__"),
+        ).annotate(
+            bloqueia_entrega=Exists(
+                projections.filter(
+                    cupom_id=OuterRef("cupom_id"),
+                    use_mode="product_activation",
+                ).exclude(
+                    stage__in=("ready", "discarded"),
+                ).exclude(category="no_session")
+            ),
+        ).filter(bloqueia_entrega=True).count(),
     }
     # Fontes que NUNCA podem se declarar completas por construção (vitrine curada,
     # prévia de canal). Cobrar completude delas transforma este contador em ruído

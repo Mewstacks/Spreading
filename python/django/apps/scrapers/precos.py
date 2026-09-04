@@ -63,11 +63,11 @@ def registrar_varios(items) -> None:
 
 
 def stats_em_lote(produtos, dias: int = 30) -> dict:
-    """{chave: {n, minimo}} dos últimos `dias`, para uma lista de produtos — UMA query.
+    """{chave: {n, minimo, mediana}} dos últimos `dias` em UMA query.
 
-    A listagem chamava stats() por item: uma query por produto da página, cada uma
-    trazendo TODAS as observações pra ordenar em Python. Aqui o banco agrega, e só o
-    que a listagem usa (n e mínimo — a mediana ninguém lia).
+    A listagem e o ranking chamavam ``stats()`` por item. No ranking produtivo isso
+    chegava a 400 consultas por regra de envio. Carregamos preço/chave uma vez,
+    ordenamos no banco e calculamos a mesma mediana de ``stats`` em memória.
 
     Filtra por marketplace junto com a chave pra bater com o índice composto
     (marketplace, chave, data); a chave sozinha já é única, mas não é prefixo dele.
@@ -75,7 +75,7 @@ def stats_em_lote(produtos, dias: int = 30) -> dict:
     from functools import reduce
     from operator import or_
 
-    from django.db.models import Count, Min, Q
+    from django.db.models import Q
 
     if not produtos:
         return {}
@@ -84,13 +84,65 @@ def stats_em_lote(produtos, dias: int = 30) -> dict:
         (getattr(p, "marketplace", "mercadolivre"), chave_produto(p))
         for p in produtos
     })
+    from django.db import connection
+
+    if connection.vendor == "postgresql":
+        # O caminho ORM portátil devolve cada observação para o Python. Em produção
+        # há mais de um milhão delas; para centenas de chaves isso ainda transferia
+        # e ordenava dezenas de milhares de linhas. O PostgreSQL calcula os três
+        # agregados junto ao índice e devolve uma linha por produto.
+        tabela = connection.ops.quote_name(PrecoHistorico._meta.db_table)
+        valores = ", ".join(["(%s, %s)"] * len(pares))
+        parametros = [valor for par in pares for valor in par]
+        parametros.append(desde)
+        sql = f"""
+            WITH requested(marketplace, chave) AS (VALUES {valores})
+            SELECT r.chave, stats.n, stats.minimo, stats.mediana
+              FROM requested r
+              CROSS JOIN LATERAL (
+                    SELECT COUNT(*)::bigint AS n,
+                           MIN(h.preco) AS minimo,
+                           percentile_cont(0.5)
+                               WITHIN GROUP (ORDER BY h.preco) AS mediana
+                      FROM {tabela} h
+                     WHERE h.marketplace = r.marketplace
+                       AND h.chave = r.chave
+                       AND h.data >= %s
+              ) stats
+             WHERE stats.n > 0
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(sql, parametros)
+            return {
+                chave: {
+                    "n": int(n), "minimo": float(minimo),
+                    "mediana": float(mediana),
+                }
+                for chave, n, minimo, mediana in cursor.fetchall()
+            }
+
     pares_q = reduce(or_, (Q(marketplace=marketplace, chave=chave)
                            for marketplace, chave in pares))
     linhas = (
         PrecoHistorico.objects.filter(pares_q, data__gte=desde)
-        .values("chave").annotate(n=Count("id"), minimo=Min("preco"))
+        .order_by("chave", "preco")
+        .values_list("chave", "preco")
     )
-    return {l["chave"]: {"n": l["n"], "minimo": l["minimo"]} for l in linhas}
+    precos_por_chave = {}
+    for chave, preco in linhas:
+        precos_por_chave.setdefault(chave, []).append(preco)
+    resultado = {}
+    for chave, precos in precos_por_chave.items():
+        n = len(precos)
+        mediana = (
+            precos[n // 2]
+            if n % 2
+            else (precos[n // 2 - 1] + precos[n // 2]) / 2
+        )
+        resultado[chave] = {
+            "n": n, "minimo": precos[0], "mediana": mediana,
+        }
+    return resultado
 
 
 def stats(produto, dias: int = 30):

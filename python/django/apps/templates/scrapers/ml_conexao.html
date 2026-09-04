@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ marketplace_nome|default:"Mercado Livre" }} — Conexão{% endblock %}
 
-{% block topbar_context %}<strong>{{ marketplace_nome|default:"Mercado Livre" }}</strong><span>{% if relatorio %}Portal de relatórios{% else %}Integração{% endif %}</span>{% endblock %}
+{% block topbar_context %}<strong>{{ marketplace_nome|default:"Mercado Livre" }}</strong><span>{% if checkout_validation %}Validação de cupons{% elif relatorio %}Portal de relatórios{% else %}Integração{% endif %}</span>{% endblock %}
 
 {% block head_extra %}
 <style>
@@ -190,9 +190,9 @@
 <div class="page-head">
   <span class="int-icon" aria-hidden="true"><i data-lucide="{% if marketplace_ml %}shopping-bag{% else %}package{% endif %}"></i></span>
   <div class="head-main">
-    <span class="eyebrow">{% if relatorio %}Portal de relatórios{% else %}Integração{% endif %}</span>
+    <span class="eyebrow">{% if checkout_validation %}Validação de cupons{% elif relatorio %}Portal de relatórios{% else %}Integração{% endif %}</span>
     <h1>{{ marketplace_nome|default:"Mercado Livre" }}</h1>
-    <p class="sub">{% if relatorio %}Autorize o portal usado para sincronizar suas métricas e comissões.{% else %}Conecte sua conta para gerar links e usar suas integrações do Mercado Livre.{% endif %}</p>
+    <p class="sub">{% if checkout_validation %}Conecte a conta de compras para comprovar códigos no carrinho. O sistema nunca confirma pedido ou pagamento.{% elif relatorio %}Autorize o portal usado para sincronizar suas métricas e comissões.{% else %}Conecte sua conta para gerar links e usar suas integrações do Mercado Livre.{% endif %}</p>
   </div>
   <div class="head-actions">
     <div id="conn-pill" class="conn-pill" role="status" aria-live="polite">
@@ -257,13 +257,13 @@
 <!-- Live view remota: peça central enquanto a conexão está em andamento -->
 <div id="live-area" class="panel" style="display:none;">
   <div class="live-toolbar">
-    <div class="live-title"><i data-lucide="monitor-smartphone"></i> Sessão remota · {% if marketplace_ml %}Mercado Livre{% else %}Amazon{% endif %}</div>
+    <div class="live-title"><i data-lucide="monitor-smartphone"></i> Sessão remota · {{ marketplace_nome|default:"Mercado Livre" }}</div>
     <div id="stream-badge" class="stream-badge is-wait" role="status" aria-live="polite">
       <span class="stream-dot"></span><span id="stream-txt">Preparando imagem…</span>
     </div>
   </div>
   <div id="live-frame-wrap">
-    <canvas id="live-canvas" width="1280" height="800" tabindex="0" aria-label="Janela interativa de login {% if marketplace_ml %}do Mercado Livre{% else %}da Amazon{% endif %}"></canvas>
+    <canvas id="live-canvas" width="1280" height="800" tabindex="0" aria-label="Janela interativa de login · {{ marketplace_nome|default:"Mercado Livre" }}"></canvas>
     <input id="live-kbd" type="text" inputmode="text" autocomplete="off" autocapitalize="off"
       autocorrect="off" spellcheck="false" aria-hidden="true" tabindex="-1">
     <div id="stream-overlay" class="stream-overlay" aria-hidden="true">
@@ -276,7 +276,7 @@
   </div>
   <div class="device-tip">
     <i data-lucide="lightbulb"></i>
-    <span id="device-tip-text">{% if marketplace_ml %}No celular, prefira SMS ou o aplicativo do Mercado Livre. No computador, você também pode escanear o QR Code com o telefone.{% else %}Conclua o login acima. Assim que a Amazon confirmar a conta, salve a sessão.{% endif %}</span>
+    <span id="device-tip-text">{% if marketplace_ml %}No celular, prefira SMS ou o aplicativo do Mercado Livre. No computador, você também pode escanear o QR Code com o telefone.{% else %}Conclua o login acima. Assim que a loja confirmar a conta, salve a sessão.{% endif %}</span>
   </div>
   <div class="live-controls">
     <button id="salvar-btn" class="btn btn-accent"><i data-lucide="badge-check"></i> {% if marketplace_ml %}Verificar conexão{% else %}Já entrei{% endif %}</button>
@@ -292,8 +292,8 @@
       <div class="panel-head">
         <span class="panel-ico"><i data-lucide="shield-check"></i></span>
         <div>
-          <strong>Conectar {% if marketplace_ml %}ao Mercado Livre{% else %}à Amazon{% endif %}</strong>
-          <p class="hint">O login {% if marketplace_ml %}do Mercado Livre será aberto aqui, no formato correto para este dispositivo{% else %}da Amazon será aberto nesta janela{% endif %}. Você entra direto no site oficial — o Spreading só retransmite a janela.</p>
+          <strong>Conectar · {{ marketplace_nome|default:"Mercado Livre" }}</strong>
+          <p class="hint">O login será aberto nesta janela, direto no site oficial. O Spreading só retransmite a janela e não armazena o que você digita.</p>
         </div>
       </div>
       <div class="actions">
@@ -312,7 +312,7 @@
           vermelha era a mesma contradição de antes, só movida para dentro do painel.
           {% endcomment %}
           <strong id="ok-titulo">Conexão confirmada</strong>
-          <p class="hint" id="ok-hint">{% if relatorio %}O Spreading já pode acessar os relatórios autorizados desta conta.{% else %}Sua sessão foi validada e já pode ser usada para gerar links.{% endif %}</p>
+          <p class="hint" id="ok-hint">{% if checkout_validation %}A sessão já pode validar códigos em carrinhos isolados, sem efetuar compra.{% elif relatorio %}O Spreading já pode acessar os relatórios autorizados desta conta.{% else %}Sua sessão foi validada e já pode ser usada para gerar links.{% endif %}</p>
         </div>
       </div>
       <div class="ok-rows">
@@ -326,26 +326,28 @@
         de tentar. O badge é preenchido pelo poll (#lb-badge), a partir do bloco
         `linkbuilder` de ml_conexao.status().
         {% endcomment %}
-        {% if not relatorio %}
+        {% if not relatorio and not checkout_validation %}
         <div class="ok-row" id="lb-row" style="display:none;">
           <span class="k">Link Builder</span>
           <span class="badge" id="lb-badge"><span class="dot"></span><span id="lb-badge-txt">—</span></span>
         </div>
         {% endif %}
-        <div class="ok-row"><span class="k">{% if relatorio %}Relatórios{% else %}Link de afiliado{% endif %}</span><span class="v" id="lb-resumo">{% if relatorio %}Acesso autorizado{% else %}Aguardando validação{% endif %}</span></div>
+        <div class="ok-row"><span class="k">{% if checkout_validation %}Uso{% elif relatorio %}Relatórios{% else %}Link de afiliado{% endif %}</span><span class="v" id="lb-resumo">{% if checkout_validation %}Somente carrinho{% elif relatorio %}Acesso autorizado{% else %}Aguardando validação{% endif %}</span></div>
       </div>
       <div class="actions">
         <button id="reconectar-btn" class="btn btn-ghost btn-sm"><i data-lucide="refresh-cw"></i> Reconectar</button>
         {% if not relatorio %}
         <button id="desconectar-btn" class="btn btn-danger btn-sm"><i data-lucide="unplug"></i> Desconectar</button>
+        {% if not checkout_validation %}
         <a class="btn-link" href="/scrapers/ml-relatorio/">Abrir portal de relatórios</a>
+        {% endif %}
         {% elif marketplace_ml %}
         <a class="btn-link" href="/scrapers/ml/">Conexão principal do Mercado Livre</a>
         {% endif %}
       </div>
       <p id="desconectar-msg" class="acao-msg" aria-live="polite"></p>
       {% if not relatorio %}
-      <p class="help" style="margin:0;">Desconectar apaga a sessão salva no servidor. Você precisará fazer login de novo para gerar links.</p>
+      <p class="help" style="margin:0;">Desconectar apaga a sessão salva no servidor. Você precisará fazer login de novo para {% if checkout_validation %}validar cupons{% else %}gerar links{% endif %}.</p>
       {% endif %}
     </div>
 
@@ -356,7 +358,7 @@
         <li id="step-1" class="step">
           <span class="ball">1</span>
           <span class="step-txt">
-            <span class="lbl">Abrir {% if marketplace_ml %}o Mercado Livre{% else %}a Amazon{% endif %}</span>
+            <span class="lbl">Abrir {% if marketplace_ml %}o{% else %}a{% endif %} {{ marketplace_nome|default:"Mercado Livre" }}</span>
             <span class="step-desc">Janela oficial de login</span>
           </span>
         </li>
@@ -389,7 +391,7 @@
   <div class="panel">
     <span class="eyebrow">Conexão segura</span>
     <ul class="tips-list">
-      <li><i data-lucide="globe"></i><span>A janela remota mostra somente o site oficial {% if marketplace_ml %}do Mercado Livre{% else %}da Amazon{% endif %} — nunca um formulário do Spreading.</span></li>
+      <li><i data-lucide="globe"></i><span>A janela remota mostra somente o site oficial de {{ marketplace_nome|default:"Mercado Livre" }} — nunca um formulário do Spreading.</span></li>
       <li><i data-lucide="keyboard"></i><span>Teclas e cliques são retransmitidos apenas para essa janela e não ficam registrados.</span></li>
       <li><i data-lucide="unplug"></i><span>Você pode desconectar quando quiser — a sessão é apagada do servidor.</span></li>
     </ul>

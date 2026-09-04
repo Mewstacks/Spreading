@@ -9,7 +9,11 @@ from django.utils import timezone
 from django.db import DatabaseError, transaction
 from django.db.models import F, FloatField, ExpressionWrapper, Count, Q
 from apps.scrapers.models import Produto, Cupom, HistoricoEnvio, Publicacao
-from apps.scrapers.precos import stats as _stats_preco
+from apps.scrapers.precos import (
+    chave_produto as _chave_preco,
+    stats as _stats_preco,
+    stats_em_lote as _stats_preco_em_lote,
+)
 from apps.scrapers.whatsapp_client import DESCONHECIDO, PERMANENTE, TRANSITORIO
 
 logger = logging.getLogger(__name__)
@@ -335,14 +339,21 @@ def _selecionar_item_legacy(macros_selecionadas=None, categorias_selecionadas=No
     return vencedores
 
 
-def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas=None,
-                               limite_envio=1, horas_cooldown=24,
+def pool_de_produtos_elegiveis(*, macros_selecionadas=None,
+                               categorias_selecionadas=None,
                                min_desconto_percent=15.0, termo=None,
-                               marketplace=None, usuario=None, grupo_id=None):
-    """Ranking determinístico, explicável e personalizado por desempenho."""
-    from django.db.models import Q
-    from apps.scrapers.marketplaces.registry import get_marketplace
+                               marketplace=None, usuario=None, teto=None):
+    """Pool bruto de produtos elegíveis: sem pontuação, sem rede, sem cooldown.
 
+    Extraído de `selecionar_item_para_grupo` para que a camada Deal
+    (`apps.scrapers.deals`) parta EXATAMENTE do mesmo conjunto que o envio de
+    produto sempre usou. Dois pools diferentes fariam a prévia e o envio
+    discordarem sobre o vencedor — que é o defeito que a camada Deal existe para
+    não repetir, não para reproduzir em outro lugar.
+
+    Devolve objetos já anotados com `economia_rs` e `desconto_percent` e
+    deduplicados por identidade de produto.
+    """
     qs = Produto.objects.exclude(origem="cupom").exclude(
         estado__in=["indisponivel", "invalido", "expirado", "stale"])
     from apps.scrapers.maintenance import produtos_frescos_q
@@ -385,9 +396,35 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
     # tick cresce com o catálogo — numa VM cuja cota de CPU já é o gargalo.
     # A ordem é por observação mais recente, então o corte tira o mais velho, que é
     # também o mais provável de já ter sido enviado ou de ter preço vencido.
-    elegiveis = deduplicar_por_produto(
-        elegiveis_qs.order_by("-ultima_observacao", "-id")[:TETO_CANDIDATOS]
+    return deduplicar_por_produto(
+        elegiveis_qs.order_by("-ultima_observacao", "-id")[
+            :(teto or TETO_CANDIDATOS)
+        ]
     )
+
+
+def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas=None,
+                               limite_envio=1, horas_cooldown=24,
+                               min_desconto_percent=15.0, termo=None,
+                               marketplace=None, usuario=None, grupo_id=None,
+                               verificar=True):
+    """Ranking determinístico, explicável e personalizado por desempenho.
+
+    ``verificar=False`` só monta o shortlist. O pipeline v2 faz a confirmação
+    just-in-time em ``enviar_oferta_de_produto``; verificar também aqui duplicava
+    a mesma chamada externa e fazia um pool de oito itens consumir até oito
+    timeouts antes de sequer tentar o primeiro envio.
+    """
+    from apps.scrapers.marketplaces.registry import get_marketplace
+
+    elegiveis = pool_de_produtos_elegiveis(
+        macros_selecionadas=macros_selecionadas,
+        categorias_selecionadas=categorias_selecionadas,
+        min_desconto_percent=min_desconto_percent, termo=termo,
+        marketplace=marketplace, usuario=usuario,
+    )
+    historicos = _stats_preco_em_lote(elegiveis, dias=30)
+    historicos_comprovacao = _stats_preco_em_lote(elegiveis, dias=90)
     cupons = {
         c.campanha_id: c for c in Cupom.objects.filter(
             campanha_id__in=[produto.campanha_id for produto in elegiveis],
@@ -424,7 +461,7 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
         # O histórico sobe para cá porque agora ele decide ELEGIBILIDADE, não só
         # pontuação: item colado na própria mínima entra mesmo com desconto de
         # vitrine baixo, e antes era descartado no SQL sem chance de ser avaliado.
-        historico = _stats_preco(produto, dias=30)
+        historico = historicos.get(_chave_preco(produto))
         if not _passa_no_minimo(produto, produto.preco_com_cupom, historico,
                                 min_desconto_percent):
             continue
@@ -441,7 +478,10 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
         # certa é não pontuar o que não foi verificado. Sem prova, a nota se apoia só
         # na economia em reais — que também vem do "de" mas é limitada pelo preço
         # real do item — e o desconto deixa de ser argumento.
-        comprovado = _desconto_comprovado(produto, produto.preco_com_cupom)
+        comprovado = _desconto_comprovado(
+            produto, produto.preco_com_cupom,
+            historico=historicos_comprovacao.get(_chave_preco(produto)),
+        )
         if comprovado:
             score = produto.desconto_percent * 2 + produto.economia_rs / 20
             motivos = [f"{produto.desconto_percent:.0f}% de desconto comprovado"]
@@ -489,6 +529,9 @@ def selecionar_item_para_grupo(macros_selecionadas=None, categorias_selecionadas
         opcoes.append(produto)
 
     opcoes.sort(key=lambda p: (-p.score_oferta, p.id))
+    if not verificar:
+        return opcoes[:limite_envio]
+
     escolhidos = []
     for produto in opcoes:
         if len(escolhidos) >= limite_envio:
@@ -638,7 +681,43 @@ def _nome_loja(marketplace, cupom=None) -> str:
     return str(marketplace or "Loja").title()
 
 
-def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
+def _linha_validade_cupom(cupom) -> str:
+    """Prazo reproduzível para a mensagem, sem fabricar escassez.
+
+    Fontes que não informam o fim continuam sem chamada de urgência. Quando o
+    prazo existe, ele é convertido para o fuso configurado do projeto para o
+    leitor não precisar interpretar UTC.
+    """
+    validade = getattr(cupom, "validade", None) if cupom is not None else None
+    if not validade:
+        return ""
+    try:
+        local = timezone.localtime(validade)
+    except (TypeError, ValueError):
+        return ""
+    return f"Válido até {local:%d/%m às %Hh%M}"
+
+
+def _linha_checagem_cupom(cupom, itens=None) -> str:
+    """Instante reproduzível da evidência, sem chamar descoberta de validação."""
+    momentos = []
+    for item in itens or ():
+        momento = getattr(item.get("relacao"), "verificado_em", None)
+        if momento:
+            momentos.append(momento)
+    momento = max(momentos) if momentos else getattr(cupom, "ultima_observacao", None)
+    if not momento:
+        return ""
+    try:
+        local = timezone.localtime(momento)
+    except (TypeError, ValueError):
+        return ""
+    rotulo = "Aplicação checada" if momentos else "Fonte checada"
+    return f"{rotulo} em {local:%d/%m às %Hh%M}"
+
+
+def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None,
+                          escopo_override=None) -> str:
     """Monta o texto de divulgação de um cupom (CupomNormalizado) p/ envio manual.
 
     Usa o `Markup` do canal e os dados de `cupom.regras` (valor_desconto/discount_num,
@@ -650,25 +729,36 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
         🛒 15% DE DESCONTO acima de R$79 (limitado a R$60)
         🎟 Use o cupom TAMOJUNTO
 
-        Clique no link e navegue na página do Meli:
+        Abra a loja e aplique o cupom no checkout:
 
         ➡️ https://mercadolivre.com/sec/2J8HDRK
     """
     from apps.scrapers.senders.base import WhatsAppMarkup
     from apps.scrapers.coupon_rules import (
-        codigo_publicavel, escopo_produtos_cupom, formatar_numero, regras_do_cupom,
+        codigo_publicavel, desconto_para_comprador, escopo_produtos_cupom,
+        formatar_numero, regras_do_cupom,
     )
+    # `escopo_override` chega já reescrito pela avaliação de IA em enviar_cupom
+    # ("produtos de Glamour.div" -> "loja Glamour") — só quando ela rodou e
+    # respondeu. Nunca inventa aqui: sem override, cai no texto cru de sempre.
     m = markup or WhatsAppMarkup()
     esc = m.escape
     regras = regras_do_cupom(cupom)
-    is_meli = str(getattr(cupom, "marketplace", "") or "").strip().lower() in (
-        "mercadolivre", "mercado livre", "meli")
     loja = _nome_loja(getattr(cupom, "marketplace", ""), cupom=cupom)
 
-    linhas = [m.bold(f"Novo cupom ⚡️ {esc(loja)}"), ""]
+    cabecalho = (
+        f"Cupom relâmpago ⚡️ {esc(loja)}"
+        if getattr(cupom, "relampago", False)
+        else f"Cupom {esc(loja)}"
+    )
+    linhas = [m.bold(cabecalho), ""]
 
     # Linha do desconto: "🛒 15% DE DESCONTO acima de R$79 (limitado a R$60)"
-    numero_desconto = formatar_numero(regras.get("valor_desconto"))
+    # Comissão Shopee não entra: não é abatimento na loja.
+    numero_desconto = (
+        formatar_numero(regras.get("valor_desconto"))
+        if desconto_para_comprador(cupom) else ""
+    )
     valor = ""
     if numero_desconto:
         valor = (f"{numero_desconto}%" if regras.get("tipo_desconto") == "porcentagem"
@@ -677,8 +767,9 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
     partes = []
     if valor:
         partes.append(f"{valor} DE DESCONTO")
-    minimo = formatar_numero(regras.get("valor_minimo"))
-    if minimo:
+    minimo_valor = regras.get("valor_minimo")
+    minimo = formatar_numero(minimo_valor)
+    if minimo and minimo_valor and minimo_valor > 0:
         partes.append(f"acima de R$ {minimo}")
     linha_desc = " ".join(partes).strip()
     desconto_max = formatar_numero(regras.get("desconto_maximo"))
@@ -688,7 +779,7 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
     if linha_desc:
         linhas.append(f"🛒 {m.bold(esc(linha_desc))}")
 
-    escopo_produtos = escopo_produtos_cupom(cupom)
+    escopo_produtos = escopo_override or escopo_produtos_cupom(cupom)
     if escopo_produtos:
         linhas.append(f"🏷️ {m.bold('Válido para:')} {esc(escopo_produtos)}")
 
@@ -707,10 +798,24 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None) -> str:
                 == escopo_produtos.strip().casefold()):
             linhas.extend(["", f"⚠️ {m.bold('Condição:')} {esc(condicao[:220])}"])
 
+    validade = _linha_validade_cupom(cupom)
+    if validade:
+        linhas.append(f"⏳ {m.bold(esc(validade))}")
+    checagem = _linha_checagem_cupom(cupom)
+    if checagem:
+        linhas.append(f"🔎 {esc(checagem)}")
+
     link = str(link_afiliado or getattr(cupom, "link", "") or "").strip()
     if link:
-        onde = "na página do Meli" if is_meli else "na página da loja"
-        linhas += ["", f"Clique no link e navegue {onde}:", "", f"➡️ {esc(link)}"]
+        acao = (
+            "Abra a loja e aplique o cupom no checkout:"
+            if codigo else
+            "Ative o cupom e veja os itens participantes:"
+        )
+        # Um único CTA, específico para o modo real de resgate. "Navegue na
+        # página" não dizia o que fazer depois do clique e aumentava a chance de
+        # a pessoa abandonar antes do checkout.
+        linhas += ["", f"👉 {m.bold(esc(acao))}", f"➡️ {esc(link)}"]
 
     return "\n".join(linhas)
 
@@ -823,6 +928,9 @@ def montar_mensagem_aviso_cupons(cupons, marketplace, link="", markup=None) -> s
         ).strip()
         if escopo:
             bloco.append(f"🏷️ {m.italic(esc(_escopo_curto(escopo)))}")
+        validade = _linha_validade_cupom(cupom)
+        if validade:
+            bloco.append(f"⏳ {m.italic(esc(validade))}")
         bloco.append(f"🎟 cupom: {m.bold(esc(codigo))}")
         blocos.append("\n".join(bloco))
     if not blocos:
@@ -1094,7 +1202,12 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
         # A chamada da IA é propositalmente texto puro; cabeçalho/código mantêm
         # o destaque próprio da mensagem de cupom.
         linhas += [esc(titulo_ia), ""]
-    linhas += [m.bold(f"Cupom {esc(loja)}"), ""]
+    cabecalho = (
+        f"Cupom relâmpago ⚡️ {esc(loja)}"
+        if getattr(cupom, "relampago", False)
+        else f"Cupom {esc(loja)}"
+    )
+    linhas += [m.bold(cabecalho), ""]
     for it in itens:
         p = it["produto"]
         relacao = it.get("relacao")
@@ -1121,11 +1234,196 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
     codigo = codigo_publicavel(cupom)
     if codigo:
         linhas.append(f"🎟 Use o cupom {m.bold(esc(codigo))}")
+        linhas.append("👉 Abra um produto acima e aplique o cupom no checkout.")
     else:
-        linhas.append(f"🎟 {m.bold('Ative o cupom no link')}")
+        # Os links de produto de campanhas ML carregam `coupon_campaign_id`; nas
+        # demais lojas a mensagem ainda manda conferir o abatimento antes de
+        # pagar, sem prometer que um simples clique validou o checkout.
+        linhas.append(f"🎟 {m.bold('Cupom de ativação')}")
+        linhas.append(
+            "👉 Abra um produto acima, ative o cupom e confirme o desconto antes de pagar."
+        )
     condicao = _condicao_do_cupom(cupom)
     if condicao:
         linhas.append(f"⚠️ {m.bold('Condição:')} {esc(condicao)}")
+    validade = _linha_validade_cupom(cupom)
+    if validade:
+        linhas.append(f"⏳ {m.bold(esc(validade))}")
+    checagem = _linha_checagem_cupom(cupom, itens)
+    if checagem:
+        linhas.append(f"🔎 {esc(checagem)}")
+    return "\n".join(linhas).strip()
+
+
+def _linha_prova_do_deal(deal) -> str:
+    """Uma frase que o histórico SUSTENTA, ou nada.
+
+    Não é adjetivo de vendedor: ou existe série de 90 dias que prova a posição do
+    preço, ou a mensagem não afirma nada sobre "estar barato". Quando o cupom é
+    perene, a referência é a vitrine — o abatimento dele já convive com a série e
+    creditá-lo aqui faria todo item da loja virar "menor preço".
+    """
+    historico = getattr(deal, "historico", None) or {}
+    if not int(historico.get("n") or 0):
+        return ""
+    referencia = deal.preco_vitrine if deal.cupom_perene else deal.preco_final
+    minimo = float(historico.get("minimo") or 0)
+    mediana = float(historico.get("mediana") or 0)
+    if minimo > 0 and referencia <= minimo * FOLGA_MINIMA_HISTORICA:
+        return "Menor preço que observamos em 90 dias"
+    if mediana > 0 and referencia < mediana:
+        queda = (mediana - referencia) / mediana * 100
+        if queda >= 5:
+            return f"{queda:.0f}% abaixo do preço habitual de 90 dias"
+    return ""
+
+
+def _fatos_do_deal(deal) -> dict:
+    """Números e alegações que o modelo pode usar — e só eles.
+
+    É a lista branca do `gerar_texto_deal`. O que sai daqui é exatamente o que a
+    mensagem vai imprimir logo abaixo, então o texto vendedor e o bloco de preço
+    nunca podem divergir. `provas` autoriza as afirmações fortes: "menor preço" só
+    entra quando o histórico sustenta, urgência só quando a validade é curta.
+    """
+    lista = float(getattr(deal.produto, "preco_sem_desconto", 0) or 0)
+    economia = lista - deal.preco_final if (
+        deal.desconto_comprovado and lista > deal.preco_final) else None
+    percentual = None
+    if economia and lista > 0:
+        percentual = round(economia / lista * 100)
+    # "menor preço em 90 dias" saiu da mensagem por decisão do usuário — e sair
+    # significa não aparecer TAMBÉM na frase da IA. Manter a prova aqui só mudava
+    # o lugar onde a mesma afirmação era feita, que é o oposto de removê-la.
+    provas = set()
+    validade = getattr(deal.cupom, "validade", None)
+    if validade and validade - timezone.now() <= timedelta(hours=12):
+        provas.add("urgencia")
+    return {
+        "preco_final": deal.preco_final,
+        "economia": economia,
+        "beneficio_cupom": deal.beneficio_rs or None,
+        "percentual": percentual,
+        "provas": provas,
+        # A janela do histórico é impressa pelo próprio código na linha de prova
+        # ("Menor preço que observamos em 90 dias"). Sem liberá-la, o modelo
+        # escrevia "em 90 dias" e o validador derrubava a frase inteira por um
+        # número que a mensagem já mostra.
+        "janela_dias": 90 if provas else None,
+    }
+
+
+def _frase_acrescenta(frase, nome, minimo_novas=3) -> str:
+    """A frase da IA só entra se disser algo que o nome do produto não diz.
+
+    Sem isto a mensagem repetia o título em prosa logo abaixo dele. A régua é
+    grosseira de propósito: contar quantas palavras de conteúdo a frase traz que
+    não estão no nome. Menos que três, ela é paráfrase e não vale a linha.
+    """
+    texto = _texto_ia_sem_formatacao(frase, 110)
+    if not texto:
+        return ""
+    from apps.scrapers.models import normalizar_busca
+
+    do_nome = {p for p in normalizar_busca(nome).split() if len(p) > 3}
+    palavras = [p for p in normalizar_busca(texto).split() if len(p) > 3]
+    if not palavras:
+        return ""
+    novas = [p for p in palavras if p not in do_nome]
+    if len(novas) < minimo_novas:
+        return ""
+    # E, mesmo trazendo palavras novas, a frase não pode REPRODUZIR o título:
+    # "Fone Bluetooth JBL para ouvir o dia inteiro" acrescenta três palavras e
+    # ainda assim imprime o nome do produto pela segunda vez na mesma tela.
+    if do_nome and len(do_nome & set(palavras)) / len(do_nome) > 0.5:
+        return ""
+    return texto
+
+
+def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None,
+                         configuracao=None) -> str:
+    """Mensagem de um Deal, no formato que os canais de oferta usam de verdade.
+
+    Anatomia copiada de quem vende (nerdofertas, promobit e afins no Telegram):
+
+        ➡️ Nome do produto
+        ✅ R$ 590  (de R$ 890)
+        🏷 Cupom: TEMNAAMZON
+        🛒 link
+
+    O NOME APARECE UMA VEZ. A versão anterior tinha gancho, nome e frase da IA
+    dizendo a mesma coisa em sequência — "ASPIRADOR PHILCO PAS4000V POR R$ 220,91"
+    / "Philco PAS4000V aspirador de pó 127 V" / "Aspirador de pó Philco 127 V com
+    42% de desconto". Três linhas, uma informação. Some o gancho: a linha do
+    produto já é a chamada, como nos canais que convertem.
+
+    A frase da IA é opcional e só entra quando acrescenta algo que o nome não diz;
+    `_frase_acrescenta` derruba a que só repete o título.
+
+    A foto do produto vai acima, pelo caminho de envio de produto.
+    """
+    from apps.scrapers.senders.base import WhatsAppMarkup
+    from apps.scrapers.coupon_rules import codigo_publicavel
+
+    m = markup or WhatsAppMarkup()
+    esc = m.escape
+    texto_ia = texto_ia or {}
+    produto = deal.produto
+    perfil = getattr(usuario, "perfil", None) if usuario else None
+
+    linhas = []
+    if getattr(produto, "relampago", False) or getattr(deal.cupom, "relampago", False):
+        linhas.append(m.bold("⚡ RELÂMPAGO"))
+
+    nome = (getattr(produto, "nome_llm", "") or "").strip() or (
+        _nome_principal_produto(getattr(produto, "nome", ""), limite=72))
+    linhas.append(f"➡️ {m.bold(esc(nome))}")
+
+    frase = _frase_acrescenta(texto_ia.get("linha") or "", nome)
+    if frase:
+        linhas.append(esc(frase))
+
+    # Frete grátis é argumento de compra, não detalhe: os canais que convertem
+    # (Pechinchou e afins) põem essa linha antes do preço. O dado já existia em
+    # `Produto.frete_full` e a mensagem nunca o usava.
+    if getattr(produto, "frete_full", False):
+        linhas.append("📦 Frete grátis")
+
+    # Preço: uma linha. O "de" só com desconto comprovado pelo nosso histórico —
+    # riscar um preço que talvez nunca tenha existido é o falso positivo mais caro
+    # do produto, porque quem assina a mensagem é o creator.
+    lista = float(getattr(produto, "preco_sem_desconto", 0) or 0)
+    preco = m.bold(f"R$ {_preco_br(deal.preco_final)}")
+    if deal.desconto_comprovado and lista > deal.preco_final:
+        linhas.append(f"🔥 {preco}  —  chega a custar R$ {_preco_br(lista)}")
+    else:
+        linhas.append(f"🔥 {preco}")
+    loja = _nome_loja(getattr(produto, "marketplace", ""))
+    if loja:
+        linhas.append(f"🏬 Achado no {esc(loja)}")
+
+    if deal.tem_cupom:
+        codigo = codigo_publicavel(deal.cupom)
+        abate = (f" — abate R$ {_preco_br(deal.beneficio_rs)}"
+                 if deal.beneficio_rs > 0 else "")
+        if codigo:
+            linhas.append(f"🏷 Cupom: {m.bold(esc(codigo))}{abate}")
+        else:
+            linhas.append(f"🏷 {m.bold('Cupom de ativação')}{abate} — ative na página")
+        minimo = _aviso_minimo_nao_atingido(deal.cupom, produto)
+        if minimo:
+            linhas.append(f"⚠️ {esc(minimo.capitalize())}")
+        validade = _linha_validade_cupom(deal.cupom)
+        if validade:
+            linhas.append(f"⏳ {esc(validade)}")
+
+    linhas.append(f"🛒 {esc(link)}")
+    disclosure = (
+        getattr(configuracao, "divulgacao_afiliado", "")
+        or getattr(perfil, "divulgacao_afiliado", "") or ""
+    ).strip()
+    if disclosure:
+        linhas.append(esc(disclosure))
     return "\n".join(linhas).strip()
 
 
@@ -1154,18 +1452,100 @@ def resolver_link_afiliado_cupom(cupom, usuario):
     if marketplace == "amazon":
         from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
         from apps.scrapers.afiliado import tag_amazon
+        from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_cupom
         tag = _executar_orm(tag_amazon, usuario)
-        if not tag or not origem.startswith("https://"):
+        if not tag:
             return {"sucesso": False, "motivo": "Cadastre sua tag Amazon para usar este cupom."}
-        parts = urlsplit(origem)
-        hostname = (parts.hostname or "").lower()
-        if not (hostname == "amazon.com.br" or hostname.endswith(".amazon.com.br")):
-            return {"sucesso": False, "motivo": "O link informado não pertence à Amazon Brasil."}
-        query = dict(parse_qsl(parts.query, keep_blank_values=True))
-        query["tag"] = tag
-        return {"sucesso": True,
-                "link": urlunsplit((parts.scheme, parts.netloc, parts.path,
-                                     urlencode(query), parts.fragment))}
+        if origem.startswith("https://"):
+            parts = urlsplit(origem)
+            hostname = (parts.hostname or "").lower()
+            if not (hostname == "amazon.com.br" or hostname.endswith(".amazon.com.br")):
+                return {"sucesso": False, "motivo": "O link informado não pertence à Amazon Brasil."}
+            query = dict(parse_qsl(parts.query, keep_blank_values=True))
+            query["tag"] = tag
+            return {"sucesso": True,
+                    "link": urlunsplit((parts.scheme, parts.netloc, parts.path,
+                                         urlencode(query), parts.fragment))}
+        destino = _executar_orm(gerar_link_afiliado_cupom, cupom, usuario)
+        if str(destino or "").startswith("https://"):
+            return {"sucesso": True, "link": destino}
+        return {"sucesso": False, "motivo": "Cadastre sua tag Amazon para usar este cupom."}
+    if marketplace == "shopee":
+        from urllib.parse import urlsplit
+        from apps.scrapers.coupon_links import (
+            canonical_coupon_link, coupon_link_verified_and_fresh,
+        )
+        from apps.scrapers.shopee import (
+            ShopeeError, credenciais_da_integracao, gerar_link,
+        )
+
+        def _estado_shopee():
+            from apps.scrapers.models import IntegracaoAfiliado
+            integracao = IntegracaoAfiliado.objects.filter(
+                owner=usuario, provedor="shopee", habilitada=True,
+                status="conectada",
+            ).first()
+            cache = LinkAfiliadoCupomUsuario.objects.filter(
+                usuario=usuario, cupom=cupom,
+            ).first()
+            return integracao, cache
+
+        integracao, cache = _executar_orm(_estado_shopee)
+        marketplace_adapter = get_marketplace("shopee")
+        if cache and coupon_link_verified_and_fresh(cache) \
+                and marketplace_adapter.verify_affiliate_tag(
+                    cache.link_afiliado, usuario=usuario,
+                ):
+            return {
+                "sucesso": True, "link": canonical_coupon_link(cache),
+                "cache": True,
+            }
+        if not integracao:
+            return {
+                "sucesso": False,
+                "motivo": "Conecte sua conta de afiliado da Shopee para usar este cupom.",
+                "precisa_integracao_shopee": True,
+            }
+        destino = origem or "https://shopee.com.br/m/cupom-de-desconto"
+        try:
+            parts = urlsplit(destino)
+            hostname = (parts.hostname or "").casefold()
+        except ValueError:
+            hostname = ""
+        if not (
+            destino.startswith("https://")
+            and (hostname == "shopee.com.br" or hostname.endswith(".shopee.com.br"))
+        ):
+            return {"sucesso": False, "motivo": "Destino Shopee invalido para afiliacao."}
+        try:
+            app_id, secret = _executar_orm(credenciais_da_integracao, integracao)
+            link = gerar_link(
+                destino, app_id=app_id, secret=secret,
+                sub_ids=[f"u{usuario.pk}", "spreading", f"c{cupom.pk}"],
+            )
+        except ShopeeError as exc:
+            return {"sucesso": False, "motivo": exc.public_message}
+        if not marketplace_adapter.verify_affiliate_tag(link, usuario=usuario):
+            return {"sucesso": False,
+                    "motivo": "A Shopee nao confirmou a atribuicao do link."}
+
+        def _gravar_shopee():
+            from apps.accounts.models import organization_for_user
+            LinkAfiliadoCupomUsuario.objects.update_or_create(
+                usuario=usuario, cupom=cupom,
+                defaults={
+                    "organization": organization_for_user(usuario),
+                    "url_origem": destino, "link_afiliado": link,
+                    "afiliado_ok": True, "estado": "pronto",
+                    "verificado_ok": True, "verificado_em": timezone.now(),
+                    "url_canonica": link, "verificacao_motivo": "",
+                    "ultimo_erro": "", "ultima_tentativa": timezone.now(),
+                    "proxima_tentativa": None,
+                },
+            )
+
+        _executar_orm(_gravar_shopee)
+        return {"sucesso": True, "link": link, "cache": False}
     if marketplace != "mercadolivre":
         return {"sucesso": False,
                 "motivo": "Esta loja ainda não oferece link afiliado para cupons."}
@@ -1250,7 +1630,22 @@ def resolver_link_afiliado_cupom(cupom, usuario):
         except Exception as exc:
             from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
             from apps.scrapers.auxiliar import SessaoExpirada
-            if isinstance(exc, (LoginError, AuthError, SessaoExpirada)):
+            if isinstance(exc, AuthError):
+                _registrar_falha_cache(
+                    "Link Builder temporariamente indisponível.",
+                    state="pendente", retry_minutes=5,
+                )
+                logger.info(
+                    "Link Builder temporariamente indisponível ao afiliar cupom %s: %s",
+                    cupom.pk, exc,
+                )
+                return {
+                    "sucesso": False,
+                    "motivo": "Link Builder temporariamente indisponível; nova tentativa agendada.",
+                    "precisa_login_ml": False,
+                    "indisponivel_ml": True,
+                }
+            if isinstance(exc, (LoginError, SessaoExpirada)):
                 _registrar_falha_cache(
                     "Sessão necessária para criar ou renovar o link afiliado.",
                     state="pendente", retry_minutes=15,
@@ -1278,7 +1673,22 @@ def resolver_link_afiliado_cupom(cupom, usuario):
         except Exception as exc:
             from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
             from apps.scrapers.auxiliar import SessaoExpirada
-            if isinstance(exc, (LoginError, AuthError, SessaoExpirada)):
+            if isinstance(exc, AuthError):
+                _registrar_falha_cache(
+                    "Link Builder temporariamente indisponível.",
+                    state="pendente", retry_minutes=5,
+                )
+                logger.info(
+                    "Link Builder temporariamente indisponível no fallback do cupom %s: %s",
+                    cupom.pk, exc,
+                )
+                return {
+                    "sucesso": False,
+                    "motivo": "Link Builder temporariamente indisponível; nova tentativa agendada.",
+                    "precisa_login_ml": False,
+                    "indisponivel_ml": True,
+                }
+            if isinstance(exc, (LoginError, SessaoExpirada)):
                 _registrar_falha_cache(
                     "Sessão necessária para criar ou renovar o link afiliado.",
                     state="pendente", retry_minutes=15,
@@ -1352,6 +1762,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     # colagem e preço por item. Sem essa prova, o código continua publicável apenas
     # como aviso de loja, que é o contrato seguro pedido para cupons digitáveis.
     modo_codigo = bool(tem_codigo and not relacoes_preparadas)
+    modo_link_direto = False
     link_codigo = ""
     if modo_codigo and not enqueue_only:
         resolucao_codigo = resolver_link_afiliado_cupom(cupom, usuario)
@@ -1367,6 +1778,74 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         link_codigo = resolucao_codigo["link"]
 
     if not modo_codigo and not relacoes_preparadas:
+        # Shopee/Awin: a API já devolve HTTPS afiliado. Amazon oficial: ASIN +
+        # tag, sem Chromium. Exigir ProdutoCupom (mapa ML) marcava ready na
+        # tela e recusava no envio.
+        from apps.scrapers.coupon_rules import ativacao_publicavel
+        destino = str(getattr(cupom, "link", "") or "")
+        marketplace = str(getattr(cupom, "marketplace", "") or "").lower()
+        if (marketplace == "awin"
+                and ativacao_publicavel(cupom, usuario=usuario)
+                and destino.startswith("https://")):
+            modo_link_direto = True
+            link_codigo = destino
+        elif marketplace == "shopee" and ativacao_publicavel(
+                cupom, usuario=usuario):
+            resolucao_shopee = resolver_link_afiliado_cupom(cupom, usuario)
+            if resolucao_shopee.get("sucesso"):
+                modo_link_direto = True
+                link_codigo = resolucao_shopee["link"]
+        elif marketplace == "amazon" and ativacao_publicavel(cupom, usuario=usuario):
+            from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_cupom
+            destino_az = _executar_orm(gerar_link_afiliado_cupom, cupom, usuario)
+            if str(destino_az or "").startswith("https://"):
+                modo_link_direto = True
+                link_codigo = destino_az
+        elif marketplace == "mercadolivre" and ativacao_publicavel(cupom, usuario=usuario):
+            from apps.scrapers.coupon_links import gerar_link_afiliado_listagem_ml
+            destino_ml = _executar_orm(gerar_link_afiliado_listagem_ml, cupom, usuario)
+            if str(destino_ml or "").startswith("https://"):
+                modo_link_direto = True
+                link_codigo = destino_ml
+
+    aviso_sem_produto = modo_codigo or modo_link_direto
+
+    # Segunda opinião por IA: o piso monetário fixo (cupom_e_lixo) já barrou o
+    # caso claro — teto/valor irrisório — antes de o cupom chegar a "pronto".
+    # Isto pega o que só leitura pega: condição confusa, escopo ilegível,
+    # cheiro de isca. Uma chamada por TENTATIVA REAL de envio, não por cupom no
+    # catálogo — por isso pode usar o modelo cheio sem custar escala. Falha ou
+    # IA desligada nunca bloqueia sozinha (fail-open); só bloqueia quando a IA
+    # respondeu e disse explicitamente que não vale.
+    from apps.scrapers.coupon_rules import escopo_produtos_cupom, regras_do_cupom
+    from apps.scrapers.llm import avaliar_cupom_ia
+    regras_cupom = regras_do_cupom(cupom)
+    escopo_original = escopo_produtos_cupom(cupom) or str(regras_cupom.get("escopo") or "")
+    avaliacao_ia = avaliar_cupom_ia(
+        escopo=escopo_original,
+        tipo_desconto=regras_cupom.get("tipo_desconto") or "",
+        valor_desconto=regras_cupom.get("valor_desconto"),
+        desconto_maximo=regras_cupom.get("desconto_maximo"),
+        valor_minimo=regras_cupom.get("valor_minimo"),
+        restrito=bool(getattr(cupom, "restrito", False)),
+    )
+    if not avaliacao_ia["vale_a_pena"]:
+        _executar_orm(
+            log_event,
+            "publicacao", "coupon_rejected_by_ai",
+            f"Cupom recusado pela IA: {avaliacao_ia['motivo'] or 'sem motivo informado'}.",
+            level="info",
+            usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                       "destino": destino_nome or grupo_id,
+                                       "motivo_ia": avaliacao_ia["motivo"]},
+        )
+        return {
+            "sucesso": False,
+            "motivo": avaliacao_ia["motivo"] or "Este cupom não passou na avaliação de qualidade.",
+            "classe": "permanente", "rejeitado_por_ia": True,
+        }
+
+    if not aviso_sem_produto and not relacoes_preparadas:
         _executar_orm(
             log_event,
             "publicacao", "coupon_not_ready",
@@ -1378,10 +1857,10 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 "motivo": "Este cupom está sendo atualizado e ainda não está disponível para envio.",
                 "classe": "transitorio", "cupom_em_preparo": True}
     relacoes_prontas = (
-        [] if modo_codigo
+        [] if aviso_sem_produto
         else _executar_orm(relacoes_prontas_para_envio, cupom, usuario)
     )
-    if not modo_codigo and not relacoes_prontas:
+    if not aviso_sem_produto and not relacoes_prontas:
         _executar_orm(
             log_event,
             "publicacao", "coupon_link_pending",
@@ -1547,10 +2026,12 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         # foto manual para aparentar associação que a fonte não comprovou.
         img_kwargs = {}
         relacao_topo = None
-        if modo_codigo:
+        itens_cupom, bloqueio_afiliacao = [], None
+        if aviso_sem_produto:
             link_registro = link_codigo
             mensagem = montar_mensagem_cupom(
                 cupom, link_afiliado=link_registro, markup=sender.markup,
+                escopo_override=avaliacao_ia["escopo_legivel"],
             )
             if imagem_b64_custom:
                 img_kwargs = {
@@ -1560,7 +2041,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         else:
             itens_cupom, bloqueio_afiliacao = _preparar_itens_cupom(
                 cupom, usuario, relacoes_prontas)
-        if (not modo_codigo and itens_cupom
+        if (not aviso_sem_produto and itens_cupom
                 and getattr(settings, "PRECO_REVALIDA_ANTES_ENVIO", True)):
             # Antes da IA (para a chamada nascer do preço fresco), antes do corte
             # do Telegram e antes da colagem — que é quem garante foto↔texto.
@@ -1570,7 +2051,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
             if not itens_cupom:
                 return falhar("Os preços deste cupom mudaram; nenhum produto "
                               "continua dentro das regras dele.", classe="transitorio")
-        if not modo_codigo and itens_cupom:
+        if not aviso_sem_produto and itens_cupom:
             _preparar_conteudo_ia_cupom(itens_cupom)
             # Telegram limita legendas de foto a 1024 caracteres. Como a regra e
             # "ate 9", remove os itens de menor prioridade ate a mensagem caber.
@@ -1587,14 +2068,14 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 cupom, itens_cupom, markup=sender.markup)
             link_registro = itens_cupom[0]["link"]
             img_kwargs = {"imagem_b64": colagem_b64, "mimetype": colagem_mime}
-        elif not modo_codigo and bloqueio_afiliacao:
+        elif not aviso_sem_produto and bloqueio_afiliacao:
             # Havia produtos comprovados, mas a sessão do Mercado Livre caiu na
             # hora de gerar os links afiliados. Não é "cupom sem produtos": é
             # reconexão. Transitório para não pausar a automação por queda de
             # sessão, e com o flag que a UI usa para oferecer o botão de reconectar.
             return falhar(bloqueio_afiliacao["mensagem"], classe="transitorio",
                           precisa_login_ml=bloqueio_afiliacao["precisa_login_ml"])
-        elif not modo_codigo:
+        elif not aviso_sem_produto:
             return falhar("Cupom sem produtos comprovadamente aplicáveis, com foto e link afiliado.",
                           classe="permanente")
         if not mensagem.strip():
@@ -1603,7 +2084,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         # com 0/0 e não havia como reconciliar "o preço anunciado não bate".
         # Aqui o par é (vitrine, pós-cupom) — nas publicações de produto o par é
         # (tabela, vitrine), que é o que aquela mensagem anuncia.
-        if not modo_codigo:
+        if not aviso_sem_produto:
             relacao_topo = itens_cupom[0].get("relacao")
 
         def _gravar_mensagem():
@@ -2037,6 +2518,25 @@ _RUIDO_NOME_PRODUTO = re.compile(
 )
 
 
+# Palavras que não podem terminar uma linha: o corte em palavra respeita o limite
+# mas deixa a frase pendurada. Medido em produção em 03/09/2026: o nome saiu como
+# "...Fórmula com Máxima Concentração e" e a condição do cupom terminou em
+# "compra a partir de R$" — anunciando um mínimo sem dizer qual.
+_CAUDA_PENDURADA = re.compile(
+    r"[\s,;:|/–—-]*(?:\b(?:e|ou|de|da|do|das|dos|com|sem|para|por|at[ée]|em|no|na|"
+    r"nos|nas|a\s+partir\s+de)\b|R\$)\s*$",
+    re.I,
+)
+
+
+def _sem_cauda_pendurada(texto: str) -> str:
+    anterior = None
+    while texto != anterior:
+        anterior = texto
+        texto = _CAUDA_PENDURADA.sub("", texto).rstrip(" -–—,;:|/")
+    return texto
+
+
 def _nome_principal_produto(nome, limite=70) -> str:
     """Limpa ruido comercial e corta em palavra, sem depender de IA externa."""
     texto = re.sub(r"\s+", " ", str(nome or "")).strip(" -–—,;")
@@ -2045,7 +2545,36 @@ def _nome_principal_produto(nome, limite=70) -> str:
     if len(texto) <= limite:
         return texto
     cortado = texto[:limite + 1].rsplit(" ", 1)[0].rstrip(" -–—,;|/")
-    return cortado or texto[:limite]
+    # Parêntese aberto e não fechado: o corte por palavra respeitou o limite mas
+    # deixou "(8gb Ram+8gb Ram" pendurado no fim do nome. Descarta o trecho a
+    # partir da abertura órfã — o que estava lá dentro era detalhe, não o produto.
+    if cortado.count("(") > cortado.count(")"):
+        cortado = cortado[:cortado.rfind("(")].rstrip(" -–—,;|/")
+    return _sem_cauda_pendurada(cortado) or texto[:limite]
+
+
+def _condicao_legivel(texto, limite=180) -> str:
+    """Condição do cupom que termina numa frase inteira, sem repetir selo.
+
+    O escopo bruto do Mercado Livre repete o mesmo selo ("25% de Desconto 25% OFF
+    25% OFF produtos Mercado Livre"), e o corte cego em 220 caracteres cortava a
+    última oração no meio. Preferir o fim de frase e remover a repetição é o que
+    faz a linha ser lida como condição, não como sobra de raspagem.
+    """
+    limpo = re.sub(r"\s+", " ", str(texto or "")).strip()
+    if not limpo:
+        return ""
+    anterior = None
+    while limpo != anterior:
+        anterior = limpo
+        limpo = re.sub(r"\b(.{3,40}?)\s+\1\b", r"\1", limpo, flags=re.I).strip()
+    if len(limpo) <= limite:
+        return _sem_cauda_pendurada(limpo)
+    corte = limpo[:limite + 1]
+    fim = max(corte.rfind(". "), corte.rfind("; "))
+    if fim > limite * 0.4:
+        return corte[:fim].strip()
+    return _sem_cauda_pendurada(corte.rsplit(" ", 1)[0]) + "…"
 
 
 def _preco_br(valor) -> str:
@@ -2164,7 +2693,12 @@ def _passa_no_minimo(produto, preco_final, historico, min_desconto_percent) -> b
     return _no_fundo_do_historico(produto, preco_final, historico)
 
 
-def _desconto_comprovado(produto, preco_final: float) -> bool:
+_SEM_HISTORICO_PRECARREGADO = object()
+
+
+def _desconto_comprovado(
+    produto, preco_final: float, *, historico=_SEM_HISTORICO_PRECARREGADO,
+) -> bool:
     """Nós já vimos este item custar mais caro?
 
     É a diferença entre "a loja diz que estava R$ 500" e "nós observamos R$ 500".
@@ -2183,14 +2717,15 @@ def _desconto_comprovado(produto, preco_final: float) -> bool:
     """
     if preco_final <= 0:
         return False
-    try:
-        historico = _stats_preco(produto, dias=90)
-    except Exception:
-        # Sem conseguir consultar, o desconto fica NÃO comprovado. Falha fechada:
-        # a mensagem perde o "DE" e não afirma nada que não foi verificado.
-        logger.warning("Histórico indisponível para o produto %s; desconto não "
-                       "comprovado.", getattr(produto, "pk", "?"))
-        return False
+    if historico is _SEM_HISTORICO_PRECARREGADO:
+        try:
+            historico = _stats_preco(produto, dias=90)
+        except Exception:
+            # Sem conseguir consultar, o desconto fica NÃO comprovado. Falha fechada:
+            # a mensagem perde o "DE" e não afirma nada que não foi verificado.
+            logger.warning("Histórico indisponível para o produto %s; desconto não "
+                           "comprovado.", getattr(produto, "pk", "?"))
+            return False
     if not historico or not historico.get("n"):
         return False
     return historico["mediana"] > preco_final * 1.02
@@ -2234,11 +2769,20 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         conteudo_ia.get("nome_curto") or _nome_principal_produto(produto.nome)
     )
     if template:
+        desconto_coerente_template = (
+            0 < desconto_percent < 90
+            and produto.preco_sem_desconto > preco_final
+            and _desconto_comprovado(produto, preco_final)
+        )
         try:
             return template.format(
-                marca=marca, nome=nome_exibicao,
-                preco=f"R$ {preco_final:.2f}",
-                desconto=f"{desconto_percent:.0f}%", link=link_afiliado,
+                marca=esc(marca), nome=esc(nome_exibicao),
+                preco=esc(f"R$ {_preco_br(preco_final)}"),
+                desconto=esc(
+                    f"{desconto_percent:.0f}%" if desconto_coerente_template else ""
+                ),
+                link=esc(link_afiliado), cta=esc(cta),
+                divulgacao_afiliado=esc(disclosure),
             )
         except (KeyError, ValueError):
             pass
@@ -2251,6 +2795,8 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     #   🔥 DE X | POR Y     [+ 🎟️ CUPOM: ... colado embaixo]
     #   🔗 link
     linhas = []
+    if getattr(produto, "relampago", False):
+        linhas += [m.bold("⚡ OFERTA RELÂMPAGO"), ""]
     # Título da IA (frase_llm) em caixa alta, no topo — a "chamada" do grupo.
     titulo = conteudo_ia.get("titulo", "")
     if titulo:
@@ -2347,8 +2893,16 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         condicao = _condicao_do_cupom(cupom_escolhido)
         if condicao:
             linhas.append(f"⚠️ {m.bold('Condição:')} {esc(condicao)}")
+        validade = _linha_validade_cupom(cupom_escolhido)
+        if validade:
+            linhas.append(f"⏳ {m.bold(esc(validade))}")
         linhas.append("")
+    linhas.append(f"👉 {m.bold(esc(cta))}")
     linhas.append(f"🔗 {esc(link_afiliado)}")
+    if marca and marca.casefold() != "ofertas":
+        linhas.extend(["", m.italic(esc(marca))])
+    if disclosure:
+        linhas.append(m.italic(esc(disclosure)))
     return "\n".join(linhas)
 
 
@@ -2375,7 +2929,7 @@ def _condicao_do_cupom(cupom) -> str:
     escopo = ""
     if hasattr(cupom, "regras"):
         escopo = str(regras_do_cupom(cupom).get("escopo") or "")
-    return (escopo or "Consulte quem pode usar antes de comprar")[:220]
+    return _condicao_legivel(escopo or "Consulte quem pode usar antes de comprar")
 
 
 def _aviso_minimo_nao_atingido(cupom, produto) -> str:
@@ -2573,10 +3127,30 @@ def _link_publicado(publicacao, link_afiliado: str) -> str:
     return link_afiliado
 
 
+def _variante_para_envio(configuracao) -> str:
+    """Escolhe A/B por exposicoes, sem deixar falhas enviesarem o teste."""
+    if not configuracao or configuracao.variante_template == "A":
+        return "A"
+    if configuracao.variante_template == "B":
+        return "B"
+    from django.db.models import Count
+
+    contagens = {
+        row["variante"]: row["total"]
+        for row in configuracao.publicacoes.filter(
+            status__in=("enviado", "incerto"), variante__in=("A", "B"),
+        ).values("variante").annotate(total=Count("id"))
+    }
+    # Empate comeca em A; depois escolhe a menos exposta. Falhas anteriores ao
+    # transporte nao contam porque o publico nunca viu aquela variante.
+    return "B" if contagens.get("A", 0) > contagens.get("B", 0) else "A"
+
+
 def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                              canal="whatsapp", usuario=None, configuracao=None,
                              destino_nome="", imagem_b64_custom=None,
-                             enqueue_only=False, _reserved_publication=None):
+                             enqueue_only=False, _reserved_publication=None,
+                             deal=None):
     """
     Núcleo de envio reutilizável e AGNÓSTICO de loja/canal:
       resolve marketplace (link afiliado + verificação) e sender (transporte) via registry.
@@ -2912,10 +3486,28 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             from apps.scrapers import preco_ao_vivo
             checagem = _executar_orm(
                 preco_ao_vivo.revalidar,
-                produto, usuario=usuario, configuracao=configuracao, url=link)
+                produto, usuario=usuario, configuracao=configuracao, url=link,
+                exigir_medicao=deal is not None)
             if not checagem["ok"]:
                 return falhar(f"preço mudou antes do envio: {checagem['motivo']}",
                               link=link)
+            # Para o caminho de DEAL, "inconclusivo" não pode virar publicação.
+            # A política geral do preço ao vivo é deliberada — o ML devolve
+            # challenge em rajadas para o IP de datacenter da Fly, e tratar isso
+            # como reprovação pararia todos os envios. Mas ela foi escrita para
+            # decidir SE envia, não para autorizar a mensagem a AFIRMAR um preço.
+            # Um deal é exatamente uma afirmação de preço: "De R$ 289 por R$ 183,91"
+            # com o catálogo desatualizado saiu para o grupo em 03/09/2026 enquanto
+            # o checkout real cobrava R$ 249,50. Transitório de propósito: a
+            # próxima janela costuma medir, e a regra de envio não tem culpa.
+            if deal is not None and checagem.get("fonte") == "inconclusivo":
+                # Sem medição AGORA não sai. Aceitar a observação salva era o
+                # atalho que fez a mensagem anunciar R$ 199,90 num item de
+                # R$ 249,50: aquele preço tinha 17 horas. São duas verificações,
+                # uma na ingestão e uma aqui, e esta não tem substituto.
+                return falhar(
+                    "preço não medido no envio; deal não é publicado",
+                    classe=TRANSITORIO, link=link)
 
         # Ofertas (origem='oferta') não têm Cupom; só busca quando há campanha_id
         cupom = None
@@ -2925,20 +3517,36 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                     campanha_id=produto.campanha_id, estado="ativo",
                 ).filter(Q(validade__isnull=True) | Q(validade__gte=timezone.now())).first()
             cupom = _executar_orm(_cupom_da_campanha)
-        variante = "A"
-        if configuracao and configuracao.variante_template == "B":
-            variante = "B"
-        elif configuracao and configuracao.variante_template == "alternar":
-            variante = "B" if _executar_orm(
-                lambda: configuracao.publicacoes.count()) % 2 else "A"
+        variante = _executar_orm(_variante_para_envio, configuracao)
         link_publicado = _link_publicado(publicacao, link)
+        if deal is not None:
+            # A revalidação ao vivo confirmou a VITRINE (inconclusivo já abortou
+            # acima). O deal foi
+            # montado com o preço do catálogo, que pode ter mudado no meio do tick,
+            # e um cupom percentual escala com ele: recalcular aqui é o que mantém
+            # `preco_final = vitrine - benefício` verdadeiro na hora do envio, e não
+            # só na hora da seleção.
+            from apps.scrapers.deals import _beneficio_do_cupom
+            deal.preco_vitrine = round(float(preco_publicavel(produto)), 2)
+            if deal.cupom is not None:
+                deal.beneficio_rs = round(
+                    _beneficio_do_cupom(deal.cupom, deal.preco_vitrine), 2)
+            deal.preco_final = round(deal.preco_vitrine - deal.beneficio_rs, 2)
+
         if publicacao:
             publicacao.variante = variante
             publicacao.link_afiliado = link
             publicacao.link_rastreado = link_publicado
             publicacao.cupom = (
-                cupom.titulo if cupom
-                else getattr(produto, "codigo_checkout", "")
+                # Precedência: o cupom do deal manda, porque é ele que a
+                # mensagem anuncia e é sobre ele que o preço final foi calculado.
+                # Depois o cupom da campanha, depois o código de checkout, e por
+                # último o rótulo de ativação inline do ML — que veio de
+                # `ad46360` e cobre o caso em que o desconto existe na página e
+                # não há código nenhum para citar.
+                getattr(getattr(deal, "cupom", None), "titulo", "")
+                or (cupom.titulo if cupom else "")
+                or getattr(produto, "codigo_checkout", "")
                 or (
                     "Ative na página do Mercado Livre"
                     if _preco_cupom_inline_ml(produto) else ""
@@ -2946,15 +3554,34 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
             )
             # preco_final foi gravado antes da revalidação; realinhar aqui mantém
             # o registro igual ao número que a mensagem anuncia.
-            publicacao.preco_final = preco_publicavel(produto)
+            publicacao.preco_final = (
+                deal.preco_final if deal is not None else preco_publicavel(produto))
             publicacao.preco_original = produto.preco_sem_desconto
             _executar_orm(publicacao.save, update_fields=[
                 "variante", "link_afiliado", "link_rastreado", "cupom",
                 "preco_final", "preco_original"])
-        mensagem = _executar_orm(
-            montar_mensagem,
-            produto, link_publicado, cupom, markup=sender.markup, usuario=usuario,
-            configuracao=configuracao, variante=variante)
+        if deal is not None:
+            # Uma chamada de IA por tentativa REAL de envio, não por item de
+            # catálogo — mesmo critério de `avaliar_cupom_ia`. Falha degrada para
+            # texto vazio: preço, cupom e prova continuam impressos pelo código.
+            from apps.scrapers.llm import gerar_texto_deal
+            texto_ia = gerar_texto_deal(
+                nome=getattr(produto, "nome", ""),
+                categoria=getattr(produto, "macro_categoria", "")
+                or getattr(produto, "categoria", "") or "",
+                motivo="; ".join(getattr(deal, "motivos", [])[:2]),
+                tem_cupom=bool(getattr(deal, "cupom", None)),
+                **_fatos_do_deal(deal),
+            )
+            mensagem = _executar_orm(
+                montar_mensagem_deal, deal, link_publicado,
+                markup=sender.markup, texto_ia=texto_ia, usuario=usuario,
+                configuracao=configuracao)
+        else:
+            mensagem = _executar_orm(
+                montar_mensagem,
+                produto, link_publicado, cupom, markup=sender.markup, usuario=usuario,
+                configuracao=configuracao, variante=variante)
         if publicacao:
             publicacao.mensagem = mensagem
             _executar_orm(publicacao.save, update_fields=["mensagem"])
@@ -3146,7 +3773,9 @@ def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
     ultimo = None
     for entry in pool:
         candidate = entry if hasattr(entry, "kind") else None
-        prod = candidate.obj if candidate else entry
+        deal_atual = candidate.obj if candidate and candidate.kind == "deal" else None
+        prod = deal_atual.produto if deal_atual else (
+            candidate.obj if candidate else entry)
         logger.debug(
             "Tentando enviar conteúdo id=%s origem=%s marketplace=%s",
             getattr(prod, "id", None), getattr(prod, "origem", "cupom"),
@@ -3165,7 +3794,7 @@ def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
             r = enviar_oferta_de_produto(
                 prod, grupo_id, verificar=verificar, dry_run=dry_run, canal=canal,
                 usuario=usuario, configuracao=configuracao, destino_nome=destino_nome,
-                enqueue_only=enqueue_only)
+                enqueue_only=enqueue_only, deal=deal_atual)
         if r.get("sucesso"):
             return r
         logger.debug("Produto id=%s reprovado no envio: %s", getattr(prod, "id", None), r.get("motivo"))

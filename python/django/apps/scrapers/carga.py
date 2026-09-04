@@ -132,7 +132,7 @@ def ml_site_browser_resource(usuario=None, *, owner_kind="scheduled"):
 
 @contextmanager
 def coordinated_ml_browser(*, usuario=None, authenticated=False,
-                           owner_kind="scheduled"):
+                           owner_kind="scheduled", wait_seconds=0):
     """Coordena o ponto exato que abrirá Chromium para o Mercado Livre.
 
     Navegação pública anônima consome somente o slot global. Se um storage state
@@ -140,18 +140,28 @@ def coordinated_ml_browser(*, usuario=None, authenticated=False,
     ou renovam a mesma credencial simultaneamente. O chamador continua responsável
     por abrir/fechar o Playwright dentro deste contexto.
     """
-    resource = (
-        ml_site_browser_resource(usuario, owner_kind=owner_kind)
-        if authenticated
-        else browser_resource(owner_kind=owner_kind)
-    )
-    with resource as acquired:
-        if not acquired:
+    deadline = time.monotonic() + max(0, float(wait_seconds or 0))
+    while True:
+        resource = (
+            ml_site_browser_resource(usuario, owner_kind=owner_kind)
+            if authenticated
+            else browser_resource(owner_kind=owner_kind)
+        )
+        with resource as acquired:
+            if acquired:
+                yield
+                return
+        restante = deadline - time.monotonic()
+        if restante <= 0:
             raise BrowserResourceUnavailable(
                 "Capacidade de browser ou sessão Mercado Livre ocupada; "
                 "a tarefa será retomada pelo worker."
             )
-        yield
+        # A negativa já registrou `owner_kind` na fila. O holder atual enxerga esse
+        # marcador entre páginas e cede; uma espera curta permite que esta mesma
+        # passada conquiste a vaga, em vez de depender de uma corrida cinco minutos
+        # depois contra todas as outras lanes.
+        time.sleep(min(2, restante))
 
 
 @contextmanager

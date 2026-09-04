@@ -1,27 +1,19 @@
-"""Cupons das páginas públicas de loja do Promobit, pelo schema.org que eles publicam.
+"""Cupons das páginas públicas de loja do Promobit.
 
-Por que esta fonte existe: até aqui o Mercado Livre dependia de UM site de terceiro
-(`afiliadosmercadolivre.github.io`) para todo cupom. Fornecedor único para a principal
-linha de produto. Aqui entra a segunda fonte, e ela não custa navegador nem credencial.
+Por que esta fonte existe: a página oficial de cupons da Amazon lista ~8 cards de
+*ativação*. O volume de código digitável (o que Cuponomia/Promobit anunciam) mora
+nas páginas `/cupons/loja/<loja>/` dos agregadores.
 
-**De onde os dados saem.** Cada página `/cupons/loja/<loja>/` traz um bloco
-`application/ld+json` com um `ItemList` de `Offer` contendo `discountCode`, `name`,
-`description` e `seller`. Isso é schema.org — a superfície que o próprio site publica
-para máquinas lerem, e o contrato mais estável que existe ali: muda muito menos que o
-DOM e infinitamente menos que o estado interno do React.
+**De onde os dados saem.** A mesma página HTML que o robots.txt libera. O Next.js
+embute `serverCoupons.coupons` em `__NEXT_DATA__` (dezenas de códigos). O bloco
+schema.org `ItemList`/`Offer` é recorte menor — fica como fallback. Não há GET em
+`/api/*` (Disallow).
 
-**O que a política deles permite.** O `robots.txt` do Promobit desautoriza `/api/*` e
-`/buscar*` explicitamente, e deixa as páginas de cupom por loja liberadas. Este
-adaptador lê **apenas** `/cupons/loja/<loja>/`, com pausa entre requisições. A API
-interna deles não é tocada — foi fechada por decisão do site, e contorná-la seria
-ignorar uma política declarada.
+**Destino.** Nunca o `/Redirect/cupom/` do Promobit: o clique e a comissão iriam
+para eles. `canonical_url` vazio; o envio monta `?tag=` na Amazon ou o aviso ML.
 
-**Confiança.** Cupom de comunidade é ALEGAÇÃO. Mais de 95% do que o Promobit publica
-vem de usuários, validado por moderação humana — o que é bom, mas não é a mesma coisa
-que ter visto o desconto acontecer. Por isso estes cupons nascem com precedência baixa
-(ver `_SOURCE_PRECEDENCE` em `persistence.py`): eles somam evidência e corroboram o
-que outra fonte já viu, mas não deveriam, sozinhos, mandar um influenciador anunciar
-um código para o grupo dele.
+**Precedência.** Continua baixa (`persistence._SOURCE_PRECEDENCE`): fonte oficial
+da loja vence o mesmo código. Promobit sozinho agora lista — Telegram não.
 """
 import html
 import json
@@ -31,6 +23,7 @@ import time
 
 import requests
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from apps.scrapers.coupon_rules import normalizar_regras_cupom, tem_restricao_publico
 from .base import IngestedItem, SourceAdapter
@@ -47,6 +40,10 @@ _PAUSA_S = 1.5
 _LD_JSON = re.compile(
     r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', re.S,
 )
+_NEXT_DATA = re.compile(
+    r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S,
+)
+_STATUS_OK = frozenset({"APPROVED", "VERIFIED", "ACTIVE", "PUBLISHED"})
 _SLUG_OK = re.compile(r"^[a-z0-9][a-z0-9-]{1,48}$")
 
 # Lojas cujo cupom o Spreading consegue afiliar. Publicar cupom de loja que não
@@ -57,8 +54,19 @@ LOJAS = {
     "shopee": "shopee",
 }
 
-_PERCENTUAL = re.compile(r"(\d{1,2})\s*%")
-_REAIS = re.compile(r"R\$\s*([\d.]+,\d{2}|\d+)")
+_PERCENTUAL = re.compile(r"(?<![\d.,])(\d{1,2}(?:[.,]\d{1,2})?)\s*%")
+_DINHEIRO_BR = r"(\d{1,3}(?:\.\d{3})+(?:,\d{2})?|\d+(?:,\d{2})?)"
+_REAIS = re.compile(rf"R\$\s*{_DINHEIRO_BR}")
+_PERCENTUAL_QUALQUER = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*%\s*(?:de desconto|off)?", re.I)
+_MINIMO = re.compile(
+    r"(?:a partir de|acima de|m[ií]nim[oa](?:\s+de)?|em compras? de)\s*"
+    rf"R\$\s*{_DINHEIRO_BR}", re.I,
+)
+_MAXIMO = re.compile(
+    r"(?:desconto m[aá]ximo de|limitad[oa]\s+a(?:t[eé])?|limite de)\s*"
+    rf"R\$\s*{_DINHEIRO_BR}", re.I,
+)
+_CONTAINER = re.compile(r"https://lista\.mercadolivre\.com\.br/[^\s,;]+", re.I)
 
 # Código que a pessoa digita no checkout: sem espaço, 3 a 30 caracteres, letras,
 # números e os separadores que o varejo usa. O filtro existe porque a fonte real
@@ -66,6 +74,11 @@ _REAIS = re.compile(r"R\$\s*([\d.]+,\d{2}|\d+)")
 # descrevem COMO usar e não são código nenhum. Publicar isso manda o grupo digitar
 # uma frase no checkout e não funcionar; é a definição de cupom que queima confiança.
 _CODIGO_OK = re.compile(r"^[A-Z0-9][A-Z0-9._-]{2,29}$")
+_SEM_CODIGO = re.compile(
+    r"(?:sem\s+(?:precisar\s+de\s+)?c[oó]digo|"
+    r"(?:benef[ií]cio|desconto)\s+(?:entra|aplicad[oa])\s+automaticamente)",
+    re.I,
+)
 
 
 def _codigo_valido(codigo: str) -> bool:
@@ -77,6 +90,38 @@ def _codigo_valido(codigo: str) -> bool:
 
 def _texto(valor):
     return html.unescape(str(valor or "")).strip()
+
+
+def _dinheiro(valor):
+    from .base import normalizar_dinheiro
+    bruto = str(valor or "").strip()
+    # Nesta fonte o ponto sem vírgula é separador de milhar (R$4.999), não quatro
+    # reais e novecentos e noventa e nove milésimos.
+    if re.fullmatch(r"\d{1,3}(?:\.\d{3})+", bruto):
+        bruto = bruto.replace(".", "")
+    return normalizar_dinheiro(bruto) if bruto else 0.0
+
+
+def _descricao_segura(texto):
+    """Remove percentuais impossíveis sem apagar a condição monetária real."""
+    def substituir(match):
+        try:
+            valor = float(match.group(1).replace(",", "."))
+        except ValueError:
+            return ""
+        return match.group(0) if 0 < valor < 100 else ""
+
+    return " ".join(_PERCENTUAL_QUALQUER.sub(substituir, _texto(texto)).split())
+
+
+def _titulo_normalizado(codigo, tipo, valor):
+    if tipo == "porcentagem":
+        numero = f"{float(valor):g}".replace(".", ",")
+        desconto = f"{numero}% OFF"
+    else:
+        numero = f"{float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        desconto = f"R$ {numero} OFF"
+    return f"Cupom {codigo} — {desconto}"
 
 
 def _blocos(corpo):
@@ -97,18 +142,99 @@ def _ofertas(corpo):
                 yield item
 
 
+def _quando(valor):
+    raw = str(valor or "").strip()
+    if not raw:
+        return None
+    if re.search(r"[+-]\d{4}$", raw):
+        raw = f"{raw[:-2]}:{raw[-2:]}"
+    parsed = parse_datetime(raw)
+    if parsed is None:
+        return None
+    return timezone.make_aware(parsed) if timezone.is_naive(parsed) else parsed
+
+
+def _status_publicado(status) -> bool:
+    s = str(status or "").strip().upper()
+    return (not s) or s in _STATUS_OK
+
+
+def _cupons_next(corpo):
+    match = _NEXT_DATA.search(corpo or "")
+    if not match:
+        return
+    try:
+        data = json.loads(match.group(1))
+    except (ValueError, TypeError):
+        return
+    if not isinstance(data, dict):
+        return
+    bloco = ((data.get("props") or {}).get("pageProps") or {}).get("serverCoupons") or {}
+    cupons = bloco.get("coupons") if isinstance(bloco, dict) else None
+    if not isinstance(cupons, list):
+        return
+    for row in cupons:
+        if isinstance(row, dict):
+            yield row
+
+
+def _montar(marketplace, slug_loja, codigo, nome, descricao, validade, agora,
+            transport):
+    codigo = _texto(codigo).upper()
+    if not _codigo_valido(codigo):
+        return None
+    texto_completo = f"{nome} {descricao}"
+    # O agregador às vezes preenche ``discountCode`` mesmo quando a própria regra
+    # diz que o benefício entra automaticamente, sem código digitável. A descrição
+    # vence o campo inconsistente: publicar esse token mandaria o usuário procurar
+    # um campo que a promoção explicitamente não usa.
+    if _SEM_CODIGO.search(texto_completo):
+        return None
+    tipo, valor = _desconto(texto_completo)
+    if not valor:
+        return None
+    descricao = _descricao_segura(descricao)
+    minimo = _MINIMO.search(descricao)
+    maximo = _MAXIMO.search(descricao)
+    container = _CONTAINER.search(descricao)
+    chave = f"promobit:{marketplace}:{codigo}"
+    regras = normalizar_regras_cupom({
+        "tipo_desconto": tipo,
+        "valor_desconto": valor,
+        "valor_minimo": _dinheiro(minimo.group(1)) if minimo else None,
+        "desconto_maximo": _dinheiro(maximo.group(1)) if maximo else None,
+        "container_url": container.group(0).rstrip(".") if container else "",
+        "modo_resgate": "codigo",
+        "escopo": descricao,
+    }, external_id=chave, codigo=codigo)
+    return IngestedItem(
+        external_id=chave[:160], marketplace=marketplace,
+        source="promobit-cupons", kind="coupon",
+        canonical_url="", title=_titulo_normalizado(codigo, tipo, valor)[:255],
+        coupon_code=codigo[:120], coupon_rules=regras,
+        content_type="voucher",
+        restricted=tem_restricao_publico(f"{nome} {descricao}"),
+        observed_at=agora, valid_until=validade,
+        evidence={
+            "transport": transport,
+            "loja": slug_loja,
+            "descricao": (descricao or "")[:300],
+            "confianca_origem": "comunidade",
+        },
+    )
+
+
 def _desconto(texto):
     """(tipo, valor) a partir do texto da oferta. Sem número, não há cupom."""
     achado = _PERCENTUAL.search(texto)
     if achado:
-        valor = int(achado.group(1))
+        valor = float(achado.group(1).replace(",", "."))
         # 100% não existe em cupom de varejo; é erro de parse ou promessa falsa.
         if 0 < valor < 100:
             return "porcentagem", float(valor)
     achado = _REAIS.search(texto)
     if achado:
-        from .base import normalizar_dinheiro
-        valor = normalizar_dinheiro(achado.group(1))
+        valor = _dinheiro(achado.group(1))
         if valor > 0:
             return "fixo", valor
     return "", 0.0
@@ -160,48 +286,39 @@ class PromobitSource(SourceAdapter):
                 falhas += 1
                 continue
             lidas += 1
-            for oferta in _ofertas(corpo):
-                codigo = _texto(oferta.get("discountCode")).upper()
-                if not _codigo_valido(codigo):
-                    # Sem código digitável não há o que anunciar: a URL de redirect do
-                    # Promobit levaria o clique (e a comissão) para eles, não para o
-                    # usuário. E frase no lugar do código ("RESGATE NO PRODUTO", visto
-                    # na fonte real) faria o grupo digitar algo que não existe.
+            for row in _cupons_next(corpo):
+                if not _status_publicado(row.get("couponStatusName")):
                     continue
+                validade = _quando(row.get("couponUntil"))
+                if validade and validade < agora:
+                    continue
+                nome = _texto(row.get("couponTitle") or row.get("couponDiscountShort"))
+                descricao = _texto(" ".join(filter(None, [
+                    _texto(row.get("couponDiscountValue")),
+                    _texto(row.get("couponDiscountShort")),
+                    _texto(row.get("couponDiscount")),
+                    _texto(row.get("couponDiscountOn")),
+                    _texto(row.get("couponInstructions")),
+                ])))
+                item = _montar(
+                    marketplace, slug_loja, row.get("couponCode"), nome,
+                    descricao, validade, agora, "promobit-next-data",
+                )
+                if item is None or item.external_id in vistos:
+                    continue
+                vistos.add(item.external_id)
+                yield item
+            for oferta in _ofertas(corpo):
                 nome = _texto(oferta.get("name"))
                 descricao = _texto(oferta.get("description"))
-                tipo, valor = _desconto(f"{nome} {descricao}")
-                if not valor:
-                    # Sem valor comprovado o cupom seria descartado adiante por
-                    # `missing_discount`; melhor não sujar o funil.
-                    continue
-                chave = f"promobit:{marketplace}:{codigo}"
-                if chave in vistos:
-                    continue
-                vistos.add(chave)
-                regras = normalizar_regras_cupom({
-                    "tipo_desconto": tipo,
-                    "valor_desconto": valor,
-                    "modo_resgate": "codigo",
-                    "escopo": descricao,
-                }, external_id=chave, codigo=codigo)
-                yield IngestedItem(
-                    external_id=chave[:160], marketplace=marketplace,
-                    source=self.slug, kind="coupon",
-                    # O destino é a loja, nunca o redirect do Promobit.
-                    canonical_url="", title=(nome or f"Cupom {codigo}")[:255],
-                    coupon_code=codigo[:120], coupon_rules=regras,
-                    content_type="voucher",
-                    restricted=tem_restricao_publico(f"{nome} {descricao}"),
-                    observed_at=agora,
-                    evidence={
-                        "transport": "promobit-schema-org",
-                        "loja": slug_loja,
-                        "descricao": descricao[:300],
-                        # Alegação da comunidade, não observação nossa. Fica escrito.
-                        "confianca_origem": "comunidade",
-                    },
+                item = _montar(
+                    marketplace, slug_loja, oferta.get("discountCode"), nome,
+                    descricao, None, agora, "promobit-schema-org",
                 )
+                if item is None or item.external_id in vistos:
+                    continue
+                vistos.add(item.external_id)
+                yield item
         self.last_health_status = "healthy" if lidas else "degraded"
         self.last_metrics = {
             "lojas_lidas": lidas,

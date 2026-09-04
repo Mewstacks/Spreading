@@ -6,7 +6,9 @@ visual. Medido em homologação: uma página de login parada produz ZERO frames 
 CAPTCHA) e o corte do gerador, que matava os listeners de teclado.
 """
 from pathlib import Path
+from unittest.mock import patch
 
+from django.contrib.auth import get_user_model
 from django.test import TestCase
 
 from apps.scrapers import amazon_conexao
@@ -36,6 +38,13 @@ class LogadoResilienteTests(TestCase):
         page = self._PageLogada()
         page.url = "https://www.amazon.com.br/ap/signin?openid.mode=checkid_setup"
         self.assertFalse(amazon_conexao._logado(page))
+
+    def test_conta_de_compras_exige_rota_interna_da_loja(self):
+        page = self._PageLogada()
+        page.url = "https://www.amazon.com.br/gp/css/homepage.html"
+        self.assertTrue(amazon_conexao._logado(page, shopper=True))
+        page.url = "https://www.amazon.com.br/"
+        self.assertFalse(amazon_conexao._logado(page, shopper=True))
 
 
 class TransporteAmazonTests(TestCase):
@@ -108,12 +117,61 @@ class AberturaDoLoginTests(TestCase):
         amazon_conexao._abrir_login(page)
         self.assertEqual(page.urls, [amazon_conexao.LOGIN_URL])
 
+    def test_modo_compras_abre_a_conta_da_loja(self):
+        page = self._PageQueNavega()
+        amazon_conexao._abrir_login(page, shopper=True)
+        self.assertEqual(page.urls, [amazon_conexao.SHOP_URL])
+
     def test_timeout_repetido_vira_erro_legivel_e_nao_nameerror(self):
         page = self._PageQueEstoura()
         with self.assertRaises(RuntimeError) as capturado:
             amazon_conexao._abrir_login(page)
         self.assertIn("Amazon demorou demais", str(capturado.exception))
         self.assertEqual(page.tentativas, amazon_conexao.GOTO_TENTATIVAS)
+
+
+class PersistenciaDaSessaoTests(TestCase):
+    """Regressão do erro ebeaf14f visto após um login válido em produção."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            "amazon-thread-tenant", password="test",
+        )
+        self.organization = self.user.personal_organization
+
+    def _assert_persistido_no_tenant(self, shopper, provider):
+        from apps.accounts.tenant import current_organization_id, tenant_suspenso
+
+        observado = {}
+
+        def salvar(user, provider_recebido, estado):
+            observado.update(
+                user=user,
+                provider=provider_recebido,
+                estado=estado,
+                organization_id=current_organization_id(),
+            )
+
+        estado = {"cookies": [{"name": "sessao", "value": "opaco"}], "origins": []}
+        # É exatamente o estado do worker longo: organização anotada, porém sem
+        # transaction.atomic/GUC ativa enquanto o usuário conclui o login.
+        with tenant_suspenso(self.organization.pk, actor_id=self.user.pk), \
+             patch.object(amazon_conexao, "save_report_state", side_effect=salvar):
+            amazon_conexao._salvar_estado_capturado(self.user, shopper, estado)
+
+        self.assertEqual(observado["user"], self.user)
+        self.assertEqual(observado["provider"], provider)
+        self.assertEqual(observado["estado"], estado)
+        self.assertEqual(observado["organization_id"], str(self.organization.pk))
+
+    def test_amazon_compras_reinstala_tenant_antes_de_gravar(self):
+        self._assert_persistido_no_tenant(True, "amazon_shop")
+
+    def test_amazon_associados_reinstala_tenant_antes_de_gravar(self):
+        self._assert_persistido_no_tenant(False, "amazon")
+
+    def test_shopee_compras_reinstala_tenant_antes_de_gravar(self):
+        self._assert_persistido_no_tenant("shopee", "shopee_shop")
 
 
 class TemplateLiveViewTests(TestCase):

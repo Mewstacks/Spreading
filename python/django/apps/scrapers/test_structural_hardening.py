@@ -11,8 +11,10 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.core.management import call_command
+from django.db import IntegrityError, connection, transaction
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from apps.accounts.models import (
@@ -21,7 +23,8 @@ from apps.accounts.models import (
 )
 from apps.scrapers.models import (
     ConfiguracaoEnvio,
-    CupomDisponibilidade, CupomFonteObservacao, CupomNormalizado, CupomPreparacao,
+    CupomDisponibilidade, CupomDisponibilidadeEvento, CupomFonteObservacao,
+    CupomNormalizado, CupomPreparacao,
     FonteIngestao,
     LinkAfiliadoCupomUsuario, LinkAfiliadoProdutoCupomUsuario,
     LinkAfiliadoUsuario, Produto, ProdutoCupom,
@@ -550,6 +553,95 @@ class BrowserResourceContractTests(TestCase):
                 "django_chromium", "source_ingest:amazon-public-coupons",
             ])
 
+    def test_ingestao_sinaliza_fila_quando_chromium_esta_ocupado(self):
+        from apps.scrapers.sources.registry import _ingestion_guard
+
+        @contextmanager
+        def unavailable_lease(_resource_key, **_kwargs):
+            yield False, {"reason": "occupied"}
+
+        fake_connection = type("Connection", (), {"vendor": "postgresql"})()
+        with patch("apps.scrapers.sources.registry.connection", fake_connection), \
+                patch("apps.scrapers.resource_control.leased_resource", unavailable_lease), \
+                patch("apps.scrapers.resource_control.sinalizar_interesse_de_esteira") as signal:
+            with _ingestion_guard(
+                "shopee-public-coupons", requires_chromium=True,
+            ) as acquired:
+                self.assertEqual(acquired, (False, "capacity_deferred"))
+
+        signal.assert_called_once_with("source_shopee-public-coupons")
+
+    def test_ingestao_espera_holder_ceder_e_roda_no_mesmo_ciclo(self):
+        from apps.scrapers.sources.registry import _ingestion_guard
+
+        tentativas = iter((False, True, True))
+
+        @contextmanager
+        def lease_sequencial(_resource_key, **_kwargs):
+            yield next(tentativas), {"resource": _resource_key}
+
+        fake_connection = type("Connection", (), {"vendor": "postgresql"})()
+        with patch("apps.scrapers.sources.registry.connection", fake_connection), \
+                patch("apps.scrapers.resource_control.leased_resource", lease_sequencial), \
+                patch("apps.scrapers.resource_control.sinalizar_interesse_de_esteira") as signal, \
+                patch("apps.scrapers.sources.registry.time.sleep"):
+            with _ingestion_guard(
+                "shopee-public-coupons", requires_chromium=True, wait_seconds=1,
+            ) as acquired:
+                self.assertEqual(acquired, (True, ""))
+
+        signal.assert_called_once_with("source_shopee-public-coupons")
+
+    def test_scrape_e_flash_nao_seguram_chromium_o_ciclo_inteiro(self):
+        import inspect
+        from apps.scrapers.management.commands.automacao import Command
+
+        scrape = inspect.getsource(Command._loop_scrape)
+        flash = inspect.getsource(Command._loop_scrape_rapido)
+        self.assertNotIn("operacao_pesada", scrape)
+        self.assertNotIn("operacao_pesada", flash)
+        self.assertIn("_rodar_scrape(", scrape)
+        self.assertIn("_rodar_scrape_rapido()", flash)
+
+    def test_boot_sobrevive_a_banco_fora_do_ar(self):
+        """Postgres indisponível no boot não pode matar o processo.
+
+        @system_job fazia SQL (checagem de role + set_config) antes do
+        primeiro ciclo do loop; sem retry, honcho derrubava o grupo inteiro
+        (8 workers, ou o gunicorn no Procfile.web) e a Fly reiniciava em
+        crash-loop. handle() precisa absorver DatabaseError no boot e tentar
+        de novo, sem propagar.
+        """
+        from django.db import DatabaseError
+        from apps.scrapers.management.commands.automacao import Command
+
+        cmd = Command()
+        chamadas = {"n": 0}
+
+        @contextmanager
+        def system_context_instavel():
+            chamadas["n"] += 1
+            if chamadas["n"] < 3:
+                raise DatabaseError("conexão fechada")
+            yield
+
+        with patch(
+            "apps.scrapers.management.commands.automacao.system_context",
+            system_context_instavel,
+        ), patch(
+            "apps.scrapers.management.commands.automacao.connections.close_all",
+        ), patch(
+            "apps.scrapers.management.commands.automacao.time.sleep",
+        ) as sleep_mock, patch.object(
+            Command, "_despachar", return_value="ok",
+        ) as despachar_mock:
+            resultado = cmd.handle(modo="scrape")
+
+        self.assertEqual(resultado, "ok")
+        self.assertEqual(chamadas["n"], 3)
+        despachar_mock.assert_called_once()
+        self.assertEqual(sleep_mock.call_count, 2)
+
 
 class WhatsAppReconcileSafetyTests(SimpleTestCase):
     def tearDown(self):
@@ -647,6 +739,15 @@ class ManualQueueOperationalStateTests(TestCase):
 
         first = self._job(self.user_a, self.org_a)
         second = self._job(self.user_b, self.org_b)
+        # SQLite/Windows pode dar o mesmo instante aos dois auto_now_add; como a
+        # PK é UUID aleatória, esse empate não prova ordem de submissão e deixava a
+        # suíte integral intermitente. Este teste verifica posições distintas, não
+        # a política para pedidos realmente simultâneos, então explicita a ordem.
+        now = timezone.now()
+        type(first).objects.filter(pk=first.pk).update(
+            criada_em=now - timedelta(microseconds=1),
+        )
+        type(second).objects.filter(pk=second.pk).update(criada_em=now)
         WorkerHeartbeat.objects.create(
             worker_id="manual:test", worker_type="manual", state="idle",
         )
@@ -1257,6 +1358,103 @@ class CouponReadinessReasonTests(TestCase):
         projection.refresh_from_db()
         self.assertEqual(projection.stage, "ready")
 
+    def test_percentual_com_teto_irrisorio_e_rejeitado_como_lixo(self):
+        """'50% OFF' com teto de R$1 é dado real do ML, não bug de parser — e é
+        lixo: o comprador nunca leva mais que o teto. Achado em produção em
+        03/09/2026 (cupom "Glamour.div", 50% OFF, desconto_maximo=1.0)."""
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        cupom = CupomNormalizado.objects.create(
+            fonte=self.source, external_id="campanha:teto-irrisorio",
+            marketplace="mercadolivre", titulo="50% OFF Em produtos de Glamour.div",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 50.0,
+                    "desconto_maximo": 1.0, "valor_minimo": 1.0,
+                    "modo_resgate": "ativacao"},
+        )
+        with self._ml():
+            projetar_disponibilidade_cupons(self.user)
+        projection = CupomDisponibilidade.objects.get(cupom=cupom, usuario=self.user)
+        self.assertEqual(
+            (projection.stage, projection.category, projection.reason_code),
+            ("discarded", "invalid", "desconto_irrelevante"),
+        )
+
+    def test_percentual_com_teto_relevante_nao_e_afetado(self):
+        """Confirma que o piso não vira gatilho de falso positivo: um cupom com
+        teto de verdade (acima do piso configurado) segue o caminho normal."""
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        cupom = CupomNormalizado.objects.create(
+            fonte=self.source, external_id="campanha:teto-bom",
+            marketplace="mercadolivre", titulo="30% OFF loja boa",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 30.0,
+                    "desconto_maximo": 200.0, "valor_minimo": 100.0,
+                    "modo_resgate": "ativacao"},
+        )
+        with self._ml():
+            projetar_disponibilidade_cupons(self.user)
+        projection = CupomDisponibilidade.objects.get(cupom=cupom, usuario=self.user)
+        self.assertNotEqual(projection.reason_code, "desconto_irrelevante")
+
+    def test_reconciliacao_em_lote_nao_cresce_queries_por_cupom(self):
+        """Quarenta alegações não podem virar quarenta EXISTS/transações."""
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        comunidade = FonteIngestao.objects.create(
+            slug="telegram-publico", marketplace="mercadolivre", nome="Telegram",
+        )
+        CupomNormalizado.objects.bulk_create([
+            CupomNormalizado(
+                fonte=comunidade, external_id=f"tg:batch:{indice}",
+                marketplace="mercadolivre", titulo=f"Cupom Telegram {indice}",
+                codigo=f"TELE{indice:04d}",
+                audience_scope=("organization" if indice >= 20 else "public"),
+                organization=(self.organization if indice >= 20 else None),
+                regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                        "valor_desconto": 10},
+            )
+            for indice in range(40)
+        ])
+        with self._ml(conectado=False, detalhe="sem_sessao"):
+            projetar_disponibilidade_cupons(self.user)
+
+        with self._ml(conectado=False, detalhe="sem_sessao"), \
+                CaptureQueriesContext(connection) as queries:
+            resultado = projetar_disponibilidade_cupons(self.user)
+
+        self.assertEqual(resultado["total"], 40)
+        self.assertLessEqual(len(queries), 25)
+        self.assertEqual(
+            CupomDisponibilidade.objects.filter(
+                usuario=self.user, reason_code="community_uncorroborated",
+            ).count(),
+            40,
+        )
+
+    def test_reprojecao_identica_nao_regrava_disponibilidade(self):
+        """Tick sem mudança não gera WAL nem mascara uma projeção parada."""
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        coupon = self._code()
+        with self._ml(conectado=False, detalhe="sem_sessao"):
+            projetar_disponibilidade_cupons(self.user)
+
+        with self._ml(conectado=False, detalhe="sem_sessao"), \
+                CaptureQueriesContext(connection) as queries:
+            projetar_disponibilidade_cupons(self.user)
+
+        availability_table = CupomDisponibilidade._meta.db_table
+        writes = [
+            query["sql"] for query in queries.captured_queries
+            if query["sql"].lstrip().upper().startswith("UPDATE")
+            and availability_table in query["sql"]
+        ]
+        self.assertEqual(writes, [])
+        self.assertEqual(
+            CupomDisponibilidade.objects.get(cupom=coupon).reason_code,
+            "ml_session_missing",
+        )
+
     def test_cache_verificado_continua_ready_sem_sessao_e_cache_vencido_nao(self):
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
 
@@ -1638,6 +1836,88 @@ class CouponReadinessReasonTests(TestCase):
         projection.refresh_from_db()
         self.assertEqual(projection.stage, "ready")
 
+    def test_campanha_da_org_sistema_nao_vaza_pra_outra_conta(self):
+        """Produção: só a org em ML_SYSTEM_ORGANIZATION_ID vê campanhas autenticadas.
+
+        lules é essa org. teste1/luiza projetam ~140 cupons públicos; lules ~2800.
+        """
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-campanhas",
+            defaults={"marketplace": "mercadolivre", "nome": "Campanhas"},
+        )
+        coupon = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:lules-only",
+            marketplace="mercadolivre", titulo="Só a org sistema",
+            codigo="", audience_scope="organization",
+            organization=self.organization, owner=None,
+            link="https://lista.mercadolivre.com.br/_Container_sys",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 10,
+                    "container_url": "https://lista.mercadolivre.com.br/_Container_sys"},
+        )
+        outsider = get_user_model().objects.create_user("nao-lules", password="x")
+        ensure_personal_organization(outsider)
+
+        with self._ml():
+            self.assertEqual(projetar_disponibilidade_cupons(self.user)["total"], 1)
+            self.assertTrue(
+                CupomDisponibilidade.objects.filter(
+                    usuario=self.user, cupom=coupon,
+                ).exists(),
+            )
+            self.assertEqual(projetar_disponibilidade_cupons(outsider)["total"], 0)
+            self.assertFalse(
+                CupomDisponibilidade.objects.filter(
+                    usuario=outsider, cupom=coupon,
+                ).exists(),
+            )
+
+    def test_mudanca_de_publico_para_organizacao_encerra_projecao_antiga(self):
+        """Uma projeção criada antes da restrição não pode sobreviver entregável."""
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        coupon = self._code()
+        outsider = get_user_model().objects.create_user("escopo-antigo", password="x")
+        outsider_org = ensure_personal_organization(outsider)
+        with self._ml():
+            projetar_disponibilidade_cupons(outsider)
+        projection = CupomDisponibilidade.objects.get(
+            usuario=outsider, organization=outsider_org, cupom=coupon,
+        )
+        eventos_antes = CupomDisponibilidadeEvento.objects.filter(
+            disponibilidade=projection,
+        ).count()
+
+        coupon.audience_scope = "organization"
+        coupon.organization = self.organization
+        coupon.save(update_fields=["audience_scope", "organization"])
+        with self._ml():
+            resultado = projetar_disponibilidade_cupons(outsider)
+
+        projection.refresh_from_db()
+        self.assertEqual(resultado["total"], 0)
+        self.assertEqual(
+            (projection.stage, projection.category, projection.reason_code),
+            ("discarded", "rejected", "coupon_out_of_scope"),
+        )
+        self.assertEqual(
+            CupomDisponibilidadeEvento.objects.filter(
+                disponibilidade=projection,
+            ).count(),
+            eventos_antes + 1,
+        )
+        # Reconciliação idempotente: não reescreve nem duplica o evento.
+        with self._ml():
+            projetar_disponibilidade_cupons(outsider)
+        self.assertEqual(
+            CupomDisponibilidadeEvento.objects.filter(
+                disponibilidade=projection,
+            ).count(),
+            eventos_antes + 1,
+        )
+
     def test_cupom_de_codigo_do_ml_tem_quem_prepare_o_link(self):
         """Impasse fechado: o cupom aparecia na tela e nunca ficava disponível.
 
@@ -1700,6 +1980,37 @@ class CouponReadinessReasonTests(TestCase):
             resultado = afiliar_cupons_de_codigo(self.user, cupons)
         self.assertEqual(len(chamadas), 1)
         self.assertEqual(resultado["gerados"], 0)
+
+    def test_link_builder_indisponivel_para_lote_sem_derrubar_sessao(self):
+        from apps.scrapers.coupon_pipeline import afiliar_cupons_de_codigo
+
+        cupons = [self._code()]
+        for indice in range(2):
+            cupons.append(CupomNormalizado.objects.create(
+                fonte=self.source, external_id=f"temporario:{indice}",
+                marketplace="mercadolivre", titulo=f"Temporário {indice}",
+                codigo=f"TEMPORARIO{indice}0",
+                link="https://lista.mercadolivre.com.br/z",
+                regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                        "valor_desconto": 10},
+            ))
+        chamadas = []
+
+        def _resolver(cupom, _usuario):
+            chamadas.append(cupom.pk)
+            return {
+                "sucesso": False,
+                "motivo": "Link Builder temporariamente indisponível.",
+                "precisa_login_ml": False,
+                "indisponivel_ml": True,
+            }
+
+        with patch("apps.scrapers.monitor_conexao.ml_conectado", return_value=True), \
+                patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom", _resolver):
+            resultado = afiliar_cupons_de_codigo(self.user, cupons)
+
+        self.assertEqual(len(chamadas), 1)
+        self.assertEqual(resultado["falhas"], 1)
 
     def test_navegador_ocupado_e_fila_e_nao_falha_de_preparo(self):
         """Contenção de capacidade não pode virar avaria na tela.
@@ -1767,6 +2078,87 @@ class CouponReadinessReasonTests(TestCase):
             CupomDisponibilidade.objects.filter(usuario=self.user).exists(),
             "A tela de Promoções voltou a escrever projeção dentro da request.",
         )
+
+    def test_backfill_apaga_orfas_em_lotes_e_reprojeta(self):
+        """DELETE único de órfãs+eventos estoura statement_timeout em produção.
+
+        Com lote pequeno o comando termina e a conta viva continua projetada.
+        """
+        vivo = self._code()
+        orfaos = [
+            CupomNormalizado.objects.create(
+                fonte=self.source, external_id=f"code:dead{i}",
+                marketplace="mercadolivre", titulo="Expirado",
+                codigo=f"DEAD{i}", estado="expirado",
+                regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                        "valor_desconto": 10},
+            )
+            for i in range(3)
+        ]
+        for cupom in [vivo, *orfaos]:
+            proj = CupomDisponibilidade.objects.create(
+                organization=self.organization, usuario=self.user, cupom=cupom,
+                channel="whatsapp", use_mode="code_notice", stage="collected",
+            )
+            CupomDisponibilidadeEvento.objects.create(
+                organization=self.organization, disponibilidade=proj,
+                from_stage="", to_stage="collected",
+                marketplace="mercadolivre", source=self.source.slug,
+                use_mode="code_notice",
+            )
+        saida = io.StringIO()
+        with patch(
+            "apps.scrapers.management.commands.backfill_disponibilidade_cupons.ORPHAN_BATCH",
+            1,
+        ), self._ml():
+            call_command(
+                "backfill_disponibilidade_cupons", "--todas", stdout=saida,
+            )
+        self.assertFalse(
+            CupomDisponibilidade.objects.filter(cupom__in=orfaos).exists(),
+        )
+        self.assertTrue(
+            CupomDisponibilidade.objects.filter(
+                cupom=vivo, usuario=self.user,
+            ).exists(),
+        )
+        self.assertIn("órfãs lote=1", saida.getvalue())
+
+
+class CupomLixoTests(SimpleTestCase):
+    """`cupom_e_lixo` decide pelo benefício REAL, não pelo percentual anunciado."""
+
+    def test_percentual_com_teto_baixo_e_lixo(self):
+        from apps.scrapers.coupon_rules import cupom_e_lixo
+        self.assertTrue(cupom_e_lixo(
+            {"tipo_desconto": "porcentagem", "valor_desconto": 50.0, "desconto_maximo": 1.0}))
+
+    def test_percentual_com_teto_alto_nao_e_lixo(self):
+        from apps.scrapers.coupon_rules import cupom_e_lixo
+        self.assertFalse(cupom_e_lixo(
+            {"tipo_desconto": "porcentagem", "valor_desconto": 30.0, "desconto_maximo": 200.0}))
+
+    def test_percentual_sem_teto_nao_e_julgavel_e_passa(self):
+        """Sem teto conhecido, a incerteza não pode virar rejeição."""
+        from apps.scrapers.coupon_rules import cupom_e_lixo
+        self.assertFalse(cupom_e_lixo(
+            {"tipo_desconto": "porcentagem", "valor_desconto": 50.0}))
+
+    def test_fixo_baixo_e_lixo(self):
+        from apps.scrapers.coupon_rules import cupom_e_lixo
+        self.assertTrue(cupom_e_lixo({"tipo_desconto": "fixo", "valor_desconto": 2.0}))
+
+    def test_fixo_alto_nao_e_lixo(self):
+        from apps.scrapers.coupon_rules import cupom_e_lixo
+        self.assertFalse(cupom_e_lixo({"tipo_desconto": "fixo", "valor_desconto": 50.0}))
+
+    def test_piso_e_configuravel_por_setting(self):
+        from apps.scrapers.coupon_rules import cupom_e_lixo
+        regras = {"tipo_desconto": "fixo", "valor_desconto": 12.0}
+        with override_settings(COUPON_VALOR_MINIMO_RELEVANTE_REAIS=5):
+            self.assertFalse(cupom_e_lixo(regras))
+        with override_settings(COUPON_VALOR_MINIMO_RELEVANTE_REAIS=20):
+            self.assertTrue(cupom_e_lixo(regras))
 
 
 class MarketplaceParserResilienceTests(SimpleTestCase):

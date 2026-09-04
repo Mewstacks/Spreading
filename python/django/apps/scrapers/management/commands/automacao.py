@@ -12,7 +12,7 @@ from datetime import timedelta
 from django.core.management.base import BaseCommand
 from django.db import DatabaseError, connections
 from django.utils import timezone
-from apps.accounts.tenant import system_job
+from apps.accounts.tenant import system_context
 
 from apps.scrapers import automacao_state as st
 from apps.scrapers.eventos import log_event
@@ -85,7 +85,8 @@ def _pausar_por_banco(job, erro, falhas: int):
     return proximo
 
 
-def _rodar_scrape():
+def _rodar_scrape(*, lojas_alvo=None):
+    from apps.scrapers.carga import BrowserResourceUnavailable
     from apps.scrapers.marketplaces.registry import MARKETPLACES
     from apps.scrapers.models import ConfiguracaoEnvio
 
@@ -94,9 +95,13 @@ def _rodar_scrape():
         .exclude(termo_busca="").values_list("termo_busca", flat=True)
     )
     lojas = list(MARKETPLACES.items())
+    if lojas_alvo:
+        alvos = set(lojas_alvo)
+        lojas = [(slug, mp) for slug, mp in lojas if slug in alvos]
     # Agnóstico de loja: cada marketplace raspa suas fontes. Habilitar Amazon/Shopee
     # depois não precisa editar este loop — basta registrar a loja no registry.
     falhas = []
+    adiados = []
     for i, (slug, mp) in enumerate(lojas):
         msg = f"[{timezone.now():%H:%M}] SCRAPE: {slug}..."
         logger.info(msg)
@@ -107,6 +112,16 @@ def _rodar_scrape():
         inicio_loja = timezone.now()
         try:
             mp.scrape_all(termos=termos)
+        except BrowserResourceUnavailable:
+            # O único Chromium está com outra lane. A fonte não respondeu mal: ela
+            # nem começou. Preservar o snapshot e retomar logo evita dois defeitos
+            # observados em produção: badge vermelho falso e espera de três horas
+            # quando a disputa aconteceu antes de o cursor sair da página 1.
+            adiados.append(slug)
+            logger.info(
+                "Scrape '%s' adiado por capacidade; catálogo anterior preservado.",
+                slug,
+            )
         except Exception as e:
             logger.exception("Scrape '%s' falhou", slug)
             # Por loja: uma fonte quebrada (seletor mudou, bloqueio) não derruba o
@@ -128,26 +143,51 @@ def _rodar_scrape():
                 status="degraded", ultima_tentativa=timezone.now(),
                 erro_publico="Falha temporária na coleta; dados anteriores preservados.")
             st.write_state("scrape", erro=ERRO_PUBLICO)
-    sucessos = len(lojas) - len(falhas)
+    sucessos = len(lojas) - len(falhas) - len(adiados)
     if sucessos:
         from apps.scrapers.maintenance import expire_stale
         expire_stale()
-    if not sucessos:
+    if not sucessos and falhas and not adiados:
         raise RuntimeError(f"Todas as fontes falharam: {', '.join(falhas)}")
     if falhas:
         logger.warning("SCRAPE concluído parcialmente; falharam: %s", ", ".join(falhas))
+    elif adiados:
+        logger.info("SCRAPE cedeu capacidade; retomarão: %s", ", ".join(adiados))
     else:
         logger.info("[%s] SCRAPE concluido", timezone.now().strftime("%H:%M"))
-    return {"sucessos": sucessos, "falhas": falhas}
+    return {"sucessos": sucessos, "falhas": falhas, "adiados": adiados}
 
 
 def _rodar_scrape_rapido(paginas=8):
-    """LANE RÁPIDA/flash (B3): só o feed /ofertas do ML, poucas páginas, em UPSERT
-    (não zera o feed da lane lenta). Pega deals-relâmpago entre as raspagens completas."""
+    """Lane de 5 min: radares HTTP de cupom e poucas páginas do feed flash ML.
+
+    Telegram e Pelando entram somente como descoberta: os mesmos gates de
+    corroboração/checkout do ciclo central continuam obrigatórios. Não resolvemos
+    redirects nem abrimos Chromium para essas duas fontes aqui.
+    """
     from apps.scrapers.scraper_mercadolivre.ofertas_scraper import mapear_ofertas
+    from apps.scrapers.carga import BrowserResourceUnavailable
+    from apps.scrapers.coupon_pipeline import _coletar_adaptador, _metricas_vazias
     from apps.scrapers.models import FonteIngestao
     logger.info("[%s] SCRAPE-FLASH: feed ML (%s paginas)", timezone.now().strftime("%H:%M"), paginas)
-    total = mapear_ofertas(max_paginas=paginas, substituir=False)
+    # A agenda oficial e HTTP/SSR e deve rodar mesmo quando o Chromium do feed
+    # estiver ocupado. Assim um cupom de uma hora nao espera o ciclo de 15 min.
+    _coletar_adaptador("ml-lightning-coupons", _metricas_vazias())
+    _coletar_adaptador("pelando-cupons", _metricas_vazias())
+    _coletar_adaptador(
+        "telegram-publico", _metricas_vazias(), items=("coupons",),
+        include_offers=False,
+    )
+    try:
+        total = mapear_ofertas(max_paginas=paginas, substituir=False)
+    except BrowserResourceUnavailable:
+        # O Chromium e deliberadamente unico. A coleta HTTP acima ja terminou e a
+        # disputa esperada com scrape/link/login nao pode transformar o ciclo em
+        # incidente nem rebaixar o ultimo snapshot saudavel do feed flash.
+        logger.info(
+            "SCRAPE-FLASH: feed ML adiado; navegador ocupado e radares HTTP concluidos."
+        )
+        return None
     now = timezone.now()
     fonte, _ = FonteIngestao.objects.get_or_create(
         slug="mercadolivre-ofertas-flash",
@@ -182,6 +222,17 @@ def _rodar_cupons(lote=40):
         coletar=True,
         limite_preparo=max(12, lote),
         limite_links=max(1, lote),
+    )
+    # Lote deliberadamente pequeno: checkout disputa o mesmo Chromium das fontes e
+    # dos links. O adaptador só usa a sessão do próprio usuário, isola um carrinho
+    # vazio e nunca cruza a ação que cria/paga um pedido.
+    from apps.scrapers.coupon_validation_adapters import CHECKOUT_VALIDATION_ADAPTERS
+    from apps.scrapers.coupon_validation_runner import (
+        defer_missing_checkout_sessions, run_validation_batch,
+    )
+    resultado["validacoes_sem_sessao"] = defer_missing_checkout_sessions()
+    resultado["validacoes_checkout"] = run_validation_batch(
+        adapters=CHECKOUT_VALIDATION_ADAPTERS, limit=2,
     )
     logger.info(
         "CUPONS: %s encontrado(s), %s persistido(s), %s preparado(s), "
@@ -227,6 +278,16 @@ def _rodar_links(lote=40):
             destino = por_marketplace.setdefault("amazon", {"gerados": 0, "falhas": 0})
             destino["gerados"] += g_amazon
             destino["falhas"] += f_amazon
+        # Shopee também usa HTTP puro (Open API) e não depende do login do ML.
+        # Ela precisa rodar antes do gate abaixo pelo mesmo motivo da Amazon: uma
+        # conta ML desconectada não pode paralisar outra loja perfeitamente pronta.
+        g_shopee, f_shopee = _gerar_links_shopee(user, lote=lote, agora=agora)
+        gerados += g_shopee
+        falhas += f_shopee
+        if g_shopee or f_shopee:
+            destino = por_marketplace.setdefault("shopee", {"gerados": 0, "falhas": 0})
+            destino["gerados"] += g_shopee
+            destino["falhas"] += f_shopee
         if not ml_conectado(user):
             # Antes isto era um `continue` mudo: o usuário simplesmente nunca gerava
             # link e nada em lugar nenhum dizia por quê. Agora a Saúde mostra.
@@ -348,6 +409,50 @@ def _gerar_links_amazon(user, *, lote, agora):
         return (0, 0)
 
 
+def _gerar_links_shopee(user, *, lote, agora):
+    """Lote de links Shopee de UM usuário via API, sem Chromium.
+
+    A esteira geral tinha caminhos explícitos apenas para Amazon e Mercado Livre.
+    Produtos Shopee descobertos fora do pipeline de cupons ficavam pendentes para
+    sempre, embora o adaptador já soubesse gerar o short link oficial.
+    """
+    from django.db.models import Exists, OuterRef, Q
+
+    from apps.scrapers.marketplaces.registry import get_marketplace
+    from apps.scrapers.models import (
+        IntegracaoAfiliado, LinkAfiliadoUsuario, Produto,
+    )
+
+    if not IntegracaoAfiliado.objects.filter(
+        owner=user, provedor="shopee", habilitada=True,
+    ).exists():
+        return (0, 0)
+
+    fora_da_fila = LinkAfiliadoUsuario.objects.filter(
+        usuario=user, produto=OuterRef("pk"),
+    ).filter(
+        Q(estado__in=["nao_afiliavel", "erro"])
+        | Q(proxima_tentativa__gt=agora)
+        | (~Q(link_afiliado="") & Q(verificado_ok=True))
+    )
+    pendentes = list(
+        Produto.objects.filter(marketplace="shopee", preco_sem_desconto__gt=0)
+        .exclude(estado__in=["indisponivel", "invalido", "expirado", "stale"])
+        .filter(Q(owner__isnull=True) | Q(owner=user))
+        .exclude(Exists(fora_da_fila))
+        .order_by("-ultima_observacao")[:lote]
+    )
+    if not pendentes:
+        return (0, 0)
+    try:
+        return get_marketplace("shopee").prefetch_links(
+            pendentes, usuario=user,
+        )
+    except Exception as e:
+        logger.warning("Geração de links Shopee falhou para %s: %s", user, e)
+        return (0, 0)
+
+
 def _rodar_verificacao_links(limite=40):
     """Aprova o DESTINO dos links já gerados — o passo que torna a oferta enviável.
 
@@ -442,8 +547,32 @@ class Command(BaseCommand):
         parser.add_argument("--lote", type=int, default=40, help="Links gerados por ciclo, por usuário.")
         parser.add_argument("--scrape-horas", type=float, default=3.0, help="Horas entre raspagens completas.")
 
-    @system_job
     def handle(self, *args, **opts):
+        """Boot resiliente: banco fora na hora de subir não pode crashar o processo.
+
+        ``@system_job`` faz SQL (checagem de role + set_config) antes do primeiro
+        ciclo do loop escolhido. Sem retry aqui, um Postgres fora do ar bem na
+        hora do boot derrubava os 8 processos do grupo honcho antes mesmo de
+        eles começarem, e o Fly reiniciava a máquina — crash-loop com Chromium
+        frio a cada volta. ``connection_created`` já reinstala o contexto numa
+        conexão nova (tenant.py), então repetir após ``close_all()`` é seguro.
+        """
+        falhas = 0
+        while True:
+            try:
+                with system_context():
+                    return self._despachar(opts)
+            except DatabaseError as exc:
+                falhas += 1
+                espera = min(15 * (2 ** max(0, falhas - 1)), BACKOFF_BANCO_MAX_S)
+                logger.warning(
+                    "Boot do automacao (modo=%s) aguardando banco (tentativa %s): %s",
+                    opts.get("modo"), falhas, exc,
+                )
+                connections.close_all()
+                time.sleep(espera)
+
+    def _despachar(self, opts):
         if opts["modo"] == "scrape":
             self._loop_scrape(opts)
         elif opts["modo"] == "scrape_rapido":
@@ -680,16 +809,12 @@ class Command(BaseCommand):
             st.write_state("scrape_rapido", fase="raspando")
             try:
                 _renovar_conexoes_db()
-                from apps.scrapers.carga import operacao_pesada
-                with operacao_pesada(owner_kind="scrape_rapido") as acquired:
-                    if not acquired:
-                        proximo = timezone.now() + timedelta(seconds=POLL)
-                        st.write_state("scrape_rapido", fase="aguardando_capacidade", erro="",
-                                       proximo_ciclo=proximo.isoformat(),
-                                       ultima_msg="Aguardando outra tarefa pesada terminar.")
-                        continue
-                    with _heartbeat_durante("scrape_rapido"):
-                        _rodar_scrape_rapido()
+                # Sem lease externo: `mapear_ofertas` já pega `django_chromium`
+                # página a página. O wrap aqui segurava o slot o ciclo inteiro e
+                # o yield interno virava mentira — links/prep morriam
+                # BrowserResourceUnavailable até o flash acabar.
+                with _heartbeat_durante("scrape_rapido"):
+                    _rodar_scrape_rapido()
                 falhas_banco = 0
             except DatabaseError as e:
                 falhas_banco += 1
@@ -712,6 +837,7 @@ class Command(BaseCommand):
         ciclos = 0
         proximo = timezone.now()  # vencido: raspa assim que ligarem
         falhas_banco = 0
+        retomar_lojas = set()
         while True:
             # Heartbeat também durante as horas de espera; sem isto o supervisor
             # considera o processo morto após 90s e pode iniciar workers duplicados.
@@ -727,20 +853,19 @@ class Command(BaseCommand):
             try:
                 st.write_state("scrape", fase="raspando", ciclos=ciclos, erro="")
                 _renovar_conexoes_db()
-                from apps.scrapers.carga import operacao_pesada
-                with operacao_pesada(owner_kind="scrape") as acquired:
-                    if not acquired:
-                        proximo = timezone.now() + timedelta(seconds=POLL)
-                        st.write_state("scrape", fase="aguardando_capacidade", erro="",
-                                       proximo_ciclo=proximo.isoformat(),
-                                       ultima_msg="Aguardando outra tarefa pesada terminar.")
-                        continue
-                    with _heartbeat_durante("scrape"):
-                        resultado = _rodar_scrape()
+                # Sem lease externo. Creators API é HTTP; ML/Amazon-página já
+                # lockam no inner. Outer wrap prendia Chromium ~62min
+                # (ofertas + checkout + campanhas + Amazon HTTP) e o funil
+                # de cupons não gerava link.
+                with _heartbeat_durante("scrape"):
+                    resultado = _rodar_scrape(
+                        lojas_alvo=retomar_lojas or None,
+                    )
                 falhas_banco = 0
                 ciclos += 1
                 fim = timezone.now()
                 degradado = bool(resultado["falhas"])
+                adiado = bool(resultado.get("adiados"))
                 # Passada interrompida no meio não pode esperar o intervalo cheio.
                 # A varredura agora cede o navegador para as esteiras que estão na
                 # fila (links, verificação, envio) e guarda a página em que parou;
@@ -748,8 +873,11 @@ class Command(BaseCommand):
                 # páginas por ciclo e o fundo do feed levaria dias para ser lido.
                 # Retomar em minutos mantém a cobertura E a cessão.
                 retomando = _resta_varredura()
+                retomar_lojas = set(resultado.get("adiados") or [])
+                if retomando:
+                    retomar_lojas.add("mercadolivre")
                 proximo = fim + (
-                    timedelta(minutes=RETOMADA_MINUTOS) if retomando
+                    timedelta(minutes=RETOMADA_MINUTOS) if retomando or adiado
                     else timedelta(minutes=30) if degradado
                     else timedelta(seconds=scrape_seg))
                 erro = ("Falha parcial: " + ", ".join(resultado["falhas"])
@@ -761,6 +889,8 @@ class Command(BaseCommand):
                     ultima_msg=(
                         f"Ciclo {ciclos} cedeu o navegador na página {retomando}; "
                         f"retoma em {RETOMADA_MINUTOS} min." if retomando
+                        else f"Ciclo {ciclos} aguardou capacidade; "
+                        f"retoma em {RETOMADA_MINUTOS} min." if adiado
                         else f"Ciclo {ciclos} parcial; nova tentativa em 30 min."
                         if degradado
                         else f"Ciclo {ciclos} concluído às {fim:%H:%M}."),

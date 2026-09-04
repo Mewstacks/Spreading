@@ -204,17 +204,7 @@ class Amazon(Marketplace):
 
     @staticmethod
     def _scrape_publico(usuarios, termos=None):
-        """Catálogo PÚBLICO: coletado uma vez e compartilhado (`owner=None`).
-
-        Antes o mesmo resultado público era persistido uma vez POR USUÁRIO elegível:
-        N cópias idênticas da mesma oferta, N vezes o custo de escrita e um catálogo
-        que crescia com o número de contas em vez de com o número de ofertas. O que
-        de fato é privado por usuário é o LINK (tag de afiliado), e ele continua em
-        `LinkAfiliadoUsuario` — a coleta não precisa ser duplicada para isso.
-
-        `usuarios` permanece na assinatura porque é ele que diz se ALGUÉM está
-        elegível a esta coleta; nenhuma linha é escrita no escopo deles.
-        """
+        """Coleta pública uma vez; somente o link afiliado é por usuário."""
         from django.conf import settings
         if not getattr(settings, "AMAZON_PUBLIC_FALLBACK", True):
             return
@@ -223,7 +213,9 @@ class Amazon(Marketplace):
         from apps.scrapers.sources import run_source
         from apps.scrapers.sources.persistence import persist_items
         resultado = run_source("amazon-public-web", terms=termos)
-        persist_items(resultado.get("offers", []), owner=None)
+        persist_items(
+            resultado.get("offers", []) + resultado.get("coupons", []), owner=None,
+        )
 
     @staticmethod
     def _scrape_cupons_publicos(usuarios):
@@ -259,9 +251,8 @@ class Amazon(Marketplace):
         # links perfeitamente válidos ("link reprovado na verificação"). Confiamos direto.
         if confiar_desconto:
             return {"ok": True, "motivo": "confiado (Creators API)"}
-        # Origem não confiável precisa de comprovação positiva. CAPTCHA/timeout/DOM
-        # ausente ficam em espera; aprová-los transformava falha operacional em
-        # evidência de elegibilidade.
+        # Origem não confiável precisa de comprovação positiva na página do
+        # produto. CAPTCHA/timeout/DOM ausente são inconclusivos, nunca aprovação.
         from apps.scrapers.sources.amazon_public import verify_product_url
         try:
             resultado = verify_product_url(link, nome_esperado=nome_esperado)
@@ -271,7 +262,7 @@ class Amazon(Marketplace):
         if not resultado.get("ok"):
             motivo = (resultado.get("motivo") or "").lower()
             if "indisponível" in motivo or "indisponivel" in motivo:
-                return resultado  # produto realmente indisponível -> reprova
+                return resultado
             logger.info("Verificação Amazon inconclusiva (%s)", resultado.get("motivo"))
             return {"ok": False,
                     "motivo": f"inconclusivo: {resultado.get('motivo')}",

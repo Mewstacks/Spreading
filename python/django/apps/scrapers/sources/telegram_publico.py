@@ -22,36 +22,48 @@ Complementar, não substituto: o worker Telethon continua sendo o caminho para
 re-divulgar a mensagem original em tempo quase real. Esta fonte serve para o catálogo
 — e funciona hoje, sem esperar credencial nenhuma.
 """
-import html
 import logging
 import re
-from datetime import datetime, timezone as dt_timezone
+import time
+from datetime import datetime, timedelta, timezone as dt_timezone
+from concurrent.futures import ThreadPoolExecutor
+from html.parser import HTMLParser
+from urllib.parse import urlsplit
 
 import requests
 from django.utils import timezone
 
 from apps.scrapers.canais.seeds import CANAIS_SUGERIDOS
 from apps.scrapers.coupon_rules import normalizar_regras_cupom
-from apps.scrapers.cupom_extractor import extrair, parece_ter_cupom
+from apps.scrapers.cupom_extractor import codigo_plausivel, extrair, parece_ter_cupom
 from .base import IngestedItem, SourceAdapter, normalizar_dinheiro
 
 logger = logging.getLogger(__name__)
 
 BASE = "https://t.me/s/"
-_TIMEOUT = (5, 20)
+_TIMEOUT = (4, 12)
+_REDIRECT_TIMEOUT = (3, 7)
+_REDIRECT_WORKERS = 16
+_CHANNEL_WORKERS = 6
+_PAGE_CACHE_TTL_SECONDS = 120
+_REDIRECT_CACHE_TTL_SECONDS = 3600
+_MAX_PAGES_PER_CHANNEL = 6
+_CHANNEL_PAGE_BUDGET_SECONDS = 12
+# A previa continua exibindo as ultimas mensagens mesmo quando o canal esta
+# parado. Baixar esse mesmo HTML outra vez nao e uma nova observacao.
+_MAX_MESSAGE_AGE = timedelta(hours=48)
+_MAX_FUTURE_SKEW = timedelta(minutes=5)
+_CANAL_LOJA_UNICA = {
+    str(row.get("handle") or "").casefold(): row["marketplaces"][0]
+    for row in CANAIS_SUGERIDOS
+    if len(row.get("marketplaces") or ()) == 1
+}
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
 
 # Handle do Telegram: letras, números e _, de 5 a 32 caracteres. Restringir aqui é o
 # que impede um handle vindo do banco de virar caminho arbitrário na URL.
 _HANDLE_OK = re.compile(r"^[A-Za-z0-9_]{5,32}$")
-
-_BLOCO_MENSAGEM = re.compile(
-    r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', re.S,
-)
-_POST_ID = re.compile(r'data-post="([^"]+)"')
-_TAG = re.compile(r"<[^>]+>")
-_QUEBRA = re.compile(r"<br\s*/?>", re.I)
 
 _URL = re.compile(r"https?://[^\s<>\"']+")
 _PRECO = re.compile(r"R\$\s*([\d.]+,\d{2}|\d+,\d{2}|\d+)")
@@ -61,8 +73,74 @@ _CUPOM = re.compile(
     r"cupom[:\s]+([A-Z0-9][A-Z0-9._-]{3,29})\b", re.I,
 )
 
+
+class _TelegramPreviewParser(HTMLParser):
+    """Associa texto, links e horario dentro do mesmo bloco de mensagem.
+
+    Listas de regex independentes se deslocam quando ha um post somente com
+    midia. O parser acompanha a arvore e impede que um cupom receba a data do post
+    seguinte.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.messages = []
+        self._current = None
+        self._div_depth = 0
+        self._text_depth = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = set(str(attrs.get("class") or "").split())
+        if (
+            self._current is None and tag == "div"
+            and "tgme_widget_message" in classes
+            and attrs.get("data-post")
+        ):
+            self._current = {
+                "post": str(attrs["data-post"]), "datetime": "", "parts": [],
+            }
+            self._div_depth = 1
+            self._text_depth = None
+            return
+        if self._current is None:
+            return
+        if tag == "div":
+            self._div_depth += 1
+            if "tgme_widget_message_text" in classes:
+                self._text_depth = self._div_depth
+        if tag == "time" and attrs.get("datetime"):
+            self._current["datetime"] = str(attrs["datetime"])
+        if self._text_depth is not None:
+            if tag == "br":
+                self._current["parts"].append("\n")
+            elif tag == "a" and str(attrs.get("href") or "").startswith(("http://", "https://")):
+                self._current["parts"].append(f" {attrs['href']} ")
+
+    def handle_endtag(self, tag):
+        if self._current is None or tag != "div":
+            return
+        if self._text_depth == self._div_depth:
+            self._text_depth = None
+        if self._div_depth == 1:
+            text = "".join(self._current["parts"])
+            self.messages.append((
+                self._current["post"], text.strip(), self._current["datetime"],
+            ))
+            self._current = None
+            self._div_depth = 0
+            self._text_depth = None
+            return
+        self._div_depth -= 1
+
+    def handle_data(self, data):
+        if self._current is not None and self._text_depth is not None:
+            self._current["parts"].append(data)
+
 _LOJAS = (
-    ("mercadolivre", ("mercadolivre.com", "mercadolibre.com", "meli.la")),
+    ("mercadolivre", (
+        "mercadolivre.com.br", "mercadolivre.com", "mercadolibre.com", "meli.la",
+    )),
     ("amazon", ("amazon.com.br", "amzn.to", "amzn.eu")),
     ("shopee", ("shopee.com.br", "s.shopee.com.br", "shope.ee")),
 )
@@ -86,17 +164,91 @@ _E_PRODUTO = {
     "shopee": ("-i.", "/product/"),
 }
 
+_AMAZON_ASIN = re.compile(r"/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})(?:[/?#]|$)", re.I)
+_ML_ITEM = re.compile(r"(?<![A-Z0-9])MLB[-_ ]?(\d{5,})(?!\d)", re.I)
+_SHOPEE_ITEM = (
+    re.compile(r"/product/(\d+)/(\d+)(?:[/?#]|$)", re.I),
+    re.compile(r"-i\.(\d+)\.(\d+)(?:[/?#]|$)", re.I),
+)
+
+
+def _host_em(host: str, dominio: str) -> bool:
+    host = str(host or "").casefold().rstrip(".")
+    dominio = str(dominio or "").casefold().rstrip(".")
+    return bool(host and (host == dominio or host.endswith(f".{dominio}")))
+
 
 def _marketplace(url: str) -> str:
-    texto = str(url or "").lower()
+    try:
+        host = (urlsplit(str(url or "")).hostname or "").casefold()
+    except ValueError:
+        return ""
     for slug, dominios in _LOJAS:
-        if any(d in texto for d in dominios):
+        if any(_host_em(host, dominio) for dominio in dominios):
             return slug
     return ""
 
 
-def _texto_limpo(bruto: str) -> str:
-    return html.unescape(_TAG.sub("", _QUEBRA.sub("\n", bruto))).strip()
+def _produto_canonico(url: str, slug: str):
+    """Devolve URL sem tracking e ids apenas para PDP reconhecida da loja."""
+    try:
+        parsed = urlsplit(str(url or ""))
+    except ValueError:
+        return "", []
+    if parsed.scheme.casefold() != "https" or _marketplace(url) != slug:
+        return "", []
+    path = parsed.path or "/"
+    if slug == "amazon":
+        match = _AMAZON_ASIN.search(path)
+        if not match:
+            return "", []
+        asin = match.group(1).upper()
+        return f"https://www.amazon.com.br/dp/{asin}", [asin]
+    if slug == "mercadolivre":
+        match = _ML_ITEM.search(path)
+        if not match:
+            return "", []
+        item_id = f"MLB{match.group(1)}"
+        return f"https://produto.mercadolivre.com.br/MLB-{match.group(1)}", [item_id]
+    if slug == "shopee":
+        match = next(
+            (found for pattern in _SHOPEE_ITEM if (found := pattern.search(path))),
+            None,
+        )
+        if not match:
+            return "", []
+        shop_id, item_id = match.groups()
+        return (
+            f"https://shopee.com.br/product/{shop_id}/{item_id}",
+            [item_id, f"{shop_id}_{item_id}"],
+        )
+    return "", []
+
+
+def _produtos_da_mensagem(texto: str, destinos=None):
+    """Produtos citados na mesma mensagem, agrupados por marketplace."""
+    destinos = destinos or {}
+    encontrados = {}
+    for bruto in _URL.findall(texto or ""):
+        bruto = bruto.rstrip(").,;")
+        slug = _marketplace(bruto)
+        if not slug:
+            continue
+        destino = bruto
+        try:
+            host = urlsplit(bruto).hostname
+        except ValueError:
+            host = ""
+        if any(_host_em(host, dominio) for dominio in _ENCURTADORES):
+            destino = destinos.get(bruto, "")
+            slug = _marketplace(destino) or slug
+        canonical, ids = _produto_canonico(destino, slug)
+        if not canonical or not ids:
+            continue
+        bucket = encontrados.setdefault(slug, {"urls": set(), "ids": set()})
+        bucket["urls"].add(canonical)
+        bucket["ids"].update(ids)
+    return encontrados
 
 
 def e_pagina_de_produto(url: str, slug: str) -> bool:
@@ -123,7 +275,7 @@ def resolver(url: str, sessao=None) -> str:
     cliente = sessao or requests
     try:
         resposta = cliente.get(
-            url, timeout=_TIMEOUT, headers={"User-Agent": _UA},
+            url, timeout=_REDIRECT_TIMEOUT, headers={"User-Agent": _UA},
             allow_redirects=True, stream=True,
         )
         final = str(resposta.url or "")
@@ -187,56 +339,230 @@ class TelegramPublicoSource(SourceAdapter):
     def __init__(self):
         self.last_metrics = {}
         self.last_health_status = "unknown"
+        self._page_cache = {}
+        self._redirect_cache = {}
+        self._last_redirect_cache_hits = 0
+        self._timestamp_metrics = {}
+        self._pagination_by_channel = {}
+
+    def _reset_timestamp_metrics(self):
+        self._timestamp_metrics = {
+            "mensagens_com_data": 0,
+            "mensagens_sem_data": 0,
+            "mensagens_antigas_descartadas": 0,
+            "mensagens_futuras_descartadas": 0,
+        }
+
+    def _pagination_metrics(self):
+        rows = list(self._pagination_by_channel.values())
+        reasons = {}
+        for row in rows:
+            reason = row.get("stop_reason") or "unknown"
+            reasons[reason] = reasons.get(reason, 0) + 1
+        return {
+            "paginas_lidas": sum(int(row.get("pages") or 0) for row in rows),
+            "paginacao_paradas": dict(sorted(reasons.items())),
+        }
 
     def _canais(self, handles=None):
         if handles:
             return [str(h).strip().lstrip("@") for h in handles if str(h).strip()]
         return [c["handle"] for c in CANAIS_SUGERIDOS]
 
-    def _baixar(self, handle):
+    def _baixar(self, handle, before=None):
         if not _HANDLE_OK.match(handle):
             logger.warning("Handle de canal recusado: %r", handle[:40])
             return ""
+        before = str(before or "").strip()
+        if before and (not before.isdigit() or int(before) <= 0):
+            logger.warning("Cursor de canal recusado: %r", before[:40])
+            return ""
+        cache_key = (handle, before)
+        cached = self._page_cache.get(cache_key)
+        now = time.monotonic()
+        if cached and now - cached[0] < _PAGE_CACHE_TTL_SECONDS:
+            return cached[1]
         resposta = requests.get(
             f"{BASE}{handle}", timeout=_TIMEOUT, headers={"User-Agent": _UA},
+            params={"before": before} if before else None,
         )
-        if resposta.status_code != 200:
-            return ""
-        return resposta.text or ""
+        corpo = resposta.text or "" if resposta.status_code == 200 else ""
+        self._page_cache[cache_key] = (now, corpo)
+        return corpo
 
-    def _mensagens(self, corpo):
-        """(post_id, texto) das mensagens da prévia, na ordem em que aparecem."""
-        ids = _POST_ID.findall(corpo)
-        blocos = _BLOCO_MENSAGEM.findall(corpo)
-        # As duas listas costumam ter o mesmo tamanho; quando não têm, o id é opcional
-        # e o texto é o que importa — melhor perder o id do que perder a mensagem.
-        for indice, bloco in enumerate(blocos):
-            post = ids[indice] if indice < len(ids) else ""
-            yield post, _texto_limpo(bloco)
+    @staticmethod
+    def _data_publicacao(data_bruta):
+        try:
+            publicada_em = datetime.fromisoformat(
+                str(data_bruta or "").replace("Z", "+00:00"),
+            )
+            if publicada_em.tzinfo is None:
+                publicada_em = publicada_em.replace(tzinfo=dt_timezone.utc)
+            return publicada_em.astimezone(dt_timezone.utc)
+        except (TypeError, ValueError):
+            return None
 
-    def discover_offers(self, canais=None, **kwargs):
+    def _paginar(self, handle):
+        """Le paginas anteriores ate cruzar 48h ou esgotar o orcamento seguro."""
+        paginas = []
+        before = ""
+        cursores = set()
+        motivo = "empty"
+        inicio = time.monotonic()
+        agora = timezone.now()
+        for _indice in range(_MAX_PAGES_PER_CHANNEL):
+            if paginas and time.monotonic() - inicio >= _CHANNEL_PAGE_BUDGET_SECONDS:
+                motivo = "time_budget"
+                break
+            corpo = self._baixar(handle, before=before)
+            if not corpo:
+                motivo = "unavailable"
+                break
+            parser = _TelegramPreviewParser()
+            parser.feed(corpo)
+            ids = []
+            for post, _texto, _data in parser.messages:
+                candidato = str(post or "").rsplit("/", 1)[-1]
+                if candidato.isdigit():
+                    ids.append(int(candidato))
+            proximo = str(min(ids)) if ids else ""
+            if before and (
+                not proximo or proximo in cursores or int(proximo) >= int(before)
+            ):
+                motivo = "cursor_repeated_or_missing"
+                break
+            paginas.append(corpo)
+            datadas = [
+                self._data_publicacao(data_bruta)
+                for _post, _texto, data_bruta in parser.messages
+            ]
+            datadas = [data for data in datadas if data is not None]
+            if not datadas:
+                motivo = "no_valid_timestamps"
+                break
+            if min(datadas) < agora - _MAX_MESSAGE_AGE:
+                motivo = "age_boundary"
+                break
+            if not proximo:
+                motivo = "cursor_repeated_or_missing"
+                break
+            cursores.add(proximo)
+            before = proximo
+        else:
+            motivo = "page_budget"
+        self._pagination_by_channel[handle] = {
+            "pages": len(paginas), "stop_reason": motivo,
+        }
+        return "\n".join(paginas)
+
+    def _carregar_canais(self, handles):
+        """Baixa previews em paralelo, isolando timeout/falha por canal."""
+        # Fontes curadas: a passada completa fica abaixo do orçamento do ciclo com
+        # seis downloads paralelos. O teto continua explícito para uma
+        # lista configurada no banco não transformar um radar barato em crawler sem
+        # limite.
+        alvos = list(handles)[:32]
+        self._pagination_by_channel = {}
+
+        def carregar(handle):
+            try:
+                return handle, self._paginar(handle), ""
+            except requests.RequestException as exc:
+                logger.info(
+                    "Canal @%s indisponível (%s).", handle, type(exc).__name__,
+                )
+                return handle, "", type(exc).__name__
+
+        with ThreadPoolExecutor(
+            max_workers=min(_CHANNEL_WORKERS, max(1, len(alvos))),
+        ) as executor:
+            return list(executor.map(carregar, alvos))
+
+    def _resolver_lote(self, urls):
+        """Resolve cada encurtador no máximo uma vez por hora por worker."""
+        now = time.monotonic()
+        result = {}
+        missing = []
+        for url in urls:
+            cached = self._redirect_cache.get(url)
+            if cached and now - cached[0] < _REDIRECT_CACHE_TTL_SECONDS:
+                result[url] = cached[1]
+            else:
+                missing.append(url)
+        self._last_redirect_cache_hits = len(urls) - len(missing)
+        if missing:
+            with ThreadPoolExecutor(max_workers=_REDIRECT_WORKERS) as executor:
+                resolved = dict(zip(missing, executor.map(resolver, missing)))
+            for url, destination in resolved.items():
+                self._redirect_cache[url] = (now, destination)
+                result[url] = destination
+        return result
+
+    def _mensagens(self, corpo, *, agora=None):
+        """(post_id, texto, data) atuais, na ordem em que aparecem na prévia."""
+        agora = agora or timezone.now()
+        parser = _TelegramPreviewParser()
+        parser.feed(corpo or "")
+        # Data ausente ou inválida falha fechada: um post antigo não pode parecer
+        # uma reobservação atual e manter um cupom vencido artificialmente vivo.
+        for post, texto, data_bruta in parser.messages:
+            if not data_bruta:
+                self._timestamp_metrics["mensagens_sem_data"] += 1
+                continue
+            publicada_em = self._data_publicacao(data_bruta)
+            if publicada_em is None:
+                self._timestamp_metrics["mensagens_sem_data"] += 1
+                continue
+            self._timestamp_metrics["mensagens_com_data"] += 1
+            if publicada_em > agora + _MAX_FUTURE_SKEW:
+                self._timestamp_metrics["mensagens_futuras_descartadas"] += 1
+                continue
+            if publicada_em < agora - _MAX_MESSAGE_AGE:
+                self._timestamp_metrics["mensagens_antigas_descartadas"] += 1
+                continue
+            yield post, texto, publicada_em
+
+    @staticmethod
+    def _partes_mensagem(linha, agora):
+        """Aceita pares legados de adaptadores/testes e triplas datadas."""
+        post, texto, *resto = linha
+        return post, texto, (resto[0] if resto else agora)
+
+    def discover_offers(self, canais=None, include_offers=True, **kwargs):
+        if not include_offers:
+            self.last_metrics = {"offers_skipped": True, "complete": False}
+            return
         handles = self._canais(canais)
         agora = timezone.now()
+        self._reset_timestamp_metrics()
         vistos = set()
         lidos = falhas = 0
         # Contadores de descarte: sem eles, uma fonte que rejeita tudo fica idêntica
         # a uma fonte sem novidade. A diferença é o que diz se o parser quebrou.
         descartados = {"nao_e_produto": 0, "nao_resolveu": 0}
 
-        for handle in handles[:12]:
-            try:
-                corpo = self._baixar(handle)
-            except requests.RequestException as exc:
-                falhas += 1
-                logger.info("Canal @%s indisponível (%s).", handle, type(exc).__name__)
-                continue
+        mensagens = []
+        for handle, corpo, _erro in self._carregar_canais(handles):
             if not corpo:
                 falhas += 1
                 continue
             lidos += 1
-            for post, texto in self._mensagens(corpo):
+            for linha in self._mensagens(corpo, agora=agora):
+                post, texto, publicada_em = self._partes_mensagem(linha, agora)
                 if not texto:
                     continue
+                mensagens.append((handle, post, texto, publicada_em))
+
+        encurtados = []
+        for _handle, _post, texto, _publicada_em in mensagens:
+            for bruto in _URL.findall(texto):
+                bruto = bruto.rstrip(").,;")
+                if any(d in bruto.lower() for d in _ENCURTADORES):
+                    encurtados.append(bruto)
+        unicos = list(dict.fromkeys(encurtados))
+        destinos = self._resolver_lote(unicos)
+
+        for handle, post, texto, publicada_em in mensagens:
                 preco_alegado = 0.0
                 achado_preco = _PRECO.search(texto)
                 if achado_preco:
@@ -251,7 +577,7 @@ class TelegramPublicoSource(SourceAdapter):
                     # `meli.la` entrava como se fosse anúncio.
                     url = bruto
                     if any(d in bruto.lower() for d in _ENCURTADORES):
-                        url = resolver(bruto)
+                        url = destinos.get(bruto, "")
                         if not url:
                             descartados["nao_resolveu"] += 1
                             continue
@@ -275,7 +601,7 @@ class TelegramPublicoSource(SourceAdapter):
                         # desconto. Ele viaja em `evidence` para diagnóstico e o
                         # preço real vem da revalidação no envio.
                         current_price=0.0, reference_price=0.0,
-                        observed_at=agora,
+                        observed_at=publicada_em,
                         evidence={
                             "transport": "telegram-preview",
                             "canal": handle,
@@ -285,12 +611,21 @@ class TelegramPublicoSource(SourceAdapter):
                             "trecho": texto[:300],
                         },
                     )
-        self.last_health_status = "healthy" if lidos else "degraded"
+        timestamps_ok = (
+            self._timestamp_metrics["mensagens_com_data"] > 0
+            or self._timestamp_metrics["mensagens_sem_data"] == 0
+        )
+        self.last_health_status = "healthy" if lidos and timestamps_ok else "degraded"
         self.last_metrics = {
             "canais_lidos": lidos,
             "canais_falhos": falhas,
             "itens": len(vistos),
             "descartados": dict(descartados),
+            "redirects_total": len(unicos),
+            "redirects_resolvidos": sum(bool(url) for url in destinos.values()),
+            "redirects_cache_hits": self._last_redirect_cache_hits,
+            **self._pagination_metrics(),
+            **self._timestamp_metrics,
             # Nunca "completo": a prévia mostra só as mensagens recentes, então
             # ausência aqui não prova que a oferta sumiu e não pode expirar catálogo.
             "complete": False,
@@ -315,72 +650,151 @@ class TelegramPublicoSource(SourceAdapter):
         atrapalha quem lê o diagnóstico.
         """
         handles = self._canais(canais)
+        handle_codes = {
+            re.sub(r"[^A-Z0-9]", "", handle.upper()) for handle in handles
+        }
         agora = timezone.now()
-        vistos = set()
-        lidos = falhas = sem_valor = 0
-
-        for handle in handles[:12]:
-            try:
-                corpo = self._baixar(handle)
-            except requests.RequestException as exc:
-                falhas += 1
-                logger.info("Canal @%s indisponível (%s).", handle, type(exc).__name__)
-                continue
+        self._reset_timestamp_metrics()
+        candidatos = {}
+        lidos = falhas = sem_valor = codigos_handle = 0
+        mensagens = []
+        for handle, corpo, _erro in self._carregar_canais(handles):
             if not corpo:
                 falhas += 1
                 continue
             lidos += 1
-            for post, texto in self._mensagens(corpo):
+            for linha in self._mensagens(corpo, agora=agora):
+                post, texto, publicada_em = self._partes_mensagem(linha, agora)
                 if not parece_ter_cupom(texto):
                     continue
-                # A loja do link acompanha a leitura como dica: quando a mensagem não
-                # nomeia a loja, o domínio do link resolve. Código anunciado na loja
-                # errada é o cupom que "não funciona" na mão de quem publicou.
-                loja_do_link = ""
-                for bruto in _URL.findall(texto):
-                    loja_do_link = _marketplace(bruto)
-                    if loja_do_link:
-                        break
-                achados = extrair(texto, loja_padrao=loja_do_link)
-                if not achados:
-                    sem_valor += 1
+                mensagens.append((handle, post, texto, publicada_em))
+
+        mensagens_validas = []
+        for handle, post, texto, publicada_em in mensagens:
+            loja_do_link = ""
+            for bruto in _URL.findall(texto):
+                loja_do_link = _marketplace(bruto)
+                if loja_do_link:
+                    break
+            if not loja_do_link:
+                # Canal curado e especializado e uma evidência de marketplace,
+                # mas somente quando a lista declara uma única loja. Canal misto
+                # sem link continua falhando fechado, sem adivinhar o destino.
+                loja_do_link = _CANAL_LOJA_UNICA.get(handle.casefold(), "")
+            achados = extrair(texto, loja_padrao=loja_do_link)
+            validos = []
+            for cupom in achados:
+                normalized_code = re.sub(
+                    r"[^A-Z0-9]", "", str(cupom.get("codigo") or "").upper(),
+                )
+                if (not codigo_plausivel(cupom.get("codigo"))
+                        or normalized_code in handle_codes):
+                    codigos_handle += 1
                     continue
+                validos.append(cupom)
+            if validos:
+                mensagens_validas.append(
+                    (handle, post, texto, publicada_em, validos)
+                )
+            else:
+                sem_valor += 1
+
+        encurtados = []
+        for _handle, _post, texto, _publicada_em, _cupons in mensagens_validas:
+            for bruto in _URL.findall(texto):
+                bruto = bruto.rstrip(").,;")
+                try:
+                    host = urlsplit(bruto).hostname
+                except ValueError:
+                    host = ""
+                if any(_host_em(host, dominio) for dominio in _ENCURTADORES):
+                    encurtados.append(bruto)
+        unicos = list(dict.fromkeys(encurtados))
+        destinos = self._resolver_lote(unicos)
+
+        for handle, post, texto, publicada_em, achados in mensagens_validas:
+                produtos = _produtos_da_mensagem(texto, destinos)
                 for cupom in achados:
                     chave = f"telegram:{cupom['loja']}:{cupom['codigo']}"
-                    if chave in vistos:
-                        continue
-                    vistos.add(chave)
-                    regras = normalizar_regras_cupom({
-                        "tipo_desconto": cupom["tipo"],
-                        "valor_desconto": cupom["valor"],
-                        "valor_minimo": cupom["minimo"],
-                        "modo_resgate": "codigo",
-                        "escopo": cupom["escopo"],
-                    }, external_id=chave, codigo=cupom["codigo"])
-                    yield IngestedItem(
-                        external_id=chave[:160], marketplace=cupom["loja"],
-                        source=self.slug, kind="coupon", canonical_url="",
-                        title=f"Cupom {cupom['codigo']}"[:255],
-                        coupon_code=cupom["codigo"][:120], coupon_rules=regras,
-                        content_type="voucher", observed_at=agora,
-                        evidence={
-                            "transport": "telegram-preview-llm",
-                            "canal": handle,
-                            "post": post,
-                            "confianca_origem": "comunidade",
-                            "teto_desconto": cupom["teto"],
-                            "trecho": texto[:300],
-                        },
-                    )
-        self.last_health_status = "healthy" if lidos else "degraded"
+                    registro = candidatos.get(chave)
+                    if registro is None:
+                        regras = normalizar_regras_cupom({
+                            "tipo_desconto": cupom["tipo"],
+                            "valor_desconto": cupom["valor"],
+                            "valor_minimo": cupom["minimo"],
+                            "modo_resgate": "codigo",
+                            "escopo": cupom["escopo"],
+                        }, external_id=chave, codigo=cupom["codigo"])
+                        registro = candidatos[chave] = {
+                            "cupom": cupom, "regras": regras, "urls": set(),
+                            "ids": set(), "canais": set(), "posts": [],
+                            "trecho": texto[:300], "observed_at": publicada_em,
+                        }
+                    elif publicada_em > registro["observed_at"]:
+                        registro["observed_at"] = publicada_em
+                    referencia = produtos.get(cupom["loja"], {})
+                    registro["urls"].update(referencia.get("urls") or set())
+                    registro["ids"].update(referencia.get("ids") or set())
+                    registro["canais"].add(handle)
+                    if post and len(registro["posts"]) < 5:
+                        registro["posts"].append(post)
+
+        for chave, registro in candidatos.items():
+            cupom = registro["cupom"]
+            urls = sorted(registro["urls"])
+            ids = sorted(registro["ids"])
+            evidence = {
+                "transport": "telegram-preview-parser",
+                "canal": sorted(registro["canais"])[0],
+                "canais": sorted(registro["canais"])[:5],
+                "posts": registro["posts"],
+                "confianca_origem": "comunidade",
+                "teto_desconto": cupom["teto"],
+                "trecho": registro["trecho"],
+            }
+            if ids:
+                evidence.update({
+                    "association": "same_public_telegram_message",
+                    "product_ids": ids,
+                })
+                if cupom["loja"] == "amazon":
+                    evidence["asins"] = ids
+                else:
+                    evidence["item_ids"] = ids
+            yield IngestedItem(
+                external_id=chave[:160], marketplace=cupom["loja"],
+                source=self.slug, kind="coupon",
+                canonical_url=(urls[0] if urls else ""),
+                title=f"Cupom {cupom['codigo']}"[:255],
+                coupon_code=cupom["codigo"][:120],
+                coupon_rules=registro["regras"], content_type="voucher",
+                observed_at=registro["observed_at"], evidence=evidence,
+            )
+        timestamps_ok = (
+            self._timestamp_metrics["mensagens_com_data"] > 0
+            or self._timestamp_metrics["mensagens_sem_data"] == 0
+        )
+        self.last_health_status = "healthy" if lidos and timestamps_ok else "degraded"
         self.last_metrics = {
+            **self.last_metrics,
             "canais_lidos": lidos,
             "canais_falhos": falhas,
-            "cupons": len(vistos),
+            "cupons": len(candidatos),
+            "cupons_com_produto": sum(bool(row["ids"]) for row in candidatos.values()),
+            "redirects_cupom_total": len(unicos),
+            "redirects_cupom_resolvidos": sum(bool(url) for url in destinos.values()),
+            "redirects_cupom_cache_hits": self._last_redirect_cache_hits,
             "sem_cupom_legivel": sem_valor,
+            "codigos_ruidosos_descartados": codigos_handle,
+            **self._pagination_metrics(),
+            **self._timestamp_metrics,
             # Nunca completo: a prévia mostra só as mensagens recentes.
             "complete": False,
         }
 
     def healthcheck(self):
-        return {"ok": True, "status": "ok"}
+        return {
+            "ok": self.last_health_status == "healthy",
+            "status": self.last_health_status,
+            "metrics": self.last_metrics,
+        }

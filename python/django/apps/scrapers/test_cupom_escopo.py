@@ -21,7 +21,8 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from apps.scrapers.models import (
-    CupomCodigo, CupomNormalizado, FonteIngestao, Produto, ProdutoCupom,
+    CupomCodigo, CupomDisponibilidade, CupomNormalizado, FonteIngestao, Produto,
+    ProdutoCupom,
 )
 
 # Um card SSR de vitrine: é o que /ofertas/cupons e a home entregam, e é o que o
@@ -500,6 +501,24 @@ class MigracaoAbreContextoDeSistemaTests(TestCase):
                 origem._system_context = real
             self.assertEqual(len(chamadas), 1, f"{nome} não abriu o contexto")
 
+    def test_fusao_de_produtos_abre_o_contexto_antes_de_consultar(self):
+        """Sem contexto, a fusão veria zero linha e o índice único da mesma
+        migração estouraria logo depois, abortando o deploy."""
+        from importlib import import_module
+
+        from django.apps import apps as registro
+
+        migracao = import_module(
+            "apps.scrapers.migrations.0072_produto_chave_natural")
+        chamadas = []
+        real = migracao._system_context
+        migracao._system_context = lambda editor: chamadas.append(editor)
+        try:
+            migracao.fundir_remanescentes(registro, _editor())
+        finally:
+            migracao._system_context = real
+        self.assertEqual(len(chamadas), 1, "0072 não abriu o contexto")
+
 
 class AvisoDeCuponsTests(TestCase):
     """O aviso em lote promete ESCOPO, então também não pode repetir a alegação.
@@ -610,6 +629,45 @@ class CupomDeComunidadeTests(TestCase):
         self.assertTrue(comunidade_corroborada(cupom))
         self.assertIsNone(_preflight(cupom, self.usuario))
 
+    def test_observacao_oficial_deduplicada_tambem_corrobora(self):
+        from apps.scrapers.coupon_rules import (
+            aguarda_corroboracao_oficial, comunidade_corroborada,
+            corroboracoes_oficiais_em_lote,
+        )
+        from apps.scrapers.sources.persistence import record_coupon_observation
+
+        cupom = self._cupom(self.comunidade, "EVIDENCIAREAL")
+        record_coupon_observation(cupom, source=self.oficial, outcome="accepted")
+
+        self.assertTrue(comunidade_corroborada(cupom))
+        corroboracoes = corroboracoes_oficiais_em_lote([cupom])
+        self.assertFalse(aguarda_corroboracao_oficial(
+            cupom, corroboracoes=corroboracoes,
+        ))
+
+    def test_observacao_oficial_expirada_nao_corroborra(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from apps.scrapers.coupon_rules import (
+            aguarda_corroboracao_oficial, comunidade_corroborada,
+            corroboracoes_oficiais_em_lote,
+        )
+        from apps.scrapers.sources.persistence import record_coupon_observation
+
+        cupom = self._cupom(self.comunidade, "EVIDENCIAVELHA")
+        observacao, _ = record_coupon_observation(
+            cupom, source=self.oficial, outcome="accepted",
+        )
+        type(observacao).objects.filter(pk=observacao.pk).update(
+            observed_at=timezone.now() - timedelta(hours=49),
+        )
+
+        self.assertFalse(comunidade_corroborada(cupom))
+        corroboracoes = corroboracoes_oficiais_em_lote([cupom])
+        self.assertTrue(aguarda_corroboracao_oficial(
+            cupom, corroboracoes=corroboracoes,
+        ))
+
     def test_fonte_oficial_nunca_precisa_de_corroboracao(self):
         from apps.scrapers.coupon_readiness import _preflight
         from apps.scrapers.coupon_rules import cupom_de_comunidade
@@ -617,6 +675,106 @@ class CupomDeComunidadeTests(TestCase):
 
         self.assertFalse(cupom_de_comunidade(cupom))
         self.assertIsNone(_preflight(cupom, self.usuario))
+
+    def test_promobit_sozinho_tambem_aguarda_corroboracao(self):
+        from apps.scrapers.coupon_readiness import _preflight
+        from apps.scrapers.coupon_rules import (
+            aguarda_corroboracao_oficial, score_cupom,
+        )
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="promobit-cupons",
+            defaults={"marketplace": "amazon", "nome": "Promobit"},
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="promobit:amazon:LOJA15",
+            marketplace="amazon", titulo="Cupom LOJA15", codigo="LOJA15",
+            link="", redemption_mode="code", estado="ativo",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 15.0,
+                    "modo_resgate": "codigo", "escopo": "selecao"},
+            evidencia={"confianca_origem": "comunidade",
+                       "transport": "promobit-next-data"},
+        )
+        self.assertTrue(aguarda_corroboracao_oficial(cupom))
+        resultado = _preflight(cupom, self.usuario)
+        self.assertEqual(resultado["stage"], "collected")
+        self.assertEqual(resultado["reason_code"], "community_uncorroborated")
+        self.assertEqual(score_cupom(cupom), 0)
+
+    def test_duas_fontes_independentes_com_mesmo_desconto_corroboram(self):
+        from apps.scrapers.coupon_readiness import _preflight
+        from apps.scrapers.coupon_rules import (
+            comunidade_corroborada, corroboracoes_independentes_em_lote,
+        )
+        promobit = FonteIngestao.objects.create(
+            slug="promobit-cupons", marketplace="multiloja", nome="Promobit",
+        )
+        cupomspot = FonteIngestao.objects.create(
+            slug="cupomspot-cupons", marketplace="multiloja", nome="CupomSpot",
+        )
+        primeiro = self._cupom(promobit, "CONSENSO20")
+        self._cupom(cupomspot, "CONSENSO20")
+
+        corroboracoes = corroboracoes_independentes_em_lote([primeiro])
+
+        self.assertTrue(comunidade_corroborada(primeiro))
+        self.assertIn(("mercadolivre", "CONSENSO20"), corroboracoes)
+        self.assertIsNone(_preflight(
+            primeiro, self.usuario, corroboracoes=corroboracoes,
+        ))
+
+    def test_duas_marcas_do_grupo_meliuz_nao_fingem_independencia(self):
+        from apps.scrapers.coupon_rules import (
+            comunidade_corroborada, corroboracoes_independentes_em_lote,
+        )
+        promobit = FonteIngestao.objects.create(
+            slug="promobit-cupons", marketplace="multiloja", nome="Promobit",
+        )
+        meliuz = FonteIngestao.objects.create(
+            slug="meliuz-cupons", marketplace="multiloja", nome="Méliuz",
+        )
+        primeiro = self._cupom(promobit, "MESMOGRUPO20")
+        self._cupom(meliuz, "MESMOGRUPO20")
+
+        corroboracoes = corroboracoes_independentes_em_lote([primeiro])
+
+        self.assertFalse(comunidade_corroborada(primeiro))
+        self.assertNotIn(("mercadolivre", "MESMOGRUPO20"), corroboracoes)
+
+    def test_fontes_que_discordam_no_desconto_nao_corroboram(self):
+        from apps.scrapers.coupon_rules import corroboracoes_independentes_em_lote
+
+        promobit = FonteIngestao.objects.create(
+            slug="promobit-cupons", marketplace="multiloja", nome="Promobit",
+        )
+        meliuz = FonteIngestao.objects.create(
+            slug="meliuz-cupons", marketplace="multiloja", nome="Méliuz",
+        )
+        primeiro = self._cupom(promobit, "CONFLITO20")
+        segundo = self._cupom(meliuz, "CONFLITO20")
+        segundo.regras = {**segundo.regras, "valor_desconto": 15.0}
+        segundo.save(update_fields=["regras"])
+
+        corroboracoes = corroboracoes_independentes_em_lote([primeiro])
+
+        self.assertNotIn(("mercadolivre", "CONFLITO20"), corroboracoes)
+
+    def test_corroboracao_em_lote_preserva_loja_e_codigo(self):
+        from apps.scrapers.coupon_rules import (
+            aguarda_corroboracao_oficial, corroboracoes_oficiais_em_lote,
+        )
+        ml = self._cupom(self.comunidade, "MESMOCODIGO")
+        amazon = CupomNormalizado.objects.create(
+            fonte=self.comunidade, external_id="amazon:comunidade:MESMOCODIGO",
+            marketplace="amazon", titulo="Cupom Amazon", codigo="MESMOCODIGO",
+        )
+        self._cupom(self.oficial, "mesmocodigo", sufixo=":oficial")
+
+        corroboracoes = corroboracoes_oficiais_em_lote([ml, amazon])
+
+        self.assertFalse(aguarda_corroboracao_oficial(
+            ml, corroboracoes=corroboracoes))
+        self.assertTrue(aguarda_corroboracao_oficial(
+            amazon, corroboracoes=corroboracoes))
 
 
 class AvisoSemCodigoRepetidoTests(TestCase):
@@ -665,3 +823,27 @@ class AvisoSemCodigoRepetidoTests(TestCase):
         self.assertEqual(codigos.count("CUPOMDOML"), 1)
         if escolhidos:
             self.assertEqual(escolhidos[0].id, oficial.id)
+
+    def test_escopos_descritos_diferente_nao_inflam_o_placar(self):
+        oficial = self._cupom(self.oficial)
+        comunidade = self._cupom(self.promobit)
+        comunidade.regras = {**comunidade.regras, "escopo": "produtos selecionados"}
+        comunidade.save(update_fields=["regras"])
+        from apps.scrapers.sources.persistence import record_coupon_observation
+
+        record_coupon_observation(oficial)
+        record_coupon_observation(comunidade)
+
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        projetar_disponibilidade_cupons(self.usuario)
+
+        projecoes = CupomDisponibilidade.objects.filter(
+            usuario=self.usuario, cupom__in=[oficial, comunidade],
+        )
+        self.assertEqual(
+            projecoes.filter(
+                stage="discarded", reason_code="lower_precedence_duplicate",
+            ).count(),
+            1,
+        )

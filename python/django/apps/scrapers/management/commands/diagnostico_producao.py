@@ -25,7 +25,9 @@ from django.utils import timezone
 
 from apps.accounts.tenant import system_context
 
-SECOES = ("catalogo", "amazon", "cupons", "envios", "eventos")
+SECOES = (
+    "catalogo", "amazon", "cupons", "envios", "conexoes", "mensagens", "eventos",
+)
 
 
 class Command(BaseCommand):
@@ -271,18 +273,21 @@ class Command(BaseCommand):
                     f"falhas={c.falhas_consecutivas} pausa={c.motivo_pausa[:50]!r}")
 
             self._sec("POOL DE CONTEUDO por regra ativa (produto vs cupom)")
-            from apps.scrapers.content_ranking import _coupon_candidates, _product_candidates
+            from apps.scrapers.content_ranking import (
+                _coupon_candidates, _product_candidates, selecionar_conteudo_para_grupo,
+            )
             for c in configs:
                 if not c.ativo:
                     continue
                 try:
                     produtos = _product_candidates(c, 8)
                     cupons_cand = _coupon_candidates(c, 8)
+                    efetivos = selecionar_conteudo_para_grupo(c, 8)
                 except Exception as exc:  # diagnóstico não pode derrubar o resto
                     self._linha(f"  config {c.id}: ERRO ao montar pool: {type(exc).__name__}: {exc}")
                     continue
                 self._linha(f"  config {c.id}: produtos={len(produtos)} cupons={len(cupons_cand)}")
-                for cand in sorted(produtos + cupons_cand, key=lambda x: -x.score)[:5]:
+                for cand in efetivos[:5]:
                     titulo = getattr(cand.obj, "titulo", "") or getattr(cand.obj, "nome", "")
                     self._linha(f"     {cand.kind:7} score={cand.score:6.2f} {titulo[:55]!r}")
 
@@ -299,6 +304,142 @@ class Command(BaseCommand):
                             f"prod={p.produto_id} erro={(p.erro or '')[:60]!r}")
             self._linha(f"  HistoricoEnvio total={HistoricoEnvio.objects.count()} "
                         f"janela={HistoricoEnvio.objects.filter(data_envio__gte=desde).count()}")
+
+        if "conexoes" in secoes:
+            # Sem segredos: este bloco existe para diferenciar "pipeline vazio" de
+            # "estoque pronto, mas a conta de teste nao autenticou o destino/loja".
+            # Antes era preciso montar um shell ad-hoc em producao, sujeito a vazar
+            # token por engano justamente durante o diagnostico de um incidente.
+            from apps.accounts.models import (
+                BrowserSession, MercadoLivreSession, WhatsAppConnection,
+            )
+            from apps.scrapers.models import IntegracaoAfiliado
+
+            self._sec("CONEXOES POR USUARIO (sem segredos)")
+            for u in usuarios:
+                perfil = Perfil.objects.filter(user=u).first()
+                org_id = getattr(perfil, "active_organization_id", None)
+                wa = WhatsAppConnection.objects.filter(organization_id=org_id).first()
+                ml = MercadoLivreSession.objects.filter(organization_id=org_id).first()
+                browser = list(
+                    BrowserSession.objects.filter(user=u, organization_id=org_id)
+                    .values("provider", "status", "probe_result", "probe_reason",
+                            "last_probe_at", "last_used_at")
+                )
+                afiliados = list(
+                    IntegracaoAfiliado.objects.filter(owner=u)
+                    .values("provedor", "status", "habilitada", "erro_publico",
+                            "ultimo_sucesso")
+                )
+                self._linha(
+                    f"  user={u.id} {u.get_username()!r} org={org_id} "
+                    f"amazon_tag={bool(getattr(perfil, 'afiliado_tag_amazon', ''))} "
+                    f"amazon_creators={bool(getattr(perfil, 'amazon_credential_id', '')) and bool(getattr(perfil, 'amazon_credential_secret', ''))} "
+                    f"amazon_elegivel={getattr(perfil, 'amazon_elegivel', None)} "
+                    f"telegram_bot={bool(getattr(perfil, 'telegram_bot_token', ''))}"
+                )
+                self._linha(
+                    "     whatsapp=" + (str({
+                        "status": wa.status, "phase": wa.phase,
+                        "last_event": wa.last_event, "last_event_at": wa.last_event_at,
+                        "unavailable_reason": wa.unavailable_reason,
+                        "consistency": wa.consistency_status,
+                    }) if wa else "ausente")
+                )
+                self._linha(
+                    "     mercado_livre=" + (str({
+                        "status": ml.status, "probe": ml.last_probe_result,
+                        "probe_reason": ml.probe_reason,
+                        "linkbuilder": ml.lb_readiness,
+                        "linkbuilder_reason": ml.lb_readiness_reason,
+                        "last_used_at": ml.last_used_at,
+                    }) if ml else "ausente")
+                )
+                self._linha(f"     browser_sessions={browser or 'nenhuma'}")
+                self._linha(f"     integracoes_afiliado={afiliados or 'nenhuma'}")
+
+        if "mensagens" in secoes:
+            # Canary estritamente read-only: seleciona pela mesma funcao do worker,
+            # usa somente link ja verificado (Amazon e deterministico) e renderiza o
+            # texto real. Nao reserva Publicacao, nao chama sender e nao abre browser.
+            from apps.scrapers.content_ranking import selecionar_conteudo_para_grupo
+            from apps.scrapers.coupon_links import (
+                canonical_coupon_link, coupon_link_verified_and_fresh,
+            )
+            from apps.scrapers.coupon_rules import codigo_publicavel
+            from apps.scrapers.models import LinkAfiliadoCupomUsuario
+            from apps.scrapers.ofertas import montar_mensagem_cupom
+            from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_cupom
+
+            self._sec("CANARIO READ-ONLY DE MENSAGENS")
+            configs = list(
+                ConfiguracaoEnvio.objects.filter(ativo=True)
+                .select_related("owner").order_by("id")
+            )
+            aprovados = falhos = 0
+            for config in configs:
+                candidatos = selecionar_conteudo_para_grupo(config, limit=1)
+                if not candidatos:
+                    falhos += 1
+                    self._linha(f"  config {config.id}: FALHOU — sem candidato")
+                    continue
+                candidato = candidatos[0]
+                if candidato.kind != "coupon":
+                    falhos += 1
+                    self._linha(
+                        f"  config {config.id}: FALHOU — primeiro candidato nao e cupom"
+                    )
+                    continue
+                cupom = candidato.obj
+                marketplace = str(cupom.marketplace or "").casefold()
+                codigo = codigo_publicavel(cupom)
+                if marketplace == "amazon":
+                    link = gerar_link_afiliado_cupom(cupom, config.owner)
+                    link_ok = bool(link and "tag=" in link)
+                elif marketplace == "mercadolivre" and not codigo:
+                    # Campanha de ativação: o envio combina o container público
+                    # específico com o rastreio já comprovado da conta. Não exige
+                    # um cache redundante para cada campanha e não abre Chromium.
+                    from apps.scrapers.coupon_links import gerar_link_afiliado_listagem_ml
+                    from apps.scrapers.marketplaces.registry import get_marketplace
+
+                    link = gerar_link_afiliado_listagem_ml(
+                        cupom, config.owner, somente_persistido_rapido=True,
+                    )
+                    link_ok = bool(link) and get_marketplace(
+                        marketplace,
+                    ).verify_affiliate_tag(link, usuario=config.owner)
+                else:
+                    cache = LinkAfiliadoCupomUsuario.objects.filter(
+                        usuario=config.owner, cupom=cupom,
+                    ).first()
+                    link_ok = coupon_link_verified_and_fresh(cache)
+                    link = canonical_coupon_link(cache) if link_ok else ""
+                mensagem = montar_mensagem_cupom(cupom, link_afiliado=link)
+                checks = {
+                    "cupom_first": True,
+                    "link_verificado": bool(link_ok),
+                    "link_na_mensagem": bool(link and link in mensagem),
+                    "resgate_explicito": bool(
+                        (codigo and codigo in mensagem) or "Ative o cupom" in mensagem
+                    ),
+                    "tamanho_whatsapp": 0 < len(mensagem) <= 4096,
+                }
+                passou = all(checks.values())
+                aprovados += int(passou)
+                falhos += int(not passou)
+                self._linha(
+                    f"  config {config.id} user={config.owner_id} {marketplace}: "
+                    f"{'PASSOU' if passou else 'FALHOU'} checks={checks} "
+                    f"chars={len(mensagem)} cupom={cupom.id} score={candidato.score:.2f}"
+                )
+                # Preview real, mas limitada e sem identificador do grupo. Links de
+                # afiliado nao sao segredo e precisam aparecer para o canario provar
+                # que o CTA final e clicavel.
+                self._linha("     preview=" + repr(mensagem[:700]))
+            self._linha(
+                f"  RESULTADO: {aprovados} passou/passaram; {falhos} falhou/falharam"
+            )
 
         if "eventos" in secoes:
             self._sec(f"EVENTOS ({dias}d) — contagem")

@@ -8,7 +8,7 @@ que uma oferta raspada por nós (destino vivo, preço conferido no momento do en
 desconto provado contra o histórico). O canal encurta a DESCOBERTA; ele não
 substitui a prova.
 
-Como esta lista foi montada (18/08/2026): abri a prévia pública `t.me/s/<canal>` de
+Como esta lista foi montada (28/08/2026): abri a prévia pública `t.me/s/<canal>` de
 cada candidato, contei quantos posts das 20 mensagens mais recentes carregavam link
 de loja e classifiquei por marketplace. Canal sem prévia pública, sem link de loja
 ou com nome que imita uma marca conhecida ficou de fora — dois casos concretos
@@ -22,6 +22,48 @@ Canal do Telegram muda de dono, vira privado e morre sem aviso — por isso o co
 
 # (handle, rótulo, marketplaces observados, links de loja em 20 posts)
 CANAIS_SUGERIDOS = [
+    {
+        "handle": "cupombr",
+        "nome": "Cupom BR — Mercado Livre",
+        "marketplaces": ["mercadolivre"],
+        "densidade": 95,
+        "nota": "31 códigos estruturados observados em 21 mensagens públicas.",
+    },
+    {
+        "handle": "cupom_shopee",
+        "nome": "Cupom Shopee",
+        "marketplaces": ["shopee"],
+        "densidade": 90,
+        "nota": "Canal especializado; códigos digitáveis e regras de mínimo.",
+    },
+    {
+        "handle": "fadadoscupons",
+        "nome": "Fada dos Cupons",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 85,
+        "nota": "12 códigos estruturados observados na prévia pública.",
+    },
+    {
+        "handle": "nerdcupons",
+        "nome": "Nerd Cupons",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 80,
+        "nota": "Cobertura multiloja com códigos digitáveis recentes.",
+    },
+    {
+        "handle": "LinksBrazil",
+        "nome": "LinksBR — Promoções",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 75,
+        "nota": "Prévia pública ativa e alta frequência de sinais de cupom.",
+    },
+    {
+        "handle": "bruxopromos",
+        "nome": "Bruxo das Promoções",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 65,
+        "nota": "Fonte adicional para corroboração e cupons relâmpago.",
+    },
     {
         "handle": "achadinhosdomercadolivre",
         "nome": "Achadinhos do Mercado Livre e da Shopee",
@@ -64,6 +106,124 @@ CANAIS_SUGERIDOS = [
         "densidade": 20,
         "nota": "Citado na imprensa de nicho como canal de achadinhos da Amazon; "
                 "na medição os links eram de ML.",
+    },
+    {
+        "handle": "sddescontos",
+        "nome": "SD Descontos — cupons",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 88,
+        "nota": "Prévia pública diária com códigos estruturados e cupons relâmpago.",
+    },
+    {
+        "handle": "MercadoCuponsBR",
+        "nome": "Mercado Cupons BR",
+        "marketplaces": ["mercadolivre"],
+        "densidade": 82,
+        "nota": "Listas por categoria com código, mínimo, teto e link de produtos.",
+    },
+    {
+        "handle": "ofertasportateis",
+        "nome": "Ofertas Critical Hits",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 70,
+        "nota": "Cobertura multiloja recente, especialmente tecnologia e games.",
+    },
+    {
+        "handle": "promoatualizado",
+        "nome": "Promo Atualizado",
+        "marketplaces": ["amazon", "shopee"],
+        "densidade": 66,
+        "nota": "Códigos recentes de Amazon e Shopee na prévia pública.",
+    },
+    {
+        "handle": "ofertanasho",
+        "nome": "Oferta na Sho — cupons",
+        "marketplaces": ["amazon", "shopee"],
+        "densidade": 65,
+        "nota": "Canal focado em códigos Shopee, com sinais adicionais da Amazon.",
+    },
+    {
+        "handle": "tecnanofertas",
+        "nome": "Tecnan Ofertas",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 55,
+        "nota": "Fonte complementar de tecnologia e alertas de cupom ML.",
+    },
+    {
+        "handle": "ofertasamazonbr",
+        "nome": "Ofertas Amazon Brasil",
+        "marketplaces": ["amazon"],
+        "densidade": 78,
+        "nota": "Canal especializado em promoções e códigos da Amazon Brasil.",
+    },
+    {
+        "handle": "canalrodrigomoreira",
+        "nome": "Ofertas Rodrigo Moreira",
+        "marketplaces": ["amazon", "mercadolivre", "shopee"],
+        "densidade": 76,
+        "nota": "Alta frequência e códigos Amazon com mínimo e teto explícitos.",
+    },
+    {
+        "handle": "TJGOFERTASs",
+        "nome": "TJG Gaming — promoções",
+        "marketplaces": ["amazon", "mercadolivre", "shopee"],
+        "densidade": 74,
+        "nota": "Canal grande de tecnologia com listas de códigos Amazon.",
+    },
+    {
+        "handle": "escolhasegura",
+        "nome": "Escolha Segura — ofertas",
+        "marketplaces": ["amazon", "mercadolivre"],
+        "densidade": 72,
+        "nota": "Códigos Amazon frequentes e associação explícita a produtos.",
+    },
+    {
+        "handle": "CuponsDaSho",
+        "nome": "Cupons da Sho",
+        "marketplaces": ["amazon", "shopee"],
+        "densidade": 71,
+        "nota": "Canal de códigos digitáveis Shopee e Amazon em tempo real.",
+    },
+    {
+        "handle": "promotop",
+        "nome": "PromoTop",
+        "marketplaces": ["amazon", "mercadolivre", "shopee"],
+        "densidade": 70,
+        "nota": "Canal multiloja de grande volume, útil para cupons curtos.",
+    },
+    {
+        "handle": "wolf_ofertas",
+        "nome": "Wolf Ofertas",
+        "marketplaces": ["amazon", "mercadolivre", "shopee"],
+        "densidade": 68,
+        "nota": "Previa ativa em 01/09/2026; codigos com desconto e minimo explicitos.",
+    },
+    {
+        "handle": "afiliadosshopeebroficial",
+        "nome": "Criadores e Afiliados Shopee Brasil Oficial",
+        "marketplaces": ["shopee"],
+        "densidade": 92,
+        "nota": "Canal oficial verificado; codigos e regras publicados para afiliados.",
+    },
+    {
+        "handle": "smarteletrobarato",
+        "nome": "Cupons de Desconto do Pepe",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 84,
+        "nota": (
+            "Previa ativa em 01/09/2026; 20 codigos estruturados apos rejeitar "
+            "palavras de interface, com cobertura forte de Shopee."
+        ),
+    },
+    {
+        "handle": "cmdiasyoutube",
+        "nome": "CM Dias - cupons e promocoes",
+        "marketplaces": ["mercadolivre", "amazon", "shopee"],
+        "densidade": 60,
+        "nota": (
+            "Previa ativa em 02/09/2026; codigos Shopee e Amazon corroborados "
+            "por fontes independentes, alem de alertas frequentes do ML."
+        ),
     },
 ]
 

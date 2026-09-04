@@ -29,6 +29,9 @@ _MARKETPLACE_ALIASES = {
     "mercadolivre": "mercadolivre",
     "mercado libre": "mercadolivre",
     "ml": "mercadolivre",
+    "shopee": "shopee",
+    "shopee brasil": "shopee",
+    "shopee br": "shopee",
 }
 _COUPON_KINDS = {"coupon", "cupom", "voucher", "promo_code", "promocode"}
 
@@ -53,6 +56,8 @@ def _marketplace(row):
         return "amazon"
     if "mercado" in value and ("livre" in value or "libre" in value):
         return "mercadolivre"
+    if "shopee" in value:
+        return "shopee"
     return ""
 
 
@@ -156,7 +161,7 @@ class LicensedFeedSource(SourceAdapter):
             if not isinstance(row, dict) or not _is_coupon(row):
                 continue
             marketplace = _marketplace(row)
-            if marketplace not in {"mercadolivre", "amazon"}:
+            if marketplace not in {"mercadolivre", "amazon", "shopee"}:
                 continue
 
             code = str(_first(

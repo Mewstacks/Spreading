@@ -1,5 +1,6 @@
 from datetime import timedelta
-from unittest.mock import patch
+from contextlib import contextmanager
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, TransactionTestCase, override_settings
@@ -47,6 +48,88 @@ class SourcePipelineTests(TestCase):
         persist_items([item], owner=self.user)
         persist_items([item], owner=self.user)
         self.assertEqual(Produto.objects.filter(owner=self.user, asin=item.external_id).count(), 1)
+
+    def test_telegram_amazon_extrai_asin_da_url_em_vez_do_external_id_longo(self):
+        item = IngestedItem(
+            external_id=(
+                "tg:amazon:https://www.amazon.com.br/Produto/dp/B0GFMC7BHK/"
+                "ref=telegram-canal"
+            ),
+            marketplace="amazon", source="telegram-publico", kind="offer",
+            canonical_url=(
+                "https://www.amazon.com.br/Produto/dp/B0GFMC7BHK/"
+                "ref=telegram-canal"
+            ),
+            title="Produto citado no Telegram", observed_at=timezone.now(),
+            evidence={"transport": "telegram-preview"},
+        )
+
+        resultado = persist_items([item])
+
+        self.assertEqual(resultado["offers"], 1)
+        produto = Produto.objects.get(marketplace="amazon", asin="B0GFMC7BHK")
+        self.assertEqual(produto.fonte, "telegram-publico")
+        self.assertLessEqual(len(produto.asin), 20)
+
+    def test_oferta_amazon_sem_asin_nao_inventa_chave(self):
+        item = IngestedItem(
+            external_id="tg:amazon:https://www.amazon.com.br/promocoes",
+            marketplace="amazon", source="telegram-publico", kind="offer",
+            canonical_url="https://www.amazon.com.br/promocoes",
+            title="Página sem produto", observed_at=timezone.now(),
+        )
+
+        resultado = persist_items([item])
+
+        self.assertEqual(resultado["offers"], 0)
+        self.assertFalse(Produto.objects.filter(marketplace="amazon").exists())
+
+    def test_cupom_datado_preserva_horario_original_da_fonte(self):
+        publicado_em = timezone.now() - timedelta(hours=23)
+        item = IngestedItem(
+            external_id="telegram:shopee:DATA20", marketplace="shopee",
+            source="telegram-publico", kind="coupon", canonical_url="",
+            title="Cupom DATA20", coupon_code="DATA20",
+            coupon_rules={
+                "tipo_desconto": "porcentagem", "valor_desconto": 20,
+                "modo_resgate": "codigo", "escopo": "site",
+            },
+            observed_at=publicado_em,
+            evidence={"transport": "telegram-preview-parser"},
+        )
+
+        persist_items([item])
+
+        cupom = CupomNormalizado.objects.get(
+            fonte__slug="telegram-publico", external_id=item.external_id,
+        )
+        self.assertLess(abs((cupom.ultima_observacao - publicado_em).total_seconds()), 1)
+
+    def test_persistencia_global_marca_placeholder_como_invalido(self):
+        from apps.scrapers.models import CupomFonteObservacao
+
+        item = IngestedItem(
+            external_id="telegram:mercadolivre:MAISCUPONS",
+            marketplace="mercadolivre", source="telegram-publico",
+            kind="coupon", canonical_url="", title="Veja mais cupons",
+            coupon_code="MAISCUPONS",
+            coupon_rules={
+                "tipo_desconto": "porcentagem", "valor_desconto": 10,
+                "modo_resgate": "codigo", "escopo": "site",
+            },
+            observed_at=timezone.now(),
+        )
+
+        persist_items([item])
+
+        cupom = CupomNormalizado.objects.get(
+            fonte__slug="telegram-publico", external_id=item.external_id,
+        )
+        self.assertEqual(cupom.estado, "invalido")
+        self.assertEqual(cupom.confianca, "baixa")
+        observacao = CupomFonteObservacao.objects.get(cupom=cupom)
+        self.assertEqual(observacao.outcome, "invalid")
+        self.assertEqual(observacao.reason_code, "invalid_coupon_code")
 
     def test_amazon_coupon_source_groups_asins_and_preserves_final_price(self):
         from apps.scrapers.sources.amazon_coupons import AmazonCouponsSource
@@ -249,7 +332,7 @@ class SourcePipelineTests(TestCase):
         AFFILIATE_FEED_TOKEN="secret-token",
     )
     @patch("apps.scrapers.sources.external_feed.requests.get")
-    def test_licensed_feed_ingests_only_ml_and_amazon_coupons(self, get):
+    def test_licensed_feed_ingests_ml_amazon_and_shopee_coupons(self, get):
         response = get.return_value
         response.json.return_value = {"items": [
             {
@@ -268,6 +351,13 @@ class SourcePipelineTests(TestCase):
                 "expires_at": "2099-12-31T23:00:00Z",
             },
             {
+                "type": "coupon", "id": "shopee-15", "store": "Shopee",
+                "title": "R$ 15 OFF", "code": "SHOPEE15",
+                "deeplink": "https://s.shopee.com.br/exemplo",
+                "discount_type": "fixo", "discount_value": 15,
+                "valid_until": "2099-12-31",
+            },
+            {
                 "type": "coupon", "id": "other-1", "store": "Outra Loja",
                 "code": "OUTRA10", "url": "https://afiliado.example/outra",
             },
@@ -281,7 +371,10 @@ class SourcePipelineTests(TestCase):
         from apps.scrapers.sources.external_feed import LicensedFeedSource
         coupons = list(LicensedFeedSource().discover_coupons())
 
-        self.assertEqual([coupon.marketplace for coupon in coupons], ["mercadolivre", "amazon"])
+        self.assertEqual(
+            [coupon.marketplace for coupon in coupons],
+            ["mercadolivre", "amazon", "shopee"],
+        )
         self.assertEqual(coupons[0].external_id, "licensed:mercadolivre:ml-10")
         self.assertEqual(coupons[0].coupon_rules["tipo_desconto"], "porcentagem")
         self.assertEqual(coupons[0].coupon_rules["valor_desconto"], 10.0)
@@ -449,8 +542,116 @@ class SourcePipelineTests(TestCase):
         with patch.object(marketplaces, "MARKETPLACES", {
                 "mercadolivre": Good(), "amazon": Bad()}):
             result = _rodar_scrape()
-        self.assertEqual(result, {"sucessos": 1, "falhas": ["amazon"]})
+        self.assertEqual(
+            result,
+            {"sucessos": 1, "falhas": ["amazon"], "adiados": []},
+        )
         expire.assert_called_once()
+
+    @patch("apps.scrapers.maintenance.expire_stale")
+    @patch("apps.scrapers.management.commands.automacao.log_event")
+    def test_full_cycle_preserves_health_when_marketplace_waits_for_capacity(
+        self, log_event, expire,
+    ):
+        from apps.scrapers.carga import BrowserResourceUnavailable
+        from apps.scrapers.management.commands.automacao import _rodar_scrape
+        from apps.scrapers.marketplaces import registry as marketplaces
+        from apps.scrapers.models import FonteIngestao
+
+        source = FonteIngestao.objects.create(
+            slug="ml-capacity-test", marketplace="mercadolivre", nome="ML teste",
+            status="ok", falhas_consecutivas=0,
+        )
+
+        class Busy:
+            def scrape_all(self, **kwargs):
+                raise BrowserResourceUnavailable("ocupado")
+
+        with patch.object(marketplaces, "MARKETPLACES", {"mercadolivre": Busy()}):
+            result = _rodar_scrape()
+
+        self.assertEqual(
+            result,
+            {"sucessos": 0, "falhas": [], "adiados": ["mercadolivre"]},
+        )
+        source.refresh_from_db()
+        self.assertEqual(source.status, "ok")
+        self.assertEqual(source.falhas_consecutivas, 0)
+        log_event.assert_not_called()
+        expire.assert_not_called()
+
+    @patch("apps.scrapers.maintenance.expire_stale")
+    def test_resume_targets_only_the_deferred_marketplace(self, expire):
+        from apps.scrapers.management.commands.automacao import _rodar_scrape
+        from apps.scrapers.marketplaces import registry as marketplaces
+
+        ml = MagicMock()
+        amazon = MagicMock()
+        with patch.object(marketplaces, "MARKETPLACES", {
+            "mercadolivre": ml, "amazon": amazon,
+        }):
+            result = _rodar_scrape(lojas_alvo={"mercadolivre"})
+
+        self.assertEqual(
+            result,
+            {"sucessos": 1, "falhas": [], "adiados": []},
+        )
+        ml.scrape_all.assert_called_once()
+        amazon.scrape_all.assert_not_called()
+        expire.assert_called_once()
+
+    def test_full_ml_feed_waits_briefly_for_the_holder_to_yield(self):
+        from apps.scrapers.carga import coordinated_ml_browser
+
+        attempts = iter([False, True])
+
+        @contextmanager
+        def fake_resource(**_kwargs):
+            yield next(attempts)
+
+        with patch("apps.scrapers.carga.browser_resource", fake_resource), \
+             patch("apps.scrapers.carga.time.sleep") as sleep:
+            with coordinated_ml_browser(owner_kind="ml_offers", wait_seconds=4):
+                acquired = True
+
+        self.assertTrue(acquired)
+        sleep.assert_called_once()
+
+    @patch(
+        "apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
+    )
+    def test_ml_capacity_deferral_preserves_component_and_aggregate_health(
+        self, mapear,
+    ):
+        from apps.scrapers.carga import BrowserResourceUnavailable
+        from apps.scrapers.marketplaces.mercadolivre import MercadoLivre
+        from apps.scrapers.models import ExecucaoIngestao
+
+        mapear.side_effect = BrowserResourceUnavailable("ocupado")
+        aggregate, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML"},
+        )
+        component, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-ofertas",
+            defaults={"marketplace": "mercadolivre", "nome": "Feed ML"},
+        )
+        FonteIngestao.objects.filter(pk__in=[aggregate.pk, component.pk]).update(
+            status="ok", falhas_consecutivas=0,
+        )
+
+        with self.assertRaises(BrowserResourceUnavailable):
+            MercadoLivre().scrape_all()
+
+        aggregate.refresh_from_db()
+        component.refresh_from_db()
+        self.assertEqual(aggregate.status, "ok")
+        self.assertEqual(component.status, "ok")
+        self.assertEqual(aggregate.falhas_consecutivas, 0)
+        self.assertEqual(component.falhas_consecutivas, 0)
+        run = ExecucaoIngestao.objects.filter(fonte=aggregate).latest("id")
+        self.assertEqual(run.status, "blocked")
+        self.assertEqual(run.health_status, "capacity_deferred")
 
 
 class CouponPagePayloadTests(TestCase):
@@ -667,6 +868,248 @@ class AmazonDiscountRecoveryTests(TestCase):
 
 
 class AmazonPublicPriceSanityTests(TestCase):
+    def test_cursor_da_busca_retoma_apenas_na_mesma_fatia(self):
+        from apps.scrapers.sources.amazon_public import (
+            CURSOR_BUSCA_AMAZON, _assinatura_fatia_busca,
+            _ler_cursor_busca_amazon,
+        )
+
+        selected = ["casa", "beleza"]
+        payload = {
+            "signature": _assinatura_fatia_busca(selected, 4, 3),
+            "index": 2,
+        }
+        with patch(
+            "apps.scrapers.automacao_state.read_state",
+            return_value={CURSOR_BUSCA_AMAZON: payload},
+        ):
+            self.assertEqual(_ler_cursor_busca_amazon(selected, 4, 3), 2)
+            self.assertEqual(_ler_cursor_busca_amazon(selected, 8, 3), 0)
+
+    def test_cursor_da_busca_e_limpo_quando_fatia_termina(self):
+        from apps.scrapers.sources.amazon_public import (
+            CURSOR_BUSCA_AMAZON, _gravar_cursor_busca_amazon,
+        )
+
+        with patch("apps.scrapers.automacao_state.write_state") as write:
+            _gravar_cursor_busca_amazon(["casa", "beleza"], 4, 3, 2)
+            self.assertEqual(
+                write.call_args.kwargs[CURSOR_BUSCA_AMAZON]["index"], 2,
+            )
+            _gravar_cursor_busca_amazon(["casa", "beleza"], 4, 3, 6)
+            self.assertEqual(write.call_args.kwargs[CURSOR_BUSCA_AMAZON], {})
+
+    @override_settings(AMAZON_PUBLIC_PAGES_PER_TERM=3)
+    def test_coleta_cedida_grava_a_pagina_seguinte(self):
+        from apps.scrapers.sources.amazon_public import AmazonPublicSource
+
+        events = []
+        page = MagicMock()
+        response = MagicMock()
+        response.status = 200
+        page.goto.return_value = response
+
+        @contextmanager
+        def browser(**_kwargs):
+            try:
+                yield page, object()
+            finally:
+                events.append("browser_released")
+
+        @contextmanager
+        def slot(_owner_kind):
+            yield
+
+        source = AmazonPublicSource()
+        with patch(
+            "apps.scrapers.sources.amazon_public._termos_do_ciclo",
+            return_value=(["casa"], 1, 4),
+        ), patch(
+            "apps.scrapers.sources.amazon_public._ler_cursor_busca_amazon",
+            return_value=0,
+        ), patch(
+            "apps.scrapers.sources.amazon_public._gravar_cursor_busca_amazon",
+        ) as save_cursor, patch(
+            "apps.scrapers.sources.amazon_public._browser_slot", slot,
+        ), patch(
+            "apps.scrapers.sources.amazon_public.iniciar_browser", browser,
+        ), patch(
+            "apps.scrapers.sources.amazon_public._economizar_banda",
+        ), patch(
+            "apps.scrapers.sources.amazon_public._pagina_atual_estruturada",
+            return_value={"title": "Amazon", "body": "", "rows": []},
+        ), patch(
+            "apps.scrapers.resource_control.interesse_pendente", return_value=True,
+        ):
+            save_cursor.side_effect = lambda *_args: events.append("cursor_saved")
+            self.assertEqual(list(source.discover_offers()), [])
+
+        self.assertEqual(events, ["browser_released", "cursor_saved"])
+        save_cursor.assert_called_once_with(["casa"], 4, 3, 1)
+        self.assertTrue(source.last_metrics["capacity_yielded"])
+        self.assertEqual(source.last_metrics["cursor_next"], 1)
+        self.assertEqual(source.last_metrics["pages_processed"], 1)
+
+    @override_settings(AMAZON_PUBLIC_PAGES_PER_TERM=3)
+    def test_coleta_retomada_comeca_na_pagina_seguinte_e_finaliza_fatia(self):
+        from apps.scrapers.sources.amazon_public import AmazonPublicSource
+
+        page = MagicMock()
+        response = MagicMock()
+        response.status = 200
+        page.goto.return_value = response
+
+        @contextmanager
+        def browser(**_kwargs):
+            yield page, object()
+
+        @contextmanager
+        def slot(_owner_kind):
+            yield
+
+        empty = {"status": 200, "title": "Amazon", "body": "", "rows": []}
+        source = AmazonPublicSource()
+        with patch(
+            "apps.scrapers.sources.amazon_public._termos_do_ciclo",
+            return_value=(["casa"], 1, 4),
+        ), patch(
+            "apps.scrapers.sources.amazon_public._ler_cursor_busca_amazon",
+            return_value=1,
+        ), patch(
+            "apps.scrapers.sources.amazon_public._gravar_cursor_busca_amazon",
+        ) as save_cursor, patch(
+            "apps.scrapers.sources.amazon_public._browser_slot", slot,
+        ), patch(
+            "apps.scrapers.sources.amazon_public.iniciar_browser", browser,
+        ), patch(
+            "apps.scrapers.sources.amazon_public._economizar_banda",
+        ), patch(
+            "apps.scrapers.sources.amazon_public._pagina_atual_estruturada",
+            return_value=empty,
+        ), patch(
+            "apps.scrapers.sources.amazon_public._buscar_pagina_na_sessao",
+            return_value=empty,
+        ) as fetch, patch(
+            "apps.scrapers.resource_control.interesse_pendente", return_value=False,
+        ):
+            self.assertEqual(list(source.discover_offers()), [])
+
+        self.assertIn("page=2", page.goto.call_args.args[0])
+        self.assertIn("page=3", fetch.call_args.args[1])
+        self.assertEqual(source.last_metrics["cursor_start"], 1)
+        self.assertEqual(source.last_metrics["pages_processed"], 2)
+        self.assertTrue(source.last_metrics["slice_complete"])
+        save_cursor.assert_called_once_with(["casa"], 4, 3, 0)
+
+    def test_extracts_current_search_page_in_one_browser_evaluation(self):
+        from apps.scrapers.sources.amazon_public import _pagina_atual_estruturada
+
+        page = MagicMock()
+        page.evaluate.return_value = {"title": "Amazon", "rows": [{"asin": "A"}]}
+
+        result = _pagina_atual_estruturada(page)
+
+        self.assertEqual(result["rows"], [{"asin": "A"}])
+        script = page.evaluate.call_args.args[0]
+        self.assertIn("querySelectorAll", script)
+        self.assertNotIn("eval(", script)
+
+    def test_first_search_page_waits_for_cards_not_domcontentloaded(self):
+        from apps.scrapers.sources.amazon_public import _abrir_primeira_pagina_busca
+
+        page = MagicMock()
+        response = MagicMock(status=200)
+        page.goto.return_value = response
+        page.evaluate.return_value = {
+            "title": "Amazon.com.br", "body": "Resultados", "rows": [{"asin": "A"}],
+        }
+
+        returned_response, payload = _abrir_primeira_pagina_busca(
+            page, "https://www.amazon.com.br/s?k=casa&page=1",
+        )
+
+        self.assertIs(returned_response, response)
+        self.assertEqual(payload["rows"], [{"asin": "A"}])
+        self.assertEqual(page.goto.call_args.kwargs, {
+            "wait_until": "commit", "timeout": 15000,
+        })
+        page.wait_for_selector.assert_called_once_with(
+            "[data-component-type='s-search-result']",
+            state="attached", timeout=10000,
+        )
+
+    def test_first_search_page_keeps_error_body_when_cards_timeout(self):
+        from apps.scrapers.sources.amazon_public import (
+            PlaywrightTimeoutError, _abrir_primeira_pagina_busca, _page_failure,
+        )
+
+        page = MagicMock()
+        page.goto.return_value = MagicMock(status=200)
+        page.wait_for_selector.side_effect = PlaywrightTimeoutError("late cards")
+        page.evaluate.return_value = {
+            "title": "Amazon.com.br Algo deu errado", "body": "", "rows": [],
+        }
+
+        _, payload = _abrir_primeira_pagina_busca(
+            page, "https://www.amazon.com.br/s?k=casa&page=1",
+        )
+
+        self.assertEqual(
+            _page_failure(200, payload["title"], payload["body"]),
+            "amazon_error_page",
+        )
+
+    def test_fetches_next_search_page_inside_accepted_session(self):
+        from apps.scrapers.sources.amazon_public import _buscar_pagina_na_sessao
+
+        page = MagicMock()
+        page.evaluate.return_value = {"status": 200, "rows": []}
+        url = "https://www.amazon.com.br/s?k=casa&page=2"
+
+        result = _buscar_pagina_na_sessao(page, url)
+
+        self.assertEqual(result["status"], 200)
+        script, argument = page.evaluate.call_args.args
+        self.assertEqual(argument, url)
+        self.assertIn('fetch(url, {credentials: "include"})', script)
+        self.assertIn("DOMParser", script)
+        self.assertNotIn("eval(", script)
+
+    @override_settings(AMAZON_PUBLIC_TERMS_PER_CYCLE=2)
+    def test_rotates_small_term_slices_without_losing_catalog_coverage(self):
+        from apps.scrapers.sources.amazon_public import _termos_do_ciclo
+
+        terms = ["a", "b", "c", "d", "e", "f", "g", "a"]
+        now = timezone.now().replace(minute=0, second=0, microsecond=0)
+        first, total, _ = _termos_do_ciclo(terms, agora=now)
+        second, second_total, _ = _termos_do_ciclo(
+            terms, agora=now + timedelta(hours=3),
+        )
+
+        self.assertEqual(total, 7)
+        self.assertEqual(second_total, 7)
+        self.assertEqual(len(first), 2)
+        self.assertEqual(len(second), 2)
+        self.assertTrue(set(first).isdisjoint(second))
+
+    @override_settings(AMAZON_PUBLIC_TERMS_PER_CYCLE=4)
+    def test_default_productive_catalog_is_covered_in_ten_three_hour_cycles(self):
+        from django.conf import settings
+        from apps.scrapers.sources.amazon_public import _termos_do_ciclo
+
+        terms = settings.AMAZON_PUBLIC_COUPON_TERMS
+        now = timezone.now().replace(minute=0, second=0, microsecond=0)
+        covered = set()
+        for cycle in range(10):
+            selected, total, _ = _termos_do_ciclo(
+                terms, agora=now + timedelta(hours=3 * cycle),
+            )
+            self.assertEqual(len(selected), min(4, total))
+            covered.update(selected)
+
+        self.assertEqual(total, 37)
+        self.assertEqual(covered, set(terms))
+
     def test_accepts_plausible_discount(self):
         from apps.scrapers.sources.amazon_public import _precos_publicaveis
 
@@ -681,6 +1124,63 @@ class AmazonPublicPriceSanityTests(TestCase):
         from apps.scrapers.sources.amazon_public import _precos_publicaveis
 
         self.assertFalse(_precos_publicaveis(63.99, 63990))
+
+    def test_extracts_only_official_coupon_final_price_phrase(self):
+        from apps.scrapers.sources.amazon_public import _preco_final_de_cupom
+
+        self.assertEqual(
+            _preco_final_de_cupom(
+                "R$ 104,66 Você paga R$ 74,66 com o cupom", 104.66,
+            ),
+            74.66,
+        )
+        self.assertEqual(
+            _preco_final_de_cupom("Livro O cupom falso por R$ 43,97", 43.97),
+            0,
+        )
+
+    def test_rejects_implausible_coupon_final_price(self):
+        from apps.scrapers.sources.amazon_public import _preco_final_de_cupom
+
+        self.assertEqual(
+            _preco_final_de_cupom(
+                "Você paga R$ 9,99 com o cupom", 100.00,
+            ),
+            0,
+        )
+
+    def test_classifies_amazon_error_responses_as_failure_not_empty_catalog(self):
+        from apps.scrapers.sources.amazon_public import _page_failure
+
+        self.assertEqual(
+            _page_failure(503, "Amazon.com.br Algo deu errado", ""),
+            "http_503_upstream_unavailable",
+        )
+        self.assertEqual(
+            _page_failure(200, "Amazon.com.br Algo deu errado", ""),
+            "amazon_error_page",
+        )
+        self.assertEqual(_page_failure(200, "Amazon.com.br", "Resultados"), "")
+
+    @override_settings(
+        AMAZON_PUBLIC_PROXY_SERVER="http://proxy.example:22225",
+        AMAZON_PUBLIC_PROXY_USERNAME="customer-zone-br",
+        AMAZON_PUBLIC_PROXY_PASSWORD="secret",
+    )
+    def test_builds_private_public_amazon_proxy_context(self):
+        from apps.scrapers.sources.amazon_public import _browser_context_options
+
+        self.assertEqual(_browser_context_options(), {"proxy": {
+            "server": "http://proxy.example:22225",
+            "username": "customer-zone-br",
+            "password": "secret",
+        }})
+
+    @override_settings(AMAZON_PUBLIC_PROXY_SERVER="")
+    def test_keeps_direct_browser_when_proxy_is_not_configured(self):
+        from apps.scrapers.sources.amazon_public import _browser_context_options
+
+        self.assertEqual(_browser_context_options(), {})
 
 
 class VerificacaoDeLinksEhLanePropriaTests(TestCase):

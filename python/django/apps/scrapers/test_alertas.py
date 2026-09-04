@@ -3,10 +3,10 @@
 Cada teste aqui corresponde a uma forma conhecida de o alerta virar inútil — ou por
 não tocar quando devia, ou por tocar tanto que se aprende a ignorá-lo.
 """
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.core import mail
-from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -34,7 +34,6 @@ def _incidente(**extra):
                    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 class AlertaDeIncidenteTests(TestCase):
     def setUp(self):
-        cache.clear()
         mail.outbox.clear()
 
     def test_incidente_novo_de_erro_avisa(self):
@@ -62,7 +61,13 @@ class AlertaDeIncidenteTests(TestCase):
         incidente = _incidente()
         notificar_incidente(incidente, criado=True)
         mail.outbox.clear()
-        cache.clear()  # simula a janela de silêncio vencendo
+        # Simula a janela de silêncio vencendo: a dedupe mora na própria linha
+        # (alertado_em/alerta_tentado_em), não mais num cache — empurra os dois
+        # carimbos pro passado, como o relógio real teria feito.
+        IncidenteSaude.objects.filter(pk=incidente.pk).update(
+            alertado_em=timezone.now() - timedelta(minutes=61),
+            alerta_tentado_em=timezone.now() - timedelta(minutes=61),
+        )
         self.assertTrue(notificar_incidente(incidente, criado=False, reaberto=True))
         self.assertEqual(len(mail.outbox), 1)
 
@@ -98,7 +103,6 @@ class AlertaDeIncidenteTests(TestCase):
                    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 class CanalDesligadoTests(TestCase):
     def setUp(self):
-        cache.clear()
         mail.outbox.clear()
 
     def test_sem_canal_configurado_nao_quebra(self):
@@ -106,12 +110,62 @@ class CanalDesligadoTests(TestCase):
         self.assertEqual(mail.outbox, [])
 
 
+@override_settings(ALERTA_TELEGRAM_CHAT_ID="", ALERTA_EMAILS="operacao@example.com",
+                   EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+class ReivindicacaoNoBancoTests(TestCase):
+    """A dedupe precisa valer entre processos e VMs, não só threads de um processo.
+
+    LocMemCache (produção, sem Redis) dedupava por processo: 10 workers no
+    mesmo Procfile mandavam até 10 mensagens do mesmo incidente. A
+    reivindicação agora é um UPDATE condicional em IncidenteSaude — o teste
+    de verdade dessa propriedade exige dois processos batendo no mesmo
+    Postgres ao mesmo tempo (TransactionTestCase + threads, só roda contra
+    PostgreSQL real). Aqui cobrimos o que é determinístico em SQLite: o
+    segundo pedido de reivindicação da MESMA linha, sem que a primeira tenha
+    confirmado ou liberado, não pode ganhar.
+    """
+
+    def test_segunda_reivindicacao_da_mesma_linha_nao_ganha_sem_liberacao(self):
+        from apps.scrapers.alertas import _reivindicar
+
+        incidente = _incidente()
+        self.assertTrue(_reivindicar(incidente))
+        # Ninguém confirmou nem liberou ainda — é exatamente a janela entre
+        # dois processos que reivindicam o mesmo evento ao mesmo tempo.
+        self.assertFalse(_reivindicar(incidente))
+
+    def test_apos_liberar_a_proxima_reivindicacao_ganha(self):
+        from apps.scrapers.alertas import _liberar_tentativa, _reivindicar
+
+        incidente = _incidente()
+        self.assertTrue(_reivindicar(incidente))
+        _liberar_tentativa(incidente)
+        self.assertTrue(_reivindicar(incidente))
+
+    def test_reivindicacao_orfa_expira_pelo_teto_de_tentativa(self):
+        """Processo morreu entre reivindicar e entregar: não pode calar pra sempre."""
+        from apps.scrapers.alertas import _TENTATIVA_TTL_MIN, _reivindicar
+
+        incidente = _incidente()
+        self.assertTrue(_reivindicar(incidente))
+        IncidenteSaude.objects.filter(pk=incidente.pk).update(
+            alerta_tentado_em=timezone.now() - timedelta(minutes=_TENTATIVA_TTL_MIN + 1),
+        )
+        self.assertTrue(_reivindicar(incidente))
+
+    def test_sem_canal_configurado_nao_segura_a_reivindicacao(self):
+        """Sem destino, não houve tentativa real — a janela não pode ficar presa."""
+        with override_settings(ALERTA_TELEGRAM_CHAT_ID="", ALERTA_EMAILS=""):
+            incidente = _incidente()
+            self.assertFalse(notificar_incidente(incidente, criado=True))
+            self.assertIsNone(
+                IncidenteSaude.objects.get(pk=incidente.pk).alerta_tentado_em,
+            )
+
+
 @override_settings(ALERTA_TELEGRAM_CHAT_ID="123", TELEGRAM_BOT_TOKEN="token",
                    ALERTA_EMAILS="", ALERTA_SILENCIO_MIN=60)
 class TelegramTests(TestCase):
-    def setUp(self):
-        cache.clear()
-
     def test_usa_telegram_quando_configurado(self):
         with patch("apps.scrapers.alertas._enviar_telegram",
                    return_value=True) as envio:
@@ -125,9 +179,6 @@ class TelegramTests(TestCase):
 class ProjecaoDispararAlertaTests(TestCase):
     """O gancho está no lugar certo: projetar um evento de erro alerta."""
 
-    def setUp(self):
-        cache.clear()
-
     @override_settings(ALERTA_EMAILS="operacao@example.com",
                        ALERTA_TELEGRAM_CHAT_ID="",
                        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
@@ -135,6 +186,122 @@ class ProjecaoDispararAlertaTests(TestCase):
         from apps.scrapers.eventos import log_event
 
         mail.outbox.clear()
-        log_event("publicacao", "tick_erro", "Ciclo de envio falhou.", level="error")
+        # processar_evento agora dispara o alerta via transaction.on_commit —
+        # necessário porque reconciliar_pendentes roda a projeção dentro de
+        # transaction.atomic() por lote, e a reivindicação (UPDATE condicional
+        # em IncidenteSaude) não pode segurar o lock de linha pelo lote
+        # inteiro. Django's TestCase nunca comita de verdade, então o hook só
+        # dispara dentro deste contexto.
+        with self.captureOnCommitCallbacks(execute=True):
+            log_event("publicacao", "tick_erro", "Ciclo de envio falhou.", level="error")
         self.assertTrue(IncidenteSaude.objects.filter(status="aberto").exists())
         self.assertEqual(len(mail.outbox), 1)
+
+
+class AlertasAcionaveisDoFunilTests(TestCase):
+    """SLA acusa trabalho parado, não inventário retido por desenho."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from django.contrib.auth import get_user_model
+        from apps.accounts.models import (
+            ensure_personal_organization, organization_for_user,
+        )
+        from apps.scrapers.models import FonteIngestao
+
+        cls.user = get_user_model().objects.create_user("alerta-funil", password="x")
+        ensure_personal_organization(cls.user)
+        cls.org = organization_for_user(cls.user)
+        cls.fonte = FonteIngestao.objects.create(
+            slug="alerta-funil-fonte", marketplace="amazon",
+            nome="Fonte do alerta", status="ok",
+        )
+
+    def _projecao(self, *, stage="eligible", category="waiting",
+                  reason="preparation_pending", codigo="ALERTA",
+                  use_mode="code_notice"):
+        from datetime import timedelta
+        from apps.scrapers.models import CupomDisponibilidade, CupomNormalizado
+
+        cupom = CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id=f"ext-{codigo}", marketplace="amazon",
+            titulo=codigo, codigo=codigo, estado="ativo", redemption_mode="code",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 10},
+        )
+        antigo = timezone.now() - timedelta(hours=2)
+        CupomNormalizado.objects.filter(pk=cupom.pk).update(
+            primeira_observacao=antigo, ultima_observacao=timezone.now(),
+        )
+        projecao = CupomDisponibilidade.objects.create(
+            organization=self.org, usuario=self.user, cupom=cupom,
+            channel="whatsapp", use_mode=use_mode, stage=stage,
+            category=category, reason_code=reason,
+        )
+        CupomDisponibilidade.objects.filter(pk=projecao.pk).update(updated_at=antigo)
+        return cupom
+
+    def test_descartado_nao_e_codigo_travado(self):
+        from apps.scrapers.maintenance import diagnosticar_alertas_pipeline_cupons
+
+        self._projecao(stage="discarded", category="invalid",
+                       reason="invalid_coupon_code")
+        contas = diagnosticar_alertas_pipeline_cupons()
+        self.assertEqual(contas["projection_stale"], 0)
+        self.assertEqual(contas["code_not_ready_20m"], 0)
+
+    def test_espera_por_usuario_ou_corroboração_nao_e_fila_travada(self):
+        from apps.scrapers.maintenance import diagnosticar_alertas_pipeline_cupons
+
+        self._projecao(category="no_session", reason="ml_session_missing",
+                       codigo="SESSAO")
+        self._projecao(category="no_link", reason="amazon_tag_missing",
+                       codigo="TAGAMAZON")
+        self._projecao(stage="collected", reason="community_uncorroborated",
+                       codigo="COMUNIDADE")
+        contas = diagnosticar_alertas_pipeline_cupons()
+        self.assertEqual(contas["projection_stale"], 0)
+        self.assertEqual(contas["code_not_ready_20m"], 0)
+
+    def test_trabalho_interno_antigo_continua_alertando(self):
+        from apps.scrapers.maintenance import diagnosticar_alertas_pipeline_cupons
+
+        self._projecao()
+        contas = diagnosticar_alertas_pipeline_cupons()
+        self.assertEqual(contas["projection_stale"], 1)
+        self.assertEqual(contas["code_not_ready_20m"], 1)
+
+    def test_browser_conta_apenas_preparo_pendente_e_fresco(self):
+        from datetime import timedelta
+        from apps.scrapers.maintenance import diagnosticar_alertas_pipeline_cupons
+        from apps.scrapers.models import CupomPreparacao
+
+        cupom_pendente = self._projecao(
+            codigo="BROWSER1", use_mode="product_activation")
+        cupom_resolvido = self._projecao(codigo="BROWSER2")
+        cupom_codigo_pronto = self._projecao(
+            codigo="BROWSER3", stage="ready")
+        cupom_sem_sessao = self._projecao(
+            codigo="BROWSER4", use_mode="product_activation",
+            category="no_session", reason="ml_session_missing")
+        antigo = timezone.now() - timedelta(hours=2)
+        CupomPreparacao.objects.create(
+            cupom=cupom_pendente, status="pendente",
+            reason_code="capacity_deferred", verificado_em=antigo,
+        )
+        CupomPreparacao.objects.create(
+            cupom=cupom_resolvido, status="pronto",
+            reason_code="capacity_deferred", verificado_em=antigo,
+        )
+        # Estes dois preparos continuam pendentes no banco, mas não bloqueiam
+        # trabalho interno: o aviso de código já está pronto e a ativação depende
+        # de autenticação humana da conta.
+        CupomPreparacao.objects.create(
+            cupom=cupom_codigo_pronto, status="pendente",
+            reason_code="capacity_deferred", verificado_em=antigo,
+        )
+        CupomPreparacao.objects.create(
+            cupom=cupom_sem_sessao, status="pendente",
+            reason_code="capacity_deferred", verificado_em=antigo,
+        )
+        contas = diagnosticar_alertas_pipeline_cupons()
+        self.assertEqual(contas["browser_wait_over_60m"], 1)

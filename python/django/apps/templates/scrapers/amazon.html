@@ -67,6 +67,17 @@
     </div>
     <div class="row-item">
       <div class="row-main">
+        <strong style="font-size:13.5px;">Validação de cupons</strong>
+        <div class="muted" style="font-size:12.5px;">Sessão de compras usada apenas para aplicar e remover códigos em carrinho isolado. Nenhum pedido é feito.</div>
+      </div>
+      <div class="row-side">
+        {% if amazon_shop_conectado %}<span class="badge badge-green"><span class="dot"></span>Conectada</span>
+        {% else %}<span class="badge badge-red"><span class="dot"></span>Não conectada</span>{% endif %}
+        <a class="btn-link btn-sm" href="{% url 'scraper-amazon-shop-conexao' %}">{% if amazon_shop_conectado %}Reconectar{% else %}Conectar{% endif %}</a>
+      </div>
+    </div>
+    <div class="row-item">
+      <div class="row-main">
         <strong style="font-size:13.5px;">Portal de relatórios</strong>
         <div class="muted" style="font-size:12.5px;">Sessão do Amazon Associados usada para importar comissões.</div>
       </div>

@@ -502,6 +502,7 @@ class MembershipRoleTests(TestCase):
 class RLSPolicyTests(SimpleTestCase):
     def test_session_tables_are_protected_and_force_rls_is_emitted(self):
         self.assertIn("accounts_mercadolivresession", STRICT_TENANT_TABLES)
+        self.assertIn("accounts_browsersession", STRICT_TENANT_TABLES)
         self.assertIn("accounts_whatsappconnection", STRICT_TENANT_TABLES)
         self.assertIn("accounts_perfil", STRICT_TENANT_TABLES)
         statements = policy_statements(
@@ -518,6 +519,23 @@ class RLSPolicyTests(SimpleTestCase):
         self.assertIn(
             'ALTER TABLE "accounts_mercadolivresession" FORCE ROW LEVEL SECURITY',
             statements,
+        )
+
+    def test_signature_is_checked_once_per_query_without_weakening_hmac(self):
+        strict = " ".join(policy_statements(
+            "accounts_mercadolivresession", mixed=False,
+        ))
+        mixed = " ".join(policy_statements(
+            "scrapers_produto", mixed=True,
+        ))
+
+        # A subconsulta não correlacionada vira InitPlan no PostgreSQL. Sem ela,
+        # context_valid consultava o segredo e calculava HMAC uma vez por linha.
+        self.assertIn("SELECT tenant_security.context_valid('system'", strict)
+        self.assertIn("SELECT tenant_security.context_valid('organization'", strict)
+        self.assertIn("organization_id IS NULL OR", mixed)
+        self.assertNotIn(
+            "AND tenant_security.context_valid('organization'", strict,
         )
 
     def test_perfil_pessoal_continua_gravavel_pelo_proprio_actor_em_org_compartilhada(self):
@@ -645,6 +663,28 @@ class PonteORMForaDoLoopTests(TransactionTestCase):
         # fechado e o dado capturado perdido.
         with self.assertRaises(ValueError):
             executar_no_tenant(lambda: None)
+
+    def test_tenant_suspenso_bloqueia_orm_direto_antes_da_rls(self):
+        from apps.accounts.tenant import TenantSuspensoORMError, tenant_suspenso
+
+        with tenant_suspenso(self.organization.pk, actor_id=self.user.pk):
+            with self.assertRaisesRegex(TenantSuspensoORMError, "executar_no_tenant"):
+                Produto.objects.filter(owner=self.user).exists()
+
+    def test_tenant_suspenso_permite_orm_pela_ponte(self):
+        from apps.accounts.tenant import tenant_suspenso
+
+        with tenant_suspenso(self.organization.pk, actor_id=self.user.pk):
+            produto = executar_no_tenant(
+                Produto.objects.create,
+                owner=self.user,
+                nome="Gravado sob tenant suspenso",
+                preco_sem_desconto=100,
+                preco_com_cupom=80,
+                marketplace="mercadolivre",
+                origem="oferta",
+            )
+        self.assertEqual(produto.organization_id, self.organization.pk)
 
 
 class EscopoAninhadoRestauraContextoTests(TestCase):

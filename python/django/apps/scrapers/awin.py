@@ -329,6 +329,12 @@ def sincronizar_feeds_produtos(integracao, max_programas=3, max_produtos=5000):
     site-wide (coupon_products.py).
     """
     from apps.scrapers.models import CupomNormalizado, Produto, ProgramaAfiliado
+    from apps.scrapers.sources.persistence import LOJAS_PERMITIDAS
+
+    # A porta se fecha antes de gastar rede: sem loja permitida, nem baixa o feed.
+    if "awin" not in LOJAS_PERMITIDAS:
+        logger.info("Feed Awin ignorado: loja fora do programa de afiliados.")
+        return
 
     programa_ids = list(CupomNormalizado.objects.filter(
         owner=integracao.owner, integracao=integracao, estado="ativo"
@@ -426,7 +432,7 @@ def sincronizar_integracao(integracao, *, forcar_programas=False):
     """Sincroniza uma conta isoladamente, preservando dados em falha externa."""
     from django.core.cache import cache
     from apps.scrapers.models import CupomNormalizado, FonteIngestao
-    from apps.scrapers.sources.persistence import persist_items
+    from apps.scrapers.sources.persistence import LOJAS_PERMITIDAS, persist_items
 
     lock = f"awin-sync:{integracao.pk}"
     if not cache.add(lock, "1", timeout=14 * 60):
@@ -440,7 +446,11 @@ def sincronizar_integracao(integracao, *, forcar_programas=False):
             sincronizar_programas(integracao)
             integracao.programas_sincronizados_em = now
         items = coletar_ofertas(integracao)
-        persist_items(items, owner=integracao.owner, integration=integracao)
+        # O que vale é o que ENTROU, não o que foi coletado: a persistência
+        # recusa loja fora do programa de afiliados, e reportar o número da
+        # coleta faria o painel dizer que sincronizou cupons que não existem.
+        gravados = persist_items(
+            items, owner=integracao.owner, integration=integracao)
         try:
             sincronizar_feeds_produtos(integracao)
         except Exception as feed_error:
@@ -493,7 +503,7 @@ def sincronizar_integracao(integracao, *, forcar_programas=False):
             "status", "ultimo_sucesso", "ultima_tentativa", "proxima_sincronizacao",
             "programas_sincronizados_em", "erro_publico", "falhas_consecutivas",
         ])
-        return {"status": "ok", "coupons": len(items)}
+        return {"status": "ok", "coupons": int((gravados or {}).get("coupons", 0))}
     except AwinError as exc:
         integracao.falhas_consecutivas += 1
         integracao.erro_publico = exc.public_message[:255]

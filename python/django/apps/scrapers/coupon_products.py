@@ -18,7 +18,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html.parser import HTMLParser
 from urllib.parse import urlsplit, urlunsplit
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -28,6 +28,7 @@ from apps.scrapers.models import (
 from apps.scrapers.carga import (
     BrowserResourceUnavailable, ml_site_browser_resource,
 )
+from apps.scrapers.identidade_produto import link_canonico
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +54,9 @@ MAX_CANDIDATOS = 36
 PREPARO_LOTE_POR_CICLO = 12
 # Teto da varredura por GET. Dimensionado pela demanda real: ~2.400 cupons ativos
 # com janela de preparo de 3h pedem ~800/h, e o ciclo de cupons roda a cada 15 min.
-# Um GET de container custa ~1s e não disputa o Chromium.
-PREPARO_LOTE_HTTP_POR_CICLO = 200
+# 400/ciclo ≈ 1600/h de catch-up. Um GET de container custa ~1s e não disputa o
+# Chromium. O lote Playwright continua em PREPARO_LOTE_POR_CICLO (12).
+PREPARO_LOTE_HTTP_POR_CICLO = 400
 _CENT = Decimal("0.01")
 
 # Mensagem estável do preparo bloqueado por sessão. É ela que a projeção lê para
@@ -279,7 +281,7 @@ def _usuario_do_preparo(cupom, usuario):
     public_amazon_inventory = (
         marketplace == "amazon"
         and getattr(getattr(cupom, "fonte", None), "slug", "")
-        == "amazon-public-coupons"
+        in {"amazon-public-coupons", "amazon-public-web"}
     )
     if ((marketplace == "mercadolivre" or public_amazon_inventory)
             and getattr(cupom, "owner_id", None) is None
@@ -566,7 +568,7 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
     def _tentar_http(credencial):
         """(linhas, barrado, falha_transporte, inexistente)."""
         try:
-            response = _ml_http_session(credencial).get(link, timeout=12)
+            response = _ml_http_session(credencial).get(link, timeout=8)
             if parede_de_login(response):
                 return None, True, False, False
             if response.status_code in (404, 410):
@@ -658,7 +660,11 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
                 resultado = listar_itens_por_cupom(payload, page, max_paginas=2)
     total = 0
     for row in (resultado or {}).get("produtos_aplicaveis", []):
-        link_produto = str(row.get("link_produto") or "")[:1000]
+        # Canonicaliza ANTES do lookup: a mesma chave que sources/persistence.py
+        # usa para o mesmo Produto. Sem isto, o cupom e a raspagem de ofertas
+        # gravavam o mesmo anúncio com URLs de tracking diferentes e criavam
+        # duas linhas — não existe constraint de unicidade que pegasse isso.
+        link_produto = link_canonico("mercadolivre", str(row.get("link_produto") or ""))
         imagem = str(row.get("imagem_url") or "")[:1000]
         if not link_produto or not imagem:
             continue
@@ -696,7 +702,24 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
             # produtos provados de um mesmo cupom estavam fora da janela.
             produto.save(update_fields=list(campos) + ["ultima_observacao"])
         else:
-            produto = Produto.objects.create(marketplace="mercadolivre", **defaults)
+            # `create()` puro perdia a corrida: entre o filter acima e esta
+            # linha, outra lane pode gravar o mesmo anúncio, e desde a chave
+            # natural de Produto isso vira IntegrityError — que subiria até o
+            # loop de cupons e pausaria o ciclo inteiro por backoff de banco.
+            # A colisão significa "alguém já criou": buscar e atualizar.
+            try:
+                with transaction.atomic():
+                    produto = Produto.objects.create(
+                        marketplace="mercadolivre", **defaults)
+            except IntegrityError:
+                produto = Produto.objects.filter(
+                    marketplace="mercadolivre", owner__isnull=True,
+                    link_produto=link_produto).first()
+                if produto is None:
+                    raise
+                for key, value in defaults.items():
+                    setattr(produto, key, value)
+                produto.save()
         ProdutoCupom.objects.update_or_create(
             produto=produto, cupom=cupom,
             defaults={"status": "confirmado", "verificado_em": timezone.now(),
@@ -712,7 +735,8 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
 
 def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
                    credenciais_alternativas=(), permitir_browser=True,
-                   source_run_id=""):
+                   source_run_id="", sessao_ml_disponivel=None,
+                   log_sessao_indisponivel=True):
     """Prepara e devolve ProdutoCupom confirmados, ou [] sem fallback inseguro.
 
     `credenciais_alternativas`: usuários cuja sessão do ML pode ler a listagem
@@ -765,6 +789,12 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
         coleta_ml = None
         if (not candidatos and permitir_rede
                 and str(cupom.marketplace).lower() == "mercadolivre"):
+            # O lote já verificou todas as organizações uma única vez. Sem esta
+            # pista, cada um dos até 400 cupons repetia consultas de sessão e
+            # tentava a mesma porta fechada. Nada foi observado, portanto o
+            # veredito continua sendo retomável e vínculos anteriores são mantidos.
+            if sessao_ml_disponivel is False:
+                raise SessaoMLIndisponivelError(ERRO_SESSAO_ML)
             # No catálogo compartilhado `contexto` é None (sessão de sistema).
             # `usuario` é só quem tornou este cupom elegível no lote — pode ser
             # justamente o dono da sessão morta, então ele entra na fila junto com
@@ -856,10 +886,11 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
         # Nenhuma observação foi feita: NÃO toque nos ProdutoCupom já confirmados e
         # não grave "vazio" — este cupom continua tão bom quanto era. Só registra
         # por que ninguém conseguiu olhar, com espera curta.
-        logger.warning(
-            "Preparo do cupom %s adiado: o Mercado Livre exigiu sessão para abrir "
-            "a listagem.", cupom.pk,
-        )
+        if log_sessao_indisponivel:
+            logger.warning(
+                "Preparo do cupom %s adiado: o Mercado Livre exigiu sessão para "
+                "abrir a listagem.", cupom.pk,
+            )
         _registrar_preparo(
             status="erro", reason_code="ml_session_required_for_preparation",
             detail=ERRO_SESSAO_ML, produtos_chave=chave,
@@ -1119,7 +1150,9 @@ def preparar_lote(
     # então não podem ser filtrados por `codigo__gt=""`.
     cupons = list(CupomNormalizado.objects.filter(estado="ativo").filter(
         Q(codigo__gt="")
-        | Q(fonte__slug__in=("amazon-public-coupons",) + _FONTES_ML_ATIVACAO)
+        | Q(fonte__slug__in=(
+            "amazon-public-coupons", "amazon-public-web",
+        ) + _FONTES_ML_ATIVACAO)
     ).filter(
         Q(validade__isnull=True) | Q(validade__gte=agora)
     ).order_by("-ultima_observacao"))
@@ -1180,6 +1213,11 @@ def preparar_lote(
         usuarios if usuarios is not None
         else get_user_model().objects.filter(is_active=True)
     )
+    from apps.accounts.ml_sessions import has_storage_state
+    # Uma consulta por usuário/organização, uma vez por ciclo. O caminho antigo
+    # repetia a leitura de credenciais em cada cupom e gerava centenas de warnings
+    # idênticos quando nenhuma conta estava conectada.
+    ml_session_available = any(has_storage_state(user) for user in usuarios)
     from apps.accounts.models import organization_for_user
     usuarios_por_organizacao = defaultdict(list)
     for candidato in usuarios:
@@ -1260,6 +1298,12 @@ def preparar_lote(
             credenciais_alternativas=credenciais,
             permitir_browser=permitir_browser,
             source_run_id=latest_run_by_source.get(cupom.fonte_id, ""),
+            sessao_ml_disponivel=(
+                ml_session_available
+                if str(cupom.marketplace or "").lower() == "mercadolivre"
+                else None
+            ),
+            log_sessao_indisponivel=False,
         ):
             prontos += 1
             por_fonte[fonte]["prontos"] += 1
@@ -1286,16 +1330,34 @@ def preparar_lote(
 
     # Passo caro, com o teto de sempre.
     com_browser = 0
+    cedeu_browser = False
     while fila_do_browser and com_browser < limite:
+        if com_browser:
+            from apps.scrapers.resource_control import interesse_pendente
+            if interesse_pendente(
+                "django_chromium", exceto="coupon_products",
+            ):
+                cedeu_browser = True
+                break
         cupom, usuario = fila_do_browser.popleft()
         com_browser += 1
         _passar(cupom, usuario, permitir_browser=True)
     adiados = len(fila_do_browser)
 
+    if not ml_session_available and any(
+        str(cupom.marketplace or "").lower() == "mercadolivre"
+        for cupom in cupons
+    ):
+        logger.info(
+            "Preparo ML: nenhuma sessão utilizável; cupons sem associação local "
+            "foram preservados e aguardam reconexão."
+        )
+
     resultado = {
         "processados": feitos,
         "prontos": prontos,
         "adiados_sem_browser": adiados,
+        "cedeu_browser": cedeu_browser,
     }
     if detalhado:
         resultado["por_fonte"] = dict(por_fonte)

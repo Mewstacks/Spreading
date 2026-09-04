@@ -90,6 +90,14 @@ def _normalizar_link_produto(link: str) -> str:
     ``Produto`` só no fim de uma busca longa. O Link Builder já conhece todas as
     formas de extrair o item MLB; reutilizamos a mesma regra e mantemos um fallback
     sem query/fragmento para páginas de catálogo não afiliáveis.
+
+    Exceção que existe por medição, não por teoria: quando a URL é de tracking
+    (``click1``/``mclics``) e o item MLB **não** pode ser extraído, a identidade do
+    produto vive inteira dentro do parâmetro opaco ``?a=``. Tirar a query ali não
+    normaliza: apaga a identidade e faz produtos DIFERENTES colidirem na mesma
+    chave. Medido em produção em 02/09/2026: 2.522 anúncios distintos colapsavam
+    em ``.../mclics/clicks/external/MLB/count``. Nesse caso preservamos a URL
+    inteira — chave feia, mas 1:1 com o anúncio.
     """
     from urllib.parse import urlsplit, urlunsplit
     from apps.scrapers.scraper_mercadolivre.link import _montar_url_isca
@@ -98,6 +106,9 @@ def _normalizar_link_produto(link: str) -> str:
     canonico = _montar_url_isca(bruto, "")
     if canonico:
         return canonico[:1000]
+    eh_tracking = "click1.mercadolivre" in bruto or "/mclics/" in bruto
+    if eh_tracking:
+        return bruto[:1000]
     try:
         parsed = urlsplit(bruto)
         limpo = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
@@ -611,6 +622,7 @@ def mapear_ofertas(max_paginas=40, substituir=True, usuario=None):
     with coordinated_ml_browser(
         usuario=usuario, authenticated=state is not None,
         owner_kind="ml_offers",
+        wait_seconds=45 if substituir else 0,
     ), iniciar_browser(storage_state=state, headless=True) as (page, context):
         for n in range(pagina_inicial, max_paginas + 1):
             # Alguém está esperando o navegador AGORA — uma pessoa logando ou uma

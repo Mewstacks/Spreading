@@ -141,7 +141,7 @@ def _sessao_wa(user) -> str:
 
 # ─────────────────────────── Mercado Livre ───────────────────────────
 
-def estado_ml(user=None, usar_cache: bool = True) -> Estado:
+def estado_ml(user=None, usar_cache: bool = True, *, permitir_sonda: bool = True) -> Estado:
     """Estado do ML: existe sessão salva E o ML ainda a aceita?
 
     Três camadas, da mais barata para a mais cara:
@@ -187,6 +187,12 @@ def estado_ml(user=None, usar_cache: bool = True) -> Estado:
         and (agora - sondado_em).total_seconds() < _TTL_ML_S
     )
     if usar_cache and fresco:
+        return _cachear(chave, _estado_do_registro(registro, "banco", agora))
+
+    # Leitores de projeção/ranking precisam do último veredito compartilhado,
+    # não podem transformar uma reconciliação de milhares de itens numa sonda
+    # HTTP. O worker de conexão continua usando o default e renova o snapshot.
+    if not permitir_sonda:
         return _cachear(chave, _estado_do_registro(registro, "banco", agora))
 
     return _cachear(chave, _sondar_e_registrar(user, organization, agora))

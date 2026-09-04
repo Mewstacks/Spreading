@@ -547,6 +547,7 @@ def amazon_painel(request):
         return redirect("scraper-amazon")
 
     from apps.scrapers.conexoes import estado_amazon_relatorios
+    from apps.scrapers.report_sessions import has_report_session
     sync = RelatorioSync.objects.filter(
         usuario=request.user, marketplace="amazon").first()
     fontes = FonteIngestao.objects.filter(
@@ -558,6 +559,7 @@ def amazon_painel(request):
         # como informação. Não pode voltar a virar requisito de conexão.
         "amazon_conectado": bool(perfil and perfil.amazon_conectado()),
         "amazon_creators_ativa": bool(perfil and perfil.amazon_creators_ativa()),
+        "amazon_shop_conectado": has_report_session(request.user, "amazon_shop"),
         "est_relatorios": estado_amazon_relatorios(request.user),
         "sync": sync,
         "fontes": fontes,
@@ -585,6 +587,7 @@ def configurar_conta(request):
         return redirect("scraper-conta")
 
     from apps.scrapers.conexoes import estado_amazon_relatorios, estado_ml_relatorios
+    from apps.scrapers.report_sessions import has_report_session
     awin_integracao = IntegracaoAfiliado.objects.filter(
         owner=request.user, provedor="awin").first()
     shopee_integracao = IntegracaoAfiliado.objects.filter(
@@ -592,6 +595,7 @@ def configurar_conta(request):
     return render(request, "scrapers/conta.html", {
         "shopee_enabled": getattr(settings, "SHOPEE_INTEGRATION_ENABLED", False),
         "shopee_integracao": shopee_integracao,
+        "shopee_shop_conectado": has_report_session(request.user, "shopee_shop"),
         "perfil": perfil,
         "tem_secret": bool(perfil and perfil.amazon_credential_secret),
         "ml_sessao_ok": _tem_sessao_ml(request.user),
@@ -839,6 +843,8 @@ def _url_manual_valida(marketplace, url):
         return host == "mercadolivre.com.br" or host.endswith(".mercadolivre.com.br")
     if marketplace == "amazon":
         return host == "amazon.com.br" or host.endswith(".amazon.com.br")
+    if marketplace == "shopee":
+        return host == "shopee.com.br" or host.endswith(".shopee.com.br")
     return marketplace == "awin"
 
 
@@ -858,7 +864,7 @@ def cupom_manual_salvar(request, cupom_id=None):
         if not coupon:
             raise PermissionDenied("Cupom não pertence a esta conta.")
     marketplace = (request.POST.get("marketplace") or "").strip().lower()
-    if marketplace not in {"mercadolivre", "amazon", "awin"}:
+    if marketplace not in {"mercadolivre", "amazon", "shopee", "awin"}:
         messages.error(request, "Escolha uma loja conectada.")
         return redirect("scraper-top")
     original_url = (request.POST.get("url") or "").strip()
@@ -1141,6 +1147,166 @@ def amazon_conexao_input(request):
 
 
 # --- Conexão do portal de RELATÓRIOS do ML (afiliados), separada do site principal ---
+
+def amazon_shop_conexao_painel(request):
+    """Sessão da loja Amazon usada somente para validar cupom sem comprar."""
+    from apps.scrapers import amazon_conexao
+    return render(request, "scrapers/ml_conexao.html", {
+        "status": amazon_conexao.status(request.user.id, shopper=True),
+        "marketplace_nome": "Amazon Compras",
+        "conexao_prefix": "/scrapers/amazon-shop",
+        "checkout_validation": True, "marketplace_ml": False,
+    })
+
+
+@require_GET
+def amazon_shop_conexao_status_json(request):
+    from apps.scrapers import amazon_conexao
+    return JsonResponse(amazon_conexao.status(request.user.id, shopper=True))
+
+
+@require_POST
+def amazon_shop_conexao_start(request):
+    from apps.scrapers import amazon_conexao
+    import json
+    if len(request.body or b"") > 4096:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        client = json.loads((request.body or b"{}").decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(amazon_conexao.criar_sessao(
+        request.user, client, shopper=True,
+    ))
+
+
+@require_POST
+def amazon_shop_conexao_salvar(request):
+    from apps.scrapers import amazon_conexao
+    amazon_conexao.salvar_agora(request.user.id, shopper=True)
+    return JsonResponse(amazon_conexao.status(request.user.id, shopper=True))
+
+
+@require_POST
+def amazon_shop_conexao_cancelar(request):
+    from apps.scrapers import amazon_conexao
+    amazon_conexao.cancelar(request.user.id, shopper=True)
+    return JsonResponse({"ok": True})
+
+
+@require_POST
+def amazon_shop_conexao_desconectar(request):
+    from apps.scrapers import amazon_conexao
+    from apps.scrapers.report_sessions import delete_report_state
+    amazon_conexao.cancelar(request.user.id, shopper=True)
+    delete_report_state(request.user, "amazon_shop")
+    return JsonResponse({"ok": True})
+
+
+@throttle_sse(6)
+@require_GET
+def amazon_shop_conexao_frames(request):
+    from apps.scrapers import amazon_conexao
+    return _resposta_login_sse(amazon_conexao.frames(
+        request.user.id, request.GET.get("session_id"), shopper=True,
+    ))
+
+
+@require_POST
+def amazon_shop_conexao_input(request):
+    import json
+    from apps.scrapers import amazon_conexao
+    if len(request.body or b"") > 65536:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        payload = json.loads((request.body or b"").decode() or "{}")
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(amazon_conexao.enfileirar_input(
+        request.user.id, payload.get("session_id"), payload.get("events"),
+        shopper=True,
+    ))
+
+
+def shopee_shop_conexao_painel(request):
+    """Sessão da Shopee usada exclusivamente para validar cupom sem comprar."""
+    from apps.scrapers import amazon_conexao
+    return render(request, "scrapers/ml_conexao.html", {
+        "status": amazon_conexao.status(request.user.id, shopper="shopee"),
+        "marketplace_nome": "Shopee Compras",
+        "conexao_prefix": "/scrapers/shopee-shop",
+        "checkout_validation": True, "marketplace_ml": False,
+    })
+
+
+@require_GET
+def shopee_shop_conexao_status_json(request):
+    from apps.scrapers import amazon_conexao
+    return JsonResponse(amazon_conexao.status(request.user.id, shopper="shopee"))
+
+
+@require_POST
+def shopee_shop_conexao_start(request):
+    from apps.scrapers import amazon_conexao
+    import json
+    if len(request.body or b"") > 4096:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        client = json.loads((request.body or b"{}").decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(amazon_conexao.criar_sessao(
+        request.user, client, shopper="shopee",
+    ))
+
+
+@require_POST
+def shopee_shop_conexao_salvar(request):
+    from apps.scrapers import amazon_conexao
+    amazon_conexao.salvar_agora(request.user.id, shopper="shopee")
+    return JsonResponse(amazon_conexao.status(request.user.id, shopper="shopee"))
+
+
+@require_POST
+def shopee_shop_conexao_cancelar(request):
+    from apps.scrapers import amazon_conexao
+    amazon_conexao.cancelar(request.user.id, shopper="shopee")
+    return JsonResponse({"ok": True})
+
+
+@require_POST
+def shopee_shop_conexao_desconectar(request):
+    from apps.scrapers import amazon_conexao
+    from apps.scrapers.report_sessions import delete_report_state
+    amazon_conexao.cancelar(request.user.id, shopper="shopee")
+    delete_report_state(request.user, "shopee_shop")
+    return JsonResponse({"ok": True})
+
+
+@throttle_sse(6)
+@require_GET
+def shopee_shop_conexao_frames(request):
+    from apps.scrapers import amazon_conexao
+    return _resposta_login_sse(amazon_conexao.frames(
+        request.user.id, request.GET.get("session_id"), shopper="shopee",
+    ))
+
+
+@require_POST
+def shopee_shop_conexao_input(request):
+    import json
+    from apps.scrapers import amazon_conexao
+    if len(request.body or b"") > 65536:
+        return JsonResponse({"ok": False, "erro": "payload_muito_grande"}, status=413)
+    try:
+        payload = json.loads((request.body or b"").decode() or "{}")
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "erro": "json_invalido"}, status=400)
+    return JsonResponse(amazon_conexao.enfileirar_input(
+        request.user.id, payload.get("session_id"), payload.get("events"),
+        shopper="shopee",
+    ))
+
 
 def ml_relatorio_conexao_painel(request):
     """Login interativo no portal de afiliados do ML, exclusivo para relatórios."""
@@ -1527,11 +1693,11 @@ def configuracoes(request):
             )
             marketplace_regra = (request.POST.get("marketplace") or "").strip()[:20]
             if (tipo_regra == ConfiguracaoEnvio.TIPO_AVISO_CUPONS
-                    and marketplace_regra not in {"mercadolivre", "amazon"}):
+                    and marketplace_regra not in {"mercadolivre", "amazon", "shopee"}):
                 messages.error(
                     request,
-                    "Escolha Mercado Livre ou Amazon para o aviso de cupons. "
-                    "Crie duas regras para avisar as duas lojas.",
+                    "Escolha Mercado Livre, Amazon ou Shopee para o aviso de cupons. "
+                    "Crie uma regra por loja para manter o envio previsível.",
                 )
                 return redirect("scraper-configuracoes")
             campos = dict(
@@ -1973,8 +2139,8 @@ def enviar_aviso_cupons_stream(request):
         if not grupo_id:
             print("[ERRO] Nenhum destino informado (grupo/chat).")
             return
-        if marketplace not in ("mercadolivre", "amazon"):
-            print("[ERRO] Escolha a loja do aviso (Mercado Livre ou Amazon).")
+        if marketplace not in ("mercadolivre", "amazon", "shopee"):
+            print("[ERRO] Escolha a loja do aviso (Mercado Livre, Amazon ou Shopee).")
             return
         # Objeto solto no lugar da regra salva: o núcleo só lê estes campos, e o
         # disparo manual não deve depender de existir uma ConfiguracaoEnvio.
@@ -2391,6 +2557,90 @@ def top_promocoes(request):
         cupons_lista.sort(key=lambda c: score_cupom(c, usuario=request.user), reverse=True)
         cupons_page = Paginator(cupons_lista, POR_PAGINA).get_page(pagina)
         cupons_catalogo = list(cupons_page)
+        if cupons_catalogo:
+            # A lista já contém apenas `ready`; agora explica POR QUE cada item
+            # merece confiança. Tudo é resolvido em lote para não reintroduzir o
+            # antigo N+1 que travava esta página com milhares de cupons.
+            from apps.scrapers.coupon_rules import (
+                corroboracoes_independentes_em_lote, cupom_de_comunidade,
+                fontes_independentes_em_lote,
+            )
+            from apps.scrapers.maintenance import COUPON_MAX_AGE_HOURS
+            from apps.scrapers.models import CupomFonteObservacao, CupomValidacao
+
+            ids_pagina = [cupom.pk for cupom in cupons_catalogo]
+            checkout_confirmado = set(CupomValidacao.objects.filter(
+                organization=organization, usuario=request.user,
+                cupom_id__in=ids_pagina, status="accepted", no_purchase=True,
+                discount_amount__gt=0,
+            ).values_list("cupom_id", flat=True))
+            fontes_independentes = fontes_independentes_em_lote(cupons_catalogo)
+            corroboracoes = corroboracoes_independentes_em_lote(
+                cupons_catalogo, fontes=fontes_independentes,
+            )
+            observadas_desde = timezone.now() - timezone.timedelta(
+                hours=COUPON_MAX_AGE_HOURS,
+            )
+            fontes_por_cupom = {
+                row["cupom_id"]: row["total"]
+                for row in CupomFonteObservacao.objects.filter(
+                    cupom_id__in=ids_pagina, outcome="accepted",
+                    observed_at__gte=observadas_desde,
+                ).values("cupom_id").annotate(
+                    total=Count("fonte_id", distinct=True),
+                )
+            }
+            fontes_diretas = {
+                "amazon-public-coupons", "amazon-public-web",
+                "ml-cupons-afiliados", "ml-lightning-coupons",
+                "ml-official-promotions", "shopee-campaigns",
+                "shopee-public-coupons", "licensed-affiliate-feed",
+            }
+            for cupom in cupons_catalogo:
+                evidencia = cupom.evidencia if isinstance(cupom.evidencia, dict) else {}
+                slug = str(cupom.fonte.slug or "")
+                chave = (
+                    str(cupom.marketplace or "").casefold(),
+                    str(cupom.codigo or "").strip().upper(),
+                )
+                cupom.evidencia_fontes = max(
+                    1, fontes_por_cupom.get(cupom.pk, 0),
+                    fontes_independentes.get(chave, 0),
+                )
+                if cupom.pk in checkout_confirmado:
+                    cupom.evidencia_rotulo = "Confirmado no carrinho"
+                    cupom.evidencia_detalhe = (
+                        "O desconto foi observado antes da compra; nenhuma compra foi concluída."
+                    )
+                    cupom.evidencia_css = "badge-green"
+                elif cupom_de_comunidade(cupom) and chave in corroboracoes:
+                    cupom.evidencia_rotulo = "Corroborado"
+                    cupom.evidencia_detalhe = (
+                        "O código e o desconto concordam em fontes independentes e recentes."
+                    )
+                    cupom.evidencia_css = "badge-green"
+                elif slug == "manual-private":
+                    cupom.evidencia_rotulo = "Privado"
+                    cupom.evidencia_detalhe = (
+                        "Cupom da sua organização, preparado com link verificado para envio."
+                    )
+                    cupom.evidencia_css = "badge-accent"
+                elif (
+                    slug in fontes_diretas
+                    or "official" in str(evidencia.get("association") or "").casefold()
+                    or "official" in str(evidencia.get("transport") or "").casefold()
+                ):
+                    cupom.evidencia_rotulo = "Observado na loja"
+                    cupom.evidencia_detalhe = (
+                        "A campanha e seu escopo foram observados em uma fonte direta da loja."
+                    )
+                    cupom.evidencia_css = "badge-green"
+                else:
+                    cupom.evidencia_rotulo = "Fonte estruturada"
+                    cupom.evidencia_detalhe = (
+                        "O cupom passou pelos gates de escopo, produto, preço e link de envio."
+                    )
+                    cupom.evidencia_css = "badge-muted"
     else:
         from apps.scrapers.ofertas import anotacao_preco_publicado
         qs = Produto.objects.filter(

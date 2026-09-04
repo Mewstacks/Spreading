@@ -520,6 +520,23 @@ class ValidacaoAmazonTests(SimpleTestCase):
         page.locator.return_value.count.return_value = 0
         self.assertTrue(_logado(page))
 
+    def test_shopee_so_aceita_perfil_autenticado_no_dominio_oficial(self):
+        from apps.scrapers.amazon_conexao import _logado
+
+        page = Mock()
+        page.locator.return_value.count.return_value = 0
+        page.url = "https://shopee.com.br/user/account/profile"
+        self.assertTrue(_logado(page, shopper="shopee"))
+
+        page.url = "https://shopee.com.br/buyer/login"
+        self.assertFalse(_logado(page, shopper="shopee"))
+
+        page.url = "https://shopee.com.br/verify/traffic"
+        self.assertFalse(_logado(page, shopper="shopee"))
+
+        page.url = "https://shopee.com.br.evil.test/user/account/profile"
+        self.assertFalse(_logado(page, shopper="shopee"))
+
 
 class PaginaDeErroDoMLTests(SimpleTestCase):
     """Sem detectar a página de erro do ML, o worker esperava um login já recusado
@@ -820,6 +837,26 @@ class ContratoHTTPLoginAmazonTests(TestCase):
         self.assertContains(response, "Já entrei")
         self.assertNotContains(response, "Abrir o Mercado Livre")
         self.assertNotContains(response, "Verificar conexão")
+
+    @patch("apps.scrapers.amazon_conexao.criar_sessao")
+    def test_shopee_usa_sessao_e_transporte_isolados(self, create):
+        create.return_value = {
+            "fase": "iniciando", "session_id": "shopee",
+            "viewport": {"width": 390, "height": 844},
+        }
+        payload = {"viewport": {"width": 390, "height": 844}}
+
+        response = self.client.post(
+            reverse("scraper-shopee-shop-start"),
+            data=json.dumps(payload), content_type="application/json",
+        )
+        panel = self.client.get(reverse("scraper-shopee-shop-conexao"))
+
+        self.assertEqual(response.status_code, 200)
+        create.assert_called_once_with(self.user, payload, shopper="shopee")
+        self.assertContains(panel, "Shopee Compras")
+        self.assertContains(panel, "Abrir a Shopee")
+        self.assertNotContains(panel, "Amazon Compras")
 
     @patch("apps.accounts.feature_flags.enabled_for_user", return_value=False)
     def test_flag_desligada_persiste_indisponivel(self, _flag):

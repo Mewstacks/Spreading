@@ -338,7 +338,9 @@ def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> li
     # Tanto ML quanto Amazon leem o relatório da SESSÃO DE RELATÓRIO cifrada
     # (report_sessions), não da sessão do site principal. Para o ML isso separa a
     # sessão do portal de afiliados (comissão) da sessão do Link Builder.
-    from apps.scrapers.report_sessions import load_report_state, registrar_veredito
+    from apps.scrapers.report_sessions import (
+        load_report_state, registrar_veredito, save_report_state,
+    )
     from apps.accounts.models import organization_for_user
     from apps.scrapers.carga import operacao_pesada
     storage_state = load_report_state(usuario, marketplace)
@@ -379,8 +381,15 @@ def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> li
                             exported[1], exported[0], marketplace, desde, ate,
                         ) if exported is not None else _extract_paginated_table_rows(
                             page, marketplace, desde, ate))
+                        # Portais renovam cookies/tokens durante uma navegação
+                        # autenticada. Descartar o storage_state novo fazia a sessão
+                        # envelhecer mesmo com sincronizações bem-sucedidas e obrigava
+                        # login manual antes do necessário. Capture antes de fechar o
+                        # Chromium e grave ainda sob o lease exclusivo da sessão.
+                        refreshed_state = context.storage_state()
                     finally:
                         browser.close()
+                save_report_state(usuario, marketplace, refreshed_state)
             # O sync é o ÚNICO fluxo que usa a sessão de relatórios de verdade, então
             # é o único que sabe se ela vale. A tela lê este veredito — antes ela só
             # checava se o arquivo existia, e por isso mostrava verde para sempre.

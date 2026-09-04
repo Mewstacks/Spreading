@@ -33,12 +33,24 @@ apps/accounts/rls.py). Por isso o que a mensagem usa é o objeto MUTADO EM MEMÓ
 a persistência é um bônus best-effort.
 """
 import logging
+import re
 import time
 
 from django.conf import settings
 from django.utils import timezone
 
 from apps.scrapers import precos
+
+# Quanto a medição do deal espera pelo Chromium antes de desistir. Precisa ser
+# maior que o intervalo entre as páginas de um lote longo (é aí que ele checa a
+# fila e cede), e menor que o tique de envio.
+PRECO_ESPERA_BROWSER_S = 60
+# Vida da varredura de ofertas. Curta de proposito: cobre os candidatos de UM
+# tique de envio, nao serve como preco guardado para o tique seguinte.
+PRECO_VARREDURA_TTL_S = 120
+# Silêncio depois de um bloqueio. O ML limita por volume; retentar a cada
+# tique transforma um limite temporário em bloqueio prolongado.
+PRECO_RECUO_BLOQUEIO_S = 600
 
 logger = logging.getLogger(__name__)
 
@@ -154,8 +166,122 @@ def _preco_ml(produto, url="", usuario=None):
     }
 
 
+_ID_NO_HREF = re.compile(r'href="[^"]*?/(?:p/)?(MLB-?[0-9]{6,})', re.I)
+_PRECO_ARIA = re.compile(
+    r'aria-label="(Antes:\s*)?([0-9]+) reais(?: com ([0-9]{1,2}) centavos)?"', re.I)
+
+
+def _valor(reais, centavos) -> float:
+    return float(reais) + (float(centavos or 0) / 100.0)
+
+
+def cards_de_ofertas(html: str) -> dict:
+    """{item_id: (preco, preco_de)} a partir do HTML da vitrine `/ofertas`.
+
+    Le do `aria-label` e nao das classes CSS: "Antes: 157 reais com 98 centavos"
+    e um contrato de acessibilidade, muito mais estavel que nome de classe, e ja
+    vem sem separador de milhar.
+    """
+    mapa = {}
+    for bloco in html.split("poly-card")[1:]:
+        achado = _ID_NO_HREF.search(bloco)
+        if not achado:
+            continue
+        item = achado.group(1).upper().replace("-", "")
+        atual = anterior = 0.0
+        for antes, reais, centavos in _PRECO_ARIA.findall(bloco[:4000]):
+            valor = _valor(reais, centavos)
+            if antes:
+                anterior = anterior or valor
+            elif not atual:
+                atual = valor
+        if atual > 0:
+            mapa[item] = (atual, anterior)
+    return mapa
+
+
+def varrer_ofertas_ml(paginas=None):
+    """{item_id: (preco, preco_de)} lido AGORA da vitrine `/ofertas`, por HTTP.
+
+    Medido em 03/09/2026 deste IP: a PDP, as APIs publicas e a busca respondem
+    muro de CAPTCHA — mas `/ofertas` responde 200 a um GET com os cookies da
+    sessao, com os cards renderizados no servidor. Sem Chromium: a varredura caiu
+    de 655 segundos (quatro paginas no navegador, disputando o unico slot da
+    maquina) para poucos segundos.
+
+    Uma varredura por tique, nao uma por candidato: dentro do mesmo envio varios
+    candidatos sao testados e todos devem ser conferidos contra a MESMA leitura.
+    O TTL curto existe para isso, nao para guardar preco entre tiques.
+    """
+    from django.core.cache import caches
+
+    from apps.scrapers.ml_auth import http_session, storage_state
+
+    paginas = max(1, int(
+        paginas or getattr(settings, "PRECO_JIT_PAGINAS_OFERTAS", 4)))
+    cache = caches["default"]
+    chave = f"ml-ofertas-jit:{paginas}"
+    guardado = cache.get(chave)
+    if guardado is not None:
+        return guardado
+
+    mapa = {}
+    try:
+        sessao = http_session(storage_state(None))
+        for numero in range(1, paginas + 1):
+            resposta = sessao.get(
+                f"https://www.mercadolivre.com.br/ofertas?page={numero}",
+                timeout=15, allow_redirects=False,
+            )
+            if resposta.status_code != 200:
+                # 302 para /captcha ou 403 do gateway. Insistir a cada tique é o
+                # que aprofunda o bloqueio: o ML limita por volume, e foi uma
+                # sequência de varreduras de teste que derrubou este caminho em
+                # 03/09/2026. Cala a boca por alguns minutos e devolve o que já
+                # tem — quem não estiver no mapa simplesmente não publica.
+                cache.set(chave, mapa, PRECO_RECUO_BLOQUEIO_S)
+                logger.info("vitrine de ofertas respondeu %s; recuando %ss",
+                            resposta.status_code, PRECO_RECUO_BLOQUEIO_S)
+                return mapa
+            mapa.update(cards_de_ofertas(resposta.text))
+    except Exception as exc:
+        logger.info("varredura de ofertas falhou: %s", str(exc)[:120])
+        return mapa
+    if mapa:
+        cache.set(chave, mapa, PRECO_VARREDURA_TTL_S)
+    logger.info("varredura de ofertas ML: %s itens em ate %s pagina(s)",
+                len(mapa), paginas)
+    return mapa
+
+
+def _preco_ml_navegador(produto, url="", usuario=None):
+    """Preco medido AGORA, conferido contra a varredura da vitrine.
+
+    Medido em 03/09/2026 deste IP: PDP, APIs publicas e a busca em
+    `lista.mercadolivre.com.br` respondem muro de CAPTCHA mesmo com navegador
+    logado. `/ofertas` responde — e a porta por onde a raspagem continua lendo, e
+    a unica que sobrou. Nenhum CAPTCHA e resolvido ou contornado.
+
+    Sem o item na varredura, devolve None: o envio fica transitorio e tenta o
+    proximo candidato, que sera conferido contra a MESMA leitura. Nunca cai no
+    preco do banco — aquele e a verificacao da ingestao, nao a do envio.
+    """
+    from apps.scrapers.scraper_mercadolivre.link import _extrair_item_id
+
+    alvo = _extrair_item_id(str(getattr(produto, "link_produto", "") or ""))
+    if not alvo:
+        return None
+    achado = varrer_ofertas_ml().get(alvo)
+    if not achado:
+        return None
+    preco, preco_de = achado
+    return {"preco": preco, "preco_de": preco_de, "fonte": "ml-ofertas-jit"}
+
+
 # Uma fonte por marketplace. Sem entrada aqui = não revalidável (segue com o banco).
 _FONTES = {"amazon": _preco_amazon, "mercadolivre": _preco_ml}
+# Segunda tentativa, cara, só para quem EXIGE medição (a camada Deal).
+_FONTES_EXIGENTES = {"mercadolivre": _preco_ml_navegador}
 
 
 def _desconto(preco_de, preco):
@@ -164,7 +290,8 @@ def _desconto(preco_de, preco):
     return (preco_de - preco) / preco_de * 100
 
 
-def revalidar(produto, usuario=None, configuracao=None, *, url="") -> dict:
+def revalidar(produto, usuario=None, configuracao=None, *, url="",
+              exigir_medicao=False) -> dict:
     """Confere o preço ao vivo e atualiza o produto. Ver política no topo.
 
     `url` é o link EFETIVAMENTE publicado; sem ela cai no `link_produto`.
@@ -201,6 +328,16 @@ def revalidar(produto, usuario=None, configuracao=None, *, url="") -> dict:
         return _resultado(True, atual, fonte="inconclusivo", motivo=str(exc)[:120])
 
     decorrido_ms = (time.monotonic() - inicio) * 1000
+    if vivo is None and exigir_medicao:
+        # Quem exige medição paga o preço dela. Sem esta passada, o bloqueio de IP
+        # do ML transforma "não consegui medir" em "publica com o preço velho".
+        cara = _FONTES_EXIGENTES.get(mkt)
+        if cara is not None:
+            try:
+                vivo = cara(produto, url=url, usuario=usuario)
+            except Exception as exc:
+                logger.info("preco_ao_vivo navegador falhou id=%s: %s",
+                            getattr(produto, "pk", ""), str(exc)[:120])
     if vivo is None:
         logger.info(
             "preco_ao_vivo %s id=%s fonte=inconclusivo ms=%.0f",

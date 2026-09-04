@@ -302,7 +302,7 @@
   <div class="head-main">
     <span class="eyebrow">Promoções</span>
     <h1><i data-lucide="flame"></i> Top Promoções</h1>
-    <p class="sub">As melhores ofertas do Mercado Livre e da Amazon. Filtre, compare e envie para seus grupos.</p>
+    <p class="sub">Ofertas e cupons de Mercado Livre, Amazon e Shopee. Filtre, compare e envie para seus grupos.</p>
   </div>
   <div class="head-actions">
     {% if tipo == 'cupom' %}
@@ -588,6 +588,7 @@ consultas agregadas que alimentam esta faixa.
     <div class="aviso-cupons-acoes">
       <button type="button" class="btn btn-ghost btn-sm" onclick="abrirEnvioAviso('mercadolivre', 'Mercado Livre')"><i data-lucide="megaphone"></i> Mercado Livre</button>
       <button type="button" class="btn btn-ghost btn-sm" onclick="abrirEnvioAviso('amazon', 'Amazon')"><i data-lucide="megaphone"></i> Amazon</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="abrirEnvioAviso('shopee', 'Shopee')"><i data-lucide="megaphone"></i> Shopee</button>
     </div>
   </div>
 
@@ -602,7 +603,7 @@ consultas agregadas que alimentam esta faixa.
     <form method="post" action="{% url 'scraper-cupom-manual' %}">{% csrf_token %}
       <div class="form-grid">
         <div><label>Loja</label><select name="marketplace" id="manual-marketplace" onchange="document.getElementById('manual-awin').style.display=this.value==='awin'?'block':'none'" required>
-          <option value="mercadolivre">Mercado Livre</option><option value="amazon">Amazon</option>
+          <option value="mercadolivre">Mercado Livre</option><option value="amazon">Amazon</option><option value="shopee">Shopee</option>
           {% if awin_programas %}<option value="awin">Awin</option>{% endif %}
         </select></div>
         <div id="manual-awin" style="display:none"><label>Anunciante Awin</label><select name="programa"><option value="">Selecione</option>{% for p in awin_programas %}<option value="{{ p.id }}">{{ p.nome }}</option>{% endfor %}</select></div>
@@ -628,7 +629,7 @@ consultas agregadas que alimentam esta faixa.
   <div class="table-flat"><table><thead><tr><th>Como usar</th><th class="cell-grow">Cupom</th><th>Loja</th><th>Validade</th><th class="col-actions">Ação</th></tr></thead><tbody>
   {% for c in cupons_catalogo %}<tr>
     <td data-label="Como usar" class="cell-code"><div class="td-val">{% if c.codigo_publico %}<span class="tech-tag" style="font-size:12px;color:var(--text);">{{ c.codigo_publico }}</span>{% else %}<span class="tech-tag">Ativar no link</span>{% endif %}</div></td>
-    <td data-label="Cupom"><div class="td-val"><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.3rem;">{% if c.relampago %}<span class="badge badge-yellow">Relâmpago</span>{% endif %}{% if c.restrito %}<span class="badge badge-muted">Restrito</span>{% endif %}{% if c.marketplace == 'awin' %}<span class="badge badge-accent">Awin</span>{% endif %}{% if c.fonte.slug == 'manual-private' %}<span class="badge badge-green">Privado</span>{% endif %}{% if not c.codigo_publico %}<span class="badge badge-muted">Ativação no link</span>{% endif %}{# A lista só recebe `ready` (ver views): o que está aqui pode ser enviado. #}<span class="badge badge-green">Pronto</span></div><div class="muted" style="font-size:11.5px;margin-top:.25rem;">{# `safe_detail` diz em que etapa da esteira o cupom parou: leitura de operação, não do usuário. #}{% if diagnostico and c.disponibilidade.safe_detail %}{{ c.disponibilidade.safe_detail }}{% elif c.restrito %}Confira as condições antes de publicar.{% else %}Confirme a aplicação no checkout.{% endif %}</div></div></td>
+    <td data-label="Cupom"><div class="td-val"><a class="link" href="{{ c.link }}" target="_blank" rel="noopener">{{ c.titulo }}</a><div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.3rem;">{% if c.relampago %}<span class="badge badge-yellow">Relâmpago</span>{% endif %}{% if c.restrito %}<span class="badge badge-muted">Restrito</span>{% endif %}{% if c.marketplace == 'awin' %}<span class="badge badge-accent">Awin</span>{% endif %}{% if not c.codigo_publico %}<span class="badge badge-muted">Ativação no link</span>{% endif %}<span class="badge {{ c.evidencia_css }}">{{ c.evidencia_rotulo }}</span>{% if c.evidencia_fontes > 1 %}<span class="tech-tag">{{ c.evidencia_fontes }} fontes</span>{% endif %}<span class="tech-tag">Atualizado há {{ c.ultima_observacao|timesince }}</span></div><div class="muted" style="font-size:11.5px;margin-top:.25rem;">{{ c.evidencia_detalhe }}{% if c.restrito %} Confira as condições antes de publicar.{% endif %}{% if diagnostico and c.disponibilidade.safe_detail %} · {{ c.disponibilidade.safe_detail }}{% endif %}</div></div></td>
     <td data-label="Loja"><div class="td-val">{% if c.anunciante_nome %}{{ c.anunciante_nome }}<div class="muted" style="font-size:11.5px;">{% if c.marketplace == 'mercadolivre' %}Mercado Livre{% else %}{{ c.marketplace|title }}{% endif %}</div>{% elif c.marketplace == 'mercadolivre' %}Mercado Livre{% else %}{{ c.marketplace|title }}{% endif %}</div></td>
     <td data-label="Validade"><div class="td-val tnum">{% if c.validade %}{{ c.validade|date:"d/m/Y H:i" }}{% else %}<span class="muted">Não informada</span>{% endif %}</div></td>
     <td data-label="Ação" class="col-actions"><div class="td-val row-actions" style="justify-content:flex-end;">

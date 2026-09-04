@@ -73,6 +73,7 @@ class VerificarTests(SimpleTestCase):
     def setUp(self):
         cache.clear()
         wa_supervisor._avisou_sem_token = False
+        wa_supervisor._ULTIMO_CORPO = {}
 
     def _rodar_falhas(self, n, reiniciar, listar):
         with patch.object(wa_supervisor, "_sonda_saudavel", return_value=False), \
@@ -174,3 +175,69 @@ class VerificarTests(SimpleTestCase):
         with patch.object(wa_supervisor, "_sonda_saudavel", return_value=False), \
              patch.object(wa_supervisor.fly_infra, "_listar_maquinas", listar):
             self.assertEqual(wa_supervisor.verificar(), "erro")
+
+
+@override_settings(**_SETTINGS)
+class SessaoTravadaTests(SimpleTestCase):
+    """O buraco que o vigia tinha: /health só dizia se o PROCESSO estava mudo.
+
+    Sessão em `expirado`, `falha_auth` ou `recuperacao_pausada` é um estado do
+    qual ela não sai sozinha — o worker responde 200 e não envia nada. Antes isso
+    só aparecia na tela de Saúde, que ninguém abre; foi assim que uma sessão
+    passou horas anunciando presença sem entregar mensagem. Restart não resolve
+    (a sessão volta no mesmo estado), então o gesto certo é abrir incidente, que
+    é o que aciona o canal de alerta.
+    """
+
+    def setUp(self):
+        cache.clear()
+        wa_supervisor._avisou_sem_token = False
+        wa_supervisor._ULTIMO_CORPO = {}
+
+    def _verificar_com_corpo(self, corpo):
+        def sonda():
+            wa_supervisor._ULTIMO_CORPO = corpo
+            return True
+
+        with patch.object(wa_supervisor, "_sonda_saudavel", side_effect=sonda),              patch.object(wa_supervisor.fly_infra, "reiniciar_maquina") as reiniciar,              patch.object(wa_supervisor, "log_event") as evento:
+            resultado = wa_supervisor.verificar()
+        return resultado, evento, reiniciar
+
+    def test_sessao_travada_abre_incidente_e_nao_reinicia(self):
+        resultado, evento, reiniciar = self._verificar_com_corpo(
+            {"sessions_total": 1, "sessions_ready": 0, "sessions_stuck": 1}
+        )
+        self.assertEqual(resultado, "ok")  # o processo está vivo; isso não muda
+        reiniciar.assert_not_called()      # restart devolveria a sessão no mesmo estado
+        self.assertEqual(evento.call_args[0][0], "whatsapp")
+        self.assertEqual(evento.call_args[0][1], "sessao_travada")
+        self.assertEqual(evento.call_args[1]["level"], "error")
+        self.assertEqual(evento.call_args[1]["contexto"]["sessions_stuck"], 1)
+
+    def test_sessao_saudavel_nao_avisa_nada(self):
+        _, evento, _ = self._verificar_com_corpo(
+            {"sessions_total": 1, "sessions_ready": 1, "sessions_stuck": 0}
+        )
+        evento.assert_not_called()
+
+    def test_health_antigo_sem_os_contadores_nao_avisa(self):
+        """Durante o deploy o Django novo conversa com o Node velho."""
+        _, evento, _ = self._verificar_com_corpo({"ok": True, "capacity": {}})
+        evento.assert_not_called()
+
+    def test_avisa_uma_vez_e_cala_enquanto_ninguem_reconecta(self):
+        corpo = {"sessions_total": 1, "sessions_ready": 0, "sessions_stuck": 1}
+        _, evento, _ = self._verificar_com_corpo(corpo)
+        self.assertEqual(evento.call_count, 1)
+        for _ in range(5):
+            _, evento, _ = self._verificar_com_corpo(corpo)
+            evento.assert_not_called()
+
+    def test_sessao_voltando_rearma_o_aviso(self):
+        travado = {"sessions_total": 1, "sessions_ready": 0, "sessions_stuck": 1}
+        saudavel = {"sessions_total": 1, "sessions_ready": 1, "sessions_stuck": 0}
+        _, evento, _ = self._verificar_com_corpo(travado)
+        self.assertEqual(evento.call_count, 1)
+        self._verificar_com_corpo(saudavel)   # reconectou: o silêncio é liberado
+        _, evento, _ = self._verificar_com_corpo(travado)
+        self.assertEqual(evento.call_count, 1)

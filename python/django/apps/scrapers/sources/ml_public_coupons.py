@@ -32,7 +32,9 @@ from django.conf import settings
 from django.utils import timezone
 
 from .base import IngestedItem, SourceAdapter
-from apps.scrapers.coupon_rules import normalizar_regras_cupom, tem_restricao_publico
+from apps.scrapers.coupon_rules import (
+    normalizar_regras_cupom, numero_br, tem_restricao_publico,
+)
 from apps.scrapers.source_diagnostics import capture_public_text_diagnostic
 
 DEFAULT_URL = ("https://afiliadosmercadolivre.github.io/"
@@ -211,6 +213,39 @@ def _boolean(valor):
     return bool(valor)
 
 
+def _desconto_confiavel(cupom):
+    """Normaliza o desconto e rejeita percentuais impossíveis da landing.
+
+    Em 27/08/2026 a própria página de afiliados publicou MELHORPROMO como
+    ``20000%`` apesar de mínimo R$4.399 e teto R$200. O valor era R$200 expresso
+    em centavos e rotulado como percentual. A correção para fixo só é segura
+    quando o número impossível coincide exatamente com ``teto * 100``; outros
+    percentuais >=100 são recusados, nunca adivinhados.
+    """
+    bruto = _campo(cupom, "discount_num", "discount_value")
+    if bruto in (None, ""):
+        bruto = _campo(cupom, "valor_desconto", "desconto", "discount")
+    valor = numero_br(bruto)
+    maximo = numero_br(_campo(cupom, "desconto_max", "max_discount"))
+    is_reais = _boolean(_campo(cupom, "is_reais", "fixed_amount", default=False))
+    if valor is None or valor <= 0:
+        return "", None
+    if is_reais:
+        return "fixo", valor
+    if valor < 100:
+        return "porcentagem", valor
+    if maximo and abs(valor - (maximo * 100)) < 0.01:
+        return "fixo", maximo
+    return "", None
+
+
+def _rotulo_desconto(tipo, valor):
+    if tipo == "porcentagem":
+        return f"{float(valor):g}".replace(".", ",") + "%"
+    numero = f"{float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {numero}"
+
+
 def _safe_source_url(url):
     try:
         parsed = urlsplit(str(url or ""))
@@ -356,9 +391,14 @@ class MLPublicCouponsSource(SourceAdapter):
             vistos.add(external_id)
             aceitos += 1
 
-            valor = str(_campo(
-                c, "valor_desconto", "desconto", "discount", default="",
-            ) or "").strip()
+            tipo_desconto, valor_desconto = _desconto_confiavel(c)
+            if not tipo_desconto:
+                rejeitados += 1
+                aceitos -= 1
+                vistos.discard(external_id)
+                rejeicoes["invalid_discount"] = rejeicoes.get("invalid_discount", 0) + 1
+                continue
+            valor = _rotulo_desconto(tipo_desconto, valor_desconto)
             acao = str(_campo(c, "acao", "scope", "categoria", default="") or "").strip()
             escopo = "site inteiro" if is_site else (acao or "produtos selecionados")
             titulo = f"{nome} — {valor} OFF ({escopo})".strip()[:255]
@@ -381,9 +421,8 @@ class MLPublicCouponsSource(SourceAdapter):
                 ) else DEFAULT_GENERAL_DESTINATION
 
             regras = normalizar_regras_cupom({
-                "tipo_desconto": "porcentagem",
-                "discount_num": _campo(c, "discount_num", "discount_value"),
-                "valor_desconto": valor,
+                "tipo_desconto": tipo_desconto,
+                "valor_desconto": valor_desconto,
                 "min_compra": _campo(c, "min_compra", "minimum_purchase"),
                 "desconto_max": _campo(c, "desconto_max", "max_discount"),
                 "acao": acao,

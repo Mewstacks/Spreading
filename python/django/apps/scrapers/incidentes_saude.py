@@ -116,8 +116,17 @@ def processar_evento(evento):
             "evento_origem", "level", "status", "confirmado_em", "confirmacao"])
     # Detectar não é avisar. Sem esta linha o incidente espera alguém abrir a tela de
     # Saúde — que é exatamente como a produção passou três dias fora do ar em agosto.
+    #
+    # on_commit em vez de chamada direta: reconciliar_pendentes roda isto dentro de
+    # transaction.atomic() por lote de até 500 eventos, e a reivindicação do alerta
+    # (UPDATE condicional em IncidenteSaude) tomaria o lock de linha pela duração do
+    # lote inteiro. Fora de um bloco atômico — o caso de log_event — on_commit
+    # dispara imediatamente, então o comportamento não muda para esse caminho.
+    from django.db import transaction
     from apps.scrapers.alertas import notificar_incidente
-    notificar_incidente(incidente, criado=criado, reaberto=reaberto)
+    transaction.on_commit(
+        lambda: notificar_incidente(incidente, criado=criado, reaberto=reaberto)
+    )
     return incidente
 
 
@@ -175,18 +184,31 @@ def fechar_conexoes_restabelecidas() -> int:
     queda está resolvido, independentemente de quem viu a transição.
     """
     from apps.scrapers.conexoes import estado_ml, estado_whatsapp
+    from apps.scrapers.report_sessions import has_report_session
     from apps.scrapers.models import IncidenteSaude
 
     fechados = 0
     abertos = (IncidenteSaude.objects.select_related("usuario")
                .filter(status="aberto", pipeline="conexao", usuario__isnull=False))
     for incidente in abertos:
-        servico = (incidente.contexto or {}).get("servico", "").lower()
+        contexto = incidente.contexto or {}
+        servico = contexto.get("servico", "").lower()
         try:
             if "whats" in servico:
                 est = estado_whatsapp(incidente.usuario)
             elif "mercado" in servico:
                 est = estado_ml(incidente.usuario)
+            elif contexto.get("provider") in {"amazon_shop", "shopee_shop"}:
+                if has_report_session(
+                    incidente.usuario, contexto["provider"],
+                ):
+                    confirmar(
+                        incidente,
+                        f"{contexto.get('servico') or 'Sessão de compra'} está "
+                        "conectada novamente.",
+                    )
+                    fechados += 1
+                continue
             else:
                 continue
         except Exception:

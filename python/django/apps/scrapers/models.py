@@ -153,6 +153,41 @@ class Produto(models.Model):
                 name="scrapers_prod_lookup_idx",
             ),
         ]
+        # Identidade do produto, finalmente no schema. Até 09/2026 não havia
+        # NENHUMA constraint aqui, e o mesmo anúncio entrava várias vezes porque
+        # writers diferentes gravavam formas diferentes da mesma URL: 5.527
+        # grupos duplicados em 68 mil linhas quando isto foi medido.
+        #
+        # São quatro constraints parciais, e não `nulls_distinct=False`, por dois
+        # motivos: `owner` NULL significa "catálogo compartilhado" (NULL = NULL
+        # aqui, semanticamente), e índice parcial funciona no SQLite da suíte,
+        # enquanto `nulls_distinct` só existe no PostgreSQL — o Django pularia a
+        # constraint nos testes e a invariante ficaria sem cobertura.
+        #
+        # O par asin/link espelha a regra que os writers já aplicam: ASIN ganha
+        # da URL quando existe (ver identidade_produto.chave_natural).
+        constraints = [
+            models.UniqueConstraint(
+                fields=["marketplace", "asin"],
+                condition=models.Q(owner__isnull=True) & ~models.Q(asin=""),
+                name="uniq_produto_publico_asin",
+            ),
+            models.UniqueConstraint(
+                fields=["marketplace", "owner", "asin"],
+                condition=models.Q(owner__isnull=False) & ~models.Q(asin=""),
+                name="uniq_produto_privado_asin",
+            ),
+            models.UniqueConstraint(
+                fields=["marketplace", "link_produto"],
+                condition=models.Q(owner__isnull=True) & models.Q(asin=""),
+                name="uniq_produto_publico_link",
+            ),
+            models.UniqueConstraint(
+                fields=["marketplace", "owner", "link_produto"],
+                condition=models.Q(owner__isnull=False) & models.Q(asin=""),
+                name="uniq_produto_privado_link",
+            ),
+        ]
 
 
 class FonteIngestao(models.Model):
@@ -569,6 +604,71 @@ class CupomDisponibilidadeEvento(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
 
+class CupomValidacao(models.Model):
+    """Tentativa auditável de aplicar um código, sempre sem concluir a compra."""
+
+    STATUS = [
+        ("pending", "Pendente"), ("running", "Em execução"),
+        ("accepted", "Aceito"), ("rejected", "Rejeitado"),
+        ("inconclusive", "Inconclusivo"),
+    ]
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE,
+        related_name="validacoes_cupons",
+    )
+    usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="validacoes_cupons",
+    )
+    cupom = models.ForeignKey(
+        CupomNormalizado, on_delete=models.CASCADE, related_name="validacoes",
+    )
+    marketplace = models.CharField(max_length=20, db_index=True)
+    product_key = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    product_url = models.URLField(max_length=1500, blank=True, default="")
+    cart_fingerprint = models.CharField(max_length=64, db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS, default="pending",
+                              db_index=True)
+    reason_code = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    safe_detail = models.CharField(max_length=255, blank=True, default="")
+    subtotal_before = models.DecimalField(max_digits=12, decimal_places=2,
+                                          null=True, blank=True)
+    subtotal_after = models.DecimalField(max_digits=12, decimal_places=2,
+                                         null=True, blank=True)
+    discount_amount = models.DecimalField(max_digits=12, decimal_places=2,
+                                          null=True, blank=True)
+    evidence = models.JSONField(default=dict, blank=True)
+    no_purchase = models.BooleanField(default=True)
+    attempts = models.PositiveIntegerField(default=0)
+    started_at = models.DateTimeField(null=True, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    retry_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["usuario", "cupom", "cart_fingerprint"],
+                name="uniq_coupon_cart_validation",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(no_purchase=True),
+                name="coupon_validation_never_purchases",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["usuario", "status", "verified_at"],
+                name="coupon_validation_user_status",
+            ),
+            models.Index(
+                fields=["marketplace", "verified_at"],
+                name="coupon_validation_market_time",
+            ),
+        ]
+
+
 class ProdutoCupom(models.Model):
     STATUS = [
         ("confirmado", "Confirmado"), ("provavel", "Provável"),
@@ -684,7 +784,15 @@ class PrecoHistorico(models.Model):
     data = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
-        indexes = [models.Index(fields=["marketplace", "chave", "data"])]
+        indexes = [
+            models.Index(fields=["marketplace", "chave", "data"]),
+            # O ranking lê preço junto das três chaves. Cobrir o valor evita um
+            # acesso aleatório à tabela para cada observação histórica.
+            models.Index(
+                fields=["marketplace", "chave", "data"], include=["preco"],
+                name="scrape_price_stats_cover",
+            ),
+        ]
 
 
 class HistoricoEnvio(models.Model):
@@ -1037,6 +1145,14 @@ class IncidenteSaude(models.Model):
                                       null=True, blank=True, related_name="incidentes")
     confirmado_em = models.DateTimeField(null=True, blank=True, db_index=True)
     confirmacao = models.CharField(max_length=255, blank=True, default="")
+    # Janela de silêncio do alerta, movida do cache (LocMem por processo, sem
+    # Redis em produção — 10 processos deduplicavam localmente e mandavam até
+    # 10 mensagens do mesmo incidente) para a própria linha. `alertado_em` é a
+    # entrega confirmada; `alerta_tentado_em` é a reivindicação em andamento —
+    # duas colunas, não uma, porque cache.add fundia as duas coisas e o
+    # cache.delete de liberação (na falha de entrega) virava remendo.
+    alertado_em = models.DateTimeField(null=True, blank=True, db_index=True)
+    alerta_tentado_em = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [models.Index(fields=["status", "ultima_ocorrencia"])]
@@ -1101,6 +1217,12 @@ class LinkAfiliadoUsuario(models.Model):
 
     class Meta:
         unique_together = ("usuario", "produto")
+        indexes = [
+            models.Index(
+                fields=["usuario", "verificado_ok", "-verificado_em"],
+                name="linkusr_ready_recent_idx",
+            ),
+        ]
 
 
 class CupomCodigo(models.Model):
@@ -1203,6 +1325,15 @@ class ConfiguracaoEnvio(models.Model):
     # soma 395 caracteres de termos. Não há índice nem unicidade sobre esta coluna,
     # então soltar o tamanho não custa nada no banco.
     termo_busca = models.TextField(blank=True, default="")
+    # Termos que ELIMINAM o item, mesma semântica de vírgula do `termo_busca`.
+    # Sem isto o nicho só sabia incluir: "fone" trazia capinha de fone, película de
+    # fone e suporte de fone, e a regra não tinha como dizer que não.
+    termos_negativos = models.TextField(blank=True, default="")
+    # Faixa de preço do nicho, avaliada sobre o preço FINAL (já com cupom), não
+    # sobre a vitrine — é o valor que o comprador vê no checkout que define se o
+    # item pertence àquele grupo.
+    preco_min = models.FloatField(null=True, blank=True)
+    preco_max = models.FloatField(null=True, blank=True)
     # Canal de envio: 'whatsapp' (grupo @g.us) | 'telegram' (chat/channel id).
     canal = models.CharField(max_length=20, default="whatsapp")
     # Filtro opcional de marketplace ('' = qualquer). Ex: só 'mercadolivre'.
@@ -1272,7 +1403,7 @@ class ConfiguracaoEnvio(models.Model):
         if self.tipo == self.TIPO_AVISO_CUPONS and self.ativo and not self.marketplace:
             from django.core.exceptions import ValidationError
             raise ValidationError({
-                "marketplace": "Escolha Mercado Livre ou Amazon para o aviso de cupons.",
+                "marketplace": "Escolha Mercado Livre, Amazon ou Shopee para o aviso de cupons.",
             })
 
     def dentro_da_janela(self, agora) -> bool:

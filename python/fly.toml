@@ -36,11 +36,20 @@ kill_timeout = "30s"
 # migra o banco a cada deploy, antes de trocar as máquinas.
 # (createcachetable saiu: o cache é LocMem por processo -- ver settings.py --, então
 # a tabela nunca foi lida por ninguém.)
+#
+# `tenant_constraints --ensure` entrou aqui em 02/09/2026 porque a ausência dele
+# deixou a produção derivar em silêncio: auditoria encontrou OITO CHECKs
+# `organization_required` que nunca foram instalados (browsersession,
+# organizationfeatureoverride, cupomdisponibilidade, cupomdisponibilidadeevento,
+# cupomvalidacao, linkafiliadoprodutocupomusuario, publicacaoevento,
+# publicacaotentativa). Não havia linha órfã — os signals de tenant seguraram —
+# mas a trava do banco não existia. Tabela nova nasce sem CHECK a menos que algo
+# no deploy garanta; agora garante.
 [deploy]
-  release_command = "sh -c 'env RELEASE_COMMAND=1 python django/manage.py check --deploy && env RELEASE_COMMAND=1 python django/manage.py migrate --noinput && env RELEASE_COMMAND=1 python django/manage.py tenant_rls --enable && env TENANT_SYSTEM_PROCESS=1 python django/manage.py bootstrap_superuser'"
+  release_command = "sh -c 'env RELEASE_COMMAND=1 python django/manage.py check --deploy && env RELEASE_COMMAND=1 python django/manage.py migrate --noinput && env RELEASE_COMMAND=1 python django/manage.py tenant_constraints --ensure && env RELEASE_COMMAND=1 python django/manage.py tenant_rls --enable && env TENANT_SYSTEM_PROCESS=1 python django/manage.py bootstrap_superuser'"
 
-# Volume persistente das sessões do ML (auth_{id}.json). Preso a UMA máquina:
-# por isso web + workers rodam juntos (honcho) e não escalamos horizontalmente.
+# Volume legado e estado local da máquina web. As credenciais ML e as sessões de
+# navegador novas ficam cifradas no PostgreSQL, pois o worker roda em outra VM.
 [[mounts]]
   source = "ml_data"
   destination = "/data"
@@ -64,26 +73,17 @@ kill_timeout = "30s"
 
 # ATENÇÃO — este bloco é o que a máquina REALMENTE roda. Não suba sem decidir o custo.
 #
-# Esta VM roda gunicorn + 5 workers de automação + Chromium (raspagem, Link Builder e o
-# live view do login ML) ao mesmo tempo, em CPU compartilhada. Isso tem um preço técnico
-# conhecido e aceito: a Fly cobra o shared-cpu por cota de baseline e aplica throttle
-# quando ela acaba. Medido em 09/08 nesta máquina: loadavg 7,29 em 2 vCPUs e CPU pressure
-# de 73% (avg300) com apenas ~15% de CPU efetivamente consumida — ou seja, os processos
-# ficam prontos e não são escalonados. O painel fica lento sob raspagem por causa disso.
-# Em 11/08, logo após o deploy v181, um login ML levou 36,2s até o primeiro frame e
-# a pressão de CPU chegou a 35,9% (avg300), enquanto /healthz em repouso ficou em
-# ~20ms e não houve pressão de memória/IO. A VM de 2 vCPU continuava sendo o gargalo.
-#
-# performance-2x/4gb resolveria o throttle, mas custa US$100,15/mês em gru contra US$18,40
-# deste shared-cpu-2x/2gb — 5,4×. O passo intermediário barato, se o throttle apertar, é
-# shared-cpu-4x/2gb (US$20,64): dobra vCPU e cota de baseline por +US$2,24/mês.
-# Esse passo intermediário foi adotado; CPU dedicada continua desnecessária enquanto
-# a pressão após o ajuste permanecer baixa.
-# Preços da tabela da região gru, que tem markup de ~1,55× sobre a tabela base.
+# Desde o desmembramento, esta VM roda somente gunicorn (1 processo, 8 threads) e, sob
+# demanda, um Chromium de login interativo. Os nove loops e a raspagem ficam na VM
+# `worker`. Medido em 01/09/2026: 424 MB usados, 1,59 GB disponíveis, loadavg e pressão
+# de CPU/memória zerados. Manter duas CPUs preserva a responsividade do live view; 1 GB
+# deixa mais de 500 MB de margem em repouso e reduz o preset GRU de US$18,40 para
+# US$10,32/mês. O smoke/load test de produção é obrigatório após cada alteração aqui.
+# Preços: tabela oficial da região gru; não incluem volume, câmbio ou tributos do cartão.
 [[vm]]
   processes = ["web"]
   size = "shared-cpu-2x"
-  memory = "2gb"
+  memory = "1gb"
 
 [[vm]]
   processes = ["worker"]

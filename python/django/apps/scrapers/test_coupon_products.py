@@ -344,6 +344,11 @@ class CouponPreparationTests(TestCase):
 
         self.assertEqual(PREPARO_LOTE_POR_CICLO, 12)
 
+    def test_varredura_http_do_ciclo_e_quatrocentos(self):
+        from apps.scrapers.coupon_products import PREPARO_LOTE_HTTP_POR_CICLO
+
+        self.assertEqual(PREPARO_LOTE_HTTP_POR_CICLO, 400)
+
     def test_varredura_http_tem_orcamento_proprio_e_so_o_caro_usa_o_limite(self):
         """O teto do Chromium não pode ser o teto de tudo.
 
@@ -407,6 +412,43 @@ class CouponPreparationTests(TestCase):
             resultado = preparar_lote(limite=1)
 
         self.assertEqual(resultado["processados"], 1)
+
+    def test_lote_caro_cede_browser_para_fonte_que_esta_na_fila(self):
+        from apps.scrapers.coupon_products import (
+            BrowserNecessarioError, preparar_lote,
+        )
+
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-capacity-yield", marketplace="mercadolivre", nome="ML",
+        )
+        for indice in range(3):
+            CupomNormalizado.objects.create(
+                fonte=fonte, external_id=f"cede-{indice}",
+                marketplace="mercadolivre", titulo=f"Cupom {indice}",
+                codigo=f"CEDE{indice}00", estado="ativo",
+                regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                        "valor_desconto": 10},
+            )
+
+        chamadas_browser = []
+
+        def _preparar(cupom, **kwargs):
+            if not kwargs["permitir_browser"]:
+                raise BrowserNecessarioError(cupom.pk)
+            chamadas_browser.append(cupom.pk)
+            return [object()]
+
+        with patch("apps.scrapers.coupon_products.preparar_cupom", _preparar), \
+                patch("apps.scrapers.resource_control.interesse_pendente",
+                      return_value=True) as pending:
+            resultado = preparar_lote(limite=3, limite_http=3)
+
+        self.assertEqual(len(chamadas_browser), 1)
+        self.assertEqual(resultado["adiados_sem_browser"], 2)
+        self.assertTrue(resultado["cedeu_browser"])
+        pending.assert_called_once_with(
+            "django_chromium", exceto="coupon_products",
+        )
 
     @patch("apps.scrapers.auxiliar.iniciar_browser")
     @patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session")
@@ -508,6 +550,26 @@ class CouponPreparationTests(TestCase):
             preparo.proxima_tentativa,
             antes + BACKOFF_TRANSPORTE + timezone.timedelta(minutes=1),
         )
+
+    def test_preflight_sem_sessao_nao_repete_coleta_remota(self):
+        """O lote detecta ausência de sessão uma vez e não abre 400 portas iguais."""
+        from apps.scrapers.coupon_products import (
+            ERRO_SESSAO_ML, preparar_cupom,
+        )
+
+        cupom = self._cupom_ml_de_container()
+        with patch("apps.scrapers.coupon_products._coletar_ml_remoto") as coletar:
+            self.assertEqual(preparar_cupom(
+                cupom, self.user, force=True,
+                sessao_ml_disponivel=False,
+                log_sessao_indisponivel=False,
+            ), [])
+
+        coletar.assert_not_called()
+        preparo = CupomPreparacao.objects.get(cupom=cupom)
+        self.assertEqual(preparo.reason_code,
+                         "ml_session_required_for_preparation")
+        self.assertEqual(preparo.erro, ERRO_SESSAO_ML)
 
     def test_container_vazio_comprovado_mantem_backoff_longo(self):
         from apps.scrapers.coupon_products import (
@@ -743,7 +805,10 @@ class CouponMessageTests(SimpleTestCase):
         # anunciada tem que ser exatamente o que o cupom abate no checkout.
         self.assertIn("🛒 De R$100 por R$83,54", mensagem)
         self.assertIn("➡️ https://meli.la/1GWNQCg", mensagem)
-        self.assertTrue(mensagem.endswith("🎟 Use o cupom *PRESENTE*"))
+        self.assertIn("🎟 Use o cupom *PRESENTE*", mensagem)
+        self.assertTrue(mensagem.endswith(
+            "👉 Abra um produto acima e aplique o cupom no checkout."
+        ))
         self.assertEqual(mensagem.count("*"), 4)
 
     def test_cupom_inclui_chamada_ia_sem_negrito_e_nome_resumido(self):
@@ -1134,6 +1199,428 @@ class CupomAtivacaoMercadoLivreTests(TestCase):
         self.assertTrue(cupom_publicavel(cupom))
 
 
+class AmazonOfficialReadySendTests(TestCase):
+    def test_oficial_com_tag_fica_ready_e_envia_sem_produto(self):
+        from unittest.mock import Mock, patch
+        from apps.accounts.models import Perfil
+        from apps.scrapers.conexoes import Estado
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+        from apps.scrapers.models import CupomDisponibilidade, CupomNormalizado, FonteIngestao
+        from apps.scrapers.ofertas import enviar_cupom
+        from apps.scrapers.senders.base import WhatsAppMarkup
+
+        user = get_user_model().objects.create_user("az-ready", password="test")
+        Perfil.objects.filter(user=user).update(afiliado_tag_amazon="loja-20")
+        user.perfil.refresh_from_db()
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="amazon-public-coupons",
+            defaults={"marketplace": "amazon", "nome": "Amazon"},
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="amazon-coupon:P9", marketplace="amazon",
+            titulo="Cupom Amazon — 15% OFF", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 15},
+            evidencia={
+                "association": "amazon-official-coupon-page",
+                "promotion_id": "P9", "asins": ["B0TESTASIN"],
+            },
+        )
+        projetar_disponibilidade_cupons(user)
+        self.assertEqual(
+            CupomDisponibilidade.objects.get(cupom=cupom, usuario=user).stage,
+            "ready",
+        )
+        sender = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
+        sender.enviar_oferta.return_value = {
+            "sucesso": True, "via": "whatsapp", "mensagem_id": "a1",
+        }
+        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender), \
+                patch("apps.scrapers.conexoes.estado_whatsapp",
+                      return_value=Estado(True, "WhatsApp", "worker", "", "", None)), \
+                patch("apps.scrapers.ofertas._preparar_itens_cupom",
+                      side_effect=AssertionError("Amazon oficial não inventa produto ML")):
+            resultado = enviar_cupom(cupom, "grupo@g.us", usuario=user)
+        self.assertTrue(resultado.get("sucesso"), resultado)
+        self.assertFalse(resultado.get("cupom_em_preparo"))
+        self.assertIn("B0TESTASIN", resultado.get("link") or "")
+        self.assertIn("tag=loja-20", resultado.get("link") or "")
+
+
+class PromobitAmazonCodigoReadySendTests(TestCase):
+    def test_codigo_promobit_sem_fonte_licenciada_nao_fica_ready(self):
+        from apps.accounts.models import Perfil
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+        from apps.scrapers.models import CupomDisponibilidade, CupomNormalizado, FonteIngestao
+
+        user = get_user_model().objects.create_user("az-promo", password="test")
+        Perfil.objects.filter(user=user).update(afiliado_tag_amazon="loja-20")
+        user.perfil.refresh_from_db()
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="promobit-cupons",
+            defaults={"marketplace": "amazon", "nome": "Promobit"},
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="promobit:amazon:ELETROS",
+            marketplace="amazon", titulo="Eletros 15% OFF", codigo="ELETROS",
+            link="", estado="ativo",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 15},
+            evidencia={"confianca_origem": "comunidade",
+                       "transport": "promobit-next-data"},
+        )
+        projetar_disponibilidade_cupons(user)
+        self.assertEqual(
+            CupomDisponibilidade.objects.get(cupom=cupom, usuario=user).stage,
+            "collected",
+        )
+
+
+@override_settings(ML_CUPONS_ATIVACAO_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
+class MlCampanhaListagemReadySendTests(TestCase):
+    def setUp(self):
+        from apps.scrapers.coupon_links import _RASTREIO_POR_USUARIO
+        _RASTREIO_POR_USUARIO.clear()
+
+    def test_campanha_com_rastreio_fica_ready_e_envia_a_listagem(self):
+        from unittest.mock import Mock, patch
+        from apps.scrapers.conexoes import Estado
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+        from apps.scrapers.models import (
+            CupomDisponibilidade, CupomNormalizado, FonteIngestao,
+            LinkAfiliadoCupomUsuario,
+        )
+        from apps.scrapers.ofertas import enviar_cupom
+        from apps.scrapers.senders.base import WhatsAppMarkup
+
+        user = get_user_model().objects.create_user("ml-lista", password="test")
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-campanhas",
+            defaults={"marketplace": "mercadolivre", "nome": "ML campanhas"},
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:888", marketplace="mercadolivre",
+            titulo="Campanha 20%", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20, "is_mar_aberto": False,
+                    "container_url": "https://lista.mercadolivre.com.br/_Container_888"},
+        )
+        LinkAfiliadoCupomUsuario.objects.create(
+            usuario=user, cupom=cupom,
+            url_origem="https://www.mercadolivre.com.br/x",
+            link_afiliado=(
+                "https://www.mercadolivre.com.br/x"
+                "?matt_word=lules&matt_tool=whatsapp"
+            ),
+            url_canonica=(
+                "https://www.mercadolivre.com.br/x"
+                "?matt_word=lules&matt_tool=whatsapp"
+            ),
+            verificado_ok=True, verificado_em=timezone.now(), estado="pronto",
+        )
+        projetar_disponibilidade_cupons(user)
+        self.assertEqual(
+            CupomDisponibilidade.objects.get(cupom=cupom, usuario=user).stage,
+            "ready",
+        )
+        sender = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
+        sender.enviar_oferta.return_value = {
+            "sucesso": True, "via": "whatsapp", "mensagem_id": "m1",
+        }
+        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender), \
+                patch("apps.scrapers.conexoes.estado_whatsapp",
+                      return_value=Estado(True, "WhatsApp", "worker", "", "", None)):
+            resultado = enviar_cupom(cupom, "grupo@g.us", usuario=user)
+        self.assertTrue(resultado.get("sucesso"), resultado)
+        link = resultado.get("link") or ""
+        self.assertIn("lista.mercadolivre.com.br/_Container_888", link)
+        self.assertIn("matt_word=lules", link)
+
+    def test_campanha_sem_rastreio_nao_finge_ready(self):
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+        from apps.scrapers.models import CupomDisponibilidade, CupomNormalizado, FonteIngestao
+
+        user = get_user_model().objects.create_user("ml-sem-rast", password="test")
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-campanhas",
+            defaults={"marketplace": "mercadolivre", "nome": "ML campanhas"},
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:889", marketplace="mercadolivre",
+            titulo="Campanha 10%", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 10, "is_mar_aberto": False,
+                    "container_url": "https://lista.mercadolivre.com.br/_Container_889"},
+        )
+        projetar_disponibilidade_cupons(user)
+        stage = CupomDisponibilidade.objects.get(cupom=cupom, usuario=user)
+        self.assertNotEqual(stage.stage, "ready")
+
+    def test_canario_monta_listagem_so_com_rastreio_persistido(self):
+        from unittest.mock import patch
+        from apps.scrapers.coupon_links import gerar_link_afiliado_listagem_ml
+        from apps.scrapers.models import (
+            CupomNormalizado, FonteIngestao, LinkAfiliadoCupomUsuario,
+        )
+
+        user = get_user_model().objects.create_user("ml-canario", password="test")
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-campanhas",
+            defaults={"marketplace": "mercadolivre", "nome": "ML campanhas"},
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:canario", marketplace="mercadolivre",
+            titulo="Campanha 25%", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 25, "is_mar_aberto": False,
+                    "container_url": "https://lista.mercadolivre.com.br/_Container_CANARY"},
+        )
+        LinkAfiliadoCupomUsuario.objects.create(
+            usuario=user, cupom=cupom,
+            url_origem="https://www.mercadolivre.com.br/x",
+            link_afiliado=(
+                "https://www.mercadolivre.com.br/x"
+                "?matt_word=canario&matt_tool=whatsapp"
+            ),
+            url_canonica=(
+                "https://www.mercadolivre.com.br/x"
+                "?matt_word=canario&matt_tool=whatsapp"
+            ),
+            verificado_ok=True, verificado_em=timezone.now(), estado="pronto",
+        )
+        with patch("apps.scrapers.coupon_links._expandir_encurtador_ml") as expand:
+            link = gerar_link_afiliado_listagem_ml(
+                cupom, user, somente_persistido_rapido=True,
+            )
+        expand.assert_not_called()
+        self.assertIn("_Container_CANARY", link)
+        self.assertIn("matt_word=canario", link)
+        self.assertIn("matt_tool=whatsapp", link)
+
+    def test_worker_expande_meli_la_e_projecao_so_le_prova_persistida(self):
+        from unittest.mock import patch
+        from apps.scrapers.coupon_links import rastreio_afiliado_ml
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+        from apps.scrapers.models import (
+            CupomDisponibilidade, CupomNormalizado, FonteIngestao,
+            LinkAfiliadoCupomUsuario,
+        )
+
+        user = get_user_model().objects.create_user("ml-meli", password="test")
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-campanhas",
+            defaults={"marketplace": "mercadolivre", "nome": "ML campanhas"},
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:890", marketplace="mercadolivre",
+            titulo="Campanha 15%", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 15, "is_mar_aberto": False,
+                    "container_url": "https://lista.mercadolivre.com.br/_Container_890"},
+        )
+        LinkAfiliadoCupomUsuario.objects.create(
+            usuario=user, cupom=cupom,
+            url_origem="https://www.mercadolivre.com.br/x",
+            link_afiliado="https://meli.la/abc",
+            url_canonica="",
+            verificado_ok=True, verificado_em=timezone.now(), estado="pronto",
+        )
+        dest = (
+            "https://www.mercadolivre.com.br/social/lules"
+            "?matt_word=lules&matt_tool=android&ref=" + ("x" * 2000)
+        )
+        with patch(
+            "apps.scrapers.coupon_links._expandir_encurtador_ml",
+            return_value=(
+                {"matt_word": "lules", "matt_tool": "android"}, dest,
+            ),
+        ) as expand:
+            # Reconciliação nunca abre rede: sem prova persistida, conserva.
+            projetar_disponibilidade_cupons(user)
+            self.assertNotEqual(
+                CupomDisponibilidade.objects.get(
+                    cupom=cupom, usuario=user,
+                ).stage,
+                "ready",
+            )
+            expand.assert_not_called()
+            # O worker de descoberta expande uma vez e persiste os parâmetros.
+            self.assertEqual(
+                rastreio_afiliado_ml(user).get("matt_word"), "lules",
+            )
+            expand.assert_called_once()
+            projetar_disponibilidade_cupons(user)
+        self.assertEqual(
+            CupomDisponibilidade.objects.get(cupom=cupom, usuario=user).stage,
+            "ready",
+        )
+        linha = LinkAfiliadoCupomUsuario.objects.get(usuario=user, cupom=cupom)
+        self.assertIn("matt_word=lules", linha.url_canonica)
+        self.assertNotIn("ref=", linha.url_canonica)
+        self.assertLessEqual(len(linha.url_canonica), 1500)
+
+    def test_rastreio_acha_matt_word_fora_dos_oito_recentes(self):
+        from unittest.mock import patch
+        from apps.scrapers.coupon_links import rastreio_afiliado_ml
+        from apps.scrapers.models import LinkAfiliadoUsuario, Produto
+
+        user = get_user_model().objects.create_user("ml-old", password="test")
+        agora = timezone.now()
+        velho = Produto.objects.create(
+            marketplace="mercadolivre", nome="velho", origem="oferta",
+            estado="ativo", preco_sem_desconto=10, preco_com_cupom=8,
+            link_produto="https://www.mercadolivre.com.br/p/MLB1",
+        )
+        LinkAfiliadoUsuario.objects.create(
+            usuario=user, produto=velho, afiliado_ok=True, estado="pronto",
+            link_afiliado=(
+                "https://www.mercadolivre.com.br/social/x?matt_word=lules"
+            ),
+            url_canonica=(
+                "https://www.mercadolivre.com.br/social/x?matt_word=lules"
+            ),
+            verificado_ok=True, verificado_em=agora - timedelta(days=3),
+        )
+        for i in range(8):
+            produto = Produto.objects.create(
+                marketplace="mercadolivre", nome=f"n{i}", origem="oferta",
+                estado="ativo", preco_sem_desconto=10, preco_com_cupom=8,
+                link_produto=f"https://www.mercadolivre.com.br/p/MLB{i + 2}",
+            )
+            LinkAfiliadoUsuario.objects.create(
+                usuario=user, produto=produto, afiliado_ok=True, estado="pronto",
+                link_afiliado=f"https://meli.la/{i}",
+                url_canonica=f"https://meli.la/{i}",
+                verificado_ok=True, verificado_em=agora,
+            )
+        with patch(
+            "apps.scrapers.coupon_links._expandir_encurtador_ml",
+            return_value=({}, ""),
+        ):
+            self.assertEqual(
+                rastreio_afiliado_ml(user).get("matt_word"), "lules",
+            )
+
+    def test_rastreio_nao_repete_http_no_mesmo_usuario(self):
+        from unittest.mock import patch
+        from apps.scrapers.coupon_links import rastreio_afiliado_ml
+        from apps.scrapers.models import (
+            CupomNormalizado, FonteIngestao, LinkAfiliadoCupomUsuario,
+        )
+
+        user = get_user_model().objects.create_user("ml-cache", password="test")
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-campanhas",
+            defaults={"marketplace": "mercadolivre", "nome": "ML campanhas"},
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:891", marketplace="mercadolivre",
+            titulo="Campanha", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 10, "is_mar_aberto": False,
+                    "container_url": "https://lista.mercadolivre.com.br/_Container_891"},
+        )
+        LinkAfiliadoCupomUsuario.objects.create(
+            usuario=user, cupom=cupom,
+            url_origem="https://www.mercadolivre.com.br/x",
+            link_afiliado="https://meli.la/cache",
+            url_canonica="",
+            verificado_ok=True, verificado_em=timezone.now(), estado="pronto",
+        )
+        with patch(
+            "apps.scrapers.coupon_links._expandir_encurtador_ml",
+            return_value=(
+                {"matt_word": "lules"},
+                "https://www.mercadolivre.com.br/x?matt_word=lules",
+            ),
+        ) as expand:
+            primeiro = rastreio_afiliado_ml(user)
+            segundo = rastreio_afiliado_ml(user)
+        self.assertEqual(primeiro.get("matt_word"), "lules")
+        self.assertEqual(primeiro, segundo)
+        self.assertEqual(expand.call_count, 1)
+
+    def test_cache_nao_vaza_quando_id_de_usuario_e_reutilizado(self):
+        from apps.scrapers.coupon_links import rastreio_afiliado_ml
+        from apps.scrapers.models import LinkAfiliadoUsuario, Produto
+
+        antigo = get_user_model().objects.create_user("ml-antigo", password="test")
+        user_id = antigo.pk
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Produto antigo", origem="oferta",
+            estado="ativo", preco_sem_desconto=10, preco_com_cupom=8,
+            link_produto="https://www.mercadolivre.com.br/p/MLB-CACHE",
+        )
+        LinkAfiliadoUsuario.objects.create(
+            usuario=antigo, produto=produto, afiliado_ok=True, estado="pronto",
+            link_afiliado=(
+                "https://www.mercadolivre.com.br/x?matt_word=conta_antiga"
+            ),
+            url_canonica=(
+                "https://www.mercadolivre.com.br/x?matt_word=conta_antiga"
+            ),
+            verificado_ok=True, verificado_em=timezone.now(),
+        )
+        self.assertEqual(
+            rastreio_afiliado_ml(antigo).get("matt_word"), "conta_antiga",
+        )
+
+        antigo.delete()
+        # Uma restauração/recriação pode reutilizar o PK. A instância não
+        # precisa ser persistida para provar a chave: a consulta ORM usa seu PK e
+        # deve encontrar zero links depois do cascade acima.
+        novo = get_user_model()(
+            id=user_id, username="ml-novo",
+            date_joined=timezone.now() + timedelta(seconds=1),
+        )
+        novo._state.db = "default"
+        self.assertEqual(rastreio_afiliado_ml(novo), {})
+
+    def test_colher_browser_grava_rastreio_sem_inventar(self):
+        from unittest.mock import patch
+        from apps.scrapers.coupon_links import colher_rastreio_ml_browser
+        from apps.scrapers.models import (
+            CupomNormalizado, FonteIngestao, LinkAfiliadoCupomUsuario,
+        )
+
+        user = get_user_model().objects.create_user("ml-browser", password="test")
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-campanhas",
+            defaults={"marketplace": "mercadolivre", "nome": "ML campanhas"},
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="campanha:892", marketplace="mercadolivre",
+            titulo="Campanha", codigo="", estado="ativo",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 10, "is_mar_aberto": False,
+                    "container_url": "https://lista.mercadolivre.com.br/_Container_892"},
+        )
+        LinkAfiliadoCupomUsuario.objects.create(
+            usuario=user, cupom=cupom,
+            url_origem="https://www.mercadolivre.com.br/x",
+            link_afiliado="https://meli.la/br",
+            url_canonica="",
+            verificado_ok=True, verificado_em=timezone.now(), estado="pronto",
+        )
+        with patch(
+            "apps.scrapers.coupon_links._expandir_encurtador_ml",
+            return_value=({}, ""),
+        ), patch(
+            "apps.scrapers.scraper_mercadolivre.link._verificar_com_browser",
+            return_value={
+                "ok": True,
+                "url_final": (
+                    "https://www.mercadolivre.com.br/social/lules"
+                    "?matt_word=lules&matt_tool=whatsapp"
+                ),
+            },
+        ):
+            achados = colher_rastreio_ml_browser(user)
+        self.assertEqual(achados.get("matt_word"), "lules")
+        linha = LinkAfiliadoCupomUsuario.objects.get(usuario=user, cupom=cupom)
+        self.assertIn("matt_word=lules", linha.url_canonica)
+
+
 @override_settings(ML_CUPONS_ATIVACAO_ENABLED=True, PILOT_ORGANIZATION_IDS=set())
 class ProdutoCupomCarregaACampanhaTests(TestCase):
     """A campanha pertence ao vínculo; produto pode participar de várias."""
@@ -1431,9 +1918,13 @@ class MapaDeRelacoesEmLoteTests(TestCase):
         segundo = self._cupom_pronto("52")
         relacao = ProdutoCupom.objects.get(cupom=segundo)
         produto = relacao.produto
+        # Mesmo produto (mesmo nome), cupons independentes. O link continua
+        # distinto porque a chave natural de Produto não permite duas linhas
+        # com a mesma identidade — se fossem o mesmo anúncio, seria UMA linha
+        # com duas associações, e é justamente isso que não pode colapsar os
+        # dois cupons num só.
         produto.nome = ProdutoCupom.objects.get(cupom=primeiro).produto.nome
-        produto.link_produto = "https://www.mercadolivre.com.br/p/MLB51"
-        produto.save(update_fields=["nome", "link_produto"])
+        produto.save(update_fields=["nome"])
         CupomPreparacao.objects.filter(cupom=segundo).update(
             produtos_chave=chave_produtos_cupom(segundo))
 

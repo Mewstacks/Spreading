@@ -372,21 +372,37 @@ class Command(BaseCommand):
             if set(table_policies) != set(expected):
                 policy_errors.append(f"{table}: conjunto de policies divergente")
                 continue
+            # Tabela SYSTEM_ONLY não tem — e não pode ter — cláusula de
+            # organização: o acesso dela é só contexto de sistema assinado, que
+            # é MAIS restrito que o das tabelas tenant. Exigir
+            # `app.organization_id` aqui reprovava uma política correta e
+            # deixava `--status` permanentemente vermelho, o que é pior que não
+            # checar: uma regressão de verdade nessas duas tabelas ficaria
+            # indistinguível do falso positivo.
+            somente_sistema = table in SYSTEM_ONLY_TABLES
+            exigidas = (
+                ["app.system_context", "app.system_signature",
+                 "tenant_security.context_valid"]
+                if somente_sistema
+                else ["app.organization_id", "app.organization_signature",
+                      "app.system_context", "app.system_signature",
+                      "tenant_security.context_valid"]
+            )
             for name, command in expected.items():
                 actual_command, using, with_check = table_policies[name]
                 expression = f"{using} {with_check}"
                 if actual_command != command:
                     policy_errors.append(f"{table}.{name}: comando divergente")
                 if (
-                    "app.organization_id" not in expression
-                    or "app.organization_signature" not in expression
-                    or "app.system_context" not in expression
-                    or "app.system_signature" not in expression
-                    or "tenant_security.context_valid" not in expression
+                    any(termo not in expression for termo in exigidas)
                     or "CURRENT_USER" not in expression.upper()
                 ):
                     policy_errors.append(
                         f"{table}.{name}: expressão fail-closed ausente"
+                    )
+                if somente_sistema and "app.organization_id" in expression:
+                    policy_errors.append(
+                        f"{table}.{name}: tabela de sistema não pode abrir por organização"
                     )
             select_expression = " ".join(table_policies["tenant_select"][1:])
             if table in CONTROL_TENANT_TABLES and (

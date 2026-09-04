@@ -7,6 +7,7 @@ const {
     shouldPurgeAuth,
     reconnectOutcome,
     reconnectAction,
+    deveReviverRecuperacaoPausada,
     qrBootstrapOutcome,
     preAuthEventIsStale,
     isRevokedReason,
@@ -55,6 +56,26 @@ test('paired credential pauses instead of being purged after retries', () => {
     assert.equal(reconnectAction(7, 0, true, 6), 'pause');
     assert.equal(reconnectAction(7, 0, false, 6), 'purge');
     assert.equal(reconnectAction(7, 1, true, 6), 'expire');
+});
+
+test('paused paired session revives only after the external cooldown', () => {
+    const now = Date.parse('2026-09-01T18:00:00.000Z');
+    const fifteenMinutes = 15 * 60 * 1000;
+    assert.equal(deveReviverRecuperacaoPausada(
+        'recuperacao_pausada', true, '2026-09-01T17:44:59.000Z', now, fifteenMinutes,
+    ), true);
+    assert.equal(deveReviverRecuperacaoPausada(
+        'recuperacao_pausada', true, '2026-09-01T17:50:00.000Z', now, fifteenMinutes,
+    ), false);
+    assert.equal(deveReviverRecuperacaoPausada(
+        'expirado', true, '2026-09-01T16:00:00.000Z', now, fifteenMinutes,
+    ), false);
+    assert.equal(deveReviverRecuperacaoPausada(
+        'recuperacao_pausada', false, '2026-09-01T16:00:00.000Z', now, fifteenMinutes,
+    ), false);
+    assert.equal(deveReviverRecuperacaoPausada(
+        'recuperacao_pausada', true, '', now, fifteenMinutes,
+    ), false);
 });
 
 test('novo QR retenta ate o teto e nunca escolhe a escada de reconnect', () => {

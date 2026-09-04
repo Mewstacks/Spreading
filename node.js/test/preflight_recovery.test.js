@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
     timeoutPreflight, mensagemPreflight, registrarStoreIndisponivel,
     mensagemEstabilizacao, deveReciclarTimeoutPreflight, iniciarRecuperacaoPreflight,
+    marcarStorePronto, deveReciclarStoreIndisponivel, STORE_INDISPONIVEL_RECYCLE_MS,
 } = require('../preflight_recovery');
 
 test('timeouts antes do envio pedem recuperação da sessão', () => {
@@ -65,4 +66,67 @@ test('timeout pré-envio responde de forma amigável, recicla uma vez e não env
     jobs[0]();
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(reciclar.chamadas, 1);
+});
+
+// Incidente 02/09/2026: sessão pareada às 16:09 com store_pronto=true; às 23:28
+// todo envio falhava em `verificar_store` e a sessão seguia anunciando
+// "conectado". O supervisor só vigia o HTTP do worker — que respondia. Sete
+// horas de entrega bloqueada em silêncio, com 2 mil cupons prontos na fila.
+test('store ausente por segundos é hidratação: não recicla', () => {
+    const agora = Date.now();
+    const session = { isConnected: true };
+    registrarStoreIndisponivel(session, agora);
+    assert.equal(deveReciclarStoreIndisponivel(session, agora + 5000), false);
+});
+
+test('store ausente além do teto recicla: bundle do WA Web levou os módulos', () => {
+    const agora = Date.now();
+    const session = { isConnected: true };
+    registrarStoreIndisponivel(session, agora);
+    assert.equal(
+        deveReciclarStoreIndisponivel(session, agora + STORE_INDISPONIVEL_RECYCLE_MS + 1),
+        true,
+    );
+});
+
+test('a janela de pareamento nunca recicla — reciclar ali custa um QR novo', () => {
+    const agora = Date.now();
+    const preparando = { isConnected: true, preparando: true };
+    registrarStoreIndisponivel(preparando, agora);
+    assert.equal(
+        deveReciclarStoreIndisponivel(preparando, agora + STORE_INDISPONIVEL_RECYCLE_MS + 1),
+        false,
+    );
+    const estabilizando = {
+        isConnected: true,
+        estabilizandoAte: agora + STORE_INDISPONIVEL_RECYCLE_MS + 60000,
+    };
+    registrarStoreIndisponivel(estabilizando, agora);
+    assert.equal(
+        deveReciclarStoreIndisponivel(estabilizando, agora + STORE_INDISPONIVEL_RECYCLE_MS + 1),
+        false,
+    );
+});
+
+test('store que volta zera o relógio: só ausência CONTÍNUA escala', () => {
+    const agora = Date.now();
+    const session = { isConnected: true };
+    registrarStoreIndisponivel(session, agora);
+    marcarStorePronto(session);
+    assert.equal(session.storeIndisponivelDesde, null);
+    registrarStoreIndisponivel(session, agora + 100000);
+    assert.equal(
+        deveReciclarStoreIndisponivel(session, agora + 150000), false,
+        'a contagem tem de reiniciar da segunda ausência, não da primeira',
+    );
+});
+
+test('sessão desconectada não recicla por store: quem trata é o fluxo de reconexão', () => {
+    const agora = Date.now();
+    const session = { isConnected: false };
+    registrarStoreIndisponivel(session, agora);
+    assert.equal(
+        deveReciclarStoreIndisponivel(session, agora + STORE_INDISPONIVEL_RECYCLE_MS + 1),
+        false,
+    );
 });

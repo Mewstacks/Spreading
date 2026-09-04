@@ -1,10 +1,41 @@
 import hashlib
+import logging
+import re
+from datetime import timedelta
 
 from django.utils import timezone
+
+from apps.scrapers.identidade_produto import link_canonico
+
+logger = logging.getLogger(__name__)
+_ASIN_EXATO = re.compile(r"^[A-Z0-9]{10}$", re.I)
+_ASIN_NA_URL = re.compile(
+    r"/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})(?:[/?#]|$)|[?&]asin=([A-Z0-9]{10})(?:[&#]|$)",
+    re.I,
+)
+
+
+def _amazon_asin(item):
+    """Extrai a chave real do produto sem gravar external_id arbitrário em ASIN."""
+    external_id = str(getattr(item, "external_id", "") or "").strip().upper()
+    if _ASIN_EXATO.fullmatch(external_id):
+        return external_id
+    match = _ASIN_NA_URL.search(str(getattr(item, "canonical_url", "") or ""))
+    if not match:
+        return ""
+    return str(match.group(1) or match.group(2) or "").upper()
+
+
+# As únicas lojas que o creator consegue afiliar hoje. Multiloja continua
+# valendo como MARKETPLACE DE FONTE (um agregador que cobre as três), mas o
+# item persistido precisa dizer a qual delas pertence.
+LOJAS_PERMITIDAS = frozenset({"mercadolivre", "amazon", "shopee"})
 
 
 _SOURCE_PRECEDENCE = {
     "ml-cupons-afiliados": 10,
+    "ml-official-promotions": 10,
+    "ml-lightning-coupons": 10,
     "mercadolivre-web": 20,
     # A mesma campanha vista também na vitrine pública deve vencer a observação
     # autenticada: é a confirmação que permite ampliar a audiência.
@@ -12,13 +43,26 @@ _SOURCE_PRECEDENCE = {
     "ml-public-containers": 30,
     "licensed-affiliate-feed": 40,
     "amazon-public-coupons": 10,
+    "amazon-public-web": 10,
     "amazon-general-coupons": 10,
     # Menor é mais forte. Estas duas ficam no fim de propósito: são ALEGAÇÃO de
     # terceiro, não observação nossa. Servem para corroborar o que outra fonte já
     # viu e para achar cupom que nos escapou — não para, sozinhas, mandar um
     # influenciador anunciar um código ao grupo dele.
     "promobit-cupons": 80,
+    "meliuz-cupons": 85,
+    "pelando-cupons": 88,
+    "bia-garimpa-cupons": 86,
+    "cupomspot-cupons": 87,
+    "prima-ryca-cupons": 89,
+    "discoup-cupons": 90,
+    "promomia-cupons": 92,
+    "cuponation-cupons": 93,
+    "cashbe-cupons": 94,
+    "peguei-barato-cupons": 95,
+    "linkerhub-cupons": 91,
     "telegram-publico": 90,
+    "shopee-public-coupons": 10,
 }
 
 
@@ -183,13 +227,29 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
     from apps.scrapers.scraper_mercadolivre.ofertas_scraper import classificar_oferta_por_nome
     offers = coupons = 0
     for item in items:
+        # Loja fora do programa não entra no banco — nem como cupom, nem como
+        # produto. Divulgar Casas Bahia, Magalu ou Americanas é trabalho para o
+        # creator e comissão para outra pessoa; e um catálogo que guarda o que não
+        # pode publicar só serve para poluir seleção, relatório e custo de leitura.
+        # AliExpress entra nesta lista no dia em que a afiliação dela existir.
+        if str(item.marketplace or "").casefold() not in LOJAS_PERMITIDAS:
+            logger.info(
+                "Item de %s descartado: loja %r fora do programa de afiliados.",
+                item.source, item.marketplace,
+            )
+            continue
         fonte, _ = FonteIngestao.objects.get_or_create(
             slug=item.source,
             defaults={"marketplace": item.marketplace, "nome": item.source},
         )
         if item.kind == "coupon":
             from apps.scrapers.coupon_rules import (
-                classificar_contrato_cupom, derivar_categoria_cupom,
+                classificar_contrato_cupom, codigo_humano,
+                derivar_categoria_cupom,
+            )
+            codigo_bruto = str(item.coupon_code or "").strip()
+            codigo_invalido = bool(
+                codigo_bruto and not codigo_humano(codigo_bruto)
             )
             programa = None
             advertiser_id = str((item.evidence or {}).get("advertiser_id") or "")
@@ -215,12 +275,28 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
                           "link": item.canonical_url, "validade": item.valid_until,
                           "inicio": item.starts_at, "restrito": item.restricted,
                           "relampago": item.flash,
-                          "estado": "ativo", "confianca": "media",
+                          "estado": "invalido" if codigo_invalido else "ativo",
+                          "confianca": "baixa" if codigo_invalido else "media",
                           "evidencia": item.evidence},
             )
+            # ``auto_now`` marca quando o parser rodou. Para feeds com horario
+            # proprio (notadamente Telegram), isso renovava um post velho sempre
+            # que o mesmo HTML era baixado. Scrapers ao vivo continuam sem escrita
+            # adicional; so corrigimos instantes materialmente anteriores.
+            observado_em = item.observed_at or timezone.now()
+            if timezone.is_naive(observado_em):
+                observado_em = timezone.make_aware(observado_em)
+            agora = timezone.now()
+            observado_em = min(observado_em, agora)
+            if observado_em < agora - timedelta(minutes=1):
+                CupomNormalizado.objects.filter(pk=cupom_obj.pk).update(
+                    ultima_observacao=observado_em,
+                )
+                cupom_obj.ultima_observacao = observado_em
             from apps.scrapers.coupon_products import atualizar_chave_cupom
             atualizar_chave_cupom(cupom_obj)
-            _enriquecer_codigos_heuristicos(cupom_obj)
+            if not codigo_invalido:
+                _enriquecer_codigos_heuristicos(cupom_obj)
             evidence = item.evidence if isinstance(item.evidence, dict) else {}
             CupomFonteObservacao.objects.update_or_create(
                 organization_id=cupom_obj.organization_id,
@@ -231,22 +307,46 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
                     "cupom": cupom_obj,
                     "precedence": _SOURCE_PRECEDENCE.get(item.source, 100),
                     "health_status": str(source_health or "unknown")[:24],
-                    "outcome": "accepted",
-                    "reason_code": "",
+                    "outcome": "invalid" if codigo_invalido else "accepted",
+                    "reason_code": (
+                        "invalid_coupon_code" if codigo_invalido else ""
+                    ),
                     # Somente prova tipada; nunca HTML, cookies ou query strings.
                     "evidence": {
                         "association": str(evidence.get("association") or "")[:80],
                         "has_promotion_id": bool(evidence.get("promotion_id")),
                         "product_ids": len(evidence.get("asins") or evidence.get("product_ids") or []),
                     },
-                    "observed_at": item.observed_at or timezone.now(),
+                    "observed_at": observado_em,
                 },
             )
             coupons += 1
             continue
         lookup = {"marketplace": item.marketplace, "owner": owner}
-        lookup["asin" if item.marketplace == "amazon" else "link_produto"] = (
-            item.external_id if item.marketplace == "amazon" else item.canonical_url)
+        product_asin = ""
+        link_produto = item.canonical_url
+        if item.marketplace == "amazon":
+            product_asin = _amazon_asin(item)
+            if not product_asin:
+                logger.warning(
+                    "Oferta Amazon descartada sem ASIN verificável (fonte=%s).",
+                    str(item.source or "")[:80],
+                )
+                continue
+            lookup["asin"] = product_asin
+        else:
+            # Canonicaliza ANTES de usar como chave: sem isto, duas lanes
+            # gravando o mesmo anúncio com URLs de tracking diferentes
+            # (click1/mclics vs. limpa) viram duas linhas de Produto, porque
+            # não existe constraint de unicidade que pegasse a divergência.
+            link_produto = link_canonico(item.marketplace, item.canonical_url)
+            if not link_produto:
+                logger.warning(
+                    "Oferta descartada sem link canonicalizável (marketplace=%s, fonte=%s).",
+                    item.marketplace, str(item.source or "")[:80],
+                )
+                continue
+            lookup["link_produto"] = link_produto
         anterior = Produto.objects.filter(**lookup).values_list(
             "evidencia", flat=True).first()
         defaults = {
@@ -255,7 +355,7 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
             "preco_com_cupom": item.current_price,
             "preco_fonte": item.reference_price,
             "preco_efetivo": item.effective_price or item.current_price,
-            "link_produto": item.canonical_url, "fonte": item.source,
+            "link_produto": link_produto, "fonte": item.source,
             "estado": "ativo", "confianca": "media",
             "evidencia": evidencia_com_cupom_preservado(item.evidence, anterior),
             "valido_ate": item.valid_until, "falha_verificacao": "",
@@ -294,8 +394,8 @@ def persist_items(items, owner=None, integration=None, source_health="healthy"):
         from apps.scrapers import precos
         precos.registrar(
             item.marketplace,
-            item.external_id if item.marketplace == "amazon" else "",
-            item.canonical_url,
+            product_asin,
+            link_produto,
             defaults["preco_efetivo"],
         )
         offers += 1

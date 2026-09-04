@@ -18,9 +18,15 @@ class Command(BaseCommand):
         parser.add_argument("--channel", default="whatsapp")
 
     def handle(self, *args, **options):
+        from apps.accounts.tenant import system_context
         from apps.scrapers.maintenance import (
             cupons_frescos_q, diagnosticar_alertas_pipeline_cupons,
         )
+
+        with system_context():
+            self._report(options, cupons_frescos_q, diagnosticar_alertas_pipeline_cupons)
+
+    def _report(self, options, cupons_frescos_q, diagnosticar_alertas_pipeline_cupons):
         now = timezone.now()
         projections = CupomDisponibilidade.objects.filter(
             channel=options["channel"],

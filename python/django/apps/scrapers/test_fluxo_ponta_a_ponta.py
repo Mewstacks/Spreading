@@ -125,6 +125,65 @@ class FluxoAmazonPontaAPontaTests(TestCase):
             "a Amazon precisa aparecer no contador por loja",
         )
 
+    def test_cupom_oficial_da_busca_tambem_chega_a_pronto(self):
+        """A frase/preço final no card oficial é prova de ativação por ASIN."""
+        from apps.scrapers.coupon_rules import normalizar_regras_cupom
+        from apps.scrapers.coupon_products import preparar_lote
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+        from apps.scrapers.sources.persistence import persist_items
+
+        now = timezone.now()
+        asin = "B0SEARCH01"
+        promotion_id = f"search:{asin}"
+        common_evidence = {
+            "transport": "amazon-official-search",
+            "association": "amazon-official-search-coupon",
+            "coupon_final_price": 75.0,
+        }
+        offer = IngestedItem(
+            external_id=asin, marketplace="amazon", source="amazon-public-web",
+            kind="offer", canonical_url=f"https://www.amazon.com.br/dp/{asin}",
+            title="Produto da busca com cupom", current_price=100.0,
+            effective_price=75.0, reference_price=100.0,
+            observed_at=now,
+            evidence={
+                **common_evidence,
+                "promotion": {"present": True, "coupon_confirmed": True,
+                              "id": promotion_id, "label": "25% off"},
+            },
+        )
+        coupon = IngestedItem(
+            external_id=f"amazon-search-coupon:{asin}", marketplace="amazon",
+            source="amazon-public-web", kind="coupon",
+            canonical_url=f"https://www.amazon.com.br/dp/{asin}",
+            title="Cupom Amazon — 25% OFF", content_type="promotion",
+            coupon_rules=normalizar_regras_cupom({
+                "tipo_desconto": "porcentagem", "valor_desconto": 25,
+                "modo_resgate": "ativacao", "escopo": "produto selecionado",
+            }, external_id=f"amazon-search-coupon:{asin}"),
+            observed_at=now,
+            evidence={
+                **common_evidence, "promotion_id": promotion_id, "asins": [asin],
+            },
+        )
+
+        persisted = persist_items([offer, coupon])
+        self.assertEqual(persisted["offers"], 1)
+        self.assertEqual(persisted["coupons"], 1)
+        preparar_lote(limite=10, usuarios=[self.user], permitir_rede=False)
+        result = projetar_disponibilidade_cupons(self.user)
+
+        normalized = CupomNormalizado.objects.get(
+            fonte__slug="amazon-public-web", external_id=coupon.external_id,
+        )
+        self.assertEqual(result["stages"].get("ready"), 1)
+        self.assertEqual(
+            CupomDisponibilidade.objects.get(
+                cupom=normalized, usuario=self.user,
+            ).stage,
+            "ready",
+        )
+
     def test_sem_tag_a_tela_mostra_a_acao_em_vez_de_fila(self):
         """Configuração da conta não pode virar centenas de falhas de produto."""
         from apps.scrapers.coupon_pipeline import afiliar_cupons
@@ -418,3 +477,112 @@ class SelecaoAutomaticaEquilibradaTests(TestCase):
         lojas = {c.obj.marketplace for c in candidatos}
         self.assertIn("amazon", lojas)
         self.assertIn("mercadolivre", lojas)
+
+    def test_cupom_pronto_antigo_nao_e_expulso_por_backlog_pendente(self):
+        """A fila nova sem validacao nao pode esconder o estoque ja pronto."""
+        from apps.scrapers.content_ranking import _coupon_candidates
+
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML", "status": "ok"},
+        )
+        agora = timezone.now()
+        pronto = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="ml-pronto-antigo", marketplace="mercadolivre",
+            titulo="Cupom validado que deve ser enviado", codigo="PRONTO25",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 25},
+        )
+        CupomNormalizado.objects.filter(pk=pronto.pk).update(
+            ultima_observacao=agora - timezone.timedelta(hours=6),
+        )
+        for i in range(90):
+            CupomNormalizado.objects.create(
+                fonte=fonte, external_id=f"ml-pendente-{i}", marketplace="mercadolivre",
+                titulo=f"Cupom ainda pendente {i}", codigo=f"PEND{i:03d}",
+                regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                        "valor_desconto": 30},
+            )
+        CupomDisponibilidade.objects.create(
+            organization=self.user.perfil.active_organization,
+            usuario=self.user, cupom=pronto, channel="whatsapp",
+            use_mode="code_notice", stage="ready",
+        )
+        config = SimpleNamespace(
+            owner=self.user, grupo_id="g@g.us", marketplace="mercadolivre",
+            macro_categoria="", termo_busca="", horas_cooldown=24,
+            min_desconto_percent=10, incluir_restritos=True,
+            incluir_sem_desconto=True,
+            programas=SimpleNamespace(values_list=lambda *a, **k: []),
+        )
+
+        candidatos = _coupon_candidates(config, limit=8)
+
+        self.assertEqual([c.obj.pk for c in candidatos], [pronto.pk])
+
+    def test_selecao_tenta_cupom_validado_antes_de_produto_com_score_maior(self):
+        """A estrategia cupom-first nao pode ser desfeita por empate de score."""
+        from apps.scrapers.content_ranking import selecionar_conteudo_para_grupo
+
+        fonte, _ = FonteIngestao.objects.get_or_create(
+            slug="mercadolivre-web",
+            defaults={"marketplace": "mercadolivre", "nome": "ML", "status": "ok"},
+        )
+        Produto.objects.create(
+            marketplace="mercadolivre", origem="oferta", nome="Produto com 70% OFF",
+            preco_sem_desconto=100, preco_com_cupom=30, estado="ativo",
+            link_produto="https://produto.mercadolivre.com.br/MLB-1234567890-item",
+            fonte="mercadolivre-web", confianca="alta",
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="ml-cupom-prioritario", marketplace="mercadolivre",
+            titulo="Cupom validado de 15%", codigo="VENDE15",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 15},
+        )
+        CupomDisponibilidade.objects.create(
+            organization=self.user.perfil.active_organization,
+            usuario=self.user, cupom=cupom, channel="whatsapp",
+            use_mode="code_notice", stage="ready",
+        )
+        config = SimpleNamespace(
+            owner=self.user, grupo_id="g@g.us", marketplace="mercadolivre",
+            macro_categoria="", termo_busca="", horas_cooldown=24,
+            min_desconto_percent=10, incluir_restritos=True,
+            incluir_sem_desconto=True,
+            programas=SimpleNamespace(values_list=lambda *a, **k: []),
+        )
+
+        candidatos = selecionar_conteudo_para_grupo(config, limit=2)
+
+        self.assertEqual(candidatos[0].kind, "coupon")
+        self.assertEqual(candidatos[0].obj, cupom)
+        self.assertEqual(candidatos[1].kind, "product")
+
+    def test_comissao_shopee_nao_entra_no_ranking_como_desconto(self):
+        from types import SimpleNamespace
+        from apps.scrapers.content_ranking import _coupon_candidates
+
+        fonte = FonteIngestao.objects.create(
+            slug="shopee-campaigns", marketplace="shopee", nome="Shopee",
+            status="ok",
+        )
+        CupomNormalizado.objects.create(
+            fonte=fonte, owner=self.user,
+            external_id="shopee:campanha:SHOP:x", marketplace="shopee",
+            titulo="Campanha Shopee", codigo="",
+            link="https://s.shopee.com.br/x",
+            regras={"modo_resgate": "ativacao", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 12},
+            evidencia={"transport": "shopee-affiliate-api"},
+        )
+        config = SimpleNamespace(
+            owner=self.user, grupo_id="g@g.us", marketplace="", macro_categoria="",
+            termo_busca="", horas_cooldown=24, min_desconto_percent=10,
+            incluir_restritos=True, incluir_sem_desconto=True,
+            programas=SimpleNamespace(values_list=lambda *a, **k: []),
+        )
+        with patch("apps.scrapers.coupon_products.ids_cupons_prontos",
+                   return_value=set()):
+            candidatos = _coupon_candidates(config, limit=8)
+        self.assertNotIn("shopee", {c.obj.marketplace for c in candidatos})

@@ -83,6 +83,9 @@ ML_BROWSER_REPORTS_ENABLED = os.getenv(
 AMAZON_BROWSER_LOGIN_ENABLED = os.getenv(
     "AMAZON_BROWSER_LOGIN_ENABLED", _AUTOMATION_DEFAULT,
 ) == "1"
+SHOPEE_BROWSER_LOGIN_ENABLED = os.getenv(
+    "SHOPEE_BROWSER_LOGIN_ENABLED", _AUTOMATION_DEFAULT,
+) == "1"
 TELETHON_RELINK_ENABLED = os.getenv(
     "TELETHON_RELINK_ENABLED", "0",
 ) == "1"
@@ -122,12 +125,75 @@ COUPON_AFFILIATE_LINK_TTL_HOURS = max(
     1, int(os.getenv("COUPON_AFFILIATE_LINK_TTL_HOURS", "168")),
 )
 AMAZON_GENERAL_COUPONS_URL = os.getenv("AMAZON_GENERAL_COUPONS_URL", "").strip()
-# Sem default: o antigo apontava pra landing de afiliados (não um relatório), então o
-# sync raspava uma página sem tabela e reportava "erro" pra sempre. Vazio = a tela diz
-# "sincronização automática indisponível", que é a verdade, em vez de erro recorrente.
-# Preencha com a URL do relatório de verdade, já dentro da conta.
-ML_AFFILIATE_REPORT_URL = os.getenv("ML_AFFILIATE_REPORT_URL", "")
-AMAZON_ASSOCIATES_REPORT_URL = os.getenv("AMAZON_ASSOCIATES_REPORT_URL", "")
+# Meta de cupons distintos PRONTOS por loja (Mercado Livre, Amazon e Shopee), do
+# contrato de aceite. Nenhum total agregado compensa uma loja abaixo dela; ver
+# apps.scrapers.coupon_abundance.
+COUPON_ABUNDANCE_GOAL = int(os.getenv("COUPON_ABUNDANCE_GOAL", "100"))
+# Piso do benefício monetário real de um cupom percentual/fixo, em reais. Existe
+# porque "50% OFF" com teto de R$1 (desconto_maximo=1.0) é dado real do
+# Mercado Livre, não bug de parser — e é lixo: o comprador nunca leva mais que
+# R$1, não importa o percentual anunciado. Medido em produção em 03/09/2026
+# (cupom Glamour.div: 50% OFF, desconto_maximo=1.0). R$10 é conservador o
+# bastante para não vetar categorias legítimas de ticket baixo.
+COUPON_VALOR_MINIMO_RELEVANTE_REAIS = float(
+    os.getenv("COUPON_VALOR_MINIMO_RELEVANTE_REAIS", "10") or "10"
+)
+COUPON_DAILY_DISCOVERY_GOAL = int(
+    os.getenv("COUPON_DAILY_DISCOVERY_GOAL", "250")
+)
+
+# --- Camada Deal (apps.scrapers.deals) ---------------------------------------
+# Quanto do preço o cupom precisa abater para o par produto+cupom virar mensagem.
+# `COUPON_VALOR_MINIMO_RELEVANTE_REAIS` julga o TETO genérico do cupom; este julga
+# o que ele vale NAQUELE item: R$ 20 OFF é ótimo num item de R$ 120 e irrelevante
+# num de R$ 4.000. Os dois pisos valem juntos, não alternadamente.
+DEAL_BENEFICIO_MINIMO_PERCENT = float(
+    os.getenv("DEAL_BENEFICIO_MINIMO_PERCENT", "5") or "5"
+)
+# Quantos deals elegíveis por dia uma regra precisa ter para a cobertura passar.
+# Folga deliberada sobre os 3–10 publicáveis: cooldown, revalidação e falha de
+# link consomem candidatos entre a seleção e o envio.
+DEAL_COBERTURA_META_DIA = int(os.getenv("DEAL_COBERTURA_META_DIA", "10"))
+# Idade máxima da observação de preço que um deal aceita, em minutos. O catálogo
+# considera um produto "fresco" por 48 h — folga correta para EXIBIR, folga
+# absurda para AFIRMAR. Medido em 03/09/2026: a air fryer publicada tinha 1021
+# minutos de observação, a vitrine dizia R$ 199,90 e o checkout cobrava R$ 249,50.
+# Com ~270 produtos ML relidos por hora, 90 minutos deixa estoque de sobra.
+DEAL_FRESCOR_MAXIMO_MIN = int(os.getenv("DEAL_FRESCOR_MAXIMO_MIN", "90"))
+# Quantas páginas da vitrine `/ofertas` a verificação de envio varre atrás do
+# card do item. É a única porta que este IP tem aberta no ML; cada página custa
+# um carregamento, então o teto existe para o envio não virar raspagem.
+PRECO_JIT_PAGINAS_OFERTAS = int(os.getenv("PRECO_JIT_PAGINAS_OFERTAS", "4"))
+# Shadow calcula o vencedor da camada Deal e registra a divergência SEM trocar o
+# envio. Live é o que troca, e nasce desligado: o rollback é apagar a flag, não
+# reverter migração.
+DEAL_LAYER_SHADOW = os.getenv("DEAL_LAYER_SHADOW", "1") == "1"
+DEAL_LAYER_LIVE = os.getenv("DEAL_LAYER_LIVE", "0") == "1"
+# Allowlist PRÓPRIA do recurso. Sem ela, `enabled_for_user` cairia na lista geral
+# `PILOT_ORGANIZATION_IDS` e ligar a camada para uma conta de teste a ligaria para
+# todas as organizações do piloto de envio — que é exatamente o acidente que a
+# separação por recurso existe para impedir.
+DEAL_LAYER_LIVE_PILOT_ORGANIZATION_IDS = {
+    value.strip()
+    for value in os.getenv("DEAL_LAYER_LIVE_PILOT_ORGANIZATION_IDS", "").split(",")
+    if value.strip()
+}
+# Mantida como registro de uma ideia que se provou errada: quando a camada está
+# ligada, não existe "cai para o caminho antigo". O legado publica sem medir preço
+# no envio, então usá-lo como rede de segurança devolvia exatamente a mentira que a
+# camada existe para impedir. Sem deal, não se publica.
+DEAL_FALLBACK_CUPOM_SOLTO = False
+# Portais autenticados reais, ainda sobrescrevíveis caso as lojas mudem a rota.
+# Sem sessão ambos redirecionam ao login, que o adapter classifica como ação do
+# usuário; uma instalação nova não deve nascer incapaz de medir conversão.
+ML_AFFILIATE_REPORT_URL = os.getenv(
+    "ML_AFFILIATE_REPORT_URL",
+    "https://www.mercadolivre.com.br/afiliados/dashboard",
+)
+AMAZON_ASSOCIATES_REPORT_URL = os.getenv(
+    "AMAZON_ASSOCIATES_REPORT_URL",
+    "https://associados.amazon.com.br/home/reports",
+)
 AMAZON_BROWSER_REPORTS_ENABLED = os.getenv(
     "AMAZON_BROWSER_REPORTS_ENABLED", "1",
 ) == "1"
@@ -457,6 +523,44 @@ AMAZON_MIN_SAVINGS_PCT = float(os.getenv("AMAZON_MIN_SAVINGS_PCT", "15"))
 # Cada página é uma chamada com throttle de ~1 TPS: subir muito alonga o ciclo.
 AMAZON_FEED_PAGES = int(os.getenv("AMAZON_FEED_PAGES", "5"))
 AMAZON_PUBLIC_FALLBACK = os.getenv("AMAZON_PUBLIC_FALLBACK", "1") == "1"
+AMAZON_PUBLIC_TERMS_PER_CYCLE = max(
+    1, int(os.getenv("AMAZON_PUBLIC_TERMS_PER_CYCLE", "4")),
+)
+AMAZON_PUBLIC_COUPON_TERMS = [
+    k.strip() for k in os.getenv(
+        "AMAZON_PUBLIC_COUPON_TERMS",
+        "brinquedos,eletronicos,livros,beleza,casa,informatica,bebe,games,"
+        "ferramentas,cozinha,esportes,automotivo,pet shop,suplementos,vitaminas,"
+        "higiene,limpeza,lavanderia,decoracao,jardinagem,papelaria,escritorio,"
+        "celular,acessorios para celular,audio,fones de ouvido,climatizacao,"
+        "iluminacao,organizacao,cama mesa banho,moda feminina,moda masculina,"
+        "bolsas,construcao,bebidas,maquiagem,cuidados pessoais",
+    ).split(",") if k.strip()
+]
+# A busca oficial concentra mais cupons do que a central de ofertas. As 37 categorias
+# foram medidas na busca BR em 2026-09. Quatro termos rotativos por ciclo mantêm o
+# Chromium dentro da capacidade atual e percorrem o conjunto em no máximo dez
+# coletas; páginas posteriores reutilizam a sessão e não baixam mídia.
+AMAZON_PUBLIC_PAGES_PER_TERM = max(
+    1, int(os.getenv("AMAZON_PUBLIC_PAGES_PER_TERM", "3")),
+)
+# Saída opcional dedicada para páginas públicas da Amazon. O Fly recebe HTTP 503
+# da busca mesmo em regiões diferentes; credenciais ficam somente em secrets.
+AMAZON_PUBLIC_PROXY_SERVER = os.getenv("AMAZON_PUBLIC_PROXY_SERVER", "").strip()
+AMAZON_PUBLIC_PROXY_USERNAME = os.getenv("AMAZON_PUBLIC_PROXY_USERNAME", "").strip()
+AMAZON_PUBLIC_PROXY_PASSWORD = os.getenv("AMAZON_PUBLIC_PROXY_PASSWORD", "").strip()
+# A mesma saída residencial PAYG pode atender Shopee e Amazon. Variáveis próprias
+# permitem separar provedores mais tarde; sem elas, reaproveitamos o proxy público
+# da Amazon para não duplicar mensalidade nem configuração.
+SHOPEE_PUBLIC_PROXY_SERVER = os.getenv(
+    "SHOPEE_PUBLIC_PROXY_SERVER", AMAZON_PUBLIC_PROXY_SERVER,
+).strip()
+SHOPEE_PUBLIC_PROXY_USERNAME = os.getenv(
+    "SHOPEE_PUBLIC_PROXY_USERNAME", AMAZON_PUBLIC_PROXY_USERNAME,
+).strip()
+SHOPEE_PUBLIC_PROXY_PASSWORD = os.getenv(
+    "SHOPEE_PUBLIC_PROXY_PASSWORD", AMAZON_PUBLIC_PROXY_PASSWORD,
+).strip()
 AFFILIATE_FEED_URL = os.getenv("AFFILIATE_FEED_URL", "")
 AFFILIATE_FEED_TOKEN = os.getenv("AFFILIATE_FEED_TOKEN", "")
 AWIN_INTEGRATION_ENABLED = os.getenv("AWIN_INTEGRATION_ENABLED", "1") == "1"
@@ -496,9 +600,12 @@ TELEGRAM_SESSION = os.getenv("TELEGRAM_SESSION", "")  # StringSession do userbot
 # ─────────────────────────────────────────────────────────────
 LLM_ATIVO = os.getenv("LLM_ATIVO", "1") == "1"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-# Sonnet é o padrão para títulos e nomes curtos. A variável continua permitindo
-# fixar outro snapshot sem alterar código em ambientes específicos.
-LLM_MODELO = os.getenv("LLM_MODELO", "claude-sonnet-5")
+# Haiku é o padrão. Os call sites em llm.py e cupom_extractor.py já declaravam
+# Haiku como _MODELO_PADRAO, mas todos leem getattr(settings, "LLM_MODELO", ...)
+# e esta linha SEMPRE define a setting — então o default deles nunca era usado e
+# cada chamada saía em Sonnet. A variável continua permitindo fixar outro
+# snapshot sem alterar código, quando houver motivo medido.
+LLM_MODELO = os.getenv("LLM_MODELO", "claude-haiku-4-5-20251001")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -551,6 +658,24 @@ else:
             "LOCATION": "spreading-local",
         }
     }
+
+# Cache que PRECISA sobreviver a restart. O `default` é LocMem em produção (não há
+# Redis), ou seja: morre a cada deploy e no desligamento noturno das 00:00, e nem é
+# compartilhado entre os processos do honcho. Para um cache de conveniência isso é
+# irrelevante; para o cache do `cupom_extractor` é dinheiro — a leitura de cada
+# mensagem de canal é uma chamada paga ao modelo, e o cache de 30 dias existe
+# exatamente para não pagar duas vezes pelo mesmo texto. Com LocMem, "30 dias" na
+# prática era "até o próximo restart".
+#
+# Postgres, não Redis: o banco já existe e não acrescenta um centavo à fatura.
+# Tabela criada por migração, portanto herda as DEFAULT PRIVILEGES de
+# `spreading_migration` (arwd para runtime e system).
+CACHES["persistente"] = CACHES["default"] if _REDIS_CACHE_URL else {
+    "BACKEND": "django.core.cache.backends.db.DatabaseCache",
+    "LOCATION": "spreading_cache",
+    "TIMEOUT": None,
+    "OPTIONS": {"MAX_ENTRIES": 50000, "CULL_FREQUENCY": 4},
+}
 
 
 # ─────────────────────────────────────────────────────────────

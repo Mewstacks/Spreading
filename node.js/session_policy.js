@@ -30,6 +30,20 @@ function reconnectAction(attempts, authPurges, hasStoredAuth, maxAttempts = 6) {
     return outcome === 'purge' && hasStoredAuth ? 'pause' : outcome;
 }
 
+// Uma credencial pareada é pausada depois da escada curta de reconnect para não
+// criar tempestade de Chromium. "Pausada" não pode, porém, significar "morta até
+// alguém abrir a tela": o monitor assinado do Django visita /reconcile em ciclos.
+// Depois de um cooldown longo, ele ganha exatamente uma nova escada automática.
+// LOGOUT/UNPAIRED nunca chegam aqui porque perdem o auth e seguem o fluxo de QR.
+function deveReviverRecuperacaoPausada(
+    fase, temCredencial, ultimaRecuperacao, agora = Date.now(), cooldownMs = 15 * 60 * 1000
+) {
+    if (fase !== 'recuperacao_pausada' || !temCredencial) return false;
+    const instante = Date.parse(String(ultimaRecuperacao || ''));
+    if (!Number.isFinite(instante)) return false;
+    return Number(agora) - instante >= Math.max(60000, Number(cooldownMs) || 0);
+}
+
 // O bootstrap de QR tem orçamento próprio e nunca participa da escada de
 // reconexão de uma credencial pareada. `attempt` inclui a tentativa atual.
 function qrBootstrapOutcome(attempt, maxAttempts = 2) {
@@ -204,6 +218,7 @@ module.exports = {
     shouldPurgeAuth,
     reconnectOutcome,
     reconnectAction,
+    deveReviverRecuperacaoPausada,
     qrBootstrapOutcome,
     preAuthEventIsStale,
     isRevokedReason,

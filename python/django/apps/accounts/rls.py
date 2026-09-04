@@ -5,6 +5,7 @@ import re
 STRICT_TENANT_TABLES = (
     "accounts_perfil",
     "accounts_mercadolivresession",
+    "accounts_browsersession",
     "accounts_whatsappconnection",
     "accounts_organizationfeatureoverride",
     "scrapers_integracaoafiliado",
@@ -24,6 +25,7 @@ STRICT_TENANT_TABLES = (
     "scrapers_eventoraspagem",
     "scrapers_cupomdisponibilidade",
     "scrapers_cupomdisponibilidadeevento",
+    "scrapers_cupomvalidacao",
     "scrapers_publicacaotentativa",
     "scrapers_publicacaoevento",
 )
@@ -61,11 +63,11 @@ def organization_expr(column: str = "organization_id") -> str:
     return (
         f"({column} = "
         "NULLIF(current_setting('app.organization_id', true), '')::uuid "
-        "AND tenant_security.context_valid("
+        "AND (SELECT tenant_security.context_valid("
         "'organization', "
         "current_setting('app.organization_id', true), "
         "current_setting('app.organization_signature', true)"
-        "))"
+        ")))"
     )
 
 
@@ -74,11 +76,11 @@ ORG_EXPR = organization_expr()
 ACTOR_EXPR = (
     "(user_id = "
     "NULLIF(current_setting('app.actor_id', true), '')::bigint "
-    "AND tenant_security.context_valid("
+    "AND (SELECT tenant_security.context_valid("
     "'actor', "
     "current_setting('app.actor_id', true), "
     "current_setting('app.actor_signature', true)"
-    "))"
+    ")))"
 )
 
 ORGANIZATION_ACTOR_EXPR = (
@@ -91,11 +93,11 @@ ORGANIZATION_ACTOR_EXPR = (
     "NULLIF(current_setting('app.actor_id', true), '')::bigint "
     "AND tenant_actor_membership.is_active"
     ")) "
-    "AND tenant_security.context_valid("
+    "AND (SELECT tenant_security.context_valid("
     "'actor', "
     "current_setting('app.actor_id', true), "
     "current_setting('app.actor_signature', true)"
-    "))"
+    ")))"
 )
 
 
@@ -110,9 +112,9 @@ def system_expr(system_role: str, migration_role: str) -> str:
     return (
         "current_setting('app.system_context', true) = 'on' "
         f"AND current_user IN ({roles}) "
-        "AND tenant_security.context_valid("
+        "AND (SELECT tenant_security.context_valid("
         "'system', '', current_setting('app.system_signature', true)"
-        ")"
+        "))"
     )
 
 
@@ -148,9 +150,11 @@ def policy_statements(
         # a validação de active_organization ainda exige Membership ativa.
         writable = f"(({system}) OR {ORG_EXPR} OR {ACTOR_EXPR})"
     else:
-        visible = f"(({system}) OR {ORG_EXPR}"
-        if mixed:
-            visible += " OR organization_id IS NULL"
+        # O catálogo compartilhado é quase todo público. Colocá-lo primeiro
+        # evita até o InitPlan de assinatura para essas linhas; para as privadas,
+        # cada assinatura continua obrigatória e validada pelo mesmo HMAC.
+        visible = "(organization_id IS NULL OR " if mixed else "("
+        visible += f"({system}) OR {ORG_EXPR}"
         visible += ")"
         writable = f"(({system}) OR {ORG_EXPR})"
     return [

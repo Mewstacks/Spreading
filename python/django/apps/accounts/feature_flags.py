@@ -24,6 +24,9 @@ from .models import (
 # relatórios da Amazon são funcionalidades básicas e nascem liberadas para todos.
 _EXPLICIT_ROLLOUT_FLAGS = frozenset({
     "SEND_PIPELINE_V2_ENABLED",
+    # A camada Deal troca o conteúdo que vai para o grupo. Enquanto o shadow não
+    # provar a divergência numa organização, ela não publica por lá.
+    "DEAL_LAYER_LIVE",
 })
 
 
@@ -113,6 +116,16 @@ def _feature_decision(flag_name, organization):
 def send_pipeline_v2_enabled(user=None) -> bool:
     """Gate tenant-aware do pipeline que produz efeitos externos."""
     return enabled_for_user("SEND_PIPELINE_V2_ENABLED", user)
+
+
+def deal_layer_live_enabled(user=None) -> bool:
+    """A camada Deal escolhe o que publicar para esta organização?
+
+    Desligada por padrão em todo lugar: o rollback é apagar a flag, não reverter
+    migração. O shadow (`DEAL_LAYER_SHADOW`) roda independente disto e não altera
+    envio nenhum.
+    """
+    return enabled_for_user("DEAL_LAYER_LIVE", user)
 
 
 def enabled_for_whatsapp_session(session_id: str) -> bool:
