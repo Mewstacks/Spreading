@@ -354,24 +354,28 @@ def pool_de_produtos_elegiveis(*, macros_selecionadas=None,
     Devolve objetos já anotados com `economia_rs` e `desconto_percent` e
     deduplicados por identidade de produto.
     """
-    qs = Produto.objects.exclude(origem="cupom").exclude(
+    base = Produto.objects.exclude(
         estado__in=["indisponivel", "invalido", "expirado", "stale"])
     from apps.scrapers.maintenance import produtos_frescos_q
-    qs = qs.filter(produtos_frescos_q())
-    qs = qs.filter(Q(owner__isnull=True) | Q(owner=usuario)) if usuario else qs.filter(
+    base = base.filter(produtos_frescos_q())
+    base = base.filter(Q(owner__isnull=True) | Q(owner=usuario)) if usuario else base.filter(
         owner__isnull=True)
     if marketplace:
-        qs = qs.filter(marketplace=marketplace)
+        base = base.filter(marketplace=marketplace)
     if macros_selecionadas:
-        qs = qs.filter(macro_categoria__in=macros_selecionadas)
+        base = base.filter(macro_categoria__in=macros_selecionadas)
     if categorias_selecionadas:
-        qs = qs.filter(categoria__in=categorias_selecionadas)
+        base = base.filter(categoria__in=categorias_selecionadas)
     if termo:
         cond = Q()
         for palavra in [p.strip() for p in termo.split(",") if p.strip()]:
             cond |= Q(nome__icontains=palavra)
         if cond:
-            qs = qs.filter(cond)
+            base = base.filter(cond)
+    # `origem="cupom"` fica fora da via de preço puro: sem cupom na conta, uma linha
+    # dessas não tem desconto de vitrine para exibir. A fatia de cupom mais abaixo
+    # a readmite, porque lá o desconto vem justamente do cupom.
+    qs = base.exclude(origem="cupom")
 
     elegiveis_qs = qs.annotate(
         economia_rs=ExpressionWrapper(
@@ -415,12 +419,36 @@ def pool_de_produtos_elegiveis(*, macros_selecionadas=None,
     #
     # O custo é limitado por teto próprio, e não some dentro do outro: se dividisse
     # o mesmo teto, encher a fatia de cupom esvaziaria a de preço puro.
+    #
+    # E ela NÃO herda o piso de desconto de vitrine, porque esse piso mede a coisa
+    # errada para este caso. Medido em 04/09/2026: dos 226 produtos com par
+    # confirmado, cupom ativo e ficha completa — preço, preço de lista, imagem,
+    # link —, exemplos reais são "de R$ 76,95 por R$ 76,95" e "de R$ 229,57 por
+    # R$ 229,57". Vitrine sem desconto nenhum: o abatimento deles É o cupom. Exigir
+    # 15% de vitrine antes de olhar o cupom elimina por construção exatamente o
+    # deal que este produto existe para publicar — é a mesma inversão que o topo de
+    # `deals.py` descreve, "a qualidade do negócio era medida sem o cupom dentro da
+    # conta", sobrevivendo um andar acima, no pool.
+    #
+    # Nada é afrouxado no que importa: benefício mínimo NESTE item, corroboração,
+    # `_passa_no_minimo`, frescor e medição de preço no envio continuam valendo, e
+    # são eles que protegem a verdade da mensagem. O piso de vitrine só protegia
+    # custo de CPU, e para isso já existe o teto da fatia.
     ids_recentes = {p.pk for p in recentes}
     com_cupom = list(
-        elegiveis_qs.filter(
+        base.filter(
             cupons_normalizados__status="confirmado",
             cupons_normalizados__cupom__estado="ativo",
-        ).exclude(pk__in=ids_recentes)
+            preco_com_cupom__gt=0,
+        ).annotate(
+            economia_rs=ExpressionWrapper(
+                F("preco_sem_desconto") - F("preco_com_cupom"),
+                output_field=FloatField()),
+            desconto_percent=ExpressionWrapper(
+                (F("preco_sem_desconto") - F("preco_com_cupom")) * 100.0
+                / F("preco_sem_desconto"), output_field=FloatField()),
+        ).filter(desconto_percent__lt=90)
+        .exclude(pk__in=ids_recentes)
         .distinct()
         .order_by("-ultima_observacao", "-id")[:TETO_CANDIDATOS_COM_CUPOM]
     )

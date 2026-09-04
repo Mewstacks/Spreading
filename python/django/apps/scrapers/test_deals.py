@@ -561,6 +561,44 @@ class PoolReservaFatiaParaCupomTests(BaseDeals):
             "Produto com par confirmado foi cortado do pool por ser menos recente.",
         )
 
+    def test_item_sem_desconto_de_vitrine_entra_pelo_cupom(self):
+        """O abatimento dele E o cupom; exigir vitrine elimina o deal por construcao.
+
+        Medido em producao em 04/09/2026: dos 226 produtos com par confirmado,
+        cupom ativo e ficha completa, exemplos reais sao "de R$ 76,95 por R$ 76,95"
+        e "de R$ 229,57 por R$ 229,57" — vitrine sem desconto nenhum. O piso de 15%
+        de vitrine rodava ANTES de olhar o cupom, entao cortava exatamente o deal
+        que este produto existe para publicar.
+        """
+        from apps.scrapers import ofertas
+
+        sem_vitrine = self._produto(
+            nome="So o cupom desconta", preco=100.0, de=100.0,
+            link="https://produto.mercadolivre.com.br/SOCUPOM")
+        self._observar(sem_vitrine, 100.0, 100.0, 100.0)
+        self._cupom(produto=sem_vitrine, codigo="SOCUPOM", percentual=20.0, teto=100.0)
+
+        ids = {p.pk for p in ofertas.pool_de_produtos_elegiveis(usuario=self.user)}
+        self.assertIn(
+            sem_vitrine.pk, ids,
+            "Item cujo desconto vem do cupom foi cortado pelo piso de vitrine.",
+        )
+
+    def test_origem_cupom_so_entra_quando_tem_par_confirmado(self):
+        """Readmitir `origem=cupom` nao pode virar porta aberta para o resto."""
+        from apps.scrapers import ofertas
+
+        orfao = Produto.objects.create(
+            owner=self.user, marketplace="mercadolivre", nome="Cupom sem par",
+            origem="cupom", preco_sem_desconto=100.0, preco_com_cupom=100.0,
+            confianca="alta",
+            link_produto="https://produto.mercadolivre.com.br/ORFAO",
+        )
+        self._observar(orfao, 100.0, 100.0, 100.0)
+
+        ids = {p.pk for p in ofertas.pool_de_produtos_elegiveis(usuario=self.user)}
+        self.assertNotIn(orfao.pk, ids)
+
     def test_a_fatia_de_cupom_tem_teto_proprio(self):
         """Encher um lado nao pode esvaziar o outro."""
         from apps.scrapers import ofertas
