@@ -963,3 +963,61 @@ class AncoraDePrecoTests(BaseDeals):
         deal.historico = {"n": 9, "mediana": 40.0, "minimo": 30.0}
 
         self.assertNotIn("DE ~", self._mensagem(deal))
+
+
+class EscopoPublicavelTests(TestCase):
+    """A linha "Vale em:" publicava sobra de raspagem, e às vezes a loja errada.
+
+    Colhido da produção em 07/09/2026, tudo isto saindo na mensagem:
+
+        LIBERAESSA (méliuz) → "› Regras Compre com cupom e ganhe 8% de economia
+                               + até 2,5% cashback . era 1,5%"
+        ACHEIOFF   (pelando) → "Em itens Selecionados"
+        ACHEIOFF   (ml)      → "Sellers"
+        LIBERAESSA           → "Casas Bahia"
+
+    Nenhum delimita nada. O último nomeava outra loja ao lado de um link meli.la.
+    """
+
+    def _publicavel(self, texto, marketplace="mercadolivre"):
+        from apps.scrapers.ofertas import _escopo_publicavel
+
+        return _escopo_publicavel(texto, marketplace)
+
+    def test_recorte_de_catalogo_passa(self):
+        for texto in ("Moda", "Casa e Cozinha", "Cozinha, Mesa e Bar",
+                      "Vehicle Parts & Accessories", "Beleza e Perfumaria"):
+            with self.subTest(texto=texto):
+                self.assertEqual(self._publicavel(texto), texto)
+
+    def test_sobra_de_raspagem_nao_passa(self):
+        self.assertEqual(self._publicavel(
+            "› Regras Compre com cupom e ganhe 8% de economia + até 2,5% "
+            "cashback . era 1,5%"), "")
+
+    def test_tautologia_nao_passa(self):
+        # "Vale em: Em itens Selecionados" não diz nada a quem lê.
+        for texto in ("Em itens Selecionados", "Produtos selecionados", "Sellers"):
+            with self.subTest(texto=texto):
+                self.assertEqual(self._publicavel(texto), "")
+
+    def test_nome_de_outra_loja_nao_passa(self):
+        """O pior caso: sai ao lado do link da loja certa."""
+        self.assertEqual(self._publicavel("Casas Bahia", "mercadolivre"), "")
+        self.assertEqual(self._publicavel("Shopee", "mercadolivre"), "")
+        self.assertEqual(self._publicavel("Mercado Livre", "amazon"), "")
+
+    def test_a_propria_loja_nao_e_barrada_por_engano(self):
+        # A regra é sobre nomear OUTRA loja, não sobre a palavra "loja".
+        self.assertEqual(
+            self._publicavel("Loja oficial Philco", "mercadolivre"),
+            "Loja oficial Philco")
+
+    def test_frase_longa_nao_passa(self):
+        self.assertEqual(self._publicavel(
+            "Cupom válido a partir do momento de sua divulgação até as 23h59 "
+            "do dia 28/09 ou ate atingir o limite de mil cupons"), "")
+
+    def test_vazio_continua_vazio(self):
+        self.assertEqual(self._publicavel(""), "")
+        self.assertEqual(self._publicavel(None), "")

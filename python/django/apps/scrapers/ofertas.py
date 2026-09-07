@@ -2723,7 +2723,7 @@ def _nome_principal_produto(nome, limite=70) -> str:
     return _sem_cauda_pendurada(cortado) or texto[:limite]
 
 
-def _condicao_legivel(texto, limite=180) -> str:
+def _condicao_legivel(texto, limite=110) -> str:
     """Condição do cupom que termina numa frase inteira, sem repetir selo.
 
     O escopo bruto do Mercado Livre repete o mesmo selo ("25% de Desconto 25% OFF
@@ -3129,11 +3129,64 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     return "\n".join(linhas)
 
 
+# Escopo publicável tem de ser um RECORTE — "Moda", "Casa e Cozinha", "Vehicle
+# Parts & Accessories". O que as fontes entregam com frequência não é isso, e a
+# mensagem publicava tudo cru. Colhido da produção em 07/09/2026:
+#
+#   LIBERAESSA (méliuz) → "› Regras Compre com cupom e ganhe 8% de economia +
+#                          até 2,5% cashback . era 1,5%"
+#   ACHEIOFF   (pelando) → "Em itens Selecionados"
+#   ACHEIOFF   (ml)      → "Sellers"
+#   LIBERAESSA           → "Casas Bahia"
+#
+# Nenhum delimita nada. O primeiro é sobra de raspagem, com navegação ("› Regras")
+# e cashback de OUTRO programa. Os dois do meio são tautologia. E o último nomeia
+# uma loja diferente num cupom do Mercado Livre, publicado ao lado de um link
+# meli.la — mentira direta para quem lê.
+#
+# A regra que já existia era "escopo delimitado E provado". Isto aplica a primeira
+# metade ao texto: na dúvida, a linha não sai. Cupom sem linha de escopo continua
+# publicável; o que não pode é anunciar um recorte que não existe.
+_ESCOPO_RUIDO = re.compile(
+    r"›|\bregras\b|cashback|\bera\s+\d|\bou\s+até\b|%|R\$"
+    r"|\bitens?\s+selecionados?\b|\bprodutos?\s+selecionados?\b"
+    r"|\bsellers?\b|\bcompre\b|\bganhe\b|\beconomize\b|\bdesconto\b",
+    re.I,
+)
+# Recorte de catálogo é nome curto. Passou disto, é frase de marketing — medido
+# contra os casos acima, o mais curto dos ruídos tem 19 caracteres e o mais longo
+# 78, enquanto um recorte real ("Cozinha, Mesa e Bar") cabe folgado em 60.
+_ESCOPO_MAX = 60
+
+
+def _escopo_publicavel(texto: str, marketplace: str = "") -> str:
+    """O escopo cru, ou '' quando ele não é um recorte de verdade."""
+    limpo = re.sub(r"\s+", " ", str(texto or "")).strip(" .;,-–—")
+    if not limpo or len(limpo) > _ESCOPO_MAX:
+        return ""
+    if _ESCOPO_RUIDO.search(limpo):
+        return ""
+    # Nomear outra loja é o pior caso: sai ao lado do link da loja certa.
+    outras = {
+        "mercadolivre": ("casas bahia", "amazon", "shopee", "magalu",
+                         "magazine luiza", "americanas", "aliexpress", "shein"),
+        "amazon": ("casas bahia", "mercado livre", "mercadolivre", "shopee",
+                   "magalu", "magazine luiza", "americanas"),
+        "shopee": ("casas bahia", "mercado livre", "mercadolivre", "amazon",
+                   "magalu", "magazine luiza", "americanas"),
+    }.get(str(marketplace or "").casefold(), ())
+    baixo = limpo.casefold()
+    if any(loja in baixo for loja in outras):
+        return ""
+    return limpo
+
+
 def _escopo_do_cupom(cupom) -> str:
     """Recorte de produtos do cupom p/ a mensagem; '' quando vale para tudo.
 
     Cupom de site inteiro não ganha linha nenhuma: dizer "vale em todos os
-    produtos" só ocupa espaço. Os demais saem com o texto que a fonte publicou.
+    produtos" só ocupa espaço. Os demais só saem quando o texto da fonte é
+    mesmo um recorte — ver `_escopo_publicavel`.
     """
     if cupom is None or not hasattr(cupom, "regras"):
         return ""
@@ -3141,7 +3194,8 @@ def _escopo_do_cupom(cupom) -> str:
 
     if regras_do_cupom(cupom).get("is_mar_aberto"):
         return ""
-    return escopo_produtos_cupom(cupom)[:120]
+    return _escopo_publicavel(
+        escopo_produtos_cupom(cupom), getattr(cupom, "marketplace", ""))
 
 
 def _condicao_do_cupom(cupom) -> str:
