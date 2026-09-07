@@ -1226,3 +1226,70 @@ class CredencialAmazonNaoEElegibilidadeTests(TestCase):
         self.assertEqual(corpo["client_id"], creds.credential_id)
         self.assertEqual(corpo["client_secret"], creds.credential_secret)
         self.assertEqual(corpo["grant_type"], "client_credentials")
+
+
+class SemCreditoDeIAAMensagemContinuaInteiraTests(BaseDeals):
+    """Sem chave da Anthropic, a mensagem perde o gancho — e nada mais.
+
+    Foi a regra pedida: "no máximo sem a mensagenzinha do começo". Tudo o que
+    vende continua sendo produzido por código — nome, preço, desconto, cupom,
+    validade, CTA e link — e o nome cai para `_nome_principal_produto`, que apara
+    o título cru do marketplace sem nenhuma ida à rede.
+
+    Este teste existe porque a degradação silenciosa é fácil de introduzir: basta
+    alguém passar a depender de `nome_curto` da IA num ponto novo, e a mensagem
+    fica pela metade num dia em que o crédito acabar — que é exatamente o dia em
+    que ninguém está olhando.
+    """
+
+    def _deal(self):
+        produto = self._produto(preco=100.0)
+        self._observar(produto, 180.0, 175.0, 170.0)
+        self._cupom(produto=produto, percentual=20.0, teto=100.0, checkout=True)
+        return deals.gerar_deals(self._config(), limite=1)[0]
+
+    def _sem_ia(self, deal, **kwargs):
+        from unittest.mock import patch
+
+        from apps.scrapers.ofertas import montar_mensagem_deal
+
+        with patch("apps.scrapers.llm.settings.ANTHROPIC_API_KEY", ""):
+            return montar_mensagem_deal(
+                deal, "https://meli.la/abc", usuario=self.user, **kwargs)
+
+    def test_a_mensagem_tem_tudo_menos_o_gancho(self):
+        deal = self._deal()
+        deal.desconto_comprovado = True
+        deal.historico = {"n": 9, "mediana": 160.0, "minimo": 80.0}
+
+        texto = self._sem_ia(deal, configuracao=self._config())
+
+        self.assertIn("Fone Bluetooth JBL", texto)   # nome, pelo aparador local
+        self.assertIn("POR R$ 80", texto)            # preço
+        self.assertIn("DE ~R$ 160~", texto)          # âncora medida
+        self.assertIn("(-50%)", texto)               # percentual
+        self.assertIn("CUPOM: PRESENTE", texto)      # cupom
+        self.assertIn("Compre aqui", texto)          # CTA
+        self.assertIn("https://meli.la/abc", texto)  # link
+
+    def test_o_nome_cru_do_marketplace_e_aparado_sem_ia(self):
+        from apps.scrapers.ofertas import _nome_principal_produto
+
+        # O caso real da produção: o corte por palavra deixava "Velocidade" —
+        # o nome terminava anunciando uma característica sem dizer qual.
+        aparado = _nome_principal_produto(
+            "Furadeira Parafusadeira De Impacto 21v Com 2 Baterias Velocidade "
+            "Variavel Reversivel Maleta", limite=70)
+
+        self.assertFalse(aparado.endswith("Velocidade"))
+        self.assertFalse(aparado.endswith("Com"))
+        self.assertIn("Furadeira", aparado)
+
+    def test_spec_com_valor_nao_e_confundida_com_cauda(self):
+        from apps.scrapers.ofertas import _nome_principal_produto
+
+        # "Tela 6.7" e "Bateria 5000mah" são informação: não podem ser podadas.
+        for nome in ("Smartphone Galaxy A17 Tela 6.7",
+                     "Smartphone Moto G56 Bateria 5000mah"):
+            with self.subTest(nome=nome):
+                self.assertEqual(_nome_principal_produto(nome, limite=70), nome)
