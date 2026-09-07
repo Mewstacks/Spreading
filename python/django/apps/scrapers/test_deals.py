@@ -384,17 +384,37 @@ class MensagemDealTests(BaseDeals):
         self.assertNotIn("habitual", texto)
         self.assertNotIn("menor preço", texto.casefold())
 
-    def test_sem_historico_a_mensagem_e_a_mesma(self):
-        """Nao ha ramo escondido: com ou sem serie, a mensagem nao muda de forma."""
+    def test_o_historico_ancora_o_preco_e_nao_vira_frase(self):
+        """O que a serie pode fazer, e o que ela nao pode.
+
+        PODE: ser a ancora do preco riscado. A mediana de 90 dias e um numero que
+        nos medimos, entao o "de" e verificavel — ao contrario do `preco_sem_desconto`
+        que a loja anuncia, que no robo aspirador era R$ 3.800 contra R$ 1.621
+        cobrados. Krishna et al. (2002): ancora implausivel pesa b=-0,350, mais forte
+        em modulo que os b=+0,244 da plausivel.
+
+        NAO PODE: virar afirmacao em prosa sobre o historico. Nem linha propria, nem
+        dentro da frase da IA, nem reescrita.
+        """
         from apps.scrapers.ofertas import montar_mensagem_deal
 
         deal = self._deal()
+        deal.desconto_comprovado = True
         deal.historico = None
         sem = montar_mensagem_deal(deal, "https://meli.la/abc", usuario=self.user)
         deal.historico = {"n": 9, "mediana": 160.0, "minimo": 80.0}
         com = montar_mensagem_deal(deal, "https://meli.la/abc", usuario=self.user)
 
-        self.assertEqual(sem, com)
+        # Sem serie nao ha ancora: so o POR.
+        self.assertNotIn("DE ", sem)
+        # Com serie, a ancora e a mediana medida, com o percentual.
+        self.assertIn("DE ~160~", com)
+        self.assertIn("(-50%)", com)
+        # E nenhuma das duas afirma nada sobre historico.
+        for texto in (sem, com):
+            self.assertNotIn("90 dias", texto)
+            self.assertNotIn("observamos", texto)
+            self.assertNotIn("mediana", texto.casefold())
 
     def test_a_funcao_que_escrevia_a_frase_nao_existe_mais(self):
         """Enquanto ela existir, alguem volta a chama-la."""
@@ -856,3 +876,90 @@ class VitrineMelhoraOPrecoNaoReprovaOCandidatoTests(BaseDeals):
 
         self.assertEqual(len(achados), 1)
         self.assertTrue(achados[0].tem_cupom)
+
+
+class AncoraDePrecoTests(BaseDeals):
+    """O preço riscado é o que NÓS medimos, e vem com o percentual.
+
+    Krishna, Briesch, Lehmann & Yuan (2002), Journal of Retailing 78:101-118,
+    meta-análise de 345 observações: âncora plausível pesa b=+0,244 na economia
+    percebida; âncora IMPLAUSÍVEL pesa b=-0,350. O efeito negativo é maior em
+    módulo — um "de" inflado não é neutro, custa. E o percentual do desconto pesa
+    b=0,57 contra b=0,122 do valor absoluto, quase cinco vezes mais.
+
+    O caso que abriu isto: o Mercado Livre anunciava "de R$ 3.800" num robô
+    aspirador cobrado a R$ 1.621. Ninguém confere esse número.
+    """
+
+    def _deal(self, **kwargs):
+        produto = self._produto(preco=100.0)
+        self._observar(produto, 180.0, 175.0, 170.0)
+        self._cupom(produto=produto, percentual=20.0, teto=100.0, checkout=True)
+        return deals.gerar_deals(self._config(), limite=1)[0]
+
+    def _mensagem(self, deal, **kwargs):
+        from apps.scrapers.ofertas import montar_mensagem_deal
+
+        return montar_mensagem_deal(
+            deal, "https://meli.la/abc", usuario=self.user, **kwargs)
+
+    def test_a_ancora_e_a_mediana_medida_nao_o_de_da_loja(self):
+        deal = self._deal()
+        deal.desconto_comprovado = True
+        # A loja diz 200 (é o `preco_sem_desconto` do fixture); nós medimos 160.
+        deal.historico = {"n": 9, "mediana": 160.0, "minimo": 80.0}
+
+        texto = self._mensagem(deal)
+
+        self.assertIn("DE ~160~", texto)
+        self.assertNotIn("200", texto)
+
+    def test_o_percentual_e_impresso(self):
+        deal = self._deal()
+        deal.desconto_comprovado = True
+        deal.historico = {"n": 9, "mediana": 160.0, "minimo": 80.0}
+
+        self.assertIn("(-50%)", self._mensagem(deal))
+
+    def test_sem_serie_nao_ha_preco_riscado(self):
+        deal = self._deal()
+        deal.desconto_comprovado = True
+        deal.historico = None
+
+        texto = self._mensagem(deal)
+
+        self.assertNotIn("DE ~", texto)
+        self.assertIn("POR", texto)
+
+    def test_desconto_nao_comprovado_nao_risca(self):
+        """A série existe, mas o portão de comprovação continua mandando."""
+        deal = self._deal()
+        deal.desconto_comprovado = False
+        deal.historico = {"n": 9, "mediana": 160.0, "minimo": 80.0}
+
+        self.assertNotIn("DE ~", self._mensagem(deal))
+
+    def test_queda_abaixo_do_minimo_da_regra_nao_risca(self):
+        """Meta-análise: preço de referência não ajuda em desconto pequeno.
+
+        O piso é o `min_desconto_percent` que o usuário já configurou — não um
+        número inventado aqui.
+        """
+        config = self._config(min_desconto_percent=20.0)
+        deal = self._deal()
+        deal.desconto_comprovado = True
+        # 80 contra mediana 88 = 9%, abaixo dos 20% da regra.
+        deal.historico = {"n": 9, "mediana": 88.0, "minimo": 80.0}
+
+        texto = self._mensagem(deal, configuracao=config)
+
+        self.assertNotIn("DE ~", texto)
+        self.assertIn("POR 80", texto)
+
+    def test_mediana_abaixo_do_preco_nao_vira_ancora_invertida(self):
+        """Série mais barata que o preço de hoje não pode virar "de" menor."""
+        deal = self._deal()
+        deal.desconto_comprovado = True
+        deal.historico = {"n": 9, "mediana": 40.0, "minimo": 30.0}
+
+        self.assertNotIn("DE ~", self._mensagem(deal))

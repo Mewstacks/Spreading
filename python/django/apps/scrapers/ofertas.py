@@ -1499,14 +1499,38 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
     if getattr(produto, "frete_full", False):
         linhas.append("📦 Frete grátis")
 
-    # O "DE" só com desconto comprovado pelo nosso histórico — riscar um preço que
-    # talvez nunca tenha existido é o falso positivo mais caro do produto, porque
-    # quem assina a mensagem é a creator.
-    lista = float(getattr(produto, "preco_sem_desconto", 0) or 0)
+    # O preço riscado é O QUE NÓS OBSERVAMOS, e vem com o percentual.
+    #
+    # Duas mudanças, as duas com número atrás.
+    #
+    # 1. A âncora deixa de ser `produto.preco_sem_desconto` — o "de" que a loja
+    #    anuncia — e passa a ser a MEDIANA de 90 dias do nosso próprio
+    #    `PrecoHistorico`. Krishna, Briesch, Lehmann & Yuan (2002), Journal of
+    #    Retailing 78:101-118, meta-análise de 345 observações: âncora plausível
+    #    pesa b=+0,244, âncora IMPLAUSÍVEL pesa b=-0,350. O efeito negativo é maior
+    #    em módulo que o positivo — uma âncora inflada não é neutra, ela custa. O
+    #    caso concreto: o Mercado Livre anunciava "de R$ 3.800" num robô aspirador
+    #    vendido a R$ 1.621, 57% de queda, número que ninguém confere. A mediana
+    #    observada é verificável por construção: é o preço que o item costuma ter,
+    #    medido por nós, não afirmado pela loja.
+    #
+    # 2. O percentual passa a ser impresso. Mesma meta-análise: o percentual do
+    #    desconto pesa b=0,57 na economia percebida contra b=0,122 do valor
+    #    absoluto — quase cinco vezes mais. A mensagem mostrava só os dois valores.
+    #
+    # Abaixo do mínimo da regra, a linha vira só o POR: a mesma meta-análise mede
+    # que o preço de referência não ajuda em desconto pequeno e plausível. O piso é
+    # o `min_desconto_percent` que o usuário já configurou, não um número novo.
     por = _preco_br(deal.preco_final)
-    if deal.desconto_comprovado and lista > deal.preco_final:
+    historico = getattr(deal, "historico", None) or {}
+    referencia = float(historico.get("mediana") or 0)
+    piso = float(getattr(configuracao, "min_desconto_percent", 0) or 0)
+    queda = ((referencia - deal.preco_final) / referencia * 100
+             if referencia > 0 else 0.0)
+    if deal.desconto_comprovado and referencia > deal.preco_final and queda >= piso:
         linhas.append(
-            f"🔥 DE {m.strike(_preco_br(lista))} | {m.bold(f'POR {por}')}")
+            f"🔥 DE {m.strike(_preco_br(referencia))} | "
+            f"{m.bold(f'POR {por}')} (-{queda:.0f}%)")
     else:
         linhas.append(f"🔥 {m.bold(f'POR {por}')}")
 
