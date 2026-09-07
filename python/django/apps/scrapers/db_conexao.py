@@ -50,8 +50,12 @@ def renovar_conexoes_antigas() -> None:
     de fora começam sem transação; sob o `TestCase`, que embrulha tudo num atomic,
     quebrava sempre.
     """
-    from django.db import close_old_connections
-
-    if any(conexao.in_atomic_block for conexao in connections.all()):
-        return
-    close_old_connections()
+    # Por conexão, não tudo-ou-nada: `close_old_connections` do Django itera
+    # `connections.all()`, e o que não pode ser fechada é a que está DENTRO de uma
+    # transação. Pular todas quando qualquer uma está em atomic deixava a conexão
+    # de uma thread nova pendurada — que é justamente o vazamento que estes
+    # wrappers existem para evitar.
+    for conexao in connections.all():
+        if conexao.in_atomic_block:
+            continue
+        conexao.close_if_unusable_or_obsolete()

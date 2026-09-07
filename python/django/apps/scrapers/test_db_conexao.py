@@ -93,3 +93,48 @@ class ConexoesAntigasRespeitamTransacaoTests(TestCase):
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1")
             self.assertEqual(cursor.fetchone()[0], 1)
+
+
+class RenovacaoEPorConexaoNaoTudoOuNadaTests(SimpleTestCase):
+    """Pular TODAS quando qualquer uma está em transação vaza a outra.
+
+    Foi o erro da primeira tentativa: os wrappers de thread existem justamente
+    para devolver a conexão que a thread abriu, e um guard tudo-ou-nada deixava
+    ela pendurada sempre que a thread principal estivesse num `atomic()` — que,
+    sob `TestCase`, é sempre.
+    """
+
+    def test_fecha_a_ociosa_e_preserva_a_que_esta_em_transacao(self):
+        from apps.scrapers import db_conexao
+
+        em_transacao = Mock(in_atomic_block=True)
+        ociosa = Mock(in_atomic_block=False)
+
+        original = db_conexao.connections
+        try:
+            db_conexao.connections = Mock(
+                all=Mock(return_value=[em_transacao, ociosa]))
+            db_conexao.renovar_conexoes_antigas()
+        finally:
+            db_conexao.connections = original
+
+        ociosa.close_if_unusable_or_obsolete.assert_called_once_with()
+        em_transacao.close_if_unusable_or_obsolete.assert_not_called()
+
+    def test_o_mesmo_vale_do_lado_de_accounts(self):
+        """`tenant.py` repete a regra por causa do import circular."""
+        from apps.accounts import tenant
+
+        em_transacao = Mock(in_atomic_block=True)
+        ociosa = Mock(in_atomic_block=False)
+
+        original = tenant.connections
+        try:
+            tenant.connections = Mock(
+                all=Mock(return_value=[em_transacao, ociosa]))
+            tenant._renovar_conexoes_antigas()
+        finally:
+            tenant.connections = original
+
+        ociosa.close_if_unusable_or_obsolete.assert_called_once_with()
+        em_transacao.close_if_unusable_or_obsolete.assert_not_called()

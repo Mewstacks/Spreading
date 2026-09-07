@@ -341,7 +341,9 @@ def _persistir_sessao(user_id: int, storage_state: dict, tentativas: int = 3,
                       prontidao: str = "unknown",
                       motivo_prontidao: str = "") -> None:
     """Grava a sessão, tolerante a socket morto depois de minutos de browser ocioso."""
-    from django.db import InterfaceError, OperationalError, close_old_connections
+    from django.db import InterfaceError, OperationalError
+
+    from apps.scrapers.db_conexao import renovar_conexoes_antigas
 
     for tentativa in range(1, tentativas + 1):
         try:
@@ -355,7 +357,13 @@ def _persistir_sessao(user_id: int, storage_state: dict, tentativas: int = 3,
                 raise
             logger.warning("Gravação da sessão ML falhou (%s/%s): %s",
                            tentativa, tentativas, exc)
-            close_old_connections()
+            # `renovar_conexoes_antigas`, nao `close_old_connections`: dentro de
+            # uma transacao aberta este ultimo nao renova nada — ele compara
+            # `get_autocommit()` com o AUTOCOMMIT do settings, que divergem por
+            # definicao dentro de um `atomic()`, e fecha. A conexao fica em
+            # `closed_in_transaction`, e o retry seguinte falha pelo motivo
+            # errado, escondendo o original.
+            renovar_conexoes_antigas()
             time.sleep(0.5 * tentativa)
 
 

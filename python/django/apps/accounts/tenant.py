@@ -11,7 +11,37 @@ from functools import wraps
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from django.db import close_old_connections, connection, connections, transaction
+from django.db import connection, connections, transaction
+
+
+def _renovar_conexoes_antigas():
+    """`close_old_connections`, exceto quando há transação aberta.
+
+    Dentro de um `atomic()` o `close_old_connections` do Django não renova nada:
+    ele compara `get_autocommit()` com o AUTOCOMMIT do settings — que divergem
+    por definição dentro de uma transação — e fecha. A conexão fica em
+    `closed_in_transaction` e toda query seguinte levanta "the connection is
+    closed", mascarando o erro que realmente aconteceu.
+
+    Os wrappers abaixo são alvos de thread e de job, onde não há transação e o
+    comportamento é idêntico ao de antes. A diferença aparece quando um deles é
+    chamado EM LINHA, dentro da transação de quem chamou — e é justamente esse
+    caso que já quebrou três vezes neste repositório (`iniciar_browser`,
+    `organization_callable`, `_persistir_sessao`).
+
+    Import local em `db_conexao` seria circular: `apps.scrapers` importa
+    `apps.accounts`. A regra é a mesma, escrita uma vez de cada lado.
+    """
+    # Por conexão, não tudo-ou-nada: o que não pode ser fechada é a que está
+    # DENTRO de uma transação. Pular todas quando qualquer uma está em atomic
+    # deixava pendurada a conexão da thread nova — justamente o vazamento que
+    # estes wrappers existem para evitar.
+    for conexao in connections.all():
+        if conexao.in_atomic_block:
+            continue
+        conexao.close_if_unusable_or_obsolete()
+
+
 from django.db.backends.signals import connection_created
 from django.dispatch import receiver
 
@@ -339,7 +369,7 @@ def organization_job(func):
         from django.contrib.auth import get_user_model
         from .models import organization_for_user
 
-        close_old_connections()
+        _renovar_conexoes_antigas()
         user = user_or_id
         if not getattr(user, "is_authenticated", False):
             user = get_user_model().objects.get(pk=user_or_id)
@@ -351,7 +381,7 @@ def organization_job(func):
                 with organization_context(organization):
                     return func(user_or_id, *args, **kwargs)
         finally:
-            close_old_connections()
+            _renovar_conexoes_antigas()
     return wrapped
 
 
@@ -462,11 +492,11 @@ def executar_no_tenant(fn, *args, organization_id=None, actor_id=None, **kwargs)
 
     def _alvo():
         # Minutos de browser matam o socket ocioso do Postgres dos dois lados.
-        close_old_connections()
+        _renovar_conexoes_antigas()
         try:
             return _no_escopo()
         finally:
-            close_old_connections()
+            _renovar_conexoes_antigas()
 
     # .result() propaga a exceção para o chamador em vez de deixá-la presa no Future.
     return _obter_executor_orm().submit(_alvo).result()
@@ -504,7 +534,7 @@ def organization_job_sem_transacao(func):
         from django.contrib.auth import get_user_model
         from .models import organization_for_user
 
-        close_old_connections()
+        _renovar_conexoes_antigas()
         user = user_or_id
         if not getattr(user, "is_authenticated", False):
             user = get_user_model().objects.get(pk=user_or_id)
@@ -514,12 +544,12 @@ def organization_job_sem_transacao(func):
                 raise ValueError("Job privado iniciado sem organização ativa.")
             organization_id = str(organization.pk)
         # Nada aberto enquanto o browser roda.
-        close_old_connections()
+        _renovar_conexoes_antigas()
         try:
             with tenant_suspenso(organization_id, actor_id=str(user.pk)):
                 return func(user_or_id, *args, **kwargs)
         finally:
-            close_old_connections()
+            _renovar_conexoes_antigas()
     return wrapped
 
 
