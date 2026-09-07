@@ -53,8 +53,24 @@ def _resultado(stage, category="", reason="", detail="", retry_at=None):
 
 
 @contextmanager
-def _session_statement_timeout(value):
-    """Relaxa o timeout da sessão e restaura. `value` é literal PG ('0', '10min')."""
+def _session_statement_timeout(value, lock_timeout=None):
+    """Relaxa os timeouts da sessão e restaura. Literais PG ('0', '10min').
+
+    `lock_timeout` existe porque os dois limites são configurados juntos em
+    `settings` — `-c lock_timeout=15000 -c statement_timeout=120000` — e o
+    comentário de lá diz para que servem: proteger as oito threads do gunicorn de
+    ficarem presas numa fila de lock, "foi o que tirou o site do ar por ~30min".
+
+    Isso é o certo para uma request web. A projeção de cupons não é uma: roda no
+    worker `cupons`, sobre milhares de linhas, e ninguém está esperando a página
+    carregar. Ela já relaxava o `statement_timeout` e herdava os 15s de lock — e
+    era isso que virava `LockNotAvailable: canceling statement due to lock timeout`
+    quando encontrava um ciclo concorrente.
+
+    O valor continua FINITO de propósito. Sem limite, uma transação abandonada
+    voltaria a prender o worker indefinidamente, que é o problema que os 15s
+    resolveram do outro lado.
+    """
     if connection.vendor != "postgresql":
         yield
         return
@@ -64,6 +80,13 @@ def _session_statement_timeout(value):
         cursor.execute(
             "SELECT set_config('statement_timeout', %s, false)", [value],
         )
+        previous_lock = None
+        if lock_timeout is not None:
+            cursor.execute("SHOW lock_timeout")
+            previous_lock = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT set_config('lock_timeout', %s, false)", [lock_timeout],
+            )
     try:
         yield
     finally:
@@ -71,6 +94,10 @@ def _session_statement_timeout(value):
             cursor.execute(
                 "SELECT set_config('statement_timeout', %s, false)", [previous],
             )
+            if previous_lock is not None:
+                cursor.execute(
+                    "SELECT set_config('lock_timeout', %s, false)", [previous_lock],
+                )
 
 
 def conexao_ml(usuario, *, permitir_sonda=True):
@@ -511,7 +538,10 @@ def projetar_disponibilidade_cupons(usuario, channel="whatsapp"):
     organization = organization_for_user(usuario)
     if organization is None:
         return {"stages": {}, "reasons": {}, "total": 0}
-    with _session_statement_timeout("0"):
+    # 90s de espera por lock: folgado para atravessar um ciclo concorrente, curto
+    # o bastante para uma transação abandonada não prender o worker até o próximo
+    # deploy. Ver `_session_statement_timeout`.
+    with _session_statement_timeout("0", lock_timeout="90s"):
         return _projetar_disponibilidade_cupons(usuario, organization, channel)
 
 
@@ -544,10 +574,17 @@ def _persistir_projecoes_em_lote(
     with transaction.atomic():
         existentes = {
             (row.cupom_id, row.use_mode): row
+            # `order_by` não é estética: SELECT ... FOR UPDATE sem ordem pega os
+            # locks na ordem que o plano escolher, e dois ciclos concorrentes
+            # podem pegá-los em ordens opostas. O primeiro a esperar estoura o
+            # `lock_timeout` — que é exatamente o
+            # `LockNotAvailable: canceling statement due to lock timeout` visto em
+            # produção em 07/09/2026. Ordem total e igual em todos os pontos
+            # elimina a inversão por construção.
             for row in CupomDisponibilidade.objects.select_for_update().filter(
                 organization=organization, usuario=usuario, channel=channel,
                 cupom_id__in=ids,
-            )
+            ).order_by("cupom_id", "use_mode")
         }
         chaves_existentes = set(existentes)
         novas = [
@@ -568,7 +605,7 @@ def _persistir_projecoes_em_lote(
                 for row in CupomDisponibilidade.objects.select_for_update().filter(
                     organization=organization, usuario=usuario, channel=channel,
                     cupom_id__in=ids,
-                )
+                ).order_by("cupom_id", "use_mode")
             }
 
         alteradas, eventos = [], []
@@ -640,7 +677,7 @@ def _encerrar_projecoes_fora_do_escopo(
                 stage="discarded",
             ).exclude(
                 cupom_id__in=cupons_visiveis.values("pk"),
-            )
+            ).order_by("cupom_id", "use_mode")
         )
         if not obsoletas:
             return 0
@@ -883,6 +920,7 @@ def marcar_ausentes_execucao_saudavel(fonte, seen_ids, *, reconcile_catalog=Fals
         projections = list(
             CupomDisponibilidade.objects.select_for_update()
             .filter(cupom_id__in=[coupon.pk for coupon in absent_coupons])
+            .order_by("cupom_id", "use_mode")
         )
         changed = []
         events = []

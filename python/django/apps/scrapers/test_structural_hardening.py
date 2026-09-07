@@ -2779,3 +2779,64 @@ class ValvulaDeSegurancaDaFilaTests(TestCase):
         self._falhar(publicacao)  # configuracao=None: não há regra para pausar
         publicacao.refresh_from_db()
         self.assertEqual(publicacao.stage, "permanent_failed")
+
+
+class LockDaProjecaoDeCuponsTests(TestCase):
+    """O `LockNotAvailable` que estava indo para o Sentry.
+
+        ERROR apps.scrapers.coupon_pipeline Projeção de disponibilidade de cupons
+        falhou para usuário 4
+        psycopg.errors.LockNotAvailable: canceling statement due to lock timeout
+
+    Duas causas, as duas verdadeiras ao mesmo tempo:
+
+    1. `SELECT ... FOR UPDATE` sem `ORDER BY` pega os locks na ordem que o plano
+       escolher. Dois ciclos concorrentes podem pegá-los em ordens opostas, e o
+       primeiro a esperar estoura o `lock_timeout`.
+    2. O `lock_timeout` de 15s vem de `settings` e existe para proteger as oito
+       threads do gunicorn — request web. A projeção roda no worker `cupons`,
+       sobre milhares de linhas, e herdava um limite pensado para outra coisa.
+    """
+
+    def test_todo_lock_da_projecao_tem_ordem_total(self):
+        """Ordem igual em todos os pontos elimina a inversão por construção."""
+        import inspect
+
+        from apps.scrapers import coupon_readiness
+
+        fonte = inspect.getsource(coupon_readiness)
+        # Cada `select_for_update()` precisa de um `order_by` no mesmo encadeamento.
+        trechos = fonte.split("select_for_update()")[1:]
+        self.assertTrue(trechos, "nenhum select_for_update encontrado")
+        for trecho in trechos:
+            # O encadeamento termina no fechamento da expressão; olhar o suficiente
+            # à frente para conter o `.order_by(...)`.
+            with self.subTest(trecho=trecho[:60]):
+                self.assertIn("order_by", trecho[:600])
+
+    def test_a_ordem_e_a_mesma_em_todos_os_pontos(self):
+        import inspect
+
+        from apps.scrapers import coupon_readiness
+
+        fonte = inspect.getsource(coupon_readiness)
+        ordens = set()
+        for trecho in fonte.split("select_for_update()")[1:]:
+            inicio = trecho.find(".order_by(")
+            if inicio == -1:
+                continue
+            fim = trecho.find(")", inicio)
+            ordens.add(trecho[inicio:fim + 1].strip())
+        # Ordens diferentes entre dois pontos reintroduzem a inversão.
+        self.assertEqual(len(ordens), 1, ordens)
+
+    def test_a_projecao_relaxa_o_lock_mas_nao_para_o_infinito(self):
+        """Sem limite, uma transação abandonada prende o worker até o deploy."""
+        import inspect
+
+        from apps.scrapers import coupon_readiness
+
+        fonte = inspect.getsource(coupon_readiness.projetar_disponibilidade_cupons)
+        self.assertIn("lock_timeout=", fonte)
+        self.assertNotIn('lock_timeout="0"', fonte)
+        self.assertNotIn("lock_timeout='0'", fonte)
