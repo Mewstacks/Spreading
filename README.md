@@ -59,7 +59,17 @@ incluído nos logs do Spreading.
 Não há chaves a configurar: o login usa o Chromium da própria imagem. Basta ter o
 Playwright + Chromium instalados (o `Dockerfile`/`setup.ps1` já fazem isso).
 
-O estado da conexão (fase do login) é guardado no cache do Django; os frames e a fila
-de input ficam em memória no processo do gunicorn (por isso 1 worker — ver `Procfile`).
-Em produção com `DATABASE_URL` (Postgres) o cache de fase é no banco, então o polling do
-front enxerga a fase mesmo entre threads.
+O estado da conexão (fase do login) fica no cache `default` do Django; os frames e a
+fila de input ficam em memória no processo do gunicorn.
+
+**`--workers 1` é obrigatório, e é o `Procfile.web` que garante isso**
+(`--workers 1 --threads 8`). Em produção não há Redis, então o cache `default` é
+LocMem: vive dentro de um processo. Com um worker e oito threads, todas as threads
+compartilham o mesmo LocMem e o polling do front enxerga a fase — e é o mesmo
+processo que segura o Chromium, os frames e a fila de input. Subir para dois workers
+quebra a tela de conexão do ML **em silêncio**: metade das requisições cai no
+processo que não tem nem a fase nem o browser.
+
+(O cache `persistente`, esse sim no Postgres, existe para o que precisa sobreviver a
+restart — cache do extrator de cupom, supervisor do WhatsApp, disjuntor do container.
+A fase do login não usa e não deveria: ela dura minutos e morre com o browser.)

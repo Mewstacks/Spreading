@@ -1,5 +1,12 @@
 # Plano de revisão e aceite de produção
 
+> **Metas de volume e teto de custo deste documento estão revogados.**
+> O que vale é `PLANO_FINAL.md`: aceite por **cobertura de nicho** (não 100 cupons por
+> marketplace nem 40 mensagens/dia), teto de **R$350/mês** tudo incluído (não R$300), e
+> produção que **dorme das 01:00 às 07:45** (não 24/7). O valor deste arquivo é o
+> registro das provas já executadas — isolamento RLS, ensaio de restore de 01/09,
+> auditoria de custo — e os critérios de evidência, que continuam valendo.
+
 Este documento é o contrato técnico de entrega. “Encontrado” não significa
 “válido”, “válido” não significa “afiliado” e “afiliado” não significa “enviado”.
 Cada etapa precisa de evidência própria.

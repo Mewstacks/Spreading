@@ -19,9 +19,13 @@ Fluxo (espelha o QR do WhatsApp):
      mouse/teclado e faz POST em enfileirar_input().
   3. thread valida a sessão com uma sonda autenticada -> salva cifrada -> 'conectado'.
 
-Estado compartilhado (fase/erro) vai pro cache (Redis/DB em prod) pra funcionar entre
-threads do gunicorn; a thread que segura o browser vive em um worker só, e os frames
-e a fila de input ficam em dicts em memória desse mesmo processo (1 worker no Fly).
+Estado compartilhado (fase/erro) vai pro cache `default` pra funcionar entre threads
+do gunicorn. Em produção esse cache é LocMem — não há Redis, e o alias do Postgres é
+o `persistente`, que este módulo não usa. LocMem vive dentro de UM processo, e é por
+isso que `Procfile.web` fixa `--workers 1 --threads 8`: as oito threads dividem o
+mesmo LocMem, o mesmo Chromium e os mesmos dicts de frame/input. Dois workers
+quebrariam a tela em silêncio — metade das requisições cairia no processo que não
+tem nem a fase nem o browser.
 """
 import logging
 import os

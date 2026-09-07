@@ -1,5 +1,9 @@
 # Especificação do seletor de ofertas e campanhas patrocinadas
 
+> **Fase futura, não construída.** Vitrine patrocinada, leilão e cobrança estão fora do
+> escopo de entrega (`PLANO_FINAL.md`). Este documento fica como desenho, não como
+> contrato.
+
 **Data:** 24 de julho de 2026
 **Complemento de:** [Plano de viabilidade e evolução do Spreading](PLANO_SAAS_VIABILIDADE.md)
 

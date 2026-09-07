@@ -35,24 +35,37 @@ workers. Valores por mês:
 | 24/7 | 74,65 | R$385 — **acima do teto** |
 | Com o desligamento noturno abaixo | **53,97** | **R$278** |
 
-O teto do produto é **R$300/mês**, e é o desligamento noturno que o faz caber. Egress
-na América do Sul é ~US$0,04/GB e não move a conta neste volume.
+O teto do produto é **R$350/mês, tudo incluído** — Fly, IA e desbloqueio pago. É o
+número que vale (`PLANO_FINAL.md`); o R$300 de versões anteriores deste arquivo e do
+`PLANO_REVISAO_PRODUCAO.md` está revogado. Os R$278 de infraestrutura deixam ~R$72/mês
+para a IA e o desbloqueio, e quem torna esse teto observável é o contador de gasto de
+IA na tela de Saúde — sem ele "teto" é chute. Egress na América do Sul é ~US$0,04/GB e
+não move a conta neste volume.
 
 Não há homologação: foi destruída em 09/08/2026 para cortar custo.
 
 ### Desligamento noturno
 
 A produção é parada diariamente à **01:00** e religada às **07:45**, no horário de
-São Paulo, pelo workflow `.github/workflows/fly-nightly-power.yml`, com uma segunda
-tentativa de start às **08:20**. As 6h45 paradas cortam 28,1% do custo de máquina —
+São Paulo, pelo workflow `.github/workflows/fly-nightly-power.yml`, com mais **cinco**
+tentativas de start ao longo da manhã. As 6h45 paradas cortam 28,1% do custo de máquina —
 é a diferença entre R$385 e R$278. O desligamento ocorre na ordem
 `web -> WhatsApp -> Postgres`; a inicialização usa a ordem inversa e só avança quando
 os health checks da dependência estão passando (`wait_until_healthy`).
 
 Em 16, 17 e 18/08/2026 o RELIGAMENTO falhou e a produção ficou fora do ar o dia
 inteiro — à noite não sobra nada de pé, então não há vigia externo para perceber. O
-`wait_until_healthy`, a ordem de dependência, o filtro de checks do Postgres e o
-segundo start das 08:20 existem por causa disso.
+`wait_until_healthy`, a ordem de dependência e o filtro de checks do Postgres existem
+por causa disso.
+
+Em 07/09/2026 aconteceu de novo, por outro motivo: o cron do GitHub Actions **atrasa
+horas e simplesmente descarta execuções** quando a fila está cheia — é best-effort,
+está na documentação deles, e naquele dia atrasou o stop em 5 horas e perdeu os dois
+starts. Daí as seis tentativas de start (10:45, 11:20, 12:00, 13:00, 15:00 e 18:00
+UTC): cada uma é idempotente e não faz nada se a produção já estiver de pé. E o
+`deploy/fly-nightly-power.sh` passou a conferir a hora de São Paulo antes de desligar
+— um stop que chega às 06:00 porque o cron atrasou é recusado, em vez de derrubar a
+produção no meio da manhã.
 
 O workflow também aceita execução manual com `start` ou `stop`. Ele usa três
 deploy tokens restritos a um único app, armazenados nos secrets do repositório:
@@ -138,4 +151,6 @@ fly ssh console --app spreading-web -C "python /app/django/manage.py loaddata /a
 - **Login ML (web-native)**: o usuário conecta o Mercado Livre pela própria interface (`/scrapers/ml/`). Rodamos um Chromium **local** (o mesmo da imagem/Playwright) e transmitimos a tela pro navegador dele via **CDP screencast** desenhado num `<canvas>`, com mouse/teclado encaminhados de volta (`Input.dispatch*`) — sem script local, sem colar `auth.json`, sem serviço externo nem secret. A senha é digitada direto na página real do ML. Ver `apps/scrapers/ml_conexao.py`.
 - **Escala**: 1 máquina web só (volume de sessões preso a ela). Escala-out exige mover sessões p/ storage compartilhado.
 - **Telegram/canais (B4)**: opcional — só ativa com `TELEGRAM_API_ID/HASH/SESSION` setados.
-- Ver `plan` completo em `.claude/plans/what-is-missing-for-ticklish-prism.md`.
+- Escopo, decisões e definição de pronto: `PLANO_FINAL.md`.
+- Restaurar o banco a partir de um snapshot: `deploy/RESTAURACAO.md`.
+- O que só o dono da conta pode ligar: `GUIA_ATIVACAO.md`.

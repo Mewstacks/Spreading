@@ -1,5 +1,8 @@
 # Plano de viabilidade e evolução do Spreading
 
+> **Fase futura, não construída.** Monetização, planos, onboarding self-service e site
+> público de marketing estão fora do escopo de entrega (`PLANO_FINAL.md`).
+
 ## De automação de ofertas a um SaaS de creator commerce
 
 **Data da análise:** 24 de julho de 2026
