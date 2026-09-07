@@ -543,7 +543,13 @@ def organization_callable(organization, func, *, segurar_transacao=True):
 
     @wraps(func)
     def wrapped():
-        close_old_connections()
+        # `renovar_conexoes_antigas`, e não `close_old_connections` puro: este
+        # callable também é chamado em linha, dentro da transação de quem chamou,
+        # e ali o `close_old_connections` fecha a conexão em vez de renová-la — o
+        # efeito que o parágrafo acima descreve.
+        from apps.scrapers.db_conexao import renovar_conexoes_antigas
+
+        renovar_conexoes_antigas()
         try:
             if segurar_transacao:
                 with organization_context(organization_id):
@@ -551,7 +557,7 @@ def organization_callable(organization, func, *, segurar_transacao=True):
             with tenant_suspenso(organization_id):
                 return func()
         finally:
-            close_old_connections()
+            renovar_conexoes_antigas()
     return wrapped
 
 
@@ -573,10 +579,12 @@ def organization_thread_target(organization, func, *, segurar_transacao=True):
 
     @wraps(func)
     def executar():
+        from apps.scrapers.db_conexao import renovar_conexoes
+
         try:
             return alvo()
         finally:
-            connections.close_all()
+            renovar_conexoes()
     return executar
 
 

@@ -1367,6 +1367,35 @@ def _fatos_do_deal(deal) -> dict:
     }
 
 
+# Motivos de score que são AFIRMAÇÃO sobre o histórico de preço. Eles existem
+# para ordenar a fila e para explicar o ranking na tela; nenhum deles pode virar
+# insumo do texto publicado.
+_MOTIVO_HISTORICO = re.compile(
+    r"hist[óo]ric|mediana|fundo|m[íi]nim|\d+\s*dias", re.I)
+
+
+def _motivo_publicavel(deal) -> str:
+    """Os motivos do score que o modelo pode ler — sem os que falam de histórico.
+
+    `deals.pontuar` devolve motivos como "no fundo do histórico de 90 dias" e
+    "37% abaixo da mediana observada". São rótulos INTERNOS de ranking, e iam
+    inteiros para o prompt como "Motivo: ...". O modelo então os reescrevia como
+    frase de venda, e o validador de alegações não pegava: o regex de `minima`
+    cobre "menor preço" e "nos últimos N dias", mas não "no fundo do histórico de
+    90 dias". Bastava o nome do produto conter "90" — "Smart TV 90 polegadas" — e
+    o número passava na lista branca junto com a frase.
+
+    Foi o último caminho aberto depois que a linha própria e o rótulo de prova
+    saíram. Aqui o motivo é filtrado na origem, que é onde ele deixa de existir em
+    vez de depender de o validador adivinhar a redação.
+    """
+    motivos = [
+        motivo for motivo in (getattr(deal, "motivos", None) or [])
+        if not _MOTIVO_HISTORICO.search(str(motivo))
+    ]
+    return "; ".join(motivos[:2])
+
+
 def _frase_acrescenta(frase, nome, minimo_novas=3) -> str:
     """A frase da IA só entra se disser algo que o nome do produto não diz.
 
@@ -3739,7 +3768,7 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                 nome=getattr(produto, "nome", ""),
                 categoria=getattr(produto, "macro_categoria", "")
                 or getattr(produto, "categoria", "") or "",
-                motivo="; ".join(getattr(deal, "motivos", [])[:2]),
+                motivo=_motivo_publicavel(deal),
                 tem_cupom=bool(getattr(deal, "cupom", None)),
                 **_fatos_do_deal(deal),
             )

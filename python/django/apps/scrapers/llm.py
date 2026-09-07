@@ -245,8 +245,10 @@ _ALEGACOES_CONTROLADAS = {
         r"|mais\s+barat[oa]"
         r"|m[íi]nima\s+hist[óo]rica"
         r"|nunca\s+(?:esteve|custou|foi|ficou)"
-        r"|hist[óo]ric[oa]\s+de\s+pre[çc]o"
-        r"|(?:em|nos\s+[úu]ltimos|dos\s+[úu]ltimos)\s+\d+\s*(?:dias|meses)"
+        r"|hist[óo]ric[oa]"
+        r"|mediana"
+        r"|fundo\s+d[oe]"
+        r"|(?:em|de|nos\s+[úu]ltimos|dos\s+[úu]ltimos)\s+\d+\s*(?:dias|meses)"
         r")", re.I),
     "urgencia": re.compile(
         r"(?:[úu]ltima chance|acaba hoje|termina hoje|s[óo] hoje|"

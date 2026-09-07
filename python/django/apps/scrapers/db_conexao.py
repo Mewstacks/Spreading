@@ -31,3 +31,27 @@ def renovar_conexoes() -> None:
         if conexao.in_atomic_block:
             continue
         conexao.close()
+
+
+def renovar_conexoes_antigas() -> None:
+    """`close_old_connections` do Django, sem o tiro no pé dentro de transação.
+
+    `close_old_connections()` chama `close_if_unusable_or_obsolete()`, e a PRIMEIRA
+    coisa que esse método faz é comparar `get_autocommit()` com o `AUTOCOMMIT` do
+    settings: se divergirem, ele fecha a conexão sem mais perguntas. Dentro de um
+    `atomic()` eles SEMPRE divergem — é o que `atomic` faz — então a chamada não
+    renova nada, fecha uma conexão que está no meio de uma transação e a deixa em
+    `closed_in_transaction`.
+
+    Isso não é teoria: `organization_callable` já documentava o efeito ("dentro de
+    uma transação o Django NÃO fecha a conexão ... nenhuma tentativa de renovar
+    (`close_all`, `close_old_connections`) tem efeito ali dentro") e mesmo assim
+    abria com `close_old_connections()`. Em produção passava porque os chamadores
+    de fora começam sem transação; sob o `TestCase`, que embrulha tudo num atomic,
+    quebrava sempre.
+    """
+    from django.db import close_old_connections
+
+    if any(conexao.in_atomic_block for conexao in connections.all()):
+        return
+    close_old_connections()

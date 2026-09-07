@@ -1326,7 +1326,12 @@ class GerarLinksNaoSeguraTransacaoTests(TestCase):
         def _corpo():
             connections["default"].ensure_connection()
 
-        with patch.object(connections, "close_all") as fechar:
+        # `renovar_conexoes` e não `connections.close_all`: fechar a conexão de
+        # dentro de uma transação aberta não a renova, marca-a como
+        # `closed_in_transaction` e mata toda query seguinte. O alvo de thread
+        # continua fechando — é o ponto dele —, mas agora pelo caminho que
+        # respeita quem chamou.
+        with patch("apps.scrapers.db_conexao.renovar_conexoes") as fechar:
             thread = threading.Thread(
                 target=organization_thread_target(org.pk, _corpo), daemon=True)
             thread.start()
@@ -1334,7 +1339,7 @@ class GerarLinksNaoSeguraTransacaoTests(TestCase):
         self.assertFalse(thread.is_alive())
         fechar.assert_called_once_with()
 
-        with patch.object(connections, "close_all") as fechar_em_linha:
+        with patch("apps.scrapers.db_conexao.renovar_conexoes") as fechar_em_linha:
             organization_callable(org.pk, _corpo)()
         fechar_em_linha.assert_not_called()
 

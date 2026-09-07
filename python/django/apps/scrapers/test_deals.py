@@ -708,3 +708,74 @@ class CupomSemProvaNaoEntraNaContaTests(BaseDeals):
         self.assertNotIn("abate R$", texto)         # sem conta não comprovada
         self.assertIn("578,55", texto)              # o número medido
         self.assertNotIn("532,27", texto)           # o número inventado
+
+
+class MotivoDeScoreNaoVazaParaAMensagemTests(BaseDeals):
+    """O último caminho por onde "90 dias" ainda alcançava o texto publicado.
+
+    Depois que a linha própria (`📉`) e o rótulo de prova saíram, sobrava um:
+    `deals.pontuar` devolve motivos como "no fundo do histórico de 90 dias", e
+    eles iam inteiros para o prompt como "Motivo: ...". O validador de alegações
+    não segurava — o regex cobria "menor preço" e "nos últimos N dias", não "no
+    fundo do histórico de 90 dias" — e a lista branca de números liberava o "90"
+    sempre que ele aparecesse no nome do produto ("Smart TV 90 polegadas").
+    """
+
+    def test_motivo_que_fala_de_historico_nao_chega_ao_modelo(self):
+        from apps.scrapers.ofertas import _motivo_publicavel
+
+        deal = deals.DealCandidate(
+            produto=self._produto(), preco_vitrine=100.0, preco_final=80.0,
+        )
+        deal.motivos = [
+            "no fundo do histórico de 90 dias",
+            "37% abaixo da mediana observada",
+            "cupom comprovado neste produto",
+        ]
+
+        self.assertEqual(_motivo_publicavel(deal), "cupom comprovado neste produto")
+
+    def test_motivo_de_venda_continua_passando(self):
+        from apps.scrapers.ofertas import _motivo_publicavel
+
+        deal = deals.DealCandidate(
+            produto=self._produto(), preco_vitrine=100.0, preco_final=80.0,
+        )
+        deal.motivos = ["oferta relâmpago", "cupom novo", "categoria Cozinha"]
+
+        self.assertEqual(_motivo_publicavel(deal), "oferta relâmpago; cupom novo")
+
+    def test_todo_motivo_historico_que_o_score_produz_e_filtrado(self):
+        """Pela lista real de `deals.pontuar`, não por amostra escolhida a dedo."""
+        from apps.scrapers.ofertas import _motivo_publicavel
+
+        deal = deals.DealCandidate(
+            produto=self._produto(), preco_vitrine=100.0, preco_final=80.0,
+        )
+        for motivo in (
+            "no fundo do histórico de 90 dias",
+            "37% abaixo da mediana observada",
+            "sem histórico ainda; economia medida pela vitrine",
+        ):
+            with self.subTest(motivo=motivo):
+                deal.motivos = [motivo]
+                self.assertEqual(_motivo_publicavel(deal), "")
+
+    def test_o_validador_derruba_a_redacao_que_escapava(self):
+        """Cinto e suspensório: mesmo se um motivo novo passar, a frase cai.
+
+        A reprodução que abriu este teste: nome "Sony WH-1000XM90" libera o número
+        90 na lista branca, e "no fundo do historico de 90 dias" saía inteiro.
+        """
+        from apps.scrapers.llm import _frase_vendavel
+
+        permitidos = {"1000", "90", "349"}
+        for frase in (
+            "Fone no fundo do histórico de 90 dias, sai por R$ 349",
+            "Está 37% abaixo da mediana observada",
+            "Preço de 90 dias atrás",
+        ):
+            with self.subTest(frase=frase):
+                self.assertEqual(
+                    _frase_vendavel(frase, permitidos=permitidos, provas=set()),
+                    "")
