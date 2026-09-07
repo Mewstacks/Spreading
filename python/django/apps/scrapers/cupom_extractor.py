@@ -442,6 +442,45 @@ def _resgatar_parcial(texto: str) -> dict:
     return {"cupons": achados}
 
 
+# Quantas mensagens pararam em cada portão antes do modelo. É a resposta para
+# "por que a chave está gastando" — sem isto, a única evidência era o saldo caindo.
+# Contadores num cache curto: são para observar o ritmo, não para auditar.
+_TTL_CONTADOR_S = 24 * 3600
+_CONTADORES = (
+    "sem_sinal_de_cupom",     # `parece_ter_cupom` recusou
+    "sem_loja",               # nenhuma loja afiliável mencionada
+    "cache",                  # já lida antes (o que NÃO foi pago)
+    "regra_local_resolveu",   # `extrair_deterministico` deu conta
+    "sem_candidato",          # nada com cara de código; o modelo só confirmaria vazio
+    "chamou_modelo",          # o que foi pago
+)
+
+
+def _contar(porta: str) -> None:
+    """Incrementa um contador de porta. Nunca levanta: é observabilidade."""
+    try:
+        cache_local = _cache_leitura()
+        chave = f"cupom_extractor:porta:{porta}"
+        try:
+            cache_local.incr(chave)
+        except ValueError:
+            cache_local.set(chave, 1, _TTL_CONTADOR_S)
+    except Exception:
+        pass
+
+
+def portas_do_extrator() -> dict:
+    """Quantas mensagens pararam em cada portão nas últimas 24h."""
+    try:
+        cache_local = _cache_leitura()
+    except Exception:
+        return {}
+    return {
+        porta: cache_local.get(f"cupom_extractor:porta:{porta}") or 0
+        for porta in _CONTADORES
+    }
+
+
 def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
     """Cupons de uma mensagem. Lista vazia quando não há, não dá, ou falha.
 
@@ -450,24 +489,29 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
     """
     texto = (texto or "").strip()
     if not texto or not parece_ter_cupom(texto):
+        _contar("sem_sinal_de_cupom")
         return []
     loja_detectada = _loja_mencionada(texto, loja_padrao)
     if not loja_detectada:
+        _contar("sem_loja")
         return []
     fallback = extrair_deterministico(texto, loja_padrao=loja_detectada)
     chave = _chave_cache(texto)
     guardado = _cache_leitura().get(chave)
     if guardado is not None:
+        _contar("cache")
         return guardado
     # Mensagem estruturada ja foi compreendida integralmente por regras locais:
     # pagar um Sonnet para transcrever os mesmos campos so aumenta custo/latencia.
     if fallback:
+        _contar("regra_local_resolveu")
         _cache_leitura().set(chave, fallback, _TTL_CACHE_S)
         return fallback
     # Desconto/banner sem nenhum token plausivel nao pode produzir cupom
     # digitavel. O modelo foi instruido a nao inventar, portanto a chamada so pode
     # confirmar vazio - dezenas delas eram feitas a cada restart do worker.
     if not _tem_candidato_plausivel(texto):
+        _contar("sem_candidato")
         _cache_leitura().set(chave, [], _TTL_CACHE_S)
         return []
     if not getattr(settings, "CUPOM_LLM_ATIVO", True):
@@ -482,6 +526,7 @@ def extrair(texto: str, *, loja_padrao="", timeout=20) -> list[dict]:
         from apps.scrapers.ia_custo import registrar_uso
         from apps.scrapers.llm import _cliente, _json_resposta, _texto_resposta
 
+        _contar("chamou_modelo")
         resposta = _cliente(timeout).messages.create(
             model=getattr(settings, "LLM_MODELO", _MODELO_PADRAO),
             # 2500, não 900. Em produção o primeiro erro real foi

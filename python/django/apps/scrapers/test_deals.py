@@ -339,7 +339,7 @@ class MensagemDealTests(BaseDeals):
             texto_ia={"linha": "Fone Bluetooth JBL para ouvir o dia inteiro"},
         )
         self.assertEqual(texto.count("Fone Bluetooth JBL"), 1)
-        self.assertIn("POR 80", texto)
+        self.assertIn("POR R$ 80", texto)
         self.assertIn("PRESENTE", texto)
         self.assertIn("https://meli.la/abc", texto)
 
@@ -356,7 +356,7 @@ class MensagemDealTests(BaseDeals):
 
         deal = self._deal()
         texto = montar_mensagem_deal(deal, "https://meli.la/abc", usuario=self.user)
-        self.assertIn("POR 80", texto)
+        self.assertIn("POR R$ 80", texto)
         self.assertIn("PRESENTE", texto)
 
     def test_a_mensagem_nao_afirma_nada_sobre_historico_de_preco(self):
@@ -408,7 +408,7 @@ class MensagemDealTests(BaseDeals):
         # Sem serie nao ha ancora: so o POR.
         self.assertNotIn("DE ", sem)
         # Com serie, a ancora e a mediana medida, com o percentual.
-        self.assertIn("DE ~160~", com)
+        self.assertIn("DE ~R$ 160~", com)
         self.assertIn("(-50%)", com)
         # E nenhuma das duas afirma nada sobre historico.
         for texto in (sem, com):
@@ -436,7 +436,7 @@ class MensagemDealTests(BaseDeals):
         deal.desconto_comprovado = True
         texto = montar_mensagem_deal(deal, "https://meli.la/abc", usuario=self.user)
 
-        self.assertIn("| *POR ", texto)
+        self.assertIn("| *POR R$ ", texto)
         self.assertIn("🎟️", texto)
         self.assertIn("👉", texto)
         self.assertIn("🔗 https://meli.la/abc", texto)
@@ -911,7 +911,7 @@ class AncoraDePrecoTests(BaseDeals):
 
         texto = self._mensagem(deal)
 
-        self.assertIn("DE ~160~", texto)
+        self.assertIn("DE ~R$ 160~", texto)
         self.assertNotIn("200", texto)
 
     def test_o_percentual_e_impresso(self):
@@ -954,7 +954,7 @@ class AncoraDePrecoTests(BaseDeals):
         texto = self._mensagem(deal, configuracao=config)
 
         self.assertNotIn("DE ~", texto)
-        self.assertIn("POR 80", texto)
+        self.assertIn("POR R$ 80", texto)
 
     def test_mediana_abaixo_do_preco_nao_vira_ancora_invertida(self):
         """Série mais barata que o preço de hoje não pode virar "de" menor."""

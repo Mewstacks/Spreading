@@ -1527,12 +1527,16 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
     piso = float(getattr(configuracao, "min_desconto_percent", 0) or 0)
     queda = ((referencia - deal.preco_final) / referencia * 100
              if referencia > 0 else 0.0)
+    # "R$" explícito. Sem ele a linha lia "POR 155", e um número solto ao lado de
+    # um nome de produto que já tem "21v" e "2 Baterias" não se identifica como
+    # preço na primeira passada de olho — que é a única que uma mensagem de grupo
+    # recebe. Todo canal grande escreve a moeda.
     if deal.desconto_comprovado and referencia > deal.preco_final and queda >= piso:
         linhas.append(
-            f"🔥 DE {m.strike(_preco_br(referencia))} | "
-            f"{m.bold(f'POR {por}')} (-{queda:.0f}%)")
+            f"🔥 DE {m.strike('R$ ' + _preco_br(referencia))} | "
+            f"{m.bold(f'POR R$ {por}')} (-{queda:.0f}%)")
     else:
-        linhas.append(f"🔥 {m.bold(f'POR {por}')}")
+        linhas.append(f"🔥 {m.bold(f'POR R$ {por}')}")
 
     if deal.tem_cupom:
         codigo = codigo_publicavel(deal.cupom)
@@ -2678,12 +2682,26 @@ _CAUDA_PENDURADA = re.compile(
     re.I,
 )
 
+# Substantivo que ABRE uma spec e ficou sem o valor dela. O corte por palavra
+# parava aqui e o grupo lia "Furadeira Parafusadeira De Impacto 21v Com 2
+# Baterias Velocidade" — o nome termina anunciando uma característica e não
+# diz qual. Só remove quando NÃO há número/unidade depois, senão "Tela 6.7"
+# e "Bateria 5000mah", que são informação de verdade, iriam junto.
+_SPEC_SEM_VALOR = re.compile(
+    r"[\s,;:|/–—+&-]*\b(?:velocidade|velocidades|tela|telas|c[âa]m(?:era|eras)?|"
+    r"bateria|baterias|mem[óo]ria|resolu[çc][ãa]o|tens[ãa]o|pot[êe]ncia|capacidade|"
+    r"garantia|voltagem|volt(?:s)?|cor|cores|tamanho|tamanhos|peso|altura|largura|"
+    r"profundidade|frequ[êe]ncia|autonomia|vers[ãa]o)\s*$",
+    re.I,
+)
+
 
 def _sem_cauda_pendurada(texto: str) -> str:
     anterior = None
     while texto != anterior:
         anterior = texto
         texto = _CAUDA_PENDURADA.sub("", texto).rstrip(" -–—,;:|/")
+        texto = _SPEC_SEM_VALOR.sub("", texto).rstrip(" -–—,;:|/")
     return texto
 
 
@@ -2714,7 +2732,7 @@ def _nome_principal_produto(nome, limite=70) -> str:
     if virgula >= limite * 0.55:
         return (_sem_cauda_pendurada(janela[:virgula].rstrip(" -–—,;|/"))
                 or janela[:virgula])
-    cortado = janela.rsplit(" ", 1)[0].rstrip(" -–—,;|/")
+    cortado = _sem_cauda_pendurada(janela.rsplit(" ", 1)[0].rstrip(" -–—,;|/"))
     # Parêntese aberto e não fechado: o corte por palavra respeitou o limite mas
     # deixou "(8gb Ram+8gb Ram" pendurado no fim do nome. Descarta o trecho a
     # partir da abertura órfã — o que estava lá dentro era detalhe, não o produto.

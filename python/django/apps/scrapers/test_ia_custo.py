@@ -83,3 +83,48 @@ class ResumoDoMesTests(TestCase):
         resumo = ia_custo.resumo_do_mes()
         self.assertFalse(resumo["estourou"])
         self.assertEqual(resumo["por_origem"][0]["origem"], "cupom_extractor")
+
+
+class PortasDoExtratorTests(TestCase):
+    """"Por que a chave está gastando rápido" precisa de número, não de palpite.
+
+    O total de tokens diz QUANTO. Estas portas dizem POR QUÊ: quantas mensagens
+    de canal pararam antes do modelo, e em qual portão. `chamou_modelo` é o que
+    foi pago; `cache`, `regra_local_resolveu` e `sem_candidato` são o que deixou
+    de ser.
+    """
+
+    def setUp(self):
+        from apps.scrapers import cupom_extractor
+
+        cupom_extractor._cache_leitura().clear()
+
+    def test_mensagem_sem_sinal_de_cupom_nao_chega_ao_modelo(self):
+        from apps.scrapers.cupom_extractor import extrair, portas_do_extrator
+
+        self.assertEqual(extrair("bom dia, tudo certo por aí?"), [])
+        self.assertEqual(portas_do_extrator()["sem_sinal_de_cupom"], 1)
+        self.assertEqual(portas_do_extrator()["chamou_modelo"], 0)
+
+    def test_a_segunda_leitura_da_mesma_mensagem_sai_do_cache(self):
+        from unittest.mock import patch
+
+        from apps.scrapers import cupom_extractor
+        from apps.scrapers.cupom_extractor import extrair, portas_do_extrator
+
+        # Sem chave, o caminho para antes da rede e ainda assim grava no cache —
+        # é a mensagem já lida que não pode ser relida.
+        texto = "Cupom Mercado Livre 10% OFF: TODOOSITE1308"
+        with patch.object(cupom_extractor.settings, "ANTHROPIC_API_KEY", ""):
+            extrair(texto)
+            antes = portas_do_extrator()["cache"]
+            extrair(texto)
+
+        self.assertGreaterEqual(portas_do_extrator()["cache"], antes)
+
+    def test_o_resumo_do_mes_publica_as_portas(self):
+        from apps.scrapers.ia_custo import resumo_do_mes
+
+        resumo = resumo_do_mes()
+        self.assertIn("portas_do_extrator", resumo)
+        self.assertIn("chamou_modelo", resumo["portas_do_extrator"])

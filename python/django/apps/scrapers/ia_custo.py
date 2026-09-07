@@ -102,7 +102,17 @@ def resumo_do_mes(competencia=None) -> dict:
         })
     por_origem.sort(key=lambda item: item["custo_brl"], reverse=True)
     limite = float(getattr(settings, "LLM_TETO_BRL_MES", 0) or 0)
+    # Onde as mensagens de canal pararam antes do modelo. Sem isto, "a chave está
+    # gastando rápido" só se responde olhando o saldo cair: o total diz QUANTO, e
+    # estas portas dizem POR QUÊ. `chamou_modelo` é o que foi pago; `cache`,
+    # `regra_local_resolveu` e `sem_candidato` são o que deixou de ser.
+    try:
+        from apps.scrapers.cupom_extractor import portas_do_extrator
+        portas = portas_do_extrator()
+    except Exception:
+        portas = {}
     return {
+        "portas_do_extrator": portas,
         "competencia": competencia,
         "disponivel": True,
         "custo_brl": round(total, 2),
