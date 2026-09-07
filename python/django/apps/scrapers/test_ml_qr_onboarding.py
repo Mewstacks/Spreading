@@ -236,6 +236,7 @@ class FluxosReaisDoWorkerQRTests(ComoWorker, TestCase):
     CAMERA_URL = "https://www.mercadolivre.com/jms/mlb/lgz/msl/login/camera-not-found"
 
     def setUp(self):
+        super().setUp()
         self.user = get_user_model().objects.create_user(
             username=f"qr-worker-{time.time_ns()}", password="test",
         )

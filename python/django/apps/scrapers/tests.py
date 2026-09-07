@@ -3570,6 +3570,7 @@ class ParserDeCupomDeCampanhaTests(ComoWorker, TestCase):
         os.path.dirname(os.path.abspath(__file__))))), "debug_cupom.json")
 
     def setUp(self):
+        super().setUp()
         # A página vazia custa 3 × RETRY_WAIT de sono real. Útil contra o ML,
         # inútil aqui: sem isto a classe sozinha leva 30s.
         sono = patch("apps.scrapers.scraper_mercadolivre.scraper.time.sleep")
@@ -4518,6 +4519,7 @@ class VerificarLinksPendentesTests(ComoWorker, TestCase):
     """A passada que APROVA o destino antes de o item virar enviável."""
 
     def setUp(self):
+        super().setUp()
         self.user = get_user_model().objects.create_user("aprovador", password="test")
 
     def _produto(self, nome):
@@ -4949,6 +4951,7 @@ class GeracaoDeLinksEmLoteTests(ComoWorker, TestCase):
     """
 
     def setUp(self):
+        super().setUp()
         self.user = get_user_model().objects.create_user("linkeiro", password="test")
 
     def _produto(self, nome="Fone", **extra):
@@ -7270,6 +7273,7 @@ class SessaoMLGravadaForaDoPlaywrightTests(ComoWorker, TestCase):
     """
 
     def setUp(self):
+        super().setUp()
         self.user = get_user_model().objects.create_user("ml-live", password="test")
         cache.clear()
 
@@ -7370,6 +7374,7 @@ class RetryDaGravacaoDaSessaoTests(ComoWorker, TestCase):
     o login inteiro por causa disso."""
 
     def setUp(self):
+        super().setUp()
         self.user = get_user_model().objects.create_user("ml-retry", password="test")
 
     def test_retenta_apos_falha_de_conexao(self):
@@ -7689,6 +7694,7 @@ class LoteDeLinksResilienteTests(ComoWorker, TestCase):
     produtos perfeitamente afiliáveis."""
 
     def setUp(self):
+        super().setUp()
         self.user = get_user_model().objects.create_user("lote-links", password="test")
 
     def _produtos(self, n):

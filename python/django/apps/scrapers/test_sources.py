@@ -42,6 +42,7 @@ class BrokenSource(FakeSource):
 
 class SourcePipelineTests(ComoWorker, TestCase):
     def setUp(self):
+        super().setUp()
         self.user = get_user_model().objects.create_user("source-user")
 
     def test_normalized_upsert_is_idempotent_and_private(self):
@@ -761,6 +762,7 @@ class OfferFeedPaginationTests(ComoWorker, TestCase):
     challenge do anti-bot, não fim do catálogo."""
 
     def setUp(self):
+        super().setUp()
         # A varredura é retomável e guarda no estado do worker a página em que
         # parou. Estes testes contam páginas a partir da PRIMEIRA, então precisam de
         # um estado próprio: sem isso, um teste anterior que cedeu o navegador na

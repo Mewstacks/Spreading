@@ -25,20 +25,75 @@ não estarem no contexto em que o código de produção roda.
 `ComoWorker` fecha essa distância. Não é para deixar o teste verde: é para o teste
 exercitar o mesmo caminho que a produção exercita, incluindo o lease de verdade.
 """
+from django.test import SimpleTestCase
+
 from apps.accounts.tenant import system_context
 
 
 class ComoWorker:
-    """Mixin: instala `system_context` pelo tempo do teste, como um worker faz."""
+    """Mixin: instala `system_context` pelo tempo do teste, como um worker faz.
+
+    Usa `setUp` + `addCleanup`, o caminho documentado. Cada classe que aplica o
+    mixin PRECISA chamar `super().setUp()` no seu próprio `setUp` — o teste
+    `test_toda_classe_com_o_mixin_chama_super_setup` cobra isso, porque um mixin
+    que silenciosamente não roda é pior do que não existir: parece coberto e não
+    está.
+    """
 
     def setUp(self):
-        self._escopo_de_worker = system_context()
-        self._escopo_de_worker.__enter__()
-        self.addCleanup(self._sair_do_escopo_de_worker)
         super().setUp()
+        escopo = system_context()
+        escopo.__enter__()
+        self.addCleanup(escopo.__exit__, None, None, None)
 
-    def _sair_do_escopo_de_worker(self):
-        escopo, self._escopo_de_worker = getattr(
-            self, "_escopo_de_worker", None), None
-        if escopo is not None:
-            escopo.__exit__(None, None, None)
+
+class OMixinPrecisaMesmoRodarTests(SimpleTestCase):
+    """Um mixin que não roda é pior do que não existir.
+
+    A primeira versão deste mixin ancorava no `setUp` e a maioria das classes que
+    o declaravam não chamava `super().setUp()` — então ele não tinha efeito
+    nenhum, em silêncio, e os 24 testes que ele deveria consertar continuavam
+    exatamente iguais. O arquivo parecia coberto e não estava.
+    """
+
+    def test_toda_classe_com_o_mixin_chama_super_setup(self):
+        import inspect
+        import re
+
+        from apps.scrapers import (
+            test_manual_scraping, test_ml_qr_onboarding, test_scraper_hardening,
+            test_sources, tests,
+        )
+
+        faltando = []
+        for modulo in (tests, test_scraper_hardening, test_sources,
+                       test_ml_qr_onboarding, test_manual_scraping):
+            fonte = inspect.getsource(modulo).split("\n")
+            usa_mixin = False
+            for indice, linha in enumerate(fonte):
+                if linha.startswith("class "):
+                    usa_mixin = "ComoWorker" in linha
+                    classe = linha.split("(")[0].replace("class ", "")
+                elif usa_mixin and re.match(r"    def setUp\(self\):\s*$", linha):
+                    corpo = "\n".join(fonte[indice:indice + 12])
+                    if "super().setUp()" not in corpo:
+                        faltando.append(f"{modulo.__name__}.{classe}")
+        self.assertEqual(faltando, [], (
+            "Estas classes declaram ComoWorker mas não chamam super().setUp(), "
+            "então o contexto de worker nunca é instalado."
+        ))
+
+    def test_o_mixin_instala_o_contexto(self):
+        from apps.accounts.tenant import in_system_context
+
+        class Sonda(ComoWorker, SimpleTestCase):
+            def runTest(self):
+                pass
+
+        sonda = Sonda()
+        sonda.setUp()
+        try:
+            self.assertTrue(in_system_context())
+        finally:
+            sonda.doCleanups()
+        self.assertFalse(in_system_context())

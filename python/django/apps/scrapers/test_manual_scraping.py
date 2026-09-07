@@ -92,6 +92,7 @@ class ManualScrapingApiTests(TestCase):
 
 class ManualScrapingQueueTests(ComoWorker, TransactionTestCase):
     def setUp(self):
+        super().setUp()
         self.user = get_user_model().objects.create_user(
             "queue-owner", password="x", is_staff=True,
         )
