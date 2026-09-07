@@ -2,9 +2,9 @@ import os
 import random
 import logging
 from contextlib import contextmanager
-from django.db import close_old_connections
 from playwright.sync_api import sync_playwright
 from apps.accounts.tenant import executar_no_tenant
+from apps.scrapers.db_conexao import renovar_conexoes_antigas
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +222,20 @@ def iniciar_browser(precisa_logar=False, auth_path=None, headless=True,
         # `estado_renovado` lá em cima para não gravar cookies de tela de login.
         if estado_renovado is not None and session_user is not None:
             try:
-                close_old_connections()   # minutos de browser matam o socket ocioso
+                # Minutos de browser matam o socket ocioso, então ele precisa ser
+                # renovado — mas `close_old_connections()` puro não renova nada
+                # quando quem chamou está dentro de uma transação: ele compara
+                # `get_autocommit()` com o AUTOCOMMIT do settings, e dentro de um
+                # `atomic()` eles sempre divergem, então fecha. A conexão fica em
+                # `closed_in_transaction` e esta gravação morre com "the connection
+                # is closed" — a renovação vira exceção logada e a sessão do
+                # Mercado Livre envelhece exatamente como antes.
+                #
+                # É o mesmo buraco que o comentário lá em cima descreve ("o
+                # `except Exception` que existia aqui engolia esse erro, então
+                # NENHUM fluxo renovava cookies"), por outra porta: o erro não é
+                # mais engolido, mas continua acontecendo.
+                renovar_conexoes_antigas()
                 # Renovação não é uma nova autenticação. Preserva o veredito real
                 # do Link Builder mesmo quando a navegação terminou numa tela de
                 # login/challenge.
