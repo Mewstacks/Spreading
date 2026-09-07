@@ -365,8 +365,11 @@ def gerar_texto_deal(*, nome, categoria="", motivo="", tem_cupom=False,
         else "Sem cupom: o preço já está aplicado na página."
     )
     partes.append("Números liberados: " + (", ".join(sorted(permitidos)) or "nenhum"))
+    # "minima" não está aqui de propósito: nunca é autorizada
+    # (`_fatos_do_deal`), e listá-la seria ensinar ao modelo a frase que a
+    # mensagem não faz. O validador `_ALEGACOES_CONTROLADAS["minima"]` continua
+    # existindo justamente para derrubá-la se o modelo a escrever por conta.
     rotulos_prova = {
-        "minima": "menor preço observado em 90 dias",
         "urgencia": "a oferta termina em poucas horas",
     }
     partes.append("Pode afirmar: " + (", ".join(

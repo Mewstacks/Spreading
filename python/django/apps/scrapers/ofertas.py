@@ -1327,33 +1327,6 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
     return "\n".join(linhas).strip()
 
 
-def _linha_prova_do_deal(deal) -> str:
-    """Uma frase que o histórico SUSTENTA, ou nada.
-
-    Não é adjetivo de vendedor: ou existe série de 90 dias que prova a posição do
-    preço, ou a mensagem não afirma nada sobre "estar barato". Quando o cupom é
-    perene, a referência é a vitrine — o abatimento dele já convive com a série e
-    creditá-lo aqui faria todo item da loja virar "menor preço".
-    """
-    historico = getattr(deal, "historico", None) or {}
-    # Cinco observações, não uma. O `pontuar` pode se apoiar no que houver — é um
-    # número interno que só ordena. Isto aqui vira uma AFIRMAÇÃO pública assinada
-    # pelo creator, e "menor preço em 90 dias" apoiado em duas leituras é a mesma
-    # classe de erro que mandou "De R$ 289 por R$ 183,91" para o grupo.
-    if int(historico.get("n") or 0) < 5:
-        return ""
-    referencia = deal.preco_vitrine if deal.cupom_perene else deal.preco_final
-    minimo = float(historico.get("minimo") or 0)
-    mediana = float(historico.get("mediana") or 0)
-    if minimo > 0 and referencia <= minimo * FOLGA_MINIMA_HISTORICA:
-        return "Menor preço que observamos em 90 dias"
-    if mediana > 0 and referencia < mediana:
-        queda = (mediana - referencia) / mediana * 100
-        if queda >= 5:
-            return f"{queda:.0f}% abaixo do preço habitual de 90 dias"
-    return ""
-
-
 def _fatos_do_deal(deal) -> dict:
     """Números e alegações que o modelo pode usar — e só eles.
 
@@ -1368,9 +1341,16 @@ def _fatos_do_deal(deal) -> dict:
     percentual = None
     if economia and lista > 0:
         percentual = round(economia / lista * 100)
-    # "menor preço em 90 dias" saiu da mensagem por decisão do usuário — e sair
-    # significa não aparecer TAMBÉM na frase da IA. Manter a prova aqui só mudava
-    # o lugar onde a mesma afirmação era feita, que é o oposto de removê-la.
+    # "menor preço em 90 dias" NÃO EXISTE na mensagem. Não como linha própria, não
+    # dentro da frase da IA, não reescrita como "menor cotação" ou "nunca esteve
+    # tão barato". Foi pedida a remoção várias vezes, e várias vezes ela voltou
+    # porque a remoção era parcial: tirava-se de um caminho e o outro continuava
+    # imprimindo. Os dois estão fechados agora, e há teste em cima de cada um.
+    #
+    # O motivo é de produto, não técnico: quem assina a mensagem é a creator, e um
+    # superlativo de preço apoiado na nossa própria amostragem é uma promessa que
+    # ela não pode cumprir. O que a mensagem afirma é o que a loja cobra — preço,
+    # cupom e link, conferidos antes de publicar.
     provas = set()
     validade = getattr(deal.cupom, "validade", None)
     if validade and validade - timezone.now() <= timedelta(hours=12):
@@ -1381,11 +1361,9 @@ def _fatos_do_deal(deal) -> dict:
         "beneficio_cupom": deal.beneficio_rs or None,
         "percentual": percentual,
         "provas": provas,
-        # A janela do histórico é impressa pelo próprio código na linha de prova
-        # ("Menor preço que observamos em 90 dias"). Sem liberá-la, o modelo
-        # escrevia "em 90 dias" e o validador derrubava a frase inteira por um
-        # número que a mensagem já mostra.
-        "janela_dias": 90 if provas else None,
+        # Nenhuma. Liberar a janela era o que deixava o modelo escrever "em 90
+        # dias" — e a mensagem não faz mais afirmação nenhuma sobre histórico.
+        "janela_dias": None,
     }
 
 
@@ -1418,23 +1396,35 @@ def _frase_acrescenta(frase, nome, minimo_novas=3) -> str:
 
 def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None,
                          configuracao=None) -> str:
-    """Mensagem de um Deal, no formato que os canais de oferta usam de verdade.
+    """Mensagem de um Deal, no MESMO formato da mensagem de produto.
 
-    Anatomia copiada de quem vende (nerdofertas, promobit e afins no Telegram):
+    Blocos separados por linha em branco, que é o que os grupos leem bem:
 
-        ➡️ Nome do produto
-        ✅ R$ 590  (de R$ 890)
-        🏷 Cupom: TEMNAAMZON
-        🛒 link
+        ⚡ OFERTA RELÂMPAGO
 
-    O NOME APARECE UMA VEZ. A versão anterior tinha gancho, nome e frase da IA
-    dizendo a mesma coisa em sequência — "ASPIRADOR PHILCO PAS4000V POR R$ 220,91"
-    / "Philco PAS4000V aspirador de pó 127 V" / "Aspirador de pó Philco 127 V com
-    42% de desconto". Três linhas, uma informação. Some o gancho: a linha do
-    produto já é a chamada, como nos canais que convertem.
+        CHUVEIRO QUENTE COM ECONOMIA
 
-    A frase da IA é opcional e só entra quando acrescenta algo que o nome não diz;
-    `_frase_acrescenta` derruba a que só repete o título.
+        🛍️ *Chuveiro Eletrônico Lorenzetti Ultra 7500W*
+
+        🔥 DE ~398,90~ | *POR 93,60*
+        🎟️ *CUPOM: PRECINHOS* — abate R$ 200
+
+        👉 *Compre aqui*
+        🔗 https://meli.la/2rTyThH
+
+    Este caminho tinha um formato próprio — bloco comprimido, sem respiro, com
+    `➡️`, `🏬 Achado no <loja>` e `🛒`. Duas anatomias para a mesma mensagem é uma
+    a mais: o formato acima é o que estava em uso e o que foi aprovado, então ele
+    é o único. As diferenças que sobram são as do Deal, não as do estilo: o preço
+    vem de `deal.preco_final` (revalidado antes de publicar) e o abatimento do
+    cupom só aparece com prova de checkout.
+
+    O que a mensagem NÃO faz, e não é esquecimento: nenhuma afirmação sobre o
+    preço estar historicamente baixo. Ver o comentário em `_fatos_do_deal`.
+
+    O NOME APARECE UMA VEZ. Título da IA, nome e frase dizendo a mesma coisa em
+    sequência era o defeito da versão anterior; `_frase_acrescenta` derruba a
+    frase que só parafraseia o título.
 
     A foto do produto vai acima, pelo caminho de envio de produto.
     """
@@ -1446,42 +1436,50 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
     texto_ia = texto_ia or {}
     produto = deal.produto
     perfil = getattr(usuario, "perfil", None) if usuario else None
+    conteudo_ia = _conteudo_marketing(produto)
+
+    marca = (
+        getattr(configuracao, "nome_marca", "")
+        or getattr(perfil, "nome_marca", "") or "Ofertas"
+    ).strip()
+    cta = (
+        getattr(configuracao, "chamada_acao", "")
+        or getattr(perfil, "chamada_acao", "") or "Compre aqui"
+    ).strip()
 
     linhas = []
     if getattr(produto, "relampago", False) or getattr(deal.cupom, "relampago", False):
-        linhas.append(m.bold("⚡ RELÂMPAGO"))
+        linhas += [m.bold("⚡ OFERTA RELÂMPAGO"), ""]
+
+    titulo = (conteudo_ia.get("titulo") or "").strip()
+    if titulo:
+        linhas += [esc(titulo), ""]
 
     nome = (getattr(produto, "nome_llm", "") or "").strip() or (
-        _nome_principal_produto(getattr(produto, "nome", ""), limite=72))
-    linhas.append(f"➡️ {m.bold(esc(nome))}")
+        conteudo_ia.get("nome_curto")
+        or _nome_principal_produto(getattr(produto, "nome", ""), limite=72))
+    linhas.append(f"{_emoji_produto(produto)} {m.bold(esc(nome))}")
 
     frase = _frase_acrescenta(texto_ia.get("linha") or "", nome)
     if frase:
         linhas.append(esc(frase))
+    linhas.append("")
 
     # Frete grátis é argumento de compra, não detalhe: os canais que convertem
-    # (Pechinchou e afins) põem essa linha antes do preço. O dado já existia em
-    # `Produto.frete_full` e a mensagem nunca o usava.
+    # põem essa linha junto do preço. O dado já existia em `Produto.frete_full`.
     if getattr(produto, "frete_full", False):
         linhas.append("📦 Frete grátis")
 
-    # Preço: uma linha. O "de" só com desconto comprovado pelo nosso histórico —
-    # riscar um preço que talvez nunca tenha existido é o falso positivo mais caro
-    # do produto, porque quem assina a mensagem é o creator.
+    # O "DE" só com desconto comprovado pelo nosso histórico — riscar um preço que
+    # talvez nunca tenha existido é o falso positivo mais caro do produto, porque
+    # quem assina a mensagem é a creator.
     lista = float(getattr(produto, "preco_sem_desconto", 0) or 0)
-    preco = m.bold(f"R$ {_preco_br(deal.preco_final)}")
+    por = _preco_br(deal.preco_final)
     if deal.desconto_comprovado and lista > deal.preco_final:
-        # "(de R$ 1.399)" e não "chega a custar R$ 1.399": a segunda lê como se o
-        # preço fosse SUBIR, e é a forma que todo canal de oferta usa.
-        linhas.append(f"🔥 {preco}  (de R$ {_preco_br(lista)})")
+        linhas.append(
+            f"🔥 DE {m.strike(_preco_br(lista))} | {m.bold(f'POR {por}')}")
     else:
-        linhas.append(f"🔥 {preco}")
-    prova = _linha_prova_do_deal(deal)
-    if prova:
-        linhas.append(f"📉 {esc(prova)}")
-    loja = _nome_loja(getattr(produto, "marketplace", ""))
-    if loja:
-        linhas.append(f"🏬 Achado no {esc(loja)}")
+        linhas.append(f"🔥 {m.bold(f'POR {por}')}")
 
     if deal.tem_cupom:
         codigo = codigo_publicavel(deal.cupom)
@@ -1491,17 +1489,28 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
         abate = (f" — abate R$ {_preco_br(deal.beneficio_publicavel)}"
                  if deal.beneficio_publicavel > 0 else " — desconto no checkout")
         if codigo:
-            linhas.append(f"🏷 Cupom: {m.bold(esc(codigo))}{abate}")
+            linhas.append(f"🎟️ {m.bold(f'CUPOM: {esc(codigo)}')}{abate}")
         else:
-            linhas.append(f"🏷 {m.bold('Cupom de ativação')}{abate} — ative na página")
+            linhas.append(
+                f"🎟️ {m.bold('CUPOM: ative no link')}{abate}")
         minimo = _aviso_minimo_nao_atingido(deal.cupom, produto)
         if minimo:
             linhas.append(f"⚠️ {esc(minimo.capitalize())}")
+        escopo = _escopo_do_cupom(deal.cupom)
+        if escopo:
+            linhas.append(f"📌 {m.bold('Vale em:')} {esc(escopo)}")
+        condicao = _condicao_do_cupom(deal.cupom)
+        if condicao:
+            linhas.append(f"⚠️ {m.bold('Condição:')} {esc(condicao)}")
         validade = _linha_validade_cupom(deal.cupom)
         if validade:
-            linhas.append(f"⏳ {esc(validade)}")
+            linhas.append(f"⏳ {m.bold(esc(validade))}")
 
-    linhas.append(f"🛒 {esc(link)}")
+    linhas.append("")
+    linhas.append(f"👉 {m.bold(esc(cta))}")
+    linhas.append(f"🔗 {esc(link)}")
+    if marca and marca.casefold() != "ofertas":
+        linhas += ["", m.italic(esc(marca))]
     disclosure = (
         getattr(configuracao, "divulgacao_afiliado", "")
         or getattr(perfil, "divulgacao_afiliado", "") or ""

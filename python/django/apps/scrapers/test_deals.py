@@ -339,7 +339,7 @@ class MensagemDealTests(BaseDeals):
             texto_ia={"linha": "Fone Bluetooth JBL para ouvir o dia inteiro"},
         )
         self.assertEqual(texto.count("Fone Bluetooth JBL"), 1)
-        self.assertIn("R$ 80", texto)
+        self.assertIn("POR 80", texto)
         self.assertIn("PRESENTE", texto)
         self.assertIn("https://meli.la/abc", texto)
 
@@ -356,55 +356,73 @@ class MensagemDealTests(BaseDeals):
 
         deal = self._deal()
         texto = montar_mensagem_deal(deal, "https://meli.la/abc", usuario=self.user)
-        self.assertIn("R$ 80", texto)
+        self.assertIn("POR 80", texto)
         self.assertIn("PRESENTE", texto)
 
-    def test_sem_prova_de_historico_nao_ha_frase_de_menor_preco(self):
-        from apps.scrapers.ofertas import _linha_prova_do_deal
+    def test_a_mensagem_nao_afirma_nada_sobre_historico_de_preco(self):
+        """A regra que este teste segura, e por que ele existe assim.
 
-        deal = deals.DealCandidate(
-            produto=self._produto(), preco_vitrine=100.0, preco_final=100.0,
-            historico=None,
-        )
-        self.assertEqual(_linha_prova_do_deal(deal), "")
+        "Menor preço que observamos em 90 dias" saiu da mensagem a pedido do
+        usuario, varias vezes, e voltou varias vezes. O motivo nao era descuido: a
+        remocao era parcial, e DOIS TESTES desta classe exigiam a frase — um
+        comparando `_linha_prova_do_deal` com o literal, outro cobrando "90 dias"
+        na mensagem montada. Quem tirasse a frase quebrava a suite e a recolocava
+        para ficar verde. O gatilho estava dentro do teste.
 
-    def test_serie_curta_nao_sustenta_afirmacao_publica(self):
-        """Duas leituras nao autorizam dizer "menor preco em 90 dias".
-
-        O score pode se apoiar no que houver: e numero interno, so ordena. Esta
-        linha vai assinada pelo creator no grupo, e e a mesma classe de erro que
-        mandou "De R$ 289 por R$ 183,91" para um grupo real em 03/09.
-        """
-        from apps.scrapers.ofertas import _linha_prova_do_deal
-
-        produto = self._produto()
-        curto = deals.DealCandidate(
-            produto=produto, preco_vitrine=80.0, preco_final=80.0,
-            historico={"n": 2, "mediana": 160.0, "minimo": 80.0},
-        )
-        self.assertEqual(_linha_prova_do_deal(curto), "")
-
-        sustentado = deals.DealCandidate(
-            produto=produto, preco_vitrine=80.0, preco_final=80.0,
-            historico={"n": 9, "mediana": 160.0, "minimo": 80.0},
-        )
-        self.assertEqual(
-            _linha_prova_do_deal(sustentado),
-            "Menor preco que observamos em 90 dias".replace("preco", "preço"),
-        )
-
-    def test_a_prova_de_preco_chega_na_mensagem(self):
-        """A funcao existia, era testada, e nenhuma mensagem a chamava.
-
-        E a unica frase da mensagem que espelhador e formatador nao conseguem
-        escrever: eles repassam o que a loja diz, sem serie propria de preco.
+        Por isso a asserção agora é pela negativa e sobre o TEXTO PUBLICADO, que é
+        onde a regra vale. Historico farto, minima colada, mediana bem acima: as
+        condicoes que antes produziam a frase. A mensagem nao pode afirmar nada.
         """
         from apps.scrapers.ofertas import montar_mensagem_deal
 
         deal = self._deal()
         deal.historico = {"n": 9, "mediana": 160.0, "minimo": 80.0}
         texto = montar_mensagem_deal(deal, "https://meli.la/abc", usuario=self.user)
-        self.assertIn("90 dias", texto)
+
+        self.assertNotIn("90 dias", texto)
+        self.assertNotIn("observamos", texto)
+        self.assertNotIn("habitual", texto)
+        self.assertNotIn("menor preço", texto.casefold())
+
+    def test_sem_historico_a_mensagem_e_a_mesma(self):
+        """Nao ha ramo escondido: com ou sem serie, a mensagem nao muda de forma."""
+        from apps.scrapers.ofertas import montar_mensagem_deal
+
+        deal = self._deal()
+        deal.historico = None
+        sem = montar_mensagem_deal(deal, "https://meli.la/abc", usuario=self.user)
+        deal.historico = {"n": 9, "mediana": 160.0, "minimo": 80.0}
+        com = montar_mensagem_deal(deal, "https://meli.la/abc", usuario=self.user)
+
+        self.assertEqual(sem, com)
+
+    def test_a_funcao_que_escrevia_a_frase_nao_existe_mais(self):
+        """Enquanto ela existir, alguem volta a chama-la."""
+        from apps.scrapers import ofertas
+
+        self.assertFalse(hasattr(ofertas, "_linha_prova_do_deal"))
+
+    def test_a_mensagem_usa_o_mesmo_formato_da_mensagem_de_produto(self):
+        """Duas anatomias para a mesma mensagem e uma a mais.
+
+        O formato aprovado é o de blocos: DE|POR com o "de" riscado, cupom em
+        `🎟️`, CTA e link no rodape. O caminho Deal tinha um formato proprio —
+        `➡️`, `🔥 *R$ X*  (de R$ Y)`, `🏬 Achado no <loja>`, `🛒` — que ninguem
+        pediu e ninguem aprovou.
+        """
+        from apps.scrapers.ofertas import montar_mensagem_deal
+
+        deal = self._deal()
+        deal.desconto_comprovado = True
+        texto = montar_mensagem_deal(deal, "https://meli.la/abc", usuario=self.user)
+
+        self.assertIn("| *POR ", texto)
+        self.assertIn("🎟️", texto)
+        self.assertIn("👉", texto)
+        self.assertIn("🔗 https://meli.la/abc", texto)
+        self.assertNotIn("🏬", texto)
+        self.assertNotIn("🛒", texto)
+        self.assertNotIn("➡️", texto)
 
     def test_o_preco_antigo_nao_e_anunciado_como_alta(self):
         """"chega a custar R$ X" le como se o preco fosse SUBIR."""
