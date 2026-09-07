@@ -12,6 +12,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Count
 from django.utils import timezone
 
 from apps.scrapers.models import Publicacao, PublicacaoEvento, PublicacaoTentativa
@@ -586,3 +587,83 @@ def reconciliar_incertos(limit=20, agora=None, consulta=None):
         logger.info("Reconciliação de envios: %s de %s incerto(s) confirmado(s) "
                     "pelo ledger.", confirmadas, consultadas)
     return {"consultadas": consultadas, "confirmadas": confirmadas}
+
+
+# Lease do consumidor v2: `_claim_next_batch` marca `processing_v2` e usa
+# `next_retry_at` como prazo. Passado o prazo sem terminal, ou o worker morreu no
+# meio ou está preso — e é o coveiro que tem de aparecer.
+LEASE_V2_MIN = 5
+
+
+def estado_da_fila(*, usuario=None, agora=None, limite=12) -> dict:
+    """O que está na fila v2 agora, com tentativa e prazo — não só "pendente".
+
+    Duas tabelas foram construídas para contar esta história (`PublicacaoTentativa`
+    e `PublicacaoEvento`) e três colunas para resumi-la (`transport_state`,
+    `attempt_count`, `next_retry_at`), e nenhuma tela lia qualquer uma delas. Sem
+    isso, um envio com três tentativas queimadas e prazo vencido é visualmente
+    idêntico a um que acabou de nascer: os dois aparecem como "pendente".
+
+    Só leitura. `atrasada` é fato observável (prazo no passado), não estimativa.
+    """
+    agora = agora or timezone.now()
+    fila = Publicacao.objects.filter(
+        status="pendente", transport_state__in=QUEUE_STATES,
+    )
+    if usuario is not None:
+        fila = fila.filter(usuario=usuario)
+
+    itens = list(
+        fila.order_by("next_retry_at", "criada_em", "pk")
+        .only("id", "canal", "destino_nome", "destino_id", "stage",
+              "transport_state", "attempt_count", "next_retry_at", "criada_em",
+              "erro")[:limite]
+    )
+    total = fila.count()
+    atrasadas = fila.filter(next_retry_at__lt=agora).count()
+    # Lease vencido é o caso que exige coveiro, não paciência: a linha está em
+    # `processing_v2` e ninguém a está processando.
+    presas = fila.filter(
+        transport_state="processing_v2",
+        next_retry_at__lt=agora - timedelta(minutes=LEASE_V2_MIN),
+    ).count()
+    reentregas = fila.filter(attempt_count__gte=1).count()
+
+    por_estado = [
+        {"estado": linha["transport_state"], "n": linha["n"]}
+        for linha in fila.values("transport_state")
+        .annotate(n=Count("id")).order_by("-n", "transport_state")
+    ]
+
+    teto = int(getattr(settings, "SEND_MAX_ATTEMPTS", 3) or 3)
+    linhas = []
+    for item in itens:
+        prazo = item.next_retry_at
+        linhas.append({
+            "id": item.pk,
+            "canal": item.canal,
+            "destino": item.destino_nome or item.destino_id,
+            "etapa": item.stage,
+            "estado": item.transport_state,
+            "tentativa": item.attempt_count,
+            "teto": teto,
+            "prazo": prazo,
+            "atrasada": bool(prazo and prazo < agora),
+            "presa": bool(
+                item.transport_state == "processing_v2" and prazo
+                and prazo < agora - timedelta(minutes=LEASE_V2_MIN)
+            ),
+            "idade_min": int((agora - item.criada_em).total_seconds() // 60),
+            "erro": item.erro,
+        })
+
+    return {
+        "total": total,
+        "atrasadas": atrasadas,
+        "presas": presas,
+        "reentregas": reentregas,
+        "teto": teto,
+        "por_estado": por_estado,
+        "itens": linhas,
+        "truncada": total > len(linhas),
+    }

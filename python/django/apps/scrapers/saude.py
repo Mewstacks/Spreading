@@ -534,6 +534,7 @@ def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") ->
     sinais = [{"nome": nome, "n": contagens.get(ev, 0)} for ev, nome in SINAIS]
     workers = _workers()
     from apps.scrapers.manual_scraping import queue_wait_metrics
+    from apps.scrapers.send_pipeline import estado_da_fila
     queue_metrics = queue_wait_metrics(
         since=desde, now=agora, usuario=usuario,
     )
@@ -562,6 +563,10 @@ def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") ->
         "conexoes": _conexoes_ao_vivo(usuario),
         "configuracao": _configuracao_silenciosa(),
         "manual_queue": queue_metrics,
+        # Fila v2 do envio. As colunas existiam e nenhuma tela as lia: sem elas,
+        # "pendente" cobre tanto o que nasceu agora quanto o que já queimou três
+        # tentativas e está com o prazo vencido.
+        "fila_envio": estado_da_fila(usuario=usuario, agora=agora),
         # Gasto de IA do mês. Fica na Saúde, e não numa tela própria, porque é a
         # mesma pergunta das outras linhas daqui: o sistema está dentro do que
         # deveria? Um teto que ninguém observa não é teto.

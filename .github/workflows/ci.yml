@@ -61,7 +61,22 @@ jobs:
       TENANT_CONTEXT_SIGNING_KEY: ci-chave-de-assinatura-de-contexto-para-testes
       # As tres roles do desenho multi-tenant. Senhas descartaveis de um servico
       # que so existe dentro deste job.
-      DATABASE_URL: postgres://spreading_runtime:ci@localhost:5432/spreading
+      # A suite conecta como `spreading_migration`, e a escolha tem motivo.
+      #
+      # `system_context()` chama `_assert_privileged_database_role()`, que so aceita
+      # a role de sistema ou a de migracao — e com razao: quem abre contexto
+      # cross-tenant tem de ser um processo de sistema. Como `spreading_runtime`, 38
+      # testes de worker morriam em PermissionDenied antes da primeira query.
+      #
+      # Entre as duas permitidas, a de migracao e a unica possivel: o banco de teste
+      # e criado pela propria conexao, entao essa role vira DONA das tabelas — e a
+      # role de sistema tem uma checagem a mais que proibe exatamente isso ("a role
+      # de workers nao pode ser dona de tabela tenant"). Em producao quem e dona das
+      # tabelas e `spreading_migration`, entao a posse aqui reproduz a de la.
+      #
+      # Nenhuma das tres tem SUPERUSER ou BYPASSRLS. Quem prova isolamento continua
+      # sendo o `tenant_isolation_probe`, que roda com a role de runtime.
+      DATABASE_URL: postgres://spreading_migration:ci@localhost:5432/spreading
       SYSTEM_DATABASE_URL: postgres://spreading_system:ci@localhost:5432/spreading
       MIGRATION_DATABASE_URL: postgres://spreading_migration:ci@localhost:5432/spreading
     steps:
@@ -83,7 +98,8 @@ jobs:
         run: |
           set -euo pipefail
           psql -h localhost -U postgres -d spreading -v ON_ERROR_STOP=1 <<'SQL'
-          CREATE ROLE spreading_migration LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'ci';
+          -- CREATEDB nas duas que criam banco de teste: a de migracao roda a suite.
+          CREATE ROLE spreading_migration LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'ci' CREATEDB;
           CREATE ROLE spreading_system    LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'ci';
           -- CREATEDB so no runtime: e ele quem cria o banco de teste do Django.
           CREATE ROLE spreading_runtime   LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'ci' CREATEDB;
@@ -140,6 +156,11 @@ jobs:
       - name: Aplica o RLS assinado
         run: RELEASE_COMMAND=1 python django/manage.py tenant_rls --enable
       - name: Prova, com a role runtime, que GUC falsificado nao atravessa tenant
+        env:
+          # Explicito porque o `DATABASE_URL` do job aponta para a role de migracao
+          # (ver o comentario la em cima). Este passo, e so ele, tem de falar com o
+          # banco como a role que atende requisicao — senao nao prova nada.
+          DATABASE_URL: postgres://spreading_runtime:ci@localhost:5432/spreading
         run: python django/manage.py tenant_isolation_probe
       # A suíte roda com a role de runtime, a mesma da produção.
       #

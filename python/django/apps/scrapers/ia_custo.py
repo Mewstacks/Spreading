@@ -60,8 +60,12 @@ def registrar_uso(resposta, *, origem: str, modelo: str = "") -> None:
         from apps.scrapers.models import GastoIA
 
         competencia = timezone.localdate().replace(day=1)
-        nome_modelo = (modelo or getattr(resposta, "model", "")
-                       or getattr(settings, "LLM_MODELO", ""))[:80]
+        # `str()` explícito: o `model` de uma resposta é texto, mas quem chama
+        # passa o que tiver, e um objeto qualquer aqui vira expressão de banco no
+        # `get_or_create` — "F() expressions can only be used to update, not to
+        # insert". Contabilidade não pode derrubar quem a chamou.
+        nome_modelo = str(modelo or getattr(resposta, "model", "")
+                          or getattr(settings, "LLM_MODELO", ""))[:80]
         linha, criada = GastoIA.objects.get_or_create(
             competencia=competencia, modelo=nome_modelo, origem=origem[:40],
         )
