@@ -305,3 +305,34 @@ class SessaoTravadaTests(SimpleTestCase):
             self._verificar_com_corpo(saudavel)   # sustentou: libera o silêncio
         _, evento, _ = self._verificar_com_corpo(travado)
         self.assertEqual(evento.call_count, 1)
+
+
+@override_settings(**_SETTINGS)
+class AlertaDeSessaoTravadaNaoRepeteTests(SimpleTestCase):
+    """Sessão travada é ESTADO, e estado não deve alertar a cada hora.
+
+    Enquanto uma sessão estiver em `expirado`/`falha_auth`/`recuperacao_pausada`,
+    o supervisor reemitia `error` a cada `_TRAVADA_SILENCIO_S` — até ~17 alertas
+    por dia de um problema que só sai com reconexão manual, e que o desligamento
+    noturno reapresenta todo dia. O primeiro é acionável; do segundo em diante é a
+    mesma frase.
+    """
+
+    def setUp(self):
+        wa_supervisor._cache().clear()
+
+    def test_o_primeiro_aviso_do_episodio_e_error(self):
+        self.assertFalse(wa_supervisor._ja_avisou_travada())
+
+    def test_a_repeticao_nao_e_mais_error(self):
+        wa_supervisor._ja_avisou_travada()
+        self.assertTrue(wa_supervisor._ja_avisou_travada())
+        self.assertTrue(wa_supervisor._ja_avisou_travada())
+
+    def test_sem_cache_o_alerta_sai(self):
+        # Perder um aviso é pior do que repeti-lo: falha aberta, de propósito.
+        from unittest.mock import patch
+
+        with patch.object(wa_supervisor, "_cache",
+                          side_effect=RuntimeError("cache fora")):
+            self.assertFalse(wa_supervisor._ja_avisou_travada())

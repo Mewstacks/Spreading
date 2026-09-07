@@ -59,6 +59,22 @@ _TRAVADA_KEY = "wa_supervisor_sessao_travada_avisada"
 _TRAVADA_SILENCIO_S = 3600
 # Marca desde quando a contagem está zerada. Ver `_avisar_sessao_travada`.
 _SAUDAVEL_DESDE_KEY = "wa_supervisor_saudavel_desde"
+# Marca que o alerta de sessao travada ja saiu neste episodio. Some sozinho
+# junto com o silencio, entao um episodio novo volta a alertar em `error`.
+_TRAVADA_AVISADA_KEY = "wa_supervisor_travada_avisada"
+
+
+def _ja_avisou_travada() -> bool:
+    """True se este episodio de travamento ja gerou o alerta de `error`."""
+    try:
+        cache = _cache()
+        if cache.get(_TRAVADA_AVISADA_KEY):
+            return True
+        cache.set(_TRAVADA_AVISADA_KEY, True, timeout=_TRAVADA_SILENCIO_S * 24)
+        return False
+    except Exception:
+        # Sem cache, alerta: perder um aviso e pior que repeti-lo.
+        return False
 # Quanto tempo de contagem zerada conta como recuperação de verdade.
 _RECUPERACAO_ESTAVEL_S = 900
 # O contador expira sozinho: se o monitor morrer no meio de uma sequência de
@@ -190,10 +206,20 @@ def _avisar_sessao_travada(corpo: dict) -> None:
     else:
         motivo = (f"{travadas} sessão(ões) WhatsApp em estado terminal e "
                   f"{repareamento} pedindo QR de novo. Nenhuma delas envia.")
-    logger.error("wa_supervisor: %s", motivo)
+    # Estado, não evento. Enquanto a sessão estiver travada isto reemite a cada
+    # `_TRAVADA_SILENCIO_S` — até ~17 alertas por dia de um problema que só sai
+    # com reconexão manual, e que o desligamento noturno reapresenta todo dia.
+    # O primeiro aviso é o que alguém pode acionar; do segundo em diante é a
+    # mesma frase. O incidente continua aberto na Saúde de qualquer forma.
+    primeira_vez = not _ja_avisou_travada()
+    nivel = "error" if primeira_vez else "warning"
+    if primeira_vez:
+        logger.error("wa_supervisor: %s", motivo)
+    else:
+        logger.warning("wa_supervisor (ainda travado): %s", motivo)
     log_event(
         "whatsapp", "sessao_travada", motivo,
-        level="error",
+        level=nivel,
         contexto={
             "sessions_stuck": travadas,
             "sessions_repareamento": repareamento,

@@ -6,6 +6,7 @@ from collections import defaultdict
 from datetime import timedelta
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.db import DatabaseError, OperationalError
 from django.db.models import Q
 from django.utils import timezone
 
@@ -857,6 +858,17 @@ def executar_pipeline_cupons(
             from apps.scrapers.coupon_validation import agendar_lote_validacao
             afiliacao["validacao_checkout"] = agendar_lote_validacao(
                 usuario, limite=30, channel="whatsapp",
+            )
+        except (OperationalError, DatabaseError) as exc:
+            # Contenção de lock não é falha: a projeção é idempotente e o próximo
+            # ciclo refaz o mesmo trabalho. Tratar isso como erro mandava um
+            # evento ao Sentry por usuário por ciclo dizendo que algo quebrou —
+            # quando o que houve foi um worker esperando outro. O `resultado`
+            # continua contando, para a Saúde não fingir que rodou.
+            resultado["adiados"] = resultado.get("adiados", 0) + 1
+            logger.warning(
+                "Projeção de cupons adiada para usuário %s por contenção no "
+                "banco; retoma no próximo ciclo: %s", usuario.pk, exc,
             )
         except Exception:
             resultado["falhos"] += 1

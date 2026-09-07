@@ -35,6 +35,20 @@ logger = logging.getLogger(__name__)
 
 JOB = "monitor"
 
+# Mesma janela do `deploy/fly-nightly-power.sh` (SONO_INICIO_H/SONO_FIM_H).
+# Deixada aqui como constante local de proposito: o worker nao le o shell,
+# e duplicar dois numeros e mais honesto que inventar um acoplamento.
+_SONO_INICIO_H = 1
+_SONO_FIM_H = 8
+
+
+def _dentro_da_janela_de_sono() -> bool:
+    """A producao esta parada de proposito agora?"""
+    from django.utils import timezone as _tz
+
+    hora = _tz.localtime().hour
+    return _SONO_INICIO_H <= hora < _SONO_FIM_H
+
 
 class Command(BaseCommand):
     help = "Verifica conexões (WhatsApp/ML), registra transições e envia alertas."
@@ -90,7 +104,12 @@ class Command(BaseCommand):
             except DatabaseError as e:
                 falhas_banco += 1
                 renovar_conexoes()
-                alerta = falhas_banco >= 2
+                # A produção é desligada às 01:00 e religada às 07:45 (o
+                # workflow `fly-nightly-power`), e o Postgres cai junto. Nas duas
+                # transições o monitor faz suas checagens sem banco e emitia
+                # ALERTA_BANCO — determinístico, todo dia, e sem ninguém para
+                # acionar: a máquina está parada de propósito.
+                alerta = falhas_banco >= 2 and not _dentro_da_janela_de_sono()
                 if alerta:
                     logger.error("ALERTA_BANCO: %s falhas consecutivas: %s", falhas_banco, e)
                 else:
