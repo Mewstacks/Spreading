@@ -110,3 +110,4 @@ page-*.png
 .DS_Store
 Thumbs.db
 desktop.ini
+.vigia/

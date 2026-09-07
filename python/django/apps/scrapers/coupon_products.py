@@ -958,10 +958,21 @@ def preparar_cupom(cupom, usuario=None, *, force=False, permitir_rede=True,
         )
         return []
     except ContainerFetchFailedError:
-        logger.warning(
-            "Preparo do cupom %s adiado por falha de transporte do container.",
-            cupom.pk,
-        )
+        # Com o disjuntor aberto isto é o comportamento esperado, não um evento:
+        # o passo HTTP nem toca a rede, e cada cupom do lote passa por aqui. Em
+        # 07/09/2026 eram ~1 WARNING por cupom por ciclo — os 403 pararam às
+        # 17:35:56 e as linhas seguiram até 17:37:48, todas dizendo a mesma coisa.
+        # Quem abriu o circuito já registrou o motivo uma vez, com a contagem.
+        if _circuito_aberto():
+            logger.debug(
+                "Preparo do cupom %s adiado: disjuntor do container aberto.",
+                cupom.pk,
+            )
+        else:
+            logger.warning(
+                "Preparo do cupom %s adiado por falha de transporte do container.",
+                cupom.pk,
+            )
         _registrar_preparo(
             status="erro", reason_code=ERRO_CONTAINER_FETCH_FAILED,
             detail=ERRO_CONTAINER_FETCH_FAILED, produtos_chave=chave,
