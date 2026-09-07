@@ -248,7 +248,11 @@ MAX_TENTATIVAS_ERRO = 8
 # marcava produtos perfeitamente afiliáveis como `nao_afiliavel`. Em produção
 # sobraram 878 linhas assim.
 _CAUSAS_DE_CONTA = (
-    "LoginError", "AuthError", "SessaoExpirada", "AntiBotError",
+    # `SemSessaoError` é subclasse de `LoginError`, mas `_nome_da_causa` compara o
+    # NOME DA CLASSE — sem listá-la aqui, criar a subclasse faria a causa deixar de
+    # ser reconhecida como problema de conta e voltaria a penalizar produto por
+    # produto. Ver o teste que segura isso.
+    "LoginError", "SemSessaoError", "AuthError", "SessaoExpirada", "AntiBotError",
     "MLSessionCryptoError",
 )
 

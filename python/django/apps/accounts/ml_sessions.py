@@ -431,6 +431,46 @@ def delete_storage_state(user) -> bool:
     return bool(deleted)
 
 
+SEM_SESSAO = "session_absent"
+SESSAO_REVOGADA = "session_revoked"
+SESSAO_ILEGIVEL = "session_unreadable"
+
+
+def motivo_sem_sessao(user) -> str:
+    """'' quando há credencial usável; senão POR QUE não há.
+
+    `has_storage_state` responde sim/não, e a fila de validação gravava o mesmo
+    `session_required` nos dois casos. Isso fez 4.020 das 6.619 validações de
+    cupom paradas caírem sob um código que mistura duas coisas opostas:
+
+      - a conta nunca conectou o Mercado Livre (cadastro em branco, nada a
+        diagnosticar, e nenhuma pressa — não adianta tentar de novo em 6 horas);
+      - a sessão existia e foi marcada `expired`, o que só acontece depois de três
+        vereditos `suspect` da sonda. No IP de datacenter da Fly essa é justamente
+        a assinatura do gateway anti-bot, e aí a pergunta é de acesso, não de
+        cadastro.
+
+    Ler os 4.020 como pressão anti-bot leva a comprar proxy residencial para
+    resolver um cadastro vazio. Ler tudo como cadastro esconde um bloqueio real.
+    Com dois códigos, o número passa a responder qual dos dois é.
+    """
+    organization = organization_for_user(user)
+    if organization is None:
+        return SEM_SESSAO
+    # `organization` é OneToOne: no máximo uma linha por tenant.
+    registro = MercadoLivreSession.objects.filter(organization=organization).first()
+    if registro is None:
+        if (settings.ML_LEGACY_SESSION_READ_ENABLED and legacy_path(user)
+                and os.path.isfile(legacy_path(user))):
+            return ""
+        return SEM_SESSAO
+    if registro.status in STATUS_UTILIZAVEIS:
+        return ""
+    if registro.status == "decrypt_error":
+        return SESSAO_ILEGIVEL
+    return SESSAO_REVOGADA
+
+
 def has_storage_state(user) -> bool:
     """A organização tem credencial utilizável AGORA?
 

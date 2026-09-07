@@ -38,7 +38,28 @@ def _salvar_link_global(prod, url_isca, link):
 
 
 class LoginError(Exception):
-    """Exceção personalizada para erros de login."""
+    """O portal EXIBIU a tela de login: a sessão que existia não vale mais."""
+    pass
+
+
+class SemSessaoError(LoginError):
+    """Não há credencial no cofre. Nada foi aberto, o Mercado Livre não participou.
+
+    Herda de LoginError porque a ação do usuário é a mesma — conectar a conta — e
+    porque todo `except LoginError` existente continua pegando os dois casos.
+
+    O que muda é poder distinguir os dois, que até 07/09/2026 era impossível: os
+    dois eram `LoginError`, separados apenas pelo texto da mensagem, e o log de
+    `coupon_pipeline` imprime só `type(exc).__name__`. "bloqueada por LoginError"
+    tanto podia ser "essa conta nunca conectou o Mercado Livre" quanto "a sessão
+    da conta acabou de ser recusada" — diagnósticos opostos, com a mesma linha.
+
+    Isso não é detalhe de log: `session_required` respondia por 4.020 das 6.619
+    validações de cupom paradas, e o comentário de 03/09/2026 em
+    `coupon_validation_adapters` já media que 3.021 de 3.840 vinham de duas contas
+    que simplesmente nunca conectaram. Ler esse número como pressão anti-bot leva
+    a comprar proxy residencial para resolver um cadastro em branco.
+    """
     pass
 
 class AuthError(Exception):
@@ -482,7 +503,7 @@ def afiliate_link_builder(link_base, auth_path=None, usuario=None):
         if not _executor_no_tenant(organization_id)(has_storage_state, usuario):
             # A guarda acontece antes de iniciar_browser: nunca cria contexto
             # Chromium anônimo para um usuário sem credencial.
-            raise LoginError(MSG_SEM_SESSAO)
+            raise SemSessaoError(MSG_SEM_SESSAO)
     with coordinated_ml_browser(
         usuario=usuario, authenticated=usuario is not None,
         owner_kind="ml_link_single",
@@ -670,7 +691,7 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None, activation_keys=None
         organization_id = _organization_id_de(usuario)
         _no_escopo = _executor_no_tenant(organization_id)
         if not _no_escopo(has_storage_state, usuario):
-            raise LoginError(MSG_SEM_SESSAO)
+            raise SemSessaoError(MSG_SEM_SESSAO)
         # "Já tem URL" NÃO é o critério: um link reprovado tem URL e precisa ser
         # REGERADO, não pulado — ver ids_com_link_utilizavel.
         activation_keys = activation_keys or {}
@@ -1328,7 +1349,7 @@ def gerar_link_afiliado_para_produto(produto, usuario=None, activation_key=""):
             # Não há sessão NENHUMA — nada foi aberto, então não é a mensagem do
             # Link Builder. Antes as duas causas compartilhavam o mesmo texto e
             # "pediu login de novo" aparecia para quem nunca havia conectado.
-            raise LoginError(MSG_SEM_SESSAO)
+            raise SemSessaoError(MSG_SEM_SESSAO)
         url_isca = _montar_url_isca(url_produto, camp_id)
         if not url_isca:
             motivo = _motivo_url_recusada(url_produto)

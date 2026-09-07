@@ -1074,3 +1074,83 @@ class CondicaoDizParaQuemValeTests(TestCase):
         for texto in ("Somente no app, primeira compra", "", "Regulamento " * 40):
             with self.subTest(texto=texto[:30]):
                 self.assertLessEqual(len(self._condicao(texto)), 60)
+
+
+class CausaDeContaReconheceASubclasseTests(TestCase):
+    """`SemSessaoError` herda de `LoginError`, mas a classificação é por NOME.
+
+    `_nome_da_causa` compara `type(exc).__name__`. Criar a subclasse sem listá-la
+    em `_CAUSAS_DE_CONTA` faria a causa deixar de ser reconhecida como problema de
+    conta — e o efeito não seria um log pior, seria o catálogo inteiro voltando a
+    ser penalizado produto por produto, que é exatamente o que a lista existe para
+    impedir.
+    """
+
+    def test_sem_sessao_continua_sendo_causa_de_conta(self):
+        from apps.scrapers.afiliado import causa_de_conta
+        from apps.scrapers.scraper_mercadolivre.link import (
+            LoginError, SemSessaoError,
+        )
+
+        self.assertTrue(issubclass(SemSessaoError, LoginError))
+        self.assertEqual(causa_de_conta(SemSessaoError("x")), "SemSessaoError")
+        self.assertEqual(causa_de_conta(LoginError("x")), "LoginError")
+
+    def test_falha_de_produto_continua_nao_sendo_causa_de_conta(self):
+        from apps.scrapers.afiliado import causa_de_conta
+
+        self.assertEqual(causa_de_conta(ValueError("URL recusada")), "")
+
+
+class MotivoSemSessaoTests(TestCase):
+    """Distinguir cofre vazio de sessão revogada, que a métrica misturava."""
+
+    def setUp(self):
+        from apps.accounts.models import ensure_personal_organization
+        from django.contrib.auth.models import User
+
+        self.user = User.objects.create_user("sem-sessao", password="x")
+        self.org = ensure_personal_organization(self.user)
+
+    def _motivo(self):
+        from apps.accounts.ml_sessions import motivo_sem_sessao
+
+        return motivo_sem_sessao(self.user)
+
+    def test_sem_registro_e_ausencia_nao_revogacao(self):
+        self.assertEqual(self._motivo(), "session_absent")
+
+    def test_sessao_ativa_nao_tem_motivo(self):
+        from apps.accounts.ml_sessions import save_storage_state
+
+        save_storage_state(self.user, {"cookies": [], "origins": []})
+        self.assertEqual(self._motivo(), "")
+
+    def test_suspeita_isolada_ainda_e_utilizavel(self):
+        # Uma suspeita é ruído do anti-bot; recusar trabalho por ela reproduz o
+        # falso-positivo que `registrar_veredito` existe para absorver.
+        from apps.accounts.models import MercadoLivreSession
+        from apps.accounts.ml_sessions import save_storage_state
+
+        save_storage_state(self.user, {"cookies": [], "origins": []})
+        MercadoLivreSession.objects.filter(organization=self.org).update(
+            status="suspect")
+        self.assertEqual(self._motivo(), "")
+
+    def test_expirada_e_revogacao_nao_ausencia(self):
+        from apps.accounts.models import MercadoLivreSession
+        from apps.accounts.ml_sessions import save_storage_state
+
+        save_storage_state(self.user, {"cookies": [], "origins": []})
+        MercadoLivreSession.objects.filter(organization=self.org).update(
+            status="expired")
+        self.assertEqual(self._motivo(), "session_revoked")
+
+    def test_ilegivel_tem_motivo_proprio(self):
+        from apps.accounts.models import MercadoLivreSession
+        from apps.accounts.ml_sessions import save_storage_state
+
+        save_storage_state(self.user, {"cookies": [], "origins": []})
+        MercadoLivreSession.objects.filter(organization=self.org).update(
+            status="decrypt_error")
+        self.assertEqual(self._motivo(), "session_unreadable")

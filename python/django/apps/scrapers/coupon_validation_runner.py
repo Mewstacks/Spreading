@@ -37,17 +37,26 @@ class ValidationObservation:
 Validator = Callable[[CupomValidacao], ValidationObservation]
 
 
-def _checkout_session_available(user, marketplace):
+# O que dizer em cada caso. Texto curto: vai para `safe_detail`, que a tela mostra.
+_DETALHE_POR_MOTIVO = {
+    "session_absent": "Conecte a conta da loja para validar no carrinho.",
+    "session_revoked": "A sessão da loja caiu; reconecte para retomar a validação.",
+    "session_unreadable": "A sessão salva está ilegível; reconecte a conta.",
+}
+
+
+def _motivo_sem_checkout(user, marketplace) -> str:
+    """'' quando dá para validar no carrinho; senão o motivo, já separado."""
     if marketplace == "mercadolivre":
-        from apps.accounts.ml_sessions import has_storage_state
-        return has_storage_state(user)
+        from apps.accounts.ml_sessions import motivo_sem_sessao
+        return motivo_sem_sessao(user)
     if marketplace == "amazon":
         from apps.scrapers.report_sessions import has_report_session
-        return has_report_session(user, "amazon_shop")
+        return "" if has_report_session(user, "amazon_shop") else "session_absent"
     if marketplace == "shopee":
         from apps.scrapers.report_sessions import has_report_session
-        return has_report_session(user, "shopee_shop")
-    return True
+        return "" if has_report_session(user, "shopee_shop") else "session_absent"
+    return ""
 
 
 def defer_missing_checkout_sessions(*, now=None):
@@ -67,14 +76,21 @@ def defer_missing_checkout_sessions(*, now=None):
     deferred = {}
     for user_id, marketplace in pairs:
         user = users.get(user_id)
-        if user is None or _checkout_session_available(user, marketplace):
+        if user is None:
             continue
+        motivo = _motivo_sem_checkout(user, marketplace)
+        if not motivo:
+            continue
+        # Conta que nunca conectou não muda de estado sozinha: tentar de novo em 6
+        # horas é reprocessar milhares de linhas para chegar à mesma conclusão. Só
+        # o usuário resolve, e ele resolve quando resolver.
+        prazo = now + timezone.timedelta(hours=24 if motivo == "session_absent" else 6)
         count = CupomValidacao.objects.filter(
             usuario_id=user_id, marketplace=marketplace, status="pending",
         ).update(
-            status="inconclusive", reason_code="session_required",
-            safe_detail="Conecte a conta da loja para validar no carrinho.",
-            verified_at=now, retry_at=retry_at, started_at=None,
+            status="inconclusive", reason_code=motivo,
+            safe_detail=_DETALHE_POR_MOTIVO.get(motivo, _DETALHE_POR_MOTIVO["session_absent"]),
+            verified_at=now, retry_at=prazo, started_at=None,
             attempts=F("attempts") + 1, no_purchase=True,
         )
         deferred[marketplace] = deferred.get(marketplace, 0) + count
@@ -130,7 +146,15 @@ def _failure_observation(reason_code, safe_detail):
 # bastante para não desperdiçar o navegador a cada cinco minutos.
 _CHAVE_DISJUNTOR = "coupon-validation-circuit"
 _PAUSA_DISJUNTOR_S = 3600
-_MOTIVOS_DE_BLOQUEIO = frozenset({"challenge", "session_expired", "session_required"})
+# O disjuntor existe para calar o lote quando a LOJA está barrando o acesso. Uma
+# conta sem cadastro não é isso: três linhas de um usuário que nunca conectou o
+# Mercado Livre calavam a validação inteira — de todos os usuários — por uma hora.
+# `session_absent` fica de fora por isso; `session_revoked` entra, porque no IP da
+# Fly ele é a assinatura do anti-bot.
+_MOTIVOS_DE_BLOQUEIO = frozenset({
+    "challenge", "session_expired", "session_required", "session_revoked",
+    "session_unreadable",
+})
 
 
 def run_validation_batch(*, adapters: Mapping[str, Validator], limit=3):

@@ -717,9 +717,16 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
                 # empurrava o catálogo inteiro para o backoff e, na oitava rodada,
                 # marcava como `nao_afiliavel` produtos que nunca tiveram defeito.
                 detalhe["reason_code"] = f"account_blocked:{conta}"
+                # A mensagem entra junto do nome da classe porque o nome
+                # sozinho não diagnostica: `AuthError` é documentado como
+                # INCONCLUSIVO ("nunca deve, sozinha, pedir reconexão") e
+                # `LoginError` cobre desde "nunca conectou" até "o ML acabou de
+                # recusar a sessão". Sem o texto, este log não distingue um
+                # cadastro em branco de um bloqueio real.
                 logger.warning(
-                    "Afiliação de cupons %s bloqueada por %s (usuário %s); "
+                    "Afiliação de cupons %s bloqueada por %s (usuário %s): %s; "
                     "nenhum produto penalizado.", slug, conta, usuario,
+                    str(exc)[:90] or "sem detalhe",
                 )
                 for produto in itens:
                     relation = relacao_por_produto[produto.id]

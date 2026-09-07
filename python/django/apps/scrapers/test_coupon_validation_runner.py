@@ -7,7 +7,7 @@ from apps.scrapers.coupon_validation_runner import (
     ValidationObservation, claim_pending_validations,
     defer_missing_checkout_sessions, run_validation_batch,
 )
-from apps.scrapers.models import CupomNormalizado, FonteIngestao
+from apps.scrapers.models import CupomNormalizado, CupomValidacao, FonteIngestao
 
 
 class CouponValidationRunnerTests(TestCase):
@@ -109,8 +109,8 @@ class CouponValidationRunnerTests(TestCase):
         )
 
         with patch(
-            "apps.scrapers.coupon_validation_runner._checkout_session_available",
-            return_value=False,
+            "apps.scrapers.coupon_validation_runner._motivo_sem_checkout",
+            return_value="session_absent",
         ):
             result = defer_missing_checkout_sessions()
 
@@ -118,6 +118,40 @@ class CouponValidationRunnerTests(TestCase):
         for validation in (first, second):
             validation.refresh_from_db()
             self.assertEqual(validation.status, "inconclusive")
-            self.assertEqual(validation.reason_code, "session_required")
+            # O motivo separa "nunca conectou" de "sessão revogada": o mesmo
+            # `session_required` para os dois fazia 4.020 das 6.619 validações
+            # paradas medirem cadastro e bloqueio como se fossem a mesma coisa.
+            self.assertEqual(validation.reason_code, "session_absent")
             self.assertIsNotNone(validation.retry_at)
             self.assertTrue(validation.no_purchase)
+
+    def test_sessao_revogada_e_ausente_nao_recebem_o_mesmo_tratamento(self):
+        """Cadastro em branco não muda sozinho; sessão revogada pode voltar."""
+        from unittest.mock import patch
+        self._scheduled()
+
+        for motivo, horas in (("session_absent", 24), ("session_revoked", 6)):
+            with self.subTest(motivo=motivo):
+                CupomValidacao.objects.update(status="pending", retry_at=None)
+                antes = timezone.now()
+                with patch(
+                    "apps.scrapers.coupon_validation_runner._motivo_sem_checkout",
+                    return_value=motivo,
+                ):
+                    defer_missing_checkout_sessions()
+                linha = CupomValidacao.objects.first()
+                self.assertEqual(linha.reason_code, motivo)
+                espera = (linha.retry_at - antes).total_seconds() / 3600
+                self.assertAlmostEqual(espera, horas, delta=0.2)
+
+    def test_conta_sem_cadastro_nao_cala_a_validacao_de_todo_mundo(self):
+        """O disjuntor é para a LOJA barrando acesso, não para cadastro vazio.
+
+        Três linhas de um usuário que nunca conectou o Mercado Livre calavam a
+        validação inteira, de todos os usuários, por uma hora.
+        """
+        from apps.scrapers.coupon_validation_runner import _MOTIVOS_DE_BLOQUEIO
+
+        self.assertNotIn("session_absent", _MOTIVOS_DE_BLOQUEIO)
+        self.assertIn("session_revoked", _MOTIVOS_DE_BLOQUEIO)
+        self.assertIn("challenge", _MOTIVOS_DE_BLOQUEIO)
