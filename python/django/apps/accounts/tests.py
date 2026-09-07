@@ -985,7 +985,21 @@ class LinkPublicoRLSTests(SimpleTestCase):
         self.assertIn("pub.id = publicacao_id", select)
 
 
-class ContextoLinkPublicoTests(TestCase):
+class ContextoLinkPublicoTests(TransactionTestCase):
+    """`TransactionTestCase`, e o motivo é o que o teste mede.
+
+    `public_link_context` usa `set_config(..., TRUE)` — SET LOCAL, derrubado no
+    fim da TRANSAÇÃO. Sob `TestCase` existe um atomic externo envolvendo o teste
+    inteiro, então o `atomic()` interno vira savepoint e o GUC sobrevive até o fim
+    do teste: a asserção de que ele é derrubado falhava, sem que houvesse nada
+    errado com o código.
+
+    Produção não tem esse atomic externo neste caminho — é justamente o que a
+    docstring de `public_link_context` descreve: para o link público o
+    `OrganizationContextMiddleware` devolve cedo. `TransactionTestCase` reproduz
+    isso, e a asserção volta a medir o que se propõe a medir.
+    """
+
     def test_instala_e_derruba_os_gucs_do_link_publico(self):
         from apps.accounts.tenant import public_link_context
 

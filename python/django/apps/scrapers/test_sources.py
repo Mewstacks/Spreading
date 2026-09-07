@@ -262,10 +262,33 @@ class SourcePipelineTests(ComoWorker, TestCase):
         self.assertIn("parcial", state.erro_publico.lower())
 
     def test_lock_prevents_duplicate_cycle(self):
-        from django.core.cache import cache
-        cache.set("ingestion-lock:fake-source", "1", 60)
-        with patch.dict(registry.SOURCES, {"fake-source": FakeSource()}):
-            result = registry.run_source("fake-source")
+        """Um ciclo já em andamento impede o segundo — pelo mecanismo REAL.
+
+        São dois mecanismos, escolhidos por vendor em `registry._lock`: no
+        PostgreSQL o lock é um `leased_resource` (tabela `ResourceLease`, que
+        coordena entre PROCESSOS); fora dele, uma chave de cache. O teste ocupava
+        só a chave de cache, então contra PostgreSQL ele ocupava algo que ninguém
+        lê, o ciclo rodava e o resultado vinha "ok" — passando no SQLite e
+        reprovando no banco de produção, pela razão certa.
+        """
+        from django.db import connection
+
+        if connection.vendor == "postgresql":
+            from apps.scrapers.resource_control import leased_resource
+
+            with leased_resource(
+                "source_ingest:fake-source", owner_kind="source_ingest",
+            ) as (tomado, _detalhe):
+                self.assertTrue(tomado, "o lease precisa estar livre no começo")
+                with patch.dict(registry.SOURCES, {"fake-source": FakeSource()}):
+                    result = registry.run_source("fake-source")
+        else:
+            from django.core.cache import cache
+
+            cache.set("ingestion-lock:fake-source", "1", 60)
+            with patch.dict(registry.SOURCES, {"fake-source": FakeSource()}):
+                result = registry.run_source("fake-source")
+
         self.assertEqual(result["status"], "running")
 
     def test_regex_discovered_coupon_is_not_auto_attached(self):

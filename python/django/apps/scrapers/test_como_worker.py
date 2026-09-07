@@ -25,7 +25,7 @@ não estarem no contexto em que o código de produção roda.
 `ComoWorker` fecha essa distância. Não é para deixar o teste verde: é para o teste
 exercitar o mesmo caminho que a produção exercita, incluindo o lease de verdade.
 """
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 from apps.accounts.tenant import system_context
 
@@ -86,7 +86,10 @@ class OMixinPrecisaMesmoRodarTests(SimpleTestCase):
     def test_o_mixin_instala_o_contexto(self):
         from apps.accounts.tenant import in_system_context
 
-        class Sonda(ComoWorker, SimpleTestCase):
+        # `TestCase`, não `SimpleTestCase`: sob PostgreSQL o `system_context`
+        # consulta `pg_roles` para conferir a role, e `SimpleTestCase` bloqueia
+        # qualquer acesso ao banco.
+        class Sonda(ComoWorker, TestCase):
             def runTest(self):
                 pass
 
