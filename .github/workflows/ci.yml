@@ -51,8 +51,12 @@ jobs:
           --health-timeout 3s
           --health-retries 20
     env:
-      APP_ENV: test
-      DJANGO_DEBUG: "0"
+      # Sem `DJANGO_DEBUG=0` e sem `APP_ENV`, de propósito: o mesmo ambiente do job
+      # em SQLite. Com DEBUG desligado o settings liga `SECURE_SSL_REDIRECT`, e o
+      # cliente de teste fala HTTP — toda requisição vira 301 e a suíte inteira
+      # cai (163 falhas + 182 erros na primeira execução, nenhuma delas real).
+      # Quem valida a configuração de produção é o `check --deploy` do
+      # release_command; o papel deste job é o BANCO.
       DJANGO_SECRET_KEY: ci-somente-para-testes-nao-vale-em-lugar-nenhum
       TENANT_CONTEXT_SIGNING_KEY: ci-chave-de-assinatura-de-contexto-para-testes
       # As tres roles do desenho multi-tenant. Senhas descartaveis de um servico
