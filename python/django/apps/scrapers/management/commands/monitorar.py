@@ -24,11 +24,12 @@ import time
 from apps.accounts.tenant import system_job
 
 from django.core.management.base import BaseCommand
-from django.db import DatabaseError, connections
+from django.db import DatabaseError
 
 from apps.scrapers import automacao_state as st
 from apps.scrapers import wa_supervisor
 from apps.scrapers.monitor_conexao import verificar_e_notificar
+from apps.scrapers.db_conexao import renovar_conexoes
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ class Command(BaseCommand):
                 # Este processo vive por dias e passa horas ocioso: o Postgres pode
                 # ter encerrado o socket nesse meio-tempo (mesma razão de
                 # _renovar_conexoes_db em automacao.py).
-                connections.close_all()
+                renovar_conexoes()
                 r = self._ciclo()
                 if falhas_banco >= 2:
                     # Só é seguro gravar o evento depois que o banco voltou.
@@ -88,7 +89,7 @@ class Command(BaseCommand):
                 )
             except DatabaseError as e:
                 falhas_banco += 1
-                connections.close_all()
+                renovar_conexoes()
                 alerta = falhas_banco >= 2
                 if alerta:
                     logger.error("ALERTA_BANCO: %s falhas consecutivas: %s", falhas_banco, e)

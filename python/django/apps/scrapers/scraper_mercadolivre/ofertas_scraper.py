@@ -11,7 +11,7 @@ import os
 import re
 import logging
 
-from django.db import OperationalError, connections
+from django.db import OperationalError
 
 from apps.scrapers.auxiliar import iniciar_browser, pausa_humana
 from apps.scrapers.carga import coordinated_ml_browser
@@ -19,6 +19,7 @@ from apps.scrapers.ml_auth import storage_state
 from apps.scrapers.models import Produto
 from apps.scrapers.progresso import emitir_progresso
 from apps.scrapers.resource_control import interesse_pendente
+from apps.scrapers.db_conexao import renovar_conexoes
 
 caminho_atual = os.path.dirname(os.path.abspath(__file__))
 logger = logging.getLogger(__name__)
@@ -33,7 +34,7 @@ def _reconectar_db():
     socket morto e estoura OperationalError("server closed the connection
     unexpectedly"). Chamado no começo de cada fase de save.
     """
-    connections.close_all()
+    renovar_conexoes()
 
 
 def _upsert_resiliente(**kwargs):

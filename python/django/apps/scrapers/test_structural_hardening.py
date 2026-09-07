@@ -629,7 +629,7 @@ class BrowserResourceContractTests(TestCase):
             "apps.scrapers.management.commands.automacao.system_context",
             system_context_instavel,
         ), patch(
-            "apps.scrapers.management.commands.automacao.connections.close_all",
+            "apps.scrapers.management.commands.automacao.renovar_conexoes",
         ), patch(
             "apps.scrapers.management.commands.automacao.time.sleep",
         ) as sleep_mock, patch.object(

@@ -16,8 +16,7 @@ from time import monotonic, sleep
 
 import requests
 from django.db import (
-    DatabaseError, IntegrityError, OperationalError, connection, connections,
-    transaction,
+    DatabaseError, IntegrityError, OperationalError, connection, transaction,
 )
 from django.db.models import Exists, OuterRef, Q
 from django.db.models import Prefetch
@@ -29,6 +28,7 @@ from apps.scrapers.models import (
     EventoRaspagem, ExecucaoRaspagem, LinkAfiliadoUsuario, Produto,
 )
 from apps.scrapers.progresso import usar_reporter
+from apps.scrapers.db_conexao import renovar_conexoes
 
 
 logger = logging.getLogger(__name__)
@@ -209,7 +209,7 @@ def _db_retry(fn, *, attempts=3):
     for index, delay in enumerate((0, 0.5, 1.5)[:attempts]):
         if delay:
             sleep(delay)
-        connections.close_all()
+        renovar_conexoes()
         try:
             return fn()
         except (OperationalError, DatabaseError) as exc:
@@ -218,7 +218,7 @@ def _db_retry(fn, *, attempts=3):
                 "Banco indisponível na etapa de raspagem (%s/%s): %s",
                 index + 1, attempts, exc,
             )
-            connections.close_all()
+            renovar_conexoes()
     raise ultimo
 
 

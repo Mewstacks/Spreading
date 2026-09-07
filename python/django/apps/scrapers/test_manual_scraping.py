@@ -133,7 +133,7 @@ class ManualScrapingQueueTests(TransactionTestCase):
                 raise OperationalError("the connection is closed")
             return "ok"
 
-        with patch("apps.scrapers.manual_scraping.connections.close_all") as close:
+        with patch("apps.scrapers.manual_scraping.renovar_conexoes") as close:
             self.assertEqual(_db_retry(operation), "ok")
 
         self.assertEqual(calls, [False, False])

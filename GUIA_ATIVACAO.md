@@ -76,24 +76,31 @@ Ele pede seu telefone e o código que chega no Telegram, e imprime a string da s
 ### 3.2 Publicar como secret
 
 ```bash
-fly secrets set --app spreading-web TELEGRAM_API_ID=SEU_ID TELEGRAM_API_HASH=SEU_HASH TELEGRAM_SESSION=SUA_STRING TELETHON_RELINK_ENABLED=1
+fly secrets set --app spreading-web TELEGRAM_API_ID=SEU_ID TELEGRAM_API_HASH=SEU_HASH TELEGRAM_SESSION=SUA_STRING
 ```
 
-O worker `canais` já roda em produção — hoje fica ocioso porque esses valores não
-existem. Assim que existirem, ele acorda sozinho.
+⚠️ **Não acrescente `TELETHON_RELINK_ENABLED=1` a esse comando.** Hoje essa flag é
+barrada por um check de sistema (`accounts.E011`, em `apps/accounts/checks.py`), e
+check de erro **derruba o release inteiro**: o próximo deploy falha antes de subir.
+A flag foi fechada de propósito na Fase 0 e só reabre quando esse check for revisto.
+
+Com os três secrets acima e a flag fechada, `monitorar_canais` continua ocioso — ele
+testa `TELETHON_RELINK_ENABLED` logo na entrada. Ou seja: **este passo está bloqueado
+até a decisão sobre a flag** — que é o que o guia diz agora, em vez de mandar você
+quebrar o próximo deploy.
 
 ### 3.3 Escolher os canais
 
 Primeiro só liste, sem criar nada:
 
 ```bash
-cd C:\Users\gege\Documents\Spreading-shopee\python && venv\Scripts\python.exe django\manage.py semear_canais --usuario SEU_USUARIO
+cd C:\Users\gege\Documents\Spreading\python && venv\Scripts\python.exe django\manage.py semear_canais --usuario SEU_USUARIO
 ```
 
 Para registrar os monitoramentos apontando ao seu grupo:
 
 ```bash
-cd C:\Users\gege\Documents\Spreading-shopee\python && venv\Scripts\python.exe django\manage.py semear_canais --usuario SEU_USUARIO --destino-canal whatsapp --destino-grupo SEU_GRUPO@g.us --criar
+cd C:\Users\gege\Documents\Spreading\python && venv\Scripts\python.exe django\manage.py semear_canais --usuario SEU_USUARIO --destino-canal whatsapp --destino-grupo SEU_GRUPO@g.us --criar
 ```
 
 Eles nascem **desligados**. Ative um de cada vez e acompanhe alguns ciclos antes de
@@ -120,11 +127,21 @@ e cada chave fica em silêncio por `ALERTA_SILENCIO_MIN` minutos.
 fly secrets set --app spreading-web ALERTA_TELEGRAM_CHAT_ID=SEU_CHAT_ID
 ```
 
-**Ou por e-mail** (o SMTP já está configurado):
+**Ou por e-mail.** O SMTP **não** está configurado: `EMAIL_HOST_USER` e
+`EMAIL_HOST_PASSWORD` nascem vazios em `settings.py`, e sem eles o Django aceita o
+`send_mail` e não entrega nada. São vários secrets, não um:
 
 ```bash
-fly secrets set --app spreading-web ALERTA_EMAILS=voce@dominio.com,socio@dominio.com
+fly secrets set --app spreading-web \
+  EMAIL_HOST=smtp-relay.brevo.com EMAIL_PORT=587 EMAIL_USE_TLS=1 EMAIL_USE_SSL=0 \
+  EMAIL_HOST_USER=SEU_LOGIN_SMTP EMAIL_HOST_PASSWORD=SUA_CHAVE_SMTP \
+  DEFAULT_FROM_EMAIL=alertas@seudominio \
+  ALERTA_EMAILS=voce@dominio.com,socio@dominio.com
 ```
+
+O padrão de `EMAIL_HOST` no código é o Titan (`smtp.titan.email`, porta 465, SSL); o
+comando acima usa Brevo porque tem 300 e-mails/dia grátis e não acrescenta nada à
+fatura. Qualquer um dos dois serve — o que não serve é `ALERTA_EMAILS` sozinho.
 
 Pode usar os dois ao mesmo tempo. Sem nenhum dos dois, o canal fica desligado e os
 incidentes continuam só na tela de Saúde — que é o comportamento de hoje.
@@ -142,9 +159,11 @@ incidentes continuam só na tela de Saúde — que é o comportamento de hoje.
 
 ## O que não fazer
 
-- **Não deployar do checkout principal.** Ele fica frequentemente atrás de
-  `origin/main`. O trabalho novo está em `feat/shopee-e-confiabilidade`, worktree
-  `C:\Users\gege\Documents\Spreading-shopee`
+- **Deployar de `origin/main`, sempre.** É o que a produção roda. O checkout local
+  costuma estar em outra branch e atrás do remoto: confira com `git fetch && git
+  status` antes de qualquer `fly deploy`. (A instrução antiga mandava deployar de
+  `feat/shopee-e-confiabilidade`; aquela branch já foi incorporada e o worktree
+  `Spreading-shopee` não vale mais.)
 - **Não mexer no `spreading-db`** sem decidir antes o que muda: é Postgres não
   gerenciado e não tem botão de desfazer
 - **Não ligar todos os canais de uma vez.** Um canal ruim gasta verificação e enche o

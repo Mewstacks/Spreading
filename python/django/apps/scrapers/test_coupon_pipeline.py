@@ -55,7 +55,7 @@ class CouponPersistenceRetryTests(TestCase):
 
         with patch.object(Cupom.objects, "bulk_create", side_effect=flaky), \
                 patch(
-                    "apps.scrapers.scraper_mercadolivre.scraper.connections.close_all"
+                    "apps.scrapers.scraper_mercadolivre.scraper.renovar_conexoes"
                 ) as close, \
                 patch("apps.scrapers.scraper_mercadolivre.scraper.time.sleep"):
             total = _persistir_campanhas_cupons(

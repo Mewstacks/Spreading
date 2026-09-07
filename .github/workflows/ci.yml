@@ -141,28 +141,21 @@ jobs:
         run: RELEASE_COMMAND=1 python django/manage.py tenant_rls --enable
       - name: Prova, com a role runtime, que GUC falsificado nao atravessa tenant
         run: python django/manage.py tenant_isolation_probe
-      # A suíte roda como SUPERUSUÁRIO, e isso é uma escolha declarada.
-      #
-      # As migrações instalam as policies de RLS, e o banco de teste as herda. Os
-      # testes montam fixture com `Model.objects.create()` sem abrir contexto de
-      # tenant — em produção quem escreve são os signals e os workers, sempre
-      # dentro de `organization_context`/`system_context`. Rodando como a role de
-      # runtime, 46 testes batem em "new row violates row-level security policy" e
-      # outros 70 caem em cascata com a conexão já abortada.
+      # A suíte roda com a role de runtime, a mesma da produção.
       #
       # O que este passo prova é a SEMÂNTICA DO POSTGRES: constraint parcial,
-      # `UniqueConstraint` com condição, operadores de JSON, transação, o ramo
-      # PostgreSQL do lease — tudo que o SQLite finge que funciona. Quem prova o
-      # ISOLAMENTO é o passo anterior, `tenant_isolation_probe`, que roda com a
-      # role de runtime e reprova GUC falsificado; e os testes de contrato de RLS,
-      # que leem as policies geradas.
+      # `UniqueConstraint` com condição, operadores de JSON, `bulk_create` com
+      # `update_conflicts`, o ramo PostgreSQL do lease — tudo que o SQLite finge
+      # que funciona. Quem prova o ISOLAMENTO é o passo anterior,
+      # `tenant_isolation_probe`, que roda com esta mesma role contra o banco já
+      # provisionado e reprova GUC falsificado.
       #
-      # Tornar a suíte inteira tenant-aware é trabalho próprio e vale a pena — é o
-      # mesmo tipo de lacuna que escondeu o 404 de todo link publicado. Fica
-      # registrado como dívida, não disfarçado de verde.
+      # O banco de teste do Django nasce de `migrate` e não passa pelo
+      # `release_command`, então ele NÃO tem RLS ligado — o `--enable` é etapa de
+      # release. Isso é consistente desde 07/09/2026: antes, duas migrações
+      # ligavam RLS por conta própria e o banco de teste nascia protegido em duas
+      # tabelas e em nenhuma das outras trinta e poucas.
       - name: Suite completa contra PostgreSQL
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/spreading
         run: python django/manage.py test apps.scrapers apps.accounts
 
   whatsapp:

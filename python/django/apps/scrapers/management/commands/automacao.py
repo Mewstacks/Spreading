@@ -10,12 +10,13 @@ from contextlib import contextmanager
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand
-from django.db import DatabaseError, connections
+from django.db import DatabaseError
 from django.utils import timezone
 from apps.accounts.tenant import system_context
 
 from apps.scrapers import automacao_state as st
 from apps.scrapers.eventos import log_event
+from apps.scrapers.db_conexao import renovar_conexoes
 
 logger = logging.getLogger("apps.automacao")
 
@@ -64,7 +65,7 @@ def _renovar_conexoes_db():
     Postgres/proxy pode encerrar o socket sem que o Django saiba; reutilizá-lo
     causava ``OperationalError: the connection is closed`` no ciclo seguinte.
     """
-    connections.close_all()
+    renovar_conexoes()
 
 
 def _pausar_por_banco(job, erro, falhas: int):
@@ -76,7 +77,7 @@ def _pausar_por_banco(job, erro, falhas: int):
     """
     espera = min(15 * (2 ** max(0, falhas - 1)), BACKOFF_BANCO_MAX_S)
     proximo = timezone.now() + timedelta(seconds=espera)
-    connections.close_all()
+    renovar_conexoes()
     logger.warning("%s pausado por banco indisponível; nova tentativa em %ss: %s",
                    job, espera, erro)
     st.write_state(job, fase="aguardando_banco", erro=ERRO_PUBLICO,
@@ -579,7 +580,7 @@ class Command(BaseCommand):
                     "Boot do automacao (modo=%s) aguardando banco (tentativa %s): %s",
                     opts.get("modo"), falhas, exc,
                 )
-                connections.close_all()
+                renovar_conexoes()
                 time.sleep(espera)
 
     def _despachar(self, opts):
@@ -654,7 +655,7 @@ class Command(BaseCommand):
                     continue
             except DatabaseError as exc:
                 logger.warning("Fila manual aguardando banco: %s", exc)
-                connections.close_all()
+                renovar_conexoes()
                 time.sleep(idle_poll)
             except Exception:
                 logger.exception("Falha no consumidor dedicado da fila manual")

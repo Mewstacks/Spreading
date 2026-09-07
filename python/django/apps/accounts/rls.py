@@ -166,7 +166,22 @@ def policy_statements(
     system_only: bool = False,
     system_role: str = "spreading_system",
     migration_role: str = "spreading_migration",
+    ativar: bool = True,
 ) -> list[str]:
+    """As policies da tabela, e por padrão o ENABLE/FORCE que as torna válidas.
+
+    `ativar=False` devolve só as policies. Serve para a migração: policy criada e
+    ainda inerte, porque quem liga o RLS é uma etapa só — `tenant_rls --enable`,
+    que roda em TODO release, no `release_command`, logo depois do `migrate`.
+
+    Duas migrações (0061 e 0070) ligavam RLS por conta própria, e o resultado era
+    um banco meio protegido em todo lugar que roda `migrate` sem o release: o banco
+    de teste do Django nascia com RLS em duas tabelas e em nenhuma das outras
+    trinta e poucas. Isso não protegia nada — o `tenant_isolation_probe` é que
+    prova isolamento — e reprovava 46 testes que montam fixture sem contexto de
+    tenant, mais 70 em cascata. Em produção nada muda: entre o `migrate` que cria
+    a tabela e o `--enable` que a liga não passa requisição nenhuma.
+    """
     system = system_expr(system_role, migration_role)
     if system_only:
         visible = writable = f"({system})"
@@ -216,7 +231,7 @@ def policy_statements(
         visible += f"({system}) OR {ORG_EXPR}"
         visible += ")"
         writable = f"(({system}) OR {ORG_EXPR})"
-    return [
+    comandos = [
         f'DROP POLICY IF EXISTS tenant_select ON "{table}"',
         f'DROP POLICY IF EXISTS tenant_insert ON "{table}"',
         f'DROP POLICY IF EXISTS tenant_update ON "{table}"',
@@ -237,6 +252,10 @@ def policy_statements(
             f'CREATE POLICY tenant_delete ON "{table}" FOR DELETE '
             f"USING {writable}"
         ),
-        f'ALTER TABLE "{table}" ENABLE ROW LEVEL SECURITY',
-        f'ALTER TABLE "{table}" FORCE ROW LEVEL SECURITY',
     ]
+    if ativar:
+        comandos += [
+            f'ALTER TABLE "{table}" ENABLE ROW LEVEL SECURITY',
+            f'ALTER TABLE "{table}" FORCE ROW LEVEL SECURITY',
+        ]
+    return comandos

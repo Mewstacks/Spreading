@@ -522,6 +522,43 @@ class RLSPolicyTests(SimpleTestCase):
             statements,
         )
 
+    def test_so_a_etapa_de_release_liga_o_rls(self):
+        """`ativar=False` cria a policy e deixa ela inerte.
+
+        Quem liga o RLS é `tenant_rls --enable`, no `release_command`. Duas
+        migrações ligavam por conta própria, e o efeito era um banco meio
+        protegido em todo lugar que roda `migrate` sem o release — o banco de
+        teste do Django nascia com RLS em duas tabelas e em nenhuma das outras.
+        """
+        ligado = policy_statements("scrapers_cupomvalidacao", mixed=False)
+        inerte = policy_statements(
+            "scrapers_cupomvalidacao", mixed=False, ativar=False,
+        )
+
+        politicas = [sql for sql in ligado if "CREATE POLICY" in sql]
+        self.assertEqual(
+            politicas, [sql for sql in inerte if "CREATE POLICY" in sql],
+        )
+        self.assertTrue(any("ENABLE ROW LEVEL SECURITY" in sql for sql in ligado))
+        self.assertFalse(any("ROW LEVEL SECURITY" in sql for sql in inerte))
+
+    def test_nenhuma_migracao_liga_rls_por_conta_propria(self):
+        """A regra tem de valer para a próxima migração também, não só para as duas."""
+        from pathlib import Path
+
+        raiz = Path(__file__).resolve().parent.parent
+        culpadas = []
+        for arquivo in sorted(raiz.glob("*/migrations/*.py")):
+            texto = arquivo.read_text(encoding="utf-8")
+            if "policy_statements(" not in texto:
+                continue
+            if "ativar=False" not in texto:
+                culpadas.append(arquivo.name)
+        self.assertEqual(culpadas, [], (
+            "Migração chamando policy_statements sem ativar=False: ela ligaria o "
+            "RLS fora do release e deixaria o banco meio protegido."
+        ))
+
     def test_signature_is_checked_once_per_query_without_weakening_hmac(self):
         strict = " ".join(policy_statements(
             "accounts_mercadolivresession", mixed=False,

@@ -1,4 +1,16 @@
-# Plano e estado da implementação — endurecimento estrutural do Spreading
+# Endurecimento estrutural do Spreading — registro histórico de 2026-08-10
+
+> **Este documento é histórico. Não descreve a produção de hoje.**
+>
+> Ele foi escrito em 10/08/2026, quando o trabalho estava commitado e ainda não
+> publicado. Desde então a produção recebeu mais de trinta deploys. Tudo abaixo que
+> diga "não está em produção", "sem push e sem deploy" ou "aguardando aceite" está
+> desatualizado por construção — o valor deste arquivo é a *trilha de auditoria* do
+> que foi endurecido e por quê, não o estado atual.
+>
+> O documento canônico do produto é `PLANO_FINAL.md`: escopo, decisões,
+> etapas e definição de pronto. Para subir uma máquina, `DEPLOY.md`. Para o que só o
+> dono da conta pode ligar, `GUIA_ATIVACAO.md`.
 
 Atualizado em 2026-08-10 (America/Sao_Paulo).
 

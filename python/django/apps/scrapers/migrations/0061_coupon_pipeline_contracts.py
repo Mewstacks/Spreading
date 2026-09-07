@@ -210,6 +210,10 @@ def install_relation_link_rls(apps, schema_editor):
             mixed=False,
             system_role=settings.TENANT_SYSTEM_DB_ROLE,
             migration_role=settings.TENANT_MIGRATION_DB_ROLE,
+            # Ligar o RLS é etapa do release (`tenant_rls --enable`), não
+            # da migração: um só lugar decide, e `migrate` sozinho nunca
+            # deixa o banco meio protegido.
+            ativar=False,
         ):
             cursor.execute(statement)
 

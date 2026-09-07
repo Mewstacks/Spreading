@@ -22,8 +22,9 @@ from apps.scrapers.models import (
 )
 from apps.scrapers.progresso import emitir_progresso, emitir_fase
 from apps.scrapers.resource_control import interesse_pendente
-from django.db import DatabaseError, OperationalError, connections, transaction
+from django.db import DatabaseError, OperationalError, transaction
 from django.utils import timezone
+from apps.scrapers.db_conexao import renovar_conexoes
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +212,7 @@ def _persistir_campanhas_cupons(
     }
     ultimo_erro = None
     for tentativa in range(1, tentativas + 1):
-        connections.close_all()
+        renovar_conexoes()
         try:
             with transaction.atomic():
                 agora = timezone.now()
@@ -295,7 +296,7 @@ def _persistir_campanhas_cupons(
                 "repetir a raspagem: %s",
                 tentativa, tentativas, exc,
             )
-            connections.close_all()
+            renovar_conexoes()
             if tentativa < tentativas:
                 time.sleep(0.5 * tentativa)
     raise ultimo_erro
