@@ -93,7 +93,8 @@ class Amazon(Marketplace):
         from apps.scrapers.models import ConfiguracaoEnvio
         from apps.scrapers.scraper_amazon import ofertas_scraper as az
         from apps.scrapers.scraper_amazon.creators_api import (
-            AmazonAPIError, AmazonConfigError, AmazonNotEligible,
+            AmazonAPIError, AmazonConfigError, AmazonCredencialInvalida,
+            AmazonNotEligible,
         )
         termos = list(
             ConfiguracaoEnvio.objects.filter(owner=usuario, ativo=True)
@@ -111,6 +112,16 @@ class Amazon(Marketplace):
             logger.info("Usuario %s nao elegivel para Amazon Creators API: %s", usuario.id, e)
             self._marcar_elegibilidade(usuario, False,
                                        "Conta sem elegibilidade na Creators API (10 vendas/30 dias).")
+            return False
+        except AmazonCredencialInvalida as e:
+            # A Amazon recusou a credencial, não a conta. Elegibilidade fica `None`
+            # ("não sabemos"), nunca `False`, e a mensagem diz o que consertar.
+            logger.warning(
+                "Credencial Amazon recusada para usuario %s: %s", usuario.id, e)
+            self._marcar_elegibilidade(
+                usuario, None,
+                "A Amazon recusou a credencial. Gere uma credencial da Creators "
+                "API no Associates Central — a chave da PA-API não serve aqui.")
             return False
         except AmazonConfigError as e:
             logger.info("Configuracao Amazon ausente para usuario %s: %s", usuario.id, e)

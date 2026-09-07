@@ -32,6 +32,22 @@ class AmazonNotEligible(Exception):
     """403 AssociateNotEligible — conta sem 10 vendas qualificadas/30 dias."""
 
 
+class AmazonCredencialInvalida(AmazonConfigError):
+    """A Amazon recusou a credencial em si — não é falta de elegibilidade.
+
+    Herda de `AmazonConfigError` porque a ação é a mesma: a dona da conta precisa
+    revisar o que cadastrou. E porque `AmazonConfigError` já grava elegibilidade
+    `None` ("não sabemos") em vez de `False` ("reprovada"), que é a verdade aqui.
+
+    Existe porque 401/403 e "sem elegibilidade" eram a mesma exceção, e o efeito
+    ia para o banco: a tela dizia "Conta sem elegibilidade na Creators API (10
+    vendas/30 dias)" quando o servidor tinha respondido
+    `{"error":"invalid_client","error_description":"Client authentication failed"}`.
+    Mandar alguém fazer dez vendas para consertar uma credencial errada é pior do
+    que não dizer nada.
+    """
+
+
 class AmazonAPIError(Exception):
     """Erro genérico de chamada à Creators API."""
 
@@ -148,14 +164,29 @@ def _obter_token(creds: Credenciais) -> str:
             return cache["token"]
 
         _exigir(creds)
-        # v3.x (Login with Amazon): form-urlencoded + HTTP Basic(id:secret), scope "::".
+        # Login with Amazon exige `client_id` e `client_secret` NO CORPO, form-urlencoded:
+        # https://developer.amazon.com/docs/login-with-amazon/authorization-code-grant.html
+        # e o guia de migração PA-API → Creators API descrevem o token request com
+        # grant_type, client_id, client_secret e scope no POST.
+        #
+        # O que estava aqui era uma quimera das duas versões da API: endpoint e scope
+        # da v3 (LWA, `creatorsapi::default`) com a autenticação da v2 (Cognito, HTTP
+        # Basic puro). Sob qualquer das duas leituras o servidor não identificava o
+        # cliente, e a resposta era exatamente a que produção registra desde então:
+        # `{"error":"invalid_client","error_description":"Client authentication failed"}`.
+        # O Basic continua junto: não atrapalha, e cobre a leitura v2.
         basic = base64.b64encode(
             f"{creds.credential_id}:{creds.credential_secret}".encode()
         ).decode()
         try:
             r = requests.post(
                 f"https://{_auth_host(creds)}/auth/o2/token",
-                data={"grant_type": "client_credentials", "scope": _SCOPE_V3},
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": creds.credential_id,
+                    "client_secret": creds.credential_secret,
+                    "scope": _SCOPE_V3,
+                },
                 headers={
                     "Authorization": f"Basic {basic}",
                     "Content-Type": "application/x-www-form-urlencoded",
@@ -165,8 +196,19 @@ def _obter_token(creds: Credenciais) -> str:
         except Exception as e:
             raise AmazonAPIError(f"Falha ao obter token: {e}")
 
+        # 401/403 NÃO é sinônimo de "conta sem elegibilidade". Mapear os dois para
+        # `AmazonNotEligible` fazia `marketplaces/amazon.py` gravar no banco
+        # "Conta sem elegibilidade na Creators API (10 vendas/30 dias)" — ou seja,
+        # a tela mandava a dona da conta ir fazer dez vendas quando o problema era
+        # a credencial. Diagnóstico falso persistido, não só ruído de log.
+        #
+        # Elegibilidade só é afirmada quando a própria Amazon fala dela.
         if r.status_code in (401, 403):
-            raise AmazonNotEligible(f"Auth recusada ({r.status_code}): {r.text[:200]}")
+            if "eligib" in r.text.lower() or "elegib" in r.text.lower():
+                raise AmazonNotEligible(
+                    f"Auth recusada ({r.status_code}): {r.text[:200]}")
+            raise AmazonCredencialInvalida(
+                f"Credencial recusada ({r.status_code}): {r.text[:200]}")
         if r.status_code >= 400:
             raise AmazonAPIError(f"Token HTTP {r.status_code}: {r.text[:200]}")
 

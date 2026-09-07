@@ -1154,3 +1154,75 @@ class MotivoSemSessaoTests(TestCase):
         MercadoLivreSession.objects.filter(organization=self.org).update(
             status="decrypt_error")
         self.assertEqual(self._motivo(), "session_unreadable")
+
+
+class CredencialAmazonNaoEElegibilidadeTests(TestCase):
+    """401/403 da Amazon não pode virar "conta sem elegibilidade".
+
+    Produção registrava, a cada ciclo:
+
+        Usuario 4 nao elegivel para Amazon Creators API: Auth recusada (401):
+        {"error_description":"Client authentication failed","error":"invalid_client"}
+
+    E gravava no banco `amazon_elegivel=False` com "Conta sem elegibilidade na
+    Creators API (10 vendas/30 dias)". A tela mandava a dona da conta fazer dez
+    vendas para consertar uma credencial errada.
+    """
+
+    def _token(self, status, corpo):
+        from unittest.mock import patch
+        from apps.scrapers.scraper_amazon import creators_api
+
+        creds = creators_api.Credenciais(
+            credential_id="amzn1.application-oa2-client.x",
+            credential_secret="amzn1.oa2-cs.v1.y",
+            host="creatorsapi.amazon", partner_tag="spreading-20",
+        )
+        resposta = type("R", (), {
+            "status_code": status, "text": corpo,
+            "json": lambda self: {},
+        })()
+        creators_api._token_cache.clear()
+        with patch.object(creators_api.requests, "post", return_value=resposta):
+            return creators_api._obter_token(creds)
+
+    def test_credencial_recusada_nao_afirma_falta_de_elegibilidade(self):
+        from apps.scrapers.scraper_amazon.creators_api import (
+            AmazonCredencialInvalida, AmazonNotEligible,
+        )
+
+        with self.assertRaises(AmazonCredencialInvalida) as caso:
+            self._token(401, '{"error":"invalid_client",'
+                             '"error_description":"Client authentication failed"}')
+        self.assertNotIsInstance(caso.exception, AmazonNotEligible)
+
+    def test_quando_a_amazon_fala_de_elegibilidade_a_gente_acredita(self):
+        from apps.scrapers.scraper_amazon.creators_api import AmazonNotEligible
+
+        with self.assertRaises(AmazonNotEligible):
+            self._token(403, '{"error":"AssociateNotEligible",'
+                             '"message":"not eligible for the Creators API"}')
+
+    def test_a_credencial_vai_no_corpo_como_a_doc_do_lwa_exige(self):
+        """Sem `client_id` no corpo o servidor responde invalid_client."""
+        from unittest.mock import patch
+        from apps.scrapers.scraper_amazon import creators_api
+
+        creds = creators_api.Credenciais(
+            credential_id="amzn1.application-oa2-client.x",
+            credential_secret="amzn1.oa2-cs.v1.y",
+            host="creatorsapi.amazon", partner_tag="spreading-20",
+        )
+        resposta = type("R", (), {
+            "status_code": 200, "text": "",
+            "json": lambda self: {"access_token": "t", "expires_in": 3600},
+        })()
+        creators_api._token_cache.clear()
+        with patch.object(creators_api.requests, "post",
+                          return_value=resposta) as post:
+            creators_api._obter_token(creds)
+
+        corpo = post.call_args.kwargs["data"]
+        self.assertEqual(corpo["client_id"], creds.credential_id)
+        self.assertEqual(corpo["client_secret"], creds.credential_secret)
+        self.assertEqual(corpo["grant_type"], "client_credentials")
