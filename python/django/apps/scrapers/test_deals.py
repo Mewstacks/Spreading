@@ -1021,3 +1021,56 @@ class EscopoPublicavelTests(TestCase):
     def test_vazio_continua_vazio(self):
         self.assertEqual(self._publicavel(""), "")
         self.assertEqual(self._publicavel(None), "")
+
+
+class CondicaoDizParaQuemValeTests(TestCase):
+    """A linha de condição responde "posso usar?", e nada além disso.
+
+    O que as fontes entregam é regulamento. Em 07/09/2026 a mensagem publicava
+    "25% de Desconto 25% OFF produtos Mercado Livre Cupom válido a partir do
+    momento de sua divulgação até às 23h59 do dia 28/09/26 ou até atingir o limite
+    de 1.000 cupons", cortado com reticências — quatro linhas no telefone que não
+    dizem para quem o cupom vale.
+    """
+
+    def _condicao(self, texto):
+        from apps.scrapers.ofertas import _condicao_publicavel
+
+        return _condicao_publicavel(texto)
+
+    def test_restricao_conhecida_vira_substantivo_curto(self):
+        casos = (
+            ("Válido apenas na primeira compra", "primeira compra"),
+            ("Exclusivo no app", "no aplicativo"),
+            ("Somente com cartão Mercado Pago", "cartão da loja"),
+            ("Pagando via Pix", "no Pix"),
+            ("Exclusivo para assinantes Meli+", "assinantes"),
+        )
+        for texto, esperado in casos:
+            with self.subTest(texto=texto):
+                self.assertEqual(self._condicao(texto), esperado)
+
+    def test_duas_restricoes_saem_as_duas(self):
+        # Omitir uma é a mesma promessa quebrada no checkout que a linha evita.
+        self.assertEqual(
+            self._condicao("Somente no app, primeira compra"),
+            "primeira compra · no aplicativo",
+        )
+
+    def test_regulamento_vira_aviso_de_uma_linha(self):
+        self.assertEqual(
+            self._condicao(
+                "25% de Desconto 25% OFF produtos Mercado Livre Cupom válido a "
+                "partir do momento de sua divulgação até às 23h59 do dia 28/09/26 "
+                "ou até atingir o limite de 1.000 cupons"),
+            "confira quem pode usar",
+        )
+
+    def test_sem_texto_ainda_avisa_que_e_restrito(self):
+        # O cupom É restrito — isso é verdade e não pode sumir da mensagem.
+        self.assertEqual(self._condicao(""), "confira quem pode usar")
+
+    def test_a_linha_cabe_em_uma_linha_de_telefone(self):
+        for texto in ("Somente no app, primeira compra", "", "Regulamento " * 40):
+            with self.subTest(texto=texto[:30]):
+                self.assertLessEqual(len(self._condicao(texto)), 60)

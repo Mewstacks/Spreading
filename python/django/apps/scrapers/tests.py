@@ -6425,7 +6425,10 @@ class MelhorCupomNormalizadoTests(TestCase):
         mensagem = montar_mensagem(self.produto, "https://meli.la/x", None)
         self.assertIn("CUPOM: APP10", mensagem)
         self.assertIn("Condição:", mensagem)
-        self.assertIn("Somente no app, primeira compra", mensagem)
+        # A linha diz PARA QUEM vale, em substantivo curto — e as duas
+        # restrições do cupom aparecem, não só a primeira.
+        self.assertIn("primeira compra", mensagem)
+        self.assertIn("no aplicativo", mensagem)
 
 
 class CasarCuponsContainerTests(TestCase):

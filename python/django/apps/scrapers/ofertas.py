@@ -3198,15 +3198,58 @@ def _escopo_do_cupom(cupom) -> str:
         escopo_produtos_cupom(cupom), getattr(cupom, "marketplace", ""))
 
 
+# Restrições de PÚBLICO que a linha de condição existe para comunicar: quem pode
+# usar o cupom. Cada padrão vira uma frase curta e fixa, porque o que importa para
+# quem lê é decidir em um segundo se o cupom serve para ele.
+_CONDICOES_CONHECIDAS = (
+    (re.compile(r"primeira\s+compra|1[ªa]\s+compra|novos?\s+(?:usu[áa]rios?|clientes?)"
+                r"|primeiro\s+pedido", re.I), "primeira compra"),
+    (re.compile(r"\bno\s+app\b|pelo\s+aplicativo|exclusivo\s+.{0,12}app", re.I),
+     "no aplicativo"),
+    (re.compile(r"cart[ãa]o\s+(?:de\s+cr[ée]dito\s+)?(?:mercado\s*p?a?g?o?|"
+                r"do\s+mercado|meli|amazon|shopee)|cart[ãa]o\s+da\s+loja", re.I),
+     "cartão da loja"),
+    (re.compile(r"\bvia\s+pix\b|pagando\s+(?:com\s+)?pix|\bno\s+pix\b", re.I),
+     "no Pix"),
+    (re.compile(r"meli\+|mercado\s*livre\s*n[íi]vel|assinantes?", re.I),
+     "assinantes"),
+)
+
+
+def _condicao_publicavel(texto: str) -> str:
+    """A restrição de público que o texto declara, ou o aviso curto e honesto.
+
+    A linha existe para responder "posso usar?". O que as fontes entregam é
+    regulamento — em 07/09/2026 a mensagem publicava "25% de Desconto 25% OFF
+    produtos Mercado Livre Cupom válido a partir do momento de sua divulgação até
+    às 23h59 do dia 28/09/26 ou até atingir o limite de 1.000 cupons", truncado
+    com reticências. Isso não diz para quem vale, ocupa quatro linhas no telefone,
+    e é o parágrafo explicativo que a mensagem não deve ter.
+
+    Quando o texto declara uma restrição reconhecível, sai a frase curta dela.
+    Quando não declara, o cupom continua marcado como restrito — o que é verdade —
+    com um aviso de uma linha, em vez de um regulamento pela metade.
+    """
+    limpo = re.sub(r"\s+", " ", str(texto or "")).strip()
+    # TODAS as que casarem, nao a primeira: um cupom de app E de primeira compra
+    # tem duas restricoes, e omitir uma delas e a mesma promessa quebrada no
+    # checkout que a linha existe para evitar.
+    achadas = [frase for padrao, frase in _CONDICOES_CONHECIDAS
+               if padrao.search(limpo)]
+    if achadas:
+        return " · ".join(achadas)
+    return "confira quem pode usar"
+
+
 def _condicao_do_cupom(cupom) -> str:
-    """Texto da condição de uso quando o cupom é restrito; '' quando não é."""
+    """Para quem o cupom vale, quando ele é restrito; '' quando não é."""
     if cupom is None or not getattr(cupom, "restrito", False):
         return ""
     from apps.scrapers.coupon_rules import regras_do_cupom
     escopo = ""
     if hasattr(cupom, "regras"):
         escopo = str(regras_do_cupom(cupom).get("escopo") or "")
-    return _condicao_legivel(escopo or "Consulte quem pode usar antes de comprar")
+    return _condicao_publicavel(escopo)
 
 
 def _aviso_minimo_nao_atingido(cupom, produto) -> str:
