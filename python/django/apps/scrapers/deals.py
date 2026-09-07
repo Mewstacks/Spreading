@@ -56,7 +56,6 @@ MOTIVO_SEM_HISTORICO = "sem_historico_de_preco"
 MOTIVO_PRECO_DE_SEMPRE = "preco_de_sempre"
 MOTIVO_ABAIXO_DO_MINIMO = "abaixo_do_minimo"
 MOTIVO_COOLDOWN = "cooldown"
-MOTIVO_PRECO_VELHO = "preco_nao_reobservado"
 MOTIVO_MINIMO_DE_COMPRA = "compra_minima_acima_do_preco"
 
 # Um cupom que existe há mais de 30 dias e continua ativo já está embutido na série
@@ -593,17 +592,41 @@ def gerar_deals(config, limite=8, *, agora=None, incluir_sem_cupom=True,
         preco_vitrine = float(getattr(produto, "preco_com_cupom", 0) or 0)
         if preco_vitrine <= 0:
             continue
-        # A medição do envio alimenta a SELEÇÃO, não só o portão final: se o preço
-        # deste item não está na varredura de agora, ele não pode ser afirmado, e
-        # não adianta pontuá-lo para descobrir isso só na hora de publicar. Quando
-        # há varredura, o preço dela substitui o do catálogo — é ele que a mensagem
-        # vai imprimir.
-        if medidos:
+        # A varredura de `/ofertas` MELHORA o preço de quem está nela. Ela não
+        # reprova quem não está, e não julga produto de outra loja.
+        #
+        # A versão anterior descartava todo item ausente do mapa, com o argumento
+        # de que "se o preço não está na varredura de agora, ele não pode ser
+        # afirmado". O argumento confunde duas coisas: a varredura são quatro
+        # páginas da VITRINE PROMOCIONAL do Mercado Livre, cerca de 200 cards. Não
+        # é uma fonte de preço para um item qualquer — é a lista de quem está em
+        # promoção naquele minuto. Produto que vem do funil de cupom mora em página
+        # de campanha e nunca esteve nessa vitrine, então "ausente do mapa" não
+        # significava preço velho: significava produto de cupom.
+        #
+        # Medido em produção em 07/09/2026, com a organização piloto: 2.915 cupons
+        # ativos, 3.019 pares produto-cupom confirmados, 3.531 preparações prontas
+        # — e `gerar_deals` devolvia SEIS candidatos, todos eletrodomésticos de
+        # vitrine, ZERO com cupom. Essa é a assinatura exata deste portão, e é o
+        # oposto da regra do produto ("cupom é o produto; promoção é
+        # acompanhamento").
+        #
+        # Pior, e sem intenção nenhuma: `_item_ml` devolve "" para Amazon e
+        # Shopee, `medidos.get("")` é None, e bastava UM produto de Mercado Livre
+        # no pool para o mapa existir e derrubar o catálogo inteiro das outras duas
+        # lojas.
+        #
+        # O que garante que o preço publicado é o do site continua no lugar, e é
+        # obrigatório: `preco_ao_vivo.revalidar` roda no envio e bloqueia quando
+        # não bate. Deixar o candidato passar aqui não afirma nada — só o mantém na
+        # fila para ser julgado por quem tem a medição. O próprio código já dizia
+        # isso três linhas acima, para o caso de a vitrine não responder: "nenhum
+        # candidato é descartado por isto e o portão do envio continua sendo o
+        # juiz".
+        if medidos and str(getattr(produto, "marketplace", "")).casefold() == "mercadolivre":
             medido = medidos.get(_item_ml(produto))
-            if not medido:
-                rejeicoes[MOTIVO_PRECO_VELHO] += 1
-                continue
-            preco_vitrine = float(medido[0])
+            if medido:
+                preco_vitrine = float(medido[0])
         escolha = _melhor_cupom_para(
             produto, confirmados=confirmados, sitewide=sitewide,
             com_checkout=com_checkout, usuario=usuario,

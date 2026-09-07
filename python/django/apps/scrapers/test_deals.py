@@ -779,3 +779,80 @@ class MotivoDeScoreNaoVazaParaAMensagemTests(BaseDeals):
                 self.assertEqual(
                     _frase_vendavel(frase, permitidos=permitidos, provas=set()),
                     "")
+
+
+class VitrineMelhoraOPrecoNaoReprovaOCandidatoTests(BaseDeals):
+    """O portão que produzia "zero cupons na fila".
+
+    `gerar_deals` descartava todo produto ausente do mapa de `varrer_ofertas_ml()`,
+    e esse mapa são quatro páginas da VITRINE PROMOCIONAL do Mercado Livre — cerca
+    de 200 cards. Produto vindo do funil de cupom mora em página de campanha e
+    nunca esteve nessa vitrine. "Ausente do mapa" não queria dizer preço velho;
+    queria dizer produto de cupom.
+
+    Medido em produção em 07/09/2026: 2.915 cupons ativos, 3.019 pares
+    produto-cupom confirmados, 3.531 preparações prontas, e SEIS candidatos, todos
+    de vitrine, zero com cupom.
+
+    Estes testes só existem porque `_precos_medidos_agora` devolve `{}` sob
+    `RUNNING_TESTS` — o caminho inteiro era invisível para a suíte.
+    """
+
+    def _com_mapa(self, mapa, config=None, **kwargs):
+        from unittest.mock import patch
+
+        with patch.object(deals, "_precos_medidos_agora", return_value=mapa):
+            return deals.gerar_deals(config or self._config(), limite=10, **kwargs)
+
+    def test_item_na_vitrine_ganha_o_preco_da_vitrine(self):
+        produto = self._produto(preco=100.0, de=200.0,
+                                link="https://www.mercadolivre.com.br/p/MLB1111111111")
+        self._observar(produto, 180.0, 175.0, 170.0)
+
+        achados = self._com_mapa({"MLB1111111111": (70.0, "vitrine")})
+
+        self.assertEqual(len(achados), 1)
+        self.assertEqual(achados[0].preco_vitrine, 70.0)
+
+    def test_item_fora_da_vitrine_continua_na_fila(self):
+        # Era aqui que o cupom morria: o produto some antes de `_melhor_cupom_para`
+        # sequer ser chamado, então a rejeição nem cita cupom.
+        produto = self._produto(preco=100.0, de=200.0,
+                                link="https://www.mercadolivre.com.br/p/MLB2222222222")
+        self._observar(produto, 180.0, 175.0, 170.0)
+
+        achados = self._com_mapa({"MLB9999999999": (10.0, "vitrine")})
+
+        self.assertEqual(len(achados), 1)
+        self.assertEqual(achados[0].preco_vitrine, 100.0)
+
+    def test_produto_de_outra_loja_nao_e_julgado_pela_vitrine_do_ml(self):
+        """`_item_ml` devolve "" fora do ML, e `medidos.get("")` é None.
+
+        Bastava UM produto de Mercado Livre no pool para o mapa existir e derrubar
+        o catálogo inteiro de Amazon e Shopee.
+        """
+        self._produto(preco=100.0, de=200.0,
+                      link="https://www.mercadolivre.com.br/p/MLB3333333333")
+        amazon = self._produto(nome="Echo Dot", preco=200.0, de=400.0,
+                               link="https://www.amazon.com.br/dp/B0ABC")
+        amazon.marketplace = "amazon"
+        amazon.save(update_fields=["marketplace"])
+        self._observar(amazon, 380.0, 375.0, 370.0)
+
+        achados = self._com_mapa({"MLB3333333333": (90.0, "vitrine")})
+
+        lojas = {d.produto.marketplace for d in achados}
+        self.assertIn("amazon", lojas)
+
+    def test_cupom_confirmado_sobrevive_a_ausencia_na_vitrine(self):
+        """O caso que a produção mostrou: par confirmado, fora da vitrine."""
+        produto = self._produto(preco=100.0, de=200.0,
+                                link="https://www.mercadolivre.com.br/p/MLB4444444444")
+        self._observar(produto, 180.0, 175.0, 170.0)
+        self._cupom(produto=produto, percentual=20.0, teto=100.0, checkout=True)
+
+        achados = self._com_mapa({"MLB0000000000": (5.0, "vitrine")}, incluir_sem_cupom=False)
+
+        self.assertEqual(len(achados), 1)
+        self.assertTrue(achados[0].tem_cupom)
