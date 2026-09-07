@@ -33,12 +33,24 @@ on:
   schedule:
     - cron: "0 4 * * *"    # 01:00 BRT — parada
     - cron: "45 10 * * *"  # 07:45 BRT — religamento
-    # Rede de segurança. O que derrubou a produção em 16, 17 e 18/08/2026 não foi
-    # a parada: foi o religamento falhar sem ninguém de pé para perceber — sem web
-    # não há vigia externo, e o dia inteiro se perdeu. `start` é idempotente
-    # (máquina já ligada só revalida health), então uma segunda tentativa custa
-    # nada e cobre exatamente aquele modo de falha.
-    - cron: "20 11 * * *"  # 08:20 BRT — segunda tentativa
+    # Rede de segurança, e ela precisou ficar MAIOR. O que derrubou a produção em
+    # 16, 17 e 18/08/2026 não foi a parada: foi o religamento falhar sem ninguém
+    # de pé para perceber — sem web não há vigia externo, e o dia inteiro se
+    # perdeu. Aconteceu de novo em 07/09/2026, e desta vez a causa ficou clara: o
+    # agendador do GitHub é best-effort e DESCARTA execuções. Naquele dia a parada
+    # das 04:00 UTC só rodou às 09:11, e os religamentos das 10:45 e 11:20 não
+    # rodaram nenhuma vez — a produção passou a manhã inteira fora, incluindo a
+    # janela de envio das 08:00.
+    #
+    # `start` é idempotente (máquina ligada só revalida health), então cada
+    # tentativa extra custa alguns segundos de runner e cobre a chance de o
+    # agendador engolir as anteriores. Para a produção passar o dia fora agora, o
+    # GitHub teria de descartar todas.
+    - cron: "20 11 * * *"  # 08:20 BRT — 2a tentativa
+    - cron: "0 12 * * *"   # 09:00 BRT — 3a
+    - cron: "0 13 * * *"   # 10:00 BRT — 4a
+    - cron: "0 15 * * *"   # 12:00 BRT — 5a
+    - cron: "0 18 * * *"   # 15:00 BRT — 6a
   workflow_dispatch:
     inputs:
       action:
@@ -78,6 +90,10 @@ jobs:
             "0 4 * * *")   ACAO=stop  ;;
             "45 10 * * *") ACAO=start ;;
             "20 11 * * *") ACAO=start ;;
+            "0 12 * * *")  ACAO=start ;;
+            "0 13 * * *")  ACAO=start ;;
+            "0 15 * * *")  ACAO=start ;;
+            "0 18 * * *")  ACAO=start ;;
             *)
               echo "Horário $SCHEDULE não está no mapa; nada a fazer." >&2
               exit 1

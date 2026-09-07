@@ -177,7 +177,30 @@ start_app() {
   wait_until_healthy "$app"
 }
 
+# Janela de sono, em hora de Brasília. O agendamento do GitHub Actions é
+# best-effort e ATRASA — medido neste repositório: o cron das 04:00 UTC disparou
+# às 09:11 em 07/09/2026 (cinco horas depois) e às 08:33 em 06/09. Uma parada que
+# chega atrasada cai no meio do expediente, e o religamento, que vem no mesmo
+# atraso, só acontece horas depois: em 07/09 a produção ficou fora do ar das 06:12
+# às ~11:00, incluindo a janela de envio das 08:00.
+#
+# Por isso o gesto não obedece à hora em que o agendador acordou: ele confere o
+# relógio. Parar só vale dentro da janela; ligar vale sempre — ligar fora de hora
+# é, no máximo, gastar um pouco antes.
+readonly SONO_INICIO_H=1
+readonly SONO_FIM_H=8
+
+dentro_da_janela_de_sono() {
+  local hora
+  hora=$(TZ="America/Sao_Paulo" date +%-H)
+  (( hora >= SONO_INICIO_H && hora < SONO_FIM_H ))
+}
+
 if [[ "$ACTION" == "stop" ]]; then
+  if ! dentro_da_janela_de_sono; then
+    echo "Parada ignorada: agora são $(TZ=America/Sao_Paulo date '+%H:%M') em"          "Brasília, fora da janela de sono (${SONO_INICIO_H}h-${SONO_FIM_H}h)."          "O agendador atrasou; desligar agora tiraria a produção do ar em"          "horário de operação." >&2
+    exit 0
+  fi
   # Primeiro remove tráfego e workers; o banco é sempre o último a parar.
   stop_app spreading-web
   stop_app spreading-wa
