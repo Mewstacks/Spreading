@@ -91,7 +91,14 @@ class Command(BaseCommand):
                     self._varrer(client)
                     st.write_state(JOB, fase="aguardando", erro="")
                 except Exception:
-                    logger.error("Erro na varredura de canais:\n%s", traceback.format_exc())
+                    # `logger.exception`, e nao `logger.error` com o traceback dentro da
+                    # mensagem: o Sentry agrupa por MENSAGEM, entao um traceback
+                    # interpolado cria uma issue NOVA a cada ocorrencia. Esta varredura
+                    # roda a cada 60 s — uma falha persistente do Telethon (sessao
+                    # invalida, flood wait, rede) rende ~1.035 issues por dia de um
+                    # unico problema. Com `exception` a mensagem e estavel e o traceback
+                    # vai no campo dele.
+                    logger.exception("Erro na varredura de canais")
                     st.write_state(JOB, fase="aguardando",
                                    erro="falha na varredura de canais")
                 _dormir_batendo(tick)

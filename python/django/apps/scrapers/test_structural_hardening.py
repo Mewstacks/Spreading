@@ -2798,30 +2798,32 @@ class LockDaProjecaoDeCuponsTests(TestCase):
        sobre milhares de linhas, e herdava um limite pensado para outra coisa.
     """
 
-    def test_todo_lock_da_projecao_tem_ordem_total(self):
-        """Ordem igual em todos os pontos elimina a inversão por construção."""
+    @staticmethod
+    def _codigo_sem_comentarios():
+        """Só as linhas de código: comentário citando a API não é uma chamada."""
         import inspect
 
         from apps.scrapers import coupon_readiness
 
-        fonte = inspect.getsource(coupon_readiness)
-        # Cada `select_for_update()` precisa de um `order_by` no mesmo encadeamento.
-        trechos = fonte.split("select_for_update()")[1:]
+        quebra = chr(10)
+        return quebra.join(
+            linha for linha in inspect.getsource(coupon_readiness).split(quebra)
+            if not linha.lstrip().startswith("#")
+        )
+
+    def test_todo_lock_da_projecao_tem_ordem_total(self):
+        """Ordem igual em todos os pontos elimina a inversão por construção."""
+        trechos = self._codigo_sem_comentarios().split("select_for_update(")[1:]
         self.assertTrue(trechos, "nenhum select_for_update encontrado")
         for trecho in trechos:
             # O encadeamento termina no fechamento da expressão; olhar o suficiente
             # à frente para conter o `.order_by(...)`.
             with self.subTest(trecho=trecho[:60]):
-                self.assertIn("order_by", trecho[:600])
+                self.assertIn("order_by", trecho[:800])
 
     def test_a_ordem_e_a_mesma_em_todos_os_pontos(self):
-        import inspect
-
-        from apps.scrapers import coupon_readiness
-
-        fonte = inspect.getsource(coupon_readiness)
         ordens = set()
-        for trecho in fonte.split("select_for_update()")[1:]:
+        for trecho in self._codigo_sem_comentarios().split("select_for_update(")[1:]:
             inicio = trecho.find(".order_by(")
             if inicio == -1:
                 continue
@@ -2829,6 +2831,22 @@ class LockDaProjecaoDeCuponsTests(TestCase):
             ordens.add(trecho[inicio:fim + 1].strip())
         # Ordens diferentes entre dois pontos reintroduzem a inversão.
         self.assertEqual(len(ordens), 1, ordens)
+
+    def test_o_lock_nao_se_estende_as_tabelas_apenas_lidas(self):
+        """`select_for_update()` puro tranca também o que `select_related` traz.
+
+        Aqui isso pegaria `CupomNormalizado` e `FonteIngestao`, que o bloco apenas
+        lê. Trancar três tabelas onde uma basta cria inversão de ordem ENTRE
+        TABELAS, e nenhuma ordenação de linhas resolve isso.
+        """
+        codigo = self._codigo_sem_comentarios()
+        for trecho in codigo.split("select_for_update(")[1:]:
+            cabeca = trecho[:trecho.find(".filter(") if ".filter(" in trecho[:400]
+                            else 200]
+            if "select_related" not in trecho[:400]:
+                continue
+            with self.subTest(trecho=trecho[:60]):
+                self.assertIn('of=("self",)', cabeca)
 
     def test_a_projecao_relaxa_o_lock_mas_nao_para_o_infinito(self):
         """Sem limite, uma transação abandonada prende o worker até o deploy."""

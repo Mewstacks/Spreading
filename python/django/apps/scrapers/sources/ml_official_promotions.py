@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html as html_lib
+import logging
 import re
 from datetime import datetime
 
@@ -13,6 +14,8 @@ from django.utils.html import strip_tags
 from apps.scrapers.coupon_rules import normalizar_regras_cupom, tem_restricao_publico
 from .base import IngestedItem, SourceAdapter, normalizar_dinheiro
 
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_URL = "https://www.mercadolivre.com.br/l/promocoes"
 _TIMEOUT = (5, 20)
@@ -114,6 +117,21 @@ class MLOfficialPromotionsSource(SourceAdapter):
     def discover_coupons(self, **kwargs):
         url = getattr(settings, "ML_OFFICIAL_PROMOTIONS_URL", "") or DEFAULT_URL
         resposta = requests.get(url, timeout=_TIMEOUT, headers={"User-Agent": _UA})
+        if resposta.status_code in (401, 403, 429):
+            # `www.mercadolivre.com.br/l/promocoes` é exatamente a superfície que
+            # o ML mura para IP de datacenter. Levantar aqui fazia o traceback
+            # subir até o `except Exception` de `sources/registry.py`, que loga
+            # "Fonte %s falhou" com o traceback inteiro — um erro por ciclo, para
+            # um fato que não é defeito nosso e que a própria fonte sabe
+            # reportar. Mesmo tratamento que `ml_lightning_coupons` já dá.
+            self.last_health_status = "blocked"
+            self.last_metrics = {"complete": False,
+                                 "http_status": resposta.status_code}
+            logger.info(
+                "Promoções oficiais do ML bloqueadas (HTTP %s); catálogo anterior "
+                "preservado.", resposta.status_code,
+            )
+            return
         resposta.raise_for_status()
         agora = timezone.now()
         rows, metrics = extrair_cupons_promocoes(resposta.text, agora=agora)

@@ -25,8 +25,32 @@ _SENTRY_LEVEL = {
 }
 
 
+# Só estes viram evento no Sentry. O resto continua no EventoOperacional, que é
+# durável, consultável e alimenta a tela de Saúde — a diferença é que não acorda
+# ninguém.
+_NIVEIS_QUE_ALERTAM = frozenset({"error", "critical", "fatal"})
+
+
 def _report_sentry(exc, *, pipeline, evento, level, usuario, contexto):
-    """Envia a exceção ao Sentry se disponível. Nunca derruba o fluxo principal."""
+    """Envia a exceção ao Sentry se disponível. Nunca derruba o fluxo principal.
+
+    `log_event` chamava isto sempre que recebia `exc`, ANTES de olhar o nível, e
+    `capture_message` cria evento em qualquer severidade. Ou seja: todo
+    `log_event(..., level="warning", exc=e)` virava alerta.
+
+    Isso não é hipotético — é o grosso do ruído. `link.py` emite um por usuário a
+    cada ciclo de 5 minutos quando um lote de links tem qualquer falha;
+    `automacao.py` emite outro sempre que a geração de links não conclui, o que
+    hoje é sempre, porque o Mercado Livre mura o IP de datacenter da Fly. São
+    dezenas de eventos por hora de uma condição conhecida que ninguém pode
+    acionar naquele instante.
+
+    Repare no contraste: a `LoggingIntegration` do próprio Sentry só promove a
+    evento a partir de ERROR (`event_level=logging.ERROR`, em `settings`). Este
+    caminho não respeitava a mesma régua.
+    """
+    if str(level or "").casefold() not in _NIVEIS_QUE_ALERTAM:
+        return
     try:
         import sentry_sdk
     except Exception:

@@ -90,14 +90,25 @@ def _session_statement_timeout(value, lock_timeout=None):
     try:
         yield
     finally:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT set_config('statement_timeout', %s, false)", [previous],
-            )
-            if previous_lock is not None:
+        # A restauração é `try/finally` DENTRO do finally, e não uma sequência,
+        # porque estes são valores de SESSÃO (`set_config(..., false)`), não
+        # `SET LOCAL`. Com `CONN_MAX_AGE=600` a conexão é reaproveitada por dez
+        # minutos: se a restauração do `statement_timeout` levantasse, o
+        # `lock_timeout` de 90s ficaria colado na conexão e seria herdado pela
+        # próxima request web — justamente o limite que existe para impedir que
+        # as oito threads do gunicorn fiquem presas numa fila de lock.
+        try:
+            with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT set_config('lock_timeout', %s, false)", [previous_lock],
+                    "SELECT set_config('statement_timeout', %s, false)", [previous],
                 )
+        finally:
+            if previous_lock is not None:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT set_config('lock_timeout', %s, false)",
+                        [previous_lock],
+                    )
 
 
 def conexao_ml(usuario, *, permitir_sonda=True):
@@ -669,7 +680,13 @@ def _encerrar_projecoes_fora_do_escopo(
     """
     with transaction.atomic():
         obsoletas = list(
-            CupomDisponibilidade.objects.select_for_update().select_related(
+            # `of=("self",)` porque `select_for_update()` puro também tranca as
+            # linhas trazidas por `select_related` — aqui `CupomNormalizado` e
+            # `FonteIngestao`, que este bloco apenas LÊ. Trancar três tabelas
+            # onde uma basta cria inversão de ordem ENTRE TABELAS com qualquer
+            # outro processo que as toque na ordem oposta, e nenhuma ordenação
+            # de linhas resolve isso.
+            CupomDisponibilidade.objects.select_for_update(of=("self",)).select_related(
                 "cupom", "cupom__fonte",
             ).filter(
                 organization=organization, usuario=usuario, channel=channel,
