@@ -11,6 +11,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import Client, SimpleTestCase, TestCase
 from django.urls import reverse
+from apps.scrapers.test_como_worker import ComoWorker
 
 
 class PersistenciaDoPortalDeAfiliadosTests(TestCase):
@@ -231,7 +232,7 @@ class RetomadaDoOnboardingQRTests(SimpleTestCase):
         self.assertNotIn("retentar_qr", payload)
 
 
-class FluxosReaisDoWorkerQRTests(TestCase):
+class FluxosReaisDoWorkerQRTests(ComoWorker, TestCase):
     CAMERA_URL = "https://www.mercadolivre.com/jms/mlb/lgz/msl/login/camera-not-found"
 
     def setUp(self):

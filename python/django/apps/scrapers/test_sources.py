@@ -14,6 +14,7 @@ from apps.scrapers.ofertas import _melhor_codigo
 from apps.scrapers.sources.base import IngestedItem, SourceAdapter
 from apps.scrapers.sources.persistence import persist_items
 from apps.scrapers.sources import registry
+from apps.scrapers.test_como_worker import ComoWorker
 
 
 class FakeSource(SourceAdapter):
@@ -39,7 +40,7 @@ class BrokenSource(FakeSource):
         raise TimeoutError("timeout")
 
 
-class SourcePipelineTests(TestCase):
+class SourcePipelineTests(ComoWorker, TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user("source-user")
 
@@ -755,7 +756,7 @@ class CouponPagePayloadTests(TestCase):
         self.assertTrue(cupom.regras["container_url"].endswith("coupon_campaign_id=13975432"))
 
 
-class OfferFeedPaginationTests(TestCase):
+class OfferFeedPaginationTests(ComoWorker, TestCase):
     """O feed /ofertas tem ~40 páginas cheias; uma página em branco é quase sempre
     challenge do anti-bot, não fim do catálogo."""
 

@@ -8,6 +8,7 @@ from django.utils import timezone
 from apps.scrapers.models import ExecucaoIngestao, FonteIngestao, Produto
 from apps.scrapers.scraper_amazon import creators_api
 from apps.scrapers.scraper_mercadolivre import link as ml_link
+from apps.scrapers.test_como_worker import ComoWorker
 
 
 class LinkBuilderHardeningTests(SimpleTestCase):
@@ -62,7 +63,7 @@ class LinkBuilderHardeningTests(SimpleTestCase):
         )
 
 
-class ScraperPersistenceHardeningTests(TestCase):
+class ScraperPersistenceHardeningTests(ComoWorker, TestCase):
     def test_url_de_tracking_longa_e_reduzida_antes_do_banco(self):
         from apps.scrapers.scraper_mercadolivre.ofertas_scraper import (
             _normalizar_link_produto,

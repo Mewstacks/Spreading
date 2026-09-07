@@ -44,6 +44,7 @@ from apps.scrapers.scraper_amazon import link as amazon_link
 from apps.scrapers.scraper_amazon import ofertas_scraper as amazon_ofertas
 from apps.scrapers.scraper_mercadolivre.scraper import _sincronizar_produtos_no_banco
 from apps.scrapers.scraper_mercadolivre import link as ml_link
+from apps.scrapers.test_como_worker import ComoWorker
 
 _TEST_WA_HEADERS = {
     "Authorization": "Bearer test-capability",
@@ -762,7 +763,7 @@ class ControlesReaisDoLinkBuilderTests(SimpleTestCase):
         self.assertTrue(page.botao.clicado)
 
 
-class VereditoLinkBuilderForaDoLoopORMTests(TransactionTestCase):
+class VereditoLinkBuilderForaDoLoopORMTests(ComoWorker, TransactionTestCase):
     """Regressão do SynchronousOnlyOperation visto em produção."""
 
     def test_veredito_real_e_gravado_com_event_loop_ativo(self):
@@ -3556,7 +3557,7 @@ class RaspagemDeCuponsTests(TestCase):
         self.assertTrue(info["acao"])
 
 
-class ParserDeCupomDeCampanhaTests(TestCase):
+class ParserDeCupomDeCampanhaTests(ComoWorker, TestCase):
     """O parser de /cupons/filter contra o DOM REAL do ML.
 
     Ele lê um JSON embutido num bundle do ML (#__NORDIC_RENDERING_CTX__) e o extrai
@@ -4513,7 +4514,7 @@ class EnviabilidadeConsistenteTests(TestCase):
         self.assertTrue(linha.verificacao_motivo)
 
 
-class VerificarLinksPendentesTests(TestCase):
+class VerificarLinksPendentesTests(ComoWorker, TestCase):
     """A passada que APROVA o destino antes de o item virar enviável."""
 
     def setUp(self):
@@ -4939,7 +4940,7 @@ class ResumoFinanceiroTests(TestCase):
         self.assertIsNone(resumo_financeiro(self.user)["comissao"])
 
 
-class GeracaoDeLinksEmLoteTests(TestCase):
+class GeracaoDeLinksEmLoteTests(ComoWorker, TestCase):
     """O worker que tira os produtos de 'pendente'.
 
     Nada em produção gerava link: não havia worker Celery, o beat_schedule é vazio e
@@ -7260,7 +7261,7 @@ class SemBypassAsyncUnsafeTests(SimpleTestCase):
         )
 
 
-class SessaoMLGravadaForaDoPlaywrightTests(TestCase):
+class SessaoMLGravadaForaDoPlaywrightTests(ComoWorker, TestCase):
     """Regressão central: a sessão só pode ser gravada com o Playwright já fechado.
 
     O login concluía, `save_storage_state` levantava SynchronousOnlyOperation dentro do
@@ -7364,7 +7365,7 @@ class MensagemDeErroDaConexaoTests(SimpleTestCase):
         self.assertEqual(mensagem_de_erro(RuntimeError(texto), "ef56"), texto)
 
 
-class RetryDaGravacaoDaSessaoTests(TestCase):
+class RetryDaGravacaoDaSessaoTests(ComoWorker, TestCase):
     """10 minutos de browser ocioso matam o socket do Postgres; uma tentativa só perdia
     o login inteiro por causa disso."""
 
@@ -7680,7 +7681,7 @@ class EvidenciaDeCupomAmazonTests(SimpleTestCase):
             evidencia_com_cupom_preservado(nova, {"promotion": {}}), nova)
 
 
-class LoteDeLinksResilienteTests(TestCase):
+class LoteDeLinksResilienteTests(ComoWorker, TestCase):
     """O lote parava inteiro no primeiro soluço do Link Builder — e, pior, marcava
     falha nos produtos por erro de INFRAESTRUTURA. Como registrar_falha incrementa
     `tentativas` e aos MAX_TENTATIVAS_ERRO (8) marca estado='erro' com

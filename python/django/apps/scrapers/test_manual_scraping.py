@@ -14,6 +14,7 @@ from apps.scrapers.manual_scraping import (
     JobReporter, _db_retry, claim_next_job, criar_execucao, executar_job,
 )
 from apps.scrapers.models import EventoOperacional, ExecucaoRaspagem
+from apps.scrapers.test_como_worker import ComoWorker
 
 
 def _pipeline_result(**overrides):
@@ -89,7 +90,7 @@ class ManualScrapingApiTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
 
-class ManualScrapingQueueTests(TransactionTestCase):
+class ManualScrapingQueueTests(ComoWorker, TransactionTestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(
             "queue-owner", password="x", is_staff=True,
