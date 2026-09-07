@@ -88,6 +88,15 @@ jobs:
           GRANT USAGE ON SCHEMA public TO spreading_runtime, spreading_system;
           GRANT USAGE, CREATE ON SCHEMA public TO spreading_migration;
           SQL
+          # O banco de TESTE do Django nasce clonando `template1`, e a migração
+          # 0061 cria policies que chamam `tenant_security.context_valid`. Sem o
+          # schema no template, cada `manage.py test` recria um banco que não tem
+          # de onde herdá-lo e a migração falha com `schema "tenant_security" does
+          # not exist` — o mesmo muro que o `--only-context` resolve no banco
+          # principal, um nível acima.
+          psql -h localhost -U postgres -d template1 -v ON_ERROR_STOP=1             -c 'GRANT CREATE ON DATABASE template1 TO spreading_migration'
+          psql -h localhost -U postgres -d template1 -v ON_ERROR_STOP=1             -c 'GRANT USAGE, CREATE ON SCHEMA public TO spreading_migration'
+          psql -h localhost -U postgres -d template1 -v ON_ERROR_STOP=1             -c 'GRANT USAGE ON SCHEMA public TO spreading_runtime, spreading_system' 
           # pgcrypto no template1 tambem: o banco de teste nasce clonando dele, e
           # o verificador de contexto assinado depende do hmac.
           for db in spreading template1; do
@@ -96,8 +105,12 @@ jobs:
       # Antes do migrate: a 0061 cria policies que chamam
       # `tenant_security.context_valid`, entao o schema assinado tem de existir
       # primeiro. Num banco ja provisionado isto e no-op.
-      - name: Instala o contexto assinado
-        run: RELEASE_COMMAND=1 python django/manage.py tenant_rls --only-context
+      - name: Instala o contexto assinado (no banco e no template)
+        run: |
+          set -euo pipefail
+          RELEASE_COMMAND=1 python django/manage.py tenant_rls --only-context
+          # E no template, para todo banco de teste já nascer com ele.
+          RELEASE_COMMAND=1             MIGRATION_DATABASE_URL=postgres://spreading_migration:ci@localhost:5432/template1             python django/manage.py tenant_rls --only-context
       - name: Migra com a role de migracao (o mesmo caminho do release_command)
         run: RELEASE_COMMAND=1 python django/manage.py migrate --noinput
       # Depois do migrate: antes disso nao ha tabela para dar privilegio sobre.
