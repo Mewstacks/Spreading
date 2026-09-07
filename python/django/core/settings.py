@@ -657,16 +657,14 @@ LLM_TETO_BRL_MES = float(os.getenv("LLM_TETO_BRL_MES", "74"))
 
 
 # ─────────────────────────────────────────────────────────────
-# Redis (Celery broker/backend + cache). Em prod: um REDIS_URL só (ex: Upstash
-# no Fly). CELERY_BROKER_URL/RESULT_BACKEND ainda sobrescrevem se você quiser
-# separar. Em dev sem Redis, cai em localhost (Celery) e cache local (abaixo).
+# Redis — opcional, e hoje ausente em produção. Serve só como cache alternativo
+# (ver bloco abaixo). O broker de Celery saiu junto com o Celery: não havia
+# worker, nem beat, nem uma única chamada `.delay()` no repositório, e o
+# `beat_schedule` era zerado de propósito. A automação sempre rodou pelos loops do
+# honcho; manter a configuração de um subsistema inexistente só convidava alguém a
+# tentar usá-lo.
 # ─────────────────────────────────────────────────────────────
 REDIS_URL = os.getenv("REDIS_URL", "")
-_redis_default = REDIS_URL or "redis://localhost:6379/0"
-CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", _redis_default)
-CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", _redis_default)
-CELERY_TIMEZONE = TIME_ZONE
-CELERY_TASK_TRACK_STARTED = True
 
 
 # ─────────────────────────────────────────────────────────────
@@ -689,9 +687,7 @@ CELERY_TASK_TRACK_STARTED = True
 # ML quebra de um jeito difícil de achar, e o throttle de login deixa de contar
 # tentativas direito.
 # ─────────────────────────────────────────────────────────────
-_REDIS_CACHE_URL = os.getenv("REDIS_CACHE_URL") or os.getenv("REDIS_URL") or (
-    CELERY_BROKER_URL if os.getenv("USE_REDIS_CACHE", "0") == "1" else ""
-)
+_REDIS_CACHE_URL = os.getenv("REDIS_CACHE_URL") or REDIS_URL
 if _REDIS_CACHE_URL:
     CACHES = {
         "default": {

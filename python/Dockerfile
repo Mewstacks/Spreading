@@ -20,9 +20,13 @@ COPY requirements.txt ./
 RUN pip install -r requirements.txt \
     && python -m playwright install --with-deps chromium
 
-# Código da aplicação (django/) + Procfile dos processos.
+# Código da aplicação (django/) + os Procfiles de cada process group.
+#
+# O `Procfile` da raiz saiu: `[processes]` do fly.toml sempre sobrescreveu o CMD,
+# então ele nunca foi lido em produção — era uma terceira cópia da lista de
+# processos, livre para divergir das outras duas, e já tinha divergido.
 COPY django/ ./django/
-COPY Procfile Procfile.web Procfile.worker ./
+COPY Procfile.web Procfile.worker ./
 
 # Estáticos compilados na build (servidos pelo WhiteNoise em runtime).
 # DEBUG=0 aqui é OBRIGATÓRIO: gera o staticfiles.json (ManifestStaticFilesStorage)
@@ -32,6 +36,7 @@ RUN DJANGO_DEBUG=0 DJANGO_SECRET_KEY=build-time-only-not-a-real-secret-000 \
 
 EXPOSE 8080
 
-# honcho sobe todos os processos do Procfile numa única máquina (o volume de
-# sessões do ML fica preso a UMA máquina no Fly — web e workers compartilham).
-CMD ["honcho", "start"]
+# Em produção quem manda é `[processes]` do fly.toml (dois grupos, duas máquinas).
+# Este CMD é só o padrão para quem roda a imagem à mão: sobe o grupo `web`, que é
+# o que serve HTTP. Antes ele apontava para um Procfile que não existe mais.
+CMD ["honcho", "-f", "Procfile.web", "start"]
