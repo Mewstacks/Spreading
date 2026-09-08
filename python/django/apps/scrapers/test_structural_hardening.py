@@ -2858,3 +2858,61 @@ class LockDaProjecaoDeCuponsTests(TestCase):
         self.assertIn("lock_timeout=", fonte)
         self.assertNotIn('lock_timeout="0"', fonte)
         self.assertNotIn("lock_timeout='0'", fonte)
+
+
+class ReentranciaDoLeaseAntesDoGuardTests(TestCase):
+    """Quem já detém o recurso não está adquirindo — está reentrando.
+
+    `operacao_pesada` checava `in_system_context()` ANTES de olhar a reentrância.
+    O worker toma o lease em contexto de sistema, entra no contexto do tenant para
+    trabalhar (que é o fluxo normal, um tenant por vez) e o pedido aninhado do
+    MESMO recurso era negado, porque ali dentro já não há contexto de sistema.
+
+    Em produção isso é `prefetch_links`: ele toma `ml_site_browser_resource` e
+    chama `gerar_links_em_lote`, que pede o mesmo recurso por dentro — e recebia
+    `BrowserResourceUnavailable` segurando o próprio lease.
+    """
+
+    def test_quem_ja_detem_entra_de_novo_mesmo_fora_do_contexto_de_sistema(self):
+        from unittest.mock import patch
+
+        from apps.scrapers import carga
+        from apps.scrapers.resource_control import _held_resources
+
+        from django.db import connection
+
+        if connection.vendor != "postgresql":
+            self.skipTest("o lease só existe no PostgreSQL")
+
+        token = _held_resources.set({"django_chromium": "token-de-teste"})
+        try:
+            with patch.object(carga, "in_system_context", return_value=False):
+                with carga.operacao_pesada(resource_key="django_chromium") as ok:
+                    self.assertTrue(ok)
+        finally:
+            _held_resources.reset(token)
+
+    def test_quem_nao_detem_continua_barrado_fora_do_contexto_de_sistema(self):
+        """O guard não foi afrouxado: só a reentrância passa na frente dele.
+
+        Só faz sentido no PostgreSQL: fora dele `operacao_pesada` devolve True na
+        primeira linha, porque o lease inteiro é curto-circuitado. Afirmar o
+        contrário sob SQLite seria afirmar sobre um caminho que não roda.
+        """
+        from unittest.mock import patch
+
+        from django.db import connection
+
+        from apps.scrapers import carga
+        from apps.scrapers.resource_control import _held_resources
+
+        if connection.vendor != "postgresql":
+            self.skipTest("o lease só existe no PostgreSQL")
+
+        token = _held_resources.set({})
+        try:
+            with patch.object(carga, "in_system_context", return_value=False):
+                with carga.operacao_pesada(resource_key="django_chromium") as ok:
+                    self.assertFalse(ok)
+        finally:
+            _held_resources.reset(token)

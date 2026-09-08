@@ -132,3 +132,40 @@ class EstadoDaFilaTests(TestCase):
         itens = estado_da_fila(agora=agora)["itens"]
 
         self.assertEqual(itens[0]["destino"], "Agora")
+
+
+class CoberturaPorNichoNaSaudeTests(TestCase):
+    """A pergunta que decide o aceite tinha módulo e não tinha tela.
+
+    "Cada grupo tem oferta suficiente do nicho dele?" é o critério de entrega —
+    cobertura por nicho, não contagem por marketplace. `deal_abundance` já
+    respondia, e o único leitor era um management command: só dava para saber por
+    SSH. Mesma situação em que a fila v2 estava.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user("cobertura", password="x")
+        ensure_personal_organization(self.user)
+
+    def test_o_resumo_da_saude_publica_a_cobertura(self):
+        from apps.scrapers.saude import resumo
+
+        r = resumo(horas=24, usuario=self.user)
+
+        self.assertIn("cobertura", r)
+        self.assertIn("regras", r["cobertura"])
+        self.assertIn("meta", r["cobertura"])
+
+    def test_falha_na_cobertura_nao_derruba_a_saude(self):
+        """Uma linha de painel não pode tirar a tela inteira do ar."""
+        from unittest.mock import patch
+
+        from apps.scrapers.saude import resumo
+
+        with patch("apps.scrapers.deal_abundance.relatorio_cobertura",
+                   side_effect=RuntimeError("fonte fora")):
+            r = resumo(horas=24, usuario=self.user)
+
+        self.assertTrue(r["cobertura"].get("indisponivel"))
+        self.assertEqual(r["cobertura"]["regras"], [])
+        self.assertIn("estado", r)

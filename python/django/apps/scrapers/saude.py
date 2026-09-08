@@ -508,6 +508,17 @@ def _custo_ia() -> dict:
                 "estourou": False, "por_origem": []}
 
 
+def _cobertura_por_nicho(usuario):
+    """Cobertura por regra de envio; nunca levanta — é uma linha de painel."""
+    try:
+        from apps.scrapers.deal_abundance import relatorio_cobertura
+
+        return relatorio_cobertura(usuario=usuario)
+    except Exception:
+        logger.exception("Cobertura por nicho indisponível para a Saúde")
+        return {"regras": [], "meta": 0, "aprovado": False, "indisponivel": True}
+
+
 def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") -> dict:
     """Fotografia do período: veredito, problemas agrupados, sinais de vida, workers."""
     agora = agora or timezone.now()
@@ -567,6 +578,11 @@ def resumo(horas: int = 24, agora=None, usuario=None, usuario_nome: str = "") ->
         # "pendente" cobre tanto o que nasceu agora quanto o que já queimou três
         # tentativas e está com o prazo vencido.
         "fila_envio": estado_da_fila(usuario=usuario, agora=agora),
+        # Cobertura por nicho. O módulo existia e o único leitor era um management
+        # command — a mesma coisa que a fila v2 era antes de ter tela: a pergunta
+        # "cada grupo tem oferta suficiente do nicho dele?" só se respondia por
+        # SSH. E é ela que decide o aceite, não a contagem por marketplace.
+        "cobertura": _cobertura_por_nicho(usuario),
         # Gasto de IA do mês. Fica na Saúde, e não numa tela própria, porque é a
         # mesma pergunta das outras linhas daqui: o sistema está dentro do que
         # deveria? Um teto que ninguém observa não é teto.

@@ -229,6 +229,32 @@ mentindo por omissão — nada roda, então nada falha.
   </div>
 </section>
 
+{% if r.cobertura.regras %}
+<section class="section section-lined">
+  <div class="section-head">
+    <h2>Cobertura por nicho</h2>
+    <span class="hint">meta {{ r.cobertura.meta }} por grupo</span>
+  </div>
+  <div class="rows">
+    {% for regra in r.cobertura.regras %}
+    <div class="row-item">
+      <span class="dot {% if regra.deficit %}off{% else %}on{% endif %}"></span>
+      <div class="row-main">
+        <div class="row-title">
+          <strong>{{ regra.destino }}</strong>
+          {% if regra.macro %}<span class="badge badge-muted">{{ regra.macro }}</span>{% endif %}
+          {% if regra.deficit %}<span class="badge {% if regra.deficit_provado %}badge-red{% else %}badge-yellow{% endif %}">Faltam {{ regra.deficit }}</span>{% endif %}
+        </div>
+        <div class="row-note">
+          {{ regra.elegiveis }} de {{ regra.meta }} · {{ regra.com_cupom }} com cupom, {{ regra.sem_cupom }} sem · {{ regra.veredito }}
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
 <section class="section section-lined">
   <div class="section-head">
     <h2>Fila de envio</h2>

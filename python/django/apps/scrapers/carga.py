@@ -53,6 +53,26 @@ def operacao_pesada(*, resource_key="django_chromium", owner_kind="scheduled",
     # HTTP aguardar uma navegação longa. Os workers instalam system_context antes
     # de chegar aqui. Falhar fechado evita tanto o bypass quanto um erro de RLS
     # opaco para o chamador.
+    # Reentrância ANTES do guard: quem JÁ detém o recurso não está adquirindo
+    # nada, está entrando de novo no que já é seu.
+    #
+    # O guard existe para impedir AQUISIÇÃO por um processo que não é worker — e
+    # essa checagem está certa. Mas ele vinha antes da reentrância, e o efeito era
+    # este: o worker toma o lease em `system_context`, entra no contexto do tenant
+    # para trabalhar (que é o fluxo normal, um tenant por vez), e o pedido
+    # aninhado do MESMO recurso é negado, porque ali dentro `in_system_context()`
+    # já é falso. `prefetch_links` toma `ml_site_browser_resource` e chama
+    # `gerar_links_em_lote`, que pede o mesmo recurso de novo por dentro — e
+    # recebia `BrowserResourceUnavailable` segurando o próprio lease.
+    #
+    # Devolver reentrante aqui não abre porta nenhuma: só passa quem tem o token
+    # em `_held_resources`, e o único jeito de tê-lo é ter adquirido antes, com o
+    # guard aplicado.
+    from apps.scrapers.resource_control import _held_resources
+
+    if (_held_resources.get() or {}).get(resource_key):
+        yield True
+        return
     if not in_system_context():
         yield False
         return
