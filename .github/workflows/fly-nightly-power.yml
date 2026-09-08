@@ -31,7 +31,7 @@ on:
   # Horários em UTC. O Brasil não tem mais horário de verão, então BRT = UTC-3 o
   # ano inteiro e o mapa abaixo não precisa de exceção sazonal.
   schedule:
-    - cron: "0 4 * * *"    # 01:00 BRT — parada
+    - cron: "17 4 * * *"   # 01:17 BRT — parada
     - cron: "45 10 * * *"  # 07:45 BRT — religamento
     # Rede de segurança, e ela precisou ficar MAIOR. O que derrubou a produção em
     # 16, 17 e 18/08/2026 não foi a parada: foi o religamento falhar sem ninguém
@@ -46,11 +46,19 @@ on:
     # tentativa extra custa alguns segundos de runner e cobre a chance de o
     # agendador engolir as anteriores. Para a produção passar o dia fora agora, o
     # GitHub teria de descartar todas.
+    #
+    # Nenhum horário cai em :00. Em 08/09/2026 os religamentos das 10:45 e 11:20
+    # UTC foram os dois descartados e a produção passou a manhã fora; a
+    # documentação do GitHub avisa que o `schedule` atrasa "durante períodos de
+    # alta carga de execuções", e cita o INÍCIO DE CADA HORA como o pico. Quatro
+    # das seis tentativas antigas estavam exatamente aí. Minuto quebrado é de
+    # graça e sai da fila mais cheia.
     - cron: "20 11 * * *"  # 08:20 BRT — 2a tentativa
-    - cron: "0 12 * * *"   # 09:00 BRT — 3a
-    - cron: "0 13 * * *"   # 10:00 BRT — 4a
-    - cron: "0 15 * * *"   # 12:00 BRT — 5a
-    - cron: "0 18 * * *"   # 15:00 BRT — 6a
+    - cron: "58 11 * * *"  # 08:58 BRT — 3a
+    - cron: "9 12 * * *"   # 09:09 BRT — 4a
+    - cron: "37 13 * * *"  # 10:37 BRT — 5a
+    - cron: "23 15 * * *"  # 12:23 BRT — 6a
+    - cron: "11 18 * * *"  # 15:11 BRT — 7a
   workflow_dispatch:
     inputs:
       action:
@@ -87,13 +95,14 @@ jobs:
             exit 0
           fi
           case "$SCHEDULE" in
-            "0 4 * * *")   ACAO=stop  ;;
+            "17 4 * * *")  ACAO=stop  ;;
             "45 10 * * *") ACAO=start ;;
             "20 11 * * *") ACAO=start ;;
-            "0 12 * * *")  ACAO=start ;;
-            "0 13 * * *")  ACAO=start ;;
-            "0 15 * * *")  ACAO=start ;;
-            "0 18 * * *")  ACAO=start ;;
+            "58 11 * * *") ACAO=start ;;
+            "9 12 * * *")  ACAO=start ;;
+            "37 13 * * *") ACAO=start ;;
+            "23 15 * * *") ACAO=start ;;
+            "11 18 * * *") ACAO=start ;;
             *)
               echo "Horário $SCHEDULE não está no mapa; nada a fazer." >&2
               exit 1

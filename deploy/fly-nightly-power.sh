@@ -187,18 +187,38 @@ start_app() {
 # Por isso o gesto não obedece à hora em que o agendador acordou: ele confere o
 # relógio. Parar só vale dentro da janela; ligar vale sempre — ligar fora de hora
 # é, no máximo, gastar um pouco antes.
+#
+# A janela de PARAR e mais estreita que a janela de dormir, e a diferenca e o que
+# consertou 08/09/2026. Naquele dia o guard funcionou como escrito: a parada das
+# 04:00 UTC chegou as 08:46 UTC (05:46 BRT), 5h46 atrasada, e 05:46 estava dentro
+# de 1h-8h, entao ela foi aceita -- corretamente, pela regra antiga. So que os
+# dois religamentos seguintes (10:45 e 11:20 UTC) foram DESCARTADOS pelo
+# agendador, e a producao passou a manha inteira parada, incluindo a janela de
+# envio das 08:00.
+#
+# A conta mostra que aceitar aquela parada nunca valeu a pena. Uma hora de sono
+# poupa cerca de R$0,37 (29% do custo de maquinas, ~R$278/mes, repartido nas ~7h
+# de sono). A parada das 05:46 compraria menos de duas horas -- menos de R$0,75 --
+# arriscando a manha de envio inteira, que e o produto.
+#
+# Entao a regra passa a ser economica, nao so horaria: so para se ainda restar
+# sono que pague o risco. Ligar continua valendo sempre e a qualquer hora --
+# ligar fora de hora custa, no maximo, um pouco de maquina ligada a mais.
 readonly SONO_INICIO_H=1
-readonly SONO_FIM_H=8
+readonly RELIGAMENTO_H=8
+# Minimo de sono que justifica o risco de a parada ser a ultima coisa que o
+# agendador entrega no dia. Abaixo disso, ficar de pe e mais barato que o buraco.
+readonly SONO_MINIMO_H=4
 
 dentro_da_janela_de_sono() {
   local hora
   hora=$(TZ="America/Sao_Paulo" date +%-H)
-  (( hora >= SONO_INICIO_H && hora < SONO_FIM_H ))
+  (( hora >= SONO_INICIO_H && hora <= RELIGAMENTO_H - SONO_MINIMO_H ))
 }
 
 if [[ "$ACTION" == "stop" ]]; then
   if ! dentro_da_janela_de_sono; then
-    echo "Parada ignorada: agora são $(TZ=America/Sao_Paulo date '+%H:%M') em"          "Brasília, fora da janela de sono (${SONO_INICIO_H}h-${SONO_FIM_H}h)."          "O agendador atrasou; desligar agora tiraria a produção do ar em"          "horário de operação." >&2
+    echo "Parada ignorada: agora são $(TZ=America/Sao_Paulo date '+%H:%M') em"          "Brasília, fora da janela de parada (${SONO_INICIO_H}h-$(( RELIGAMENTO_H - SONO_MINIMO_H ))h)."          "O agendador atrasou; desligar agora tiraria a produção do ar em"          "horário de operação." >&2
     exit 0
   fi
   # Primeiro remove tráfego e workers; o banco é sempre o último a parar.
