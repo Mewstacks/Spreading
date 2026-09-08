@@ -31,7 +31,29 @@ class ReportSyncActionRequired(Exception):
 
 
 class ReportSyncError(Exception):
-    """Falha operacional do sync."""
+    """Falha operacional do sync.
+
+    A mensagem desta classe é sempre escrita por nós — marketplace, formato,
+    nomes de coluna — e nunca carrega dado de sessão ou do usuário. Isso importa
+    porque o tratador final redige a mensagem de exceções ARBITRÁRIAS antes de
+    gravar, e com razão: um erro qualquer pode trazer URL com token dentro. Só
+    que a redação valia para esta classe também, e o resultado era que todo
+    problema de sincronização chegava ao evento como a mesma frase — "falha
+    operacional durante a sincronização (ReportSyncError)". "Exportação vazia" e
+    "cabeçalhos não reconhecidos" ficavam indistinguíveis, e 34 ocorrências em
+    sete dias não diziam nada a ninguém.
+    """
+
+
+class ReportSyncBusy(ReportSyncError):
+    """O recurso está ocupado agora. Não é falha — é hora errada.
+
+    O Chromium e a sessão de relatório são compartilhados com o resto do funil, e
+    perder a disputa por eles é o funcionamento normal de uma fila. Entrava como
+    `sync_failed` de nível error e empurrava a próxima tentativa em SEIS HORAS —
+    o pior dos dois mundos: alarme por um lock que se solta em segundos, e o
+    relatório parado o resto do dia por causa disso.
+    """
 
 
 class ReportSyncNaoConfigurado(Exception):
@@ -358,13 +380,13 @@ def _fetch_browser_report(usuario, marketplace: str, url: str, desde, ate) -> li
             organization=organization,
         ) as chromium_acquired:
             if not chromium_acquired:
-                raise ReportSyncError("Chromium ocupado por outra tarefa; tente novamente.")
+                raise ReportSyncBusy("Chromium ocupado por outra tarefa; tente novamente.")
             with operacao_pesada(
                 resource_key=resource, owner_kind="reports",
                 organization=organization,
             ) as session_acquired:
                 if not session_acquired:
-                    raise ReportSyncError("Sessão de relatório ocupada por outra tarefa.")
+                    raise ReportSyncBusy("Sessão de relatório ocupada por outra tarefa.")
                 with sync_playwright() as p:
                     browser = p.chromium.launch(headless=True)
                     try:
@@ -765,6 +787,38 @@ def sync_marketplace(usuario, marketplace: str, dias: int = 14) -> RelatorioSync
         sync.save()
         log_event("relatorios", "sync_action_required", str(exc), level="warning",
                   usuario=usuario, contexto={"marketplace": marketplace})
+        return sync
+    except ReportSyncBusy as exc:
+        # Perder a disputa pelo Chromium ou pela sessão é fila funcionando, não
+        # falha. Como `sync_failed` de nível error isto alarmava por um lock que
+        # se solta em segundos e ainda empurrava a próxima tentativa em seis
+        # horas — o relatório ficava parado o resto do dia por causa de uma
+        # espera. Minutos, não horas, e aviso, não erro.
+        sync.status = "ocupado"
+        sync.erro = str(exc)[:500]
+        sync.ultimo_fim = timezone.now()
+        sync.prerequisite_code = "resource_busy"
+        sync.proxima_execucao = timezone.now() + timedelta(
+            minutes=getattr(settings, "RELATORIO_RETRY_OCUPADO_MIN", 15) or 15)
+        sync.save()
+        log_event("relatorios", "sync_ocupado", str(exc), level="warning",
+                  usuario=usuario, contexto={"marketplace": marketplace})
+        return sync
+    except ReportSyncError as exc:
+        # A mensagem desta classe é escrita por nós e não carrega dado do
+        # usuário — ver a docstring de `ReportSyncError`. Registrá-la é o que
+        # torna a falha diagnosticável: sem isto, "exportação vazia" e
+        # "cabeçalhos não reconhecidos" chegavam ao evento como a mesma frase, e
+        # 34 ocorrências em sete dias não diziam nada. A redação abaixo continua
+        # valendo para exceções arbitrárias, que é onde ela sempre fez sentido.
+        sync.status = "erro"
+        sync.erro = str(exc)[:500]
+        sync.ultimo_fim = timezone.now()
+        sync.prerequisite_code = "operational_failure"
+        sync.proxima_execucao = timezone.now() + timedelta(hours=6)
+        sync.save()
+        log_event("relatorios", "sync_failed", str(exc), level="error",
+                  usuario=usuario, contexto={"marketplace": marketplace}, exc=exc)
         return sync
     except Exception as exc:
         sync.status = "erro"

@@ -226,6 +226,12 @@ CATALOGO = {
                      "dashboard de ganhos fica desatualizado.",
         "acao": "Veja o traceback; costuma ser sessão do marketplace expirada.",
     },
+    "sync_ocupado": {
+        "titulo": "Sincronização adiada",
+        "significa": "O Chromium ou a sessão de relatório estava em uso por outra "
+                     "tarefa. Nada falhou; a tentativa foi remarcada para minutos.",
+        "acao": "Nenhuma. Repetir sempre é sinal de disputa por navegador.",
+    },
     "sync_action_required": {
         "titulo": "Conta precisa ser reconectada",
         "significa": "O marketplace pediu login de novo para liberar o relatório de comissão.",

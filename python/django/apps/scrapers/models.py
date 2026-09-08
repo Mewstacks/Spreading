@@ -999,6 +999,10 @@ class RelatorioSync(models.Model):
         ("ok", "Sincronizado"),
         ("erro", "Erro"),
         ("acao", "Precisa de ação"),
+        # Perdeu a disputa pelo Chromium ou pela sessão de relatório. Não é erro
+        # nem ação do usuário: é hora errada, e a próxima tentativa vem em
+        # minutos. Entrava como "erro" e empurrava o retry em seis horas.
+        ("ocupado", "Recurso ocupado"),
         # Distinto de "acao": não há nada que o usuário possa fazer. A leitura
         # automática daquele portal ainda não existe/não está configurada, e mandar
         # ele "reconectar" uma conta que já está conectada é um loop sem saída.
