@@ -51,6 +51,11 @@ class ComoWorker:
     # processo de teste. Sob SQLite o lease inteiro é curto-circuitado
     # (`carga.operacao_pesada` devolve True), então nada disso aparecia.
     RECURSOS_DO_WORKER = ("django_chromium",)
+    # Leases cuja chave só existe em tempo de execução: a sessão de site do ML é
+    # `ml_site_session:<uuid da organização>`, e a organização nasce no `setUp` da
+    # própria subclasse, depois deste mixin. Um prefixo cobre isso sem que cada
+    # teste tenha de adivinhar o UUID.
+    PREFIXOS_DO_WORKER = ("ml_site_session:",)
 
     def setUp(self):
         super().setUp()
@@ -60,11 +65,23 @@ class ComoWorker:
         self._conceder_recursos()
 
     def _conceder_recursos(self):
-        if not self.RECURSOS_DO_WORKER:
+        if not self.RECURSOS_DO_WORKER and not self.PREFIXOS_DO_WORKER:
             return
         from apps.scrapers import resource_control
 
-        detidos = dict(resource_control._held_resources.get() or {})
+        prefixos = tuple(self.PREFIXOS_DO_WORKER)
+
+        class _Detidos(dict):
+            """Dict que também responde por prefixo, para as chaves dinâmicas."""
+
+            def get(self, chave, padrao=None):
+                if chave in self:
+                    return dict.get(self, chave)
+                if prefixos and str(chave).startswith(prefixos):
+                    return f"teste-{chave}"
+                return padrao
+
+        detidos = _Detidos(resource_control._held_resources.get() or {})
         maquina = set(resource_control._held_machine_resources.get() or set())
         for recurso in self.RECURSOS_DO_WORKER:
             detidos.setdefault(recurso, f"teste-{recurso}")
