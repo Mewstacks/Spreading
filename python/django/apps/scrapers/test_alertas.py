@@ -7,7 +7,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.core import mail
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from apps.scrapers.alertas import notificar_incidente
@@ -305,3 +305,66 @@ class AlertasAcionaveisDoFunilTests(TestCase):
         )
         contas = diagnosticar_alertas_pipeline_cupons()
         self.assertEqual(contas["browser_wait_over_60m"], 1)
+
+
+class CanalSemTransporteEstaDesligadoTests(SimpleTestCase):
+    """Destinatário sem SMTP é canal desligado, não canal quebrado.
+
+    `ALERTA_EMAILS` diz PARA QUEM; `EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD` dizem
+    POR ONDE. Ter só o primeiro faz o alerta ser tentado, o `send_mail` levantar,
+    e a falha virar mais um incidente — uma por tentativa.
+
+    Medido em produção em 07/09/2026: 542 ocorrências de `email_falhou` abertas,
+    afogando os incidentes reais, entre eles o `conexao_caiu` que ninguém viu.
+    """
+
+    @override_settings(
+        ALERTA_EMAILS="dono@exemplo.com",
+        EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
+        EMAIL_HOST_USER="", EMAIL_HOST_PASSWORD="",
+        ALERTA_TELEGRAM_CHAT_ID="",
+    )
+    def test_destinatario_sem_smtp_nao_e_tentado(self):
+        from apps.scrapers.alertas import _destinos
+
+        chat, emails = _destinos()
+
+        self.assertEqual(emails, [])
+        self.assertEqual(chat, "")
+
+    @override_settings(
+        ALERTA_EMAILS="dono@exemplo.com",
+        EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
+        EMAIL_HOST_USER="usuario", EMAIL_HOST_PASSWORD="senha",
+    )
+    def test_com_transporte_o_canal_volta(self):
+        from apps.scrapers.alertas import _destinos
+
+        _chat, emails = _destinos()
+
+        self.assertEqual(emails, ["dono@exemplo.com"])
+
+    @override_settings(
+        ALERTA_EMAILS="dono@exemplo.com",
+        EMAIL_BACKEND="django.core.mail.backends.console.EmailBackend",
+        EMAIL_HOST_USER="", EMAIL_HOST_PASSWORD="",
+    )
+    def test_backend_de_console_conta_como_transporte(self):
+        """Ele entrega — na tela. É o caminho de desenvolvimento."""
+        from apps.scrapers.alertas import _destinos
+
+        _chat, emails = _destinos()
+
+        self.assertEqual(emails, ["dono@exemplo.com"])
+
+    @override_settings(
+        ALERTA_EMAILS="", ALERTA_TELEGRAM_CHAT_ID="chat-123",
+        EMAIL_HOST_USER="", EMAIL_HOST_PASSWORD="",
+    )
+    def test_o_telegram_nao_depende_do_smtp(self):
+        from apps.scrapers.alertas import _destinos
+
+        chat, emails = _destinos()
+
+        self.assertEqual(chat, "chat-123")
+        self.assertEqual(emails, [])

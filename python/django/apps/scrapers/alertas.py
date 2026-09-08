@@ -60,14 +60,48 @@ def _silencio_minutos() -> int:
     return max(1, int(getattr(settings, "ALERTA_SILENCIO_MIN", 60) or 60))
 
 
+def _smtp_configurado() -> bool:
+    """Existe transporte de e-mail, ou só destinatário?
+
+    `ALERTA_EMAILS` diz PARA QUEM mandar; `EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD`
+    dizem POR ONDE. Ter só o primeiro é o pior dos dois mundos: o alerta é
+    tentado, o `send_mail` levanta, e a falha vira mais um incidente.
+
+    Medido em produção em 07/09/2026: `ALERTA_EMAILS` configurado, SMTP não, e
+    542 ocorrências de `email_falhou` abertas — afogando os incidentes de
+    verdade, entre eles o `conexao_caiu` que ninguém viu. O backend de console
+    (usado em desenvolvimento) conta como configurado: ele entrega, na tela.
+    """
+    backend = str(getattr(settings, "EMAIL_BACKEND", "") or "")
+    if "console" in backend or "locmem" in backend:
+        return True
+    return bool(
+        str(getattr(settings, "EMAIL_HOST_USER", "") or "").strip()
+        and str(getattr(settings, "EMAIL_HOST_PASSWORD", "") or "").strip()
+    )
+
+
 def _destinos():
-    """(chat_id do Telegram, lista de e-mails). Vazio = canal desligado."""
+    """(chat_id do Telegram, lista de e-mails). Vazio = canal desligado.
+
+    O e-mail só entra quando há destinatário E transporte — ver
+    `_smtp_configurado`. Um canal que não pode entregar está desligado, não
+    quebrado, e tratá-lo como quebrado gerava um incidente por tentativa.
+    """
     chat = str(getattr(settings, "ALERTA_TELEGRAM_CHAT_ID", "") or "").strip()
     emails = [
         e.strip() for e in
         str(getattr(settings, "ALERTA_EMAILS", "") or "").split(",")
         if e.strip()
     ]
+    if emails and not _smtp_configurado():
+        logger.warning(
+            "ALERTA_EMAILS tem %s destinatário(s) e não há SMTP "
+            "(EMAIL_HOST_USER/EMAIL_HOST_PASSWORD vazios): o canal de e-mail "
+            "está DESLIGADO. Os incidentes seguem só na tela de Saúde.",
+            len(emails),
+        )
+        emails = []
     return chat, emails
 
 
