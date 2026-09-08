@@ -178,6 +178,31 @@ jobs:
       # tabelas e em nenhuma das outras trinta e poucas.
       - name: Suite completa contra PostgreSQL
         run: python django/manage.py test apps.scrapers apps.accounts
+      # Quem sobrou segurando o banco de teste.
+      #
+      # A suite passa inteira e o job ainda falha no teardown do Django com
+      # `database "test_spreading" is being accessed by other users`. Uma conexao
+      # fica pendurada, e isso NAO e so chateacao de CI: e o mesmo vazamento que
+      # `organization_thread_target` existe para evitar — conexao aberta por uma
+      # thread que morreu sem devolve-la. Em produção isso acumula ate o processo
+      # reiniciar.
+      #
+      # Este passo nao conserta nada; ele nomeia o culpado. `pg_stat_activity`
+      # mostra a query e o estado da sessao sobrevivente, que e a informacao que
+      # falta para consertar a causa em vez do sintoma.
+      - name: Quem ficou segurando o banco de teste
+        if: always()
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "
+            SELECT pid, state, application_name,
+                   now() - state_change AS parado_ha,
+                   left(regexp_replace(query, '\s+', ' ', 'g'), 160) AS ultima_query
+              FROM pg_stat_activity
+             WHERE datname = 'test_spreading'
+             ORDER BY state_change;
+          " || true
 
   whatsapp:
     runs-on: ubuntu-latest
