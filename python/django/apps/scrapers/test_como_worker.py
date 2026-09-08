@@ -111,20 +111,23 @@ class OMixinPrecisaMesmoRodarTests(SimpleTestCase):
             "então o contexto de worker nunca é instalado."
         ))
 
-    def test_o_mixin_instala_o_contexto(self):
+
+class OMixinInstalaOContextoTests(ComoWorker, TestCase):
+    """A prova direta: uma classe que usa o mixin está no contexto de worker.
+
+    A versão anterior instanciava uma sonda e chamava `setUp()` na mão. Isso pula
+    `_pre_setup`, então não há conexão de teste montada — e sob PostgreSQL o
+    `system_context` consulta `pg_roles` para conferir a role. Usar o mixin de
+    verdade, na própria classe, mede a mesma coisa sem simular o runner.
+    """
+
+    def test_o_teste_roda_dentro_do_contexto_de_sistema(self):
         from apps.accounts.tenant import in_system_context
 
-        # `TestCase`, não `SimpleTestCase`: sob PostgreSQL o `system_context`
-        # consulta `pg_roles` para conferir a role, e `SimpleTestCase` bloqueia
-        # qualquer acesso ao banco.
-        class Sonda(ComoWorker, TestCase):
-            def runTest(self):
-                pass
+        self.assertTrue(in_system_context())
 
-        sonda = Sonda()
-        sonda.setUp()
-        try:
-            self.assertTrue(in_system_context())
-        finally:
-            sonda.doCleanups()
-        self.assertFalse(in_system_context())
+    def test_o_recurso_do_worker_esta_concedido(self):
+        from apps.scrapers import resource_control
+
+        detidos = resource_control._held_resources.get() or {}
+        self.assertIn("django_chromium", detidos)

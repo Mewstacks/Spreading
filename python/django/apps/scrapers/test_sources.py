@@ -274,14 +274,30 @@ class SourcePipelineTests(ComoWorker, TestCase):
         from django.db import connection
 
         if connection.vendor == "postgresql":
-            from apps.scrapers.resource_control import leased_resource
+            # A linha do lease é gravada direto, com um token que NÃO é o deste
+            # contexto: `leased_resource` é reentrante por desenho — quem já
+            # segura o recurso recebe True ao pedir de novo — então tomá-lo aqui
+            # não simularia um segundo ciclo, simularia o mesmo.
+            import uuid
+            from datetime import timedelta
 
-            with leased_resource(
-                "source_ingest:fake-source", owner_kind="source_ingest",
-            ) as (tomado, _detalhe):
-                self.assertTrue(tomado, "o lease precisa estar livre no começo")
-                with patch.dict(registry.SOURCES, {"fake-source": FakeSource()}):
-                    result = registry.run_source("fake-source")
+            from django.utils import timezone
+
+            from apps.scrapers.models import ResourceLease
+
+            agora = timezone.now()
+            ResourceLease.objects.update_or_create(
+                resource_key="source_ingest:fake-source",
+                defaults={
+                    "owner_token": uuid.uuid4().hex,
+                    "owner_kind": "source_ingest",
+                    "acquired_at": agora,
+                    "heartbeat_at": agora,
+                    "expires_at": agora + timedelta(minutes=10),
+                },
+            )
+            with patch.dict(registry.SOURCES, {"fake-source": FakeSource()}):
+                result = registry.run_source("fake-source")
         else:
             from django.core.cache import cache
 
