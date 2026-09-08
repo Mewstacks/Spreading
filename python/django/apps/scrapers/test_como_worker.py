@@ -40,11 +40,39 @@ class ComoWorker:
     está.
     """
 
+    # Recursos que o teste declara já deter. `leased_resource` e
+    # `machine_resource_slot` são REENTRANTES por desenho — um worker que já
+    # segura o Chromium não pede de novo ao entrar numa função aninhada, e é esse
+    # mesmo mecanismo que se usa aqui.
+    #
+    # Sem isto, um teste que exercita `gerar_links_em_lote` ou `mapear_ofertas`
+    # contra PostgreSQL morre em `BrowserResourceUnavailable`: o lease é uma linha
+    # em `ResourceLease` mais um flock de arquivo, nenhum dos dois concedido a um
+    # processo de teste. Sob SQLite o lease inteiro é curto-circuitado
+    # (`carga.operacao_pesada` devolve True), então nada disso aparecia.
+    RECURSOS_DO_WORKER = ("django_chromium",)
+
     def setUp(self):
         super().setUp()
         escopo = system_context()
         escopo.__enter__()
         self.addCleanup(escopo.__exit__, None, None, None)
+        self._conceder_recursos()
+
+    def _conceder_recursos(self):
+        if not self.RECURSOS_DO_WORKER:
+            return
+        from apps.scrapers import resource_control
+
+        detidos = dict(resource_control._held_resources.get() or {})
+        maquina = set(resource_control._held_machine_resources.get() or set())
+        for recurso in self.RECURSOS_DO_WORKER:
+            detidos.setdefault(recurso, f"teste-{recurso}")
+            maquina.add(recurso)
+        token = resource_control._held_resources.set(detidos)
+        token_maquina = resource_control._held_machine_resources.set(maquina)
+        self.addCleanup(resource_control._held_machine_resources.reset, token_maquina)
+        self.addCleanup(resource_control._held_resources.reset, token)
 
 
 class OMixinPrecisaMesmoRodarTests(SimpleTestCase):
