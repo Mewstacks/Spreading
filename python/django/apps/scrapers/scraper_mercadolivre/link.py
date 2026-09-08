@@ -275,8 +275,25 @@ def _linkbuilder_pronto(page) -> bool:
         botao = _botao_gerar_linkbuilder(page)
         if campo is None or botao is None:
             return False
-        if botao.is_enabled(timeout=1000):
-            return True
+        # `is_enabled` LEVANTA quando o locator não assenta no prazo — não devolve
+        # False. Sem este try, o TimeoutError subia até o `except` do fim da função
+        # e virava "não está pronto", pulando todo o fallback abaixo. Medido em
+        # produção em 08/09/2026, na conta da lules, com a página carregada e
+        # logada: o botão Gerar existe, o textarea existe, e mesmo assim
+        # `is_enabled(timeout=1000)` estourava na primeira visita porque o Andes
+        # re-renderiza o botão enquanto o React monta. Aquecida a página, a mesma
+        # chamada respondia e o veredito virava True.
+        #
+        # O estrago não ficou no scraper: `ml_conexao` usa esta mesma função para
+        # decidir se a sessão vale, então o portal era declarado indisponível e a
+        # tela pedia reconexão de uma conta que estava conectada o tempo todo.
+        # Estourar o prazo aqui significa "ainda não sei", e a resposta a não saber
+        # é seguir para o fallback, não desistir.
+        try:
+            if botao.is_enabled(timeout=1000):
+                return True
+        except Exception:
+            pass
 
         # No DOM atual o botão nasce desabilitado enquanto o textarea está vazio.
         # Exercitamos o formulário sem submeter: isto prova que os controles estão
