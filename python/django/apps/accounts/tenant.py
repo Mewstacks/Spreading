@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import threading
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -401,6 +402,8 @@ def organization_job(func):
 # os.environ é global ao processo (8 threads no gunicorn) e o `finally` de um fluxo
 # removia a permissão debaixo de outro, o que era a origem da intermitência.
 
+logger = logging.getLogger(__name__)
+
 _executor_orm: ThreadPoolExecutor | None = None
 _executor_orm_lock = threading.Lock()
 
@@ -431,6 +434,37 @@ def _obter_executor_orm() -> ThreadPoolExecutor:
                     max_workers=1, thread_name_prefix="orm-fora-do-loop",
                 )
     return _executor_orm
+
+
+def encerrar_executor_orm(timeout: float = 5.0) -> bool:
+    """Fecha o executor e a conexão que a thread dele mantém. Devolve se havia um.
+
+    A conexão persistente é o PONTO do executor em produção — está no docstring
+    acima. Ela também é a razão de o banco de teste não poder ser derrubado no fim
+    da suíte: `DROP DATABASE` falha com "is being accessed by other users", e a
+    sessão sobrevivente é justamente esta, com `set_config('app.organization_id',
+    '', false)` como última query.
+
+    O fechamento roda DENTRO da thread do executor, porque `connections` é
+    thread-local: fechar a partir de fora não alcança a conexão dela.
+
+    Isto não é para produção — lá o executor deve mesmo viver enquanto o processo
+    viver. É para quem precisa devolver o banco ao final: a suíte, e um comando
+    que queira encerrar limpo.
+    """
+    global _executor_orm
+
+    with _executor_orm_lock:
+        executor, _executor_orm = _executor_orm, None
+    if executor is None:
+        return False
+    try:
+        executor.submit(connections.close_all).result(timeout=timeout)
+    except Exception:
+        logger.warning("Não foi possível fechar a conexão do executor de ORM.",
+                       exc_info=True)
+    executor.shutdown(wait=True)
+    return True
 
 
 @contextmanager

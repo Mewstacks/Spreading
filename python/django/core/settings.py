@@ -968,3 +968,9 @@ if SENTRY_DSN:
         logging.getLogger(__name__).warning(
             "Sentry não foi inicializado (%s).", type(exc).__name__
         )
+
+
+# Encerra o executor de ORM antes de derrubar o banco de teste. Ver
+# `core/test_runner.py`: a thread persistente dele mantém uma conexão viva de
+# propósito, e era ela que fazia o `DROP DATABASE` falhar no fim da suíte.
+TEST_RUNNER = "core.test_runner.SpreadingTestRunner"
