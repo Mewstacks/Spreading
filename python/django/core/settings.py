@@ -974,3 +974,18 @@ if SENTRY_DSN:
 # `core/test_runner.py`: a thread persistente dele mantém uma conexão viva de
 # propósito, e era ela que fazia o `DROP DATABASE` falhar no fim da suíte.
 TEST_RUNNER = "core.test_runner.SpreadingTestRunner"
+
+# ─────────────────────────────────────────────────────────────
+# Limites de operação — todos por env, nenhum fixo no código
+# ─────────────────────────────────────────────────────────────
+# Estes governam quanto o sistema envia, quanto tempo ele espera e quando
+# desiste. Estavam como constante dentro do módulo, o que significa que mudá-los
+# exigia deploy. Os defaults são os mesmos de antes: nada muda de comportamento
+# ao subir esta versão, muda quem pode ajustar.
+SEND_LEASE_V2_MIN = int(os.getenv("SEND_LEASE_V2_MIN", "5"))
+MENSAGEM_ESCOPO_MAX_CHARS = int(os.getenv("MENSAGEM_ESCOPO_MAX_CHARS", "60"))
+MENSAGEM_CONDICAO_MAX_CHARS = int(os.getenv("MENSAGEM_CONDICAO_MAX_CHARS", "110"))
+CUPOM_CONTAINER_CACHE_HORAS = int(os.getenv("CUPOM_CONTAINER_CACHE_HORAS", "3"))
+CUPOM_EXIBICAO_HORAS = int(os.getenv("CUPOM_EXIBICAO_HORAS", "48"))
+AFILIADO_MAX_TENTATIVAS = int(os.getenv("AFILIADO_MAX_TENTATIVAS", "8"))
+WORKER_HEARTBEAT_STALE_S = int(os.getenv("WORKER_HEARTBEAT_STALE_S", "90"))

@@ -2741,7 +2741,7 @@ def _nome_principal_produto(nome, limite=70) -> str:
     return _sem_cauda_pendurada(cortado) or texto[:limite]
 
 
-def _condicao_legivel(texto, limite=110) -> str:
+def _condicao_legivel(texto, limite=None) -> str:
     """Condição do cupom que termina numa frase inteira, sem repetir selo.
 
     O escopo bruto do Mercado Livre repete o mesmo selo ("25% de Desconto 25% OFF
@@ -2749,6 +2749,8 @@ def _condicao_legivel(texto, limite=110) -> str:
     última oração no meio. Preferir o fim de frase e remover a repetição é o que
     faz a linha ser lida como condição, não como sobra de raspagem.
     """
+    if limite is None:
+        limite = int(getattr(settings, "MENSAGEM_CONDICAO_MAX_CHARS", 110) or 110)
     limpo = re.sub(r"\s+", " ", str(texto or "")).strip()
     if not limpo:
         return ""
@@ -3174,7 +3176,7 @@ _ESCOPO_RUIDO = re.compile(
 # Recorte de catálogo é nome curto. Passou disto, é frase de marketing — medido
 # contra os casos acima, o mais curto dos ruídos tem 19 caracteres e o mais longo
 # 78, enquanto um recorte real ("Cozinha, Mesa e Bar") cabe folgado em 60.
-_ESCOPO_MAX = 60
+_ESCOPO_MAX = int(getattr(settings, "MENSAGEM_ESCOPO_MAX_CHARS", 60) or 60)
 
 
 def _escopo_publicavel(texto: str, marketplace: str = "") -> str:

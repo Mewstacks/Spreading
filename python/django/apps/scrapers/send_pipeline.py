@@ -592,7 +592,7 @@ def reconciliar_incertos(limit=20, agora=None, consulta=None):
 # Lease do consumidor v2: `_claim_next_batch` marca `processing_v2` e usa
 # `next_retry_at` como prazo. Passado o prazo sem terminal, ou o worker morreu no
 # meio ou está preso — e é o coveiro que tem de aparecer.
-LEASE_V2_MIN = 5
+LEASE_V2_MIN = int(getattr(settings, "SEND_LEASE_V2_MIN", 5) or 5)
 
 
 def estado_da_fila(*, usuario=None, agora=None, limite=12) -> dict:

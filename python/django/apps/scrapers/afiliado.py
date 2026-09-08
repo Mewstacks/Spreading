@@ -239,7 +239,7 @@ def registrar_reprovacao(usuario, produto, motivo: str) -> None:
 # lote inteiro a cada ciclo e nenhum outro produto avançava — a pilha de "pendente"
 # que não saía mesmo com o worker rodando.
 _BACKOFF_MIN = (5, 15, 60, 180, 360)
-MAX_TENTATIVAS_ERRO = 8
+MAX_TENTATIVAS_ERRO = int(getattr(settings, "AFILIADO_MAX_TENTATIVAS", 8) or 8)
 
 
 # Causas que pertencem à CONTA (sessão do ML, Link Builder, tag ausente), nunca ao

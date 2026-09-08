@@ -30,15 +30,16 @@ from apps.scrapers.carga import (
     BrowserResourceUnavailable, ml_site_browser_resource,
 )
 from apps.scrapers.identidade_produto import link_canonico
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
-CACHE_HORAS = 3
+CACHE_HORAS = int(getattr(settings, "CUPOM_CONTAINER_CACHE_HORAS", 3) or 3)
 # O preparo volta para a fila a cada 3h, mas uma relação comprovada continua
 # exibível enquanto o próprio produto estiver dentro da janela segura do catálogo.
 # Separar as duas janelas evita que o teto do lote vire, acidentalmente, um teto de
 # cupons visíveis.
-EXIBICAO_HORAS = 48
+EXIBICAO_HORAS = int(getattr(settings, "CUPOM_EXIBICAO_HORAS", 48) or 48)
 # Espera antes de reprocessar um cupom que não rendeu nenhum produto. Sem isto o
 # preparo vazio é reagendado imediatamente e consome o lote inteiro em repetição.
 BACKOFF_VAZIO = timedelta(hours=6)

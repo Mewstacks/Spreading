@@ -36,7 +36,7 @@ _FALHA_DE_BANCO = (DatabaseError, InterfaceError)
 
 # Heartbeat: o loop grava estado a cada ~15s. Se o último estado é recente, existe
 # um worker vivo (honcho em prod, ou subprocess destacado em dev). > isto = morto.
-HEARTBEAT_STALE = 90
+HEARTBEAT_STALE = int(getattr(settings, "WORKER_HEARTBEAT_STALE_S", 90) or 90)
 
 
 def _diretorio_de_estado() -> str:
