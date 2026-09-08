@@ -13,7 +13,9 @@ from apps.scrapers.carga import coordinated_ml_browser
 from apps.scrapers.coupon_rules import (
     derivar_categoria_cupom, extrair_escopo_produtos, rotulo_anunciante,
     tem_restricao_publico)
-from apps.scrapers.scraper_mercadolivre.categorias_pagina import mapear_domain_ids
+from apps.scrapers.scraper_mercadolivre.categorias_pagina import (
+    id_do_anuncio, mapear_domain_ids,
+)
 from apps.scrapers.ml_auth import avisar_sem_sessao, storage_state
 from apps.scrapers.identidade_produto import link_canonico
 from apps.scrapers.models import (
@@ -957,9 +959,12 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
                             prod_id = m.group(1)
 
                 if prod_id:
-                    if not str(prod_id).startswith("MLB"):
-                        prod_id = f"MLB{prod_id}"
-                    categoria = categorias_por_id.get(prod_id, "DESCONHECIDO")
+                    # O payload e o card alternam MLB123/MLB-123. O mesmo
+                    # normalizador da leitura do payload evita que uma mudança
+                    # puramente de formatação apague a categoria do anúncio.
+                    prod_id = id_do_anuncio(prod_id)
+                    if prod_id:
+                        categoria = categorias_por_id.get(prod_id, "DESCONHECIDO")
 
                 bloco_preco_atual_frac = card.locator(".ui-search-price__second-line .andes-money-amount__fraction, .poly-price__current .andes-money-amount__fraction")
                 if bloco_preco_atual_frac.count() == 0:

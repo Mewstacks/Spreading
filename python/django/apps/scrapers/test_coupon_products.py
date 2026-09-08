@@ -806,28 +806,29 @@ class CouponMessageTests(SimpleTestCase):
         self.assertIn("🛒 De R$100 por R$83,54", mensagem)
         self.assertIn("➡️ https://meli.la/1GWNQCg", mensagem)
         self.assertIn("🎟 Use o cupom *PRESENTE*", mensagem)
+        self.assertIn(
+            "👉 Abra um produto acima e aplique o cupom no checkout.", mensagem
+        )
         self.assertTrue(mensagem.endswith(
-            "👉 Abra um produto acima e aplique o cupom no checkout."
+            "_ℹ Link de afiliado; posso receber comissão._"
         ))
         self.assertEqual(mensagem.count("*"), 4)
 
-    def test_cupom_inclui_chamada_ia_sem_negrito_e_nome_resumido(self):
+    def test_cupom_ignora_chamada_ia_e_usa_nome_local(self):
         from apps.scrapers.ofertas import montar_mensagem_cupom_produtos
 
         cupom, itens = self._data()
         produto = itens[0]["produto"]
         # Caches antigos podiam guardar os próprios asteriscos da IA.
         produto.frase_llm = "*BORA RENOVAR ESSE SETUP*"
-        produto.nome_llm = "Livro Chama de Ferro Capa Dura"
+        produto.nome_llm = "NOME CURTO DA IA"
 
         mensagem = montar_mensagem_cupom_produtos(cupom, itens)
 
-        self.assertTrue(mensagem.startswith(
-            "BORA RENOVAR ESSE SETUP\n\n*Cupom Mercado Livre*"
-        ))
-        self.assertNotIn("*BORA RENOVAR ESSE SETUP*", mensagem)
+        self.assertTrue(mensagem.startswith("*Cupom Mercado Livre*"))
+        self.assertNotIn("BORA RENOVAR ESSE SETUP", mensagem)
         self.assertIn("📖 Livro Chama de Ferro Capa Dura", mensagem)
-        self.assertNotIn("Brinde Exclusivo", mensagem)
+        self.assertNotIn("NOME CURTO DA IA", mensagem)
         self.assertEqual(mensagem.count("*"), 4)
 
     def test_telegram_escapa_html_e_tem_dois_negritos(self):
@@ -844,17 +845,10 @@ class CouponMessageTests(SimpleTestCase):
         self.assertIn("Livro &lt;Especial&gt; &amp; Capa dura", mensagem)
 
 
-class ProductMessageAITests(SimpleTestCase):
-    @patch("apps.scrapers.ofertas._conteudo_marketing")
-    def test_chamada_ia_nao_recebe_negrito_e_nome_curto_substitui_original(
-        self, conteudo
-    ):
+class ProductMessageTests(SimpleTestCase):
+    def test_copy_ignora_chamada_ia_e_usa_nome_curto_local(self):
         from apps.scrapers.ofertas import montar_mensagem
 
-        conteudo.return_value = {
-            "titulo": "TELA BRABA PRA JOGAR BONITO",
-            "nome_curto": "Monitor Gamer Samsung Odyssey G5 27 QHD 165Hz",
-        }
         produto = SimpleNamespace(
             nome=("Monitor Gamer Samsung Odyssey G5 27, Resolução QHD, Taxa de "
                   "atualização de 165Hz & 1ms de tempo de resposta (MPRT), "
@@ -871,11 +865,8 @@ class ProductMessageAITests(SimpleTestCase):
             produto, "https://amazon.com.br/dp/ABC?tag=teste", None
         )
 
-        self.assertTrue(mensagem.startswith(
-            "TELA BRABA PRA JOGAR BONITO\n\n"
-            "💻 *Monitor Gamer Samsung Odyssey G5 27 QHD 165Hz*"
-        ))
-        self.assertNotIn("*TELA BRABA PRA JOGAR BONITO*", mensagem)
+        self.assertTrue(mensagem.startswith("💻 *Monitor Gamer Samsung Odyssey G5 27"))
+        self.assertNotIn("TELA BRABA PRA JOGAR BONITO", mensagem)
         self.assertNotIn("Curvatura com 1000R", mensagem)
 
 

@@ -59,8 +59,8 @@ class PrecoPublicavelTests(TestCase):
         produto = self._produto()
         texto = montar_mensagem(produto, "https://link", None)
 
-        self.assertIn("POR 90", texto)
-        self.assertNotIn("POR 100", texto)
+        self.assertIn("POR R$ 90", texto)
+        self.assertNotIn("POR R$ 100", texto)
         # O "DE" continua sendo a referência da vitrine riscada.
         self.assertIn("120", texto)
         self.assertIn("CUPOM: ative na Amazon — o preço já é com ele", texto)
@@ -70,8 +70,25 @@ class PrecoPublicavelTests(TestCase):
             preco_efetivo=0, evidencia={}, fonte="amazon-creators-api",
         )
         texto = montar_mensagem(produto, "https://link", None)
-        self.assertIn("POR 100", texto)
+        self.assertIn("POR R$ 100", texto)
         self.assertNotIn("CUPOM", texto)
+
+    def test_copy_canonica_usa_fatos_e_nao_reaproveita_hype_da_ia(self):
+        produto = self._produto(
+            frete_full=True,
+            nome_llm="NOME DA IA QUE NAO PODE SUBSTITUIR O PRODUTO",
+            frase_llm="MENOR PRECO HISTORICO! ULTIMAS UNIDADES!",
+        )
+
+        texto = montar_mensagem(produto, "https://link", None)
+
+        self.assertIn("Cafeteira Expresso", texto)
+        self.assertIn("Frete grátis", texto)
+        self.assertIn("Ver oferta na loja", texto)
+        self.assertIn("Link de afiliado; posso receber comissão.", texto)
+        self.assertNotIn("MENOR PRECO HISTORICO", texto)
+        self.assertNotIn("ULTIMAS UNIDADES", texto)
+        self.assertNotIn("NOME DA IA", texto)
 
 
 class ParidadeTelaMensagemTests(TestCase):
@@ -152,7 +169,7 @@ class MensagemDeProdutoDeCupomMLTests(TestCase):
 
         texto = montar_mensagem(produto, "https://meli.la/abc", cupom)
 
-        self.assertIn("POR 100", texto)
+        self.assertIn("POR R$ 100", texto)
         self.assertIn("DE ", texto)          # 250, o preço de lista
         self.assertIn("250", texto)
         self.assertIn("CUPOM: ative no link", texto)
@@ -183,8 +200,8 @@ class MensagemDeProdutoDeCupomMLTests(TestCase):
 
         texto = montar_mensagem(produto, "https://meli.la/camera", None)
 
-        self.assertIn("POR 98,77", texto)
-        self.assertNotIn("POR 113,74", texto)
+        self.assertIn("POR R$ 98,77", texto)
+        self.assertNotIn("POR R$ 113,74", texto)
         self.assertIn("CUPOM: ative no Mercado Livre — o preço já é com ele", texto)
 
     def test_preco_efetivo_ml_sem_prova_direta_nao_e_publicado(self):
@@ -198,7 +215,7 @@ class MensagemDeProdutoDeCupomMLTests(TestCase):
 
         texto = montar_mensagem(produto, "https://meli.la/camera", None)
 
-        self.assertIn("POR 113,74", texto)
+        self.assertIn("POR R$ 113,74", texto)
         self.assertNotIn("CUPOM: ative no Mercado Livre — o preço já é com ele", texto)
 
 

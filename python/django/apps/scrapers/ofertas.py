@@ -789,7 +789,7 @@ def _linha_checagem_cupom(cupom, itens=None) -> str:
 
 
 def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None,
-                          escopo_override=None) -> str:
+                          escopo_override=None, divulgacao_afiliado=None) -> str:
     """Monta o texto de divulgação de um cupom (CupomNormalizado) p/ envio manual.
 
     Usa o `Markup` do canal e os dados de `cupom.regras` (valor_desconto/discount_num,
@@ -888,6 +888,12 @@ def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None,
         # página" não dizia o que fazer depois do clique e aumentava a chance de
         # a pessoa abandonar antes do checkout.
         linhas += ["", f"👉 {m.bold(esc(acao))}", f"➡️ {esc(link)}"]
+
+    disclosure = str(
+        divulgacao_afiliado or "ℹ Link de afiliado; posso receber comissão."
+    ).strip()
+    if disclosure:
+        linhas += ["", m.italic(esc(disclosure))]
 
     return "\n".join(linhas)
 
@@ -1242,7 +1248,8 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
     return itens, bloqueio
 
 
-def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
+def montar_mensagem_cupom_produtos(cupom, itens, markup=None,
+                                   divulgacao_afiliado=None) -> str:
     """Mensagem de cupom no formato pedido pela cliente: cabeçalho + lista de produtos.
 
         *Cupom ⚡️ Mercado Livre*
@@ -1264,16 +1271,6 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
 
     loja = _nome_loja(getattr(cupom, "marketplace", ""), cupom=cupom)
     linhas = []
-    titulo_ia = (
-        _texto_ia_sem_formatacao(
-            getattr(itens[0]["produto"], "frase_llm", ""), 80
-        )
-        if itens else ""
-    )
-    if titulo_ia:
-        # A chamada da IA é propositalmente texto puro; cabeçalho/código mantêm
-        # o destaque próprio da mensagem de cupom.
-        linhas += [esc(titulo_ia), ""]
     cabecalho = (
         f"Cupom relâmpago ⚡️ {esc(loja)}"
         if getattr(cupom, "relampago", False)
@@ -1294,8 +1291,8 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
         por_val = getattr(relacao, "preco_final", None)
         if por_val is None:
             por_val = p.preco_com_cupom
-        nome = getattr(p, "nome_llm", "") or _nome_principal_produto(p.nome)
-        linhas.append(f"{_emoji_produto(p)} {esc(_nome_principal_produto(nome))}")
+        nome = _nome_principal_produto(p.nome)
+        linhas.append(f"{_emoji_produto(p)} {esc(nome)}")
         de = _preco_br(de_val)
         por = _preco_br(por_val)
         linhas.append(f"🛒 De R${de} por R${por}")
@@ -1324,6 +1321,11 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None) -> str:
     checagem = _linha_checagem_cupom(cupom, itens)
     if checagem:
         linhas.append(f"🔎 {esc(checagem)}")
+    disclosure = str(
+        divulgacao_afiliado or "ℹ Link de afiliado; posso receber comissão."
+    ).strip()
+    if disclosure:
+        linhas += ["", m.italic(esc(disclosure))]
     return "\n".join(linhas).strip()
 
 
@@ -1462,10 +1464,8 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
 
     m = markup or WhatsAppMarkup()
     esc = m.escape
-    texto_ia = texto_ia or {}
     produto = deal.produto
     perfil = getattr(usuario, "perfil", None) if usuario else None
-    conteudo_ia = _conteudo_marketing(produto)
 
     marca = (
         getattr(configuracao, "nome_marca", "")
@@ -1473,25 +1473,15 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
     ).strip()
     cta = (
         getattr(configuracao, "chamada_acao", "")
-        or getattr(perfil, "chamada_acao", "") or "Compre aqui"
+        or getattr(perfil, "chamada_acao", "") or "Ver oferta na loja"
     ).strip()
 
     linhas = []
     if getattr(produto, "relampago", False) or getattr(deal.cupom, "relampago", False):
         linhas += [m.bold("⚡ OFERTA RELÂMPAGO"), ""]
 
-    titulo = (conteudo_ia.get("titulo") or "").strip()
-    if titulo:
-        linhas += [esc(titulo), ""]
-
-    nome = (getattr(produto, "nome_llm", "") or "").strip() or (
-        conteudo_ia.get("nome_curto")
-        or _nome_principal_produto(getattr(produto, "nome", ""), limite=72))
+    nome = _nome_principal_produto(getattr(produto, "nome", ""), limite=72)
     linhas.append(f"{_emoji_produto(produto)} {m.bold(esc(nome))}")
-
-    frase = _frase_acrescenta(texto_ia.get("linha") or "", nome)
-    if frase:
-        linhas.append(esc(frase))
     linhas.append("")
 
     # Frete grátis é argumento de compra, não detalhe: os canais que convertem
@@ -1570,10 +1560,11 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
         linhas += ["", m.italic(esc(marca))]
     disclosure = (
         getattr(configuracao, "divulgacao_afiliado", "")
-        or getattr(perfil, "divulgacao_afiliado", "") or ""
+        or getattr(perfil, "divulgacao_afiliado", "")
+        or "ℹ Link de afiliado; posso receber comissão."
     ).strip()
     if disclosure:
-        linhas.append(esc(disclosure))
+        linhas.append(m.italic(esc(disclosure)))
     return "\n".join(linhas).strip()
 
 
@@ -2182,6 +2173,10 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
             mensagem = montar_mensagem_cupom(
                 cupom, link_afiliado=link_registro, markup=sender.markup,
                 escopo_override=avaliacao_ia["escopo_legivel"],
+                divulgacao_afiliado=(
+                    getattr(configuracao, "divulgacao_afiliado", "")
+                    or getattr(getattr(usuario, "perfil", None), "divulgacao_afiliado", "")
+                ),
             )
             if imagem_b64_custom:
                 img_kwargs = {
@@ -2202,12 +2197,15 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 return falhar("Os preços deste cupom mudaram; nenhum produto "
                               "continua dentro das regras dele.", classe="transitorio")
         if not aviso_sem_produto and itens_cupom:
-            _preparar_conteudo_ia_cupom(itens_cupom)
             # Telegram limita legendas de foto a 1024 caracteres. Como a regra e
             # "ate 9", remove os itens de menor prioridade ate a mensagem caber.
             if canal == "telegram":
                 while len(itens_cupom) > 1 and len(montar_mensagem_cupom_produtos(
-                        cupom, itens_cupom, markup=sender.markup)) > 1024:
+                        cupom, itens_cupom, markup=sender.markup,
+                        divulgacao_afiliado=(
+                            getattr(configuracao, "divulgacao_afiliado", "")
+                            or getattr(getattr(usuario, "perfil", None), "divulgacao_afiliado", "")
+                        ))) > 1024:
                     itens_cupom.pop()
             from apps.scrapers.colagem import montar_colagem_itens
             colagem_b64, colagem_mime, itens_cupom = montar_colagem_itens(itens_cupom)
@@ -2215,7 +2213,11 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 return falhar("Nenhuma foto válida foi encontrada para os produtos do cupom.",
                               classe="transitorio")
             mensagem = montar_mensagem_cupom_produtos(
-                cupom, itens_cupom, markup=sender.markup)
+                cupom, itens_cupom, markup=sender.markup,
+                divulgacao_afiliado=(
+                    getattr(configuracao, "divulgacao_afiliado", "")
+                    or getattr(getattr(usuario, "perfil", None), "divulgacao_afiliado", "")
+                ))
             link_registro = itens_cupom[0]["link"]
             img_kwargs = {"imagem_b64": colagem_b64, "mimetype": colagem_mime}
         elif not aviso_sem_produto and bloqueio_afiliacao:
@@ -2977,8 +2979,9 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     Monta o texto da oferta usando o `Markup` do canal (WhatsApp *neg*, Telegram <b>).
     Conteúdo dinâmico passa por markup.escape p/ não quebrar HTML do Telegram.
 
-    Formato curto (modelo dos grupos): título da IA em caixa alta, produto, preço
-    DE|POR, cupom (quando há código publicável) e link.
+    Formato de curadoria direta: foto enviada pelo sender, nome curto, informação
+    factual, preço, cupom, condição e um CTA. O texto não depende de IA: envio sem
+    crédito continua tão completo e honesto quanto o envio enriquecido.
     """
     from apps.scrapers.senders.base import WhatsAppMarkup
     m = markup or WhatsAppMarkup()
@@ -2994,38 +2997,24 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     ).strip()
     cta = (
         getattr(configuracao, "chamada_acao", "")
-        or getattr(perfil, "chamada_acao", "") or "Compre aqui"
+        or getattr(perfil, "chamada_acao", "") or "Ver oferta na loja"
     ).strip()
     disclosure = (
         getattr(configuracao, "divulgacao_afiliado", "")
-        or getattr(perfil, "divulgacao_afiliado", "") or ""
+        or getattr(perfil, "divulgacao_afiliado", "")
+        or "ℹ Link de afiliado; posso receber comissão."
     ).strip()
     template = (
         getattr(configuracao, "template_b" if variante == "B" else "template_a", "")
         or getattr(perfil, "template_b" if variante == "B" else "template_a", "")
     )
-    conteudo_ia = _conteudo_marketing(produto)
-    nome_exibicao = (
-        conteudo_ia.get("nome_curto") or _nome_principal_produto(produto.nome)
-    )
+    # Templates livres não podem remover preço, cupom, condições ou transparência.
+    # Mantemos os campos no banco para não quebrar configurações existentes, mas o
+    # corpo publicado é sempre o canônico abaixo. Marca e CTA continuam configuráveis.
     if template:
-        desconto_coerente_template = (
-            0 < desconto_percent < 90
-            and produto.preco_sem_desconto > preco_final
-            and _desconto_comprovado(produto, preco_final)
-        )
-        try:
-            return template.format(
-                marca=esc(marca), nome=esc(nome_exibicao),
-                preco=esc(f"R$ {_preco_br(preco_final)}"),
-                desconto=esc(
-                    f"{desconto_percent:.0f}%" if desconto_coerente_template else ""
-                ),
-                link=esc(link_afiliado), cta=esc(cta),
-                divulgacao_afiliado=esc(disclosure),
-            )
-        except (KeyError, ValueError):
-            pass
+        logger.info("Template livre ignorado na mensagem canônica da configuração %s.",
+                    getattr(configuracao, "pk", "conta"))
+    nome_exibicao = _nome_principal_produto(produto.nome)
 
     # Blocos separados por linha em branco, no estilo dos grupos:
     #   TÍTULO
@@ -3037,12 +3026,12 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     linhas = []
     if getattr(produto, "relampago", False):
         linhas += [m.bold("⚡ OFERTA RELÂMPAGO"), ""]
-    # Título da IA (frase_llm) em caixa alta, no topo — a "chamada" do grupo.
-    titulo = conteudo_ia.get("titulo", "")
-    if titulo:
-        linhas += [esc(titulo), ""]
-
-    linhas += [f"{_emoji_produto(produto)} {m.bold(esc(nome_exibicao))}", ""]
+    linhas.append(f"{_emoji_produto(produto)} {m.bold(esc(nome_exibicao))}")
+    # Frete grátis é um benefício factual que a coleta já confirmou; não há
+    # promessa de estoque, histórico ou urgência inventada.
+    if getattr(produto, "frete_full", False):
+        linhas.append("📦 Frete grátis")
+    linhas.append("")
 
     # Guarda final: desconto >= 90% (ou "De:" <= "Por:") indica preço corrompido
     # (ex.: savingBasis em escala errada). Em vez de imprimir "100% OFF" absurdo,
@@ -3067,9 +3056,11 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     por = _preco_br(preco_final)
     if desconto_valido:
         de = _preco_br(produto.preco_sem_desconto)
-        linhas.append(f"🔥 DE {m.strike(de)} | {m.bold(f'POR {por}')}")
+        linhas.append(
+            f"🔥 DE {m.strike('R$ ' + de)} | {m.bold(f'POR R$ {por}')} "
+            f"(-{desconto_percent:.0f}%)")
     else:
-        linhas.append(f"🔥 {m.bold(f'POR {por}')}")
+        linhas.append(f"🔥 {m.bold(f'POR R$ {por}')}")
 
     # REGRA: cupons NÃO acumulam no ML. Cada item anuncia no máximo UM cupom.
     # Prioridade: cupom do link (cupom_pai) > código do próprio item (codigo_checkout)
@@ -3901,21 +3892,12 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                 "variante", "link_afiliado", "link_rastreado", "cupom",
                 "preco_final", "preco_original"])
         if deal is not None:
-            # Uma chamada de IA por tentativa REAL de envio, não por item de
-            # catálogo — mesmo critério de `avaliar_cupom_ia`. Falha degrada para
-            # texto vazio: preço, cupom e prova continuam impressos pelo código.
-            from apps.scrapers.llm import gerar_texto_deal
-            texto_ia = gerar_texto_deal(
-                nome=getattr(produto, "nome", ""),
-                categoria=getattr(produto, "macro_categoria", "")
-                or getattr(produto, "categoria", "") or "",
-                motivo=_motivo_publicavel(deal),
-                tem_cupom=bool(getattr(deal, "cupom", None)),
-                **_fatos_do_deal(deal),
-            )
+            # Copy de envio precisa ser reproduzível mesmo sem crédito/latência da
+            # IA. A seleção pode usar sinais ricos; a mensagem é sempre montada dos
+            # fatos que acabaram de passar pela revalidação.
             mensagem = _executar_orm(
                 montar_mensagem_deal, deal, link_publicado,
-                markup=sender.markup, texto_ia=texto_ia, usuario=usuario,
+                markup=sender.markup, usuario=usuario,
                 configuracao=configuracao)
         else:
             mensagem = _executar_orm(

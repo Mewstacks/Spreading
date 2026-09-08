@@ -628,7 +628,7 @@ def amazon_painel(request):
 
 
 def configurar_conta(request):
-    """Conta do afiliado: plano, identidade de publicação, templates e resumo
+    """Conta do afiliado: plano, identidade de publicação e resumo
     das integrações. A configuração da Amazon mora na página própria da
     integração (scraper-amazon); a sessão ML é conectada em Conexão Mercado
     Livre. Cada usuário configura a PRÓPRIA conta (multi-tenant)."""
@@ -640,10 +640,8 @@ def configurar_conta(request):
         perfil.divulgacao_afiliado = (
             request.POST.get("divulgacao_afiliado") or perfil.divulgacao_afiliado
         ).strip()[:180]
-        perfil.template_a = (request.POST.get("template_a") or "").strip()
-        perfil.template_b = (request.POST.get("template_b") or "").strip()
         perfil.save(update_fields=["nome_marca", "tom_marca", "chamada_acao",
-                                   "divulgacao_afiliado", "template_a", "template_b"])
+                                   "divulgacao_afiliado"])
         messages.success(request, "Conta atualizada.")
         return redirect("scraper-conta")
 
@@ -1776,13 +1774,11 @@ def configuracoes(request):
                 min_desconto_percent=desconto,
                 max_envios_dia=max_envios_dia,
                 pausar_apos_falhas=pausar_apos_falhas,
-                variante_template=(request.POST.get("variante_template") or "alternar"),
+                variante_template="alternar",
                 nome_marca=(request.POST.get("nome_marca") or "").strip()[:80],
                 tom_marca=(request.POST.get("tom_marca") or "").strip()[:20],
                 chamada_acao=(request.POST.get("chamada_acao") or "").strip()[:120],
                 divulgacao_afiliado=(request.POST.get("divulgacao_afiliado") or "").strip()[:180],
-                template_a=(request.POST.get("template_a") or "").strip(),
-                template_b=(request.POST.get("template_b") or "").strip(),
                 incluir_restritos=bool(request.POST.get("incluir_restritos")),
                 incluir_sem_desconto=bool(request.POST.get("incluir_sem_desconto")),
                 ativo=bool(request.POST.get("ativo")),

@@ -356,10 +356,8 @@
             <div><label>Nome da marca</label><input name="nome_marca" placeholder="{{ perfil.nome_marca }}"></div>
             <div><label>Tom</label><select name="tom_marca"><option value="">Padrão da conta</option><option value="direto">Direto</option><option value="amigavel">Amigável</option><option value="premium">Premium</option><option value="urgente">Urgente, sem falsa escassez</option></select></div>
             <div><label>Chamada para ação</label><input name="chamada_acao" placeholder="{{ perfil.chamada_acao }}"></div>
-            <div><label>Variação de mensagem</label><select name="variante_template"><option value="alternar">Alternar entre A e B</option><option value="A">Somente A</option><option value="B">Somente B</option></select></div>
             <div style="grid-column:1/-1;"><label>Divulgação de afiliado</label><input name="divulgacao_afiliado" placeholder="{{ perfil.divulgacao_afiliado }}"></div>
-            <div style="grid-column:1/-1;"><label>Template A (opcional)</label><textarea name="template_a" rows="3" placeholder="{marca}&#10;{nome} — {preco} ({desconto})&#10;{link}"></textarea></div>
-            <div style="grid-column:1/-1;"><label>Template B (opcional)</label><textarea name="template_b" rows="3" placeholder="Variáveis: {marca}, {nome}, {preco}, {desconto}, {link}"></textarea></div>
+            <p class="help" style="grid-column:1/-1;margin:0;">A mensagem publicada segue o padrão de curadoria direta: nome, preço comprovado, cupom ou condição, CTA, link e transparência. Marca, chamada para ação e divulgação acima podem ser personalizadas; os campos obrigatórios não podem ser removidos.</p>
           </div>
         </div>
       </details>

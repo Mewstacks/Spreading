@@ -52,23 +52,8 @@
       </div>
 
       <div class="form-section">
-        <div class="fs-title"><i data-lucide="layout-template"></i> Templates de mensagem <span class="muted" style="font-weight:400;">· opcionais — em branco, usa o padrão do Spreading</span></div>
-        <div class="tpl-vars">
-          <span class="tech-tag">{marca}</span>
-          <span class="tech-tag">{nome}</span>
-          <span class="tech-tag">{preco}</span>
-          <span class="tech-tag">{desconto}</span>
-          <span class="tech-tag">{link}</span>
-        </div>
-        <div class="tpl-field">
-          <label>Template A</label>
-          <textarea class="tpl" name="template_a" rows="4" placeholder="{marca} — {nome} — {preco} — {desconto} — {link}">{{ perfil.template_a }}</textarea>
-        </div>
-        <div class="tpl-field">
-          <label>Template B</label>
-          <textarea class="tpl" name="template_b" rows="4">{{ perfil.template_b }}</textarea>
-          <span class="help">Usado para variar as mensagens e reduzir repetição nos grupos.</span>
-        </div>
+        <div class="fs-title"><i data-lucide="shield-check" aria-hidden="true"></i> Padrão de mensagem</div>
+        <p class="help" style="margin:0;">Toda publicação usa uma estrutura fixa e verificável: nome do produto, preço comprovado, cupom ou condição quando existir, CTA, link e transparência de afiliado. Isso evita mensagens sem preço, cupom, condição ou aviso de comissão. Personalize a marca, a chamada para ação e a divulgação acima.</p>
       </div>
 
       <div class="form-actions">

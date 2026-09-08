@@ -28,7 +28,19 @@ SELETOR_PAYLOAD = "#__NORDIC_RENDERING_CTX__"
 MARCADOR_INICIO = "_n.ctx.r="
 MARCADOR_FIM = ";_n.ctx.r.assets"
 
-_MLB = re.compile(r"MLB[A-Z]?\d+")
+_MLB = re.compile(r"MLB-?[A-Z]?\d+", re.I)
+
+
+def _id_ml(valor) -> str:
+    """Identificador de anúncio num formato único para casar página e card.
+
+    O payload do ML alterna ``MLB123`` e ``MLB-123`` (e, em alguns componentes,
+    usa o mesmo identificador em ``product_id`` em vez de ``id``). A URL do card
+    não conserva essa escolha de formatação, portanto o mapa precisa normalizar
+    antes de ser usado pelo coletor.
+    """
+    achado = _MLB.search(str(valor or ""))
+    return achado.group(0).upper().replace("-", "") if achado else ""
 
 
 def id_do_anuncio(link) -> str:
@@ -37,8 +49,7 @@ def id_do_anuncio(link) -> str:
     Serve para casar o card com o mapa de `mapear_domain_ids`. O link já chega
     normalizado por `_normalizar_link_produto`, que preserva o item MLB.
     """
-    achado = _MLB.search(str(link or ""))
-    return achado.group(0) if achado else ""
+    return _id_ml(link)
 
 
 def _coletar(obj, item_para_cat, produto_para_item):
@@ -48,17 +59,23 @@ def _coletar(obj, item_para_cat, produto_para_item):
     `catalog_product_id` apontando para o `item_id` real — daí os dois mapas.
     """
     if isinstance(obj, dict):
-        domain_id = obj.get("domain_id", "")
+        domain_id = str(obj.get("domain_id") or "")
         if domain_id:
-            item_id = obj.get("id")
-            if item_id and _MLB.match(str(item_id)):
-                item_para_cat[str(item_id)] = str(domain_id).replace("MLB-", "")
+            # O payload continuou trazendo ``domain_id``, mas a identidade deixou
+            # de aparecer só em ``id``. Registrar as chaves que carregam um MLB
+            # preserva o sinal oficial sem adivinhar categoria pelo título.
+            for chave in ("id", "item_id", "product_id", "catalog_product_id"):
+                identificador = _id_ml(obj.get(chave))
+                if identificador:
+                    item_para_cat[identificador] = domain_id.replace("MLB-", "")
 
         item_id_ref = obj.get("item_id")
         for chave in ("product_id", "catalog_product_id"):
             apelido = obj.get(chave)
-            if apelido and item_id_ref and _MLB.match(str(apelido)):
-                produto_para_item[str(apelido)] = str(item_id_ref)
+            produto_id = _id_ml(apelido)
+            item_id = _id_ml(item_id_ref)
+            if produto_id and item_id:
+                produto_para_item[produto_id] = item_id
 
         for valor in obj.values():
             _coletar(valor, item_para_cat, produto_para_item)

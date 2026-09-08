@@ -1967,6 +1967,31 @@ class ConfiguracaoValidationTests(TestCase):
         self.assertRedirects(response, self.url)
         self.assertFalse(self.user.configuracoes.exists())
 
+    def test_edicao_nao_apaga_template_legado_que_nao_sera_publicado(self):
+        """Remover o campo da tela não deve alterar um dado legado em silêncio."""
+        cfg = ConfiguracaoEnvio.objects.create(
+            owner=self.user, canal="whatsapp", grupo_id="123@g.us",
+            template_a="{nome} {link}", template_b="{preco}",
+        )
+
+        response = self.client.post(self.url, {
+            "id": str(cfg.id), "canal": "whatsapp", "grupo_id": "123@g.us",
+            "intervalo_minutos": "60", "min_desconto_percent": "15",
+        })
+
+        self.assertRedirects(response, self.url)
+        cfg.refresh_from_db()
+        self.assertEqual(cfg.template_a, "{nome} {link}")
+        self.assertEqual(cfg.template_b, "{preco}")
+
+    def test_telas_explicam_o_padrao_canonico_sem_editor_de_template(self):
+        regras = self.client.get(self.url)
+        conta = self.client.get(reverse("scraper-conta"))
+
+        self.assertContains(regras, "padrão de curadoria direta")
+        self.assertContains(conta, "Padrão de mensagem")
+        self.assertNotContains(conta, "Template A")
+
 
 class TopPromocoesFilterTests(TestCase):
     def setUp(self):
@@ -2883,14 +2908,14 @@ class AttributionWorkflowTests(TestCase):
         self.assertNotIn("OFERTA RELÂMPAGO", comum)
         self.assertIn("OFERTA RELÂMPAGO", relampago)
 
-    def test_default_affiliate_disclosure_is_not_added_to_messages(self):
+    def test_default_affiliate_disclosure_is_always_added_to_messages(self):
         from apps.scrapers.ofertas import montar_mensagem
 
         message = montar_mensagem(
             self.product, "https://example.com/a", None, usuario=self.user,
         )
 
-        self.assertNotIn("Este conteúdo contém link de afiliado.", message)
+        self.assertIn("Link de afiliado; posso receber comissão.", message)
 
     @override_settings(DEBUG=False, PUBLIC_BASE_URL="https://spreading.example")
     def test_mensagem_leva_o_link_direto_da_loja_mesmo_em_producao(self):
@@ -6542,6 +6567,7 @@ class MensagemCupomTests(SimpleTestCase):
         self.assertIn("Fonte checada em", mensagem)
         self.assertIn("Abra a loja e aplique o cupom no checkout:", mensagem)
         self.assertNotIn("Clique no link e navegue", mensagem)
+        self.assertIn("Link de afiliado; posso receber comissão.", mensagem)
 
     def test_relampago_real_recebe_selo(self):
         from apps.scrapers.ofertas import montar_mensagem_cupom
@@ -6639,6 +6665,7 @@ class MensagemCupomTests(SimpleTestCase):
         self.assertIn("PROMO20", mensagem)
         self.assertIn("limitado a R$ 60", mensagem)
         self.assertIn("a=1&amp;b=2", mensagem)
+        self.assertIn("<i>ℹ Link de afiliado; posso receber comissão.</i>", mensagem)
 
     def test_json_malformado_nao_levanta(self):
         from apps.scrapers.ofertas import montar_mensagem_cupom

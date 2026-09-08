@@ -363,6 +363,30 @@ class MLPaginaCategoriaTests(SimpleTestCase):
         mapa = mapear_domain_ids(page)
         self.assertEqual(mapa["MLB777"], "CELLPHONES")
 
+    def test_payload_atual_com_item_id_hifenizado_preserva_domain_id(self):
+        """Fixture do payload observado em produção em 08/09/2026.
+
+        O componente passou a trazer a chave do card em ``item_id`` e hifenada,
+        em vez do antigo ``id``. A categoria oficial ainda existe e não pode ser
+        descartada por uma diferença apenas de representação.
+        """
+        from apps.scrapers.scraper_mercadolivre.categorias_pagina import (
+            id_do_anuncio, mapear_domain_ids,
+        )
+
+        page = self._page(self._payload(
+            '{"search":{"items":[{"item_id":"MLB-123456789",'
+            '"product_id":"MLB-A123456789",'
+            '"domain_id":"MLB-VACUUM_CLEANERS"}]}}'))
+
+        mapa = mapear_domain_ids(page)
+        self.assertEqual(mapa["MLB123456789"], "VACUUM_CLEANERS")
+        self.assertEqual(mapa["MLBA123456789"], "VACUUM_CLEANERS")
+        self.assertEqual(
+            id_do_anuncio("https://produto.mercadolivre.com.br/MLB-123456789"),
+            "MLB123456789",
+        )
+
     def test_script_ausente_avisa_em_vez_de_falhar_calado(self):
         """Era o `except Exception: pass`: o catálogo inteiro ia a DESCONHECIDO
         e não sobrava nada no log apontando para a leitura de categoria."""

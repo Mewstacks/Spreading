@@ -1269,7 +1269,7 @@ class SemCreditoDeIAAMensagemContinuaInteiraTests(BaseDeals):
         self.assertIn("DE ~R$ 160~", texto)          # âncora medida
         self.assertIn("(-50%)", texto)               # percentual
         self.assertIn("CUPOM: PRESENTE", texto)      # cupom
-        self.assertIn("Compre aqui", texto)          # CTA
+        self.assertIn("Compre aqui", texto)          # CTA configurado
         self.assertIn("https://meli.la/abc", texto)  # link
 
     def test_o_nome_cru_do_marketplace_e_aparado_sem_ia(self):

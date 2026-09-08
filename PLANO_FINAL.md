@@ -410,3 +410,53 @@ Unlocker, mas é conta nova em nome do dono.
   lugares), reentrância de lease negada, RLS meio ligado por migração.
 - Produtos: 64.152 no total, 2.335 frescos no ML e 1.464 na Amazon. Sete das
   esteiras vivas, 30 fontes de ingestão habilitadas.
+
+---
+
+## Fechamento de produção — critérios objetivos (08/09/2026)
+
+**Meta operacional:** a conta `lules` só é considerada apta a publicar em grupos
+reais quando todos os portões abaixo forem verdes. “Hoje” significa liberar uma
+operação controlada depois do canário; o acompanhamento de sete dias continua
+necessário para chamar a operação de estável, não é licença para publicar sem
+prova.
+
+1. **Copy canônica e honesta.** WhatsApp e Telegram devem publicar foto, nome
+   determinístico, benefício factual, `DE / POR / percentual` apenas quando há
+   histórico comprovado, um único cupom/condição, CTA, link e transparência de
+   afiliado. Não dependem de Anthropic e não podem afirmar menor preço histórico,
+   estoque escasso ou urgência sem evidência.
+2. **Catálogo classificado.** Em uma rodada real, pelo menos 95% dos candidatos
+   elegíveis precisam ter macro-categoria. Uma coleta sem `domain_id` não pode
+   apagar categoria ou macro já persistida; a classificação local é o fallback.
+3. **Cupons dos nichos da Lu.** Cada regra ativa da `lules` para aspiradores e
+   limpeza, eletrodomésticos, cozinha e casa deve atingir a meta de cobertura e a
+   meta de cupons (`DEAL_COBERTURA_META_CUPOM_DIA`, padrão 3). Volume de ofertas
+   sem cupom reprova a regra.
+4. **Preço e entrega.** Todo item é revalidado antes do envio; divergência ou
+   revalidação inconclusiva bloqueia a publicação. Uma `operation_id` produz no
+   máximo uma mensagem confirmada.
+5. **Canário privado.** Para cada destino configurado, validar imagem, leitura em
+   celular, preço igual ao site, link clicável, cupom/ativação aplicável e o texto
+   no markup do canal. O canário read-only não substitui o envio privado aprovado.
+6. **Operação observável.** Web, worker e WhatsApp saudáveis; alertas têm transporte
+   e destinatário reais; não há regra ativa apontando para grupo de teste; Telegram
+   permanece pronto como contingência.
+7. **ML e custo.** O desbloqueador para PDP/container só pode ser ligado após o
+   dono confirmar conta, teto gratuito ou custo e ausência de cobrança automática.
+   Sem ele, a publicação de itens cujo preço não puder ser revalidado continua
+   corretamente bloqueada.
+
+### Estado da implementação desta rodada
+
+- Copy passou a ser determinística e canônica, inclusive para deals e cupons;
+  templates livres não podem omitir informação obrigatória. Anthropic ficou fora
+  do caminho crítico de publicação.
+- O parser do payload atual do Mercado Livre aceita `MLB-…`, `item_id` e
+  `product_id`, e o caminho de cupom também normaliza a chave do card. Há fixture
+  da regressão observada em 08/09.
+- A cobertura por nicho já conta cupons, não apenas ofertas; as metas passam a
+  ser o gate da conta `lules`.
+- Ainda depende do dono da conta: IDs dos grupos reais, canal de alerta e a
+  decisão explícita sobre o desbloqueador ML. Esses três itens não podem ser
+  inferidos nem ativados com segurança pelo código.
