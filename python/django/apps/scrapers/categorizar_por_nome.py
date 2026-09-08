@@ -61,7 +61,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "notebook", "laptop", "computador", "desktop", "monitor", "teclado",
         "mouse", "mousepad", "impressora", "roteador", "modem", "pendrive",
         "ssd", "hd externo", "memoria ram", "placa de video", "processador",
-        "webcam", "tablet", "estabilizador", "nobreak", "cabo hdmi",
+        "webcam", "tablet", "estabilizador", "nobreak", "cabo hdmi", "starlink",
     ),
     "Áudio, Vídeo e Fotografia": (
         "caixa de som", "soundbar", "fone bluetooth", "headset", "headphone",
@@ -75,6 +75,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "lava e seca", "maquina de lavar", "extratora",
         ("aspirador", 3),
         "cafeteira", "sanduicheira", "forno eletrico", "purificador", "bebedouro", "ferro de passar",
+        "panificadora", "tanquinho", "sorveteira", "mixer", "dreame",
     ),
     "Climatização e Aquecimento": (
         "ar condicionado", "ventilador", "climatizador", "aquecedor",
@@ -84,31 +85,37 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "sofa", "poltrona", "cadeira", "mesa", "estante", "armario", "guarda roupa",
         "colchao", "travesseiro", "edredom", "lencol", "cortina", "tapete",
         "toalha", "almofada", "quadro decorativo", "espelho", "luminaria",
-        "abajur", "criado mudo", "rack", "painel de tv", "cabideiro",
+        "abajur", "criado mudo", "rack", "painel de tv", "cabideiro", "banqueta",
+        "mesa de cabeceira", "lixeira", "manta", "paneleiro", "difusor de ambiente",
         "aromatizador", "home spray",
     ),
     "Cozinha, Mesa e Bar": (
         "panela", "frigideira", "talher", "talheres", "prato", "copo", "taca",
         "caneca", "garrafa termica", "jogo de jantar", "faqueiro", "assadeira",
         "escorredor", "pote hermetico", "marmita", "churrasqueira", "espetinho",
-        "galheteiro", "saleiro", "bandeja", "garrafa isotermica",
+        "galheteiro", "saleiro", "bandeja", "garrafa isotermica", "espatula",
+        "faca de carne", "pinca culinaria", "luva termica", "tabua de corte",
+        "balanca de cozinha", "organizador de esponja", "pote organizador",
     ),
     "Limpeza e Lavanderia": (
         "detergente", "sabao", "amaciante", "desinfetante", "agua sanitaria",
         "vassoura", "rodo", "balde", "esfregao", "pano de chao", "cesto de roupa",
-        "varal", "cabide",
+        "varal", "cabide", "pano limpa vidros", "neutralizador de ar",
     ),
     "Casa e Construção": (
         "torneira", "chuveiro", "registro", "sifao", "vaso sanitario", "pia",
         "azulejo", "porcelanato", "argamassa", "cimento", "tinta", "verniz",
-        "fechadura", "dobradica", "cadeado", "mangueira", "caixa dagua",
+        "fechadura", "dobradica", "cadeado", "mangueira", "caixa dagua", "puxador",
+        "cremalheira", "rodape", "prendedor de porta",
     ),
     "Ferramentas e Manutenção": (
         "furadeira", "parafusadeira", "esmerilhadeira", "serra", "martelo",
         "alicate", "chave de fenda", "chave philips", "chave inglesa",
         "jogo de chaves", "trena", "nivel a laser", "lixadeira", "soldador",
         "compressor", "macaco hidraulico", "morsa", "broca", "parafuso",
-        "arruela", "porca", "vedacao", "multimetro", "paquimetro",
+        "arruela", "porca", "vedacao", "multimetro", "paquimetro", "maquina de solda",
+        "arame solda", "nivelador a laser", "pistola de pintura", "abracadeira",
+        "chave combinada",
     ),
     "Materiais Elétricos e Componentes": (
         "lampada", "reator", "disjuntor", "tomada", "interruptor", "fita led",
@@ -125,7 +132,9 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         ("pneu", 2), ("calibrador de pneu", 4), "roda automotiva", "amortecedor", "pastilha de freio", "oleo motor",
         "bateria automotiva", "farol", "lanterna automotiva", "retrovisor",
         "capa de banco", "tapete automotivo", "som automotivo", "cera automotiva",
-        "aditivo", "limpador de para brisa", "capacete", "moto peca",
+        "aditivo", "limpador de para brisa", "capacete", "moto peca", "parachoque",
+        "grade radiador", "sensor abs", "manopla cambio", "comando de valvula",
+        "correia tensor", "eletrovalvula", "capa de chuva moto", "lixeira automotiva",
     ),
     "Pets e Animais": (
         "cachorro", "gato", "pet", "racao", "coleira", "guia para cachorro",
@@ -140,7 +149,9 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "shampoo", "condicionador", "hidratante", "perfume", "batom", "esmalte",
         "maquiagem", "base facial", "protetor solar", "secador de cabelo",
         "chapinha", "prancha de cabelo", "barbeador", "depilador", "creme facial",
-        "sabonete", "desodorante", "escova de cabelo",
+        "sabonete", "desodorante", "escova de cabelo", "leave in", "oleo capilar",
+        "po descolorante", "progressiva", "modelador de cachos", "mascara condicionador",
+        "reparador de pontas", "protetor termico", "cronograma capilar", "cronograma",
     ),
     "Saúde, Ortopedia e Equipamentos Médicos": (
         "termometro", "oximetro", "medidor de pressao", "nebulizador", "mascara",
@@ -148,6 +159,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "cadeira de rodas", "escova de dente", "creme dental", "fio dental",
         "suplemento", "whey", "creatina", "colageno", "vitamina",
         "magnesio", "pre treino", "cinta hernia", "multivitaminico", "omega 3",
+        "andador", "barra de apoio", "corretor de postura", "medidor de febre", "kinesio",
     ),
     "Alimentos e Bebidas": (
         "cafe", "cha", "chocolate", "biscoito", "bolacha", "cerveja", "vinho",
@@ -160,7 +172,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "camiseta", "camisa", "calca", "bermuda", "short", "vestido", "saia",
         "jaqueta", "moletom", "blusa", "tenis", "sapato", "sandalia", "chinelo",
         "bota", "meia", "cueca", "calcinha", "sutia", "oculos de sol", "cinto",
-        "bone", "pijama", "cropped",
+        "bone", "pijama", "cropped", "headband", "chapeu de palha",
     ),
     "Bolsas, Malas e Viagem": (
         "mochila", "bolsa", "mala de viagem", "carteira", "necessaire",
@@ -175,7 +187,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "bicicleta ergometrica", "corda de pular", "colchonete", "tapete de yoga",
         "bola de futebol", "chuteira", "luva de boxe", "skate", "patins",
         "prancha de equilibrio", "elastico de exercicio", "natacao", "mergulho",
-        "oculos de natacao",
+        "oculos de natacao", "garrafa de pulso", "treino funcional",
     ),
     "Camping, Pesca e Outdoor": (
         "barraca", "saco de dormir", "lanterna de cabeca", "canivete",
@@ -201,7 +213,8 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
     ),
     "Festas, Eventos e Presentes": (
         "balao", "bexiga", "confete", "vela de aniversario", "topo de bolo",
-        "lembrancinha", "painel de festa", "descartavel para festa",
+        "lembrancinha", "painel de festa", "descartavel para festa", "bandeira do brasil",
+        "bandeirola", "festa junina",
     ),
     "Embalagens e Descartáveis": (
         "saco plastico", "sacola", "sacolas", "embalagem", "caixa de papelao",

@@ -46,6 +46,23 @@ class MacroDoNomeTests(SimpleTestCase):
             macro_do_nome("Compressor Portátil Digital Calibrador De Pneu"),
             "Automotivo")
 
+    def test_vocabulario_dos_itens_desconhecidos_do_feed(self):
+        """Amostras reais que chegaram sem domain_id em 08/09/2026."""
+        casos = {
+            "Dreame L40 Ultra Com Base E Mop 19000pa Branco": "Eletrodomésticos",
+            "Tanquinho De Lavar Roupa Mueller 20 Kg": "Eletrodomésticos",
+            "Panificadora Multipane Branca Britânia": "Eletrodomésticos",
+            "Espátula Curva de Aço Inox para Hambúrguer": "Cozinha, Mesa e Bar",
+            "Lixeira Automotiva Couro Ecológico Para Carro": "Automotivo",
+            "Andador Dobrável Para Idoso Adulto Com Assento":
+                "Saúde, Ortopedia e Equipamentos Médicos",
+            "Kit Cronograma Profissional Essendy Salão De Beleza":
+                "Beleza e Cuidados Pessoais",
+            "Puxador Concha De Embutido Para Portas De Correr": "Casa e Construção",
+        }
+        for nome, esperado in casos.items():
+            self.assertEqual(macro_do_nome(nome), esperado, nome)
+
     def test_qualificador_no_fim_nao_manda_no_resultado(self):
         """A cabeca do nome decide; o que vem depois e complemento.
 
