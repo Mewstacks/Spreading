@@ -295,3 +295,68 @@ Vitrine patrocinada, leilão, cobrança e planos, onboarding self-service, site 
 marketing, payout e marketplace aberto, ROAS por creator, API oficial de afiliados do Mercado
 Livre (não existe), e a segunda sessão de WhatsApp para o grupo do dev — que entra depois, por
 Telegram ou com medição de memória antes.
+
+---
+
+## Estado em 08/09/2026 — o que está pronto e o que trava
+
+Escrito depois de uma rodada longa de correção em produção. É a fotografia, não o
+plano: o plano acima continua valendo.
+
+### O único bloqueio do funil agora
+
+**A sessão do Mercado Livre está no cofre e o Link Builder a recusa.** Não é
+"caiu": `MercadoLivreSession.status = active`, sonda com zero falhas, e mesmo
+assim toda tentativa de afiliar responde
+
+    O Mercado Livre pediu login de novo ao abrir o Link Builder.
+
+Isso é `LoginError` com prova — o portal exibiu a tela de login, ao contrário do
+`AuthError`, que é inconclusivo por documentação. Sem link de afiliado não há
+mensagem, e é por isso que o envio parou. **Ação: reconectar em `/scrapers/ml/`.**
+A tela está `idle` e pronta; ela já mostra `linkbuilder: ok=False`.
+
+O resto do caminho está de pé: WhatsApp da lules conectado, worker com as sete
+esteiras vivas, banco saudável, CI verde.
+
+### Por que ninguém foi avisado
+
+O incidente FOI detectado — `conexao_caiu`, nível `error`, 208 ocorrências — e
+morreu com `alertado: None`. `ALERTA_EMAILS` está configurado e o SMTP não, então
+cada tentativa de avisar falhava e abria outro incidente: 542 ocorrências de
+`email_falhou` afogando o que importava. O código não tenta mais sem transporte,
+mas **o canal continua desligado até existir SMTP ou `ALERTA_TELEGRAM_CHAT_ID`**.
+É o secret pendente desde o começo, e é o que separa "o sistema sabe" de "você
+sabe".
+
+### Pendente com o dono da conta
+
+1. **Reconectar o Mercado Livre** — desbloqueia link, envio e validação de cupom.
+2. **Canal de alerta** — SMTP (Brevo, 300/dia grátis) ou `ALERTA_TELEGRAM_CHAT_ID`.
+   Sem isso, a próxima parada também passa despercebida.
+3. **Crédito da Anthropic** — sem ele a mensagem sai sem o gancho de abertura. O
+   resto (nome, preço, cupom, validade, CTA, link) é produzido por código e tem
+   teste garantindo que sobrevive à chave em branco.
+4. **Regras de envio dos grupos reais** — existem três, todas apontando para
+   "Teste ofertas".
+
+### Pendente de decisão de custo
+
+**Desbloqueio do Mercado Livre.** O IP de datacenter da Fly é barrado no container
+de cupom e na PDP, o que mantém `sem_par_confirmado` em ~136 e `CupomValidacao`
+sem nenhuma aprovação. É a causa de o cupom ser escasso na fila, e não a ordenação
+— que já põe cupom na frente, verificado em produção.
+
+### Medições que valem guardar
+
+- Cobertura por nicho, agora na tela de Saúde: Eletrodomésticos 50 ofertas/2
+  cupons, Celulares 26/1, Ferramentas 37/0. A meta passou a cobrar cupom além de
+  volume, porque 37 ofertas sem nenhum cupom estavam passando como "meta
+  atingida".
+- Custo de IA: `cupom_extractor` responde por 99% do gasto, 765 tokens por
+  chamada. O gasto é volume, não desperdício por chamada. Prompt caching **não**
+  se aplica: Haiku 4.5 exige 4.096 tokens mínimos e o prompt fixo tem 442 — abaixo
+  do mínimo a API ignora o `cache_control` sem erro.
+- CI contra PostgreSQL: de 12 falhas + 124 erros para verde. O caminho até lá
+  achou defeitos reais — `close_old_connections` dentro de transação (quatro
+  lugares), reentrância de lease negada, RLS meio ligado por migração.
