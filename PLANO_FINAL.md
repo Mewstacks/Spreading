@@ -300,63 +300,113 @@ Telegram ou com medição de memória antes.
 
 ## Estado em 08/09/2026 — o que está pronto e o que trava
 
-Escrito depois de uma rodada longa de correção em produção. É a fotografia, não o
-plano: o plano acima continua valendo.
+Fotografia, não plano: o plano acima continua valendo. Reescrita no fim do dia,
+depois de medir em produção. **Boa parte do que esta seção dizia de manhã estava
+errado**, e o registro do erro vale mais que a correção.
 
-### O único bloqueio do funil agora
+### O que se acreditava, e o que a medição mostrou
 
-**A sessão do Mercado Livre está no cofre e o Link Builder a recusa.** Não é
-"caiu": `MercadoLivreSession.status = active`, sonda com zero falhas, e mesmo
-assim toda tentativa de afiliar responde
+Dizia-se aqui que a sessão do Mercado Livre tinha caído e que por isso o envio
+tinha parado. As duas metades eram falsas.
 
-    O Mercado Livre pediu login de novo ao abrir o Link Builder.
+**A sessão nunca caiu.** `MercadoLivreSession.status = active`, sonda
+`conectado`, 44 cookies no cofre. A página do Link Builder abre logada, com o
+textarea de URLs, o botão Gerar e a etiqueta `lpohoffmann` à mostra. O que
+respondia "indisponível" era código nosso: `Locator.is_enabled` **levanta**
+`TimeoutError` quando o locator não assenta no prazo — não devolve `False`. A
+chamada estava solta dentro do `try` que abraça `_linkbuilder_pronto`, então o
+estouro virava "não está pronto" e o fallback logo abaixo (preencher o campo e
+ver o botão habilitar) nunca rodava. Como `ml_conexao` julga a sessão pela mesma
+função, o sistema mandava reconectar uma conta que estava conectada o tempo todo.
+Corrigido, deployado e verificado em produção: página fria, `pronto? True`.
 
-Isso é `LoginError` com prova — o portal exibiu a tela de login, ao contrário do
-`AuthError`, que é inconclusivo por documentação. Sem link de afiliado não há
-mensagem, e é por isso que o envio parou. **Ação: reconectar em `/scrapers/ml/`.**
-A tela está `idle` e pronta; ela já mostra `linkbuilder: ok=False`.
+**O envio não estava parado.** 37 `send_ok` em sete dias, `send_concluido` da
+lules no meio da tarde de hoje.
 
-O resto do caminho está de pé: WhatsApp da lules conectado, worker com as sete
-esteiras vivas, banco saudável, CI verde.
+Lição para a próxima: `links_erro` e `links_sem_sessao` carimbavam a causa
+errada, e a causa errada foi acreditada por dias porque combinava com um vilão
+conhecido — o muro de IP. Antes de culpar o muro, medir o host exato.
 
-### Por que ninguém foi avisado
+### O bloqueio que sobra, e ele é real
 
-O incidente FOI detectado — `conexao_caiu`, nível `error`, 208 ocorrências — e
-morreu com `alertado: None`. `ALERTA_EMAILS` está configurado e o SMTP não, então
-cada tentativa de avisar falhava e abria outro incidente: 542 ocorrências de
-`email_falhou` afogando o que importava. O código não tenta mais sem transporte,
-mas **o canal continua desligado até existir SMTP ou `ALERTA_TELEGRAM_CHAT_ID`**.
-É o secret pendente desde o começo, e é o que separa "o sistema sabe" de "você
-sabe".
+O muro de IP do Mercado Livre, **por host e caminho** — remedido hoje da conta da
+lules:
+
+| Caminho | Resultado |
+|---|---|
+| `/afiliados/linkbuilder` | 200, logado e funcional |
+| PDP de produto | 3 de 3 em `/captcha/wall/logged` |
+| `lista.mercadolivre.com.br/cupons` | mesmo muro |
+
+Daí saem os dois sintomas que restam, e são o mesmo sintoma:
+
+- `send_failed: preço não confirmado agora e a última leitura foi há 2598 min
+  (limite 90)` — a revalidação obrigatória não consegue medir porque a PDP é
+  muro. O portão está certo; falta é a medida.
+- Canário de mensagem 0 de 3, "primeiro candidato não é cupom". **Não é bug de
+  ordenação**: medido, 25 de 25 candidatos são `deal` e nenhum é `coupon`. O
+  container de cupom vem de `lista.`, que é muro. A fila de cupom está seca na
+  origem.
+
+### O apagão da manhã, e por que ele não se repete
+
+A produção passou das 05:46 às 09:02 fora do ar, incluindo a janela de envio das
+08:00. A parada das 04:00 UTC foi entregue às 08:46 UTC — 5h46 atrasada — e os
+dois religamentos seguintes foram **descartados** pelo agendador do GitHub, que é
+best-effort e nomeia o início de cada hora como pico. Quatro das seis tentativas
+estavam exatamente em `:00`.
+
+Três mudanças, todas medidas:
+
+1. A janela de parada virou econômica. Uma hora de sono poupa ~R$0,37; a parada
+   das 05:46 compraria menos de duas horas contra a manhã inteira. Só para se
+   restarem ao menos quatro horas de sono. Hoje teria sido recusada.
+2. Nenhum cron em `:00`, e sete tentativas de religamento em vez de cinco.
+3. `web` e `db` **não são mais parados**. Os event logs mostram o proxy da Fly
+   levantando os dois em 45s e 33s: pará-los trocava zero centavo por um bounce
+   noturno do Postgres. Só worker e WhatsApp dormem de fato.
+
+`test_energia_producao` cobra os três arquivos que só concordavam por convenção
+(workflow, mapa de ações, script), e foi verificado por mutação.
+
+### Correção de custo — a conta documentada estava R$30 abaixo
+
+Consequência direta do achado acima: a conta de **R$278/mês** assumia as quatro
+máquinas dormindo. Só duas dormem. O número real é **US$59,75 = R$308/mês** a
+R$5,16. Continua abaixo do teto de R$350 deste plano. **Não é aumento de gasto —
+é a fatura que sempre existiu, medida certo pela primeira vez.**
 
 ### Pendente com o dono da conta
 
-1. **Reconectar o Mercado Livre** — desbloqueia link, envio e validação de cupom.
-2. **Canal de alerta** — SMTP (Brevo, 300/dia grátis) ou `ALERTA_TELEGRAM_CHAT_ID`.
-   Sem isso, a próxima parada também passa despercebida.
-3. **Crédito da Anthropic** — sem ele a mensagem sai sem o gancho de abertura. O
-   resto (nome, preço, cupom, validade, CTA, link) é produzido por código e tem
-   teste garantindo que sobrevive à chave em branco.
-4. **Regras de envio dos grupos reais** — existem três, todas apontando para
+1. **Canal de alerta** — SMTP (Brevo, 300/dia grátis) ou `ALERTA_TELEGRAM_CHAT_ID`.
+   O incidente da manhã foi detectado e morreu com `alertado: None`. Enquanto não
+   existir transporte, o sistema sabe e você não.
+2. **Crédito da Anthropic** — sem ele a mensagem sai sem o gancho de abertura. O
+   resto (nome, preço, cupom, validade, CTA, link) é código, com teste garantindo
+   que sobrevive à chave em branco.
+3. **Regras de envio dos grupos reais** — existem três, todas apontando para
    "Teste ofertas".
+
+Reconectar o Mercado Livre **saiu desta lista**: não era necessário.
 
 ### Pendente de decisão de custo
 
-**Desbloqueio do Mercado Livre.** O IP de datacenter da Fly é barrado no container
-de cupom e na PDP, o que mantém `sem_par_confirmado` em ~136 e `CupomValidacao`
-sem nenhuma aprovação. É a causa de o cupom ser escasso na fila, e não a ordenação
-— que já põe cupom na frente, verificado em produção.
+**Desbloqueio do Mercado Livre.** É o que destrava revalidação de preço e o funil
+de cupom de uma vez — os dois sintomas restantes têm essa única causa. Depois do
+corte de demanda da E2 cabe na cota gratuita de 5.000 requisições/mês do Web
+Unlocker, mas é conta nova em nome do dono.
 
 ### Medições que valem guardar
 
-- Cobertura por nicho, agora na tela de Saúde: Eletrodomésticos 50 ofertas/2
-  cupons, Celulares 26/1, Ferramentas 37/0. A meta passou a cobrar cupom além de
-  volume, porque 37 ofertas sem nenhum cupom estavam passando como "meta
-  atingida".
+- Cobertura por nicho, na tela de Saúde: Eletrodomésticos 50 ofertas/2 cupons,
+  Celulares 26/1, Ferramentas 37/0. A meta passou a cobrar cupom além de volume,
+  porque 37 ofertas sem nenhum cupom passavam como "meta atingida".
 - Custo de IA: `cupom_extractor` responde por 99% do gasto, 765 tokens por
-  chamada. O gasto é volume, não desperdício por chamada. Prompt caching **não**
-  se aplica: Haiku 4.5 exige 4.096 tokens mínimos e o prompt fixo tem 442 — abaixo
+  chamada. É volume, não desperdício por chamada. Prompt caching **não** se
+  aplica: Haiku 4.5 exige 4.096 tokens mínimos e o prompt fixo tem 442 — abaixo
   do mínimo a API ignora o `cache_control` sem erro.
-- CI contra PostgreSQL: de 12 falhas + 124 erros para verde. O caminho até lá
+- CI contra PostgreSQL: de 12 falhas + 124 erros para verde, e o caminho até lá
   achou defeitos reais — `close_old_connections` dentro de transação (quatro
   lugares), reentrância de lease negada, RLS meio ligado por migração.
+- Produtos: 64.152 no total, 2.335 frescos no ML e 1.464 na Amazon. Sete das
+  esteiras vivas, 30 fontes de ingestão habilitadas.

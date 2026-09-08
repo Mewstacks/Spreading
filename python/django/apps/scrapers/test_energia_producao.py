@@ -166,6 +166,59 @@ class AgendamentoDeEnergiaTests(SimpleTestCase):
             "sono mínimo abaixo de 3h não paga o risco de o religamento falhar",
         )
 
+    def test_a_parada_nao_toca_no_banco(self):
+        """Parar o Postgres toda madrugada comprava 33 segundos de nada.
+
+        Event log de 08/09/2026: `spreading-db` parou às 05:46:40 e o proxy da
+        Fly o levantou às 05:47:13. O mesmo vale para o process group `web`
+        (`min_machines_running = 1`): 45 segundos parado. O desligamento noturno
+        só economiza no que fica de fato parado — worker e WhatsApp — e um
+        bounce de banco por zero centavo é risco de graça.
+        """
+        chamadas = re.findall(r"^\s*stop_app\s+(\S+)(?:\s+(\S+))?\s*$",
+                              self.script, re.MULTILINE)
+        parados = {app for app, _ in chamadas}
+        self.assertNotIn(
+            "spreading-db", parados,
+            "o banco volta sozinho pelo proxy; pará-lo é só um bounce noturno",
+        )
+        self.assertIn("spreading-wa", parados, "o WhatsApp é quem realmente dorme")
+
+    def test_a_parada_do_web_atinge_so_o_worker(self):
+        """No `spreading-web` só o process group `worker` fica parado."""
+        chamadas = dict(
+            (app, grupo)
+            for app, grupo in re.findall(
+                r"^\s*stop_app\s+(\S+)(?:\s+(\S+))?\s*$", self.script, re.MULTILINE)
+        )
+        self.assertEqual(
+            chamadas.get("spreading-web"), "worker",
+            "sem o filtro de grupo a parada derruba o web, que o proxy religa "
+            "em 45s — churn puro",
+        )
+
+    def test_quem_le_as_maquinas_consome_o_process_group(self):
+        """`machine_rows` emite três colunas; ler duas corrompe o estado.
+
+        Com `IFS` de tab, `read -r id estado` joga a terceira coluna para dentro
+        de `estado`, que vira "started<TAB>worker" e deixa de casar com
+        "started" em qualquer comparação. Nada quebra ruidosamente: a parada
+        recusa por "estado inesperado" e o religamento decide que não há o que
+        ligar.
+        """
+        self.assertIn(
+            "fly_process_group", self.script,
+            "machine_rows precisa trazer o process group",
+        )
+        leitores = re.findall(r"read -r machine_id state(\s+grupo)?", self.script)
+        self.assertTrue(leitores, "ninguém está lendo as máquinas")
+        for extra in leitores:
+            self.assertTrue(
+                extra.strip(),
+                "há um leitor de machine_rows consumindo só duas colunas; "
+                "o process group vazaria para dentro do estado",
+            )
+
     def test_o_primeiro_religamento_precede_a_janela_de_envio(self):
         """A janela de envio abre às 08:00; o WhatsApp leva ~50s autenticando."""
         starts = [

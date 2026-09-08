@@ -47,18 +47,29 @@ fly_for_app() {
   FLY_API_TOKEN="$(token_for_app "$app")" flyctl "$@"
 }
 
+# Terceira coluna: o process group. `spreading-web` tem dois (web e worker) e
+# eles têm destinos diferentes na parada noturna — ver o comentário no ramo de
+# stop. Quem lê estas linhas precisa consumir os três campos: com IFS de tab,
+# `read -r id estado` jogaria o grupo para dentro de `estado` e nenhuma
+# comparação de estado funcionaria.
 machine_rows() {
   local app="$1"
   fly_for_app "$app" machine list --app "$app" --json \
-    | jq -r '.[] | [.id, .state] | @tsv'
+    | jq -r '.[] | [.id, .state, (.config.metadata.fly_process_group // "")] | @tsv'
 }
 
+# `stop_app app [grupo]` — com grupo, para só as máquinas daquele process group.
 stop_app() {
   local app="$1"
-  local machine_id state found=0
+  local somente="${2:-}"
+  local machine_id state grupo found=0
 
-  while IFS=$'\t' read -r machine_id state; do
+  while IFS=$'\t' read -r machine_id state grupo; do
     [[ -n "$machine_id" ]] || continue
+    if [[ -n "$somente" && "$grupo" != "$somente" ]]; then
+      echo "$app/$machine_id ($grupo) fica de pé: só $somente dorme."
+      continue
+    fi
     found=1
     if [[ "$state" == "stopped" || "$state" == "suspended" ]]; then
       echo "$app/$machine_id já está $state."
@@ -74,7 +85,8 @@ stop_app() {
   done < <(machine_rows "$app")
 
   if [[ "$found" -eq 0 ]]; then
-    echo "Nenhuma máquina encontrada em $app; recusando continuar." >&2
+    echo "Nenhuma máquina${somente:+ do grupo $somente} encontrada em $app;" \
+         "recusando continuar." >&2
     return 1
   fi
 }
@@ -141,9 +153,9 @@ wait_until_healthy() {
 
 start_app() {
   local app="$1"
-  local machine_id state found=0 started_any=0
+  local machine_id state grupo found=0 started_any=0
 
-  while IFS=$'\t' read -r machine_id state; do
+  while IFS=$'\t' read -r machine_id state grupo; do
     [[ -n "$machine_id" ]] || continue
     found=1
     if [[ "$state" == "started" ]]; then
@@ -221,10 +233,26 @@ if [[ "$ACTION" == "stop" ]]; then
     echo "Parada ignorada: agora são $(TZ=America/Sao_Paulo date '+%H:%M') em"          "Brasília, fora da janela de parada (${SONO_INICIO_H}h-$(( RELIGAMENTO_H - SONO_MINIMO_H ))h)."          "O agendador atrasou; desligar agora tiraria a produção do ar em"          "horário de operação." >&2
     exit 0
   fi
-  # Primeiro remove tráfego e workers; o banco é sempre o último a parar.
-  stop_app spreading-web
+  # Só o que REALMENTE dorme. Medido nos event logs das máquinas em 08/09/2026:
+  #
+  #   web     stop 05:46:20 -> start 05:47:06 por `proxy`   (45s parado)
+  #   db      stop 05:46:40 -> start 05:47:13 por `proxy`   (33s parado)
+  #   worker  stop 05:46:24 -> so voltou as 09:02, a mao     (3h16)
+  #   wa      stop 05:46:36 -> so voltou as 09:02, a mao     (3h16)
+  #
+  # `spreading-web` tem `min_machines_running = 1` com `auto_start_machines`, e o
+  # `spreading-db` responde por flycast: o proxy da Fly levanta os dois de volta
+  # em menos de um minuto. Pará-los não economizava nada — trocava zero centavo
+  # por um encerramento do gunicorn e, pior, um bounce do Postgres toda
+  # madrugada. Só o worker e o WhatsApp ficam de fato parados, e são eles que a
+  # conta do desligamento noturno sempre pagou.
+  #
+  # Efeito colateral que vale registrar: como web e db não dormem, existe algo de
+  # pé a noite inteira. É o candidato natural a vigia do religamento, que hoje
+  # depende só do agendador do GitHub — o mesmo que descartou as duas tentativas
+  # de 08/09.
   stop_app spreading-wa
-  stop_app spreading-db
+  stop_app spreading-web worker
 else
   # Dependências sobem antes dos consumidores, e cada etapa espera health checks
   # — mas a espera é uma PRECAUÇÃO, não um portão. Uma dependência que demora (ou
