@@ -238,15 +238,16 @@ mentindo por omissão — nada roda, então nada falha.
   <div class="rows">
     {% for regra in r.cobertura.regras %}
     <div class="row-item">
-      <span class="dot {% if regra.deficit %}off{% else %}on{% endif %}"></span>
+      <span class="dot {% if regra.deficit or regra.deficit_cupom %}off{% else %}on{% endif %}"></span>
       <div class="row-main">
         <div class="row-title">
           <strong>{{ regra.destino }}</strong>
           {% if regra.macro %}<span class="badge badge-muted">{{ regra.macro }}</span>{% endif %}
           {% if regra.deficit %}<span class="badge {% if regra.deficit_provado %}badge-red{% else %}badge-yellow{% endif %}">Faltam {{ regra.deficit }}</span>{% endif %}
+          {% if regra.deficit_cupom %}<span class="badge badge-red">Faltam {{ regra.deficit_cupom }} com cupom</span>{% endif %}
         </div>
         <div class="row-note">
-          {{ regra.elegiveis }} de {{ regra.meta }} · {{ regra.com_cupom }} com cupom, {{ regra.sem_cupom }} sem · {{ regra.veredito }}
+          {{ regra.elegiveis }} de {{ regra.meta }} ofertas · {{ regra.com_cupom }} de {{ regra.meta_cupom }} com cupom · {{ regra.veredito }}
         </div>
       </div>
     </div>

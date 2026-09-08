@@ -27,6 +27,30 @@ def meta_por_regra() -> int:
         return 10
 
 
+def meta_de_cupom_por_regra() -> int:
+    """Quantos dos deals do nicho precisam ter cupom.
+
+    Volume sozinho aprovava um nicho vazio do que importa. Medido em produção em
+    07/09/2026, com a meta contando só deals:
+
+        Eletrodomésticos          50 elegíveis   2 com cupom   meta_atingida
+        Celulares, Telefonia      26 elegíveis   1 com cupom   meta_atingida
+        Ferramentas e Manutenção  37 elegíveis   0 com cupom   meta_atingida
+
+    Trinta e sete ofertas e nenhum cupom passava como "meta atingida". Cupom é o
+    produto; promoção é acompanhamento — então a cobertura cobra os dois, e um
+    nicho sem cupom nenhum não é um nicho coberto.
+
+    O padrão é 3, e é deliberadamente baixo: nicho específico e de pouco giro não
+    precisa de abundância, precisa de existir. Sobe por setting quando o funil de
+    cupom voltar a render.
+    """
+    try:
+        return max(0, int(getattr(settings, "DEAL_COBERTURA_META_CUPOM_DIA", 3)))
+    except (TypeError, ValueError):
+        return 3
+
+
 def _fontes_nao_exauridas(marketplace) -> list:
     """Fontes que pararam por orçamento nosso, e não por fim de inventário."""
     lojas = [marketplace] if marketplace else None
@@ -51,10 +75,17 @@ def cobertura_da_regra(config, *, agora=None, meta=None):
     marketplace = str(getattr(config, "marketplace", "") or "").casefold()
     pendentes = _fontes_nao_exauridas(marketplace)
 
-    if len(deals) >= meta:
+    meta_cupom = meta_de_cupom_por_regra()
+    deficit_cupom = max(0, meta_cupom - com_cupom)
+    if len(deals) >= meta and not deficit_cupom:
         veredito = "meta_atingida"
     elif pendentes:
         veredito = "coleta_incompleta"
+    elif deficit_cupom and len(deals) >= meta:
+        # Distinguir os dois déficits importa para saber o que consertar: falta de
+        # oferta é problema de coleta; oferta sobrando e cupom faltando é o funil
+        # de cupom parado, que tem outra causa e outro conserto.
+        veredito = "sem_cupom_no_nicho"
     else:
         veredito = "deficit_provado"
     return {
@@ -67,7 +98,9 @@ def cobertura_da_regra(config, *, agora=None, meta=None):
         "com_cupom": com_cupom,
         "sem_cupom": len(deals) - com_cupom,
         "meta": meta,
+        "meta_cupom": meta_cupom,
         "deficit": max(0, meta - len(deals)),
+        "deficit_cupom": deficit_cupom,
         "veredito": veredito,
         "deficit_provado": veredito == "deficit_provado",
         "fontes_nao_exauridas": pendentes,
@@ -104,7 +137,8 @@ def relatorio_cobertura(*, agora=None, meta=None, apenas_ativas=True, usuario=No
         # Uma regra abaixo da meta reprova o conjunto: um creator sem deal é um
         # creator sem produto, por mais que a média das outras contas esteja boa.
         "aprovado": bool(regras) and all(
-            regra["elegiveis"] >= meta for regra in regras
+            regra["elegiveis"] >= meta and not regra["deficit_cupom"]
+            for regra in regras
         ),
         "coleta_incompleta": [
             regra["config_id"] for regra in regras

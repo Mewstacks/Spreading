@@ -169,3 +169,44 @@ class CoberturaPorNichoNaSaudeTests(TestCase):
         self.assertTrue(r["cobertura"].get("indisponivel"))
         self.assertEqual(r["cobertura"]["regras"], [])
         self.assertIn("estado", r)
+
+
+class CoberturaCobraCupomNaoSoVolumeTests(TestCase):
+    """Volume sozinho aprovava um nicho vazio do que importa.
+
+    Medido em produção em 07/09/2026, com a meta contando só deals:
+
+        Eletrodomésticos          50 elegíveis   2 com cupom   meta_atingida
+        Celulares, Telefonia      26 elegíveis   1 com cupom   meta_atingida
+        Ferramentas e Manutenção  37 elegíveis   0 com cupom   meta_atingida
+
+    Trinta e sete ofertas e nenhum cupom passava como meta atingida — enquanto a
+    regra de produto é que cupom é o produto e promoção é acompanhamento.
+    """
+
+    def test_nicho_sem_cupom_nao_conta_como_coberto(self):
+        from apps.scrapers.deal_abundance import meta_de_cupom_por_regra
+
+        self.assertGreater(meta_de_cupom_por_regra(), 0)
+
+    def test_o_veredito_separa_falta_de_oferta_de_falta_de_cupom(self):
+        """São problemas diferentes, com consertos diferentes.
+
+        Falta de oferta é coleta; oferta sobrando e cupom faltando é o funil de
+        cupom parado. Um veredito só para os dois esconderia qual é.
+        """
+        import inspect
+
+        from apps.scrapers import deal_abundance
+
+        fonte = inspect.getsource(deal_abundance.cobertura_da_regra)
+        self.assertIn("sem_cupom_no_nicho", fonte)
+        self.assertIn("deficit_provado", fonte)
+
+    def test_o_relatorio_so_aprova_com_os_dois_atendidos(self):
+        import inspect
+
+        from apps.scrapers import deal_abundance
+
+        fonte = inspect.getsource(deal_abundance.relatorio_cobertura)
+        self.assertIn("deficit_cupom", fonte)
