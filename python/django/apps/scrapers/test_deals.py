@@ -175,6 +175,30 @@ class PrecoDeSempreTests(BaseDeals):
         self.assertEqual(rejeicoes[deals.MOTIVO_PRECO_DE_SEMPRE], 1)
 
 
+class PrioridadeCupomTests(BaseDeals):
+    """Oferta pequena sem cupom não compete com a promessa de curadoria."""
+
+    def test_queda_de_seis_por_cento_sem_cupom_nao_publica(self):
+        produto = self._produto(preco=94.0, de=100.0)
+        self._observar(produto, 100.0, 100.0, 100.0)
+        self.assertEqual(deals.gerar_deals(self._config(), limite=5), [])
+
+    def test_regra_sem_desconto_nao_cai_para_produto_sem_cupom(self):
+        produto = self._produto(preco=70.0, de=100.0)
+        self._observar(produto, 100.0, 100.0, 100.0)
+        config = self._config(incluir_sem_desconto=False)
+        self.assertEqual(deals.gerar_deals(config, limite=5), [])
+
+    def test_regra_sem_desconto_ainda_publica_cupom_comprovado(self):
+        produto = self._produto(preco=100.0, de=100.0)
+        self._observar(produto, 120.0, 120.0, 120.0)
+        self._cupom(produto=produto, percentual=20.0, checkout=True)
+        config = self._config(incluir_sem_desconto=False)
+        resultado = deals.gerar_deals(config, limite=5)
+        self.assertEqual(len(resultado), 1)
+        self.assertTrue(resultado[0].tem_cupom)
+
+
 class NichoTests(BaseDeals):
     """M3 — o nicho agora sabe excluir, não só incluir."""
 
@@ -202,6 +226,7 @@ class NichoTests(BaseDeals):
     def test_termo_positivo_pontua_afinidade(self):
         produto = self._produto(nome="Fone Bluetooth JBL Tune", preco=100.0)
         self._observar(produto, 180.0)
+        self._cupom(produto=produto, percentual=20.0, checkout=True)
         com_termo = deals.gerar_deals(self._config(termo_busca="fone"), limite=1)[0]
         sem_termo = deals.gerar_deals(self._config(), limite=1)[0]
         self.assertGreater(com_termo.componentes["afinidade"],
@@ -1332,10 +1357,15 @@ class QuemTemMedicaoVaiPrimeiroTests(BaseDeals):
 
     def test_o_nao_medido_continua_na_fila(self):
         """Ordenar não é descartar: a fila inteira continua disponível."""
-        self._produto(nome="Medido", preco=100.0, de=200.0,
-                      link="https://www.mercadolivre.com.br/p/MLB3333333333")
-        self._produto(nome="Sem medicao", preco=60.0, de=200.0,
-                      link="https://www.mercadolivre.com.br/p/MLB4444444444")
+        medido = self._produto(nome="Medido", preco=100.0, de=200.0,
+                               link="https://www.mercadolivre.com.br/p/MLB3333333333")
+        cego = self._produto(nome="Sem medicao", preco=60.0, de=200.0,
+                             link="https://www.mercadolivre.com.br/p/MLB4444444444")
+        self._observar(medido, 180.0, 175.0, 170.0)
+        self._observar(cego, 190.0, 185.0, 180.0)
+        self._cupom(produto=medido, percentual=20.0, teto=100.0, checkout=True)
+        self._cupom(produto=cego, codigo="SEM_MEDICAO", percentual=20.0,
+                     teto=100.0, checkout=True)
 
         achados = self._com_mapa({"MLB3333333333": (100.0, "vitrine")})
 

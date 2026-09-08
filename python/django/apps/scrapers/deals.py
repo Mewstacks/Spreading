@@ -85,6 +85,30 @@ def _beneficio_minimo_reais() -> float:
         return 10.0
 
 
+def _desconto_minimo_sem_cupom_percent() -> float:
+    """Piso de queda comprovada para publicar uma oferta sem cupom.
+
+    É deliberadamente independente do ``de`` exibido pela loja e da configuração
+    legado de 5%. Sem cupom, uma queda pequena não compensa ocupar o grupo; com
+    cupom, o portão de benefício neste item continua sendo a medida relevante.
+    """
+    try:
+        return max(0.0, float(
+            getattr(settings, "DEAL_DESCONTO_MINIMO_SEM_CUPOM_PERCENT", 15) or 15))
+    except (TypeError, ValueError):
+        return 15.0
+
+
+def _queda_comprovada_percent(preco_final, historico) -> float:
+    """Queda contra a mediana observada, ou zero quando ainda não há prova."""
+    if not historico or int(historico.get("n") or 0) < 3:
+        return 0.0
+    mediana = float(historico.get("mediana") or 0)
+    if mediana <= 0 or preco_final <= 0:
+        return 0.0
+    return max(0.0, (mediana - float(preco_final)) / mediana * 100.0)
+
+
 @dataclass
 class DealCandidate:
     """Produto + cupom aplicável, com o preço que o comprador realmente paga."""
@@ -534,6 +558,11 @@ def gerar_deals(config, limite=8, *, agora=None, incluir_sem_cupom=True,
         rejeicoes = defaultdict(int)
     usuario = getattr(config, "owner", None)
     macro = str(getattr(config, "macro_categoria", "") or "").strip()
+    # A configuração decide se a regra pode publicar preço puro. O argumento
+    # explícito existe para diagnósticos/testes, mas a regra nunca pode ser
+    # afrouxada por acidente pelo default da função.
+    incluir_sem_cupom = bool(incluir_sem_cupom and getattr(
+        config, "incluir_sem_desconto", True))
 
     produtos = pool_de_produtos_elegiveis(
         macros_selecionadas=[macro] if macro else None,
@@ -669,6 +698,12 @@ def gerar_deals(config, limite=8, *, agora=None, incluir_sem_cupom=True,
                 preco_final >= float(historico_30["mediana"]) * 0.98):
             rejeicoes[MOTIVO_PRECO_DE_SEMPRE] += 1
             continue
+        if cupom is None:
+            piso_sem_cupom = max(
+                minimo_config, _desconto_minimo_sem_cupom_percent())
+            if _queda_comprovada_percent(preco_final, historico_30) < piso_sem_cupom:
+                rejeicoes[MOTIVO_ABAIXO_DO_MINIMO] += 1
+                continue
         deal = DealCandidate(
             produto=produto, cupom=cupom, relacao=relacao,
             preco_vitrine=round(preco_vitrine, 2), beneficio_rs=round(beneficio, 2),

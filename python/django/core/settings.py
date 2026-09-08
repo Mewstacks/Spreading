@@ -162,6 +162,13 @@ COUPON_DAILY_DISCOVERY_GOAL = int(
 DEAL_BENEFICIO_MINIMO_PERCENT = float(
     os.getenv("DEAL_BENEFICIO_MINIMO_PERCENT", "5") or "5"
 )
+# Oferta sem cupom só merece uma mensagem quando a queda contra o nosso histórico
+# é material. O percentual de lista da loja não é evidência: ele pode estar
+# inflado, como aconteceu na mensagem de 6% que saiu em 08/09. Cupons continuam
+# avaliados pelo benefício real no item, acima.
+DEAL_DESCONTO_MINIMO_SEM_CUPOM_PERCENT = float(
+    os.getenv("DEAL_DESCONTO_MINIMO_SEM_CUPOM_PERCENT", "15") or "15"
+)
 # Quantos deals elegíveis por dia uma regra precisa ter para a cobertura passar.
 # Folga deliberada sobre os 3–10 publicáveis: cooldown, revalidação e falha de
 # link consomem candidatos entre a seleção e o envio.
