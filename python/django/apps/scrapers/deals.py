@@ -623,10 +623,12 @@ def gerar_deals(config, limite=8, *, agora=None, incluir_sem_cupom=True,
         # isso três linhas acima, para o caso de a vitrine não responder: "nenhum
         # candidato é descartado por isto e o portão do envio continua sendo o
         # juiz".
+        medido_agora = False
         if medidos and str(getattr(produto, "marketplace", "")).casefold() == "mercadolivre":
             medido = medidos.get(_item_ml(produto))
             if medido:
                 preco_vitrine = float(medido[0])
+                medido_agora = True
         escolha = _melhor_cupom_para(
             produto, confirmados=confirmados, sitewide=sitewide,
             com_checkout=com_checkout, usuario=usuario,
@@ -679,11 +681,31 @@ def gerar_deals(config, limite=8, *, agora=None, incluir_sem_cupom=True,
             rejeicoes[MOTIVO_SEM_HISTORICO] += 1
         pontuar(deal, config=config, historico_90=historico_90,
                 performance=performance, agora=agora)
+        # Não entra no score: não é qualidade da oferta, é chance de o envio
+        # conseguir confirmar o preço. Só ordena.
+        deal.medido_agora = medido_agora
         deals.append(deal)
 
     # Cupom primeiro, e não por empate: oferta sem cupom vende muito menos, então
     # ela é o fundo da fila e não disputa posição com um par produto+cupom. O score
     # continua ordenando DENTRO de cada grupo. É decisão de operação, medida no
     # grupo, não estética de ranking.
-    deals.sort(key=lambda d: (not d.tem_cupom, -d.score, getattr(d.produto, "pk", 0)))
+    # Cupom primeiro; depois quem TEM medição de agora; depois o score.
+    #
+    # O critério do meio não afrouxa portão nenhum — ele evita desperdício. O
+    # envio revalida o preço obrigatoriamente e recusa o que não pode confirmar
+    # ("preço não confirmado agora e a última leitura foi há 1862 min"), e um item
+    # fora da varredura desta rodada quase sempre é um desses. Medido em produção
+    # em 07/09/2026: cinco recusas por preço para cada envio.
+    #
+    # Deixá-los na fila continua certo — outra fonte pode medi-los, e descartá-los
+    # na seleção foi o que zerou o cupom. O que muda é a ordem: quem já tem
+    # medição vai primeiro, e o trabalho do ciclo termina em mensagem em vez de
+    # terminar em recusa.
+    deals.sort(key=lambda d: (
+        not d.tem_cupom,
+        not getattr(d, "medido_agora", False),
+        -d.score,
+        getattr(d.produto, "pk", 0),
+    ))
     return deals[:limite] if limite else deals

@@ -1293,3 +1293,67 @@ class SemCreditoDeIAAMensagemContinuaInteiraTests(BaseDeals):
                      "Smartphone Moto G56 Bateria 5000mah"):
             with self.subTest(nome=nome):
                 self.assertEqual(_nome_principal_produto(nome, limite=70), nome)
+
+
+class QuemTemMedicaoVaiPrimeiroTests(BaseDeals):
+    """Ordem por chance de o envio confirmar o preço — sem afrouxar o portão.
+
+    O envio revalida o preço obrigatoriamente e recusa o que não consegue
+    confirmar: "preço não confirmado agora e a última leitura foi há 1862 min".
+    Um item fora da varredura desta rodada quase sempre é um desses. Medido em
+    produção em 07/09/2026: cinco recusas por preço para cada envio.
+
+    Deixá-los na fila continua certo — descartá-los na seleção foi o que zerou o
+    cupom. O que muda é a ordem.
+    """
+
+    def _com_mapa(self, mapa, **kwargs):
+        from unittest.mock import patch
+
+        with patch.object(deals, "_precos_medidos_agora", return_value=mapa):
+            return deals.gerar_deals(self._config(), limite=10, **kwargs)
+
+    def test_o_medido_agora_vem_antes_do_nao_medido(self):
+        medido = self._produto(
+            nome="Medido", preco=100.0, de=200.0,
+            link="https://www.mercadolivre.com.br/p/MLB1111111111")
+        self._observar(medido, 180.0, 175.0, 170.0)
+        cego = self._produto(
+            nome="Sem medicao", preco=60.0, de=200.0,
+            link="https://www.mercadolivre.com.br/p/MLB2222222222")
+        # Score MAIOR: sem o critério novo, este viria primeiro e morreria no envio.
+        self._observar(cego, 190.0, 185.0, 180.0)
+
+        achados = self._com_mapa({"MLB1111111111": (100.0, "vitrine")})
+
+        self.assertEqual(achados[0].produto.pk, medido.pk)
+        self.assertTrue(achados[0].medido_agora)
+        self.assertFalse(achados[1].medido_agora)
+
+    def test_o_nao_medido_continua_na_fila(self):
+        """Ordenar não é descartar: a fila inteira continua disponível."""
+        self._produto(nome="Medido", preco=100.0, de=200.0,
+                      link="https://www.mercadolivre.com.br/p/MLB3333333333")
+        self._produto(nome="Sem medicao", preco=60.0, de=200.0,
+                      link="https://www.mercadolivre.com.br/p/MLB4444444444")
+
+        achados = self._com_mapa({"MLB3333333333": (100.0, "vitrine")})
+
+        self.assertEqual(len(achados), 2)
+
+    def test_cupom_continua_na_frente_da_medicao(self):
+        """A ordem é cupom primeiro; medição só desempata dentro do grupo."""
+        medido = self._produto(
+            nome="Medido sem cupom", preco=100.0, de=200.0,
+            link="https://www.mercadolivre.com.br/p/MLB5555555555")
+        self._observar(medido, 180.0, 175.0, 170.0)
+        com_cupom = self._produto(
+            nome="Cupom sem medicao", preco=100.0, de=200.0,
+            link="https://www.mercadolivre.com.br/p/MLB6666666666")
+        self._observar(com_cupom, 180.0, 175.0, 170.0)
+        self._cupom(produto=com_cupom, percentual=20.0, teto=100.0, checkout=True)
+
+        achados = self._com_mapa({"MLB5555555555": (100.0, "vitrine")})
+
+        self.assertTrue(achados[0].tem_cupom)
+        self.assertFalse(achados[0].medido_agora)
