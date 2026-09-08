@@ -177,7 +177,35 @@ jobs:
       # ligavam RLS por conta própria e o banco de teste nascia protegido em duas
       # tabelas e em nenhuma das outras trinta e poucas.
       - name: Suite completa contra PostgreSQL
-        run: python django/manage.py test apps.scrapers apps.accounts
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # Amostra as conexoes ao banco de teste DURANTE a suite. O passo de
+          # diagnostico depois do teardown vinha com "(0 rows)": a conexao
+          # sobrevivente pertence ao proprio processo do runner e morre junto com
+          # ele, entao so da para ve-la enquanto ele esta vivo.
+          (
+            while true; do
+              psql -h localhost -U postgres -d postgres -At -F'|' -c "
+                SELECT now(), pid, state, backend_type,
+                       left(regexp_replace(coalesce(query,''), '\s+', ' ', 'g'), 120)
+                  FROM pg_stat_activity
+                 WHERE datname = 'test_spreading';
+              " >> /tmp/conexoes.log 2>/dev/null || true
+              sleep 2
+            done
+          ) &
+          AMOSTRAGEM=$!
+          set +e
+          python django/manage.py test apps.scrapers apps.accounts
+          RESULTADO=$?
+          set -e
+          kill $AMOSTRAGEM 2>/dev/null || true
+          echo "=== ultimas amostras de conexao ao banco de teste ==="
+          tail -40 /tmp/conexoes.log || true
+          echo "=== maximo de conexoes simultaneas observado ==="
+          cut -d'|' -f1 /tmp/conexoes.log | uniq -c | sort -rn | head -3 || true
+          exit $RESULTADO
       # Quem sobrou segurando o banco de teste.
       #
       # A suite passa inteira e o job ainda falha no teardown do Django com
