@@ -28,6 +28,23 @@ def _enviar(assunto: str, destino: str, template_base: str, ctx: dict) -> bool:
     ):
         # Sem credencial, insistir no SMTP só produz um 553 por alerta/signup.
         # Registra a degradação no máximo uma vez por hora e preserva o fluxo.
+        #
+        # `warning`, não `error`, e a diferença é entre duas coisas que não se
+        # parecem quando viram evento: ISTO é "você ainda não configurou o SMTP",
+        # um estado conhecido e pendente com o dono da conta; o ramo lá embaixo,
+        # onde `msg.send` levanta, é "está configurado e quebrou". Só o segundo
+        # é notícia.
+        #
+        # O nível muda o alcance, não a visibilidade: `warning` continua abrindo
+        # incidente (`incidentes_saude.processar_evento` aceita warning e error),
+        # então a tela de Saúde segue mostrando, com a ação já escrita — checar
+        # EMAIL_HOST_USER/EMAIL_HOST_PASSWORD. O que para é o evento de hora em
+        # hora no Sentry.
+        #
+        # O motivo de isso importar foi medido em 07-08/09/2026: 542 ocorrências
+        # de `email_falhou` afogaram o `conexao_caiu` de nível error que ninguém
+        # viu, e a produção passou a manhã fora do ar. Ruído conhecido esconde
+        # sinal desconhecido — é a mesma razão de `alertas._smtp_configurado`.
         if cache.add("email:configuracao-ausente", "1", timeout=3600):
             from apps.scrapers.eventos import log_event
 
@@ -35,7 +52,7 @@ def _enviar(assunto: str, destino: str, template_base: str, ctx: dict) -> bool:
             log_event(
                 "sistema", "email_falhou",
                 "SMTP não configurado; e-mails estão temporariamente indisponíveis.",
-                level="error", contexto={"backend": backend},
+                level="warning", contexto={"backend": backend},
             )
         return False
     try:

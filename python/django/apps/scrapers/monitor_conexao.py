@@ -129,17 +129,46 @@ def _processar(perfil, nome_servico, campo, estado, agora, cooldown, enviar) -> 
         # mas em nível de aviso e sem e-mail.
         nunca_conectou = anterior is None and estado.detalhe == "sem_sessao"
         if nunca_conectou:
-            setattr(perfil, estado_attr, False)
-            perfil.save(update_fields=[estado_attr])
-            log_event(
-                "conexao", "conexao_ausente",
-                f"{nome_servico} de {perfil.user.get_username()} nunca foi conectado: "
-                f"{estado.motivo or 'falta configurar'}",
-                level="warning", usuario=perfil.user,
-                contexto={"servico": nome_servico, "motivo": estado.motivo,
-                          "detalhe": estado.detalhe,
-                          "availability_code": estado.availability_code},
+            # O estado FICA em None de propósito, e é a correção de 08/09/2026.
+            #
+            # `{campo}_estado` é um booleano de três valores — None (nunca esteve
+            # de pé), True, False — e None é a única marca que separa "nunca foi
+            # conectado" de "estava conectado e caiu". Gravar False aqui apagava
+            # exatamente a evidência que este ramo existe para preservar: no tique
+            # seguinte `anterior` já era False, `nunca_conectou` dava falso, e a
+            # mesma integração nunca-conectada caía no ramo de baixo e virava
+            # `conexao_caiu` de nível error. A proteção valia por uma única
+            # passagem.
+            #
+            # Foi assim que 99 `conexao_caiu` de nível error apareceram em sete
+            # dias dizendo "Mercado Livre de teste1 está fora do ar: Nenhuma
+            # sessão do Mercado Livre — conecte sua conta", de contas de teste que
+            # ninguém jamais ligou, enquanto `conexao_ausente` não aparecia
+            # nenhuma vez no mesmo relatório. Ruído conhecido em nível de erro é o
+            # que esconde o erro desconhecido.
+            #
+            # O carimbo de alerta é o que evita o outro extremo: sem ele, manter
+            # None faria o aviso repetir a cada tique de 5 minutos — 288 por dia
+            # por serviço. Com ele, ~4 por dia, e a tela de Saúde continua
+            # mostrando o que falta configurar.
+            #
+            # Quando a conta for de fato conectada, o ramo `else` grava True, e um
+            # tombo posterior passa a ser um `conexao_caiu` legítimo.
+            cooldown_ok = (
+                ultimo_alerta is None or (agora - ultimo_alerta) >= cooldown
             )
+            if cooldown_ok:
+                setattr(perfil, alerta_attr, agora)
+                perfil.save(update_fields=[alerta_attr])
+                log_event(
+                    "conexao", "conexao_ausente",
+                    f"{nome_servico} de {perfil.user.get_username()} nunca foi "
+                    f"conectado: {estado.motivo or 'falta configurar'}",
+                    level="warning", usuario=perfil.user,
+                    contexto={"servico": nome_servico, "motivo": estado.motivo,
+                              "detalhe": estado.detalhe,
+                              "availability_code": estado.availability_code},
+                )
             return 0
         primeira_vez = anterior is not False        # True ou None -> acabou de cair
         cooldown_ok = ultimo_alerta is None or (agora - ultimo_alerta) >= cooldown

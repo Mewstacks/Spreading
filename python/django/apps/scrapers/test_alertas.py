@@ -3,6 +3,7 @@
 Cada teste aqui corresponde a uma forma conhecida de o alerta virar inútil — ou por
 não tocar quando devia, ou por tocar tanto que se aprende a ignorá-lo.
 """
+import inspect
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -368,3 +369,76 @@ class CanalSemTransporteEstaDesligadoTests(SimpleTestCase):
 
         self.assertEqual(chat, "chat-123")
         self.assertEqual(emails, [])
+
+
+class SmtpAusenteNaoEErroTests(TestCase):
+    """Falta de configuração não é falha; falha configurada é.
+
+    `apps.accounts.emails._enviar` tem dois ramos que produzem o mesmo evento
+    `email_falhou`, e eles dizem coisas diferentes:
+
+      1. SMTP nem configurado — estado conhecido, pendente com o dono da conta;
+      2. `msg.send` levantou — está configurado e quebrou.
+
+    Só o segundo é notícia. Enquanto o primeiro entrava como `error`, ele virava
+    evento de hora em hora no Sentry para dizer sempre a mesma coisa. Em
+    07-08/09/2026 foi exatamente esse tipo de ruído — 542 ocorrências — que
+    afogou o `conexao_caiu` de nível error que ninguém viu, e a produção passou
+    a manhã fora do ar.
+
+    O nível muda o alcance, não a visibilidade: `warning` continua abrindo
+    incidente, então a tela de Saúde segue mostrando, com a ação já escrita.
+    """
+
+    def _chamar(self, **overrides):
+        from django.core.cache import cache
+        from apps.accounts import emails as accounts_emails
+
+        cache.delete("email:configuracao-ausente")
+        conf = {
+            "EMAIL_BACKEND": "django.core.mail.backends.smtp.EmailBackend",
+            "EMAIL_HOST_USER": "",
+            "EMAIL_HOST_PASSWORD": "",
+        }
+        conf.update(overrides)
+        with override_settings(**conf), \
+                patch("apps.scrapers.eventos.log_event") as log:
+            enviado = accounts_emails._enviar(
+                "Assunto", "quem@exemplo.com", "accounts/email_base", {},
+            )
+        return enviado, log
+
+    def test_smtp_ausente_entra_como_warning(self):
+        enviado, log = self._chamar()
+
+        self.assertFalse(enviado, "sem transporte não há entrega")
+        self.assertTrue(log.called, "a degradação continua registrada")
+        _args, kwargs = log.call_args
+        self.assertEqual(
+            kwargs.get("level"), "warning",
+            "SMTP não configurado é estado pendente, não incidente novo; "
+            "como error ele vira evento no Sentry a cada hora, para sempre",
+        )
+
+    def test_o_evento_continua_sendo_email_falhou(self):
+        """O nome não muda: a tela de Saúde e a purga dependem dele."""
+        _enviado, log = self._chamar()
+        args, _kwargs = log.call_args
+        self.assertEqual(args[0], "sistema")
+        self.assertEqual(args[1], "email_falhou")
+
+    def test_warning_ainda_abre_incidente(self):
+        """Rebaixar não pode virar esconder.
+
+        `incidentes_saude.processar_evento` aceita warning e error; se um dia
+        passar a exigir error, este rebaixamento apagaria o aviso da tela em vez
+        de só tirá-lo do Sentry.
+        """
+        from apps.scrapers import incidentes_saude
+
+        fonte = inspect.getsource(incidentes_saude.processar_evento)
+        self.assertIn(
+            '{"warning", "error"}', fonte,
+            "o incidente precisa continuar aceitando warning, senão rebaixar "
+            "email_falhou o tira também da tela de Saúde",
+        )
