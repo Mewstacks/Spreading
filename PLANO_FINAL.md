@@ -457,6 +457,9 @@ prova.
   da regressão observada em 08/09.
 - A cobertura por nicho já conta cupons, não apenas ofertas; as metas passam a
   ser o gate da conta `lules`.
+- `prontidao_producao --username lules` consolida os gates read-only de alerta,
+  destinos, taxonomia, esteiras e cobertura. Ele retorna erro enquanto algum
+  requisito estiver pendente e é o comando de liberação antes do canário privado.
 - Ainda depende do dono da conta: IDs dos grupos reais, canal de alerta e a
   decisão explícita sobre o desbloqueador ML. Esses três itens não podem ser
   inferidos nem ativados com segurança pelo código.
