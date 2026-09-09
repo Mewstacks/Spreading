@@ -1,9 +1,11 @@
 from datetime import timedelta
 from importlib import import_module
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.db import OperationalError, connection
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
@@ -424,6 +426,40 @@ class CouponNicheRankingTests(TestCase):
         candidatos = _coupon_candidates(config, limit=5)
 
         self.assertEqual([item.obj.pk for item in candidatos], [cupom.pk])
+
+
+class CouponCanaryCommandTests(TestCase):
+    def test_preview_never_envia_sem_flag_explicita(self):
+        user = get_user_model().objects.create_user("canary-lu", password="x")
+        config = ConfiguracaoEnvio.objects.create(
+            owner=user, grupo_id="teste@g.us", grupo_nome="Teste ofertas",
+            canal="whatsapp", min_desconto_percent=15,
+        )
+        cupom = SimpleNamespace(pk=10)
+        produto = SimpleNamespace(pk=20, nome="Produto comprovado")
+        relacao = SimpleNamespace(
+            produto=produto, preco_atual=100, preco_final=80,
+        )
+        candidato = SimpleNamespace(
+            kind="coupon", obj=cupom, score=60, reasons=["20% de desconto"],
+        )
+        saida = StringIO()
+        with patch(
+            "apps.scrapers.content_ranking.selecionar_conteudo_para_grupo",
+            return_value=[candidato],
+        ), patch(
+            "apps.scrapers.coupon_products.relacoes_prontas_para_envio",
+            return_value=[relacao],
+        ), patch(
+            "apps.scrapers.ofertas._desconto_efetivo_do_item_cupom", return_value=20,
+        ), patch(
+            "apps.scrapers.ofertas._piso_desconto_cupom", return_value=15,
+        ), patch("apps.scrapers.ofertas.enviar_cupom") as enviar:
+            call_command("canario_cupom", config=config.pk, username=user.username,
+                         stdout=saida)
+
+        self.assertIn("Prévia somente", saida.getvalue())
+        enviar.assert_not_called()
 
 
 class AmazonPublicCouponsCadenceTests(TestCase):
