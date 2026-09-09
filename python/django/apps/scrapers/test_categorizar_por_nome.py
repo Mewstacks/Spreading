@@ -96,6 +96,21 @@ class MacroDoNomeTests(SimpleTestCase):
             "Máquina Acabamento Kemei Shaver Profissional": "Beleza e Cuidados Pessoais",
             "Cinta Modeladora Sem Costura Alta Compressão": "Moda, Calçados e Acessórios",
             "Maleta Anti-impacto Vonder para Ferramentas": "Ferramentas e Manutenção",
+            "Cartão de memória Western Digital WD Purple 64GB": "Eletrônicos e Informática",
+            "Perfurador Solo Trado Gasolina com 3 Brocas": "Ferramentas e Manutenção",
+            "Quatree Supreme Cão Adulto Frango 15kg": "Pets e Animais",
+            "Papel Recicle A4 Multiuso 75g com 500 folhas": "Papelaria, Escritório e Escola",
+            "Mini Kit de Ferramentas Jardinagem para Suculentas": "Jardim, Piscina e Área Externa",
+            "Gran Plus Menu Castrados para gato adulto": "Pets e Animais",
+            "Kit 3 T-shirts Oversized Classic Algodão": "Moda, Calçados e Acessórios",
+            "TV Box Proeletronic SmartPro 4K Android": "Áudio, Vídeo e Fotografia",
+            "Strobo Cordão Natal 1600 Leds Pisca Flash": "Festas, Eventos e Presentes",
+            "Kit 2 Super Tweeter JBL Selenium ST400": "Áudio, Vídeo e Fotografia",
+            "Secador Taiff Tourmaline Íon 2100W": "Beleza e Cuidados Pessoais",
+            "Cadeirinha Selim Infantil Assento Quadro": "Esportes e Fitness",
+            "Cunha Preta Para Uso em Fisioterapia": "Saúde, Ortopedia e Equipamentos Médicos",
+            "Todo mundo já sentiu isso": "Livros, Mídia e Conteúdo",
+            "Terapia da jardinagem Volume 30": "Livros, Mídia e Conteúdo",
         }
         for nome, esperado in casos.items():
             self.assertEqual(macro_do_nome(nome), esperado, nome)
