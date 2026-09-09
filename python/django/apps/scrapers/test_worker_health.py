@@ -29,3 +29,19 @@ class WorkerHealthBootTests(SimpleTestCase):
 
         self.assertFalse(ok)
         self.assertFalse(body["esteiras"]["scrape"]["iniciando"])
+
+    def test_heartbeat_da_maquina_anterior_nao_mente_no_restart(self):
+        from apps.scrapers.management.commands import worker_health
+
+        now = timezone.now()
+        with patch.object(worker_health, "INICIADO_EM", now), patch.object(
+            worker_health.st, "worker_alive", return_value=True,
+        ), patch.object(
+            worker_health.st, "read_state",
+            return_value={"atualizado_em": (now - timedelta(seconds=5)).timestamp()},
+        ):
+            ok, body = worker_health._diagnostico(now + timedelta(seconds=30))
+
+        self.assertTrue(ok)
+        self.assertFalse(body["esteiras"]["scrape"]["viva"])
+        self.assertTrue(body["esteiras"]["scrape"]["iniciando"])

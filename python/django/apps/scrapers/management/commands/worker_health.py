@@ -47,6 +47,23 @@ ATRASO_DE_BOOT = {
 INICIADO_EM = timezone.now()
 
 
+def _viva_neste_boot(job: str) -> bool:
+    """Heartbeat recente e escrito depois de este processo de saúde iniciar.
+
+    O estado é compartilhado no PostgreSQL. Depois de um deploy, o heartbeat da
+    VM anterior ainda pode estar dentro dos 90 s de TTL enquanto os processos do
+    Procfile novo sequer acordaram. Contá-lo como vivo faz o health afirmar que
+    todas as esteiras subiram quando só herdou dados antigos.
+    """
+    if not st.worker_alive(job):
+        return False
+    try:
+        atualizado_em = float(st.read_state(job).get("atualizado_em") or 0)
+    except (TypeError, ValueError):
+        return False
+    return atualizado_em >= INICIADO_EM.timestamp()
+
+
 def _diagnostico(agora=None) -> tuple[bool, dict]:
     """(saudável, corpo). Uma esteira sem heartbeat recente reprova o check."""
     agora = agora or timezone.now()
@@ -54,7 +71,7 @@ def _diagnostico(agora=None) -> tuple[bool, dict]:
     esteiras = {}
     for job in ESTEIRAS:
         try:
-            viva = st.worker_alive(job)
+            viva = _viva_neste_boot(job)
         except Exception as exc:  # banco fora do ar é indisponibilidade, não crash
             logger.warning("worker_health: falha ao ler heartbeat de %s: %s", job, exc)
             esteiras[job] = {"viva": False, "erro": str(exc)}
