@@ -1908,40 +1908,9 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                       "com foto, preço e link verificados.",
             "classe": "permanente", "cupom_sem_produto": True,
         }
-    # Segunda opinião por IA: o piso monetário fixo (cupom_e_lixo) já barrou o
-    # caso claro — teto/valor irrisório — antes de o cupom chegar a "pronto".
-    # Isto pega o que só leitura pega: condição confusa, escopo ilegível,
-    # cheiro de isca. Uma chamada por TENTATIVA REAL de envio, não por cupom no
-    # catálogo — por isso pode usar o modelo cheio sem custar escala. Falha ou
-    # IA desligada nunca bloqueia sozinha (fail-open); só bloqueia quando a IA
-    # respondeu e disse explicitamente que não vale.
-    from apps.scrapers.coupon_rules import escopo_produtos_cupom, regras_do_cupom
-    from apps.scrapers.llm import avaliar_cupom_ia
-    regras_cupom = regras_do_cupom(cupom)
-    escopo_original = escopo_produtos_cupom(cupom) or str(regras_cupom.get("escopo") or "")
-    avaliacao_ia = avaliar_cupom_ia(
-        escopo=escopo_original,
-        tipo_desconto=regras_cupom.get("tipo_desconto") or "",
-        valor_desconto=regras_cupom.get("valor_desconto"),
-        desconto_maximo=regras_cupom.get("desconto_maximo"),
-        valor_minimo=regras_cupom.get("valor_minimo"),
-        restrito=bool(getattr(cupom, "restrito", False)),
-    )
-    if not avaliacao_ia["vale_a_pena"]:
-        _executar_orm(
-            log_event,
-            "publicacao", "coupon_rejected_by_ai",
-            f"Cupom recusado pela IA: {avaliacao_ia['motivo'] or 'sem motivo informado'}.",
-            level="info",
-            usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
-                                       "destino": destino_nome or grupo_id,
-                                       "motivo_ia": avaliacao_ia["motivo"]},
-        )
-        return {
-            "sucesso": False,
-            "motivo": avaliacao_ia["motivo"] or "Este cupom não passou na avaliação de qualidade.",
-            "classe": "permanente", "rejeitado_por_ia": True,
-        }
+    # A publicação é decidida por evidência estruturada e revalidação de preço.
+    # Não chama IA na hora do envio: crédito, latência ou texto gerado não podem
+    # interferir no canário nem na entrega de uma oferta já comprovada.
 
     relacoes_prontas = _executar_orm(relacoes_prontas_para_envio, cupom, usuario)
     if not relacoes_prontas:
@@ -2096,7 +2065,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         relacao_topo = None
         itens_cupom, bloqueio_afiliacao = [], None
         itens_cupom, bloqueio_afiliacao = _preparar_itens_cupom(
-            cupom, usuario, relacoes_prontas)
+            cupom, usuario, relacoes_prontas, limite=1)
         if (itens_cupom
                 and getattr(settings, "PRECO_REVALIDA_ANTES_ENVIO", True)):
             # Antes da IA (para a chamada nascer do preço fresco), antes do corte
