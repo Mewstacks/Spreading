@@ -233,13 +233,6 @@ def _rodar_feed_afiliados():
 
 def _rodar_cupons(lote=40):
     """Mantém coleta, preparo e links mesmo com a raspagem geral desligada."""
-    from apps.scrapers.coupon_pipeline import executar_pipeline_cupons
-
-    resultado = executar_pipeline_cupons(
-        coletar=True,
-        limite_preparo=max(12, lote),
-        limite_links=max(1, lote),
-    )
     # Lote deliberadamente pequeno: checkout disputa o mesmo Chromium das fontes e
     # dos links. O adaptador só usa a sessão do próprio usuário, isola um carrinho
     # vazio e nunca cruza a ação que cria/paga um pedido.
@@ -247,10 +240,19 @@ def _rodar_cupons(lote=40):
     from apps.scrapers.coupon_validation_runner import (
         defer_missing_checkout_sessions, run_validation_batch,
     )
-    resultado["validacoes_sem_sessao"] = defer_missing_checkout_sessions()
-    resultado["validacoes_checkout"] = run_validation_batch(
+    validacoes_sem_sessao = defer_missing_checkout_sessions()
+    validacoes_checkout = run_validation_batch(
         adapters=CHECKOUT_VALIDATION_ADAPTERS, limit=2,
     )
+    from apps.scrapers.coupon_pipeline import executar_pipeline_cupons
+
+    resultado = executar_pipeline_cupons(
+        coletar=True,
+        limite_preparo=max(12, lote),
+        limite_links=max(1, lote),
+    )
+    resultado["validacoes_sem_sessao"] = validacoes_sem_sessao
+    resultado["validacoes_checkout"] = validacoes_checkout
     # Produto criado pelo pipeline de cupom nasce com `categoria=DESCONHECIDO`, e o
     # classificador de macro do ML deriva justamente da categoria. Sem macro, nenhuma
     # `ConfiguracaoEnvio` enxerga o item — todas filtram por ela. Medido em 04/09:
