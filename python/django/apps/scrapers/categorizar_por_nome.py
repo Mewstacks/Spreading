@@ -66,7 +66,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
     "Áudio, Vídeo e Fotografia": (
         "caixa de som", "soundbar", "fone bluetooth", "headset", "headphone",
         "microfone", "camera", "cameras", "gopro", "drone", "projetor",
-        "televisao", "smart tv", "lente", "tripe", "ring light",
+        "televisao", "smart tv", "lente", "tripe", "ring light", "fones de ouvido",
     ),
     "Eletrodomésticos": (
         "geladeira", "refrigerador", "fogao", "cooktop", "microondas",
@@ -76,6 +76,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         ("aspirador", 3),
         "cafeteira", "sanduicheira", "forno eletrico", "purificador", "bebedouro", "ferro de passar",
         "panificadora", "tanquinho", "sorveteira", "mixer", "dreame",
+        "frigobar", "ferro a vapor",
     ),
     "Climatização e Aquecimento": (
         "ar condicionado", "ventilador", "climatizador", "aquecedor",
@@ -88,6 +89,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "abajur", "criado mudo", "rack", "painel de tv", "cabideiro", "banqueta",
         "mesa de cabeceira", "lixeira", "manta", "paneleiro", "difusor de ambiente",
         "aromatizador", "home spray",
+        "penteadeira", "comoda", "roupeiro", "quarto modulado",
     ),
     "Cozinha, Mesa e Bar": (
         "panela", "frigideira", "talher", "talheres", "prato", "copo", "taca",
@@ -96,6 +98,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "galheteiro", "saleiro", "bandeja", "garrafa isotermica", "espatula",
         "faca de carne", "pinca culinaria", "luva termica", "tabua de corte",
         "balanca de cozinha", "organizador de esponja", "pote organizador",
+        "cuscuzeira", "mandolin", "multifatiador", "utensilios de cozinha",
     ),
     "Limpeza e Lavanderia": (
         "detergente", "sabao", "amaciante", "desinfetante", "agua sanitaria",
@@ -107,6 +110,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "azulejo", "porcelanato", "argamassa", "cimento", "tinta", "verniz",
         "fechadura", "dobradica", "cadeado", "mangueira", "caixa dagua", "puxador",
         "cremalheira", "rodape", "prendedor de porta",
+        "ducha higienica", "cuba de embutir", "piso vinilico", "spray impermeabilizante",
     ),
     "Ferramentas e Manutenção": (
         "furadeira", "parafusadeira", "esmerilhadeira", "serra", "martelo",
@@ -116,12 +120,14 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "arruela", "porca", "vedacao", "multimetro", "paquimetro", "maquina de solda",
         "arame solda", "nivelador a laser", "pistola de pintura", "abracadeira",
         "chave combinada",
+        "maquina inversora", "chave de impacto", "perfurador de solo", "bomba pressurizadora",
     ),
     "Materiais Elétricos e Componentes": (
         "lampada", "reator", "disjuntor", "tomada", "interruptor", "fita led",
         "refletor", "extensao eletrica", "filtro de linha", "pilha", "bateria",
         "soquete", "e27", "plafon", "spot led", "rolo de fio", "cabo flexivel",
         "placa solar", "inversor", "fio eletrico",
+        "protetor de surto", "conector wago", "cabo de rede", "cabo ethernet",
     ),
     "Jardim, Piscina e Área Externa": (
         "piscina", "mangueira de jardim", "regador", "vaso de planta", "adubo",
@@ -152,6 +158,8 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "sabonete", "desodorante", "escova de cabelo", "leave in", "oleo capilar",
         "po descolorante", "progressiva", "modelador de cachos", "mascara condicionador",
         "reparador de pontas", "protetor termico", "cronograma capilar", "cronograma",
+        "gel de limpeza", "clareador corporal", "clareador para axilas", "primer iluminador",
+        "aparador de pelos", "aparador oneblade",
     ),
     "Saúde, Ortopedia e Equipamentos Médicos": (
         "termometro", "oximetro", "medidor de pressao", "nebulizador", "mascara",
@@ -160,6 +168,8 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "suplemento", "whey", "creatina", "colageno", "vitamina",
         "magnesio", "pre treino", "cinta hernia", "multivitaminico", "omega 3",
         "andador", "barra de apoio", "corretor de postura", "medidor de febre", "kinesio",
+        "proteina isolada", "isolate protein", "beef protein", "hipercalorico", "cpap",
+        "balanca bioimpedancia",
     ),
     "Alimentos e Bebidas": (
         "cafe", "cha", "chocolate", "biscoito", "bolacha", "cerveja", "vinho",
@@ -173,6 +183,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "jaqueta", "moletom", "blusa", "tenis", "sapato", "sandalia", "chinelo",
         "bota", "meia", "cueca", "calcinha", "sutia", "oculos de sol", "cinto",
         "bone", "pijama", "cropped", "headband", "chapeu de palha",
+        "polo masculina", "polo enxuto", "tech t shirt", "daily t shirt",
     ),
     "Bolsas, Malas e Viagem": (
         "mochila", "bolsa", "mala de viagem", "carteira", "necessaire",
@@ -197,6 +208,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "playstation", "xbox", "nintendo", "controle de video game", "joystick",
         "boneca", "boneco", "lego", "quebra cabeca", "jogo de tabuleiro",
         "carrinho de brinquedo", "pelucia", "cubo magico", "video game",
+        "figurinhas", "cartas pokemon", "switch fisico",
     ),
     "Papelaria, Escritório e Escola": (
         "caderno", "caneta", "lapis", "borracha escolar", "mochila escolar",

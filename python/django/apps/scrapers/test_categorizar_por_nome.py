@@ -63,6 +63,21 @@ class MacroDoNomeTests(SimpleTestCase):
         for nome, esperado in casos.items():
             self.assertEqual(macro_do_nome(nome), esperado, nome)
 
+    def test_vocabulario_recente_sem_domain_id(self):
+        """Novos títulos reais que chegaram no feed sem macro em 09/09/2026."""
+        casos = {
+            "Airfryer Série 3000 7,2l Digital Philips Walita": "Eletrodomésticos",
+            "Frigobar Philco 121l Branco": "Eletrodomésticos",
+            "Penteadeira Ditália C/ Tampo De Vidro": "Casa, Móveis e Decoração",
+            "Cuscuzeira Inox Nordestina 16cm": "Cozinha, Mesa e Bar",
+            "Gel de Limpeza Antioleosidade Bioderma": "Beleza e Cuidados Pessoais",
+            "Isolate Protein 900g New Millen": "Saúde, Ortopedia e Equipamentos Médicos",
+            "Chave De Impacto 800n.m Com 2 Baterias": "Ferramentas e Manutenção",
+            "Kit 4 Refletor Led 100w": "Materiais Elétricos e Componentes",
+        }
+        for nome, esperado in casos.items():
+            self.assertEqual(macro_do_nome(nome), esperado, nome)
+
     def test_qualificador_no_fim_nao_manda_no_resultado(self):
         """A cabeca do nome decide; o que vem depois e complemento.
 
