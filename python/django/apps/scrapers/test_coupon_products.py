@@ -1259,6 +1259,20 @@ class CouponProductLinkTests(SimpleTestCase):
             "mercadolivre",
         ))
 
+    def test_ml_social_link_reuses_only_verified_tracking_on_product_isca(self):
+        from apps.scrapers.ofertas import _link_cupom_do_produto
+
+        link = _link_cupom_do_produto(
+            "https://www.mercadolivre.com.br/social/lphoffmann?matt_word=lu&matt_tool=1",
+            "mercadolivre",
+            "https://produto.mercadolivre.com.br/MLB-123-item?_campaign=7",
+        )
+
+        self.assertEqual(
+            link,
+            "https://produto.mercadolivre.com.br/MLB-123-item?_campaign=7&matt_word=lu&matt_tool=1",
+        )
+
 
 class PromobitAmazonCodigoReadySendTests(TestCase):
     def test_codigo_promobit_sem_fonte_licenciada_nao_fica_ready(self):

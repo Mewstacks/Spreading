@@ -1162,6 +1162,38 @@ def _link_cupom_do_produto_publicavel(link: str, marketplace: str) -> bool:
     return bool(caminho and caminho != "/" and not caminho.startswith("/social/"))
 
 
+def _link_cupom_do_produto(link: str, marketplace: str, url_isca: str = "") -> str:
+    """Devolve o deep link do item, preservando rastreio ML já comprovado.
+
+    O Link Builder do ML pode resolver um encurtador para ``/social/<perfil>``.
+    Isso prova os parâmetros de atribuição, mas não é uma página de produto. Quando
+    a isca específica foi verificada, reaplica apenas esses parâmetros nela.
+    """
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    bruto = str(link or "")
+    if _link_cupom_do_produto_publicavel(bruto, marketplace):
+        return bruto
+    if str(marketplace or "").lower() != "mercadolivre" or not url_isca:
+        return ""
+    try:
+        origem = urlsplit(bruto)
+        isca = urlsplit(str(url_isca))
+    except ValueError:
+        return ""
+    if not _link_cupom_do_produto_publicavel(str(url_isca), marketplace):
+        return ""
+    rastreio = {
+        chave: valor for chave, valor in parse_qsl(origem.query, keep_blank_values=True)
+        if chave in {"matt_word", "matt_tool", "tracking_id"} and valor
+    }
+    if not rastreio:
+        return ""
+    query = dict(parse_qsl(isca.query, keep_blank_values=True))
+    query.update(rastreio)
+    return urlunsplit((isca.scheme, isca.netloc, isca.path, urlencode(query), ""))
+
+
 def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
     """([{produto, link}], bloqueio) com link afiliado válido + foto p/ a colagem.
 
@@ -1210,9 +1242,9 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
             break
         relation = relacao_por_produto[p.id]
         row = situacao.get(relation.pk)
-        link = canonical_coupon_link(row) if coupon_link_verified_and_fresh(row) else ""
-        if link and not _link_cupom_do_produto_publicavel(link, mkt):
-            link = ""
+        link_bruto = canonical_coupon_link(row) if coupon_link_verified_and_fresh(row) else ""
+        link = _link_cupom_do_produto(link_bruto, mkt, getattr(row, "url_isca", ""))
+        if link_bruto and not link:
             bloqueio = {
                 "mensagem": "O link afiliado disponível aponta para uma vitrine ou "
                             "perfil, não para o produto anunciado.",
@@ -1244,9 +1276,12 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
                 logger.debug("Falha ao afiliar produto %s do cupom: %s",
                              getattr(p, "id", "?"), exc)
                 info = None
-            if (info and info.get("link_afiliado") and info.get("afiliado_ok") is not False
-                    and _link_cupom_do_produto_publicavel(info["link_afiliado"], mkt)):
-                link = info["link_afiliado"]
+            link_gerado = _link_cupom_do_produto(
+                (info or {}).get("link_afiliado", ""), mkt,
+                (info or {}).get("url_isca", ""),
+            )
+            if info and link_gerado and info.get("afiliado_ok") is not False:
+                link = link_gerado
                 try:
                     def _salvar_relacao():
                         LinkAfiliadoProdutoCupomUsuario.objects.update_or_create(
