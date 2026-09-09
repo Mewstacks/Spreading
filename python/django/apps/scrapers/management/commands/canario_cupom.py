@@ -51,9 +51,13 @@ class Command(BaseCommand):
         piso = _piso_desconto_cupom(config)
         candidato = relacao = desconto = None
         for possivel in candidatos:
-            relacao_pronta = next(
-                iter(relacoes_prontas_para_envio(possivel.obj, user)), None,
-            )
+            relacoes = relacoes_prontas_para_envio(possivel.obj, user)
+            if config.macro_categoria:
+                relacoes = [
+                    item for item in relacoes
+                    if item.produto.macro_categoria == config.macro_categoria
+                ]
+            relacao_pronta = next(iter(relacoes), None)
             if not relacao_pronta:
                 continue
             desconto_efetivo = _desconto_efetivo_do_item_cupom({
@@ -85,6 +89,7 @@ class Command(BaseCommand):
             cupom, config.grupo_id, canal=config.canal, usuario=user,
             destino_nome=config.grupo_nome, configuracao=config,
             score=candidato.score, motivos_score=candidato.reasons,
+            relacao_id=relacao.pk,
         )
         if not resultado.get("sucesso"):
             raise CommandError(resultado.get("motivo") or "Canário não foi publicado.")

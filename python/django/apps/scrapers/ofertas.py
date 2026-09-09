@@ -1974,6 +1974,15 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     relacoes_preparadas = _executar_orm(
         relacoes_preparadas_para_envio, cupom, usuario,
     )
+    # Um mesmo cupom pode valer para produtos de macros distintas. A regra do
+    # destino escolhe o produto, portanto nunca pode cair na primeira relação
+    # arbitrária e publicar Áudio em um grupo de Telefonia, por exemplo.
+    macro_destino = str(getattr(configuracao, "macro_categoria", "") or "")
+    if macro_destino:
+        relacoes_preparadas = [
+            relacao for relacao in relacoes_preparadas
+            if relacao.produto.macro_categoria == macro_destino
+        ]
     if relacao_id is not None:
         relacoes_preparadas = [
             relacao for relacao in relacoes_preparadas
@@ -1998,6 +2007,11 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     # interferir no canário nem na entrega de uma oferta já comprovada.
 
     relacoes_prontas = _executar_orm(relacoes_prontas_para_envio, cupom, usuario)
+    if macro_destino:
+        relacoes_prontas = [
+            relacao for relacao in relacoes_prontas
+            if relacao.produto.macro_categoria == macro_destino
+        ]
     if relacao_id is not None:
         relacoes_prontas = [
             relacao for relacao in relacoes_prontas
