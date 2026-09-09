@@ -1072,6 +1072,8 @@ def listar_itens_por_cupom(cupom, page, max_paginas=5):
 
 
 def _sincronizar_produtos_no_banco(cupons_com_produtos):
+    from apps.scrapers.categorizar_por_nome import macro_do_nome
+
     processados = 0
     for entrada in cupons_com_produtos:
         camp_id = entrada.get("campaignId", "")
@@ -1133,6 +1135,13 @@ def _sincronizar_produtos_no_banco(cupons_com_produtos):
                     link_produto=link,
                     imagem_url=p.get("imagem_url") or "",
                     categoria=p.get("categoria", "DESCONHECIDO"),
+                    # A página de container passou a omitir domain_id em parte
+                    # das coletas. Este produto é uma geração nova (a anterior
+                    # fica stale), então esperar o backfill posterior deixa o
+                    # cupom invisível para as regras por macro durante um ciclo.
+                    # A classificação pelo nome é determinística e só ocupa o
+                    # lugar que o sinal oficial não preencheu.
+                    macro_categoria=macro_do_nome(p["nome_produto"]),
                     marketplace="mercadolivre",
                     origem="cupom",
                     estado="ativo",

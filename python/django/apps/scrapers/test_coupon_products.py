@@ -2080,6 +2080,13 @@ class SemanticaDePrecoDoCatalogoMLTests(TestCase):
         # O preço pós-cupom NÃO é persistido: ele é recalculado na publicação.
         self.assertNotEqual(produto.preco_com_cupom, 80.0)
 
+    def test_produto_de_cupom_sem_domain_id_ja_nasce_com_macro_local(self):
+        produto = self._sincronizar()
+
+        # Não depende do backfill geral: esta é a geração ativa que as regras de
+        # envio enxergam no mesmo ciclo da coleta de cupom.
+        self.assertEqual(produto.macro_categoria, "Eletrodomésticos")
+
     def test_cupom_desconta_uma_vez_so(self):
         """O bug: 20% sobre 100 tem de dar 80, não 64."""
         from apps.scrapers.coupon_products import calcular_precos

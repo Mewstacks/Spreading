@@ -397,6 +397,18 @@ class MLPaginaCategoriaTests(SimpleTestCase):
             "MLB123456789",
         )
 
+    def test_payload_camel_case_domain_id_preserva_categoria_oficial(self):
+        """Variante de payload da vitrine ML observada em 09/09/2026."""
+        from apps.scrapers.scraper_mercadolivre.categorias_pagina import mapear_domain_ids
+
+        page = self._page(self._payload(
+            '{"search":{"items":[{"item_id":"MLB-987654321",'
+            '"domainId":"MLB-VACUUM_CLEANERS"}]}}'))
+
+        self.assertEqual(
+            mapear_domain_ids(page), {"MLB987654321": "VACUUM_CLEANERS"},
+        )
+
     def test_script_ausente_avisa_em_vez_de_falhar_calado(self):
         """Era o `except Exception: pass`: o catálogo inteiro ia a DESCONHECIDO
         e não sobrava nada no log apontando para a leitura de categoria."""

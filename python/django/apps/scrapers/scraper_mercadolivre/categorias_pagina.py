@@ -59,7 +59,11 @@ def _coletar(obj, item_para_cat, produto_para_item):
     `catalog_product_id` apontando para o `item_id` real — daí os dois mapas.
     """
     if isinstance(obj, dict):
-        domain_id = str(obj.get("domain_id") or "")
+        # O payload do ML alterna snake_case e camelCase conforme o brick que
+        # renderizou a vitrine. Ambos carregam o mesmo domain oficial; ignorar
+        # ``domainId`` faz o coletor cair no fallback local mesmo quando a loja
+        # forneceu a taxonomia.
+        domain_id = str(obj.get("domain_id") or obj.get("domainId") or "")
         if domain_id:
             # O payload continuou trazendo ``domain_id``, mas a identidade deixou
             # de aparecer só em ``id``. Registrar as chaves que carregam um MLB
