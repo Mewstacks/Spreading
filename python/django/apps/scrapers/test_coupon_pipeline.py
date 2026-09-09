@@ -330,6 +330,19 @@ class CouponPipelineTests(TestCase):
         self.assertEqual(ordem[:2], ["links", "coleta"])
         self.assertEqual(resultado["links_verificados"], 1)
 
+    def test_conta_com_destino_tem_prioridade_sobre_conta_de_teste(self):
+        from apps.scrapers.coupon_pipeline import _priorizar_usuarios_com_destino
+
+        teste = get_user_model().objects.create_user("pipeline-teste")
+        ConfiguracaoEnvio.objects.create(
+            owner=self.user, organization=self.user.perfil.organization,
+            grupo_id="teste@g.us", grupo_nome="Teste ofertas", ativo=False,
+        )
+
+        ordenados = _priorizar_usuarios_com_destino([teste, self.user])
+
+        self.assertEqual(ordenados, [self.user, teste])
+
     def test_afiliacao_nao_faz_queries_por_cupom(self):
         from apps.scrapers.coupon_pipeline import afiliar_cupons
         from apps.scrapers.coupon_products import chave_produtos_cupom

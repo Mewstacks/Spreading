@@ -1,14 +1,16 @@
 monitor: sleep 10 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar --tick 5
 envio: sleep 20 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo envio --tick 5
 manual: sleep 30 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo manual
-cupons: sleep 45 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo cupons --tick 15 --lote 40
+# Pares cupom+produto já comprovados são a fila de publicação. Ela inicia antes
+# das coletas que usam Chromium, para não perder o único navegador para o feed.
+cupons: sleep 35 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo cupons --tick 15 --lote 40
 # Links já preparados têm prioridade sobre a coleta incremental: se o flash abre
 # Chromium primeiro, a conta espera um ciclo inteiro sem conseguir publicar um
 # cupom que já tem produto, preço e código verificados.
 # Sobe antes do preparo de cupons (45s), do flash (75s) e da varredura completa
 # (90s), para materializar primeiro os pares que já estão validados.
-links: sleep 35 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo links --tick 5 --lote 40
-scrapeflash: sleep 75 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape_rapido --tick 5
-scrape: sleep 90 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape --scrape-horas 3
+links: sleep 150 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo links --tick 5 --lote 40
+scrapeflash: sleep 180 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape_rapido --tick 5
+scrape: sleep 210 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape --scrape-horas 3
 canais: sleep 15 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar_canais --tick 60
 saude: exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py worker_health --port 8081

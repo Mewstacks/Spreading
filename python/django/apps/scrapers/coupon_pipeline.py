@@ -54,6 +54,25 @@ def _usuarios_ativos(usuarios=None):
     return list(get_user_model().objects.filter(is_active=True, id__in=ids))
 
 
+def _priorizar_usuarios_com_destino(usuarios):
+    """Processa contas operacionais antes de sobras de teste/demonstração."""
+    if len(usuarios) < 2:
+        return usuarios
+    from apps.scrapers.models import ConfiguracaoEnvio
+
+    ids = [usuario.pk for usuario in usuarios]
+    com_destino = set(
+        ConfiguracaoEnvio.objects.filter(owner_id__in=ids)
+        .exclude(grupo_id="")
+        .values_list("owner_id", flat=True)
+        .distinct()
+    )
+    return sorted(
+        usuarios,
+        key=lambda usuario: (usuario.pk not in com_destino, usuario.pk),
+    )
+
+
 # A página de cupons Amazon é Chromium. Rodá-la a cada 15 min disputa o slot
 # com preparo/links do ML; 6h mantém o catálogo fresco sem bloquear o funil.
 AMAZON_CUPONS_TTL_COLETA = timedelta(hours=6)
@@ -782,7 +801,7 @@ def executar_pipeline_cupons(
     permitir_rede_preparo=True, limite_http_preparo=None,
 ):
     """Executa um ciclo completo sem permitir que uma fonte derrube as demais."""
-    usuarios = _usuarios_ativos(usuarios)
+    usuarios = _priorizar_usuarios_com_destino(_usuarios_ativos(usuarios))
 
     # Materializa primeiro a pequena fila de pares já comprovados. Uma coleta
     # lenta não pode tomar o único Chromium e atrasar um cupom já publicável.
