@@ -40,6 +40,9 @@ class Command(BaseCommand):
         parser.add_argument(
             "--elegiveis", action="store_true",
             help="No dry-run, audita só o mesmo pool que pode virar publicação.")
+        parser.add_argument(
+            "--username", default="lules",
+            help="Conta cujo pool publicável é auditado por --elegiveis.")
 
     def handle(self, *args, **opts):
         with system_context():
@@ -50,7 +53,7 @@ class Command(BaseCommand):
                 limite=opts["limite"],
                 apenas_com_cupom=opts["apenas_com_cupom"],
                 produto_ids=(
-                    [produto.pk for produto in self._pool_elegivel()]
+                    [produto.pk for produto in self._pool_elegivel(opts["username"])]
                     if opts["elegiveis"] else None
                 ),
             )
@@ -58,9 +61,15 @@ class Command(BaseCommand):
                 f"{n} produto(s) classificado(s) pelo nome."))
 
     @staticmethod
-    def _pool_elegivel():
+    def _pool_elegivel(username):
+        from django.contrib.auth import get_user_model
         from apps.scrapers.ofertas import pool_de_produtos_elegiveis
-        return pool_de_produtos_elegiveis(min_desconto_percent=15.0)
+        usuario = get_user_model().objects.filter(
+            username=str(username or "").strip(), is_active=True,
+        ).first()
+        return pool_de_produtos_elegiveis(
+            usuario=usuario, min_desconto_percent=15.0,
+        )
 
     def _prever(self, opts):
         # Espelha o alvo real de `popular_macro_por_nome`: uma macro antiga sobre
@@ -72,7 +81,7 @@ class Command(BaseCommand):
         )
         qs = Produto.objects.filter(sem_autoridade).exclude(nome="")
         if opts["elegiveis"]:
-            ids = [produto.pk for produto in self._pool_elegivel()]
+            ids = [produto.pk for produto in self._pool_elegivel(opts["username"])]
             qs = qs.filter(pk__in=ids)
         elif opts["frescos"]:
             qs = qs.filter(produtos_frescos_q())
