@@ -9,7 +9,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from apps.scrapers.models import ConfiguracaoEnvio, Produto
-from apps.scrapers.production_readiness import avaliar
+from apps.scrapers.production_readiness import _taxonomia_catalogo, avaliar
 
 
 class ProducaoReadinessTests(TestCase):
@@ -34,6 +34,21 @@ class ProducaoReadinessTests(TestCase):
                 "deficit_cupom": 0 if cupom else 3,
             }],
         }
+
+    def test_taxonomia_mede_pool_elegivel_nao_catalogo_bruto(self):
+        """Produto fora do mínimo não pode reprovar o gate de candidatos."""
+        Produto.objects.create(
+            owner=None, marketplace="mercadolivre", nome="Produto sem desconto",
+            origem="oferta", estado="ativo", link_produto="https://example.com/MLB2",
+            preco_sem_desconto=100, preco_com_cupom=96, macro_categoria="",
+            ultima_observacao=timezone.now(),
+        )
+
+        metrica = _taxonomia_catalogo(self.user)
+
+        self.assertEqual(metrica["total"], 1)
+        self.assertEqual(metrica["classificados"], 1)
+        self.assertEqual(metrica["percentual"], 100.0)
 
     @patch("apps.scrapers.automacao_state.worker_alive", return_value=True)
     @patch("apps.scrapers.production_readiness._destinos", return_value=("-100123", []))

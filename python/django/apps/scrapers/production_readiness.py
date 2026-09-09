@@ -6,11 +6,9 @@ credenciais e o envio do canário continuam sendo ações deliberadas do dono.
 """
 from __future__ import annotations
 
-from django.db.models import Q
 from django.utils import timezone
 
 from apps.scrapers.alertas import _destinos
-from apps.scrapers.maintenance import produtos_frescos_q
 
 
 NICHOS_PRIORITARIOS_LU = frozenset({
@@ -20,7 +18,6 @@ NICHOS_PRIORITARIOS_LU = frozenset({
     "Casa, Móveis e Decoração",
 })
 _MARCADORES_DE_TESTE = ("teste", "test", "smoke", "dev")
-_ESTADOS_INELEGIVEIS = ("indisponivel", "invalido", "expirado", "stale")
 
 
 def _destino_real(config) -> bool:
@@ -31,23 +28,29 @@ def _destino_real(config) -> bool:
 
 
 def _taxonomia_catalogo(usuario, *, agora=None) -> dict:
-    """Cobertura de macro-categoria do catálogo fresco visível à conta.
+    """Cobertura de macro nos candidatos que o envio realmente pode selecionar.
 
-    A conta enxerga produtos públicos e seus próprios produtos. É a população
-    anterior a qualquer filtro de grupo; medir só o pool já filtrado esconderia
-    exatamente os itens sem macro que deixam de virar candidatos.
+    O aceite é 95% de *candidatos elegíveis*, não de todo o catálogo fresco. O
+    catálogo também guarda itens sem desconto suficiente, sem ligação verificável
+    ou já fora do teto do shortlist; eles não chegam a uma regra e não devem fazer
+    um gate de publicação mentir. Usar o mesmo pool de ``gerar_deals`` é a garantia
+    de que diagnóstico e envio falam da mesma população.
     """
-    from apps.scrapers.models import Produto
+    from apps.scrapers.ofertas import pool_de_produtos_elegiveis
 
-    agora = agora or timezone.now()
-    itens = (Produto.objects.filter(produtos_frescos_q(agora=agora))
-             .filter(Q(owner__isnull=True) | Q(owner=usuario))
-             .exclude(estado__in=_ESTADOS_INELEGIVEIS)
-             .filter(preco_sem_desconto__gt=0, preco_com_cupom__gt=0))
-    total = itens.count()
-    classificados = (itens.exclude(macro_categoria__isnull=True)
-                     .exclude(macro_categoria="")
-                     .exclude(macro_categoria="DESCONHECIDO").count())
+    # A função usa a janela de frescor do momento. `agora` continua no contrato da
+    # readiness para os demais gates; o pool consulta a mesma fonte de tempo em
+    # produção e os testes não dependem de relógio artificial.
+    itens = pool_de_produtos_elegiveis(
+        usuario=usuario,
+        min_desconto_percent=15.0,
+    )
+    total = len(itens)
+    classificados = sum(
+        1 for item in itens
+        if str(getattr(item, "macro_categoria", "") or "").strip()
+        not in {"", "DESCONHECIDO"}
+    )
     percentual = 0.0 if not total else (classificados * 100.0 / total)
     return {
         "total": total,
