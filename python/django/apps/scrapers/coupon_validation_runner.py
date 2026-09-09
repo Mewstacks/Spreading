@@ -118,7 +118,7 @@ def claim_pending_validations(*, marketplaces, limit=3, now=None):
             Q(retry_at__isnull=True) | Q(retry_at__lte=now),
             status="pending", marketplace__in=marketplaces,
         ).select_related("cupom", "usuario").order_by(
-            "created_at", "pk",
+            "-created_at", "-pk",
         )[:limit])
         for row in rows:
             row.status = "running"

@@ -100,6 +100,19 @@ class CouponValidationRunnerTests(TestCase):
         self.assertEqual(validation.status, "running")
         self.assertGreater(validation.started_at, timezone.now() - timezone.timedelta(minutes=1))
 
+    def test_fresh_validation_is_claimed_before_an_older_pending_attempt(self):
+        older = self._scheduled()
+        newer, _ = agendar_validacao(
+            self.coupon, self.user, product_key="B000000002",
+            product_url="https://www.amazon.com.br/dp/B000000002",
+        )
+
+        claimed = claim_pending_validations(marketplaces={"amazon"}, limit=1)
+
+        self.assertEqual([row.pk for row in claimed], [newer.pk])
+        older.refresh_from_db()
+        self.assertEqual(older.status, "pending")
+
     def test_missing_session_is_deferred_in_bulk_before_browser_lane(self):
         from unittest.mock import patch
         first = self._scheduled()
