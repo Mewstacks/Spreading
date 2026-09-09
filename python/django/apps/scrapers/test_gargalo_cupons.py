@@ -1,15 +1,8 @@
-"""Cupom de código não espera um link que a mensagem nunca vai usar.
+"""Códigos só ficam prontos quando pertencem a uma oferta concreta.
 
-`enviar_aviso_cupons` monta a mensagem com UM link para a lista inteira de códigos —
-é o formato ("Ative em algum produto do link") e é o que o código faz: resolve o
-link do primeiro cupom do lote e anuncia todos sob ele.
-
-A readiness, porém, exigia um `LinkAfiliadoCupomUsuario` verificado POR CUPOM. Cada
-um desses custa uma vaga do único Chromium da máquina, para produzir um link que
-nunca é lido. Em produção isso apareceu como `code_not_ready_20m` na casa das
-centenas com `browser_wait_over_60m` acumulando.
-
-Estes testes fixam o novo contrato e, principalmente, o que ele NÃO afrouxa.
+O formato legado de aviso genérico foi desativado: sem produto, foto, preço e link
+verificados não há mensagem para publicar. Estes testes preservam a distinção entre
+um link de afiliado válido e a prova de que aquele código vale para aquele produto.
 """
 from datetime import timedelta
 
@@ -85,7 +78,7 @@ class LinkDeAvisoTests(TestCase):
 
 
 class ProntidaoDeCodigoTests(TestCase):
-    """O efeito no funil: o segundo cupom deixa de esperar o Link Builder."""
+    """Um código não contorna o par produto+cupom confirmado."""
 
     @classmethod
     def setUpTestData(cls):
@@ -105,7 +98,7 @@ class ProntidaoDeCodigoTests(TestCase):
                     "modo_resgate": "codigo"},
         )
 
-    def test_segundo_cupom_fica_pronto_sem_link_proprio(self):
+    def test_codigo_sem_produto_confirmado_nao_fica_pronto_so_por_ter_link(self):
         from apps.scrapers.coupon_readiness import _codigo, conexao_ml
 
         primeiro = self._cupom("PRIMEIRO")
@@ -119,8 +112,8 @@ class ProntidaoDeCodigoTests(TestCase):
         segundo = self._cupom("SEGUNDO")
 
         resultado = _codigo(segundo, self.user, conexao_ml(self.user))
-        self.assertEqual(resultado["stage"], "ready",
-                         "Sem link próprio, mas com link de aviso do usuário: pronto.")
+        self.assertEqual(resultado["stage"], "eligible")
+        self.assertEqual(resultado["reason_code"], "product_match_pending")
 
     def test_sem_link_algum_continua_aguardando(self):
         from apps.scrapers.coupon_readiness import _codigo, conexao_ml

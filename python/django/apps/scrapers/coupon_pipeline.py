@@ -55,9 +55,19 @@ def _usuarios_ativos(usuarios=None):
 
 
 def _priorizar_usuarios_com_destino(usuarios):
-    """Processa contas operacionais antes de sobras de teste/demonstração."""
+    """Processa primeiro a conta do piloto e, depois, destinos configurados.
+
+    O Chromium é único. Ordenar apenas por ``pk`` após encontrar qualquer grupo
+    fazia uma conta de demonstração com um grupo de teste tomar o slot antes da
+    conta que efetivamente opera o piloto. Isso não é isolamento nem fairness:
+    para a operação editorial, o backlog da conta piloto é o que precisa ganhar
+    produto+cupom+link primeiro. As outras contas continuam sendo processadas no
+    mesmo ciclo; apenas não podem bloquear a primeira chance da conta operacional.
+    """
     if len(usuarios) < 2:
         return usuarios
+    from django.conf import settings
+    from apps.accounts.models import organization_for_user
     from apps.scrapers.models import ConfiguracaoEnvio
 
     ids = [usuario.pk for usuario in usuarios]
@@ -67,9 +77,20 @@ def _priorizar_usuarios_com_destino(usuarios):
         .values_list("owner_id", flat=True)
         .distinct()
     )
+    pilotos = set()
+    allowlist = set(getattr(settings, "PILOT_ORGANIZATION_IDS", set()) or set())
+    if allowlist:
+        for usuario in usuarios:
+            organizacao = organization_for_user(usuario)
+            if organizacao and str(organizacao.pk) in allowlist:
+                pilotos.add(usuario.pk)
     return sorted(
         usuarios,
-        key=lambda usuario: (usuario.pk not in com_destino, usuario.pk),
+        key=lambda usuario: (
+            usuario.pk not in pilotos,
+            usuario.pk not in com_destino,
+            usuario.pk,
+        ),
     )
 
 

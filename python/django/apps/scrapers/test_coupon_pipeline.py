@@ -343,6 +343,23 @@ class CouponPipelineTests(TestCase):
 
         self.assertEqual(ordenados, [self.user, teste])
 
+    def test_conta_do_piloto_tem_prioridade_mesmo_com_destino_de_teste(self):
+        """O único Chromium serve a operação piloto antes de uma conta auxiliar."""
+        from apps.scrapers.coupon_pipeline import _priorizar_usuarios_com_destino
+
+        auxiliar = get_user_model().objects.create_user("pipeline-auxiliar")
+        ConfiguracaoEnvio.objects.create(
+            owner=auxiliar, organization=auxiliar.perfil.organization,
+            grupo_id="auxiliar@g.us", grupo_nome="Teste auxiliar", ativo=False,
+        )
+
+        with override_settings(
+            PILOT_ORGANIZATION_IDS={str(self.user.perfil.organization_id)},
+        ):
+            ordenados = _priorizar_usuarios_com_destino([auxiliar, self.user])
+
+        self.assertEqual(ordenados, [self.user, auxiliar])
+
     def test_macro_do_destino_tem_prioridade_na_fila_de_links(self):
         """O primeiro lote deve servir um grupo configurado antes do catálogo solto."""
         from apps.scrapers.coupon_pipeline import afiliar_cupons
