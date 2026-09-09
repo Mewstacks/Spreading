@@ -37,6 +37,9 @@ class Command(BaseCommand):
         parser.add_argument(
             "--amostras", type=int, default=12,
             help="No dry-run, quantidade de títulos sem veredito local a exibir.")
+        parser.add_argument(
+            "--elegiveis", action="store_true",
+            help="No dry-run, audita só o mesmo pool que pode virar publicação.")
 
     def handle(self, *args, **opts):
         with system_context():
@@ -59,7 +62,13 @@ class Command(BaseCommand):
             | Q(categoria__isnull=True)
         )
         qs = Produto.objects.filter(sem_autoridade).exclude(nome="")
-        if opts["frescos"]:
+        if opts["elegiveis"]:
+            from apps.scrapers.ofertas import pool_de_produtos_elegiveis
+            ids = [produto.pk for produto in pool_de_produtos_elegiveis(
+                min_desconto_percent=15.0,
+            )]
+            qs = qs.filter(pk__in=ids)
+        elif opts["frescos"]:
             qs = qs.filter(produtos_frescos_q())
         if opts["apenas_com_cupom"]:
             qs = qs.filter(
