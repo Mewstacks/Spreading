@@ -1250,7 +1250,7 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
 
 def montar_mensagem_cupom_produtos(cupom, itens, markup=None,
                                    divulgacao_afiliado=None) -> str:
-    """Mensagem de cupom no formato pedido pela cliente: cabeçalho + lista de produtos.
+    """Mensagem de cupom com produto, preço, condição, CTA e link.
 
         *Cupom ⚡️ Mercado Livre*
 
@@ -1296,7 +1296,6 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None,
         de = _preco_br(de_val)
         por = _preco_br(por_val)
         linhas.append(f"🛒 De R${de} por R${por}")
-        linhas.append(f"➡️ {esc(it['link'])}")
         linhas.append("")
 
     # Linha do cupom no fim (mesmo formato do texto puro): só o código em negrito.
@@ -1321,6 +1320,9 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None,
     checagem = _linha_checagem_cupom(cupom, itens)
     if checagem:
         linhas.append(f"🔎 {esc(checagem)}")
+    if itens:
+        linhas += ["", "👉 Abra a oferta e aplique no checkout:",
+                   f"➡️ {esc(itens[0]['link'])}"]
     disclosure = str(
         divulgacao_afiliado or "ℹ Link de afiliado; posso receber comissão."
     ).strip()
@@ -1855,7 +1857,7 @@ def resolver_link_afiliado_cupom(cupom, usuario):
 
 def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nome="",
                  imagem_b64_custom=None, configuracao=None, score=0, motivos_score=None,
-                 enqueue_only=False, _reserved_publication=None):
+                 enqueue_only=False, _reserved_publication=None, relacao_id=None):
     """Núcleo auditável de envio de cupom associado a produto.
 
     O grupo recebe uma oferta, não um código solto: toda publicação exige produto
@@ -1894,6 +1896,11 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     relacoes_preparadas = _executar_orm(
         relacoes_preparadas_para_envio, cupom, usuario,
     )
+    if relacao_id is not None:
+        relacoes_preparadas = [
+            relacao for relacao in relacoes_preparadas
+            if relacao.pk == int(relacao_id)
+        ]
     if not relacoes_preparadas:
         _executar_orm(
             log_event,
@@ -1913,6 +1920,11 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     # interferir no canário nem na entrega de uma oferta já comprovada.
 
     relacoes_prontas = _executar_orm(relacoes_prontas_para_envio, cupom, usuario)
+    if relacao_id is not None:
+        relacoes_prontas = [
+            relacao for relacao in relacoes_prontas
+            if relacao.pk == int(relacao_id)
+        ]
     if not relacoes_prontas:
         _executar_orm(
             log_event,
