@@ -445,6 +445,45 @@ class CouponNicheRankingTests(TestCase):
 
         self.assertEqual([item.obj.pk for item in candidatos], [cupom.pk])
 
+    def test_termo_da_regra_aceita_nome_do_produto_confirmado(self):
+        """Um cupom de titulo generico deve aparecer pelo produto que ele prova."""
+        from apps.scrapers.content_ranking import _coupon_candidates
+
+        user = get_user_model().objects.create_user("ranking-termo", password="x")
+        fonte = FonteIngestao.objects.create(
+            slug="ranking-termo-fonte", marketplace="mercadolivre", nome="Cupons")
+        config = ConfiguracaoEnvio.objects.create(
+            owner=user, grupo_id="teste@g.us", grupo_nome="Teste ofertas",
+            canal="whatsapp", macro_categoria="Eletrodomesticos",
+            termo_busca="air fryer", min_desconto_percent=15,
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="ranking-termo-20", marketplace="mercadolivre",
+            categoria="Campanhas gerais", titulo="Cupom da loja", codigo="AIR20",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20}, estado="ativo",
+            ultima_observacao=timezone.now(),
+        )
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Air fryer comprovada", origem="cupom",
+            macro_categoria="Eletrodomesticos", preco_sem_desconto=300,
+            preco_com_cupom=240, link_produto="https://produto.example/airfryer",
+            imagem_url="https://img.example/airfryer.jpg",
+        )
+        ProdutoCupom.objects.create(
+            produto=produto, cupom=cupom, status="confirmado",
+            preco_original=300, preco_atual=300, preco_final=240,
+            verificado_em=timezone.now(),
+        )
+        CupomDisponibilidade.objects.create(
+            organization=user.perfil.organization, usuario=user, cupom=cupom,
+            channel="whatsapp", stage="ready", use_mode="code_notice",
+        )
+
+        candidatos = _coupon_candidates(config, limit=5)
+
+        self.assertEqual([item.obj.pk for item in candidatos], [cupom.pk])
+
 
 class CouponCanaryCommandTests(TestCase):
     def test_preview_never_envia_sem_flag_explicita(self):

@@ -224,7 +224,20 @@ def _coupon_candidates(config, limit):
         terms = [term.strip() for term in config.termo_busca.split(",") if term.strip()]
         term_query = Q()
         for term in terms:
-            term_query |= Q(titulo__icontains=term) | Q(categoria__icontains=term)
+            # O titulo de uma campanha quase sempre e generico ("Cupom da loja"),
+            # enquanto o subnicho da regra pertence ao produto que ela comprovadamente
+            # atende. Exigir que o texto aparecesse no cupom fazia um par ja
+            # confirmado (produto + preco + codigo) desaparecer de uma regra como
+            # "air fryer". A relacao continua obrigatoriamente confirmada: isto nao
+            # transforma um aviso solto de cupom em candidato.
+            term_query |= (
+                Q(titulo__icontains=term)
+                | Q(categoria__icontains=term)
+                | Q(
+                    produtos__status="confirmado",
+                    produtos__produto__nome__icontains=term,
+                )
+            )
         if term_query:
             query = query.filter(term_query)
     recent_since = now - timedelta(hours=config.horas_cooldown)
