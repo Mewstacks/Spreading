@@ -49,8 +49,14 @@ def _heartbeat_durante(job, intervalo=15):
             # `system_context` \u00e9 local \u00e0 thread. Sem reinstal\u00e1-lo aqui, um
             # ciclo longo (browser/feed) perde o heartbeat no banco depois de 90s
             # e o healthcheck declara a esteira morta enquanto ela ainda trabalha.
-            with system_context():
-                st.write_state(job)
+            try:
+                with system_context():
+                    st.write_state(job)
+            except DatabaseError as exc:
+                # Numa oscilação do proxy o próximo pulso refaz a conexão; a
+                # thread nunca pode morrer e deixar uma esteira sem heartbeat.
+                logger.warning("Heartbeat da esteira %s falhou; tentando novamente: %s",
+                               job, type(exc).__name__)
 
     thread = threading.Thread(target=_pulse, daemon=True, name=f"heartbeat-{job}")
     thread.start()

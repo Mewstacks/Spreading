@@ -35,7 +35,10 @@ _CHALLENGE_MARKERS = (
     "nao consigo resolver o desafio",
 )
 _MONEY_RE = re.compile(r"R\$\s*([0-9][0-9.]*)(?:,([0-9]{1,2}))?", re.I)
-_PRODUCT_TOKEN_RE = re.compile(r"\bMLB\d{6,}\b", re.I)
+# O ML usa tanto ``MLB123`` quanto ``MLB-123`` nas URLs canônicas.  Normalizar
+# ambos é essencial para o limpador localizar exatamente o item que ele mesmo
+# acabou de colocar no carrinho.
+_PRODUCT_TOKEN_RE = re.compile(r"\bMLB-?\d{6,}\b", re.I)
 _ML_EMPTY_CART_MARKERS = (
     "seu carrinho esta vazio", "carrinho vazio",
     "voce ainda nao tem produtos", "adicione produtos ao carrinho",
@@ -51,6 +54,10 @@ _ML_EMPTY_CART_MARKERS = (
 )
 _ML_CART_ITEM_MARKERS = (
     "remover produto", "excluir produto", "salvar para depois",
+    # Variante observada no carrinho autenticado do ML: o controle vem apenas
+    # como "Excluir", mas o contador explícito torna a presença de item
+    # inequívoca. Não inferimos ocupação apenas por resumo/preço.
+    "produto em seu carrinho", "produtos em seu carrinho",
 )
 
 

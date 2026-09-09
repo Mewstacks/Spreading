@@ -16,7 +16,7 @@ from contextvars import ContextVar
 from datetime import timedelta
 
 from django.conf import settings
-from django.db import close_old_connections, transaction
+from django.db import DatabaseError, close_old_connections, transaction
 from django.utils import timezone
 
 from apps.accounts.tenant import system_context
@@ -537,15 +537,23 @@ def worker_activity(worker_type, worker_id, task_type):
 
     def _pulse():
         while not stop.wait(HEARTBEAT_SECONDS):
-            close_old_connections()
             try:
+                close_old_connections()
                 with system_context():
                     pulse_worker(
                         worker_type, worker_id=worker_id, state="busy",
                         task_type=task_type,
                     )
+            except DatabaseError as exc:
+                # O worker principal refaz a conexão no próximo pulso. A thread
+                # não pode morrer por uma oscilação transitória do proxy.
+                logger.warning("Heartbeat do worker %s falhou; tentando novamente: %s",
+                               worker_type, type(exc).__name__)
             finally:
-                close_old_connections()
+                try:
+                    close_old_connections()
+                except DatabaseError:
+                    pass
 
     pulse_worker(worker_type, worker_id=worker_id, state="busy", task_type=task_type)
     thread = threading.Thread(target=_pulse, daemon=True, name=f"worker-{worker_type}")
@@ -734,8 +742,8 @@ def leased_resource(resource_key="django_chromium", *, owner_kind="scheduled",
                 # transformou um travamento em oito horas de funil parado.
                 _encerrar_por_teto(resource_key, "teto de posse atingido")
                 return
-            close_old_connections()
             try:
+                close_old_connections()
                 with system_context():
                     if not heartbeat(resource_key, token):
                         # Perder o heartbeat só acontece quando alguém expropriou
@@ -745,8 +753,16 @@ def leased_resource(resource_key="django_chromium", *, owner_kind="scheduled",
                         # segundo portão, com o lease do Postgres já nas mãos.
                         _encerrar_por_teto(resource_key, "lease expropriado")
                         return
+            except DatabaseError as exc:
+                # Em indisponibilidade prolongada o TTL continua sendo o limite
+                # seguro; uma falha transitória não pode matar este heartbeat.
+                logger.warning("Heartbeat do lease %s falhou; tentando novamente: %s",
+                               resource_key, type(exc).__name__)
             finally:
-                close_old_connections()
+                try:
+                    close_old_connections()
+                except DatabaseError:
+                    pass
 
     thread = threading.Thread(target=_pulse, daemon=True, name=f"lease-{resource_key}")
     thread.start()
