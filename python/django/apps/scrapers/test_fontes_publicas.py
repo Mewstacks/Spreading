@@ -858,6 +858,54 @@ class ShopeePublicCouponsTests(TestCase):
             list(source.coupon_pages),
         )
 
+    def test_timeout_lendo_body_preserva_catalogo_sem_derrubar_ciclo(self):
+        class Locator:
+            def inner_text(self, timeout=None):
+                raise TimeoutError("body indisponivel")
+
+        class Page:
+            url = COUPONS_URL
+
+            def on(self, *_args):
+                return None
+
+            def goto(self, url, **_kwargs):
+                self.url = url
+
+            def wait_for_selector(self, *_args, **_kwargs):
+                return None
+
+            def wait_for_timeout(self, *_args, **_kwargs):
+                return None
+
+            def locator(self, _selector):
+                return Locator()
+
+        page = Page()
+
+        @contextmanager
+        def browser(**_kwargs):
+            yield page, object()
+
+        source = ShopeePublicCouponsSource()
+        with patch(
+            "apps.scrapers.sources.shopee_public_coupons.iniciar_browser",
+            browser,
+        ), patch(
+            "apps.scrapers.sources.shopee_public_coupons._economizar_banda",
+        ), patch(
+            "apps.scrapers.sources.shopee_public_coupons._capture_source_diagnostic",
+        ) as diagnostic:
+            items = list(source.discover_coupons())
+
+        self.assertEqual(items, [])
+        self.assertFalse(source.last_metrics["complete"])
+        self.assertEqual(source.last_health_status, "degraded")
+        self.assertEqual(source.last_metrics["pages_processed"], 2)
+        diagnostic.assert_called_with(
+            page, source.slug, "body_timeout", authenticated=False,
+        )
+
     def test_proxy_residencial_e_opcional_e_nao_vaza_credencial_na_url(self):
         with self.settings(
             SHOPEE_PUBLIC_PROXY_SERVER="https://proxy.example:8443",

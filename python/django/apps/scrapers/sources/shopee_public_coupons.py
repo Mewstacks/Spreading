@@ -443,7 +443,26 @@ class ShopeePublicCouponsSource(SourceAdapter):
                     page.wait_for_timeout(3000)
                 except Exception:
                     pass
-                body = page.locator("body").inner_text(timeout=10000)
+                try:
+                    body = page.locator("body").inner_text(timeout=10000)
+                except Exception:
+                    # Uma pagina que nao entrega nem o body e falha operacional,
+                    # nao um catalogo vazio. Registrar a pagina incompleta deixa a
+                    # ingestao preservar os cupons anteriores e permite que as
+                    # demais fontes/lojas completem o ciclo sem transformar o
+                    # timeout em excecao nao tratada no worker.
+                    _capture_source_diagnostic(
+                        page, self.slug, "body_timeout",
+                        authenticated=usuario is not None,
+                    )
+                    page_snapshots.append({
+                        "url": coupons_url, "items_seen": 0, "accepted": 0,
+                        "complete": False, "health": "degraded",
+                        "schema_errors": 0,
+                    })
+                    if coupons_url == COUPONS_URL:
+                        break
+                    continue
                 page_auth_required = _auth_required(page.url, body)
                 if page_auth_required:
                     auth_required = True
