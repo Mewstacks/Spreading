@@ -46,7 +46,11 @@ def _heartbeat_durante(job, intervalo=15):
 
     def _pulse():
         while not parar.wait(intervalo):
-            st.write_state(job)
+            # `system_context` \u00e9 local \u00e0 thread. Sem reinstal\u00e1-lo aqui, um
+            # ciclo longo (browser/feed) perde o heartbeat no banco depois de 90s
+            # e o healthcheck declara a esteira morta enquanto ela ainda trabalha.
+            with system_context():
+                st.write_state(job)
 
     thread = threading.Thread(target=_pulse, daemon=True, name=f"heartbeat-{job}")
     thread.start()
