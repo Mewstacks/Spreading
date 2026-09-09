@@ -14,8 +14,9 @@ from django.db.models import Q
 
 from apps.accounts.tenant import system_context
 from apps.scrapers.categorizar_por_nome import (
-    macro_do_nome, popular_macro_por_nome,
+    CATEGORIA_SEM_AUTORIDADE, macro_do_nome, popular_macro_por_nome,
 )
+from apps.scrapers.maintenance import produtos_frescos_q
 from apps.scrapers.models import Produto
 
 
@@ -30,6 +31,12 @@ class Command(BaseCommand):
         parser.add_argument(
             "--dry-run", action="store_true",
             help="Mostra o que seria classificado, sem gravar.")
+        parser.add_argument(
+            "--frescos", action="store_true",
+            help="No dry-run, limita à janela de produtos publicáveis atual.")
+        parser.add_argument(
+            "--amostras", type=int, default=12,
+            help="No dry-run, quantidade de títulos sem veredito local a exibir.")
 
     def handle(self, *args, **opts):
         with system_context():
@@ -44,9 +51,16 @@ class Command(BaseCommand):
                 f"{n} produto(s) classificado(s) pelo nome."))
 
     def _prever(self, opts):
-        qs = Produto.objects.filter(
+        # Espelha o alvo real de `popular_macro_por_nome`: uma macro antiga sobre
+        # categoria DESCONHECIDO não é autoridade e pode ser corrigida pelo nome.
+        sem_autoridade = (
             Q(macro_categoria__isnull=True) | Q(macro_categoria="")
-        ).exclude(nome="")
+            | Q(categoria__in=CATEGORIA_SEM_AUTORIDADE)
+            | Q(categoria__isnull=True)
+        )
+        qs = Produto.objects.filter(sem_autoridade).exclude(nome="")
+        if opts["frescos"]:
+            qs = qs.filter(produtos_frescos_q())
         if opts["apenas_com_cupom"]:
             qs = qs.filter(
                 cupons_normalizados__status="confirmado",
@@ -63,16 +77,16 @@ class Command(BaseCommand):
             total += 1
             macro = macro_do_nome(produto.nome)
             if not macro:
+                if len(exemplos) < max(0, opts["amostras"]):
+                    exemplos.append(("sem veredito", produto.nome[:96]))
                 continue
             classificados += 1
             por_macro[macro] = por_macro.get(macro, 0) + 1
-            if len(exemplos) < 12:
-                exemplos.append((macro, produto.nome[:52]))
 
-        self.stdout.write(f"sem macro: {total} | classificáveis: {classificados}")
+        self.stdout.write(f"sem autoridade: {total} | classificáveis: {classificados}")
         for macro, n in sorted(por_macro.items(), key=lambda kv: -kv[1]):
             self.stdout.write(f"  {n:>5}  {macro}")
         if exemplos:
-            self.stdout.write("exemplos:")
+            self.stdout.write("amostras sem veredito local:")
             for macro, nome in exemplos:
                 self.stdout.write(f"  {macro[:34]:<34} <- {nome}")
