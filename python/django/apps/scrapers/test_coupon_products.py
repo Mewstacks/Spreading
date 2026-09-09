@@ -1191,7 +1191,7 @@ class CupomAtivacaoMercadoLivreTests(TestCase):
 
 
 class AmazonOfficialReadySendTests(TestCase):
-    def test_oficial_com_tag_fica_ready_e_envia_sem_produto(self):
+    def test_oficial_com_tag_nao_envia_sem_produto_vinculado(self):
         from unittest.mock import Mock, patch
         from apps.accounts.models import Perfil
         from apps.scrapers.conexoes import Estado
@@ -1228,14 +1228,22 @@ class AmazonOfficialReadySendTests(TestCase):
         }
         with patch("apps.scrapers.senders.registry.get_sender", return_value=sender), \
                 patch("apps.scrapers.conexoes.estado_whatsapp",
-                      return_value=Estado(True, "WhatsApp", "worker", "", "", None)), \
-                patch("apps.scrapers.ofertas._preparar_itens_cupom",
-                      side_effect=AssertionError("Amazon oficial não inventa produto ML")):
+                      return_value=Estado(True, "WhatsApp", "worker", "", "", None)):
             resultado = enviar_cupom(cupom, "grupo@g.us", usuario=user)
-        self.assertTrue(resultado.get("sucesso"), resultado)
-        self.assertFalse(resultado.get("cupom_em_preparo"))
-        self.assertIn("B0TESTASIN", resultado.get("link") or "")
-        self.assertIn("tag=loja-20", resultado.get("link") or "")
+        self.assertFalse(resultado.get("sucesso"), resultado)
+        self.assertTrue(resultado.get("cupom_sem_produto"))
+        sender.enviar_oferta.assert_not_called()
+
+
+class GenericCouponNoticeTests(SimpleTestCase):
+    def test_notice_without_product_is_blocked_before_any_transport(self):
+        from apps.scrapers.ofertas import enviar_aviso_cupons
+
+        result = enviar_aviso_cupons([], "grupo@g.us")
+
+        self.assertFalse(result["sucesso"])
+        self.assertTrue(result["cupom_sem_produto"])
+        self.assertIn("produto", result["motivo"])
 
 
 class PromobitAmazonCodigoReadySendTests(TestCase):
@@ -1273,7 +1281,7 @@ class MlCampanhaListagemReadySendTests(TestCase):
         from apps.scrapers.coupon_links import _RASTREIO_POR_USUARIO
         _RASTREIO_POR_USUARIO.clear()
 
-    def test_campanha_com_rastreio_fica_ready_e_envia_a_listagem(self):
+    def test_campanha_com_rastreio_nao_envia_listagem_sem_produto(self):
         from unittest.mock import Mock, patch
         from apps.scrapers.conexoes import Estado
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
@@ -1322,10 +1330,9 @@ class MlCampanhaListagemReadySendTests(TestCase):
                 patch("apps.scrapers.conexoes.estado_whatsapp",
                       return_value=Estado(True, "WhatsApp", "worker", "", "", None)):
             resultado = enviar_cupom(cupom, "grupo@g.us", usuario=user)
-        self.assertTrue(resultado.get("sucesso"), resultado)
-        link = resultado.get("link") or ""
-        self.assertIn("lista.mercadolivre.com.br/_Container_888", link)
-        self.assertIn("matt_word=lules", link)
+        self.assertFalse(resultado.get("sucesso"), resultado)
+        self.assertTrue(resultado.get("cupom_sem_produto"))
+        sender.enviar_oferta.assert_not_called()
 
     def test_campanha_sem_rastreio_nao_finge_ready(self):
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons

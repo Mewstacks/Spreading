@@ -1856,11 +1856,11 @@ def resolver_link_afiliado_cupom(cupom, usuario):
 def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nome="",
                  imagem_b64_custom=None, configuracao=None, score=0, motivos_score=None,
                  enqueue_only=False, _reserved_publication=None):
-    """Nucleo auditavel do envio manual de CupomNormalizado.
+    """Núcleo auditável de envio de cupom associado a produto.
 
-    `imagem_b64_custom` (opcional): foto escolhida no envio. Cupom não tem foto de
-    produto, então sem ela sai como texto puro (comportamento de sempre); com ela,
-    a foto vira a imagem acima da mensagem (só no transporte base64/WhatsApp)."""
+    O grupo recebe uma oferta, não um código solto: toda publicação exige produto
+    comprovadamente compatível, foto, preço revalidado e link daquele produto.
+    """
     from django.contrib.auth import get_user_model
     from apps.scrapers.coupon_rules import codigo_publicavel
     from apps.scrapers.eventos import log_event
@@ -1888,69 +1888,26 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         return {"sucesso": False, "motivo": "Cupom não encontrado, inativo ou vencido.",
                 "classe": "permanente"}
 
-    # Cupom de código é um aviso de loja: não inventa produto nem associação. Ele
-    # exige um destino afiliado válido, mas não passa pelo gate de ProdutoCupom que
-    # pertence exclusivamente às ativações. A página pode mudar entre render e
-    # clique, então ambos os modos são revalidados aqui.
-    tem_codigo = bool(codigo_publicavel(cupom))
     from apps.scrapers.coupon_products import (
         relacoes_preparadas_para_envio, relacoes_prontas_para_envio,
     )
     relacoes_preparadas = _executar_orm(
         relacoes_preparadas_para_envio, cupom, usuario,
     )
-    # Se uma fonte realmente comprovou produtos, preservamos a publicação rica com
-    # colagem e preço por item. Sem essa prova, o código continua publicável apenas
-    # como aviso de loja, que é o contrato seguro pedido para cupons digitáveis.
-    modo_codigo = bool(tem_codigo and not relacoes_preparadas)
-    modo_link_direto = False
-    link_codigo = ""
-    if modo_codigo and not enqueue_only:
-        resolucao_codigo = resolver_link_afiliado_cupom(cupom, usuario)
-        if not resolucao_codigo.get("sucesso"):
-            return {
-                "sucesso": False,
-                "motivo": resolucao_codigo.get("motivo")
-                or "O link afiliado deste cupom ainda não está disponível.",
-                "classe": "transitorio",
-                "precisa_login_ml": bool(resolucao_codigo.get("precisa_login_ml")),
-                "link_afiliado_pendente": True,
-            }
-        link_codigo = resolucao_codigo["link"]
-
-    if not modo_codigo and not relacoes_preparadas:
-        # Shopee/Awin: a API já devolve HTTPS afiliado. Amazon oficial: ASIN +
-        # tag, sem Chromium. Exigir ProdutoCupom (mapa ML) marcava ready na
-        # tela e recusava no envio.
-        from apps.scrapers.coupon_rules import ativacao_publicavel
-        destino = str(getattr(cupom, "link", "") or "")
-        marketplace = str(getattr(cupom, "marketplace", "") or "").lower()
-        if (marketplace == "awin"
-                and ativacao_publicavel(cupom, usuario=usuario)
-                and destino.startswith("https://")):
-            modo_link_direto = True
-            link_codigo = destino
-        elif marketplace == "shopee" and ativacao_publicavel(
-                cupom, usuario=usuario):
-            resolucao_shopee = resolver_link_afiliado_cupom(cupom, usuario)
-            if resolucao_shopee.get("sucesso"):
-                modo_link_direto = True
-                link_codigo = resolucao_shopee["link"]
-        elif marketplace == "amazon" and ativacao_publicavel(cupom, usuario=usuario):
-            from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_cupom
-            destino_az = _executar_orm(gerar_link_afiliado_cupom, cupom, usuario)
-            if str(destino_az or "").startswith("https://"):
-                modo_link_direto = True
-                link_codigo = destino_az
-        elif marketplace == "mercadolivre" and ativacao_publicavel(cupom, usuario=usuario):
-            from apps.scrapers.coupon_links import gerar_link_afiliado_listagem_ml
-            destino_ml = _executar_orm(gerar_link_afiliado_listagem_ml, cupom, usuario)
-            if str(destino_ml or "").startswith("https://"):
-                modo_link_direto = True
-                link_codigo = destino_ml
-
-    aviso_sem_produto = modo_codigo or modo_link_direto
-
+    if not relacoes_preparadas:
+        _executar_orm(
+            log_event,
+            "publicacao", "coupon_without_product_blocked",
+            "Cupom bloqueado: não há produto comprovadamente aplicável.", level="info",
+            usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                       "destino": destino_nome or grupo_id},
+        )
+        return {
+            "sucesso": False,
+            "motivo": "Este cupom ainda não tem produto comprovadamente aplicável, "
+                      "com foto, preço e link verificados.",
+            "classe": "permanente", "cupom_sem_produto": True,
+        }
     # Segunda opinião por IA: o piso monetário fixo (cupom_e_lixo) já barrou o
     # caso claro — teto/valor irrisório — antes de o cupom chegar a "pronto".
     # Isto pega o que só leitura pega: condição confusa, escopo ilegível,
@@ -1986,22 +1943,8 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
             "classe": "permanente", "rejeitado_por_ia": True,
         }
 
-    if not aviso_sem_produto and not relacoes_preparadas:
-        _executar_orm(
-            log_event,
-            "publicacao", "coupon_not_ready",
-            "Cupom aguardando preparação ou atualização.", level="warning",
-            usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
-                                       "destino": destino_nome or grupo_id},
-        )
-        return {"sucesso": False,
-                "motivo": "Este cupom está sendo atualizado e ainda não está disponível para envio.",
-                "classe": "transitorio", "cupom_em_preparo": True}
-    relacoes_prontas = (
-        [] if aviso_sem_produto
-        else _executar_orm(relacoes_prontas_para_envio, cupom, usuario)
-    )
-    if not aviso_sem_produto and not relacoes_prontas:
+    relacoes_prontas = _executar_orm(relacoes_prontas_para_envio, cupom, usuario)
+    if not relacoes_prontas:
         _executar_orm(
             log_event,
             "publicacao", "coupon_link_pending",
@@ -2120,20 +2063,6 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
             "motivo": "Cupom reservado e aguardando o worker.",
         }
 
-    # No worker v2 o link do aviso de código é resolvido somente depois do claim.
-    if modo_codigo and not link_codigo:
-        resolucao_codigo = resolver_link_afiliado_cupom(cupom, usuario)
-        if not resolucao_codigo.get("sucesso"):
-            return {
-                "sucesso": False,
-                "motivo": resolucao_codigo.get("motivo")
-                or "O link afiliado deste cupom ainda não está disponível.",
-                "classe": "transitorio",
-                "precisa_login_ml": bool(resolucao_codigo.get("precisa_login_ml")),
-                "link_afiliado_pendente": True,
-            }
-        link_codigo = resolucao_codigo["link"]
-
     _executar_orm(
         log_event,
         "publicacao", "send_started", "Preparando envio do cupom.",
@@ -2163,30 +2092,12 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         return {"sucesso": False, "motivo": str(motivo), **extra}
 
     try:
-        # Código validado é aviso sem produto. Ativação continua estrita e nunca usa
-        # foto manual para aparentar associação que a fonte não comprovou.
         img_kwargs = {}
         relacao_topo = None
         itens_cupom, bloqueio_afiliacao = [], None
-        if aviso_sem_produto:
-            link_registro = link_codigo
-            mensagem = montar_mensagem_cupom(
-                cupom, link_afiliado=link_registro, markup=sender.markup,
-                escopo_override=avaliacao_ia["escopo_legivel"],
-                divulgacao_afiliado=(
-                    getattr(configuracao, "divulgacao_afiliado", "")
-                    or getattr(getattr(usuario, "perfil", None), "divulgacao_afiliado", "")
-                ),
-            )
-            if imagem_b64_custom:
-                img_kwargs = {
-                    "imagem_b64": imagem_b64_custom,
-                    "mimetype": "image/jpeg",
-                }
-        else:
-            itens_cupom, bloqueio_afiliacao = _preparar_itens_cupom(
-                cupom, usuario, relacoes_prontas)
-        if (not aviso_sem_produto and itens_cupom
+        itens_cupom, bloqueio_afiliacao = _preparar_itens_cupom(
+            cupom, usuario, relacoes_prontas)
+        if (itens_cupom
                 and getattr(settings, "PRECO_REVALIDA_ANTES_ENVIO", True)):
             # Antes da IA (para a chamada nascer do preço fresco), antes do corte
             # do Telegram e antes da colagem — que é quem garante foto↔texto.
@@ -2196,7 +2107,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
             if not itens_cupom:
                 return falhar("Os preços deste cupom mudaram; nenhum produto "
                               "continua dentro das regras dele.", classe="transitorio")
-        if not aviso_sem_produto and itens_cupom:
+        if itens_cupom:
             # Telegram limita legendas de foto a 1024 caracteres. Como a regra e
             # "ate 9", remove os itens de menor prioridade ate a mensagem caber.
             if canal == "telegram":
@@ -2220,14 +2131,14 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 ))
             link_registro = itens_cupom[0]["link"]
             img_kwargs = {"imagem_b64": colagem_b64, "mimetype": colagem_mime}
-        elif not aviso_sem_produto and bloqueio_afiliacao:
+        elif bloqueio_afiliacao:
             # Havia produtos comprovados, mas a sessão do Mercado Livre caiu na
             # hora de gerar os links afiliados. Não é "cupom sem produtos": é
             # reconexão. Transitório para não pausar a automação por queda de
             # sessão, e com o flag que a UI usa para oferecer o botão de reconectar.
             return falhar(bloqueio_afiliacao["mensagem"], classe="transitorio",
                           precisa_login_ml=bloqueio_afiliacao["precisa_login_ml"])
-        elif not aviso_sem_produto:
+        else:
             return falhar("Cupom sem produtos comprovadamente aplicáveis, com foto e link afiliado.",
                           classe="permanente")
         if not mensagem.strip():
@@ -2236,8 +2147,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
         # com 0/0 e não havia como reconciliar "o preço anunciado não bate".
         # Aqui o par é (vitrine, pós-cupom) — nas publicações de produto o par é
         # (tabela, vitrine), que é o que aquela mensagem anuncia.
-        if not aviso_sem_produto:
-            relacao_topo = itens_cupom[0].get("relacao")
+        relacao_topo = itens_cupom[0].get("relacao")
 
         def _gravar_mensagem():
             Publicacao.objects.filter(pk=publicacao.pk).update(
@@ -2413,13 +2323,21 @@ def selecionar_cupons_para_aviso(configuracao, usuario, limite=LIMITE_CUPONS_AVI
 def enviar_aviso_cupons(cupons, grupo_id, *, canal="whatsapp", usuario=None,
                         destino_nome="", configuracao=None, enqueue_only=False,
                         _reserved_publications=None):
-    """Publica o aviso de cupons novos: só códigos, banner da loja, um link.
+    """Recusa o formato legado de aviso genérico de cupons.
 
-    Espelha a contabilidade de `enviar_cupom` (lock do usuário, cota diária,
-    deduplicação por destino, uma Publicacao por cupom anunciado) e dispensa tudo
-    que só faz sentido quando há produto: preparo, colagem e verificação de link
-    afiliado por item.
+    Não há contexto de produto, preço final ou foto nesse formato; portanto ele não
+    atende ao contrato editorial da operação e não pode chegar a grupo algum.
     """
+    return {
+        "sucesso": False,
+        "motivo": "Aviso genérico de cupom desativado: publique somente cupom vinculado "
+                  "a produto, foto, preço e link verificados.",
+        "classe": PERMANENTE,
+        "cupom_sem_produto": True,
+    }
+
+    # Código abaixo mantido temporariamente como referência para uma migração de
+    # dados; é inalcançável enquanto o contrato de curadoria direta estiver ativo.
     from django.contrib.auth import get_user_model
     from apps.scrapers.banners import sortear_banner_b64
     from apps.scrapers.coupon_rules import codigo_publicavel
