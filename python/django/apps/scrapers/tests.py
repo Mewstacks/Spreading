@@ -6761,7 +6761,7 @@ class EnvioCupomTests(TestCase):
         sender.enviar_oferta.return_value = resultado
         return sender
 
-    def test_codigo_sem_produto_comprovado_e_enviado_como_aviso(self):
+    def test_codigo_sem_produto_comprovado_e_bloqueado(self):
         from apps.scrapers.models import ProdutoCupom
         from apps.scrapers.ofertas import enviar_cupom
 
@@ -6770,12 +6770,6 @@ class EnvioCupomTests(TestCase):
             "sucesso": True, "via": "whatsapp", "mensagem_id": "code-only-1",
         })
         with patch(
-            "apps.scrapers.ofertas.resolver_link_afiliado_cupom",
-            return_value={"sucesso": True, "link": "https://meli.la/codigo"},
-        ), patch(
-            "apps.scrapers.ofertas._preparar_itens_cupom",
-            side_effect=AssertionError("código não pode inventar associação a produto"),
-        ), patch(
             "apps.scrapers.senders.registry.get_sender", return_value=sender,
         ):
             resultado = enviar_cupom(
@@ -6783,70 +6777,28 @@ class EnvioCupomTests(TestCase):
                 imagem_b64_custom="aW1hZ2Vt",
             )
 
-        self.assertTrue(resultado["sucesso"])
-        self.assertEqual(resultado["link"], "https://meli.la/codigo")
-        args, kwargs = sender.enviar_oferta.call_args
-        self.assertIn("SAVE20", args[1])
-        self.assertEqual(kwargs["imagem_b64"], "aW1hZ2Vt")
+        self.assertFalse(resultado["sucesso"])
+        self.assertTrue(resultado["cupom_sem_produto"])
+        self.assertIn("produto comprovadamente aplicável", resultado["motivo"])
+        sender.enviar_oferta.assert_not_called()
         self.assertFalse(ProdutoCupom.objects.filter(cupom=self.cupom).exists())
-        self.assertEqual(
-            Publicacao.objects.get(cupom_normalizado=self.cupom).status, "enviado",
-        )
+        self.assertFalse(Publicacao.objects.filter(cupom_normalizado=self.cupom).exists())
 
-    def test_ia_reprova_cupom_bloqueia_envio_e_nao_gasta_preparo(self):
-        """A IA roda ANTES do preparo caro: cupom reprovado nunca chega a
-        montar mensagem, colagem nem reservar Publicacao."""
+    def test_envio_de_cupom_nao_depende_da_ia(self):
+        """Uma oferta já comprovada segue mesmo se o enriquecimento de IA cair."""
         from apps.scrapers.ofertas import enviar_cupom
 
         sender = self._sender({"sucesso": True, "via": "whatsapp", "mensagem_id": "x"})
         with patch(
             "apps.scrapers.llm.avaliar_cupom_ia",
-            return_value={"vale_a_pena": False, "motivo": "Condição confusa, parece isca",
-                          "escopo_legivel": ""},
-        ), patch(
-            "apps.scrapers.ofertas._preparar_itens_cupom",
-            side_effect=AssertionError("não pode preparar um cupom já reprovado pela IA"),
+            side_effect=AssertionError("IA não pode entrar no caminho crítico"),
         ), patch(
             "apps.scrapers.senders.registry.get_sender", return_value=sender,
         ):
             resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
 
-        self.assertFalse(resultado["sucesso"])
-        self.assertEqual(resultado["motivo"], "Condição confusa, parece isca")
-        self.assertTrue(resultado.get("rejeitado_por_ia"))
-        sender.enviar_oferta.assert_not_called()
-        self.assertFalse(Publicacao.objects.filter(cupom_normalizado=self.cupom).exists())
-
-    def test_ia_aprovada_humaniza_o_escopo_na_mensagem_enviada(self):
-        """`escopo_legivel` da IA chega até o texto real que sai no WhatsApp —
-        é a correção direta de 'produtos de Glamour.div' na mensagem."""
-        from apps.scrapers.models import ProdutoCupom
-        from apps.scrapers.ofertas import enviar_cupom
-
-        ProdutoCupom.objects.filter(cupom=self.cupom).delete()
-        sender = self._sender({"sucesso": True, "via": "whatsapp", "mensagem_id": "y"})
-        with patch(
-            "apps.scrapers.ofertas.resolver_link_afiliado_cupom",
-            return_value={"sucesso": True, "link": "https://meli.la/codigo"},
-        ), patch(
-            "apps.scrapers.ofertas._preparar_itens_cupom",
-            side_effect=AssertionError("código não pode inventar associação a produto"),
-        ), patch(
-            "apps.scrapers.llm.avaliar_cupom_ia",
-            return_value={"vale_a_pena": True, "motivo": "",
-                          "escopo_legivel": "loja Testinho"},
-        ), patch(
-            "apps.scrapers.senders.registry.get_sender", return_value=sender,
-        ):
-            resultado = enviar_cupom(
-                self.cupom, "123@g.us", usuario=self.user,
-                imagem_b64_custom="aW1hZ2Vt",
-            )
-
         self.assertTrue(resultado["sucesso"])
-        mensagem_enviada = sender.enviar_oferta.call_args[0][1]
-        self.assertIn("loja Testinho", mensagem_enviada)
-        self.assertNotIn(".div", mensagem_enviada)
+        sender.enviar_oferta.assert_called_once()
 
     @patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom",
            return_value={"sucesso": True, "link": "https://meli.la/afiliado"})
@@ -6960,6 +6912,23 @@ class EnvioCupomTests(TestCase):
         self.assertFalse(resultado["precisa_login_ml"])
         self.assertIn("Link Builder", resultado["motivo"])
 
+    @override_settings(PRECO_REVALIDA_ANTES_ENVIO=False)
+    def test_cupom_de_seis_porcento_nao_envia_nem_em_caminho_manual(self):
+        """O valor fixo do cupom precisa passar pelo preço do produto associado."""
+        from apps.scrapers.ofertas import enviar_cupom
+
+        relacao = self.cupom.produtos.get(produto=self.produto)
+        relacao.preco_final = 94.0
+        relacao.save(update_fields=["preco_final"])
+        sender = self._sender({"sucesso": True, "via": "whatsapp"})
+        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
+            resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertTrue(resultado["desconto_abaixo_minimo"])
+        self.assertIn("6%", resultado["motivo"])
+        sender.enviar_oferta.assert_not_called()
+
     def test_cupom_publico_nao_tenta_lock_de_escrita(self):
         """RLS deixa o catálogo público legível, mas não permite FOR UPDATE nele."""
         from apps.scrapers.ofertas import enviar_cupom
@@ -7002,13 +6971,12 @@ class EnvioCupomTests(TestCase):
         sender.enviar_oferta.assert_called_once()
         self.assertEqual(Publicacao.objects.get().status, "enviado")
 
-    def test_preparo_vencido_nao_reserva_publicacao(self):
+    def test_preparo_vencido_bloqueia_publicacao(self):
         from apps.scrapers.coupon_products import CACHE_HORAS
         from apps.scrapers.models import CupomPreparacao
         from apps.scrapers.ofertas import enviar_cupom
 
-        # Este gate é exclusivo de ativação. Código digitável sem associação segue
-        # o fluxo de aviso de loja e não deve depender de ProdutoCupom.
+        # Sem preparo fresco não há produto, preço e link comprovados para publicar.
         self.cupom.codigo = ""
         self.cupom.regras = {**self.cupom.regras, "modo_resgate": "ativacao"}
         self.cupom.save(update_fields=["codigo", "regras"])
@@ -7017,8 +6985,8 @@ class EnvioCupomTests(TestCase):
         resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
 
         self.assertFalse(resultado["sucesso"])
-        self.assertTrue(resultado["cupom_em_preparo"])
-        self.assertIn("sendo atualizado", resultado["motivo"])
+        self.assertTrue(resultado["cupom_sem_produto"])
+        self.assertIn("produto comprovadamente aplicável", resultado["motivo"])
         self.assertFalse(Publicacao.objects.filter(usuario=self.user).exists())
 
     def test_link_afiliado_pendente_nao_reserva_publicacao(self):

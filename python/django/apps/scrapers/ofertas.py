@@ -1313,6 +1313,36 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
     return itens, bloqueio
 
 
+def _desconto_efetivo_do_item_cupom(item) -> float:
+    """Percentual real entre a vitrine e o total após o cupom.
+
+    O valor anunciado pelo cupom (por exemplo, ``R$ 24 OFF``) não diz sozinho se
+    a oferta é boa. A mesma regra pode representar 24% num item de R$ 100 ou 6%
+    num de R$ 400. Este cálculo usa o par confirmado na relação produto+cupom,
+    que é justamente o preço que será impresso e revalidado antes do transporte.
+    """
+    produto = item.get("produto")
+    relacao = item.get("relacao")
+    de = float(getattr(relacao, "preco_atual", 0) or getattr(
+        produto, "preco_com_cupom", 0) or 0)
+    por = float(getattr(relacao, "preco_final", 0) or getattr(
+        produto, "preco_com_cupom", 0) or 0)
+    if de <= 0 or por <= 0 or por >= de:
+        return 0.0
+    return (de - por) * 100.0 / de
+
+
+def _piso_desconto_cupom(configuracao) -> float:
+    """Piso editorial que vale inclusive para envio manual.
+
+    Configuração não é autorização para uma oferta fraca: o envio manual era o
+    último caminho que podia deixar passar um cupom de 6%. O piso de 15% é o
+    padrão de curadoria da operação e uma regra mais exigente continua valendo.
+    """
+    configurado = float(getattr(configuracao, "min_desconto_percent", 0) or 0)
+    return max(15.0, configurado)
+
+
 def montar_mensagem_cupom_produtos(cupom, itens, markup=None,
                                    divulgacao_afiliado=None) -> str:
     """Mensagem de cupom com produto, preço, condição, CTA e link.
@@ -2155,6 +2185,14 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 return falhar("Os preços deste cupom mudaram; nenhum produto "
                               "continua dentro das regras dele.", classe="transitorio")
         if itens_cupom:
+            desconto_efetivo = _desconto_efetivo_do_item_cupom(itens_cupom[0])
+            piso_desconto = _piso_desconto_cupom(configuracao)
+            if desconto_efetivo < piso_desconto:
+                return falhar(
+                    f"O desconto efetivo deste cupom Ã© {desconto_efetivo:.0f}% "
+                    f"(mÃ­nimo editorial: {piso_desconto:.0f}%); oferta nÃ£o publicada.",
+                    classe="permanente", desconto_abaixo_minimo=True,
+                )
             # Telegram limita legendas de foto a 1024 caracteres. Como a regra e
             # "ate 9", remove os itens de menor prioridade ate a mensagem caber.
             if canal == "telegram":
