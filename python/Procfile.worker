@@ -1,6 +1,6 @@
 # A verificação de conexão pode abrir Chromium. No boot ela vem depois da fila de
 # cupom; saúde do worker continua disponível imediatamente pelo processo `saude`.
-monitor: sleep 150 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar --tick 5
+monitor: sleep 360 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar --tick 5
 envio: sleep 20 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo envio --tick 5
 manual: sleep 30 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo manual
 # Pares cupom+produto já comprovados são a fila de publicação. Ela inicia antes
@@ -11,8 +11,10 @@ cupons: sleep 35 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py aut
 # cupom que já tem produto, preço e código verificados.
 # Sobe antes do preparo de cupons (45s), do flash (75s) e da varredura completa
 # (90s), para materializar primeiro os pares que já estão validados.
-links: sleep 150 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo links --tick 5 --lote 40
-scrapeflash: sleep 180 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape_rapido --tick 5
-scrape: sleep 210 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape --scrape-horas 3
+# Let the coupon lane finish its account-prioritized product+coupon pairs before
+# generic links or collection contend for the single Chromium session.
+links: sleep 360 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo links --tick 5 --lote 40
+scrapeflash: sleep 390 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape_rapido --tick 5
+scrape: sleep 420 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape --scrape-horas 3
 canais: sleep 15 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar_canais --tick 60
 saude: exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py worker_health --port 8081
