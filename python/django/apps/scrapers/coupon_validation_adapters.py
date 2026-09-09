@@ -36,6 +36,18 @@ _CHALLENGE_MARKERS = (
 )
 _MONEY_RE = re.compile(r"R\$\s*([0-9][0-9.]*)(?:,([0-9]{1,2}))?", re.I)
 _PRODUCT_TOKEN_RE = re.compile(r"\bMLB\d{6,}\b", re.I)
+_ML_EMPTY_CART_MARKERS = (
+    "seu carrinho esta vazio", "carrinho vazio",
+    "voce ainda nao tem produtos", "adicione produtos ao carrinho",
+    # O ML alterna o texto por experimento/região. Todas as variações abaixo
+    # significam inequivocamente carrinho sem linhas de produto.
+    "ainda nao ha produtos", "ainda nao existem produtos",
+    "nao ha produtos no seu carrinho", "nao possui produtos no carrinho",
+    "nao tem produtos no carrinho",
+)
+_ML_CART_ITEM_MARKERS = (
+    "remover produto", "excluir produto", "salvar para depois",
+)
 
 
 def _fold(value) -> str:
@@ -127,18 +139,32 @@ def _cart_total(body):
 
 
 def _cart_empty(body):
+    """Retorna o estado apenas quando o texto prova carrinho vazio/ocupado.
+
+    ``Resumo da compra`` e valores também aparecem em recomendações e no resumo
+    vazio do Mercado Livre. Eles jamais são prova de uma linha de produto.
+    """
     text = _fold(body)
-    if any(marker in text for marker in (
-        "seu carrinho esta vazio", "carrinho vazio",
-        "voce ainda nao tem produtos", "adicione produtos ao carrinho",
-    )):
+    if any(marker in text for marker in _ML_EMPTY_CART_MARKERS):
         return True
-    if any(marker in text for marker in (
-        "resumo da compra", "remover produto", "excluir produto",
-        "salvar para depois",
-    )) and (_cart_total(body) or _MONEY_RE.search(str(body or ""))):
+    if any(marker in text for marker in _ML_CART_ITEM_MARKERS):
         return False
     return None
+
+
+def _cart_detection_evidence(body):
+    """Sinais depuráveis sem persistir conteúdo, produto ou dado da sessão."""
+    text = _fold(body)
+    return {
+        "empty_markers": [
+            marker for marker in _ML_EMPTY_CART_MARKERS if marker in text
+        ],
+        "line_item_markers": [
+            marker for marker in _ML_CART_ITEM_MARKERS if marker in text
+        ],
+        "has_purchase_summary": "resumo da compra" in text,
+        "has_currency": bool(_MONEY_RE.search(str(body or ""))),
+    }
 
 
 def _session_problem(url, body):
@@ -751,6 +777,7 @@ def _observe_ml_cart(page, validation) -> ValidationObservation:
             evidence=evidence,
         )
     empty = _cart_empty(initial_body)
+    evidence["cart_preflight"] = _cart_detection_evidence(initial_body)
     if empty is not True:
         reason = "cart_not_empty" if empty is False else "cart_layout_unknown"
         return ValidationObservation(

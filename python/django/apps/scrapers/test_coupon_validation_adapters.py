@@ -218,6 +218,12 @@ class MercadoLivreCheckoutAdapterTests(SimpleTestCase):
     def test_understands_empty_and_nonempty_cart_without_guessing_unknown_layout(self):
         self.assertIs(_cart_empty("Seu carrinho está vazio\nConfira nossas ofertas"), True)
         self.assertIs(_cart_empty("Resumo da compra\nTotal\nR$ 120,00\nRemover produto"), False)
+        self.assertIs(
+            _cart_empty("Resumo da compra\nTotal\nR$ 120,00\nAinda não há produtos"),
+            True,
+        )
+        # Preço/recomendação no resumo vazio não é linha de produto.
+        self.assertIsNone(_cart_empty("Resumo da compra\nOferta do dia\nR$ 120,00"))
         self.assertIsNone(_cart_empty("Boas-vindas ao Mercado Livre"))
 
     def test_classifies_explicit_marketplace_feedback(self):
