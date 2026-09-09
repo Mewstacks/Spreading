@@ -1364,14 +1364,13 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None,
     m = markup or WhatsAppMarkup()
     esc = m.escape
 
-    loja = _nome_loja(getattr(cupom, "marketplace", ""), cupom=cupom)
+    codigo = codigo_publicavel(cupom)
+    # Campanha de ativação não é um cupom útil para quem recebe a mensagem: não
+    # há nada para copiar no checkout. O transporte também bloqueia este caso.
+    if not codigo or not itens:
+        return ""
+
     linhas = []
-    cabecalho = (
-        f"Cupom relâmpago ⚡️ {esc(loja)}"
-        if getattr(cupom, "relampago", False)
-        else f"Cupom {esc(loja)}"
-    )
-    linhas += [m.bold(cabecalho), ""]
     for it in itens:
         p = it["produto"]
         relacao = it.get("relacao")
@@ -1386,44 +1385,24 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None,
         por_val = getattr(relacao, "preco_final", None)
         if por_val is None:
             por_val = p.preco_com_cupom
-        nome = _nome_principal_produto(p.nome)
+        nome = _nome_principal_produto(p.nome, limite=52)
         linhas.append(f"{_emoji_produto(p)} {esc(nome)}")
         de = _preco_br(de_val)
         por = _preco_br(por_val)
-        linhas.append(f"🛒 De R${de} por R${por}")
+        linhas.append(f"De ❌ R$ {de}")
+        linhas.append(f"Por 🔥 R$ {por}")
         linhas.append("")
 
-    # Linha do cupom no fim (mesmo formato do texto puro): só o código em negrito.
-    codigo = codigo_publicavel(cupom)
-    if codigo:
-        linhas.append(f"🎟 Use o cupom {m.bold(esc(codigo))}")
-        linhas.append("👉 Abra um produto acima e aplique o cupom no checkout.")
-    else:
-        # Os links de produto de campanhas ML carregam `coupon_campaign_id`; nas
-        # demais lojas a mensagem ainda manda conferir o abatimento antes de
-        # pagar, sem prometer que um simples clique validou o checkout.
-        linhas.append(f"🎟 {m.bold('Cupom de ativação')}")
+    linhas.append(f"🎟 CUPOM: {m.bold(esc(codigo))}")
     condicao = _condicao_do_cupom(cupom)
     if condicao:
-        linhas.append(f"⚠️ {m.bold('Condição:')} {esc(condicao)}")
+        linhas.append(f"📌 {esc(condicao)}")
     validade = _linha_validade_cupom(cupom)
     if validade:
-        linhas.append(f"⏳ {m.bold(esc(validade))}")
-    checagem = _linha_checagem_cupom(cupom, itens)
-    if checagem:
-        linhas.append(f"🔎 {esc(checagem)}")
+        linhas.append(f"⏳ {esc(validade)}")
     if itens:
-        acao = (
-            "👉 Abra a oferta, ative o cupom e confirme o desconto no checkout:"
-            if not codigo else "👉 Abra a oferta e aplique o cupom no checkout:"
-        )
-        linhas += ["", acao,
-                   f"➡️ {esc(itens[0]['link'])}"]
-    disclosure = str(
-        divulgacao_afiliado or "ℹ Link de afiliado; posso receber comissão."
-    ).strip()
-    if disclosure:
-        linhas += ["", m.italic(esc(disclosure))]
+        linhas += ["", "👉 Aplique o cupom no carrinho:",
+                   f"🔗 {esc(itens[0]['link'])}"]
     return "\n".join(linhas).strip()
 
 
@@ -1635,9 +1614,6 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
                  if deal.beneficio_publicavel > 0 else " — desconto no checkout")
         if codigo:
             linhas.append(f"🎟️ {m.bold(f'CUPOM: {esc(codigo)}')}{abate}")
-        else:
-            linhas.append(
-                f"🎟️ {m.bold('CUPOM: ative no link')}{abate}")
         minimo = _aviso_minimo_nao_atingido(deal.cupom, produto)
         if minimo:
             linhas.append(f"⚠️ {esc(minimo.capitalize())}")
@@ -1656,13 +1632,6 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
     linhas.append(f"🔗 {esc(link)}")
     if marca and marca.casefold() != "ofertas":
         linhas += ["", m.italic(esc(marca))]
-    disclosure = (
-        getattr(configuracao, "divulgacao_afiliado", "")
-        or getattr(perfil, "divulgacao_afiliado", "")
-        or "ℹ Link de afiliado; posso receber comissão."
-    ).strip()
-    if disclosure:
-        linhas.append(m.italic(esc(disclosure)))
     return "\n".join(linhas).strip()
 
 
@@ -1985,6 +1954,19 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
     if cupom.estado != "ativo" or (cupom.validade and cupom.validade < agora):
         return {"sucesso": False, "motivo": "Cupom não encontrado, inativo ou vencido.",
                 "classe": "permanente"}
+    if not codigo_publicavel(cupom):
+        _executar_orm(
+            log_event,
+            "publicacao", "coupon_without_code_blocked",
+            "Cupom bloqueado: não possui código copiável para a mensagem.", level="info",
+            usuario=usuario, contexto={"cupom_id": cupom_id, "canal": canal,
+                                       "destino": destino_nome or grupo_id},
+        )
+        return {
+            "sucesso": False,
+            "motivo": "Este cupom não tem um código copiável para o checkout.",
+            "classe": "permanente", "cupom_sem_codigo": True,
+        }
 
     from apps.scrapers.coupon_products import (
         relacoes_preparadas_para_envio, relacoes_prontas_para_envio,
@@ -3071,19 +3053,15 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     # > melhor código genérico VÁLIDO para este item. Nunca os três juntos.
     cod_item = getattr(produto, "codigo_checkout", "")
     linha_cupom = None
-    cupom_escolhido = cupom_pai
+    cupom_escolhido = None
     if cupom_pai is not None:
-        linha_cupom = f"🎟️ {m.bold('CUPOM: ative no link')}"
+        from apps.scrapers.coupon_rules import codigo_publicavel
+        codigo = codigo_publicavel(cupom_pai)
+        if codigo:
+            cupom_escolhido = cupom_pai
+            linha_cupom = f"🎟️ {m.bold(f'CUPOM: {esc(codigo)}')}"
     elif cod_item:
         linha_cupom = f"🎟️ {m.bold(f'CUPOM: {esc(cod_item)}')}"
-    elif (getattr(produto, "marketplace", "") == "amazon"
-          and (getattr(produto, "evidencia", {}) or {}).get("promotion", {}).get("coupon_confirmed")):
-        # Dizer só "ative na página" deixava a linha sem a informação que muda a
-        # decisão: o preço anunciado logo acima é o PÓS-cupom. Quem não ativasse
-        # pagava o outro valor e concluía, com razão, que o anúncio mentiu.
-        linha_cupom = f"🎟️ {m.bold('CUPOM: ative na Amazon — o preço já é com ele')}"
-    elif _preco_cupom_inline_ml(produto):
-        linha_cupom = f"🎟️ {m.bold('CUPOM: ative no Mercado Livre — o preço já é com ele')}"
     else:
         # Códigos genéricos (CupomCodigo) são de checkout do ML — NÃO valem na Amazon.
         mkt = getattr(produto, "marketplace", "mercadolivre")
@@ -3094,18 +3072,6 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
                 from apps.scrapers.coupon_rules import codigo_publicavel
                 codigo = codigo_publicavel(do_catalogo) or None
                 cupom_escolhido = do_catalogo if codigo else None
-                # Cupom de ATIVAÇÃO (clique, sem código digitável) é hoje a quase
-                # totalidade do catálogo de campanhas do ML. Sem este ramo, um
-                # produto com cupom confirmado saía sem nenhuma linha 🎟️ — o
-                # sintoma que a cliente relatou como "cupom não vem na mensagem".
-                # O portão de confiança já foi aplicado em
-                # `_melhor_cupom_normalizado_obj`: só chega aqui cupom de site
-                # inteiro ou com `ProdutoCupom` confirmado para ESTE item.
-                if not codigo:
-                    from apps.scrapers.coupon_rules import ativacao_publicavel
-                    if ativacao_publicavel(do_catalogo, usuario=usuario):
-                        cupom_escolhido = do_catalogo
-                        linha_cupom = f"🎟️ {m.bold('CUPOM: ative no link')}"
             if linha_cupom is None and not codigo:
                 codigo, cupom_escolhido = _melhor_codigo(produto), None
         if codigo:
@@ -3139,8 +3105,6 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     linhas.append(f"🔗 {esc(link_afiliado)}")
     if marca and marca.casefold() != "ofertas":
         linhas.extend(["", m.italic(esc(marca))])
-    if disclosure:
-        linhas.append(m.italic(esc(disclosure)))
     return "\n".join(linhas)
 
 

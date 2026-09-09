@@ -793,26 +793,24 @@ class CouponMessageTests(SimpleTestCase):
         return cupom, [{"produto": produto, "relacao": relacao,
                         "link": "https://meli.la/1GWNQCg"}]
 
-    def test_whatsapp_tem_negrito_somente_no_cabecalho_e_codigo(self):
+    def test_whatsapp_mostra_produto_preco_codigo_e_link_sem_ruido(self):
         from apps.scrapers.ofertas import montar_mensagem_cupom_produtos
 
         cupom, itens = self._data()
         mensagem = montar_mensagem_cupom_produtos(cupom, itens)
 
-        self.assertTrue(mensagem.startswith("*Cupom Mercado Livre*"))
+        self.assertTrue(mensagem.startswith("📖 Livro Chama de Ferro"))
         self.assertIn("📖 Livro Chama de Ferro Capa Dura Edição Especial", mensagem)
         # "De" é o preço de VITRINE (100), não o de tabela (197,90): a diferença
         # anunciada tem que ser exatamente o que o cupom abate no checkout.
-        self.assertIn("🛒 De R$100 por R$83,54", mensagem)
-        self.assertIn("➡️ https://meli.la/1GWNQCg", mensagem)
-        self.assertIn("🎟 Use o cupom *PRESENTE*", mensagem)
-        self.assertIn(
-            "👉 Abra um produto acima e aplique o cupom no checkout.", mensagem
-        )
-        self.assertTrue(mensagem.endswith(
-            "_ℹ Link de afiliado; posso receber comissão._"
-        ))
-        self.assertEqual(mensagem.count("*"), 4)
+        self.assertIn("De ❌ R$ 100", mensagem)
+        self.assertIn("Por 🔥 R$ 83,54", mensagem)
+        self.assertIn("🎟 CUPOM: *PRESENTE*", mensagem)
+        self.assertIn("👉 Aplique o cupom no carrinho:", mensagem)
+        self.assertIn("🔗 https://meli.la/1GWNQCg", mensagem)
+        self.assertNotIn("Cupom Mercado Livre", mensagem)
+        self.assertNotIn("Fonte checada", mensagem)
+        self.assertNotIn("Link de afiliado", mensagem)
 
     def test_cupom_ignora_chamada_ia_e_usa_nome_local(self):
         from apps.scrapers.ofertas import montar_mensagem_cupom_produtos
@@ -825,13 +823,13 @@ class CouponMessageTests(SimpleTestCase):
 
         mensagem = montar_mensagem_cupom_produtos(cupom, itens)
 
-        self.assertTrue(mensagem.startswith("*Cupom Mercado Livre*"))
+        self.assertTrue(mensagem.startswith("📖 Livro Chama de Ferro"))
         self.assertNotIn("BORA RENOVAR ESSE SETUP", mensagem)
         self.assertIn("📖 Livro Chama de Ferro Capa Dura", mensagem)
         self.assertNotIn("NOME CURTO DA IA", mensagem)
-        self.assertEqual(mensagem.count("*"), 4)
+        self.assertIn("🎟 CUPOM: *PRESENTE*", mensagem)
 
-    def test_telegram_escapa_html_e_tem_dois_negritos(self):
+    def test_telegram_escapa_html_e_tem_codigo_em_negrito(self):
         from apps.scrapers.ofertas import montar_mensagem_cupom_produtos
         from apps.scrapers.senders.base import TelegramHTMLMarkup
 
@@ -840,9 +838,17 @@ class CouponMessageTests(SimpleTestCase):
         mensagem = montar_mensagem_cupom_produtos(
             cupom, itens, markup=TelegramHTMLMarkup())
 
-        self.assertEqual(mensagem.count("<b>"), 2)
-        self.assertEqual(mensagem.count("</b>"), 2)
+        self.assertEqual(mensagem.count("<b>"), 1)
+        self.assertEqual(mensagem.count("</b>"), 1)
         self.assertIn("Livro &lt;Especial&gt; &amp; Capa dura", mensagem)
+
+    def test_cupom_sem_codigo_nao_monta_mensagem(self):
+        from apps.scrapers.ofertas import montar_mensagem_cupom_produtos
+
+        cupom, itens = self._data()
+        cupom.codigo = ""
+
+        self.assertEqual(montar_mensagem_cupom_produtos(cupom, itens), "")
 
 
 class ProductMessageTests(SimpleTestCase):
@@ -1017,7 +1023,7 @@ class CouponCollageTests(SimpleTestCase):
         self.assertGreater(min(larguras), 400)
         self.assertLess(max(larguras) - min(larguras), 40)
 
-    def test_margem_branca_de_outros_marketplaces_nao_e_recortada(self):
+    def test_foto_unica_de_outro_marketplace_tambem_e_reenquadrada(self):
         from PIL import Image, ImageDraw
         from apps.scrapers.colagem import montar_colagem_itens
 
@@ -1031,7 +1037,7 @@ class CouponCollageTests(SimpleTestCase):
         pixels_escuros = imagem.convert("L").point(lambda pixel: 255 if pixel < 64 else 0)
         esquerda, _topo, direita, _base = pixels_escuros.getbbox()
 
-        self.assertLess(direita - esquerda, 300)
+        self.assertGreater(direita - esquerda, 800)
 
     def test_urls_locais_e_nao_https_sao_rejeitadas(self):
         from apps.scrapers.colagem import _url_publica
@@ -1231,7 +1237,7 @@ class AmazonOfficialReadySendTests(TestCase):
                       return_value=Estado(True, "WhatsApp", "worker", "", "", None)):
             resultado = enviar_cupom(cupom, "grupo@g.us", usuario=user)
         self.assertFalse(resultado.get("sucesso"), resultado)
-        self.assertTrue(resultado.get("cupom_sem_produto"))
+        self.assertTrue(resultado.get("cupom_sem_codigo"))
         sender.enviar_oferta.assert_not_called()
 
 
@@ -1359,7 +1365,7 @@ class MlCampanhaListagemReadySendTests(TestCase):
                       return_value=Estado(True, "WhatsApp", "worker", "", "", None)):
             resultado = enviar_cupom(cupom, "grupo@g.us", usuario=user)
         self.assertFalse(resultado.get("sucesso"), resultado)
-        self.assertTrue(resultado.get("cupom_sem_produto"))
+        self.assertTrue(resultado.get("cupom_sem_codigo"))
         sender.enviar_oferta.assert_not_called()
 
     def test_campanha_sem_rastreio_nao_finge_ready(self):

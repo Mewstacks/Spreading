@@ -63,7 +63,7 @@ class PrecoPublicavelTests(TestCase):
         self.assertNotIn("POR R$ 100", texto)
         # O "DE" continua sendo a referência da vitrine riscada.
         self.assertIn("120", texto)
-        self.assertIn("CUPOM: ative na Amazon — o preço já é com ele", texto)
+        self.assertNotIn("CUPOM", texto)
 
     def test_produto_sem_cupom_mantem_o_preco_de_vitrine(self):
         produto = self._produto(
@@ -85,7 +85,7 @@ class PrecoPublicavelTests(TestCase):
         self.assertIn("Cafeteira Expresso", texto)
         self.assertIn("Frete grátis", texto)
         self.assertIn("Ver oferta na loja", texto)
-        self.assertIn("Link de afiliado; posso receber comissão.", texto)
+        self.assertNotIn("Link de afiliado; posso receber comissão.", texto)
         self.assertNotIn("MENOR PRECO HISTORICO", texto)
         self.assertNotIn("ULTIMAS UNIDADES", texto)
         self.assertNotIn("NOME DA IA", texto)
@@ -172,7 +172,7 @@ class MensagemDeProdutoDeCupomMLTests(TestCase):
         self.assertIn("POR R$ 100", texto)
         self.assertIn("DE ", texto)          # 250, o preço de lista
         self.assertIn("250", texto)
-        self.assertIn("CUPOM: ative no link", texto)
+        self.assertNotIn("CUPOM", texto)
         # O antigo pós-cupom duplamente descontado (20% de 80) não pode aparecer.
         self.assertNotIn("64", texto)
 
@@ -202,7 +202,7 @@ class MensagemDeProdutoDeCupomMLTests(TestCase):
 
         self.assertIn("POR R$ 98,77", texto)
         self.assertNotIn("POR R$ 113,74", texto)
-        self.assertIn("CUPOM: ative no Mercado Livre — o preço já é com ele", texto)
+        self.assertNotIn("CUPOM", texto)
 
     def test_preco_efetivo_ml_sem_prova_direta_nao_e_publicado(self):
         produto = Produto.objects.create(

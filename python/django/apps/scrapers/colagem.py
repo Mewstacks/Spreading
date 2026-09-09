@@ -196,6 +196,12 @@ def _montar_imagens(imagens):
     if not imagens:
         return "", ""
 
+    # Com um produto só, o card centralizava uma miniatura e criava a moldura
+    # branca enorme no WhatsApp. Reenquadrar o objeto preserva a proporção sem
+    # inventar um recorte e mantém a foto legível no celular.
+    if len(imagens) == 1:
+        imagens = [_enquadrar_produto_amazon(imagens[0])]
+
     n = len(imagens)
     colunas = math.ceil(math.sqrt(n))
     linhas = math.ceil(n / colunas)

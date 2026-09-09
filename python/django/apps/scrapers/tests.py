@@ -2862,7 +2862,7 @@ class AttributionWorkflowTests(TestCase):
         )
         self.assertIn("Tech do Dia", message)
 
-    def test_default_message_uses_configured_cta_brand_and_disclosure(self):
+    def test_default_message_uses_configured_cta_brand_without_disclosure_footer(self):
         from apps.scrapers.ofertas import montar_mensagem
 
         config = ConfiguracaoEnvio.objects.create(
@@ -2877,7 +2877,7 @@ class AttributionWorkflowTests(TestCase):
 
         self.assertIn("Ver preço na loja", message)
         self.assertIn("Achados da Lu", message)
-        self.assertIn("Link de afiliado; posso receber comissão.", message)
+        self.assertNotIn("Link de afiliado; posso receber comissão.", message)
 
     def test_custom_template_does_not_claim_unproven_discount_and_escapes_data(self):
         from apps.scrapers.ofertas import montar_mensagem
@@ -2908,14 +2908,14 @@ class AttributionWorkflowTests(TestCase):
         self.assertNotIn("OFERTA RELÂMPAGO", comum)
         self.assertIn("OFERTA RELÂMPAGO", relampago)
 
-    def test_default_affiliate_disclosure_is_always_added_to_messages(self):
+    def test_default_affiliate_disclosure_is_not_added_to_messages(self):
         from apps.scrapers.ofertas import montar_mensagem
 
         message = montar_mensagem(
             self.product, "https://example.com/a", None, usuario=self.user,
         )
 
-        self.assertIn("Link de afiliado; posso receber comissão.", message)
+        self.assertNotIn("Link de afiliado; posso receber comissão.", message)
 
     @override_settings(DEBUG=False, PUBLIC_BASE_URL="https://spreading.example")
     def test_mensagem_leva_o_link_direto_da_loja_mesmo_em_producao(self):
@@ -6700,11 +6700,9 @@ class MensagemCupomTests(SimpleTestCase):
             **base, codigo="", regras={"modo_resgate": "ativacao"},
         ), itens)
 
-        self.assertIn("Abra um produto acima e aplique o cupom no checkout.", com_codigo)
-        self.assertNotIn("Cupom de ativação", com_codigo)
-        self.assertIn("Cupom de ativação", ativacao)
-        self.assertIn("confirme o desconto antes de pagar.", ativacao)
-        self.assertNotIn("Ative o cupom no link", ativacao)
+        self.assertIn("🎟 CUPOM: *NOTE10*", com_codigo)
+        self.assertIn("👉 Aplique o cupom no carrinho:", com_codigo)
+        self.assertEqual(ativacao, "")
 
 
 class EnvioCupomTests(TestCase):
@@ -6783,6 +6781,19 @@ class EnvioCupomTests(TestCase):
         sender.enviar_oferta.assert_not_called()
         self.assertFalse(ProdutoCupom.objects.filter(cupom=self.cupom).exists())
         self.assertFalse(Publicacao.objects.filter(cupom_normalizado=self.cupom).exists())
+
+    def test_cupom_sem_codigo_e_bloqueado_antes_de_preparar_o_envio(self):
+        from apps.scrapers.ofertas import enviar_cupom
+
+        self.cupom.codigo = ""
+        self.cupom.save(update_fields=["codigo"])
+        sender = self._sender({"sucesso": True, "via": "whatsapp"})
+        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
+            resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertTrue(resultado["cupom_sem_codigo"])
+        sender.enviar_oferta.assert_not_called()
 
     def test_envio_de_cupom_nao_depende_da_ia(self):
         """Uma oferta já comprovada segue mesmo se o enriquecimento de IA cair."""
@@ -6972,12 +6983,12 @@ class EnvioCupomTests(TestCase):
         sender.enviar_oferta.assert_called_once()
         self.assertEqual(Publicacao.objects.get().status, "enviado")
 
-    def test_preparo_vencido_bloqueia_publicacao(self):
+    def test_cupom_de_ativacao_e_bloqueado_antes_de_consultar_preparo(self):
         from apps.scrapers.coupon_products import CACHE_HORAS
         from apps.scrapers.models import CupomPreparacao
         from apps.scrapers.ofertas import enviar_cupom
 
-        # Sem preparo fresco não há produto, preço e link comprovados para publicar.
+        # Campanha de ativação não é enviável: não há código para a pessoa copiar.
         self.cupom.codigo = ""
         self.cupom.regras = {**self.cupom.regras, "modo_resgate": "ativacao"}
         self.cupom.save(update_fields=["codigo", "regras"])
@@ -6986,8 +6997,8 @@ class EnvioCupomTests(TestCase):
         resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
 
         self.assertFalse(resultado["sucesso"])
-        self.assertTrue(resultado["cupom_sem_produto"])
-        self.assertIn("produto comprovadamente aplicável", resultado["motivo"])
+        self.assertTrue(resultado["cupom_sem_codigo"])
+        self.assertIn("código copiável", resultado["motivo"])
         self.assertFalse(Publicacao.objects.filter(usuario=self.user).exists())
 
     def test_link_afiliado_pendente_nao_reserva_publicacao(self):

@@ -316,6 +316,10 @@ def _melhor_cupom_para(produto, *, confirmados, sitewide, com_checkout, usuario,
         if cupom_e_lixo(regras):
             rejeicoes[MOTIVO_REGRA_ILEGIVEL] += 1
             continue
+        # Oferta com cupom só pode anunciar um código que a pessoa consiga usar.
+        # "Ative no link" não entra no cálculo nem no texto de produção.
+        if not codigo_publicavel(cupom):
+            continue
         minimo = float(regras.get("valor_minimo") or 0)
         if minimo and minimo > preco_vitrine:
             rejeicoes[MOTIVO_MINIMO_DE_COMPRA] += 1

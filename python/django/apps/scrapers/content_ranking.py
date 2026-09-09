@@ -271,7 +271,7 @@ def _coupon_candidates(config, limit):
     from apps.scrapers.coupon_products import ids_cupons_prontos
     from apps.scrapers.coupon_rules import (
         aguarda_corroboracao_oficial, corroboracoes_oficiais_em_lote,
-        desconto_para_comprador,
+        codigo_publicavel, desconto_para_comprador,
     )
     prontos = ids_cupons_prontos(config.owner, pool)
     ready_ids = set(
@@ -286,6 +286,11 @@ def _coupon_candidates(config, limit):
     corroboracoes = corroboracoes_oficiais_em_lote(pool)
     candidates = []
     for coupon in pool:
+        # No WhatsApp, campanha de ativação não ocupa o lugar de um cupom que a
+        # pessoa consiga copiar no checkout.
+        if (str(getattr(config, "canal", "whatsapp") or "whatsapp").casefold()
+                == "whatsapp" and not codigo_publicavel(coupon)):
+            continue
         if not _cupom_rankeavel(coupon, config.owner, prontos, ready_ids):
             continue
         if aguarda_corroboracao_oficial(coupon, corroboracoes=corroboracoes):
