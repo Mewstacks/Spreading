@@ -11,8 +11,9 @@ from django.utils import timezone
 
 from apps.accounts.models import Organization
 from apps.scrapers.models import (
-    Cupom, CupomFonteObservacao, CupomNormalizado, CupomPreparacao, FonteIngestao,
-    LinkAfiliadoUsuario, Produto, ProdutoCupom,
+    ConfiguracaoEnvio, Cupom, CupomDisponibilidade, CupomFonteObservacao,
+    CupomNormalizado, CupomPreparacao, FonteIngestao, LinkAfiliadoUsuario,
+    Produto, ProdutoCupom,
 )
 
 
@@ -378,6 +379,51 @@ class CouponPipelineTests(TestCase):
         # E o ciclo chegou ao fim: fontes que não passam por `run_source` continuam
         # sendo reportadas depois das que falharam.
         self.assertIn("manual-private", result["fontes"])
+
+
+class CouponNicheRankingTests(TestCase):
+    def test_macro_da_regra_aceita_produto_confirmado_do_cupom(self):
+        """A campanha não precisa repetir o nicho no próprio título.
+
+        A prova relevante é a relação confirmada com o produto, que é também o
+        único caminho que o transporte aceita publicar.
+        """
+        from apps.scrapers.content_ranking import _coupon_candidates
+
+        user = get_user_model().objects.create_user("ranking-nicho", password="x")
+        fonte = FonteIngestao.objects.create(
+            slug="ranking-nicho-fonte", marketplace="mercadolivre", nome="Cupons")
+        config = ConfiguracaoEnvio.objects.create(
+            owner=user, grupo_id="teste@g.us", grupo_nome="Teste ofertas",
+            canal="whatsapp", macro_categoria="Eletrodomésticos",
+            min_desconto_percent=15,
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="ranking-nicho-20", marketplace="mercadolivre",
+            categoria="Campanhas gerais", titulo="Oferta da semana", codigo="CASA20",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20}, estado="ativo",
+            ultima_observacao=timezone.now(),
+        )
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Air fryer comprovada", origem="cupom",
+            macro_categoria="Eletrodomésticos", preco_sem_desconto=300,
+            preco_com_cupom=240, link_produto="https://produto.example/airfryer",
+            imagem_url="https://img.example/airfryer.jpg",
+        )
+        ProdutoCupom.objects.create(
+            produto=produto, cupom=cupom, status="confirmado",
+            preco_original=300, preco_atual=300, preco_final=240,
+            verificado_em=timezone.now(),
+        )
+        CupomDisponibilidade.objects.create(
+            organization=user.perfil.organization, usuario=user, cupom=cupom,
+            channel="whatsapp", stage="ready", use_mode="code_notice",
+        )
+
+        candidatos = _coupon_candidates(config, limit=5)
+
+        self.assertEqual([item.obj.pk for item in candidatos], [cupom.pk])
 
 
 class AmazonPublicCouponsCadenceTests(TestCase):

@@ -207,8 +207,19 @@ def _coupon_candidates(config, limit):
     if config.marketplace:
         query = query.filter(marketplace=config.marketplace)
     if config.macro_categoria:
-        query = query.filter(Q(categoria=config.macro_categoria)
-                             | Q(titulo__icontains=config.macro_categoria))
+        # A categoria textual da campanha quase sempre é ampla (ou vem vazia).
+        # O nicho que importa para a publicação é o do produto em que o cupom foi
+        # comprovadamente aplicado. Sem essa perna, um cupom pronto para uma air
+        # fryer ficava invisível à regra de Eletrodomésticos só porque a campanha
+        # se chamava "Cupom Mercado Livre".
+        query = query.filter(
+            Q(categoria=config.macro_categoria)
+            | Q(titulo__icontains=config.macro_categoria)
+            | Q(
+                produtos__status="confirmado",
+                produtos__produto__macro_categoria=config.macro_categoria,
+            )
+        ).distinct()
     if config.termo_busca:
         terms = [term.strip() for term in config.termo_busca.split(",") if term.strip()]
         term_query = Q()
