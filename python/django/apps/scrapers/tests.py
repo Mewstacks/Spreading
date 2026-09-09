@@ -3537,6 +3537,23 @@ class RaspagemDeCuponsTests(TestCase):
         self.assertEqual(run.total_cupons, 3)
         self.assertEqual(run.status, "ok")
 
+    def test_raspagem_longa_do_ml_cede_ao_preparo_prioritario(self):
+        """Não toma Chromium de um produto+cupom que pode ser publicado."""
+        from apps.scrapers.carga import BrowserResourceUnavailable
+
+        with patch(
+            "apps.scrapers.automacao_state.read_state",
+            return_value={"fase": "processando"},
+        ), patch(
+            "apps.scrapers.automacao_state.worker_alive", return_value=True,
+        ), patch(
+            "apps.scrapers.scraper_mercadolivre.ofertas_scraper.mapear_ofertas",
+        ) as ofertas:
+            with self.assertRaises(BrowserResourceUnavailable):
+                get_marketplace("mercadolivre").scrape_all()
+
+        ofertas.assert_not_called()
+
     def test_falha_nos_cupons_de_campanha_nao_derruba_ofertas(self):
         """O parser de campanha depende de um JSON embutido no bundle do ML — a peça
         mais frágil daqui. Se ele cair, ofertas e códigos ainda têm de entrar."""

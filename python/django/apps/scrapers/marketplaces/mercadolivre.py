@@ -9,6 +9,27 @@ from apps.scrapers.marketplaces.base import Marketplace
 logger = logging.getLogger(__name__)
 
 
+def _preparo_de_cupons_tem_prioridade() -> bool:
+    """True enquanto o funil produto+cupom está no caminho crítico.
+
+    A coleta longa de ofertas usa o mesmo Chromium e pode durar muitas páginas.
+    Sem este portão, ela conseguia tomar o slot entre uma etapa de preparo e a
+    geração do link, deixando um cupom já confirmado esperar o ciclo inteiro.
+    """
+    from django.db import DatabaseError
+    from apps.scrapers import automacao_state as st
+
+    try:
+        return (
+            st.read_state("cupons").get("fase") == "processando"
+            and st.worker_alive("cupons")
+        )
+    except DatabaseError:
+        # O lease do browser continua protegendo a máquina; sem estado confiável
+        # não inventamos uma prioridade que poderia congelar a coleta.
+        return False
+
+
 class MercadoLivre(Marketplace):
     slug = "mercadolivre"
 
@@ -112,6 +133,16 @@ class MercadoLivre(Marketplace):
         return total
 
     def scrape_all(self, termos=None) -> None:
+        if _preparo_de_cupons_tem_prioridade():
+            from apps.scrapers.carga import BrowserResourceUnavailable
+
+            logger.info(
+                "Raspagem longa do ML adiada: pares produto+cupom prioritários "
+                "ainda estão em preparo."
+            )
+            raise BrowserResourceUnavailable(
+                "Preparo prioritário de cupons está usando o funil do ML."
+            )
         from apps.scrapers.scraper_mercadolivre.ofertas_scraper import (
             mapear_ofertas, buscar_por_termo,
         )
