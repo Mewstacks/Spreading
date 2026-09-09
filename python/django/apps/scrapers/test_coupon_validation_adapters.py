@@ -325,6 +325,20 @@ class MercadoLivreCheckoutAdapterTests(SimpleTestCase):
         state.assert_not_called()
         self.assertEqual(result.reason_code, "invalid_input")
 
+    def test_link_pending_defers_checkout_before_opening_browser(self):
+        validation = SimpleNamespace(
+            usuario=SimpleNamespace(id=7), cupom=SimpleNamespace(codigo="TESTE20"),
+            product_url="https://www.mercadolivre.com.br/produto/p/MLB12345678",
+        )
+        with patch("apps.scrapers.coupon_validation_adapters.interesse_pendente",
+                   return_value=True), \
+                patch("apps.scrapers.coupon_validation_adapters.ml_auth.storage_state_para") as state:
+            result = validate_mercadolivre(validation)
+
+        state.assert_not_called()
+        self.assertEqual(result.status, "inconclusive")
+        self.assertEqual(result.reason_code, "browser_busy")
+
 
 class AmazonCheckoutAdapterTests(SimpleTestCase):
     def test_accepts_only_canonical_amazon_product_urls(self):

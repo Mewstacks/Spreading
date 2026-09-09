@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from .auxiliar import BrowserError, iniciar_browser
 from .carga import BrowserResourceUnavailable, coordinated_ml_browser
 from .coupon_validation_runner import ValidationObservation
+from .resource_control import interesse_pendente
 from . import ml_auth
 
 
@@ -966,6 +967,18 @@ def validate_mercadolivre(validation) -> ValidationObservation:
             safe_detail="Código ou URL de produto inválido para validação.",
             evidence={"no_purchase_boundary": True},
         )
+    # Checkout é enriquecimento opcional. Um link de afiliado já associado a
+    # produto, preço e código é o caminho que torna a oferta publicável; não
+    # pode ficar atrás de uma observação de carrinho que pode levar 45 s ou cair
+    # em CAPTCHA. A esteira de links deixa um marcador quando perdeu o Chromium.
+    if interesse_pendente(
+        "django_chromium", exceto="coupon_checkout_validation",
+    ):
+        return ValidationObservation(
+            status="inconclusive", reason_code="browser_busy",
+            safe_detail="Link de afiliado prioritário em processamento; validação será retomada.",
+            evidence={"no_purchase_boundary": True},
+        )
     # Credencial do remetente primeiro; sem ela, a de sistema. O veredito de um
     # carrinho é sobre o CÓDIGO, não sobre quem testa: se ele aplica desconto,
     # aplica para qualquer conta. Medido em 03/09/2026: das 3.840 validações
@@ -988,12 +1001,9 @@ def validate_mercadolivre(validation) -> ValidationObservation:
         with coordinated_ml_browser(
             usuario=dono_da_sessao, authenticated=True,
             owner_kind="coupon_checkout_validation",
-            # Com espera, não pega-ou-desiste: a negativa inscreve esta esteira na
-            # fila do Chromium e o lote longo cede entre páginas. Sem isso a
-            # validação perdia a corrida para a raspagem em toda tentativa e
-            # morria em `browser_busy` — foi o que sobrou depois de resolver
-            # sessão e alvo.
-            wait_seconds=90,
+            # Não acampa na fila: checkout não pode tomar a janela em que links
+            # prioritários conseguem materializar uma oferta pronta para envio.
+            wait_seconds=0,
         ), iniciar_browser(
             storage_state=state, session_user=dono_da_sessao, headless=True,
         ) as (page, _context):

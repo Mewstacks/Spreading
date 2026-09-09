@@ -246,10 +246,6 @@ def _rodar_cupons(lote=40):
     from apps.scrapers.coupon_validation_runner import (
         defer_missing_checkout_sessions, run_validation_batch,
     )
-    validacoes_sem_sessao = defer_missing_checkout_sessions()
-    validacoes_checkout = run_validation_batch(
-        adapters=CHECKOUT_VALIDATION_ADAPTERS, limit=2,
-    )
     from apps.scrapers.coupon_pipeline import executar_pipeline_cupons
 
     resultado = executar_pipeline_cupons(
@@ -268,6 +264,15 @@ def _rodar_cupons(lote=40):
 
     resultado["macros_por_nome"] = popular_macro_por_nome(
         limite=max(200, lote * 5), apenas_com_cupom=True,
+    )
+    # A publicação exige o par produto+cupom, preço e link; a observação de
+    # checkout é uma camada adicional de prova. Rodá-la antes fazia uma página
+    # lenta/CAPTCHA segurar o Chromium e impedir que o par já comprovado virasse
+    # um link publicável. A ordem preserva a validação, mas tira-a do caminho
+    # crítico de uma oferta pronta.
+    validacoes_sem_sessao = defer_missing_checkout_sessions()
+    validacoes_checkout = run_validation_batch(
+        adapters=CHECKOUT_VALIDATION_ADAPTERS, limit=2,
     )
     logger.info(
         "CUPONS: %s encontrado(s), %s persistido(s), %s preparado(s), "
