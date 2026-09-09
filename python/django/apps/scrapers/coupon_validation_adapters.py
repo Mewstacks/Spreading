@@ -44,6 +44,10 @@ _ML_EMPTY_CART_MARKERS = (
     "ainda nao ha produtos", "ainda nao existem produtos",
     "nao ha produtos no seu carrinho", "nao possui produtos no carrinho",
     "nao tem produtos no carrinho",
+    # Variante atual do estado vazio no app-cart do ML: a tela traz resumo e
+    # recomendações com preço, mas informa que nada foi *adicionado* ainda.
+    "voce ainda nao adicionou produtos", "ainda nao adicionou produtos ao seu carrinho",
+    "nao adicionou nada ao carrinho", "ainda nao adicionou nada",
 )
 _ML_CART_ITEM_MARKERS = (
     "remover produto", "excluir produto", "salvar para depois",
