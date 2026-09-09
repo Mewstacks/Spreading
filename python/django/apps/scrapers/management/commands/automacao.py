@@ -284,7 +284,25 @@ def _rodar_cupons(lote=40):
     return resultado
 
 
-def _rodar_links(lote=40):
+def _cupons_estao_processando() -> bool:
+    """Evita que a lane de links tome Chromium no meio do preparo de cupons.
+
+    O trabalho de Amazon/Shopee pode seguir sem navegador. O trecho ML e a
+    verificação de destino, porém, devem ceder: cupom já associado a produto tem
+    prioridade editorial sobre preencher a fila genérica de links.
+    """
+    try:
+        return (
+            st.read_state("cupons").get("fase") == "processando"
+            and st.worker_alive("cupons")
+        )
+    except DatabaseError:
+        # Sem leitura confiável do estado, não inventa prioridade; o lease de
+        # Chromium ainda é a última proteção contra concorrência.
+        return False
+
+
+def _rodar_links(lote=40, *, incluir_ml=True):
     """Pré-gera links de afiliado dos produtos pendentes — um lote por ciclo.
 
     Sem isto nada em produção gerava link: o scrape só cria Produto (com link vazio),
@@ -328,6 +346,8 @@ def _rodar_links(lote=40):
             destino = por_marketplace.setdefault("shopee", {"gerados": 0, "falhas": 0})
             destino["gerados"] += g_shopee
             destino["falhas"] += f_shopee
+        if not incluir_ml:
+            continue
         if not ml_conectado(user):
             # Antes isto era um `continue` mudo: o usuário simplesmente nunca gerava
             # link e nada em lugar nenhum dizia por quê. Agora a Saúde mostra.
@@ -801,22 +821,36 @@ class Command(BaseCommand):
             try:
                 st.write_state("links", fase="gerando", erro="")
                 _renovar_conexoes_db()
-                # Geração e verificação adquirem o slot apenas enquanto o Chromium
-                # está vivo. As queries que selecionam os lotes ficam fora do lease.
+                cupons_prioritarios = _cupons_estao_processando()
+                # Amazon e Shopee não usam Chromium, portanto continuam fluindo
+                # mesmo no preparo de cupom. ML e a verificação de destinos cedem
+                # até aquele ciclo terminar, em vez de disputar o navegador e
+                # transformar a perda de prioridade em BrowserResourceUnavailable.
                 with _heartbeat_durante("links"):
-                    res = _rodar_links(lote=lote)
-                st.write_state("links", fase="verificando", erro="")
-                with _heartbeat_durante("links"):
-                    ver = _rodar_verificacao_links(limite=lote)
+                    res = _rodar_links(lote=lote, incluir_ml=not cupons_prioritarios)
+                if cupons_prioritarios:
+                    ver = {"aprovados": 0, "reprovados": 0}
+                else:
+                    st.write_state("links", fase="verificando", erro="")
+                    with _heartbeat_durante("links"):
+                        ver = _rodar_verificacao_links(limite=lote)
                 falhas_banco = 0
-                proximo = timezone.now() + timedelta(minutes=tick)
+                proximo = timezone.now() + timedelta(
+                    seconds=POLL if cupons_prioritarios else tick * 60
+                )
                 st.write_state(
-                    "links", fase="aguardando", proximo_ciclo=proximo.isoformat(),
+                    "links",
+                    fase="aguardando_cupons" if cupons_prioritarios else "aguardando",
+                    proximo_ciclo=proximo.isoformat(),
                     gerados=res["gerados"], falhas=res["falhas"], erro="",
                     verificados=ver["aprovados"], reprovados=ver["reprovados"],
                     ultima_msg=(f"{res['gerados']} link(s) gerado(s), "
                                 f"{res['falhas']} falha(s), "
-                                f"{ver['aprovados']} verificado(s) às {agora:%H:%M}."),
+                                + (
+                                    "ML aguardando o preparo prioritário de cupons."
+                                    if cupons_prioritarios else
+                                    f"{ver['aprovados']} verificado(s) às {agora:%H:%M}."
+                                )),
                 )
             except DatabaseError as e:
                 falhas_banco += 1

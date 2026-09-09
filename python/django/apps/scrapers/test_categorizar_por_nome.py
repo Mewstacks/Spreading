@@ -124,6 +124,26 @@ class MacroDoNomeTests(SimpleTestCase):
         for nome, esperado in casos.items():
             self.assertEqual(macro_do_nome(nome), esperado, nome)
 
+    def test_titulos_elegiveis_do_feed_sem_domain_id_nao_ficam_sem_macro(self):
+        """Casos atuais do pool; todos têm substantivo inicial inequívoco."""
+        casos = {
+            "Case Suporte Veícular Teto Carro Externo Starlink Mini": "Automotivo",
+            "Aparelho De Jantar 20 Peças Dalia Flora Oxford": "Cozinha, Mesa e Bar",
+            "Caixa Amplificada Connect Lights Cm-400 Mondial": "Áudio, Vídeo e Fotografia",
+            "Vonder Airless 1,2 Hp Máquina De Pintura 900W": "Ferramentas e Manutenção",
+            "Irrigador Oral Portátil Ipx7 De 400ml": "Saúde, Ortopedia e Equipamentos Médicos",
+            "Ômega 3 Ultra 1100 Óleo De Peixe": "Saúde, Ortopedia e Equipamentos Médicos",
+            "Emeet S800 HDR 4K 30FPS Webcams": "Eletrônicos e Informática",
+            "Palmilha Para Pisada Pronada Fascite Plantar": "Saúde, Ortopedia e Equipamentos Médicos",
+            "Suporte De Painel Veicular Starlink Mini": "Automotivo",
+            "4x Spot Slim Sobrepor Teto Beiral 5w": "Materiais Elétricos e Componentes",
+            "Apoio De Cabeça De Bebe Para Cadeirinha": "Bebês e Maternidade",
+            "Máquina De Cortar Cabelo Wahl Home Cut": "Beleza e Cuidados Pessoais",
+            "Máquina De Tosa Doméstica Em Casa - Pet Clipper": "Pets e Animais",
+        }
+        for nome, esperado in casos.items():
+            self.assertEqual(macro_do_nome(nome), esperado, nome)
+
     def test_vocabulario_recente_papelaria_e_livros_sem_domain_id(self):
         """Amostra real do feed fresco que não trazia domain_id em 09/09/2026."""
         casos = {
