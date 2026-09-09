@@ -49,9 +49,18 @@ class Command(BaseCommand):
             n = popular_macro_por_nome(
                 limite=opts["limite"],
                 apenas_com_cupom=opts["apenas_com_cupom"],
+                produto_ids=(
+                    [produto.pk for produto in self._pool_elegivel()]
+                    if opts["elegiveis"] else None
+                ),
             )
             self.stdout.write(self.style.SUCCESS(
                 f"{n} produto(s) classificado(s) pelo nome."))
+
+    @staticmethod
+    def _pool_elegivel():
+        from apps.scrapers.ofertas import pool_de_produtos_elegiveis
+        return pool_de_produtos_elegiveis(min_desconto_percent=15.0)
 
     def _prever(self, opts):
         # Espelha o alvo real de `popular_macro_por_nome`: uma macro antiga sobre
@@ -63,10 +72,7 @@ class Command(BaseCommand):
         )
         qs = Produto.objects.filter(sem_autoridade).exclude(nome="")
         if opts["elegiveis"]:
-            from apps.scrapers.ofertas import pool_de_produtos_elegiveis
-            ids = [produto.pk for produto in pool_de_produtos_elegiveis(
-                min_desconto_percent=15.0,
-            )]
+            ids = [produto.pk for produto in self._pool_elegivel()]
             qs = qs.filter(pk__in=ids)
         elif opts["frescos"]:
             qs = qs.filter(produtos_frescos_q())

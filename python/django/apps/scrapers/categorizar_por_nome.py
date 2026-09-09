@@ -347,7 +347,7 @@ CATEGORIA_SEM_AUTORIDADE = ("", "DESCONHECIDO")
 
 
 def popular_macro_por_nome(*, limite=None, apenas_com_cupom=False,
-                           corrigir_sem_categoria=True) -> int:
+                           corrigir_sem_categoria=True, produto_ids=None) -> int:
     """Preenche `macro_categoria` a partir do nome. Idempotente.
 
     Onde o marketplace informou `categoria`, ele manda:
@@ -375,6 +375,8 @@ def popular_macro_por_nome(*, limite=None, apenas_com_cupom=False,
         vazio |= (Q(categoria__in=CATEGORIA_SEM_AUTORIDADE)
                   | Q(categoria__isnull=True))
     qs = Produto.objects.filter(vazio).exclude(nome="")
+    if produto_ids is not None:
+        qs = qs.filter(pk__in=list(produto_ids))
     if apenas_com_cupom:
         qs = qs.filter(
             cupons_normalizados__status="confirmado",
