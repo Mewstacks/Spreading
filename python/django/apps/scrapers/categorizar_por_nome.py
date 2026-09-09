@@ -54,7 +54,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
     "Celulares, Telefonia e Wearables": (
         "celular", "celulares", "smartphone", "smartphones", "iphone", "galaxy",
         "redmi", "motorola", ("smartwatch", 3), ("smartband", 3), "chip",
-        "capinha", "capa de celular", "pelicula", "carregador", "powerbank", "power bank", "poco",
+        "capinha", "capa de celular", "capa samsung", "pelicula", "carregador", "powerbank", "power bank", "poco",
         "fone de ouvido", "airpods", "watch",
     ),
     "Eletrônicos e Informática": (
@@ -68,6 +68,8 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "microfone", "camera", "cameras", "gopro", "drone", "projetor",
         "televisao", "smart tv", "lente", "tripe", "ring light", "fones de ouvido",
         "caixa som", "projetores", "tv box", "tweeter", "suporte de queixo para capacete",
+        "conversor de audio", "kit som ambiente", "adaptador placa de som", "isolador de audio",
+        "woofer", "receptor bluetooth", "interface de audio", "alto falante", "cabo estereo auxiliar",
         # Títulos recentes de marketplace usam o substantivo curto antes de
         # qualificadores: “Fone tradutor ...”, “Fone sem fio ...”. É inequívoco
         # no catálogo de produto (não confundir com texto livre de atendimento).
@@ -107,7 +109,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "cuscuzeira", "mandolin", "multifatiador", "utensilios de cozinha", "pote de vidro",
     ),
     "Limpeza e Lavanderia": (
-        "detergente", "sabao", ("amaciante", 2), "desinfetante", "agua sanitaria",
+        "detergente", "sabao", ("amaciante", 2), "desinfetante", "agua sanitaria", "papel higienico",
         "vassoura", "rodo", "balde", "esfregao", "pano de chao", "cesto de roupa",
         "varal", "cabide", "pano limpa vidros", "neutralizador de ar",
         "kit banheiro", "cesto para roupas", "cesto dobravel", "cesto multiuso", "sacos de lavar", "escova eletrica de limpeza", "neutralizadores", "inseticida",
@@ -117,7 +119,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "azulejo", "porcelanato", "argamassa", "cimento", "tinta", "verniz",
         "fechadura", "dobradica", "cadeado", "mangueira", "caixa dagua", "puxador",
         "cremalheira", "rodape", "prendedor de porta",
-        "ducha higienica", "cuba de embutir", "piso vinilico", "spray impermeabilizante", "sanitario", "vaso convencional",
+        "ducha higienica", "cuba de embutir", "piso vinilico", "spray impermeabilizante", "spray vedatudo", "sanitario", "vaso convencional",
     ),
     "Ferramentas e Manutenção": (
         "furadeira", "parafusadeira", "esmerilhadeira", "serra", "martelo",
@@ -163,6 +165,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "shampoo", "condicionador", "hidratante", "perfume", "batom", "esmalte",
         "maquiagem", "base facial", "protetor solar", "secador de cabelo", "secador de cabelos", "prancha lizze", "dyson airstrait",
         "chapinha", "prancha de cabelo", "barbeador", "depilador", "creme facial", "secador taiff", "above women", "oleo magico blend",
+        "retinol", "bastao de cera para cabelo", "fitas clareadora dental", "kit antirrugas", "dentes de po clareador", "fita de silicone para remocao",
         "sabonete", "desodorante", "escova de cabelo", "leave in", "oleo capilar",
         "matizador", "bioplastia", "babyliss", "cabelo e corpo", "hair care", "lowell",
         "po descolorante", "progressiva", "modelador de cachos", "mascara condicionador",
@@ -235,7 +238,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "papel colorido", "ficha", "marcador de linhas", "adesivos", "lettering", "caligrafia", "faber castell", "faber-castell", "canson", "trilux",
     ),
     "Livros, Mídia e Conteúdo": (
-        "livro", "livros", "coloring book", "todo mundo ja sentiu isso", "planta certa para o lugar certo",
+        "livro", "livros", "coloring book", "workbook", "ielts grammar", "todo mundo ja sentiu isso", "planta certa para o lugar certo",
         "terapia da jardinagem", "jardim de polinizadores", "botanica para jardinistas",
         "jardinagem basica para leigos", "curso natureza de jardinagem", "guia pratico de jardinagem",
     ),

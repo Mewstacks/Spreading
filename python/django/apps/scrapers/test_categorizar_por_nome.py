@@ -111,6 +111,15 @@ class MacroDoNomeTests(SimpleTestCase):
             "Cunha Preta Para Uso em Fisioterapia": "Saúde, Ortopedia e Equipamentos Médicos",
             "Todo mundo já sentiu isso": "Livros, Mídia e Conteúdo",
             "Terapia da jardinagem Volume 30": "Livros, Mídia e Conteúdo",
+            "Conversor de Áudio Analógico para Digital RCA": "Áudio, Vídeo e Fotografia",
+            "Kit Som Ambiente Bluetooth com 6 Caixas": "Áudio, Vídeo e Fotografia",
+            "Woofer clássico de 6 polegadas": "Áudio, Vídeo e Fotografia",
+            "Spray Vedatudo Impermeabilizante Emborrachado": "Casa e Construção",
+            "Papel Higiênico Familiar Folha Dupla": "Limpeza e Lavanderia",
+            "Creme Puro Retinol Anti Idade": "Beleza e Cuidados Pessoais",
+            "Fitas Clareadora Dental White": "Beleza e Cuidados Pessoais",
+            "Capa Samsung Silicone Líquido": "Celulares, Telefonia e Wearables",
+            "Ready for Workbook with Audio CD": "Livros, Mídia e Conteúdo",
         }
         for nome, esperado in casos.items():
             self.assertEqual(macro_do_nome(nome), esperado, nome)
