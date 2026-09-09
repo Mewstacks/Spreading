@@ -296,6 +296,40 @@ class CouponPipelineTests(TestCase):
 
         self.assertEqual(ids_cupons_prontos(self.user, [self.coupon]), set())
 
+    def test_pares_confirmados_geram_link_antes_da_coleta(self):
+        from apps.scrapers.coupon_pipeline import executar_pipeline_cupons, _metricas_vazias
+
+        ordem = []
+        afiliacao = {
+            "vinculados": 1, "links_gerados": 1, "links_verificados": 1,
+            "links_reprovados": 0, "links_transitorios": 0, "links_falhos": 0,
+            "prontos": 1,
+        }
+        with patch(
+            "apps.scrapers.coupon_pipeline._usuarios_ativos", return_value=[self.user],
+        ), patch(
+            "apps.scrapers.coupon_pipeline.afiliar_cupons",
+            side_effect=lambda *args, **kwargs: ordem.append("links") or afiliacao,
+        ), patch(
+            "apps.scrapers.coupon_pipeline.coletar_cupons",
+            side_effect=lambda **kwargs: ordem.append("coleta") or _metricas_vazias(),
+        ), patch(
+            "apps.scrapers.coupon_products.preparar_lote",
+            return_value={"processados": 0, "prontos": 0, "por_fonte": {},
+                          "adiados_sem_browser": 0},
+        ), patch(
+            "apps.scrapers.coupon_readiness.projetar_disponibilidade_cupons",
+            return_value={},
+        ), patch(
+            "apps.scrapers.coupon_validation.agendar_lote_validacao", return_value={},
+        ), patch(
+            "apps.scrapers.coupon_links.rastreio_afiliado_ml", return_value=True,
+        ):
+            resultado = executar_pipeline_cupons(usuarios=[self.user])
+
+        self.assertEqual(ordem[:2], ["links", "coleta"])
+        self.assertEqual(resultado["links_verificados"], 1)
+
     def test_afiliacao_nao_faz_queries_por_cupom(self):
         from apps.scrapers.coupon_pipeline import afiliar_cupons
         from apps.scrapers.coupon_products import chave_produtos_cupom

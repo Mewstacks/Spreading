@@ -783,6 +783,27 @@ def executar_pipeline_cupons(
 ):
     """Executa um ciclo completo sem permitir que uma fonte derrube as demais."""
     usuarios = _usuarios_ativos(usuarios)
+
+    # Materializa primeiro a pequena fila de pares já comprovados. Uma coleta
+    # lenta não pode tomar o único Chromium e atrasar um cupom já publicável.
+    # Pares recém-descobertos entram no próximo ciclo: continuamos com somente um
+    # lote de Link Builder por conta/ciclo, sem aumentar a pressão na sessão ML.
+    afiliacao_prioritaria = {}
+    for usuario in usuarios:
+        try:
+            afiliacao_prioritaria[str(usuario.pk)] = afiliar_cupons(
+                usuario, limite=limite_links,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Afiliação prioritária de cupons falhou para usuário %s", usuario.pk,
+            )
+            afiliacao_prioritaria[str(usuario.pk)] = {
+                "links_falhos": 1,
+                "erro": "Falha operacional no preparo de links.",
+                "causa": type(exc).__name__,
+            }
+
     resultado = coletar_cupons(usuarios=usuarios) if coletar else _metricas_vazias()
 
     # Associação e preparação agora compartilham a mesma fila justa e idempotente.
@@ -813,25 +834,9 @@ def executar_pipeline_cupons(
     resultado["preparo_por_fonte"] = preparo.get("por_fonte", {})
     resultado["preparos_adiados"] = preparo.get("adiados_sem_browser", 0)
 
-    por_usuario = {}
+    por_usuario = afiliacao_prioritaria
     for usuario in usuarios:
-        try:
-            # `limite_codigo` fica DELIBERADAMENTE pequeno. A fila de ~2.400
-            # cupons de código pede mais, mas o Link Builder é a superfície mais
-            # frágil do sistema: subir este teto de 8 para 40 derrubou a sessão do
-            # ML em produção em menos de uma hora (`lb_readiness=login_required`,
-            # sessão `suspect`), e sessão caída para o funil INTEIRO — não só os
-            # códigos. Vazão aqui se ganha com ciclos, não com lote.
-            afiliacao = afiliar_cupons(usuario, limite=limite_links)
-        except Exception as exc:
-            logger.exception("Pipeline de cupons falhou para usuário %s", usuario.pk)
-            afiliacao = {
-                "links_falhos": 1,
-                "erro": "Falha operacional no preparo de links.",
-                "causa": type(exc).__name__,
-            }
-            resultado["falhos"] += 1
-        por_usuario[str(usuario.pk)] = afiliacao
+        afiliacao = por_usuario[str(usuario.pk)]
         for key in (
             "vinculados", "links_gerados", "links_verificados",
             "links_reprovados", "links_transitorios", "links_falhos", "prontos",
