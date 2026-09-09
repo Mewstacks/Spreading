@@ -3658,12 +3658,48 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
     from apps.scrapers.carga import BrowserResourceUnavailable
     from apps.scrapers.scraper_mercadolivre.link import LoginError, AuthError
 
+    def _info_do_link_verificado_do_deal():
+        """O Deal usa somente a URL aprovada para este produto e este cupom.
+
+        Reconstruir o link genérico do produto aqui deixava a mensagem dizer
+        ``CUPOM X`` ao lado de uma URL sem a campanha X. A relação de cupom já
+        tem um link afiliado verificado pelo funil; sem esse registro não há
+        fallback, porque um Deal sem a URL do seu cupom não é publicável.
+        """
+        if deal is None or usuario is None or not getattr(deal, "relacao_id", None):
+            return None
+        from apps.scrapers.coupon_links import (
+            canonical_coupon_link, coupon_link_verified_and_fresh,
+        )
+        from apps.scrapers.models import LinkAfiliadoProdutoCupomUsuario
+
+        row = LinkAfiliadoProdutoCupomUsuario.objects.filter(
+            usuario=usuario, relacao_id=deal.relacao_id,
+        ).first()
+        if not coupon_link_verified_and_fresh(row):
+            return None
+        link = canonical_coupon_link(row)
+        if not link:
+            return None
+        return {
+            "link_afiliado": link,
+            "url_canonica": link,
+            "verificado_ok": True,
+            # A linha é criada somente pelo resolvedor de link afiliado e já
+            # passou por sua verificação; não devemos trocar por um builder genérico.
+            "afiliado_ok": True,
+        }
+
     # O trabalho roda aninhado para que QUALQUER exceção inesperada (a Publicacao já
     # existe como 'pendente' neste ponto) feche a linha antes de propagar. Sem isto,
     # um erro não previsto deixa a publicação pendente para sempre no dashboard.
     def _executar():
         try:
-            info = mp.build_affiliate_link(produto, usuario=usuario)
+            info = (
+                _executar_orm(_info_do_link_verificado_do_deal)
+                if deal is not None
+                else mp.build_affiliate_link(produto, usuario=usuario)
+            )
         except BrowserResourceUnavailable as e:
             # Fila de navegador, não erro de envio. Precisa de um `except` PRÓPRIO
             # porque a classe é RuntimeError (carga.py), não BrowserError — sem ele
@@ -3714,6 +3750,12 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                 if precisa_login else _motivo_navegador(texto),
                 precisa_login_ml=precisa_login, _erro_tecnico=texto, **classe)
         if not info:
+            if deal is not None:
+                return falhar(
+                    "Deal sem link afiliado verificado para este produto e cupom; "
+                    "nada foi publicado.",
+                    classe=TRANSITORIO,
+                )
             return falhar("falha ao gerar link de afiliado "
                           "(URL não afiliável ou o Link Builder recusou)")
         link = info["link_afiliado"]

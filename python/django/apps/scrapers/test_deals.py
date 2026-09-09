@@ -95,6 +95,36 @@ class BaseDeals(TestCase):
         return cupom
 
 
+class DealLinkPairTests(BaseDeals):
+    """O cupom publicado e a URL publicada precisam ser o mesmo par."""
+
+    def test_deal_sem_link_especifico_falha_sem_chamar_builder_generico(self):
+        from unittest.mock import MagicMock, patch
+
+        from apps.scrapers.ofertas import enviar_oferta_de_produto
+
+        produto = self._produto()
+        cupom = self._cupom(produto=produto)
+        relacao = ProdutoCupom.objects.get(produto=produto, cupom=cupom)
+        deal = deals.DealCandidate(
+            produto=produto, cupom=cupom, relacao=relacao,
+            preco_vitrine=100, preco_final=100,
+        )
+        marketplace = MagicMock()
+        sender = MagicMock()
+        with patch("apps.scrapers.marketplaces.registry.get_marketplace",
+                   return_value=marketplace), patch(
+                       "apps.scrapers.senders.registry.get_sender", return_value=sender):
+            resultado = enviar_oferta_de_produto(
+                produto, "123@g.us", usuario=self.user,
+                configuracao=self._config(), deal=deal,
+            )
+
+        self.assertFalse(resultado["sucesso"])
+        self.assertIn("produto e cupom", resultado["motivo"])
+        marketplace.build_affiliate_link.assert_not_called()
+
+
 class PrecoFinalCoerenteTests(BaseDeals):
     """M2 — o preço anunciado é sempre vitrine menos o abatimento medido."""
 
