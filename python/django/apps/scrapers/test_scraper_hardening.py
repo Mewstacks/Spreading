@@ -409,6 +409,18 @@ class MLPaginaCategoriaTests(SimpleTestCase):
             mapear_domain_ids(page), {"MLB987654321": "VACUUM_CLEANERS"},
         )
 
+    def test_payload_atual_com_domain_aninhado_preserva_categoria_oficial(self):
+        """Outro brick Nordic passou a embutir o domain em um objeto."""
+        from apps.scrapers.scraper_mercadolivre.categorias_pagina import mapear_domain_ids
+
+        page = self._page(self._payload(
+            '{"search":{"items":[{"item_id":"MLB-555666777",'
+            '"domain":{"id":"MLB-VACUUM_CLEANERS"}}]}}'))
+
+        self.assertEqual(
+            mapear_domain_ids(page), {"MLB555666777": "VACUUM_CLEANERS"},
+        )
+
     def test_script_ausente_avisa_em_vez_de_falhar_calado(self):
         """Era o `except Exception: pass`: o catálogo inteiro ia a DESCONHECIDO
         e não sobrava nada no log apontando para a leitura de categoria."""

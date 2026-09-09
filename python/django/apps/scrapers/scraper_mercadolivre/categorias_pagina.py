@@ -29,6 +29,7 @@ MARCADOR_INICIO = "_n.ctx.r="
 MARCADOR_FIM = ";_n.ctx.r.assets"
 
 _MLB = re.compile(r"MLB-?[A-Z]?\d+", re.I)
+_DOMAIN_OFICIAL = re.compile(r"^MLB-[A-Z][A-Z0-9_]*$", re.I)
 
 
 def _id_ml(valor) -> str:
@@ -52,6 +53,25 @@ def id_do_anuncio(link) -> str:
     return _id_ml(link)
 
 
+def _domain_oficial(obj) -> str:
+    """Lê a categoria oficial nas variantes atuais do contexto Nordic.
+
+    Alguns bricks recentes trocaram ``domain_id`` por ``domain`` e, em outros,
+    passaram a colocar o identificador dentro de um objeto. Só aceita um valor
+    com o formato de domain do ML; um ``category`` livre nunca pode virar
+    taxonomia oficial por acidente.
+    """
+    for chave in ("domain_id", "domainId", "domain"):
+        bruto = obj.get(chave)
+        if isinstance(bruto, dict):
+            bruto = (bruto.get("id") or bruto.get("domain_id")
+                     or bruto.get("domainId"))
+        valor = str(bruto or "").strip()
+        if _DOMAIN_OFICIAL.fullmatch(valor):
+            return valor
+    return ""
+
+
 def _coletar(obj, item_para_cat, produto_para_item):
     """Varre o payload atrás de (anúncio -> domain_id) e dos apelidos de catálogo.
 
@@ -59,11 +79,9 @@ def _coletar(obj, item_para_cat, produto_para_item):
     `catalog_product_id` apontando para o `item_id` real — daí os dois mapas.
     """
     if isinstance(obj, dict):
-        # O payload do ML alterna snake_case e camelCase conforme o brick que
-        # renderizou a vitrine. Ambos carregam o mesmo domain oficial; ignorar
-        # ``domainId`` faz o coletor cair no fallback local mesmo quando a loja
-        # forneceu a taxonomia.
-        domain_id = str(obj.get("domain_id") or obj.get("domainId") or "")
+        # O payload do ML alterna snake_case, camelCase e ``domain`` conforme o
+        # brick que renderizou a vitrine. Todos carregam a mesma taxonomia.
+        domain_id = _domain_oficial(obj)
         if domain_id:
             # O payload continuou trazendo ``domain_id``, mas a identidade deixou
             # de aparecer só em ``id``. Registrar as chaves que carregam um MLB
