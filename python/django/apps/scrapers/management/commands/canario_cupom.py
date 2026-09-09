@@ -46,22 +46,29 @@ class Command(BaseCommand):
         # escolher um Deal já medido (e corretamente não cair no ranking legado),
         # mas isso não deve impedir a homologação da fila de cupons prontos.
         candidatos = _coupon_candidates(config, limit=20)
-        candidato = next(iter(candidatos), None)
-        if candidato is None:
+        if not candidatos:
             raise CommandError("Nenhum cupom pronto e elegível para esta regra.")
-        cupom = candidato.obj
-        relacao = next(iter(relacoes_prontas_para_envio(cupom, user)), None)
-        if not relacao:
-            raise CommandError("O cupom selecionado perdeu produto, foto ou link verificado.")
-        desconto = _desconto_efetivo_do_item_cupom({
-            "produto": relacao.produto, "relacao": relacao,
-        })
         piso = _piso_desconto_cupom(config)
-        if desconto < piso:
-            raise CommandError(
-                f"Cupom selecionado tem desconto efetivo de {desconto:.0f}% "
-                f"(mínimo editorial: {piso:.0f}%)."
+        candidato = relacao = desconto = None
+        for possivel in candidatos:
+            relacao_pronta = next(
+                iter(relacoes_prontas_para_envio(possivel.obj, user)), None,
             )
+            if not relacao_pronta:
+                continue
+            desconto_efetivo = _desconto_efetivo_do_item_cupom({
+                "produto": relacao_pronta.produto, "relacao": relacao_pronta,
+            })
+            if desconto_efetivo >= piso:
+                candidato, relacao, desconto = (
+                    possivel, relacao_pronta, desconto_efetivo,
+                )
+                break
+        if candidato is None:
+            raise CommandError(
+                "Nenhum cupom elegível manteve produto, foto, link e desconto "
+                f"efetivo de ao menos {piso:.0f}%.")
+        cupom = candidato.obj
 
         self.stdout.write(
             "CANÁRIO "
