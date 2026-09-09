@@ -735,11 +735,36 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None, activation_keys=None
                 pendentes.append(produto)
     else:
         pendentes = [p for p in produtos if not p.link_afiliado]
-    if not pendentes:
-        return (0, 0)
-
     gerados = 0
     falhas = 0
+    # Filtra antes de reservar o Chromium. O Link Builder não aceita vitrines de
+    # catálogo (MLBU) e antes elas abriam o browser apenas para receber a mesma
+    # recusa item a item. Em uma fila de cupom isso deixava os poucos pares de
+    # produto reais esperando atrás de dezenas de candidatos impossíveis.
+    # Registrar a falha aqui preserva o veredito terminal e impede retentativas
+    # infinitas, com o mesmo contrato que o loop abaixo já tinha.
+    afiliaveis = []
+    for prod in pendentes:
+        camp_id = str((activation_keys or {}).get(
+            prod.id, prod.campanha_id,
+        ) or "")
+        if _montar_url_isca(prod.link_produto, camp_id):
+            afiliaveis.append(prod)
+            continue
+        motivo = _motivo_url_recusada(prod.link_produto)
+        logger.info(
+            "Produto %s não é afiliável antes de abrir o Link Builder: %s",
+            getattr(prod, "id", None), motivo,
+        )
+        if usuario is not None:
+            _no_escopo(registrar_falha, usuario, prod, motivo, terminal=True)
+        else:
+            executar_no_tenant(registrar_falha, usuario, prod, motivo, terminal=True)
+        falhas += 1
+    pendentes = afiliaveis
+    if not pendentes:
+        return (0, falhas)
+
     ultimo_erro = None
     consecutivas = 0      # reaberturas seguidas do Link Builder
     interrompido = None   # erro que encerrou o lote antes do fim

@@ -7780,6 +7780,31 @@ class LoteDeLinksResilienteTests(ComoWorker, TestCase):
                 ml.gerar_links_em_lote(produtos, usuario=self.user)
         navegador.assert_not_called()
 
+    def test_catalogo_sem_item_real_nao_abre_chromium(self):
+        """Catálogo MLBU é recusado antes de disputar o browser do piloto."""
+        from apps.scrapers.scraper_mercadolivre import link as ml
+
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Catálogo sem item", origem="cupom",
+            preco_sem_desconto=100, preco_com_cupom=80,
+            link_produto="https://www.mercadolivre.com.br/up/MLBU123456789",
+        )
+        direto = lambda fn, *a, **kw: fn(
+            *a, **{k: v for k, v in kw.items() if k != "organization_id"}
+        )
+
+        with patch.object(ml, "iniciar_browser") as navegador, \
+             patch.object(ml, "has_storage_state", return_value=True), \
+             patch.object(ml, "executar_no_tenant", direto), \
+             patch.object(ml, "registrar_falha") as falha:
+            resultado = ml.gerar_links_em_lote([produto], usuario=self.user)
+
+        self.assertEqual(resultado, (0, 1))
+        navegador.assert_not_called()
+        falha.assert_called_once()
+        self.assertEqual(falha.call_args.args[:2], (self.user, produto))
+        self.assertTrue(falha.call_args.kwargs["terminal"])
+
     def test_falha_no_meio_reabre_e_continua_o_lote(self):
         from apps.scrapers.scraper_mercadolivre import link as ml
         produtos = self._produtos(3)
