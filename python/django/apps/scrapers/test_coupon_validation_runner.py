@@ -4,7 +4,7 @@ from django.utils import timezone
 
 from apps.scrapers.coupon_validation import agendar_validacao
 from apps.scrapers.coupon_validation_runner import (
-    ValidationObservation, claim_pending_validations,
+    ValidationObservation, _chave_disjuntor, claim_pending_validations,
     defer_missing_checkout_sessions, run_validation_batch,
 )
 from apps.scrapers.models import CupomNormalizado, CupomValidacao, FonteIngestao
@@ -168,3 +168,53 @@ class CouponValidationRunnerTests(TestCase):
         self.assertNotIn("session_absent", _MOTIVOS_DE_BLOQUEIO)
         self.assertIn("session_revoked", _MOTIVOS_DE_BLOQUEIO)
         self.assertIn("challenge", _MOTIVOS_DE_BLOQUEIO)
+
+    def test_desafio_do_ml_nao_pausa_checkout_da_amazon(self):
+        """O CAPTCHA de uma loja não pode congelar os demais marketplaces."""
+        from django.core.cache import cache
+
+        cache.set(_chave_disjuntor("mercadolivre"), "1", 60)
+        try:
+            validation = self._scheduled()
+            metrics = run_validation_batch(adapters={
+                "mercadolivre": lambda _row: self.fail("ML está em pausa"),
+                "amazon": lambda _row: ValidationObservation(
+                    status="accepted", subtotal_before="100", subtotal_after="80",
+                ),
+            })
+        finally:
+            cache.delete(_chave_disjuntor("mercadolivre"))
+
+        validation.refresh_from_db()
+        self.assertEqual(metrics["accepted"], 1)
+        self.assertEqual(metrics["paused_marketplaces"], ["mercadolivre"])
+        self.assertEqual(validation.status, "accepted")
+
+    def test_bloqueio_do_ml_nao_grava_disjuntor_global(self):
+        """Cada marketplace que esgota o lote ganha apenas a sua própria pausa."""
+        from django.core.cache import cache
+
+        self._scheduled()
+        ml_coupon = CupomNormalizado.objects.create(
+            fonte=self.coupon.fonte, external_id="runner:ml:CHALLENGE",
+            marketplace="mercadolivre", titulo="Cupom ML", codigo="ML20",
+            redemption_mode="code", regras={"modo_resgate": "codigo"},
+        )
+        agendar_validacao(
+            ml_coupon, self.user, product_key="MLB123",
+            product_url="https://www.mercadolivre.com.br/p/MLB123",
+        )
+        try:
+            metrics = run_validation_batch(adapters={
+                "mercadolivre": lambda _row: ValidationObservation(
+                    status="inconclusive", reason_code="challenge",
+                ),
+                "amazon": lambda _row: ValidationObservation(
+                    status="accepted", subtotal_before="100", subtotal_after="80",
+                ),
+            }, limit=2)
+            self.assertEqual(metrics["accepted"], 1)
+            self.assertTrue(cache.get(_chave_disjuntor("mercadolivre")))
+            self.assertFalse(cache.get(_chave_disjuntor("amazon")))
+        finally:
+            cache.delete(_chave_disjuntor("mercadolivre"))

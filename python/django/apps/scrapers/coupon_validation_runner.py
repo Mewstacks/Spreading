@@ -7,6 +7,7 @@ veredito monetário continua centralizado em ``coupon_validation``.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Callable, Mapping
@@ -144,7 +145,7 @@ def _failure_observation(reason_code, safe_detail):
 # Quanto tempo o lote fica em silêncio depois de a loja barrar tudo. Uma hora é
 # curto o bastante para voltar sozinho quando o bloqueio passar, e longo o
 # bastante para não desperdiçar o navegador a cada cinco minutos.
-_CHAVE_DISJUNTOR = "coupon-validation-circuit"
+_CHAVE_DISJUNTOR_PREFIXO = "coupon-validation-circuit"
 _PAUSA_DISJUNTOR_S = 3600
 # O disjuntor existe para calar o lote quando a LOJA está barrando o acesso. Uma
 # conta sem cadastro não é isso: três linhas de um usuário que nunca conectou o
@@ -155,6 +156,19 @@ _MOTIVOS_DE_BLOQUEIO = frozenset({
     "challenge", "session_expired", "session_required", "session_revoked",
     "session_unreadable",
 })
+
+
+def _chave_disjuntor(marketplace: str) -> str:
+    """Chave de pausa do checkout, isolada por loja.
+
+    Um CAPTCHA do Mercado Livre é uma condição de acesso daquela loja/IP. Ele não
+    torna uma sessão Amazon inválida nem justifica deixar cupons da Shopee parados.
+    A chave global antiga fazia exatamente isso: um lote de ML bloqueado pausava o
+    executor inteiro por uma hora, apesar de ``run_validation_batch`` prometer que
+    uma loja não prende as demais.
+    """
+    normalizado = str(marketplace or "").strip().casefold()
+    return f"{_CHAVE_DISJUNTOR_PREFIXO}:{normalizado or 'unknown'}"
 
 
 def run_validation_batch(*, adapters: Mapping[str, Validator], limit=3):
@@ -172,20 +186,29 @@ def run_validation_batch(*, adapters: Mapping[str, Validator], limit=3):
     from django.core.cache import caches
 
     cache = caches["default"]
-    if cache.get(_CHAVE_DISJUNTOR):
+    # O bloqueio é da loja, nunca da fila toda. Assim Amazon/Shopee continuam
+    # verificando seus pares mesmo enquanto o IP da Fly recebe desafio do ML.
+    available = {
+        marketplace: adapter for marketplace, adapter in normalized.items()
+        if not cache.get(_chave_disjuntor(marketplace))
+    }
+    paused_marketplaces = sorted(set(normalized) - set(available))
+    if not available:
         return {"claimed": 0, "accepted": 0, "rejected": 0,
-                "inconclusive": 0, "adapter_errors": 0, "pausado": True}
+                "inconclusive": 0, "adapter_errors": 0, "pausado": True,
+                "paused_marketplaces": paused_marketplaces}
 
     rows = claim_pending_validations(
-        marketplaces=normalized.keys(), limit=limit,
+        marketplaces=available.keys(), limit=limit,
     )
     metrics = {
         "claimed": len(rows), "accepted": 0, "rejected": 0,
         "inconclusive": 0, "adapter_errors": 0,
     }
-    bloqueadas = 0
+    bloqueadas = Counter()
+    processadas = Counter()
     for row in rows:
-        adapter = normalized[row.marketplace]
+        adapter = available[row.marketplace]
         try:
             observation = adapter(row)
             if not isinstance(observation, ValidationObservation):
@@ -215,14 +238,18 @@ def run_validation_batch(*, adapters: Mapping[str, Validator], limit=3):
             evidence=observation.evidence,
         )
         metrics[result.status] += 1
+        processadas[row.marketplace] += 1
         if observation.reason_code in _MOTIVOS_DE_BLOQUEIO:
-            bloqueadas += 1
-    # Lote inteiro barrado pela loja: nada aqui é sobre os cupons, é sobre o
-    # acesso. Cala a boca por uma hora em vez de queimar o navegador a cada tique.
-    if rows and bloqueadas == len(rows):
-        cache.set(_CHAVE_DISJUNTOR, "1", _PAUSA_DISJUNTOR_S)
-        logger.info(
-            "validacao de cupom pausada %ss: %s de %s tentativas barradas pela loja",
-            _PAUSA_DISJUNTOR_S, bloqueadas, len(rows),
-        )
+            bloqueadas[row.marketplace] += 1
+    # Lote inteiro barrado por UMA loja: pausa só aquela loja. Insistir contra o
+    # muro desperdiça Chromium; pausar Amazon/Shopee por um CAPTCHA do ML também.
+    for marketplace, total in processadas.items():
+        if total and bloqueadas[marketplace] == total:
+            cache.set(_chave_disjuntor(marketplace), "1", _PAUSA_DISJUNTOR_S)
+            logger.info(
+                "validacao de cupom %s pausada %ss: %s de %s tentativas barradas pela loja",
+                marketplace, _PAUSA_DISJUNTOR_S, bloqueadas[marketplace], total,
+            )
+    if paused_marketplaces:
+        metrics["paused_marketplaces"] = paused_marketplaces
     return metrics
