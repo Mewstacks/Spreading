@@ -317,6 +317,42 @@ class CouponPipelineTests(TestCase):
         self.assertEqual(linha.estado, "pendente")
         self.assertLessEqual(linha.proxima_tentativa, timezone.now() + timedelta(seconds=95))
 
+    def test_catalogo_mlbu_nao_consume_vaga_de_produto_publicavel(self):
+        from apps.scrapers.coupon_pipeline import afiliar_cupons
+
+        products = self._prepared_products()
+        catalogo = products[0]
+        catalogo.link_produto = "https://www.mercadolivre.com.br/up/MLBU123456789"
+        catalogo.ultima_observacao = timezone.now() + timedelta(days=1)
+        catalogo.save(update_fields=["link_produto", "ultima_observacao"])
+        relacao_catalogo = ProdutoCupom.objects.get(
+            produto=catalogo, cupom=self.coupon,
+        )
+        marketplace = SimpleNamespace(
+            prefetch_links=Mock(return_value=(0, 0)),
+            verificar_links_pendentes=Mock(
+                return_value={"reprovados": 0, "transitorios": 0},
+            ),
+        )
+        with patch(
+            "apps.scrapers.marketplaces.registry.get_marketplace",
+            return_value=marketplace,
+        ):
+            resultado = afiliar_cupons(self.user, limite=1)
+
+        linha = LinkAfiliadoProdutoCupomUsuario.objects.get(
+            usuario=self.user, relacao=relacao_catalogo,
+        )
+        self.assertEqual(resultado["nao_afiliaveis"], 1)
+        self.assertEqual(linha.estado, "nao_afiliavel")
+        self.assertNotEqual(
+            marketplace.prefetch_links.call_args.args[0][0].pk, catalogo.pk,
+        )
+        self.assertIn(
+            marketplace.prefetch_links.call_args.args[0][0].pk,
+            {product.pk for product in products if product.pk != catalogo.pk},
+        )
+
     def test_pares_confirmados_geram_link_antes_da_coleta(self):
         from apps.scrapers.coupon_pipeline import executar_pipeline_cupons, _metricas_vazias
 

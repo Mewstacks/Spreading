@@ -631,6 +631,7 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
     )
     produtos = {}
     relacao_por_produto = {}
+    nao_afiliaveis = 0
     cupons_por_id = {cupom.pk: cupom for cupom in cupons}
     for cupom_id in sorted(
         preparadas,
@@ -656,6 +657,30 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
                 or (row.proxima_tentativa and row.proxima_tentativa > agora)
             ):
                 continue
+            if str(relacao.produto.marketplace or "").lower() == "mercadolivre":
+                # Descarta a relação antes de aplicar o limite do lote. O
+                # Link Builder também faz essa checagem, mas ali o produto já
+                # ocupou uma das vagas e uma fila cheia de MLBU atrasava o
+                # primeiro produto real para o ciclo seguinte.
+                from apps.scrapers.scraper_mercadolivre.link import (
+                    _montar_url_isca, _motivo_url_recusada,
+                )
+
+                activation = str(relacao.activation_key or "")
+                if not _montar_url_isca(relacao.produto.link_produto, activation):
+                    LinkAfiliadoProdutoCupomUsuario.objects.update_or_create(
+                        usuario=usuario, relacao=relacao,
+                        defaults={
+                            "estado": "nao_afiliavel", "verificado_ok": False,
+                            "verificacao_motivo": _motivo_url_recusada(
+                                relacao.produto.link_produto,
+                            )[:300],
+                            "ultima_tentativa": agora,
+                            "proxima_tentativa": None,
+                        },
+                    )
+                    nao_afiliaveis += 1
+                    continue
             # Um produto por ciclo: o cache intermediário legado é por produto.
             # A relação seguinte avança no próximo ciclo sem sobrescrever duas
             # campanhas antes que a primeira seja materializada.
@@ -671,6 +696,7 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
         "links_transitorios": 0,
         "links_falhos": 0,
         "capacidade_adiada": 0,
+        "nao_afiliaveis": nao_afiliaveis,
         "prontos": 0,
         "por_marketplace": {},
     }
