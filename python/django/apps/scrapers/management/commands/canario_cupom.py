@@ -68,6 +68,11 @@ class Command(BaseCommand):
             "--enviar", action="store_true",
             help="Publica o canário selecionado. Sem esta flag, não altera nada.",
         )
+        parser.add_argument(
+            "--texto", action="store_true",
+            help=("Imprime a copy exata do par pronto, sem criar publicação "
+                  "nem chamar o transporte."),
+        )
 
     @system_job
     def handle(self, *args, **options):
@@ -134,6 +139,32 @@ class Command(BaseCommand):
             f"desconto={desconto:.0f}% destino={config.grupo_nome!r}"
         )
         if not options["enviar"]:
+            if options["texto"]:
+                from apps.scrapers.ofertas import (
+                    _preparar_itens_cupom, montar_mensagem_cupom_produtos,
+                )
+
+                itens, bloqueio = _preparar_itens_cupom(
+                    cupom, user, [relacao], limite=1,
+                )
+                if not itens:
+                    detalhe = (bloqueio or {}).get("mensagem", "") if bloqueio else ""
+                    raise CommandError(
+                        "O par pronto não manteve um link de produto utilizável. "
+                        + detalhe
+                    )
+                mensagem = montar_mensagem_cupom_produtos(
+                    cupom, itens,
+                    divulgacao_afiliado=(
+                        getattr(config, "divulgacao_afiliado", "")
+                        or getattr(getattr(user, "perfil", None), "divulgacao_afiliado", "")
+                    ),
+                )
+                if not mensagem:
+                    raise CommandError("A copy do canário ficou vazia.")
+                self.stdout.write("COPY_INICIO")
+                self.stdout.write(mensagem)
+                self.stdout.write("COPY_FIM")
             self.stdout.write(self.style.NOTICE("Prévia somente; nada foi enviado."))
             return
 

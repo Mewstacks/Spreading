@@ -796,6 +796,49 @@ class CouponCanaryCommandTests(TestCase):
         self.assertIn("Prévia somente", saida.getvalue())
         enviar.assert_not_called()
 
+    def test_preview_texto_imprime_copy_sem_criar_publicacao(self):
+        user = get_user_model().objects.create_user("canary-copy", password="x")
+        config = ConfiguracaoEnvio.objects.create(
+            owner=user, grupo_id="teste@g.us", grupo_nome="Teste ofertas",
+            canal="whatsapp", min_desconto_percent=15,
+        )
+        cupom = SimpleNamespace(pk=10)
+        produto = SimpleNamespace(pk=20, nome="Produto comprovado")
+        relacao = SimpleNamespace(
+            pk=30, produto=produto, preco_atual=100, preco_final=80,
+        )
+        candidato = SimpleNamespace(
+            kind="coupon", obj=cupom, score=60, reasons=["20% de desconto"],
+        )
+        saida = StringIO()
+        with patch(
+            "apps.scrapers.content_ranking._coupon_candidates",
+            return_value=[candidato],
+        ), patch(
+            "apps.scrapers.coupon_products.relacoes_prontas_para_envio",
+            return_value=[relacao],
+        ), patch(
+            "apps.scrapers.ofertas._desconto_efetivo_do_item_cupom", return_value=20,
+        ), patch(
+            "apps.scrapers.ofertas._piso_desconto_cupom", return_value=15,
+        ), patch(
+            "apps.scrapers.ofertas._preparar_itens_cupom",
+            return_value=([{"produto": produto, "relacao": relacao,
+                           "link": "https://meli.la/canary-copy"}], None),
+        ), patch(
+            "apps.scrapers.ofertas.montar_mensagem_cupom_produtos",
+            return_value="CUPOM: *COPY20*",
+        ), patch("apps.scrapers.ofertas.enviar_cupom") as enviar:
+            call_command(
+                "canario_cupom", "--texto", config=config.pk,
+                username=user.username, stdout=saida,
+            )
+
+        self.assertIn("COPY_INICIO", saida.getvalue())
+        self.assertIn("CUPOM: *COPY20*", saida.getvalue())
+        self.assertIn("COPY_FIM", saida.getvalue())
+        enviar.assert_not_called()
+
     def test_preview_pula_registro_ready_sem_relacao_e_acha_o_proximo(self):
         user = get_user_model().objects.create_user("canary-next", password="x")
         config = ConfiguracaoEnvio.objects.create(
