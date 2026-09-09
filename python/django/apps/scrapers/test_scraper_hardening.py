@@ -274,6 +274,16 @@ class AmazonCredentialHardeningTests(SimpleTestCase):
         with self.assertRaises(creators_api.AmazonNotEligible):
             creators_api._post("searchItems", {}, creds)
 
+    @patch.object(
+        creators_api, "_obter_token",
+        side_effect=creators_api.AmazonCredencialInvalida("invalid_client"),
+    )
+    def test_invalid_client_nao_vira_erro_transitorio_por_keyword(self, _token):
+        """Credencial recusada deve acionar fallback público, sem 12 retries."""
+        creds = creators_api.Credenciais("id", "secret", "host", "tag")
+        with self.assertRaises(creators_api.AmazonCredencialInvalida):
+            creators_api._post("searchItems", {}, creds)
+
 
 class AmazonTaxonomyTests(SimpleTestCase):
     """A Creators API já classifica o item; descartar isso escondia a loja inteira."""

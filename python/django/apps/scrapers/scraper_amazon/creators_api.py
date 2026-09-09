@@ -254,7 +254,7 @@ def _post(operacao: str, payload: dict, creds: Credenciais, _tentativa: int = 1)
             },
             timeout=20,
         )
-    except AmazonNotEligible:
+    except (AmazonNotEligible, AmazonConfigError):
         raise
     except Exception as e:
         raise AmazonAPIError(f"{operacao} falhou: {e}")
