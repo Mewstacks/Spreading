@@ -15,7 +15,7 @@ from apps.accounts.models import Organization
 from apps.scrapers.models import (
     ConfiguracaoEnvio, Cupom, CupomDisponibilidade, CupomFonteObservacao,
     CupomNormalizado, CupomPreparacao, FonteIngestao, LinkAfiliadoUsuario,
-    Produto, ProdutoCupom,
+    LinkAfiliadoProdutoCupomUsuario, Produto, ProdutoCupom,
 )
 
 
@@ -620,6 +620,55 @@ class CouponNicheRankingTests(TestCase):
 
 
 class CouponCanaryCommandTests(TestCase):
+    def test_preview_usa_par_pronto_quando_projecao_ainda_nao_atualizou(self):
+        """O canário homologa o que pode ser enviado, não uma projeção atrasada."""
+        from apps.scrapers.coupon_products import chave_produtos_cupom
+
+        user = get_user_model().objects.create_user("canary-pair", password="x")
+        config = ConfiguracaoEnvio.objects.create(
+            owner=user, grupo_id="teste@g.us", grupo_nome="Teste ofertas",
+            canal="whatsapp", macro_categoria="Eletrodomésticos",
+            min_desconto_percent=15,
+        )
+        fonte = FonteIngestao.objects.create(
+            slug="canary-pair-source", marketplace="mercadolivre", nome="ML",
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="canary-pair-20", marketplace="mercadolivre",
+            titulo="Cupom de teste", codigo="PAR20", estado="ativo",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20}, ultima_observacao=timezone.now(),
+        )
+        produto = Produto.objects.create(
+            marketplace="mercadolivre", nome="Air fryer pareada", origem="cupom",
+            macro_categoria="Eletrodomésticos", preco_sem_desconto=300,
+            preco_com_cupom=240, link_produto="https://produto.example/airfryer",
+            imagem_url="https://img.example/airfryer.jpg",
+        )
+        relacao = ProdutoCupom.objects.create(
+            produto=produto, cupom=cupom, status="confirmado",
+            preco_original=300, preco_atual=300, preco_final=240,
+            verificado_em=timezone.now(),
+        )
+        CupomPreparacao.objects.create(
+            cupom=cupom, usuario=None, status="pronto",
+            produtos_chave=chave_produtos_cupom(cupom),
+            verificado_em=timezone.now(),
+        )
+        LinkAfiliadoProdutoCupomUsuario.objects.create(
+            usuario=user, relacao=relacao, estado="pronto", verificado_ok=True,
+            verificado_em=timezone.now(),
+            link_afiliado="https://meli.la/canary-pair",
+            url_canonica="https://meli.la/canary-pair",
+        )
+        saida = StringIO()
+        with patch("apps.scrapers.content_ranking._coupon_candidates", return_value=[]):
+            call_command("canario_cupom", config=config.pk, username=user.username,
+                         stdout=saida)
+
+        self.assertIn(f"cupom={cupom.pk}", saida.getvalue())
+        self.assertIn("Prévia somente", saida.getvalue())
+
     def test_preview_never_envia_sem_flag_explicita(self):
         user = get_user_model().objects.create_user("canary-lu", password="x")
         config = ConfiguracaoEnvio.objects.create(
