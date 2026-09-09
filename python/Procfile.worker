@@ -1,4 +1,6 @@
-monitor: sleep 10 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar --tick 5
+# A verificação de conexão pode abrir Chromium. No boot ela vem depois da fila de
+# cupom; saúde do worker continua disponível imediatamente pelo processo `saude`.
+monitor: sleep 150 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar --tick 5
 envio: sleep 20 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo envio --tick 5
 manual: sleep 30 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo manual
 # Pares cupom+produto já comprovados são a fila de publicação. Ela inicia antes
