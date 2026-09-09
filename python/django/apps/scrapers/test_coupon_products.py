@@ -343,6 +343,42 @@ class CouponPreparationTests(TestCase):
         self.assertEqual(resultado["prontos"], 1)
         self.assertEqual(preparar.call_args.args[0].id, pendente.id)
 
+    def test_lote_prioriza_codigo_com_produto_confirmado(self):
+        """O canario de cupom nao deve esperar atras de codigo sem produto."""
+        from apps.scrapers.coupon_products import preparar_lote
+
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-confirmed-priority", marketplace="mercadolivre",
+            nome="Cupons ML",
+        )
+        sem_produto = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="codigo-sem-produto", marketplace="mercadolivre",
+            titulo="Codigo generico", codigo="GENERIC25", estado="ativo",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 25},
+        )
+        confirmado = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="codigo-com-produto", marketplace="mercadolivre",
+            titulo="Codigo com produto", codigo="CELULAR25", estado="ativo",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 25},
+        )
+        produto = self._product(self.user, origem="cupom")
+        ProdutoCupom.objects.create(
+            produto=produto, cupom=confirmado, status="confirmado",
+            preco_original=100, preco_atual=100, preco_final=75,
+            verificado_em=timezone.now(),
+        )
+
+        with patch(
+            "apps.scrapers.coupon_products.preparar_cupom", return_value=[object()],
+        ) as preparar:
+            resultado = preparar_lote(limite=1, permitir_rede=False)
+
+        self.assertEqual(resultado["processados"], 1)
+        self.assertEqual(preparar.call_args.args[0].id, confirmado.id)
+        self.assertNotEqual(preparar.call_args.args[0].id, sem_produto.id)
+
     def test_limite_padrao_de_preparacao_e_doze(self):
         from apps.scrapers.coupon_products import PREPARO_LOTE_POR_CICLO
 

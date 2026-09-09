@@ -1272,6 +1272,15 @@ def preparar_lote(
     ).filter(
         Q(validade__isnull=True) | Q(validade__gte=agora)
     ).order_by("-ultima_observacao"))
+    # Selecionar antes de preparar: um codigo digitavel que ja possui produto
+    # confirmado e o caminho mais curto para uma mensagem completa. A prova
+    # anterior nao libera envio sozinha: o preparo ainda revalida foto, preco,
+    # frescor e link antes de promover a disponibilidade.
+    codigos_com_produto_confirmado = set(
+        ProdutoCupom.objects.filter(
+            cupom_id__in=[cupom.id for cupom in cupons], status="confirmado",
+        ).values_list("cupom_id", flat=True)
+    )
     fresco_desde = agora - timedelta(hours=CACHE_HORAS)
     preparos = {
         (prep.cupom_id, prep.usuario_id): prep
@@ -1300,6 +1309,10 @@ def preparar_lote(
         gastando a capacidade nos candidatos com menos chance de render produto.
         """
         if _codigo_publicavel(cupom):
+            # Sem produto confirmado, codigo generico continua atras de uma
+            # campanha cujo escopo a propria loja publicou.
+            if cupom.id in codigos_com_produto_confirmado:
+                return -2
             # Ter código digitável não diz a que produtos o desconto se aplica.
             # Um código raspado da vitrine, sem lista nenhuma, encabeçava o lote a
             # cada ciclo e voltava vazio — agora ele vai para o fim da fila, atrás
