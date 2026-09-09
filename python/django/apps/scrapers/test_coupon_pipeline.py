@@ -53,6 +53,36 @@ class CouponMessageReadinessTests(SimpleTestCase):
         )
 
 
+class CouponWorkerOrderingTests(SimpleTestCase):
+    def test_worker_projects_checkout_results_only_after_pipeline(self):
+        """A coleta/preparo/link precisa terminar antes da validação opcional."""
+        from apps.scrapers.management.commands.automacao import _rodar_cupons
+
+        pipeline = {
+            "encontrados": 0, "persistidos": 0, "preparados": 0,
+            "links_verificados": 0, "prontos": 0,
+            "falhos": 0, "links_falhos": 0,
+        }
+        with patch(
+            "apps.scrapers.coupon_pipeline.executar_pipeline_cupons",
+            return_value=pipeline,
+        ) as executar, patch(
+            "apps.scrapers.categorizar_por_nome.popular_macro_por_nome",
+            return_value=7,
+        ), patch(
+            "apps.scrapers.coupon_validation_runner.defer_missing_checkout_sessions",
+            return_value=3,
+        ), patch(
+            "apps.scrapers.coupon_validation_runner.run_validation_batch",
+            return_value={"confirmados": 1},
+        ):
+            resultado = _rodar_cupons(lote=20)
+
+        executar.assert_called_once_with(coletar=True, limite_preparo=20, limite_links=20)
+        self.assertEqual(resultado["validacoes_sem_sessao"], 3)
+        self.assertEqual(resultado["validacoes_checkout"], {"confirmados": 1})
+
+
 class CouponPersistenceRetryTests(TestCase):
     def test_retry_persiste_sem_refazer_a_varredura(self):
         from apps.scrapers.scraper_mercadolivre.scraper import (

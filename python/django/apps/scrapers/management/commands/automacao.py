@@ -253,8 +253,6 @@ def _rodar_cupons(lote=40):
         limite_preparo=max(12, lote),
         limite_links=max(1, lote),
     )
-    resultado["validacoes_sem_sessao"] = validacoes_sem_sessao
-    resultado["validacoes_checkout"] = validacoes_checkout
     # Produto criado pelo pipeline de cupom nasce com `categoria=DESCONHECIDO`, e o
     # classificador de macro do ML deriva justamente da categoria. Sem macro, nenhuma
     # `ConfiguracaoEnvio` enxerga o item — todas filtram por ela. Medido em 04/09:
@@ -274,6 +272,8 @@ def _rodar_cupons(lote=40):
     validacoes_checkout = run_validation_batch(
         adapters=CHECKOUT_VALIDATION_ADAPTERS, limit=2,
     )
+    resultado["validacoes_sem_sessao"] = validacoes_sem_sessao
+    resultado["validacoes_checkout"] = validacoes_checkout
     logger.info(
         "CUPONS: %s encontrado(s), %s persistido(s), %s preparado(s), "
         "%s link(s) verificado(s), %s cupom(ns) pronto(s), %s falha(s)",
