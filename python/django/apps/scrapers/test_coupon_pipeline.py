@@ -357,6 +357,18 @@ class CouponPipelineTests(TestCase):
 
         self.assertLess(_peso_do_cupom(self.coupon), _peso_do_cupom(menor))
 
+    def test_pipeline_nao_gasta_browser_com_codigo_sem_produto(self):
+        from apps.scrapers.coupon_pipeline import afiliar_cupons
+
+        with patch(
+            "apps.scrapers.coupon_pipeline.afiliar_cupons_de_codigo",
+            side_effect=AssertionError("código solto não pode gerar link"),
+        ):
+            resultado = afiliar_cupons(self.user, limite=1)
+
+        self.assertEqual(resultado["links_gerados"], 0)
+        self.assertEqual(resultado["cupons_codigo_pendentes"], 0)
+
     def test_afiliacao_nao_faz_queries_por_cupom(self):
         from apps.scrapers.coupon_pipeline import afiliar_cupons
         from apps.scrapers.coupon_products import chave_produtos_cupom

@@ -632,12 +632,11 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
         "prontos": 0,
         "por_marketplace": {},
     }
-    # Antes do early return de `produtos`: cupom de código não tem produto
-    # vinculado por construção, então ficava fora de todo o caminho de afiliação.
-    codigo = afiliar_cupons_de_codigo(usuario, cupons, limite=limite_codigo)
-    metricas["links_gerados"] += codigo["gerados"]
-    metricas["links_falhos"] += codigo["falhas"]
-    metricas["cupons_codigo_pendentes"] = codigo["pendentes"]
+    # O broadcast de código solto é editorialmente proibido: não há produto,
+    # preço final ou foto para provar a oferta. Manter a geração do link legado
+    # consumia o único Chromium ANTES dos pares publicáveis e fazia o canário
+    # correto esperar. Código só entra pela relação ProdutoCupom confirmada.
+    metricas["cupons_codigo_pendentes"] = 0
     if not produtos:
         metricas["prontos"] = len(ids_cupons_prontos(usuario, cupons))
         return metricas
