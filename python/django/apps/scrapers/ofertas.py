@@ -2266,6 +2266,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                     "canal": resultado.get("canal", canal),
                     "link": link_registro, "mensagem": mensagem,
                     "publicacao": publicacao,
+                    "operation_id": publicacao_transporte.operation_key,
                     "mensagem_id": resultado.get("mensagem_id"),
                     "classe": resultado.get("classe", ""),
                     "resultado": resultado.get("resultado", "confirmado"),

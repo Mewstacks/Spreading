@@ -6812,6 +6812,7 @@ class EnvioCupomTests(TestCase):
             outro = enviar_cupom(self.cupom, "456@g.us", usuario=self.user)
 
         self.assertTrue(primeiro["sucesso"])
+        self.assertTrue(primeiro["operation_id"])
         self.assertTrue(segundo["duplicado"])
         self.assertTrue(outro["sucesso"])
         self.assertEqual(Publicacao.objects.filter(
