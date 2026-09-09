@@ -343,6 +343,20 @@ class CouponPipelineTests(TestCase):
 
         self.assertEqual(ordenados, [self.user, teste])
 
+    def test_codigo_com_maior_desconto_tem_prioridade_de_link(self):
+        from apps.scrapers.coupon_pipeline import _peso_do_cupom
+
+        menor = CupomNormalizado.objects.create(
+            fonte=self.source, external_id="pipeline-low-discount",
+            marketplace="mercadolivre", titulo="Cupom 5%", codigo="PIPE5",
+            estado="ativo", regras={
+                "modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                "valor_desconto": 5,
+            },
+        )
+
+        self.assertLess(_peso_do_cupom(self.coupon), _peso_do_cupom(menor))
+
     def test_afiliacao_nao_faz_queries_por_cupom(self):
         from apps.scrapers.coupon_pipeline import afiliar_cupons
         from apps.scrapers.coupon_products import chave_produtos_cupom

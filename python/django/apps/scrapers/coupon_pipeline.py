@@ -545,10 +545,18 @@ def _peso_do_cupom(cupom) -> int:
     """Posição na fila de afiliação (menor = antes). Ver EvidenceStrength."""
     from apps.scrapers.coupon_rules import (
         FORCA_EVIDENCIA_ORDEM, codigo_publicavel, forca_evidencia,
+        regras_do_cupom,
     )
 
+    try:
+        desconto = max(0.0, float(regras_do_cupom(cupom).get("valor_desconto") or 0))
+    except (TypeError, ValueError):
+        desconto = 0.0
     if codigo_publicavel(cupom):
-        return 0
+        # Código comprovado e maior desconto útil merecem o primeiro Link Builder.
+        # Antes todos os códigos empatavam e um 25% podia ficar atrás de dezenas de
+        # cupons menores só pela ordem incidental do banco.
+        return -min(500, int(desconto))
     if str(cupom.marketplace or "").lower() != "mercadolivre":
         # Amazon/Awin não usam container: a prova de associação é a própria fonte
         # oficial, então entram logo depois dos códigos.
@@ -589,7 +597,15 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
     }
     produtos = {}
     relacao_por_produto = {}
-    for cupom_id in sorted(preparadas, key=lambda pk: ordem_dos_cupons.get(pk, 9)):
+    cupons_por_id = {cupom.pk: cupom for cupom in cupons}
+    for cupom_id in sorted(
+        preparadas,
+        key=lambda pk: (
+            ordem_dos_cupons.get(pk, 9),
+            -getattr(cupons_por_id.get(pk), "ultima_observacao", agora).timestamp(),
+            -pk,
+        ),
+    ):
         for relacao in preparadas[cupom_id]:
             row = relation_rows.get(relacao.pk)
             if coupon_link_verified_and_fresh(row):
