@@ -3815,6 +3815,34 @@ class ParserDeCupomDeCampanhaTests(ComoWorker, TestCase):
         self.assertEqual(salvos, 30)
         self.assertEqual(Cupom.objects.count(), 30)
 
+    def test_fallback_cede_browser_entre_paginas_para_esteira_de_links(self):
+        """Uma fila de links não pode esperar a varredura inteira do ML acabar."""
+        from apps.scrapers.scraper_mercadolivre.scraper import mapear_cupons
+
+        with open(self.DUMP, encoding="utf-8") as f:
+            dump = json.load(f)
+        # O fixture real é de uma página; completar pagination cria uma segunda
+        # navegação e prova que o contexto do browser foi fechado e reaberto.
+        dump["appProps"]["pageProps"]["filteredCouponsData"]["pagination"] = {
+            "total": 2,
+        }
+        pagina_2 = {
+            "appProps": {"pageProps": {"filteredCouponsData": {
+                "coupons": [], "pagination": {"total": 2},
+            }}},
+        }
+        sess = self._http_falsa(["<html>login</html>"])
+        page = self._browser_page([dump, pagina_2])
+
+        with patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session", return_value=sess), \
+                self._browser_fake(page), \
+                patch("apps.scrapers.scraper_mercadolivre.scraper.interesse_pendente",
+                      side_effect=[True, False]) as esperando:
+            salvos = mapear_cupons()
+
+        self.assertEqual(salvos, 30)
+        self.assertGreaterEqual(esperando.call_count, 1)
+
     def test_sessao_expirada_no_fallback_propaga(self):
         """Se o fallback abre o browser e a sessão caiu, SessaoExpirada sobe — é o que
         o SSE transforma no aviso de reconexão."""

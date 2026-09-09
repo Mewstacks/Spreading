@@ -154,7 +154,9 @@ def _transporte_cupons(state, usuario=None):
     """
     session = _ml_http_session(state)
     estado = {"forcar_browser": False, "usou_browser": False, "_page": None}
-    stack = ExitStack()
+    # The browser fallback can cross dozens of pages. Keep its scope releasable so
+    # an already-queued affiliate-link task can run between two campaign pages.
+    pilha = {"atual": ExitStack()}
 
     def fetch(n):
         if not estado["forcar_browser"]:
@@ -166,6 +168,7 @@ def _transporte_cupons(state, usuario=None):
                 logger.debug("Falha HTTP na pagina %s de cupons: %s", n, e)
                 return None
         if estado["_page"] is None:
+            stack = pilha["atual"]
             stack.enter_context(coordinated_ml_browser(
                 usuario=usuario, authenticated=state is not None,
                 owner_kind="ml_campaign_coupons",
@@ -183,10 +186,23 @@ def _transporte_cupons(state, usuario=None):
             raise BrowserError(f"Nao foi possivel acessar a pagina de cupons: {e}")
         return page.content()
 
+    def ceder_browser():
+        """Close this page's browser scope and return the shared lease."""
+        if estado["_page"] is None:
+            return False
+        try:
+            pilha["atual"].close()
+        finally:
+            estado["_page"] = None
+            pilha["atual"] = ExitStack()
+        return True
+
+    estado["ceder_browser"] = ceder_browser
+
     try:
         yield fetch, estado
     finally:
-        stack.close()
+        pilha["atual"].close()
 
 
 def _persistir_campanhas_cupons(
@@ -565,6 +581,24 @@ def mapear_cupons(n=1, faixa=None, usuario=None):
                 logger.info("Última página (%s de %s) processada; varredura completa", n, total_paginas)
                 varredura_completa = True
                 break
+
+            # The HTTP path has no Chromium cost. In its browser fallback, though,
+            # holding one page for an entire 94-page campaign starved the affiliate
+            # link lane. Yield only when another lane has actually been denied.
+            if (
+                _estado.get("usou_browser")
+                and interesse_pendente(
+                    "django_chromium", exceto="ml_campaign_coupons",
+                )
+                and _estado["ceder_browser"]()
+            ):
+                logger.info(
+                    "Cupons de campanha cederam o navegador apos a pagina %s; "
+                    "retomando quando a esteira prioritaria concluir.", n,
+                )
+                # The links lane ticks every five seconds. This window prevents the
+                # campaign scraper from immediately reacquiring the slot it yielded.
+                time.sleep(6)
 
             n += 1
 
