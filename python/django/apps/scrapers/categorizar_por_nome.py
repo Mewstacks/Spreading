@@ -81,7 +81,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "airfryer", "air fryer", "fritadeira", "liquidificador", "batedeira",
         "lava e seca", "maquina de lavar", "extratora",
         ("aspirador", 3),
-        "cafeteira", "sanduicheira", "forno eletrico", "purificador", "bebedouro", "ferro de passar",
+        "cafeteira", "sanduicheira", "forno eletrico", "forno de bancada", "purificador", "bebedouro", "ferro de passar",
         "panificadora", "tanquinho", "sorveteira", "mixer", "dreame",
         "frigobar", "ferro a vapor", "fritadeiras", "micro ondas", "micro-ondas", "depurador", "filtro de agua", "pipoqueira",
     ),

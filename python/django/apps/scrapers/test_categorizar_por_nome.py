@@ -192,6 +192,7 @@ class MacroDoNomeTests(SimpleTestCase):
             "Microsoft 3 6 5 Family + Proteção Premium":
                 "Eletrônicos e Informática",
             "Pipoqueira Elétrica Popflix Pp-04 Ar Quente": "Eletrodomésticos",
+            "Forno De Bancada Elétrico Dako Pratiko 50 Litros": "Eletrodomésticos",
             "Kit L'oréal Professionnel Absolut Repair Gold Duo":
                 "Beleza e Cuidados Pessoais",
             "Combo de Booster Pokémon ME05 Escuridão Absoluta":
