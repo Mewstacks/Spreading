@@ -343,6 +343,37 @@ class CouponPipelineTests(TestCase):
 
         self.assertEqual(ordenados, [self.user, teste])
 
+    def test_macro_do_destino_tem_prioridade_na_fila_de_links(self):
+        """O primeiro lote deve servir um grupo configurado antes do catálogo solto."""
+        from apps.scrapers.coupon_pipeline import afiliar_cupons
+
+        products = self._prepared_products()
+        products[0].macro_categoria = "Casa, Móveis e Decoração"
+        products[0].save(update_fields=["macro_categoria"])
+        products[1].macro_categoria = "Celulares, Telefonia e Wearables"
+        products[1].save(update_fields=["macro_categoria"])
+        ConfiguracaoEnvio.objects.create(
+            owner=self.user, organization=self.user.perfil.organization,
+            grupo_id="teste@g.us", grupo_nome="Teste ofertas", ativo=False,
+            macro_categoria="Celulares, Telefonia e Wearables",
+        )
+        marketplace = Mock()
+        marketplace.prefetch_links.return_value = (0, 0)
+        marketplace.verificar_links_pendentes.return_value = {
+            "reprovados": 0, "transitorios": 0,
+        }
+
+        with patch(
+            "apps.scrapers.marketplaces.registry.get_marketplace",
+            return_value=marketplace,
+        ):
+            afiliar_cupons(self.user, limite=1)
+
+        self.assertEqual(
+            marketplace.prefetch_links.call_args.args[0][0].pk,
+            products[1].pk,
+        )
+
     def test_codigo_com_maior_desconto_tem_prioridade_de_link(self):
         from apps.scrapers.coupon_pipeline import _peso_do_cupom
 

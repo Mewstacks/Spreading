@@ -595,6 +595,18 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
     ordem_dos_cupons = {
         cupom.pk: _peso_do_cupom(cupom) for cupom in cupons
     }
+    # Uma regra de destino e a intenção editorial da conta. Quando duas ofertas
+    # são igualmente comprovadas, materializar primeiro a macro-categoria que tem
+    # grupo configurado libera o canário (e, depois, a publicação) sem desperdiçar
+    # o lote em produtos que não podem ir a lugar algum. Inclui grupo de teste
+    # inativo: ele precisa ser capaz de homologar antes de virar destino real.
+    from apps.scrapers.models import ConfiguracaoEnvio
+    macros_de_destino = set(
+        ConfiguracaoEnvio.objects.filter(owner=usuario)
+        .exclude(grupo_id="")
+        .exclude(macro_categoria="")
+        .values_list("macro_categoria", flat=True)
+    )
     produtos = {}
     relacao_por_produto = {}
     cupons_por_id = {cupom.pk: cupom for cupom in cupons}
@@ -606,7 +618,14 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
             -pk,
         ),
     ):
-        for relacao in preparadas[cupom_id]:
+        for relacao in sorted(
+            preparadas[cupom_id],
+            key=lambda item: (
+                0 if item.produto.macro_categoria in macros_de_destino else 1,
+                -(getattr(item.produto, "ultima_observacao", None) or agora).timestamp(),
+                -item.pk,
+            ),
+        ):
             row = relation_rows.get(relacao.pk)
             if coupon_link_verified_and_fresh(row):
                 continue
