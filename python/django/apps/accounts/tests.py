@@ -5,12 +5,14 @@ import json
 import os
 import tempfile
 import threading
+from io import StringIO
 from datetime import timedelta
 from unittest.mock import patch
 
 import jwt
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.core.exceptions import (
     ImproperlyConfigured,
     PermissionDenied,
@@ -76,6 +78,21 @@ class OrganizationBoundaryTests(TestCase):
         self.assertNotEqual(
             organization.pk, self.bob.personal_organization.pk,
         )
+
+    def test_repair_missing_profiles_recreates_only_the_missing_boundary(self):
+        from apps.accounts.models import Perfil
+
+        Perfil.objects.get(user=self.alice).delete()
+        output = StringIO()
+        call_command(
+            "repair_missing_profiles", "--username", self.alice.username,
+            "--apply", stdout=output,
+        )
+
+        repaired = Perfil.objects.get(user=self.alice)
+        self.assertEqual(repaired.organization, self.alice.personal_organization)
+        self.assertEqual(repaired.active_organization, self.alice.personal_organization)
+        self.assertIn("REPARADO", output.getvalue())
 
     def test_private_model_derives_organization_from_owner(self):
         product = Produto.objects.create(

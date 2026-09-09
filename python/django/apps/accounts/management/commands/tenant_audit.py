@@ -1,4 +1,5 @@
 from django.core.management.base import BaseCommand, CommandError
+from django.contrib.auth import get_user_model
 
 from apps.accounts.models import (
     Membership,
@@ -52,6 +53,15 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         errors = []
         with system_context():
+            missing_profiles = list(
+                get_user_model().objects.filter(
+                    is_active=True, perfil__isnull=True,
+                ).values_list("username", flat=True)
+            )
+            if missing_profiles:
+                errors.append(
+                    "User: perfil ausente para " + ", ".join(missing_profiles[:20])
+                )
             personal = {
                 str(org.personal_owner_id): str(org.pk)
                 for org in Organization.objects.exclude(personal_owner_id=None)
