@@ -23,7 +23,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--limite", type=int, default=1)
         parser.add_argument("--cooldown", type=int, default=24, help="Horas de cooldown por produto.")
-        parser.add_argument("--min-desconto", type=float, default=15.0, help="Desconto mínimo (%).")
+        parser.add_argument("--min-desconto", type=float, default=15.0, help="Desconto mínimo (%%).")
         parser.add_argument("--grupo", type=str, default=None, help="grupoid de destino (sobrescreve o padrão).")
         parser.add_argument("--macro", action="append", default=None, help="Filtra macro-categoria (repetível).")
         parser.add_argument("--categoria", action="append", default=None, help="Filtra categoria (repetível).")
