@@ -95,6 +95,23 @@ class MacroDoNomeTests(SimpleTestCase):
         for nome, esperado in casos.items():
             self.assertEqual(macro_do_nome(nome), esperado, nome)
 
+    def test_vocabulario_recente_de_marcas_e_plural_sem_domain_id(self):
+        """Itens novos só entram quando o substantivo ou a combinação é inequívoca."""
+        casos = {
+            "HUAWEI WATCH GT 7 Pro 46mm Smart Watch":
+                "Celulares, Telefonia e Wearables",
+            "Amaciante Downy Concentrado Perfume Collection Místico 3L":
+                "Limpeza e Lavanderia",
+            "Jogo De Panelas Cerâmico Triplo Indução Vitrex Ecoglid":
+                "Cozinha, Mesa e Bar",
+            "Kit 10 Cuecas Boxer Sem Costura": "Moda, Calçados e Acessórios",
+            "CANSON Papel Colorido A4 120g":
+                "Papelaria, Escritório e Escola",
+            "Pentel Pastel Oleoso 12 Cores": "Arte, Artesanato e Costura",
+        }
+        for nome, esperado in casos.items():
+            self.assertEqual(macro_do_nome(nome), esperado, nome)
+
     def test_qualificador_no_fim_nao_manda_no_resultado(self):
         """A cabeca do nome decide; o que vem depois e complemento.
 

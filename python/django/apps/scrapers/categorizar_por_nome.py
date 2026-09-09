@@ -55,7 +55,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "celular", "celulares", "smartphone", "smartphones", "iphone", "galaxy",
         "redmi", "motorola", ("smartwatch", 3), ("smartband", 3), "chip",
         "capinha", "capa de celular", "pelicula", "carregador", "powerbank",
-        "fone de ouvido", "airpods",
+        "fone de ouvido", "airpods", "watch",
     ),
     "Eletrônicos e Informática": (
         "notebook", "laptop", "computador", "desktop", "monitor", "teclado",
@@ -80,7 +80,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         ("aspirador", 3),
         "cafeteira", "sanduicheira", "forno eletrico", "purificador", "bebedouro", "ferro de passar",
         "panificadora", "tanquinho", "sorveteira", "mixer", "dreame",
-        "frigobar", "ferro a vapor",
+        "frigobar", "ferro a vapor", "fritadeiras", "micro ondas",
     ),
     "Climatização e Aquecimento": (
         "ar condicionado", "ventilador", "climatizador", "aquecedor",
@@ -96,16 +96,16 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "penteadeira", "comoda", "roupeiro", "quarto modulado",
     ),
     "Cozinha, Mesa e Bar": (
-        "panela", "frigideira", "talher", "talheres", "prato", "copo", "taca",
+        "panela", "panelas", "frigideira", "talher", "talheres", "prato", "copo", "taca",
         "caneca", "garrafa termica", "jogo de jantar", "faqueiro", "assadeira",
         "escorredor", "pote hermetico", "marmita", "churrasqueira", "espetinho",
         "galheteiro", "saleiro", "bandeja", "garrafa isotermica", "espatula",
         "faca de carne", "pinca culinaria", "luva termica", "tabua de corte",
         "balanca de cozinha", "organizador de esponja", "pote organizador",
-        "cuscuzeira", "mandolin", "multifatiador", "utensilios de cozinha",
+        "cuscuzeira", "mandolin", "multifatiador", "utensilios de cozinha", "pote de vidro",
     ),
     "Limpeza e Lavanderia": (
-        "detergente", "sabao", "amaciante", "desinfetante", "agua sanitaria",
+        "detergente", "sabao", ("amaciante", 2), "desinfetante", "agua sanitaria",
         "vassoura", "rodo", "balde", "esfregao", "pano de chao", "cesto de roupa",
         "varal", "cabide", "pano limpa vidros", "neutralizador de ar",
     ),
@@ -144,7 +144,8 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "capa de banco", "tapete automotivo", "som automotivo", "cera automotiva",
         "aditivo", "limpador de para brisa", "capacete", "moto peca", "parachoque",
         "grade radiador", "sensor abs", "manopla cambio", "comando de valvula",
-        "correia tensor", "eletrovalvula", "capa de chuva moto", "lixeira automotiva",
+        "correia tensor", "eletrovalvula", "capa de chuva moto", "capa chuva motoqueiro",
+        "lixeira automotiva",
     ),
     "Pets e Animais": (
         "cachorro", "gato", "pet", "racao", "coleira", "guia para cachorro",
@@ -186,7 +187,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "camiseta", "camisa", "calca", "bermuda", "short", "vestido", "saia",
         "jaqueta", "moletom", "blusa", "tenis", "sapato", "sandalia", "chinelo",
         "bota", "meia", "cueca", "calcinha", "sutia", "oculos de sol", "cinto",
-        "bone", "pijama", "cropped", "headband", "chapeu de palha",
+        "bone", "pijama", "cropped", "headband", "chapeu de palha", "meias", "cuecas",
         "polo masculina", "polo enxuto", "tech t shirt", "daily t shirt",
     ),
     "Bolsas, Malas e Viagem": (
@@ -225,6 +226,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "bloco de anotacoes", "lapiseira", "ecolapis", "fragmentadora de papel",
         "planner", "borracha", "papel a4", "sulfite", "fita corretiva",
         "prancheta", "marca-texto", "ficha pautada", "adesivo decorado",
+        "papel colorido", "ficha", "marcador de linhas",
     ),
     "Livros, Mídia e Conteúdo": (
         "livro", "livros", "coloring book",
@@ -235,7 +237,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
     ),
     "Arte, Artesanato e Costura": (
         "linha de costura", "agulha", "maquina de costura", "tecido", "feltro",
-        "tinta acrilica", "pincel", "tela para pintura", "cola quente", "biscuit",
+        "tinta acrilica", "pincel", "tela para pintura", "cola quente", "biscuit", "pastel oleoso",
     ),
     "Festas, Eventos e Presentes": (
         "balao", "bexiga", "confete", "vela de aniversario", "topo de bolo",
