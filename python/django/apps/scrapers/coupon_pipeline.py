@@ -28,6 +28,7 @@ def _metricas_vazias():
         "links_reprovados": 0,
         "links_transitorios": 0,
         "links_falhos": 0,
+        "capacidade_adiada": 0,
         "prontos": 0,
         "falhos": 0,
         "fontes": {},
@@ -669,6 +670,7 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
         "links_reprovados": 0,
         "links_transitorios": 0,
         "links_falhos": 0,
+        "capacidade_adiada": 0,
         "prontos": 0,
         "por_marketplace": {},
     }
@@ -781,27 +783,21 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
                     },
                 )
         except Exception as exc:
-            falhas += len(itens)
             detalhe["erro"] = "Falha operacional ao gerar ou verificar links."
             detalhe["causa"] = type(exc).__name__
+            from apps.scrapers.carga import BrowserResourceUnavailable
             from apps.scrapers.afiliado import causa_de_conta, registrar_falha
-            conta = causa_de_conta(exc)
-            if conta:
-                # Sessão caída, Link Builder recusado ou navegador ocupado: UM
-                # bloqueio de conta, não N falhas de produto. Gravar por item
-                # empurrava o catálogo inteiro para o backoff e, na oitava rodada,
-                # marcava como `nao_afiliavel` produtos que nunca tiveram defeito.
-                detalhe["reason_code"] = f"account_blocked:{conta}"
-                # A mensagem entra junto do nome da classe porque o nome
-                # sozinho não diagnostica: `AuthError` é documentado como
-                # INCONCLUSIVO ("nunca deve, sozinha, pedir reconexão") e
-                # `LoginError` cobre desde "nunca conectou" até "o ML acabou de
-                # recusar a sessão". Sem o texto, este log não distingue um
-                # cadastro em branco de um bloqueio real.
-                logger.warning(
-                    "Afiliação de cupons %s bloqueada por %s (usuário %s): %s; "
-                    "nenhum produto penalizado.", slug, conta, usuario,
-                    str(exc)[:90] or "sem detalhe",
+
+            if isinstance(exc, BrowserResourceUnavailable):
+                # Contenção é normal durante o handoff de deploy: o processo
+                # anterior pode deixar o TTL de 90s terminar, mas o lote de cupons
+                # não pode transformar isso em backoff de 15min. Mantemos o par
+                # pronto para uma tentativa curta, sem somar falha de produto.
+                detalhe["reason_code"] = "capacity_deferred"
+                metricas["capacidade_adiada"] += len(itens)
+                logger.info(
+                    "Afiliação de cupons %s adiada por capacidade (usuário %s); "
+                    "retoma em breve.", slug, usuario,
                 )
                 for produto in itens:
                     relation = relacao_por_produto[produto.id]
@@ -809,30 +805,67 @@ def afiliar_cupons(usuario, *, limite=80, faixa=None, limite_codigo=8):
                         usuario=usuario, relacao=relation,
                         defaults={
                             "estado": "pendente", "verificado_ok": None,
-                            "verificacao_motivo": "Sessão necessária para gerar um novo link.",
+                            "verificacao_motivo": (
+                                "Navegador ocupado; tentativa retomada automaticamente."
+                            ),
                             "ultima_tentativa": agora,
-                            "proxima_tentativa": agora + timezone.timedelta(minutes=15),
+                            "proxima_tentativa": agora + timezone.timedelta(seconds=90),
                         },
                     )
             else:
-                for produto in itens:
-                    registrar_falha(
-                        usuario, produto,
-                        f"Falha operacional de afiliação ({type(exc).__name__}).",
+                falhas += len(itens)
+                conta = causa_de_conta(exc)
+                if conta:
+                    # Sessão caída ou Link Builder indisponível é um bloqueio
+                    # de conta, não N falhas de produto.
+                    detalhe["reason_code"] = f"account_blocked:{conta}"
+                    logger.warning(
+                        "Afiliação de cupons %s bloqueada por %s (usuário %s): %s; "
+                        "nenhum produto penalizado.", slug, conta, usuario,
+                        str(exc)[:90] or "sem detalhe",
                     )
-                    relation = relacao_por_produto[produto.id]
-                    current = relation_rows.get(relation.pk)
-                    LinkAfiliadoProdutoCupomUsuario.objects.update_or_create(
-                        usuario=usuario, relacao=relation,
-                        defaults={
-                            "estado": "erro", "verificado_ok": None,
-                            "verificacao_motivo": "Falha operacional ao gerar o link.",
-                            "tentativas": (getattr(current, "tentativas", 0) or 0) + 1,
-                            "ultima_tentativa": agora,
-                            "proxima_tentativa": agora + timezone.timedelta(minutes=30),
-                        },
+                    for produto in itens:
+                        relation = relacao_por_produto[produto.id]
+                        LinkAfiliadoProdutoCupomUsuario.objects.update_or_create(
+                            usuario=usuario, relacao=relation,
+                            defaults={
+                                "estado": "pendente", "verificado_ok": None,
+                                "verificacao_motivo": (
+                                    "Sessão necessária para gerar um novo link."
+                                ),
+                                "ultima_tentativa": agora,
+                                "proxima_tentativa": (
+                                    agora + timezone.timedelta(minutes=15)
+                                ),
+                            },
+                        )
+                else:
+                    for produto in itens:
+                        registrar_falha(
+                            usuario, produto,
+                            f"Falha operacional de afiliação ({type(exc).__name__}).",
+                        )
+                        relation = relacao_por_produto[produto.id]
+                        current = relation_rows.get(relation.pk)
+                        LinkAfiliadoProdutoCupomUsuario.objects.update_or_create(
+                            usuario=usuario, relacao=relation,
+                            defaults={
+                                "estado": "erro", "verificado_ok": None,
+                                "verificacao_motivo": (
+                                    "Falha operacional ao gerar o link."
+                                ),
+                                "tentativas": (
+                                    getattr(current, "tentativas", 0) or 0
+                                ) + 1,
+                                "ultima_tentativa": agora,
+                                "proxima_tentativa": (
+                                    agora + timezone.timedelta(minutes=30)
+                                ),
+                            },
+                        )
+                    logger.exception(
+                        "Afiliação de cupons %s falhou para %s", slug, usuario,
                     )
-                logger.exception("Afiliação de cupons %s falhou para %s", slug, usuario)
         after = {
             row.relacao_id for row in LinkAfiliadoProdutoCupomUsuario.objects.filter(
                 usuario=usuario, relacao_id__in=target_relation_ids,
@@ -914,6 +947,7 @@ def executar_pipeline_cupons(
         for key in (
             "vinculados", "links_gerados", "links_verificados",
             "links_reprovados", "links_transitorios", "links_falhos", "prontos",
+            "capacidade_adiada",
         ):
             resultado[key] += int(afiliacao.get(key, 0) or 0)
         try:

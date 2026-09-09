@@ -296,6 +296,27 @@ class CouponPipelineTests(TestCase):
 
         self.assertEqual(ids_cupons_prontos(self.user, [self.coupon]), set())
 
+    def test_capacidade_do_browser_reagenda_par_sem_contar_falha(self):
+        from apps.scrapers.carga import BrowserResourceUnavailable
+        from apps.scrapers.coupon_pipeline import afiliar_cupons
+
+        self._prepared_products()
+        marketplace = SimpleNamespace(
+            prefetch_links=Mock(side_effect=BrowserResourceUnavailable("ocupado")),
+            verificar_links_pendentes=Mock(),
+        )
+        with patch(
+            "apps.scrapers.marketplaces.registry.get_marketplace",
+            return_value=marketplace,
+        ):
+            resultado = afiliar_cupons(self.user, limite=1)
+
+        linha = LinkAfiliadoProdutoCupomUsuario.objects.get(usuario=self.user)
+        self.assertEqual(resultado["capacidade_adiada"], 1)
+        self.assertEqual(resultado["links_falhos"], 0)
+        self.assertEqual(linha.estado, "pendente")
+        self.assertLessEqual(linha.proxima_tentativa, timezone.now() + timedelta(seconds=95))
+
     def test_pares_confirmados_geram_link_antes_da_coleta(self):
         from apps.scrapers.coupon_pipeline import executar_pipeline_cupons, _metricas_vazias
 

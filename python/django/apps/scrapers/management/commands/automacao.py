@@ -755,11 +755,21 @@ class Command(BaseCommand):
                 with _heartbeat_durante("cupons"):
                     resultado = _rodar_cupons(lote=lote)
                 falhas_banco = 0
-                proximo = timezone.now() + timedelta(minutes=tick)
+                cedeu_capacidade = bool(
+                    resultado.get("capacidade_adiada")
+                    or resultado.get("preparos_adiados")
+                )
+                # Após um deploy o lease do Chromium encerrado pelo processo
+                # anterior pode permanecer até o TTL. Voltar em segundos evita
+                # deixar cupom pronto parado por todo o tick de 15min.
+                proximo = timezone.now() + timedelta(
+                    seconds=poll if cedeu_capacidade else tick * 60
+                )
                 falhas = resultado["falhos"] + resultado["links_falhos"]
                 st.write_state(
                     "cupons",
-                    fase="degradado" if falhas else "aguardando",
+                    fase=("aguardando_capacidade" if cedeu_capacidade
+                          else "degradado" if falhas else "aguardando"),
                     ultimo_ciclo_fim=timezone.now().isoformat(),
                     proximo_ciclo=proximo.isoformat(),
                     encontrados=resultado["encontrados"],
@@ -773,9 +783,11 @@ class Command(BaseCommand):
                     fontes=resultado["fontes"],
                     erro="" if not falhas else "Uma ou mais fontes/links falharam.",
                     ultima_msg=(
+                        ("Navegador ocupado; nova tentativa em segundos."
+                         if cedeu_capacidade else
                         f"{resultado['prontos']} cupom(ns) pronto(s), "
                         f"{resultado['links_verificados']} link(s) verificado(s) "
-                        f"às {agora:%H:%M}."
+                        f"às {agora:%H:%M}.")
                     ),
                 )
             except DatabaseError as exc:
