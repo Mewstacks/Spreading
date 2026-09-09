@@ -67,6 +67,10 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "caixa de som", "soundbar", "fone bluetooth", "headset", "headphone",
         "microfone", "camera", "cameras", "gopro", "drone", "projetor",
         "televisao", "smart tv", "lente", "tripe", "ring light", "fones de ouvido",
+        # Títulos recentes de marketplace usam o substantivo curto antes de
+        # qualificadores: “Fone tradutor ...”, “Fone sem fio ...”. É inequívoco
+        # no catálogo de produto (não confundir com texto livre de atendimento).
+        "fone",
     ),
     "Eletrodomésticos": (
         "geladeira", "refrigerador", "fogao", "cooktop", "microondas",
@@ -214,6 +218,16 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "caderno", "caneta", "lapis", "borracha escolar", "mochila escolar",
         "estojo", "agenda", "papel sulfite", "grampeador", "pasta arquivo",
         "marca texto", "cartucho", "toner", "fita adesiva",
+        # Vocabulário observado no feed sem domain_id em 09/09/2026. São nomes de
+        # produto, não marcas, e evitam que a maior parte dos itens escolares
+        # recentes fique invisível só por abrir com “kit” ou “caderneta”.
+        "caderneta", "papelaria", "canetas", "caneta esferografica", "regua",
+        "bloco de anotacoes", "lapiseira", "ecolapis", "fragmentadora de papel",
+        "planner", "borracha", "papel a4", "sulfite", "fita corretiva",
+        "prancheta", "marca-texto", "ficha pautada", "adesivo decorado",
+    ),
+    "Livros, Mídia e Conteúdo": (
+        "livro", "livros", "coloring book",
     ),
     "Música e Instrumentos": (
         "violao", "guitarra", "baixo eletrico", "teclado musical", "bateria musical",

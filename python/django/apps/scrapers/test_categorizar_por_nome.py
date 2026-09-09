@@ -78,6 +78,23 @@ class MacroDoNomeTests(SimpleTestCase):
         for nome, esperado in casos.items():
             self.assertEqual(macro_do_nome(nome), esperado, nome)
 
+    def test_vocabulario_recente_papelaria_e_livros_sem_domain_id(self):
+        """Amostra real do feed fresco que não trazia domain_id em 09/09/2026."""
+        casos = {
+            "Caderneta Pautado Capa Dura Toque Aveludado 80 Folhas":
+                "Papelaria, Escritório e Escola",
+            "Kit Papelaria Infantil com 6 Carimbos Emoji":
+                "Papelaria, Escritório e Escola",
+            "Tilibra Régua em Poliestireno 30 cm Degradê":
+                "Papelaria, Escritório e Escola",
+            "ProCalc Fragmentadora de Papel 10 folhas":
+                "Papelaria, Escritório e Escola",
+            "Cute & Comfy Coloring Book for Adults":
+                "Livros, Mídia e Conteúdo",
+        }
+        for nome, esperado in casos.items():
+            self.assertEqual(macro_do_nome(nome), esperado, nome)
+
     def test_qualificador_no_fim_nao_manda_no_resultado(self):
         """A cabeca do nome decide; o que vem depois e complemento.
 
