@@ -230,7 +230,7 @@ def _tem_link_de_aviso(usuario, marketplace) -> bool:
     return any(coupon_link_verified_and_fresh(linha) for linha in candidatos)
 
 
-def _codigo(cupom, usuario, conexao, *, links_codigo=None,
+def _codigo(cupom, usuario, conexao, *, prontas=None, links_codigo=None,
             links_aviso_por_marketplace=None, shopee_conectada=False):
     codigo = codigo_publicavel(cupom)
     if not codigo:
@@ -249,6 +249,14 @@ def _codigo(cupom, usuario, conexao, *, links_codigo=None,
             cupom.integracao.habilitada and cupom.integracao.status == "conectada"):
         return _resultado("eligible", "no_session", "integration_disconnected",
                           "Integração de afiliados desconectada.")
+
+    # Código não é oferta. O transporte já exige um produto pareado; a projeção
+    # aplica o mesmo contrato para que dashboard, canário e envio não divergam.
+    if cupom.pk not in (prontas or {}):
+        return _resultado(
+            "eligible", "waiting", "product_match_pending",
+            "Código público aguardando produto, preço, foto e link comprovados.",
+        )
 
     marketplace = str(cupom.marketplace or "").lower()
     if marketplace == "amazon":
@@ -755,7 +763,9 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
         ))
         .order_by("_prio", "-ultima_observacao")[:5000]
     )
-    ativacoes = [c for c in cupons if not codigo_publicavel(c)]
+    # Código e ativação exigem o mesmo par produto+cupom para uma mensagem
+    # publicável. O modo altera somente a copy, não a evidência exigida.
+    ativacoes = list(cupons)
     observations = CupomFonteObservacao.objects.filter(
         cupom_id__in=[c.pk for c in cupons], outcome="accepted",
         health_status__in=("healthy", "ok", "healthy_empty"),
@@ -842,7 +852,8 @@ def _projetar_disponibilidade_cupons(usuario, organization, channel):
         if outcome is None:
             outcome = (
                 _codigo(
-                    cupom, usuario, conexao, links_codigo=links_codigo,
+                    cupom, usuario, conexao, prontas=prontas,
+                    links_codigo=links_codigo,
                     links_aviso_por_marketplace=links_aviso,
                     shopee_conectada=shopee_conectada,
                 )

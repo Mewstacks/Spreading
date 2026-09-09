@@ -35,6 +35,24 @@ class CouponSemanticParserTests(SimpleTestCase):
         self.assertEqual(_extrair_codigos_semanticos(page), ["PROMOMELI"])
 
 
+class CouponMessageReadinessTests(SimpleTestCase):
+    @patch("apps.scrapers.coupon_readiness.coupon_mode_enabled", return_value=True)
+    def test_codigo_solto_nunca_fica_pronto_para_mensagem(self, _enabled):
+        from apps.scrapers.coupon_readiness import _codigo
+
+        cupom = SimpleNamespace(
+            pk=17, codigo="PAREADO20", programa=None, integracao=None,
+            regras={"modo_resgate": "codigo"},
+        )
+
+        resultado = _codigo(cupom, usuario=None, conexao={"ok": True}, prontas={})
+
+        self.assertEqual(
+            (resultado["stage"], resultado["reason_code"]),
+            ("eligible", "product_match_pending"),
+        )
+
+
 class CouponPersistenceRetryTests(TestCase):
     def test_retry_persiste_sem_refazer_a_varredura(self):
         from apps.scrapers.scraper_mercadolivre.scraper import (
