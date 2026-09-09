@@ -226,6 +226,7 @@ class MercadoLivreCheckoutAdapterTests(SimpleTestCase):
             _cart_empty("Resumo da compra\nR$ 120,00\nVocê ainda não adicionou produtos ao seu carrinho"),
             True,
         )
+        self.assertIs(_cart_empty("Resumo da compra\nTotal\nR$ 0,00"), True)
         # Preço/recomendação no resumo vazio não é linha de produto.
         self.assertIsNone(_cart_empty("Resumo da compra\nOferta do dia\nR$ 120,00"))
         self.assertIsNone(_cart_empty("Boas-vindas ao Mercado Livre"))

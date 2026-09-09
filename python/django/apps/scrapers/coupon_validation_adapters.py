@@ -153,6 +153,12 @@ def _cart_empty(body):
         return True
     if any(marker in text for marker in _ML_CART_ITEM_MARKERS):
         return False
+    # O app-cart atual pode não renderizar a frase de vazio. Resumo com total
+    # exatamente zero, sem nenhum controle de linha, é a outra prova objetiva de
+    # carrinho vazio; recomendações podem ter preço, mas não viram item nem total.
+    total = _cart_total(body)
+    if total is not None and total == Decimal("0.00"):
+        return True
     return None
 
 
@@ -168,6 +174,7 @@ def _cart_detection_evidence(body):
         ],
         "has_purchase_summary": "resumo da compra" in text,
         "has_currency": bool(_MONEY_RE.search(str(body or ""))),
+        "total": str(_cart_total(body) if _cart_total(body) is not None else ""),
     }
 
 
