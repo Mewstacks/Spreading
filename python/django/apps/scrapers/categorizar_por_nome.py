@@ -273,8 +273,18 @@ def _construir_indice() -> None:
             # `\b` nas duas pontas: palavra inteira. Sem isso "cama" casaria dentro
             # de "camarao" e "tv" dentro de "tvs" — erro silencioso e caro, porque
             # manda o item para o nicho errado em vez de deixá-lo de fora.
-            padrao = re.compile(r"\b" + r"\s+".join(
-                re.escape(p) for p in termo.split(" ")) + r"\b")
+            # Cards de marketplace alternam livremente singular e plural: ``toalha``
+            # e ``toalhas``, ``projetor`` e ``projetores``. A regra anterior usava
+            # fronteira de palavra (correto), mas tratava cada plural como uma palavra
+            # totalmente diferente (inútil). Aceitar só o ``s`` final preserva a
+            # fronteira e não transforma uma busca em substring: ``casa`` casa em
+            # ``casas``, nunca em ``casamento``. Palavras que já terminam em ``s``
+            # ficam literais para não gerar formas artificiais como ``ss``.
+            partes = []
+            for parte in termo.split(" "):
+                sufixo_plural = r"s?" if parte.isalpha() and not parte.endswith("s") else ""
+                partes.append(re.escape(parte) + sufixo_plural)
+            padrao = re.compile(r"\b" + r"\s+".join(partes) + r"\b")
             _INDICE.append((padrao, macro, peso_fixo or len(termo.split(" "))))
 
 

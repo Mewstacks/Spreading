@@ -43,6 +43,9 @@ class Command(BaseCommand):
         parser.add_argument(
             "--username", default="lules",
             help="Conta cujo pool publicável é auditado por --elegiveis.")
+        parser.add_argument(
+            "--somente-sem-macro", action="store_true",
+            help="No dry-run, mostra apenas candidatos que continuam sem macro.")
 
     def handle(self, *args, **opts):
         with system_context():
@@ -90,6 +93,8 @@ class Command(BaseCommand):
                 cupons_normalizados__status="confirmado",
                 cupons_normalizados__cupom__estado="ativo",
             ).distinct()
+        if opts["somente_sem_macro"]:
+            qs = qs.filter(Q(macro_categoria__isnull=True) | Q(macro_categoria=""))
         qs = qs.order_by("-ultima_observacao", "-id")
         if opts["limite"]:
             qs = qs[:opts["limite"]]

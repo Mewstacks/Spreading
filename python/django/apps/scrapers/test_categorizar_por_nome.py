@@ -145,6 +145,16 @@ class MacroDoNomeTests(SimpleTestCase):
         self.assertEqual(macro_do_nome(""), "")
         self.assertEqual(macro_do_nome(None), "")
 
+    def test_plural_do_nome_preserva_classificacao_por_palavra_inteira(self):
+        self.assertEqual(
+            macro_do_nome("Jogo de Toalhas de Banho 4 Pecas"),
+            "Casa, Móveis e Decoração",
+        )
+        self.assertEqual(
+            macro_do_nome("Fones Bluetooth Sem Fio"),
+            "Áudio, Vídeo e Fotografia",
+        )
+
     def test_casa_palavra_inteira_e_ignora_acento(self):
         # "cama" nao pode casar dentro de "camarao"
         self.assertNotEqual(macro_do_nome("Camarão Descascado Congelado 1kg"),
