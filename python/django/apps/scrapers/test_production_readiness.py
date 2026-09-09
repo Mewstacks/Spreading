@@ -9,10 +9,15 @@ from django.test import TestCase
 from django.utils import timezone
 
 from apps.scrapers.models import ConfiguracaoEnvio, Produto
-from apps.scrapers.production_readiness import _taxonomia_catalogo, avaliar
+from apps.scrapers.production_readiness import (
+    NICHOS_PRIORITARIOS_LU, _taxonomia_catalogo, avaliar,
+)
 
 
 class ProducaoReadinessTests(TestCase):
+    def test_nichos_da_lu_incluem_audio_de_comparativos(self):
+        self.assertIn("Áudio, Vídeo e Fotografia", NICHOS_PRIORITARIOS_LU)
+
     def setUp(self):
         self.user = get_user_model().objects.create_user("lules", password="x")
         self.config = ConfiguracaoEnvio.objects.create(

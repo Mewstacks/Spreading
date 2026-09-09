@@ -16,6 +16,7 @@ NICHOS_PRIORITARIOS_LU = frozenset({
     "Limpeza e Lavanderia",
     "Cozinha, Mesa e Bar",
     "Casa, Móveis e Decoração",
+    "Áudio, Vídeo e Fotografia",
 })
 _MARCADORES_DE_TESTE = ("teste", "test", "smoke", "dev")
 
