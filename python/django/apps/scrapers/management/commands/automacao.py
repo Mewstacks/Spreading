@@ -273,10 +273,17 @@ def _rodar_cupons(lote=40):
     # lenta/CAPTCHA segurar o Chromium e impedir que o par já comprovado virasse
     # um link publicável. A ordem preserva a validação, mas tira-a do caminho
     # crítico de uma oferta pronta.
-    validacoes_sem_sessao = defer_missing_checkout_sessions()
-    validacoes_checkout = run_validation_batch(
-        adapters=CHECKOUT_VALIDATION_ADAPTERS, limit=2,
-    )
+    if resultado.get("retentativa_prioritaria"):
+        # Não reabre checkout enquanto aguardamos o mesmo Chromium. A próxima
+        # volta vem em segundos e executa as validações normalmente depois que
+        # o par produto+cupom tiver a primeira chance de gerar o link.
+        validacoes_sem_sessao = 0
+        validacoes_checkout = {}
+    else:
+        validacoes_sem_sessao = defer_missing_checkout_sessions()
+        validacoes_checkout = run_validation_batch(
+            adapters=CHECKOUT_VALIDATION_ADAPTERS, limit=2,
+        )
     resultado["validacoes_sem_sessao"] = validacoes_sem_sessao
     resultado["validacoes_checkout"] = validacoes_checkout
     logger.info(

@@ -351,6 +351,27 @@ class CouponPipelineTests(TestCase):
         self.assertEqual(ordem[:2], ["links", "coleta"])
         self.assertEqual(resultado["links_verificados"], 1)
 
+    def test_contecao_de_browser_retorna_antes_da_coleta_longa(self):
+        from apps.scrapers.coupon_pipeline import executar_pipeline_cupons
+
+        afiliacao = {
+            "vinculados": 1, "links_gerados": 0, "links_verificados": 0,
+            "links_reprovados": 0, "links_transitorios": 0, "links_falhos": 0,
+            "prontos": 0, "capacidade_adiada": 1,
+        }
+        with patch(
+            "apps.scrapers.coupon_pipeline._usuarios_ativos", return_value=[self.user],
+        ), patch(
+            "apps.scrapers.coupon_pipeline.afiliar_cupons", return_value=afiliacao,
+        ), patch(
+            "apps.scrapers.coupon_pipeline.coletar_cupons",
+            side_effect=AssertionError("coleta não deve atrasar a retomada"),
+        ):
+            resultado = executar_pipeline_cupons(usuarios=[self.user])
+
+        self.assertTrue(resultado["retentativa_prioritaria"])
+        self.assertEqual(resultado["capacidade_adiada"], 1)
+
     def test_conta_com_destino_tem_prioridade_sobre_conta_de_teste(self):
         from apps.scrapers.coupon_pipeline import _priorizar_usuarios_com_destino
 

@@ -911,6 +911,27 @@ def executar_pipeline_cupons(
                 "causa": type(exc).__name__,
             }
 
+    # Em handoff de deploy, o lease do Chromium anterior pode sobreviver por até
+    # 90s. Não começar uma coleta longa nesse intervalo: ela também precisa de
+    # navegador e fazia a retentativa curta só acontecer muitos minutos depois.
+    # A coleta é idempotente e volta no ciclo seguinte; o par já comprovado é o
+    # caminho de publicação e deve recuperar o slot primeiro.
+    if any(item.get("capacidade_adiada") for item in afiliacao_prioritaria.values()):
+        resultado = _metricas_vazias()
+        for afiliacao in afiliacao_prioritaria.values():
+            for key in (
+                "vinculados", "links_gerados", "links_verificados",
+                "links_reprovados", "links_transitorios", "links_falhos",
+                "prontos", "capacidade_adiada",
+            ):
+                resultado[key] += int(afiliacao.get(key, 0) or 0)
+        resultado.update({
+            "preparos_adiados": 0,
+            "usuarios": afiliacao_prioritaria,
+            "retentativa_prioritaria": True,
+        })
+        return resultado
+
     resultado = coletar_cupons(usuarios=usuarios) if coletar else _metricas_vazias()
 
     # Associação e preparação agora compartilham a mesma fila justa e idempotente.
