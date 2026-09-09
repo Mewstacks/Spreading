@@ -139,7 +139,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
     "Jardim, Piscina e Área Externa": (
         "piscina", "mangueira de jardim", "regador", "vaso de planta", "adubo",
         "substrato", "semente", "cortador de grama", "aparador de cerca",
-        "pergolado", "churrasqueira de jardim", "rede de descanso", "tesoura de poda", "pa de jardim", "pazinha", "pulverizador", "kit jardinagem", "soprador", "ancinho", "luvas para jardinagem", "esguicho", "para jardim", "tesoura para podar", "tesoura de jardinagem", "horta em vasos", "bonsai", "formifita", "antiformigas",
+        "pergolado", "churrasqueira de jardim", "rede de descanso", "tesoura de poda", "pa de jardim", "pazinha", "pulverizador", "kit jardinagem", "soprador", "ancinho", "luvas para jardinagem", "esguicho", "para jardim", "para grama", "vassoura para grama", "vasoura para grama", "foice de jardinagem", "irrigacao gotejamento", "tesoura para podar", "tesoura de jardinagem", "horta em vasos", "bonsai", "formifita", "antiformigas",
     ),
     "Automotivo": (
         ("pneu", 2), ("calibrador de pneu", 4), "roda automotiva", "amortecedor", "pastilha de freio", "oleo motor",
@@ -164,6 +164,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "maquiagem", "base facial", "protetor solar", "secador de cabelo", "secador de cabelos", "prancha lizze", "dyson airstrait",
         "chapinha", "prancha de cabelo", "barbeador", "depilador", "creme facial",
         "sabonete", "desodorante", "escova de cabelo", "leave in", "oleo capilar",
+        "matizador", "bioplastia", "babyliss", "cabelo e corpo", "hair care",
         "po descolorante", "progressiva", "modelador de cachos", "mascara condicionador",
         "reparador de pontas", "protetor termico", "cronograma capilar", "cronograma",
         "gel de limpeza", "clareador corporal", "clareador para axilas", "primer iluminador",
@@ -227,6 +228,8 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         # recentes fique invisível só por abrir com “kit” ou “caderneta”.
         "caderneta", "papelaria", "canetas", "caneta esferografica", "regua",
         "bloco de anotacoes", "lapiseira", "ecolapis", "fragmentadora de papel",
+        "prendedor de papel", "papel reciclado", "nota autoadesiva", "cola em fita",
+        "tilibra", "pentel", "tris",
         "planner", "borracha", "papel a4", "sulfite", "fita corretiva",
         "prancheta", "marca-texto", "ficha pautada", "adesivo decorado",
         "papel colorido", "ficha", "marcador de linhas", "adesivos", "lettering", "caligrafia", "faber castell", "faber-castell", "canson", "trilux",

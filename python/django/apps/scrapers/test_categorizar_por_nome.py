@@ -78,6 +78,19 @@ class MacroDoNomeTests(SimpleTestCase):
         for nome, esperado in casos.items():
             self.assertEqual(macro_do_nome(nome), esperado, nome)
 
+    def test_vocabulario_do_feed_sem_macro_de_hoje(self):
+        """Itens reais que mantinham a prontidão abaixo do limiar editorial."""
+        casos = {
+            "Matizador Profissional Knut Ultra Silver Perolado 150g": "Beleza e Cuidados Pessoais",
+            "Kit Bioplastia Lowell Home Care": "Beleza e Cuidados Pessoais",
+            "PRENDENDOR PAPEL TILIBRA DOURADO 25M": "Papelaria, Escritório e Escola",
+            "Nota Autoadesiva Tris Multicor pacote de 100": "Papelaria, Escritório e Escola",
+            "Vasoura para Grama e Jardim 22 Dentes sem Cabo": "Jardim, Piscina e Área Externa",
+            "Kit Irrigação Gotejamento Automático para Jardim": "Jardim, Piscina e Área Externa",
+        }
+        for nome, esperado in casos.items():
+            self.assertEqual(macro_do_nome(nome), esperado, nome)
+
     def test_vocabulario_recente_papelaria_e_livros_sem_domain_id(self):
         """Amostra real do feed fresco que não trazia domain_id em 09/09/2026."""
         casos = {
