@@ -83,10 +83,14 @@ class MacroDoNomeTests(SimpleTestCase):
         casos = {
             "Matizador Profissional Knut Ultra Silver Perolado 150g": "Beleza e Cuidados Pessoais",
             "Kit Bioplastia Lowell Home Care": "Beleza e Cuidados Pessoais",
+            "Kit Lowell Novo Blinda Cor Protetor Shampoo E Condicionador": "Beleza e Cuidados Pessoais",
             "PRENDENDOR PAPEL TILIBRA DOURADO 25M": "Papelaria, Escritório e Escola",
             "Nota Autoadesiva Tris Multicor pacote de 100": "Papelaria, Escritório e Escola",
             "Vasoura para Grama e Jardim 22 Dentes sem Cabo": "Jardim, Piscina e Área Externa",
             "Kit Irrigação Gotejamento Automático para Jardim": "Jardim, Piscina e Área Externa",
+            "Tesoura para Poda Profissional Premium": "Jardim, Piscina e Área Externa",
+            "Balança Digital Corporal Bioimpedância Aplicativo": "Saúde, Ortopedia e Equipamentos Médicos",
+            "Supercoffee Vanilla Latte Economic Size": "Alimentos e Bebidas",
         }
         for nome, esperado in casos.items():
             self.assertEqual(macro_do_nome(nome), esperado, nome)
