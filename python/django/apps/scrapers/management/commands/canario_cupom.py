@@ -21,7 +21,7 @@ class Command(BaseCommand):
 
     @system_job
     def handle(self, *args, **options):
-        from apps.scrapers.content_ranking import selecionar_conteudo_para_grupo
+        from apps.scrapers.content_ranking import _coupon_candidates
         from apps.scrapers.coupon_products import relacoes_prontas_para_envio
         from apps.scrapers.ofertas import (
             _desconto_efetivo_do_item_cupom,
@@ -42,11 +42,12 @@ class Command(BaseCommand):
         if not any(marcador in destino for marcador in MARCADORES_DE_TESTE):
             raise CommandError("Canário só pode ser publicado em grupo de teste.")
 
-        candidatos = selecionar_conteudo_para_grupo(
-            config, limit=20, registrar_shadow=False,
-        )
-        candidato = next((item for item in candidatos if item.kind == "coupon"), None)
-        if not candidato:
+        # O canário é uma prova específica do fluxo de cupom. A camada Deal pode
+        # escolher um Deal já medido (e corretamente não cair no ranking legado),
+        # mas isso não deve impedir a homologação da fila de cupons prontos.
+        candidatos = _coupon_candidates(config, limit=20)
+        candidato = next(iter(candidatos), None)
+        if candidato is None:
             raise CommandError("Nenhum cupom pronto e elegível para esta regra.")
         cupom = candidato.obj
         relacao = next(iter(relacoes_prontas_para_envio(cupom, user)), None)

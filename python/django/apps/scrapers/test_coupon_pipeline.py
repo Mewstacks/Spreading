@@ -445,7 +445,7 @@ class CouponCanaryCommandTests(TestCase):
         )
         saida = StringIO()
         with patch(
-            "apps.scrapers.content_ranking.selecionar_conteudo_para_grupo",
+            "apps.scrapers.content_ranking._coupon_candidates",
             return_value=[candidato],
         ), patch(
             "apps.scrapers.coupon_products.relacoes_prontas_para_envio",
