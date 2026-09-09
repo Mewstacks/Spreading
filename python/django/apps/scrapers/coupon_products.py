@@ -637,6 +637,17 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
                 # ligada, em "o ML exigiu sessão" — um cupom morto voltando à fila a
                 # cada 20 min, para sempre, e ainda pedindo reconexão ao usuário.
                 return [], False, False, True
+            if response.status_code == 403:
+                # O ML pode responder 403 ao cliente HTTP mesmo com uma sessão
+                # válida, por challenge/WAF do endpoint ``lista.``. Isso é uma
+                # resposta concreta (não timeout) e o Chromium autenticado é o
+                # fallback previsto para ela. Tratá-la como falha de transporte
+                # abria o disjuntor e impedia exatamente o passo que a resolveria.
+                logger.info(
+                    "Container ML via HTTP recebeu 403 para %s; tentando navegador.",
+                    cupom.pk,
+                )
+                return None, False, False, False
             response.raise_for_status()
             _registrar_sucesso_de_transporte()
             return _produtos_ml_do_html(response.text, limite=9), False, False, False

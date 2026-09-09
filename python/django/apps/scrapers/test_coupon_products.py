@@ -3,7 +3,7 @@ from datetime import timedelta
 from decimal import Decimal
 from io import BytesIO
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase, override_settings
@@ -529,6 +529,30 @@ class CouponPreparationTests(TestCase):
                         + timezone.timedelta(minutes=1))
         # E o Chromium não é gasto contra a mesma porta fechada.
         iniciar_browser.assert_not_called()
+
+    @patch("apps.scrapers.scraper_mercadolivre.scraper.listar_itens_por_cupom")
+    @patch("apps.scrapers.auxiliar.iniciar_browser")
+    @patch("apps.scrapers.coupon_products.ml_site_browser_resource")
+    @patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session")
+    @patch("apps.scrapers.ml_auth.storage_state", return_value={"cookies": []})
+    def test_403_do_container_tenta_browser_em_vez_de_abrir_disjuntor(
+        self, _storage, http_session, browser_resource, iniciar_browser, listar,
+    ):
+        """403 do WAF é resposta do ML; a sessão Chromium ainda pode lê-la."""
+        from apps.scrapers.coupon_products import _coletar_ml_remoto
+
+        resposta = Mock(status_code=403, text="challenge", url="https://lista.mercadolivre.com.br/x")
+        http_session.return_value.get.return_value = resposta
+        browser_resource.return_value = MagicMock()
+        browser_resource.return_value.__enter__.return_value = True
+        iniciar_browser.return_value = MagicMock()
+        iniciar_browser.return_value.__enter__.return_value = (Mock(), Mock())
+        listar.return_value = {"produtos_aplicaveis": []}
+
+        resultado = _coletar_ml_remoto(self._cupom_ml_de_container())
+
+        iniciar_browser.assert_called_once()
+        self.assertEqual(resultado["veredito"], "vazio_comprovado")
 
     def test_falha_de_transporte_tem_motivo_e_backoff_curto(self):
         from apps.scrapers.coupon_products import (
