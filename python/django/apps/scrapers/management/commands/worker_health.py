@@ -21,6 +21,7 @@ import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from django.core.management.base import BaseCommand
+from django.utils import timezone
 
 from apps.scrapers import automacao_state as st
 
@@ -36,9 +37,20 @@ logger = logging.getLogger(__name__)
 # em grupo, e era a única invisível das duas telas.
 ESTEIRAS = ("scrape", "scrape_rapido", "cupons", "envio", "links", "monitor", "canais")
 
+# As lanes de coleta e links iniciam deliberadamente depois da fila de cupons para
+# não disputar Chromium no boot. Sem essa tabela o health check reprovava a máquina
+# durante a própria janela planejada e um deploy saudável terminava como crítico.
+ATRASO_DE_BOOT = {
+    "canais": 15, "envio": 20, "cupons": 35,
+    "links": 360, "monitor": 360, "scrape_rapido": 390, "scrape": 420,
+}
+INICIADO_EM = timezone.now()
 
-def _diagnostico() -> tuple[bool, dict]:
+
+def _diagnostico(agora=None) -> tuple[bool, dict]:
     """(saudável, corpo). Uma esteira sem heartbeat recente reprova o check."""
+    agora = agora or timezone.now()
+    desde_boot = max(0, (agora - INICIADO_EM).total_seconds())
     esteiras = {}
     for job in ESTEIRAS:
         try:
@@ -47,9 +59,16 @@ def _diagnostico() -> tuple[bool, dict]:
             logger.warning("worker_health: falha ao ler heartbeat de %s: %s", job, exc)
             esteiras[job] = {"viva": False, "erro": str(exc)}
             continue
-        esteiras[job] = {"viva": viva}
-    ok = all(e.get("viva") for e in esteiras.values())
-    return ok, {"ok": ok, "esteiras": esteiras, "stale_s": st.HEARTBEAT_STALE}
+        aguardando_boot = (
+            not viva
+            and desde_boot < ATRASO_DE_BOOT.get(job, 0) + st.HEARTBEAT_STALE
+        )
+        esteiras[job] = {"viva": viva, "iniciando": aguardando_boot}
+    ok = all(e.get("viva") or e.get("iniciando") for e in esteiras.values())
+    return ok, {
+        "ok": ok, "esteiras": esteiras, "stale_s": st.HEARTBEAT_STALE,
+        "desde_boot_s": round(desde_boot),
+    }
 
 
 class _Handler(BaseHTTPRequestHandler):
