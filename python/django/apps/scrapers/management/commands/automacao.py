@@ -26,6 +26,11 @@ RETRY_MINUTOS = 5
 BACKOFF_BANCO_MAX_S = 300
 # Intervalo até retomar uma varredura que cedeu o navegador no meio do caminho.
 RETOMADA_MINUTOS = 5
+# A classificação por nome é propositalmente conservadora, mas percorrer todo o
+# histórico a cada scrape completo fazia a etapa de pós-processamento competir com
+# a próxima coleta. O queryset ordena por observação, portanto este teto cobre o
+# lote fresco que acabou de entrar sem deixar uma taxonomia antiga atrasar a lane.
+LIMITE_CLASSIFICACAO_APOS_COLETA = 2_000
 
 
 def _resta_varredura():
@@ -168,7 +173,7 @@ def _rodar_scrape(*, lojas_alvo=None):
         # O ML nem sempre traz domain_id no feed novo. Classificar no mesmo
         # ciclo impede que a coleta fresca derrube o gate de taxonomia até o
         # próximo backfill manual.
-        popular_macro_por_nome()
+        popular_macro_por_nome(limite=LIMITE_CLASSIFICACAO_APOS_COLETA)
     if not sucessos and falhas and not adiados:
         raise RuntimeError(f"Todas as fontes falharam: {', '.join(falhas)}")
     if falhas:

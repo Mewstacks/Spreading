@@ -655,6 +655,20 @@ class SourcePipelineTests(ComoWorker, TestCase):
         self.assertIn("aspirador robô", termos)
         expire.assert_called_once()
 
+    @patch("apps.scrapers.categorizar_por_nome.popular_macro_por_nome")
+    @patch("apps.scrapers.maintenance.expire_stale")
+    def test_full_cycle_classifica_apenas_o_lote_fresco(self, _expire, categorizar):
+        """A pós-classificação não pode monopolizar a esteira por todo o histórico."""
+        from apps.scrapers.management.commands import automacao
+        from apps.scrapers.marketplaces import registry as marketplaces
+
+        with patch.object(marketplaces, "MARKETPLACES", {"mercadolivre": MagicMock()}):
+            automacao._rodar_scrape()
+
+        categorizar.assert_called_once_with(
+            limite=automacao.LIMITE_CLASSIFICACAO_APOS_COLETA,
+        )
+
     def test_full_ml_feed_waits_briefly_for_the_holder_to_yield(self):
         from apps.scrapers.carga import coordinated_ml_browser
 
