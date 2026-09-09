@@ -10,7 +10,8 @@ from apps.scrapers.coupon_validation import (
     validacoes_recentes_por_codigo,
 )
 from apps.scrapers.models import (
-    CupomDisponibilidade, CupomNormalizado, CupomValidacao, FonteIngestao, Produto,
+    CupomDisponibilidade, CupomNormalizado, CupomPreparacao, CupomValidacao,
+    FonteIngestao, Produto, ProdutoCupom,
 )
 
 
@@ -80,6 +81,36 @@ class CouponValidationLedgerTests(TestCase):
             self.coupon, self.user, corroboracoes=set(),
             validacoes_checkout=validations,
         ))
+
+    def test_accepted_checkout_materializes_the_exact_product_coupon_pair(self):
+        """Checkout aceito precisa chegar ao mesmo contrato do envio, não só à tela."""
+        product = Produto.objects.create(
+            marketplace="amazon", nome="Livro validado", asin="B012345678",
+            preco_sem_desconto=120, preco_com_cupom=120, preco_efetivo=120,
+            imagem_url="https://images.example/livro.jpg",
+            link_produto="https://www.amazon.com.br/dp/B012345678",
+        )
+        validation, _ = agendar_validacao(
+            self.coupon, self.user, product_key=product.asin,
+            product_url=product.link_produto,
+            cart_context={"quantity": 1, "product_id": product.pk},
+        )
+
+        registrar_resultado(
+            validation, status="accepted", subtotal_before="120.00",
+            subtotal_after="100.00",
+        )
+
+        relation = ProdutoCupom.objects.get(produto=product, cupom=self.coupon)
+        self.assertEqual(relation.status, "confirmado")
+        self.assertEqual(relation.preco_atual, Decimal("120.00"))
+        self.assertEqual(relation.preco_final, Decimal("100.00"))
+        self.assertIsNone(relation.organization_id)
+        preparation = CupomPreparacao.objects.get(
+            cupom=self.coupon, usuario=self.user,
+        )
+        self.assertEqual(preparation.status, "pronto")
+        self.assertEqual(preparation.reason_code, "checkout_discount_observed")
 
     def test_terminal_checkout_rejection_discards_for_this_user(self):
         registrar_resultado(

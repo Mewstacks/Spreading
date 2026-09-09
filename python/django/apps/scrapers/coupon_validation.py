@@ -209,6 +209,80 @@ def agendar_validacao(cupom, usuario, *, product_key="", product_url="",
     return validation, created
 
 
+def _materializar_associacao_checkout(validacao):
+    """Promove uma redução observada ao par estrito produto+cupom.
+
+    O carrinho é a prova mais forte que temos para um código de comunidade: ele
+    conhece o item exato, o subtotal antes/depois e nunca cruza a fronteira de
+    compra. Antes este veredito só liberava a *alegação* na projeção; faltava
+    gravar o par que o transporte de WhatsApp exige, deixando o funil em
+    ``product_match_pending`` para sempre.
+
+    A associação produto+código é factual; a validação e o preparo que a liberam
+    continuam vinculados à conta que executou o checkout.
+    """
+    if validacao.status != "accepted" or not validacao.no_purchase:
+        return None
+    contexto = validacao.evidence.get("cart_context") if isinstance(
+        validacao.evidence, dict) else {}
+    produto_id = (contexto or {}).get("product_id")
+    if not produto_id:
+        return None
+
+    from .models import CupomPreparacao, Produto, ProdutoCupom
+    organization = validacao.organization
+    if organization is None:
+        # Linhas criadas antes da migração de tenancy podem ser lidas durante
+        # um backfill; nunca transforme esse caso em relação pública.
+        organization = organization_for_user(validacao.usuario)
+    if organization is None:
+        return None
+    produto = Produto.objects.filter(
+        pk=produto_id,
+        marketplace=str(validacao.marketplace or "").casefold(),
+        link_produto=validacao.product_url,
+    ).first()
+    if produto is None:
+        return None
+    antes, depois = validacao.subtotal_before, validacao.subtotal_after
+    if antes is None or depois is None or depois >= antes:
+        return None
+
+    agora = timezone.now()
+    evidencia = {
+        "regra": "checkout_sem_compra",
+        "validacao_id": validacao.pk,
+        "subtotal_antes": str(antes),
+        "subtotal_depois": str(depois),
+    }
+    relacao, _ = ProdutoCupom.objects.update_or_create(
+        produto=produto, cupom=validacao.cupom,
+        defaults={
+            "status": "confirmado", "verificado_em": agora,
+            "preco_original": antes, "preco_atual": antes,
+            "preco_final": depois, "evidencia": evidencia,
+        },
+    )
+
+    # O preparo anterior pode ter sido adiado por falta de associação. A prova
+    # do checkout já traz os três preços exigidos, então reabre a mesma chave
+    # para o ranking/link builder sem esperar o backoff de um veredito obsoleto.
+    from .coupon_products import chave_produtos_cupom, _usuario_do_preparo
+    contexto_preparo = _usuario_do_preparo(validacao.cupom, validacao.usuario)
+    CupomPreparacao.objects.update_or_create(
+        cupom=validacao.cupom, usuario=contexto_preparo,
+        defaults={
+            "organization": organization,
+            "status": "pronto",
+            "produtos_chave": chave_produtos_cupom(validacao.cupom),
+            "verificado_em": agora, "proxima_tentativa": None,
+            "erro": "", "reason_code": "checkout_discount_observed",
+            "safe_detail": "Desconto monetário confirmado no carrinho sem compra.",
+        },
+    )
+    return relacao
+
+
 def registrar_resultado(validation, *, status, reason_code="", safe_detail="",
                         subtotal_before=None, subtotal_after=None, evidence=None):
     """Persiste um veredito conservador e recalcula a economia observada.
@@ -271,6 +345,7 @@ def registrar_resultado(validation, *, status, reason_code="", safe_detail="",
             "subtotal_after", "discount_amount", "evidence", "no_purchase",
             "attempts", "verified_at", "retry_at", "updated_at",
         ))
+        _materializar_associacao_checkout(locked)
     return locked
 
 
