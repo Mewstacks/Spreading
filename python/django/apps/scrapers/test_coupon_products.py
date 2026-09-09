@@ -1246,6 +1246,20 @@ class GenericCouponNoticeTests(SimpleTestCase):
         self.assertIn("produto", result["motivo"])
 
 
+class CouponProductLinkTests(SimpleTestCase):
+    def test_ml_social_profile_never_counts_as_product_link(self):
+        from apps.scrapers.ofertas import _link_cupom_do_produto_publicavel
+
+        self.assertFalse(_link_cupom_do_produto_publicavel(
+            "https://www.mercadolivre.com.br/social/lphoffmann?matt_word=x",
+            "mercadolivre",
+        ))
+        self.assertTrue(_link_cupom_do_produto_publicavel(
+            "https://www.mercadolivre.com.br/p/MLB123?matt_word=x",
+            "mercadolivre",
+        ))
+
+
 class PromobitAmazonCodigoReadySendTests(TestCase):
     def test_codigo_promobit_sem_fonte_licenciada_nao_fica_ready(self):
         from apps.accounts.models import Perfil

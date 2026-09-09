@@ -1146,6 +1146,22 @@ def _motivo_navegador(texto: str, generico: str = "Não foi possível preparar o
     return texto if texto.startswith("Link Builder") else generico
 
 
+def _link_cupom_do_produto_publicavel(link: str, marketplace: str) -> bool:
+    """Recusa links de vitrine/perfil que não levam ao item anunciado."""
+    from urllib.parse import urlsplit
+
+    try:
+        partes = urlsplit(str(link or ""))
+    except ValueError:
+        return False
+    if partes.scheme != "https" or not partes.netloc:
+        return False
+    if str(marketplace or "").lower() != "mercadolivre":
+        return True
+    caminho = (partes.path or "/").rstrip("/").lower()
+    return bool(caminho and caminho != "/" and not caminho.startswith("/social/"))
+
+
 def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
     """([{produto, link}], bloqueio) com link afiliado válido + foto p/ a colagem.
 
@@ -1195,6 +1211,13 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
         relation = relacao_por_produto[p.id]
         row = situacao.get(relation.pk)
         link = canonical_coupon_link(row) if coupon_link_verified_and_fresh(row) else ""
+        if link and not _link_cupom_do_produto_publicavel(link, mkt):
+            link = ""
+            bloqueio = {
+                "mensagem": "O link afiliado disponível aponta para uma vitrine ou "
+                            "perfil, não para o produto anunciado.",
+                "precisa_login_ml": False,
+            }
         if not link and bloqueio is None:
             try:
                 info = mp.build_affiliate_link(
@@ -1221,7 +1244,8 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
                 logger.debug("Falha ao afiliar produto %s do cupom: %s",
                              getattr(p, "id", "?"), exc)
                 info = None
-            if info and info.get("link_afiliado") and info.get("afiliado_ok") is not False:
+            if (info and info.get("link_afiliado") and info.get("afiliado_ok") is not False
+                    and _link_cupom_do_produto_publicavel(info["link_afiliado"], mkt)):
                 link = info["link_afiliado"]
                 try:
                     def _salvar_relacao():
@@ -1242,6 +1266,12 @@ def _preparar_itens_cupom(cupom, usuario, relacoes, limite=9):
                     _executar_orm(_salvar_relacao)
                 except Exception:
                     pass
+            elif info and info.get("link_afiliado"):
+                bloqueio = {
+                    "mensagem": "O link afiliado gerado aponta para uma vitrine ou "
+                                "perfil, não para o produto anunciado.",
+                    "precisa_login_ml": False,
+                }
         if link:
             itens.append({"produto": p, "link": link,
                           "relacao": relacao_por_produto[p.id]})
