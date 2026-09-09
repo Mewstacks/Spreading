@@ -61,7 +61,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "notebook", "laptop", "computador", "desktop", "monitor", "teclado",
         "mouse", "mousepad", "impressora", "roteador", "modem", "pendrive",
         "ssd", "hd externo", "memoria ram", "placa de video", "placa-mae", "fonte cooler master", "processador",
-        "webcam", "tablet", "estabilizador", "nobreak", "cabo hdmi", "starlink",
+        "webcam", "tablet", "estabilizador", "nobreak", "cabo hdmi", "starlink", "gpu", "radeon", "adaptador hub usb",
     ),
     "Áudio, Vídeo e Fotografia": (
         "caixa de som", "soundbar", "fone bluetooth", "headset", "headphone",
@@ -95,7 +95,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "mesa de cabeceira", "lixeira", "manta", "paneleiro", "difusor de ambiente",
         "aromatizador", "home spray",
         "penteadeira", "comoda", "roupeiro", "quarto modulado", "cama box", "painel decorativo", "figura decorativa", "vaso decorativo", "letreiro decorativo",
-        "porta chaves", "porta-retrato", "cachepot", "ornamento decorativo", "placa decorativa", "caixa decorativa", "puff", "costela de adao artificial", "caixa plastica", "cesto de lixo",
+        "porta chaves", "porta-retrato", "porta retrato", "cachepot", "ornamento decorativo", "placa decorativa", "caixa decorativa", "puff", "costela de adao artificial", "caixa plastica", "cesto de lixo", "elefante decorativo", "plantas artificiais", "painel 3d",
     ),
     "Cozinha, Mesa e Bar": (
         "panela", "panelas", "frigideira", "talher", "talheres", "prato", "copo", "taca",
@@ -110,7 +110,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "detergente", "sabao", ("amaciante", 2), "desinfetante", "agua sanitaria",
         "vassoura", "rodo", "balde", "esfregao", "pano de chao", "cesto de roupa",
         "varal", "cabide", "pano limpa vidros", "neutralizador de ar",
-        "kit banheiro", "cesto para roupas", "cesto dobravel", "sacos de lavar", "escova eletrica de limpeza", "neutralizadores", "inseticida",
+        "kit banheiro", "cesto para roupas", "cesto dobravel", "cesto multiuso", "sacos de lavar", "escova eletrica de limpeza", "neutralizadores", "inseticida",
     ),
     "Casa e Construção": (
         "torneira", "chuveiro", "registro", "sifao", "vaso sanitario", "pia",
@@ -127,7 +127,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "arruela", "porca", "vedacao", "multimetro", "paquimetro", "maquina de solda",
         "arame solda", "nivelador a laser", "pistola de pintura", "abracadeira",
         "chave combinada",
-        "maquina inversora", "chave de impacto", "perfurador de solo", "bomba pressurizadora", "desobstruidora de alta pressao", "multi ferramentas", "escada multifuncional", "fio de solda", "fita dupla face",
+        "maquina inversora", "maquina solda", "chave de impacto", "perfurador de solo", "bomba pressurizadora", "desobstruidora de alta pressao", "multi ferramentas", "escada multifuncional", "fio de solda", "fita dupla face",
     ),
     "Materiais Elétricos e Componentes": (
         "lampada", "reator", "disjuntor", "tomada", "interruptor", "fita led",
@@ -167,7 +167,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "po descolorante", "progressiva", "modelador de cachos", "mascara condicionador",
         "reparador de pontas", "protetor termico", "cronograma capilar", "cronograma",
         "gel de limpeza", "clareador corporal", "clareador para axilas", "primer iluminador",
-        "aparador de pelos", "aparador oneblade", "serum capilar", "secador multifuncional", "alisador", "base coat", "oleo creme", "oleo reparador",
+        "aparador de pelos", "aparador oneblade", "serum capilar", "serum", "secador multifuncional", "alisador", "base coat", "oleo creme", "oleo reparador", "principia", "eico pro",
     ),
     "Saúde, Ortopedia e Equipamentos Médicos": (
         "termometro", "oximetro", "medidor de pressao", "nebulizador", "mascara",
@@ -195,7 +195,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
     ),
     "Bolsas, Malas e Viagem": (
         "mochila", "bolsa", "mala de viagem", "carteira", "necessaire",
-        "pochete", "mala de bordo", "chaveiro",
+        "pochete", "mala de bordo", "chaveiro", "bolsa masculina",
     ),
     "Joias, Relógios e Bijuterias": (
         "relogio", "colar", "pulseira", "brinco", "anel", "corrente de prata",

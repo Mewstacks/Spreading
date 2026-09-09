@@ -125,6 +125,12 @@ class MacroDoNomeTests(SimpleTestCase):
             "Kit 4 Refletores LED 400W": "Materiais Elétricos e Componentes",
             "Kit Encanto Faber-Castell": "Papelaria, Escritório e Escola",
             "Tesoura Para Podar Profissional": "Jardim, Piscina e Área Externa",
+            "Máquina Solda Inversora 250A": "Ferramentas e Manutenção",
+            "Principia Kit Essencial GL-02": "Beleza e Cuidados Pessoais",
+            "GPU Powercolor AMD Radeon": "Eletrônicos e Informática",
+            "Elefante Decorativo Em Resina": "Casa, Móveis e Decoração",
+            "Cesto Multiuso Para Lavanderia": "Limpeza e Lavanderia",
+            "Adaptador Hub USB Com 8 Portas": "Eletrônicos e Informática",
         }
         for nome, esperado in casos.items():
             self.assertEqual(macro_do_nome(nome), esperado, nome)
