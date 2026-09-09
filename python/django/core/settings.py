@@ -585,6 +585,9 @@ AMAZON_PUBLIC_COUPON_TERMS = [
 AMAZON_PUBLIC_PAGES_PER_TERM = max(
     1, int(os.getenv("AMAZON_PUBLIC_PAGES_PER_TERM", "3")),
 )
+AMAZON_PUBLIC_FETCH_TIMEOUT_MS = max(
+    1000, int(os.getenv("AMAZON_PUBLIC_FETCH_TIMEOUT_MS", "15000")),
+)
 # Saída opcional dedicada para páginas públicas da Amazon. O Fly recebe HTTP 503
 # da busca mesmo em regiões diferentes; credenciais ficam somente em secrets.
 AMAZON_PUBLIC_PROXY_SERVER = os.getenv("AMAZON_PUBLIC_PROXY_SERVER", "").strip()

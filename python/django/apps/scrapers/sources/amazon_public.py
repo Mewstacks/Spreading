@@ -221,23 +221,46 @@ def _abrir_primeira_pagina_busca(page, url):
 
 
 def _buscar_pagina_na_sessao(page, url):
-    """Busca paginação na sessão já aceita, sem nova navegação/round-trips DOM."""
-    script = """async (url) => {
+    """Busca paginação na sessão já aceita, sem nova navegação/round-trips DOM.
+
+    ``fetch`` no contexto da página não herda o timeout de ``page.goto``.
+    Sem um AbortController, uma conexão pendurada da Amazon segurava o único
+    Chromium e atrasava o preparo de cupons das demais lojas.
+    """
+    timeout_ms = max(
+        1000, int(getattr(settings, "AMAZON_PUBLIC_FETCH_TIMEOUT_MS", 15000)),
+    )
+    script = """async ({url, timeoutMs}) => {
             const extract = """ + _SEARCH_ROWS_JS + """;
             const started = Date.now();
-            const response = await fetch(url, {credentials: "include"});
-            const html = await response.text();
-            const doc = new DOMParser().parseFromString(html, "text/html");
-            return {
-                status: response.status,
-                title: doc.title || "",
-                body: (doc.body ? doc.body.innerText : "").slice(0, 5000),
-                rows: extract(doc),
-                bytes: html.length,
-                duration_ms: Date.now() - started,
-            };
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
+            try {
+                const response = await fetch(url, {
+                    credentials: "include", signal: controller.signal,
+                });
+                const html = await response.text();
+                const doc = new DOMParser().parseFromString(html, "text/html");
+                return {
+                    status: response.status,
+                    title: doc.title || "",
+                    body: (doc.body ? doc.body.innerText : "").slice(0, 5000),
+                    rows: extract(doc),
+                    bytes: html.length,
+                    duration_ms: Date.now() - started,
+                };
+            } catch (error) {
+                return {
+                    status: 0, title: "", body: "", rows: [], bytes: 0,
+                    duration_ms: Date.now() - started,
+                    fetch_error: error && error.name === "AbortError"
+                        ? "fetch_timeout" : "fetch_failed",
+                };
+            } finally {
+                clearTimeout(timer);
+            }
         }"""
-    return page.evaluate(script, url)
+    return page.evaluate(script, {"url": url, "timeoutMs": timeout_ms})
 
 
 @contextmanager

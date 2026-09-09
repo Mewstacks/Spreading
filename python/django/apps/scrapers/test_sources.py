@@ -1126,8 +1126,11 @@ class AmazonPublicPriceSanityTests(TestCase):
 
         self.assertEqual(result["status"], 200)
         script, argument = page.evaluate.call_args.args
-        self.assertEqual(argument, url)
-        self.assertIn('fetch(url, {credentials: "include"})', script)
+        self.assertEqual(argument["url"], url)
+        self.assertEqual(argument["timeoutMs"], 15000)
+        self.assertIn('fetch(url, {', script)
+        self.assertIn('credentials: "include"', script)
+        self.assertIn("AbortController", script)
         self.assertIn("DOMParser", script)
         self.assertNotIn("eval(", script)
 
