@@ -112,6 +112,23 @@ class MacroDoNomeTests(SimpleTestCase):
         for nome, esperado in casos.items():
             self.assertEqual(macro_do_nome(nome), esperado, nome)
 
+    def test_auditoria_do_pool_elegivel_sem_macro(self):
+        """Títulos reais auditados em 09/09/2026, sem categoria da origem."""
+        casos = {
+            "Porta Chaves Strassis Design Metal e Madeira": "Casa, Móveis e Decoração",
+            "Cesto Dobrável Para Roupas 39 Litros": "Limpeza e Lavanderia",
+            "Sérum Capilar Reparador Para Cabelos": "Beleza e Cuidados Pessoais",
+            "Chiclete Trident Menta Caixa": "Alimentos e Bebidas",
+            "Caixa Som Philco Extreme 1200w": "Áudio, Vídeo e Fotografia",
+            "Sanitário Vaso Convencional Redondo": "Casa e Construção",
+            "Escada Multifuncional de Alumínio 4x4": "Ferramentas e Manutenção",
+            "Kit 4 Refletores LED 400W": "Materiais Elétricos e Componentes",
+            "Kit Encanto Faber-Castell": "Papelaria, Escritório e Escola",
+            "Tesoura Para Podar Profissional": "Jardim, Piscina e Área Externa",
+        }
+        for nome, esperado in casos.items():
+            self.assertEqual(macro_do_nome(nome), esperado, nome)
+
     def test_qualificador_no_fim_nao_manda_no_resultado(self):
         """A cabeca do nome decide; o que vem depois e complemento.
 

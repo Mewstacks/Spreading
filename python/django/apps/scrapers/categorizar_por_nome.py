@@ -67,6 +67,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "caixa de som", "soundbar", "fone bluetooth", "headset", "headphone",
         "microfone", "camera", "cameras", "gopro", "drone", "projetor",
         "televisao", "smart tv", "lente", "tripe", "ring light", "fones de ouvido",
+        "caixa som", "projetores",
         # Títulos recentes de marketplace usam o substantivo curto antes de
         # qualificadores: “Fone tradutor ...”, “Fone sem fio ...”. É inequívoco
         # no catálogo de produto (não confundir com texto livre de atendimento).
@@ -94,6 +95,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "mesa de cabeceira", "lixeira", "manta", "paneleiro", "difusor de ambiente",
         "aromatizador", "home spray",
         "penteadeira", "comoda", "roupeiro", "quarto modulado", "cama box", "painel decorativo", "figura decorativa", "vaso decorativo", "letreiro decorativo",
+        "porta chaves", "porta-retrato", "cachepot", "ornamento decorativo", "placa decorativa", "caixa decorativa", "puff", "costela de adao artificial", "caixa plastica", "cesto de lixo",
     ),
     "Cozinha, Mesa e Bar": (
         "panela", "panelas", "frigideira", "talher", "talheres", "prato", "copo", "taca",
@@ -108,13 +110,14 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "detergente", "sabao", ("amaciante", 2), "desinfetante", "agua sanitaria",
         "vassoura", "rodo", "balde", "esfregao", "pano de chao", "cesto de roupa",
         "varal", "cabide", "pano limpa vidros", "neutralizador de ar",
+        "kit banheiro", "cesto para roupas", "cesto dobravel", "sacos de lavar", "escova eletrica de limpeza", "neutralizadores", "inseticida",
     ),
     "Casa e Construção": (
         "torneira", "chuveiro", "registro", "sifao", "vaso sanitario", "pia",
         "azulejo", "porcelanato", "argamassa", "cimento", "tinta", "verniz",
         "fechadura", "dobradica", "cadeado", "mangueira", "caixa dagua", "puxador",
         "cremalheira", "rodape", "prendedor de porta",
-        "ducha higienica", "cuba de embutir", "piso vinilico", "spray impermeabilizante",
+        "ducha higienica", "cuba de embutir", "piso vinilico", "spray impermeabilizante", "sanitario", "vaso convencional",
     ),
     "Ferramentas e Manutenção": (
         "furadeira", "parafusadeira", "esmerilhadeira", "serra", "martelo",
@@ -124,19 +127,19 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "arruela", "porca", "vedacao", "multimetro", "paquimetro", "maquina de solda",
         "arame solda", "nivelador a laser", "pistola de pintura", "abracadeira",
         "chave combinada",
-        "maquina inversora", "chave de impacto", "perfurador de solo", "bomba pressurizadora", "desobstruidora de alta pressao", "multi ferramentas",
+        "maquina inversora", "chave de impacto", "perfurador de solo", "bomba pressurizadora", "desobstruidora de alta pressao", "multi ferramentas", "escada multifuncional", "fio de solda", "fita dupla face",
     ),
     "Materiais Elétricos e Componentes": (
         "lampada", "reator", "disjuntor", "tomada", "interruptor", "fita led",
         "refletor", "extensao eletrica", "filtro de linha", "pilha", "bateria",
         "soquete", "e27", "plafon", "spot led", "rolo de fio", "cabo flexivel",
         "placa solar", "inversor", "fio eletrico",
-        "protetor de surto", "conector wago", "cabo de rede", "cabo ethernet",
+        "protetor de surto", "conector wago", "cabo de rede", "cabo ethernet", "refletores", "conector compacto", "conectores compactos", "iclamper",
     ),
     "Jardim, Piscina e Área Externa": (
         "piscina", "mangueira de jardim", "regador", "vaso de planta", "adubo",
         "substrato", "semente", "cortador de grama", "aparador de cerca",
-        "pergolado", "churrasqueira de jardim", "rede de descanso", "tesoura de poda", "pa de jardim", "pazinha", "pulverizador", "kit jardinagem", "soprador", "ancinho", "luvas para jardinagem", "esguicho",
+        "pergolado", "churrasqueira de jardim", "rede de descanso", "tesoura de poda", "pa de jardim", "pazinha", "pulverizador", "kit jardinagem", "soprador", "ancinho", "luvas para jardinagem", "esguicho", "para jardim", "tesoura para podar", "tesoura de jardinagem", "horta em vasos", "bonsai", "formifita", "antiformigas",
     ),
     "Automotivo": (
         ("pneu", 2), ("calibrador de pneu", 4), "roda automotiva", "amortecedor", "pastilha de freio", "oleo motor",
@@ -145,7 +148,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "aditivo", "limpador de para brisa", "capacete", "moto peca", "parachoque",
         "grade radiador", "sensor abs", "manopla cambio", "comando de valvula",
         "correia tensor", "eletrovalvula", "capa de chuva moto", "capa chuva motoqueiro",
-        "lixeira automotiva",
+        "lixeira automotiva", "michelin city extra", "rallybar", "parabrisa", "comando admissao", "painel secagem pintura",
     ),
     "Pets e Animais": (
         "cachorro", "gato", "pet", "racao", "coleira", "guia para cachorro",
@@ -164,7 +167,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "po descolorante", "progressiva", "modelador de cachos", "mascara condicionador",
         "reparador de pontas", "protetor termico", "cronograma capilar", "cronograma",
         "gel de limpeza", "clareador corporal", "clareador para axilas", "primer iluminador",
-        "aparador de pelos", "aparador oneblade",
+        "aparador de pelos", "aparador oneblade", "serum capilar", "secador multifuncional", "alisador", "base coat", "oleo creme", "oleo reparador",
     ),
     "Saúde, Ortopedia e Equipamentos Médicos": (
         "termometro", "oximetro", "medidor de pressao", "nebulizador", "mascara",
@@ -174,21 +177,21 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "magnesio", "pre treino", "cinta hernia", "multivitaminico", "omega 3",
         "andador", "barra de apoio", "corretor de postura", "medidor de febre", "kinesio",
         "proteina isolada", "isolate protein", "beef protein", "hipercalorico", "cpap",
-        "balanca bioimpedancia",
+        "balanca bioimpedancia", "corretores de postura", "fotopolimerizador odontologico", "cunha para uso",
     ),
     "Alimentos e Bebidas": (
         "cafe", "cha", "chocolate", "biscoito", "bolacha", "cerveja", "vinho",
         "whisky", "vodka", "refrigerante", "suco", "azeite", "arroz", "feijao",
         "macarrao", "farinha", "acucar", "leite", "achocolatado", "castanha",
         "amendoim", "macadamia", "noz", "mel", "tempero", "gelatina", "creme de avela",
-        "molho", "curry",
+        "molho", "curry", "chiclete",
     ),
     "Moda, Calçados e Acessórios": (
         "camiseta", "camisa", "calca", "bermuda", "bermudas dry fit", "short", "vestido", "saia",
         "jaqueta", "moletom", "blusa", "tenis", "sapato", "sandalia", "chinelo",
         "bota", "meia", "cueca", "calcinha", "sutia", "oculos de sol", "cinto",
         "bone", "pijama", "cropped", "headband", "chapeu de palha", "meias", "cuecas",
-        "polo masculina", "polo enxuto", "tech t shirt", "daily t shirt",
+        "polo masculina", "polo enxuto", "tech t shirt", "daily t shirt", "guarda chuva",
     ),
     "Bolsas, Malas e Viagem": (
         "mochila", "bolsa", "mala de viagem", "carteira", "necessaire",
@@ -226,7 +229,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "bloco de anotacoes", "lapiseira", "ecolapis", "fragmentadora de papel",
         "planner", "borracha", "papel a4", "sulfite", "fita corretiva",
         "prancheta", "marca-texto", "ficha pautada", "adesivo decorado",
-        "papel colorido", "ficha", "marcador de linhas",
+        "papel colorido", "ficha", "marcador de linhas", "adesivos", "lettering", "caligrafia", "faber castell", "faber-castell", "canson", "trilux",
     ),
     "Livros, Mídia e Conteúdo": (
         "livro", "livros", "coloring book",
