@@ -22,6 +22,10 @@ class CouponPreparationTests(TestCase):
         self.other = get_user_model().objects.create_user("coupon-other")
         self.source = FonteIngestao.objects.create(
             slug="coupon-products-tests", marketplace="amazon", nome="Cupons")
+        # O challenge HTTP é uma proteção de produção persistente. Isolar o
+        # teste impede que um 403 de um caso altere a rota do próximo.
+        from apps.scrapers.coupon_products import _cache_circuito, _CHALLENGE_KEY
+        _cache_circuito().delete(_CHALLENGE_KEY)
 
     def _coupon(self, **overrides):
         values = {
@@ -553,6 +557,33 @@ class CouponPreparationTests(TestCase):
 
         iniciar_browser.assert_called_once()
         self.assertEqual(resultado["veredito"], "vazio_comprovado")
+
+    @patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session")
+    @patch("apps.scrapers.ml_auth.storage_state", return_value={"cookies": []})
+    def test_challenge_http_pula_gets_repetidos_para_a_fila_do_browser(
+        self, _storage, http_session,
+    ):
+        """Um WAF no primeiro container não pode consumir o lote inteiro em 403."""
+        from apps.scrapers.coupon_products import (
+            BrowserNecessarioError, _coletar_ml_remoto,
+        )
+
+        resposta = Mock(status_code=403, text="challenge",
+                        url="https://lista.mercadolivre.com.br/x")
+        http_session.return_value.get.return_value = resposta
+        cupom = self._cupom_ml_de_container()
+
+        with patch("apps.scrapers.coupon_products._challenge_http_aberto",
+                   return_value=False):
+            with self.assertRaises(BrowserNecessarioError):
+                _coletar_ml_remoto(cupom, permitir_browser=False)
+        self.assertEqual(http_session.return_value.get.call_count, 1)
+
+        with patch("apps.scrapers.coupon_products._challenge_http_aberto",
+                   return_value=True):
+            with self.assertRaises(BrowserNecessarioError):
+                _coletar_ml_remoto(cupom, permitir_browser=False)
+        self.assertEqual(http_session.return_value.get.call_count, 1)
 
     def test_falha_de_transporte_tem_motivo_e_backoff_curto(self):
         from apps.scrapers.coupon_products import (

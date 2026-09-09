@@ -72,6 +72,12 @@ CONTAINER_FALHAS_ATE_ABRIR = int(
 CONTAINER_CIRCUITO_S = int(os.getenv("CONTAINER_CIRCUITO_S", "900") or "900")
 _CIRCUITO_KEY = "container-ml:circuito"
 _FALHAS_KEY = "container-ml:falhas-seguidas"
+# Um 403 do endpoint de lista não é falha de rede: é um challenge que o
+# Chromium autenticado pode resolver. Repetir 400 GETs idênticos antes de usar o
+# browser fazia o lote inteiro acabar no HTTP, sem produzir sequer um par. Esta
+# marca curta pula direto para a fila do browser depois da primeira evidência.
+_CHALLENGE_KEY = "container-ml:http-challenge"
+CONTAINER_CHALLENGE_S = int(os.getenv("CONTAINER_CHALLENGE_S", "300") or "300")
 
 
 def _cache_circuito():
@@ -86,6 +92,22 @@ def _circuito_aberto() -> bool:
         return bool(_cache_circuito().get(_CIRCUITO_KEY))
     except Exception:
         return False  # sem cache, o comportamento é o de antes
+
+
+def _challenge_http_aberto() -> bool:
+    """Indica que o endpoint de lista está recusando GETs nesta janela."""
+    try:
+        return bool(_cache_circuito().get(_CHALLENGE_KEY))
+    except Exception:
+        return False
+
+
+def _registrar_challenge_http():
+    """Evita uma tempestade de 403; o próximo passo é o Chromium."""
+    try:
+        _cache_circuito().set(_CHALLENGE_KEY, True, timeout=CONTAINER_CHALLENGE_S)
+    except Exception:
+        logger.exception("Falha ao registrar challenge HTTP do container ML")
 
 
 def _registrar_falha_de_transporte():
@@ -110,6 +132,7 @@ def _registrar_sucesso_de_transporte():
         cache = _cache_circuito()
         cache.delete(_FALHAS_KEY)
         cache.delete(_CIRCUITO_KEY)
+        cache.delete(_CHALLENGE_KEY)
     except Exception:
         pass
 _CENT = Decimal("0.01")
@@ -619,6 +642,10 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
     houve_resposta_http = False
     houve_falha_transporte = False
     listagem_inexistente = False
+    # Depois de um 403 recente, o mesmo host continua devolvendo a mesma parede
+    # para todos os containers. Não transformamos isto em "vazio" nem em falha
+    # permanente: apenas reservamos o próximo cupom para o passo autenticado.
+    challenge_http = _challenge_http_aberto()
 
     def _tentar_http(credencial):
         """(linhas, barrado, falha_transporte, inexistente)."""
@@ -647,6 +674,7 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
                     "Container ML via HTTP recebeu 403 para %s; tentando navegador.",
                     cupom.pk,
                 )
+                _registrar_challenge_http()
                 return None, False, False, False
             response.raise_for_status()
             _registrar_sucesso_de_transporte()
@@ -661,40 +689,45 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
     # da fila é sempre a do contexto do preparo.
     rows = None
     agora = timezone.now()
-    for indice, candidato in enumerate(candidatos):
-        chave = getattr(candidato, "id", None)
-        if _parede_recente(chave, agora):
-            # Já barrou nesta janela. Um lote tem centenas de cupons: repetir o GET
-            # para colher a mesma parede custa um round-trip por cupom.
-            barrado = True
-            continue
-        credencial = state if indice == 0 else storage_state(candidato)
-        if credencial is None:
-            continue
-        houve_credencial = True
-        rows, parede, falha_transporte, inexistente = _tentar_http(credencial)
-        houve_falha_transporte = houve_falha_transporte or falha_transporte
-        houve_resposta_http = houve_resposta_http or not (parede or falha_transporte)
-        if inexistente:
-            # 404/410 é resposta definitiva do ML e vale para qualquer credencial:
-            # não há por que tentar as outras nem subir Chromium.
-            listagem_inexistente = True
-            barrado = False
-            break
-        if rows:
-            barrado = False
-            state = credencial
-            break
-        if not parede and not falha_transporte:
-            # Uma resposta HTTP real, ainda que sem cards, supera a parede vista
-            # numa credencial anterior. O browser pode agora confirmar o vazio com
-            # esta credencial em vez de classificar tudo como sessão expirada.
-            barrado = False
-            state = credencial
-            break
-        if parede:
-            _marcar_parede(chave, agora)
-            barrado = True
+    if not challenge_http:
+        for indice, candidato in enumerate(candidatos):
+            chave = getattr(candidato, "id", None)
+            if _parede_recente(chave, agora):
+                # Já barrou nesta janela. Um lote tem centenas de cupons: repetir o GET
+                # para colher a mesma parede custa um round-trip por cupom.
+                barrado = True
+                continue
+            credencial = state if indice == 0 else storage_state(candidato)
+            if credencial is None:
+                continue
+            houve_credencial = True
+            rows, parede, falha_transporte, inexistente = _tentar_http(credencial)
+            houve_falha_transporte = houve_falha_transporte or falha_transporte
+            houve_resposta_http = houve_resposta_http or not (parede or falha_transporte)
+            if inexistente:
+                # 404/410 é resposta definitiva do ML e vale para qualquer credencial:
+                # não há por que tentar as outras nem subir Chromium.
+                listagem_inexistente = True
+                barrado = False
+                break
+            if rows:
+                barrado = False
+                state = credencial
+                break
+            if not parede and not falha_transporte:
+                # Uma resposta HTTP real, ainda que sem cards, supera a parede vista
+                # numa credencial anterior. O browser pode agora confirmar o vazio com
+                # esta credencial em vez de classificar tudo como sessão expirada.
+                barrado = False
+                state = credencial
+                break
+            if parede:
+                _marcar_parede(chave, agora)
+                barrado = True
+    else:
+        # A sessão ainda pode ser utilizada pelo browser. O campo é necessário
+        # para que o diagnóstico abaixo não a confunda com sessão ausente.
+        houve_credencial = state is not None
     if listagem_inexistente:
         return {"total": 0, "veredito": "vazio_comprovado"}
     if rows:
