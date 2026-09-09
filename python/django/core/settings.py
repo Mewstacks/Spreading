@@ -637,9 +637,10 @@ TELEGRAM_SESSION = os.getenv("TELEGRAM_SESSION", "")  # StringSession do userbot
 # ─────────────────────────────────────────────────────────────
 # LLM — resuminho engraçado das ofertas (API do Claude / Anthropic)
 # Trocado do Ollama local (não roda no Fly) para a API do Claude. Gate por
-# LLM_ATIVO + ANTHROPIC_API_KEY (setar nos secrets do Fly). Sem key => sem frase.
+# IA é enriquecimento opcional: coleta, validação e publicação não dependem dela.
+# Desligada por padrão, evita consumo surpresa quando já existe uma chave no ambiente.
 # ─────────────────────────────────────────────────────────────
-LLM_ATIVO = os.getenv("LLM_ATIVO", "1") == "1"
+LLM_ATIVO = os.getenv("LLM_ATIVO", "0") == "1"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 # Haiku é o padrão. Os call sites em llm.py e cupom_extractor.py já declaravam
 # Haiku como _MODELO_PADRAO, mas todos leem getattr(settings, "LLM_MODELO", ...)
@@ -805,9 +806,9 @@ ALERTA_CONEXAO_COOLDOWN_H = int(os.getenv("ALERTA_CONEXAO_COOLDOWN_H", "6"))
 # problema espera alguém abrir a tela de Saúde — o modo de falha de 16, 17 e 18/08.
 # ALERTA_TELEGRAM_CHAT_ID usa o TELEGRAM_BOT_TOKEN que já existe; ALERTA_EMAILS é
 # lista separada por vírgula. Vazio nos dois = canal desligado (padrão em dev).
-# Leitura de cupom em canal por IA. Cada mensagem é lida uma vez (cache por hash)
-# e só mensagem com sinal de cupom é enviada — o custo é de leitura, não de volume.
-CUPOM_LLM_ATIVO = os.getenv("CUPOM_LLM_ATIVO", "1") == "1"
+# Leitura por IA é complementar ao parser determinístico e requer ativação explícita
+# após haver um teto de orçamento definido para a conta.
+CUPOM_LLM_ATIVO = os.getenv("CUPOM_LLM_ATIVO", "0") == "1"
 ALERTA_TELEGRAM_CHAT_ID = os.getenv("ALERTA_TELEGRAM_CHAT_ID", "")
 ALERTA_EMAILS = os.getenv("ALERTA_EMAILS", "")
 # Silêncio por chave de incidente. Alerta que toca demais é alerta que se ignora.
