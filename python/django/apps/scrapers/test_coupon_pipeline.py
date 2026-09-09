@@ -461,6 +461,38 @@ class CouponCanaryCommandTests(TestCase):
         self.assertIn("Prévia somente", saida.getvalue())
         enviar.assert_not_called()
 
+    def test_preview_pula_registro_ready_sem_relacao_e_acha_o_proximo(self):
+        user = get_user_model().objects.create_user("canary-next", password="x")
+        config = ConfiguracaoEnvio.objects.create(
+            owner=user, grupo_id="teste@g.us", grupo_nome="Teste ofertas",
+            canal="whatsapp", min_desconto_percent=15,
+        )
+        invalido = SimpleNamespace(pk=10)
+        valido = SimpleNamespace(pk=11)
+        produto = SimpleNamespace(pk=20, nome="Produto comprovado")
+        relacao = SimpleNamespace(
+            produto=produto, preco_atual=100, preco_final=80,
+        )
+        candidatos = [
+            SimpleNamespace(kind="coupon", obj=invalido, score=80, reasons=[]),
+            SimpleNamespace(kind="coupon", obj=valido, score=60, reasons=[]),
+        ]
+        saida = StringIO()
+        with patch(
+            "apps.scrapers.content_ranking._coupon_candidates", return_value=candidatos,
+        ), patch(
+            "apps.scrapers.coupon_products.relacoes_prontas_para_envio",
+            side_effect=lambda cupom, _user: [] if cupom is invalido else [relacao],
+        ), patch(
+            "apps.scrapers.ofertas._desconto_efetivo_do_item_cupom", return_value=20,
+        ), patch(
+            "apps.scrapers.ofertas._piso_desconto_cupom", return_value=15,
+        ):
+            call_command("canario_cupom", config=config.pk, username=user.username,
+                         stdout=saida)
+
+        self.assertIn("cupom=11", saida.getvalue())
+
 
 class AmazonPublicCouponsCadenceTests(TestCase):
     @patch("apps.scrapers.report_sessions.has_report_session", return_value=True)
