@@ -589,6 +589,22 @@ class AmazonMarketplaceReportingTests(TestCase):
         # viajam junto para o relatório da fonte, sem repetir chamadas à API.
         coletar.assert_called_once_with(user, metricas=None)
 
+    def test_amazon_coleta_pauta_da_lu_sem_regra_de_envio_ativa(self):
+        """A homologação de grupos não pode esvaziar a descoberta da Amazon."""
+        from django.contrib.auth import get_user_model
+        from apps.scrapers.marketplaces.amazon import Amazon
+        from apps.scrapers.scraper_amazon import ofertas_scraper as az
+
+        user = get_user_model().objects.create_user("amazon-pauta-lu", password="x")
+        with patch.object(az, "coletar_feed", return_value=[]), \
+                patch.object(az, "buscar_por_termo", return_value=0) as buscar:
+            self.assertTrue(Amazon()._scrape_usuario(user))
+
+        self.assertEqual(
+            [call.args[0] for call in buscar.call_args_list],
+            ["robô aspirador", "aspirador robô"],
+        )
+
     def test_api_totalmente_fora_marca_conta_e_libera_fallback(self):
         from django.contrib.auth import get_user_model
         from apps.scrapers.marketplaces.amazon import Amazon

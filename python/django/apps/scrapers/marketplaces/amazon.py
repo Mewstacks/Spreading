@@ -96,10 +96,12 @@ class Amazon(Marketplace):
             AmazonAPIError, AmazonConfigError, AmazonCredencialInvalida,
             AmazonNotEligible,
         )
-        termos = list(
+        termos_configurados = list(
             ConfiguracaoEnvio.objects.filter(owner=usuario, ativo=True)
             .exclude(termo_busca="").values_list("termo_busca", flat=True)
         )
+        from apps.scrapers.prioridades_lu import termos_de_coleta
+        termos = termos_de_coleta(termos_configurados)
         try:
             # Uma coleta, dois destinos: ofertas e promoções liam as MESMAS páginas
             # da API separadamente e dobravam o consumo da cota do usuário.

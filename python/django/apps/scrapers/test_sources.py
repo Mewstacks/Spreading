@@ -641,6 +641,20 @@ class SourcePipelineTests(ComoWorker, TestCase):
         amazon.scrape_all.assert_not_called()
         expire.assert_called_once()
 
+    @patch("apps.scrapers.maintenance.expire_stale")
+    def test_full_cycle_inclui_pauta_da_lu_sem_ligar_grupo(self, expire):
+        from apps.scrapers.management.commands.automacao import _rodar_scrape
+        from apps.scrapers.marketplaces import registry as marketplaces
+
+        ml = MagicMock()
+        with patch.object(marketplaces, "MARKETPLACES", {"mercadolivre": ml}):
+            _rodar_scrape()
+
+        termos = ml.scrape_all.call_args.kwargs["termos"]
+        self.assertIn("robô aspirador", termos)
+        self.assertIn("aspirador robô", termos)
+        expire.assert_called_once()
+
     def test_full_ml_feed_waits_briefly_for_the_holder_to_yield(self):
         from apps.scrapers.carga import coordinated_ml_browser
 

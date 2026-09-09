@@ -101,10 +101,15 @@ def _rodar_scrape(*, lojas_alvo=None):
     from apps.scrapers.marketplaces.registry import MARKETPLACES
     from apps.scrapers.models import ConfiguracaoEnvio
 
-    termos = list(
+    termos_configurados = list(
         ConfiguracaoEnvio.objects.filter(ativo=True)
         .exclude(termo_busca="").values_list("termo_busca", flat=True)
     )
+    # Coleta não publica. A pauta da criadora continua abastecendo o catálogo
+    # enquanto os destinos reais estão em homologação, em vez de depender de uma
+    # regra ativa que poderia mandar mensagem para um grupo antes da aprovação.
+    from apps.scrapers.prioridades_lu import termos_de_coleta
+    termos = termos_de_coleta(termos_configurados)
     lojas = list(MARKETPLACES.items())
     if lojas_alvo:
         alvos = set(lojas_alvo)
