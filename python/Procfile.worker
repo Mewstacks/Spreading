@@ -5,7 +5,9 @@ cupons: sleep 45 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py aut
 # Links já preparados têm prioridade sobre a coleta incremental: se o flash abre
 # Chromium primeiro, a conta espera um ciclo inteiro sem conseguir publicar um
 # cupom que já tem produto, preço e código verificados.
-links: sleep 60 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo links --tick 5 --lote 40
+# Sobe antes do preparo de cupons (45s), do flash (75s) e da varredura completa
+# (90s), para materializar primeiro os pares que já estão validados.
+links: sleep 35 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo links --tick 5 --lote 40
 scrapeflash: sleep 75 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape_rapido --tick 5
 scrape: sleep 90 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py automacao --modo scrape --scrape-horas 3
 canais: sleep 15 && exec env TENANT_SYSTEM_PROCESS=1 python django/manage.py monitorar_canais --tick 60
