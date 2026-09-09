@@ -884,6 +884,27 @@ class CouponMessageTests(SimpleTestCase):
         self.assertNotIn("NOME CURTO DA IA", mensagem)
         self.assertIn("🎟 CUPOM: *PRESENTE*", mensagem)
 
+    def test_mesmo_formato_de_cupom_para_todas_as_lojas(self):
+        """A loja troca o destino; a hierarquia editorial nunca muda."""
+        from apps.scrapers.ofertas import montar_mensagem_cupom_produtos
+
+        for marketplace, link in (
+            ("mercadolivre", "https://meli.la/exato"),
+            ("amazon", "https://amazon.com.br/dp/ABC?tag=lules-20"),
+            ("shopee", "https://shopee.com.br/product/1/2"),
+        ):
+            cupom, itens = self._data()
+            cupom.marketplace = marketplace
+            itens[0]["link"] = link
+            mensagem = montar_mensagem_cupom_produtos(cupom, itens)
+            self.assertIn("Livro Chama de Ferro", mensagem, marketplace)
+            self.assertIn("De ❌ R$ 100", mensagem, marketplace)
+            self.assertIn("Por 🔥 R$ 83,54", mensagem, marketplace)
+            self.assertIn("🎟 CUPOM: *PRESENTE*", mensagem, marketplace)
+            self.assertIn("Aplique o cupom no carrinho", mensagem, marketplace)
+            self.assertIn(link, mensagem, marketplace)
+            self.assertNotIn("Link de afiliado", mensagem, marketplace)
+
     def test_telegram_escapa_html_e_tem_codigo_em_negrito(self):
         from apps.scrapers.ofertas import montar_mensagem_cupom_produtos
         from apps.scrapers.senders.base import TelegramHTMLMarkup

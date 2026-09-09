@@ -61,7 +61,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "notebook", "laptop", "computador", "desktop", "monitor", "teclado",
         "mouse", "mousepad", "impressora", "roteador", "modem", "pendrive",
         "ssd", "hd externo", "memoria ram", "cartao de memoria", "placa de video", "placa-mae", "fonte cooler master", "processador",
-        "webcam", "tablet", "estabilizador", "nobreak", "cabo hdmi", "starlink", "gpu", "radeon", "adaptador hub usb",
+        "webcam", "tablet", "estabilizador", "nobreak", "cabo hdmi", "starlink", "gpu", "radeon", "adaptador hub usb", "microsoft",
     ),
     "Áudio, Vídeo e Fotografia": (
         "caixa de som", "soundbar", "fone bluetooth", "headset", "headphone",
@@ -83,7 +83,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         ("aspirador", 3),
         "cafeteira", "sanduicheira", "forno eletrico", "purificador", "bebedouro", "ferro de passar",
         "panificadora", "tanquinho", "sorveteira", "mixer", "dreame",
-        "frigobar", "ferro a vapor", "fritadeiras", "micro ondas", "micro-ondas", "depurador", "filtro de agua",
+        "frigobar", "ferro a vapor", "fritadeiras", "micro ondas", "micro-ondas", "depurador", "filtro de agua", "pipoqueira",
     ),
     "Climatização e Aquecimento": (
         "ar condicionado", "ventilador", "climatizador", "aquecedor",
@@ -129,7 +129,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "arruela", "porca", "vedacao", "multimetro", "paquimetro", "maquina de solda",
         "arame solda", "nivelador a laser", "pistola de pintura", "abracadeira",
         "chave combinada", "maleta anti impacto",
-        "maquina inversora", "maquina solda", "chave de impacto", "perfurador de solo", "bomba pressurizadora", "desobstruidora de alta pressao", "multi ferramentas", "escada multifuncional", "fio de solda", "fita dupla face",
+        "maquina inversora", "maquina solda", "chave de impacto", "perfurador de solo", "bomba pressurizadora", "desobstruidora de alta pressao", "multi ferramentas", "escada multifuncional", "escada extensivel", "escada de fibra", "fio de solda", "fita dupla face",
     ),
     "Materiais Elétricos e Componentes": (
         "lampada", "reator", "disjuntor", "tomada", "interruptor", "fita led",
@@ -170,7 +170,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "matizador", "bioplastia", "babyliss", "cabelo e corpo", "hair care", "lowell",
         "po descolorante", "progressiva", "modelador de cachos", "mascara condicionador",
         "reparador de pontas", "protetor termico", "cronograma capilar", "cronograma",
-        "gel de limpeza", "clareador corporal", "clareador para axilas", "primer iluminador", "oneblade", "shaver", "maquina acabamento",
+        "gel de limpeza", "clareador corporal", "clareador para axilas", "primer iluminador", "oneblade", "shaver", "maquina acabamento", "absolut repair",
         "aparador de pelos", "aparador oneblade", "serum capilar", "serum", "secador multifuncional", "alisador", "base coat", "oleo creme", "oleo reparador", "principia", "eico pro",
     ),
     "Saúde, Ortopedia e Equipamentos Médicos": (
@@ -181,7 +181,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "magnesio", "pre treino", "cinta hernia", "multivitaminico", "omega 3",
         "andador", "barra de apoio", "corretor de postura", "medidor de febre", "kinesio",
         "proteina isolada", "isolate protein", "beef protein", "hipercalorico", "cpap",
-        "balanca bioimpedancia", "corretores de postura", "fotopolimerizador odontologico", "cunha para uso",
+        "balanca bioimpedancia", "balanca de bioimpedancia", "corretores de postura", "fotopolimerizador odontologico", "cunha para uso",
     ),
     "Alimentos e Bebidas": (
         "cafe", "cha", "chocolate", "biscoito", "bolacha", "cerveja", "vinho", "supercoffee",
@@ -198,7 +198,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "polo masculina", "polo enxuto", "tech t shirt", "daily t shirt", "cinta modeladora", "guarda chuva",
     ),
     "Bolsas, Malas e Viagem": (
-        "mochila", "bolsa", "mala de viagem", "carteira", "necessaire",
+        "mochila", "bolsa", "mala de viagem", "mala bordo", "carteira", "necessaire",
         "pochete", "mala de bordo", "chaveiro", "bolsa masculina",
     ),
     "Joias, Relógios e Bijuterias": (
@@ -219,7 +219,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
     "Games, Brinquedos e Hobbies": (
         "playstation", "xbox", "nintendo", "controle de video game", "joystick",
         "boneca", "boneco", "lego", "quebra cabeca", "jogo de tabuleiro",
-        "carrinho de brinquedo", "pelucia", "cubo magico", "video game",
+        "carrinho de brinquedo", "pelucia", "cubo magico", "video game", "booster pokemon",
         "figurinhas", "cartas pokemon", "switch fisico",
     ),
     "Papelaria, Escritório e Escola": (
@@ -238,7 +238,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "papel colorido", "ficha", "marcador de linhas", "adesivos", "lettering", "caligrafia", "faber castell", "faber-castell", "canson", "trilux",
     ),
     "Livros, Mídia e Conteúdo": (
-        "livro", "livros", "coloring book", "workbook", "ielts grammar", "todo mundo ja sentiu isso", "planta certa para o lugar certo",
+        "livro", "livros", "coloring book", "workbook", "ielts grammar", "b2 first", "complete first", "todo mundo ja sentiu isso", "planta certa para o lugar certo",
         "terapia da jardinagem", "jardim de polinizadores", "botanica para jardinistas",
         "jardinagem basica para leigos", "curso natureza de jardinagem", "guia pratico de jardinagem",
     ),

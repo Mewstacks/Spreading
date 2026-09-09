@@ -181,6 +181,27 @@ class MacroDoNomeTests(SimpleTestCase):
         for nome, esperado in casos.items():
             self.assertEqual(macro_do_nome(nome), esperado, nome)
 
+    def test_itens_reais_restantes_do_pool_elegivel(self):
+        """Amostra de 09/09 que mantinha o gate abaixo de 95%."""
+        casos = {
+            "Balança De Bioimpedância Profissional 8 Sensores Digital App":
+                "Saúde, Ortopedia e Equipamentos Médicos",
+            "Escada De Fibra De Vidro Extensível 3,60 X 6 M":
+                "Ferramentas e Manutenção",
+            "Mala Bordo Abs Sestini 360 Essencial 2": "Bolsas, Malas e Viagem",
+            "Microsoft 3 6 5 Family + Proteção Premium":
+                "Eletrônicos e Informática",
+            "Pipoqueira Elétrica Popflix Pp-04 Ar Quente": "Eletrodomésticos",
+            "Kit L'oréal Professionnel Absolut Repair Gold Duo":
+                "Beleza e Cuidados Pessoais",
+            "Combo de Booster Pokémon ME05 Escuridão Absoluta":
+                "Games, Brinquedos e Hobbies",
+            "B2 First 4 Sb W/Ans W/Audio": "Livros, Mídia e Conteúdo",
+            "Complete First Wb W/O Ans W/Audio 3Ed": "Livros, Mídia e Conteúdo",
+        }
+        for nome, esperado in casos.items():
+            self.assertEqual(macro_do_nome(nome), esperado, nome)
+
     def test_qualificador_no_fim_nao_manda_no_resultado(self):
         """A cabeca do nome decide; o que vem depois e complemento.
 
