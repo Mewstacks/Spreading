@@ -147,7 +147,13 @@ def _rodar_scrape(*, lojas_alvo=None):
     sucessos = len(lojas) - len(falhas) - len(adiados)
     if sucessos:
         from apps.scrapers.maintenance import expire_stale
+        from apps.scrapers.categorizar_por_nome import popular_macro_por_nome
+
         expire_stale()
+        # O ML nem sempre traz domain_id no feed novo. Classificar no mesmo
+        # ciclo impede que a coleta fresca derrube o gate de taxonomia até o
+        # próximo backfill manual.
+        popular_macro_por_nome()
     if not sucessos and falhas and not adiados:
         raise RuntimeError(f"Todas as fontes falharam: {', '.join(falhas)}")
     if falhas:
@@ -205,6 +211,12 @@ def _rodar_scrape_rapido(paginas=8):
         fonte.status = "degraded"
         fonte.erro_publico = "Coleta vazia; catálogo anterior preservado."
     fonte.save()
+    if total:
+        from apps.scrapers.categorizar_por_nome import popular_macro_por_nome
+
+        # A lane flash introduz produtos entre os scrapes completos. Limitar ao
+        # recorte mais recente deixa a macro pronta antes do próximo envio.
+        popular_macro_por_nome(limite=500)
     return total
 
 
