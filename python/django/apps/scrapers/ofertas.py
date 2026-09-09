@@ -1390,7 +1390,17 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None,
         de = _preco_br(de_val)
         por = _preco_br(por_val)
         linhas.append(f"De ❌ R$ {de}")
-        linhas.append(f"Por 🔥 R$ {por}")
+        # É uma conta sobre o mesmo par de preços que acabamos de imprimir, não
+        # uma promessa de "menor preço" nem uma âncora histórica. Deixar o
+        # percentual visível evita que uma oferta aprovada no piso editorial de
+        # 15% pareça uma promoção pequena no celular.
+        try:
+            de_num, por_num = float(de_val), float(por_val)
+            percentual = round((de_num - por_num) * 100 / de_num) if de_num > 0 else 0
+        except (TypeError, ValueError, ZeroDivisionError):
+            percentual = 0
+        sufixo_percentual = f" ({percentual}% OFF)" if percentual > 0 else ""
+        linhas.append(f"Por 🔥 R$ {por}{sufixo_percentual}")
         linhas.append("")
 
     linhas.append(f"🎟 CUPOM: {m.bold(esc(codigo))}")

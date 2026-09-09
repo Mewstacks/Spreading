@@ -895,7 +895,7 @@ class CouponMessageTests(SimpleTestCase):
         # "De" é o preço de VITRINE (100), não o de tabela (197,90): a diferença
         # anunciada tem que ser exatamente o que o cupom abate no checkout.
         self.assertIn("De ❌ R$ 100", mensagem)
-        self.assertIn("Por 🔥 R$ 83,54", mensagem)
+        self.assertIn("Por 🔥 R$ 83,54 (16% OFF)", mensagem)
         self.assertIn("🎟 CUPOM: *PRESENTE*", mensagem)
         self.assertIn("👉 Aplique o cupom no carrinho:", mensagem)
         self.assertIn("🔗 https://meli.la/1GWNQCg", mensagem)
@@ -935,7 +935,7 @@ class CouponMessageTests(SimpleTestCase):
             mensagem = montar_mensagem_cupom_produtos(cupom, itens)
             self.assertIn("Livro Chama de Ferro", mensagem, marketplace)
             self.assertIn("De ❌ R$ 100", mensagem, marketplace)
-            self.assertIn("Por 🔥 R$ 83,54", mensagem, marketplace)
+            self.assertIn("Por 🔥 R$ 83,54 (16% OFF)", mensagem, marketplace)
             self.assertIn("🎟 CUPOM: *PRESENTE*", mensagem, marketplace)
             self.assertIn("Aplique o cupom no carrinho", mensagem, marketplace)
             self.assertIn(link, mensagem, marketplace)
