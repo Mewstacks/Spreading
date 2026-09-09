@@ -91,6 +91,11 @@ class MacroDoNomeTests(SimpleTestCase):
             "Tesoura para Poda Profissional Premium": "Jardim, Piscina e Área Externa",
             "Balança Digital Corporal Bioimpedância Aplicativo": "Saúde, Ortopedia e Equipamentos Médicos",
             "Supercoffee Vanilla Latte Economic Size": "Alimentos e Bebidas",
+            "Zenrelia 5mg para Cães 30 comprimidos": "Pets e Animais",
+            "Kit Troca Oleo 5w30 Sintético para Motor": "Automotivo",
+            "Máquina Acabamento Kemei Shaver Profissional": "Beleza e Cuidados Pessoais",
+            "Cinta Modeladora Sem Costura Alta Compressão": "Moda, Calçados e Acessórios",
+            "Maleta Anti-impacto Vonder para Ferramentas": "Ferramentas e Manutenção",
         }
         for nome, esperado in casos.items():
             self.assertEqual(macro_do_nome(nome), esperado, nome)
