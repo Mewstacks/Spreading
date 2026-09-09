@@ -1373,9 +1373,6 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None,
         # demais lojas a mensagem ainda manda conferir o abatimento antes de
         # pagar, sem prometer que um simples clique validou o checkout.
         linhas.append(f"🎟 {m.bold('Cupom de ativação')}")
-        linhas.append(
-            "👉 Abra um produto acima, ative o cupom e confirme o desconto antes de pagar."
-        )
     condicao = _condicao_do_cupom(cupom)
     if condicao:
         linhas.append(f"⚠️ {m.bold('Condição:')} {esc(condicao)}")
@@ -1386,7 +1383,11 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None,
     if checagem:
         linhas.append(f"🔎 {esc(checagem)}")
     if itens:
-        linhas += ["", "👉 Abra a oferta e aplique no checkout:",
+        acao = (
+            "👉 Abra a oferta, ative o cupom e confirme o desconto no checkout:"
+            if not codigo else "👉 Abra a oferta e aplique o cupom no checkout:"
+        )
+        linhas += ["", acao,
                    f"➡️ {esc(itens[0]['link'])}"]
     disclosure = str(
         divulgacao_afiliado or "ℹ Link de afiliado; posso receber comissão."
