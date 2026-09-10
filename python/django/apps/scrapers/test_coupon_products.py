@@ -464,6 +464,33 @@ class CouponPreparationTests(TestCase):
         self.assertEqual(resultado["prontos"], 2)
         self.assertEqual(resultado["adiados_sem_browser"], 6)
 
+    def test_lote_para_ml_quando_circuito_de_desafio_esta_aberto(self):
+        """Um 403 não transforma a fila inteira em centenas de adiamentos."""
+        from apps.scrapers.coupon_products import preparar_lote
+
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-layout-circuit", marketplace="mercadolivre", nome="Cupons ML",
+        )
+        for indice in range(2):
+            CupomNormalizado.objects.create(
+                fonte=fonte, external_id=f"layout-{indice}",
+                marketplace="mercadolivre", titulo=f"Cupom {indice}",
+                codigo=f"LAYOUT{indice}0", estado="ativo",
+                regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                        "valor_desconto": 10},
+            )
+
+        with patch(
+            "apps.scrapers.coupon_products._challenge_browser_aberto",
+            side_effect=[False, True],
+        ), patch(
+            "apps.scrapers.coupon_products.preparar_cupom", return_value=[object()],
+        ) as preparar:
+            resultado = preparar_lote(limite=2, limite_http=2)
+
+        self.assertEqual(resultado["processados"], 1)
+        self.assertEqual(preparar.call_count, 1)
+
     def test_sem_limite_http_explicito_o_lote_pequeno_continua_pequeno(self):
         """Quem pede um lote de 1 recebe 1 — o orçamento grande é escolha do
         pipeline, que é quem conhece a cadência do worker."""

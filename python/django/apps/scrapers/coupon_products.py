@@ -1488,6 +1488,17 @@ def preparar_lote(
         cupom, usuario = fila.popleft()
         if fila:
             filas.append(fila)
+        # Um 403 seguido de layout não confirmado abre este circuito no próprio
+        # ``_coletar_ml_remoto``. Continuar percorrendo cada campanha ML no mesmo
+        # ciclo não gera dado novo: só cria centenas de preparações adiadas,
+        # polui o alerta de backlog e atrasa fontes que ainda podem entregar.
+        # Não marcamos tentativa nem alteramos a taxonomia; o próximo ciclo volta
+        # a tentar apenas quando a janela curta do circuito tiver expirado.
+        if (
+            str(cupom.marketplace or "").lower() == "mercadolivre"
+            and _challenge_browser_aberto()
+        ):
+            continue
         contexto = _usuario_do_preparo(cupom, usuario)
         chave = atualizar_chave_cupom(cupom)
         prep = preparos.get((cupom.id, getattr(contexto, "id", None)))
