@@ -968,6 +968,39 @@ def executar_pipeline_cupons(
                 "prontos", "capacidade_adiada",
             ):
                 resultado[key] += int(afiliacao.get(key, 0) or 0)
+        # A contenção só impede a etapa que ABRIRIA o navegador. Ela não pode
+        # congelar a projeção dos pares que já tinham foto, preço e link
+        # verificado antes deste ciclo. O retorno antecipado antigo pulava este
+        # trecho inteiro e deixava milhares de `CupomDisponibilidade` vencidas;
+        # em seguida o ranking dizia que não havia cupom, mesmo quando a relação
+        # pronta estava no banco. Esta projeção é somente SQL e não disputa o
+        # Chromium que acabou de ser cedido.
+        from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
+
+        for usuario in usuarios:
+            try:
+                por_canal = {
+                    canal: projetar_disponibilidade_cupons(usuario, channel=canal)
+                    for canal in ("whatsapp", "telegram")
+                }
+                afiliacao_prioritaria[str(usuario.pk)]["disponibilidade"] = (
+                    por_canal["whatsapp"]
+                )
+                afiliacao_prioritaria[str(usuario.pk)][
+                    "disponibilidade_por_canal"
+                ] = por_canal
+            except (OperationalError, DatabaseError) as exc:
+                # Contenção do banco é retomável e nunca deve transformar o
+                # handoff normal do browser em falha de produto.
+                resultado["adiados"] = resultado.get("adiados", 0) + 1
+                logger.warning(
+                    "Projeção de cupons prontos adiada para usuário %s por "
+                    "contenção no banco: %s", usuario.pk, exc,
+                )
+            except Exception:
+                logger.exception(
+                    "Projeção de cupons prontos falhou para usuário %s", usuario.pk,
+                )
         resultado.update({
             "preparos_adiados": 0,
             "usuarios": afiliacao_prioritaria,

@@ -402,11 +402,19 @@ class CouponPipelineTests(TestCase):
         ), patch(
             "apps.scrapers.coupon_pipeline.coletar_cupons",
             side_effect=AssertionError("coleta não deve atrasar a retomada"),
-        ):
+        ), patch(
+            "apps.scrapers.coupon_readiness.projetar_disponibilidade_cupons",
+            return_value={"ready": 1},
+        ) as projetar:
             resultado = executar_pipeline_cupons(usuarios=[self.user])
 
         self.assertTrue(resultado["retentativa_prioritaria"])
         self.assertEqual(resultado["capacidade_adiada"], 1)
+        self.assertEqual(projetar.call_count, 2)
+        self.assertEqual(
+            resultado["usuarios"][str(self.user.pk)]["disponibilidade"],
+            {"ready": 1},
+        )
 
     def test_conta_com_destino_tem_prioridade_sobre_conta_de_teste(self):
         from apps.scrapers.coupon_pipeline import _priorizar_usuarios_com_destino
