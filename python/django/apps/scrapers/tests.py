@@ -2875,7 +2875,7 @@ class AttributionWorkflowTests(TestCase):
             self.product, "https://example.com/a", None,
             usuario=self.user, configuracao=config,
         )
-        self.assertIn("Tech do Dia", message)
+        self.assertNotIn("Tech do Dia", message)
 
     def test_default_message_uses_configured_cta_brand_without_disclosure_footer(self):
         from apps.scrapers.ofertas import montar_mensagem
@@ -2890,8 +2890,8 @@ class AttributionWorkflowTests(TestCase):
             usuario=self.user, configuracao=config,
         )
 
-        self.assertIn("Ver preço na loja", message)
-        self.assertIn("Achados da Lu", message)
+        self.assertIn("Abra a oferta:", message)
+        self.assertNotIn("Achados da Lu", message)
         self.assertNotIn("Link de afiliado; posso receber comissão.", message)
 
     def test_custom_template_does_not_claim_unproven_discount_and_escapes_data(self):
@@ -2921,7 +2921,7 @@ class AttributionWorkflowTests(TestCase):
         relampago = montar_mensagem(self.product, "https://example.com/a", None)
 
         self.assertNotIn("OFERTA RELÂMPAGO", comum)
-        self.assertIn("OFERTA RELÂMPAGO", relampago)
+        self.assertNotIn("OFERTA RELÂMPAGO", relampago)
 
     def test_default_affiliate_disclosure_is_not_added_to_messages(self):
         from apps.scrapers.ofertas import montar_mensagem
@@ -6509,7 +6509,7 @@ class MelhorCupomNormalizadoTests(TestCase):
         self.assertEqual(_melhor_cupom_normalizado(self.produto), "MIN150")
 
         mensagem = montar_mensagem(self.produto, "https://meli.la/x", None)
-        self.assertIn("CUPOM: MIN150", mensagem)
+        self.assertIn("CUPOM: *MIN150*", mensagem)
         self.assertIn("válido em compras acima de R$150", mensagem)
 
     def test_cupom_restrito_informa_a_condicao_na_mensagem(self):
@@ -6523,8 +6523,8 @@ class MelhorCupomNormalizadoTests(TestCase):
         CupomNormalizado.objects.filter(pk=cupom.pk).update(restrito=True)
 
         mensagem = montar_mensagem(self.produto, "https://meli.la/x", None)
-        self.assertIn("CUPOM: APP10", mensagem)
-        self.assertIn("Condição:", mensagem)
+        self.assertIn("CUPOM: *APP10*", mensagem)
+        self.assertIn("📌", mensagem)
         # A linha diz PARA QUEM vale, em substantivo curto — e as duas
         # restrições do cupom aparecem, não só a primeira.
         self.assertIn("primeira compra", mensagem)
