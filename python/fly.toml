@@ -29,7 +29,10 @@ kill_timeout = "30s"
   ML_AUTH_DIR = "/data/ml_sessions"
   # O painel e os loops agora rodam em VMs distintas; PostgreSQL é o estado comum.
   AUTOMACAO_STATE_BACKEND = "database"
-  AUTOMACAO_DEFAULT_ENABLED = "scrape,envio,links,relatorios"
+  # Cupons é uma esteira de coleta/preparo, não de publicação. Sem ela, o
+  # processo sobe saudável mas nunca materializa produto+cupom+link para o
+  # canário, deixando a operação sem estoque publicável.
+  AUTOMACAO_DEFAULT_ENABLED = "scrape,envio,links,relatorios,cupons"
   # Serviço do WhatsApp na rede privada do Fly (.internal).
   WHATSAPP_API_URL = "http://spreading-wa.internal:3000"
 
