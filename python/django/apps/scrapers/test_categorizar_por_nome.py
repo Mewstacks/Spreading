@@ -223,6 +223,24 @@ class MacroDoNomeTests(SimpleTestCase):
         for nome, esperado in casos.items():
             self.assertEqual(macro_do_nome(nome), esperado, nome)
 
+    def test_itens_reais_que_ficaram_sem_macro_no_pool_publicavel(self):
+        """Vocabulário inequívoco observado na auditoria de produção de 10/09."""
+        casos = {
+            "iRobot® Roomba® Plus 505 Combo Robot + AutoWash™ Dock":
+                "Eletrodomésticos",
+            "Pistola Pintura Gravidade 600ml Profissional":
+                "Ferramentas e Manutenção",
+            "Tv Stick 4k Android Chromecast Smart Hdmi":
+                "Áudio, Vídeo e Fotografia",
+            "Simparic 40mg Cães Pulgas Carrapatos": "Pets e Animais",
+            "Resistencia Lorenzetti Jet Turbo 7800w":
+                "Materiais Elétricos e Componentes",
+            "Organizador Porta Facas Acrílico 5 Espaços": "Cozinha, Mesa e Bar",
+            "Kit Baby Doll Pijama Short E Blusa": "Moda, Calçados e Acessórios",
+        }
+        for nome, esperado in casos.items():
+            self.assertEqual(macro_do_nome(nome), esperado, nome)
+
     def test_qualificador_no_fim_nao_manda_no_resultado(self):
         """A cabeca do nome decide; o que vem depois e complemento.
 

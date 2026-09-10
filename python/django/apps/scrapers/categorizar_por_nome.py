@@ -73,7 +73,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         # Títulos recentes de marketplace usam o substantivo curto antes de
         # qualificadores: “Fone tradutor ...”, “Fone sem fio ...”. É inequívoco
         # no catálogo de produto (não confundir com texto livre de atendimento).
-        "fone",
+        "fone", "tv stick",
     ),
     "Eletrodomésticos": (
         "geladeira", "refrigerador", "fogao", "cooktop", "microondas",
@@ -83,7 +83,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         ("aspirador", 3),
         "cafeteira", "sanduicheira", "forno eletrico", "forno de bancada", "purificador", "bebedouro", "ferro de passar",
         "panificadora", "tanquinho", "sorveteira", "mixer", "dreame",
-        "frigobar", "ferro a vapor", "fritadeiras", "micro ondas", "micro-ondas", "depurador", "filtro de agua", "pipoqueira",
+        "frigobar", "ferro a vapor", "fritadeiras", "micro ondas", "micro-ondas", "depurador", "filtro de agua", "pipoqueira", "irobot",
     ),
     "Climatização e Aquecimento": (
         "ar condicionado", "ventilador", "climatizador", "aquecedor",
@@ -106,7 +106,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "galheteiro", "saleiro", "bandeja", "garrafa isotermica", "espatula",
         "faca de carne", "pinca culinaria", "luva termica", "tabua de corte",
         "balanca de cozinha", "organizador de esponja", "pote organizador",
-        "cuscuzeira", "mandolin", "multifatiador", "utensilios de cozinha", "pote de vidro", "aparelho de jantar",
+        "cuscuzeira", "mandolin", "multifatiador", "utensilios de cozinha", "pote de vidro", "aparelho de jantar", "porta facas",
     ),
     "Limpeza e Lavanderia": (
         "detergente", "sabao", ("amaciante", 2), "desinfetante", "agua sanitaria", "papel higienico",
@@ -129,14 +129,14 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "arruela", "porca", "vedacao", "multimetro", "paquimetro", "maquina de solda",
         "arame solda", "nivelador a laser", "pistola de pintura", "abracadeira",
         "chave combinada", "maleta anti impacto",
-        "maquina inversora", "maquina solda", "chave de impacto", "perfurador de solo", "bomba pressurizadora", "desobstruidora de alta pressao", "multi ferramentas", "escada multifuncional", "escada extensivel", "escada de fibra", "fio de solda", "fita dupla face", "vonder airless", "maquina de pintura",
+        "maquina inversora", "maquina solda", "chave de impacto", "perfurador de solo", "bomba pressurizadora", "desobstruidora de alta pressao", "multi ferramentas", "escada multifuncional", "escada extensivel", "escada de fibra", "fio de solda", "fita dupla face", "vonder airless", "maquina de pintura", "pistola pintura",
     ),
     "Materiais Elétricos e Componentes": (
         "lampada", "reator", "disjuntor", "tomada", "interruptor", "fita led",
         "refletor", "extensao eletrica", "filtro de linha", "pilha", "bateria",
         "soquete", "e27", "plafon", "spot led", "rolo de fio", "cabo flexivel",
         "placa solar", "inversor", "fio eletrico",
-        "protetor de surto", "conector wago", "cabo de rede", "cabo ethernet", "refletores", "conector compacto", "conectores compactos", "iclamper", "spot slim",
+        "protetor de surto", "conector wago", "cabo de rede", "cabo ethernet", "refletores", "conector compacto", "conectores compactos", "iclamper", "spot slim", "resistencia lorenzetti",
     ),
     "Jardim, Piscina e Área Externa": (
         "piscina", "mangueira de jardim", "regador", "vaso de planta", "adubo",
@@ -155,7 +155,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
     "Pets e Animais": (
         "cachorro", "gato", "pet", "racao", "coleira", "guia para cachorro",
         "arranhador", "aquario", "petisco", "areia higienica", "caixa de transporte", "cao adulto", "gran plus",
-        "comedouro", "bebedouro pet", "tapete higienico", "zenrelia", "maquina de tosa domestica",
+        "comedouro", "bebedouro pet", "tapete higienico", "zenrelia", "simparic", "maquina de tosa domestica",
     ),
     "Bebês e Maternidade": (
         "bebe", "fralda", "mamadeira", "chupeta", "carrinho de bebe",
@@ -195,7 +195,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "jaqueta", "moletom", "blusa", "tenis", "sapato", "sandalia", "chinelo",
         "bota", "meia", "cueca", "calcinha", "sutia", "oculos de sol", "cinto",
         "bone", "pijama", "cropped", "headband", "chapeu de palha", "meias", "cuecas",
-        "polo masculina", "polo enxuto", "tech t shirt", "daily t shirt", "cinta modeladora", "guarda chuva",
+        "polo masculina", "polo enxuto", "tech t shirt", "daily t shirt", "cinta modeladora", "baby doll", "guarda chuva",
     ),
     "Bolsas, Malas e Viagem": (
         "mochila", "bolsa", "mala de viagem", "mala bordo", "carteira", "necessaire",
