@@ -77,6 +77,16 @@ class SourcePipelineTests(ComoWorker, TestCase):
         scrape_publico.assert_called_once()
         self.assertEqual(scrape_publico.call_args.args[0], [self.user])
 
+    @override_settings(PILOT_ORGANIZATION_IDS={"org-piloto"})
+    def test_amazon_prioriza_org_piloto_antes_de_conta_auxiliar(self):
+        from types import SimpleNamespace
+        from apps.scrapers.marketplaces.amazon import _priorizar_perfis
+
+        auxiliar = SimpleNamespace(organization_id="org-auxiliar", user_id=1)
+        piloto = SimpleNamespace(organization_id="org-piloto", user_id=99)
+
+        self.assertEqual(_priorizar_perfis([auxiliar, piloto]), [piloto, auxiliar])
+
     @override_settings(SECRETS_FERNET_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
     def test_salvar_nova_credencial_amazon_reabre_tentativa_creators(self):
         from apps.scrapers.views import _salvar_campos_amazon

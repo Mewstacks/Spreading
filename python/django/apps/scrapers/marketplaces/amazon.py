@@ -15,6 +15,31 @@ logger = logging.getLogger(__name__)
 _CREDENCIAL_CREATORS_RECUSADA = "A Amazon recusou a credencial."
 
 
+def _priorizar_perfis(perfis):
+    """Coloca a organização-piloto antes das contas auxiliares na fila Amazon.
+
+    A Creators API é serializada por credencial e uma conta pode levar minutos
+    para percorrer todas as palavras-chave. Sem uma ordem estável, uma conta de
+    desenvolvimento com PK menor fazia a operação da creator esperar a varredura
+    inteira, mesmo quando ela era a única com destinos de WhatsApp em validação.
+    O piloto não ganha mais chamadas: apenas ganha a primeira posição do ciclo.
+    """
+    from django.conf import settings
+
+    pilotos = {
+        str(org).strip()
+        for org in (getattr(settings, "PILOT_ORGANIZATION_IDS", set()) or set())
+        if str(org).strip()
+    }
+    return sorted(
+        perfis,
+        key=lambda perfil: (
+            0 if str(getattr(perfil, "organization_id", "")) in pilotos else 1,
+            getattr(perfil, "user_id", 0),
+        ),
+    )
+
+
 def _creators_aguarda_reconexao(perfil) -> bool:
     """Evita repetir um 401 conhecido em todo ciclo agendado.
 
@@ -38,7 +63,7 @@ class Amazon(Marketplace):
         from apps.accounts.models import Perfil
         from apps.scrapers.afiliado import tag_amazon
         from apps.scrapers.scraper_amazon.creators_api import creds_de_usuario
-        perfis = Perfil.objects.select_related("user").all()
+        perfis = _priorizar_perfis(Perfil.objects.select_related("user").all())
         candidatos = [p for p in perfis if not p.bloqueado and tag_amazon(p.user)]
         conectados = [
             p for p in candidatos
