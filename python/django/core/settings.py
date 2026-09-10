@@ -356,13 +356,14 @@ _MIGRATION_DATABASE_URL = os.getenv("MIGRATION_DATABASE_URL", "")
 _SYSTEM_DATABASE_URL = os.getenv("SYSTEM_DATABASE_URL", "")
 # Em produção existem duas VMs e várias lanes persistentes. Dez minutos de
 # conexão ociosa por thread/processo esgota facilmente pools pequenos e deixa
-# comandos de suporte esperando para abrir uma sessão. Um minuto preserva a
-# reutilização dentro de cada ciclo sem reter slots entre eles; uma instalação
-# com pool maior ainda pode optar por outro valor sem novo deploy.
+# comandos de suporte esperando para abrir uma sessão. Nesta operação há oito
+# processos de worker, além do web e de comandos de suporte; manter conexões
+# ociosas por padrão esgota o limite do Postgres e faz até o canário esperar.
+# A reutilização é opt-in por ambiente para instalações com pool dimensionado.
 try:
-    DATABASE_CONN_MAX_AGE = max(0, int(os.getenv("DATABASE_CONN_MAX_AGE", "60")))
+    DATABASE_CONN_MAX_AGE = max(0, int(os.getenv("DATABASE_CONN_MAX_AGE", "0")))
 except ValueError:
-    DATABASE_CONN_MAX_AGE = 60
+    DATABASE_CONN_MAX_AGE = 0
 MIGRATION_DATABASE_CONFIGURED = bool(_MIGRATION_DATABASE_URL)
 SYSTEM_DATABASE_CONFIGURED = bool(_SYSTEM_DATABASE_URL)
 TENANT_SYSTEM_PROCESS = os.getenv("TENANT_SYSTEM_PROCESS", "0") == "1"
