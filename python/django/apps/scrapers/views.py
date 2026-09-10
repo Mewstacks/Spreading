@@ -585,14 +585,27 @@ def _salvar_campos_amazon(perfil, post) -> None:
     Único caminho de escrita desses campos: a página da integração Amazon usa
     este helper. A secret só é sobrescrita quando o campo vem preenchido
     (em branco mantém a atual); o valor é criptografado pelo campo do model."""
-    perfil.afiliado_tag_amazon = (post.get("afiliado_tag_amazon") or "").strip()
-    perfil.amazon_credential_id = (post.get("amazon_credential_id") or "").strip()
-    perfil.amazon_creators_host = (post.get("amazon_creators_host") or "").strip()
-    campos = ["afiliado_tag_amazon", "amazon_credential_id", "amazon_creators_host"]
+    credential_id = (post.get("amazon_credential_id") or "").strip()
+    creators_host = (post.get("amazon_creators_host") or "").strip()
     novo_secret = (post.get("amazon_credential_secret") or "").strip()
+    credential_changed = bool(
+        credential_id != (perfil.amazon_credential_id or "").strip()
+        or creators_host != (perfil.amazon_creators_host or "").strip()
+        or novo_secret
+    )
+    perfil.afiliado_tag_amazon = (post.get("afiliado_tag_amazon") or "").strip()
+    perfil.amazon_credential_id = credential_id
+    perfil.amazon_creators_host = creators_host
+    campos = ["afiliado_tag_amazon", "amazon_credential_id", "amazon_creators_host"]
     if novo_secret:
         perfil.amazon_credential_secret = novo_secret
         campos.append("amazon_credential_secret")
+    if credential_changed:
+        # Uma nova chave precisa ter a chance de ser sondada no próximo ciclo;
+        # manter o 401 anterior faria o agendador continuar no fallback para sempre.
+        perfil.amazon_elegivel = None
+        perfil.amazon_ultimo_erro = ""
+        campos.extend(["amazon_elegivel", "amazon_ultimo_erro"])
     perfil.save(update_fields=campos)
 
 

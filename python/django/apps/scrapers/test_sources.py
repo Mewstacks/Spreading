@@ -51,6 +51,57 @@ class SourcePipelineTests(ComoWorker, TestCase):
         persist_items([item], owner=self.user)
         self.assertEqual(Produto.objects.filter(owner=self.user, asin=item.external_id).count(), 1)
 
+    @override_settings(SECRETS_FERNET_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    @patch("apps.scrapers.scraper_amazon.creators_api.creds_de_usuario")
+    @patch("apps.scrapers.marketplaces.amazon.Amazon._scrape_publico")
+    @patch("apps.scrapers.marketplaces.amazon.Amazon._scrape_usuario")
+    def test_amazon_401_conhecido_usa_fallback_sem_repetir_creators(
+        self, scrape_user, scrape_publico, creds,
+    ):
+        """Credencial invalid_client fica aguardando reconexão, sem spam a cada tick."""
+        perfil = self.user.perfil
+        perfil.afiliado_tag_amazon = "source-user-20"
+        perfil.amazon_credential_id = "invalid-client"
+        perfil.amazon_credential_secret = "invalid-secret"
+        perfil.amazon_ultimo_erro = "A Amazon recusou a credencial. Gere uma nova."
+        perfil.save(update_fields=[
+            "afiliado_tag_amazon", "amazon_credential_id",
+            "amazon_credential_secret", "amazon_ultimo_erro",
+        ])
+        creds.return_value.completo.return_value = True
+
+        from apps.scrapers.marketplaces.amazon import Amazon
+        Amazon().scrape_all(termos=["air fryer"])
+
+        scrape_user.assert_not_called()
+        scrape_publico.assert_called_once()
+        self.assertEqual(scrape_publico.call_args.args[0], [self.user])
+
+    @override_settings(SECRETS_FERNET_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    def test_salvar_nova_credencial_amazon_reabre_tentativa_creators(self):
+        from apps.scrapers.views import _salvar_campos_amazon
+
+        perfil = self.user.perfil
+        perfil.amazon_credential_id = "antiga"
+        perfil.amazon_credential_secret = "segredo-antigo"
+        perfil.amazon_elegivel = None
+        perfil.amazon_ultimo_erro = "A Amazon recusou a credencial."
+        perfil.save(update_fields=[
+            "amazon_credential_id", "amazon_credential_secret",
+            "amazon_elegivel", "amazon_ultimo_erro",
+        ])
+
+        _salvar_campos_amazon(perfil, {
+            "afiliado_tag_amazon": "source-user-20",
+            "amazon_credential_id": "nova",
+            "amazon_credential_secret": "segredo-novo",
+            "amazon_creators_host": "",
+        })
+
+        perfil.refresh_from_db()
+        self.assertIsNone(perfil.amazon_elegivel)
+        self.assertEqual(perfil.amazon_ultimo_erro, "")
+
     def test_telegram_amazon_extrai_asin_da_url_em_vez_do_external_id_longo(self):
         item = IngestedItem(
             external_id=(

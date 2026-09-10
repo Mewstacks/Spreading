@@ -12,6 +12,20 @@ from apps.scrapers.marketplaces.base import Marketplace, MarketplaceIndisponivel
 
 logger = logging.getLogger(__name__)
 
+_CREDENCIAL_CREATORS_RECUSADA = "A Amazon recusou a credencial."
+
+
+def _creators_aguarda_reconexao(perfil) -> bool:
+    """Evita repetir um 401 conhecido em todo ciclo agendado.
+
+    O fallback público continua coletando preço/oferta e a tag ainda gera links.
+    Apenas a API Creators fica em espera até que a dona salve uma nova credencial;
+    esse salvamento limpa o marcador em ``_salvar_campos_amazon``.
+    """
+    return str(getattr(perfil, "amazon_ultimo_erro", "") or "").startswith(
+        _CREDENCIAL_CREATORS_RECUSADA
+    )
+
 
 class Amazon(Marketplace):
     slug = "amazon"
@@ -26,8 +40,12 @@ class Amazon(Marketplace):
         from apps.scrapers.scraper_amazon.creators_api import creds_de_usuario
         perfis = Perfil.objects.select_related("user").all()
         candidatos = [p for p in perfis if not p.bloqueado and tag_amazon(p.user)]
-        conectados = [p for p in candidatos if creds_de_usuario(p.user).completo()]
-        fallback = [p for p in candidatos if not creds_de_usuario(p.user).completo()]
+        conectados = [
+            p for p in candidatos
+            if creds_de_usuario(p.user).completo()
+            and not _creators_aguarda_reconexao(p)
+        ]
+        fallback = [p for p in candidatos if p not in conectados]
         from apps.scrapers.scraper_amazon.ofertas_scraper import metricas_vazias
 
         inicio = timezone.now()
