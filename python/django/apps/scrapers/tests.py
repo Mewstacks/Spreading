@@ -6917,6 +6917,45 @@ class EnvioCupomTests(TestCase):
         self.assertEqual(publicacao.produto_id, self.produto.id)
         sender.enviar_oferta.assert_called_once()
 
+    def test_cupom_nao_repete_mesmo_item_com_outra_linha_de_catalogo(self):
+        """URLs distintas da mesma oferta não podem furar o limite editorial."""
+        from apps.scrapers.models import ProdutoCupom
+        from apps.scrapers.ofertas import enviar_cupom
+        from apps.scrapers.coupon_products import atualizar_chave_cupom
+        from apps.scrapers.models import CupomPreparacao
+
+        duplicado = Produto.objects.create(
+            marketplace="mercadolivre", nome="Produto comprovado", origem="cupom",
+            preco_sem_desconto=150, preco_com_cupom=100,
+            link_produto="https://produto.mercadolivre.com.br/MLB-999-outra-url",
+            link_afiliado="https://meli.la/produto-2", imagem_url="https://img.example/p2.jpg",
+        )
+        outro = CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id="afiliados:LINHA20:site",
+            marketplace="mercadolivre", titulo="Linha 20%", codigo="LINHA20",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 20,
+                    "modo_resgate": "codigo", "is_mar_aberto": True}, estado="ativo")
+        ProdutoCupom.objects.create(
+            produto=duplicado, cupom=outro, status="confirmado",
+            preco_original=150, preco_atual=100, preco_final=80,
+            verificado_em=timezone.now())
+        CupomPreparacao.objects.create(
+            cupom=outro, usuario=None, status="pronto",
+            produtos_chave=atualizar_chave_cupom(outro), verificado_em=timezone.now())
+        LinkAfiliadoUsuario.objects.create(
+            usuario=self.user, produto=duplicado, afiliado_ok=True, estado="pronto",
+            link_afiliado="https://meli.la/produto-2", verificado_ok=True,
+            verificado_em=timezone.now(), url_canonica="https://meli.la/produto-2",
+        )
+        sender = self._sender({"sucesso": True, "via": "whatsapp", "mensagem_id": "m1"})
+        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
+            primeiro = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+            segundo = enviar_cupom(outro, "123@g.us", usuario=self.user)
+
+        self.assertTrue(primeiro["sucesso"])
+        self.assertTrue(segundo["duplicado"])
+        sender.enviar_oferta.assert_called_once()
+
     def test_cupom_com_um_produto_envia_a_foto_original(self):
         from apps.scrapers.ofertas import enviar_cupom
 

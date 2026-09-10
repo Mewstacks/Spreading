@@ -60,6 +60,67 @@ def _motivo_publico_transporte(resultado) -> str:
     return "Não foi possível confirmar o envio pelo canal selecionado."
 
 
+def _identidades_editoriais(produtos):
+    """Identidades que o público reconhece como o mesmo item.
+
+    O banco preserva uma linha por URL observada. Isso é correto para auditoria,
+    mas não pode virar duas mensagens quase idênticas quando a loja muda a URL
+    ou dois coletores encontram o mesmo título. A identidade de publicação é
+    deliberadamente conservadora: mesma loja + URL canônica, ASIN, ou título
+    normalizado exatamente igual.
+    """
+    from apps.scrapers.identidade_produto import link_canonico
+
+    identidades = set()
+    for produto in produtos:
+        if not produto:
+            continue
+        marketplace = str(getattr(produto, "marketplace", "") or "").lower()
+        asin = str(getattr(produto, "asin", "") or "").strip().upper()
+        if asin:
+            identidades.add(("asin", marketplace, asin))
+        link = link_canonico(marketplace, getattr(produto, "link_produto", ""))
+        if link:
+            identidades.add(("url", marketplace, link))
+        nome = str(getattr(produto, "nome_norm", "") or "").strip()
+        if nome:
+            identidades.add(("nome", marketplace, nome))
+    return identidades
+
+
+def _publicacao_recente_do_mesmo_item(*, usuario, canal, destino_id, desde,
+                                      pendente_desde, produtos):
+    """Encontra repetição editorial, inclusive em linhas legadas de cupom.
+
+    Publicações antigas de cupom não guardavam ``produto_id``. Para elas usamos
+    as relações confirmadas do cupom; para as novas, a FK torna a consulta
+    direta. Isso impede que uma troca de código, URL ou coletor fure a regra de
+    24h do mesmo item no mesmo grupo.
+    """
+    alvo = _identidades_editoriais(produtos)
+    if not alvo:
+        return None
+    recentes = Publicacao.objects.filter(
+        usuario=usuario, canal=canal, destino_id=destino_id,
+    ).filter(
+        Q(status="pendente", criada_em__gte=pendente_desde)
+        | Q(status="enviado", enviada_em__gte=desde)
+        | Q(status="incerto", criada_em__gte=desde)
+    ).select_related("produto", "cupom_normalizado").order_by("-criada_em")
+    for publicacao in recentes:
+        itens_publicados = [publicacao.produto] if publicacao.produto_id else []
+        if not itens_publicados and publicacao.origem == "cupom" and publicacao.cupom_normalizado_id:
+            itens_publicados = [
+                relacao.produto
+                for relacao in publicacao.cupom_normalizado.produtos.filter(
+                    status="confirmado"
+                ).select_related("produto")
+            ]
+        if alvo.intersection(_identidades_editoriais(itens_publicados)):
+            return publicacao
+    return None
+
+
 def _motivo_reprovacao_da_loja(marketplace, relatorio, confiar_desconto) -> str:
     """Motivo escrito pela loja que realmente verificou o link.
 
@@ -2055,13 +2116,6 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 "classe": "transitorio", "link_afiliado_pendente": True}
 
     desde = agora - timedelta(hours=24)
-    # A unidade editorial é o produto, não o código. Um mesmo item pode aparecer
-    # em vários cupons; trocar SAVE20 por CLIENTETOP não autoriza repetir a oferta
-    # no mesmo grupo. Mantemos também o fallback pela relação cupom→produto para
-    # cobrir publicações antigas, criadas antes de Publicacao.produto ser gravado
-    # no caminho de cupom.
-    produto_ids_relacoes = {relacao.produto_id for relacao in relacoes_prontas}
-
     def _reservar():
         """Transação curta de reserva: lock do usuário, deduplicação por destino,
         cota diária e a Publicacao pendente. Roda via _executar_orm para não
@@ -2105,16 +2159,11 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 return {"sucesso": False, "motivo": motivo, "duplicado": True,
                         "classe": "permanente"}
 
-            recente_produto = Publicacao.objects.filter(
-                usuario=usuario, canal=canal, destino_id=grupo_id,
-            ).filter(
-                Q(status="pendente", criada_em__gte=agora - timedelta(minutes=30))
-                | Q(status="enviado", enviada_em__gte=desde)
-                | Q(status="incerto", criada_em__gte=desde)
-            ).filter(
-                Q(produto_id__in=produto_ids_relacoes)
-                | Q(origem="cupom", cupom_normalizado__produtos__produto_id__in=produto_ids_relacoes)
-            ).order_by("-criada_em").first()
+            recente_produto = _publicacao_recente_do_mesmo_item(
+                usuario=usuario, canal=canal, destino_id=grupo_id, desde=desde,
+                pendente_desde=agora - timedelta(minutes=30),
+                produtos=[relacao.produto for relacao in relacoes_prontas],
+            )
             if recente_produto:
                 motivo = ("Esta oferta já está sendo enviada para o destino."
                           if recente_produto.status == "pendente"
@@ -3581,14 +3630,11 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                     return {"sucesso": False, "motivo": "Limite diário de envios atingido.",
                             "classe": "permanente"}
                 desde = agora_abertura - timedelta(hours=24)
-                recente = Publicacao.objects.filter(
-                    usuario=usuario, produto=produto,
-                    canal=canal, destino_id=grupo_id,
-                ).filter(
-                    Q(status="pendente", criada_em__gte=agora_abertura - timedelta(minutes=30))
-                    | Q(status="enviado", enviada_em__gte=desde)
-                    | Q(status="incerto", criada_em__gte=desde)
-                ).order_by("-criada_em").first()
+                recente = _publicacao_recente_do_mesmo_item(
+                    usuario=usuario, canal=canal, destino_id=grupo_id, desde=desde,
+                    pendente_desde=agora_abertura - timedelta(minutes=30),
+                    produtos=[produto],
+                )
                 if recente:
                     motivo = ("Esta oferta já está sendo enviada para o destino."
                               if recente.status == "pendente"
