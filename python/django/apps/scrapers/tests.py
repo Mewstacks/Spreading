@@ -6794,6 +6794,12 @@ class EnvioCupomTests(TestCase):
         self.colagem.side_effect = lambda itens, **_kwargs: (
             "b64", "image/jpeg", list(itens))
         self.addCleanup(self._colagem_patcher.stop)
+        self._imagem_patcher = patch(
+            "apps.scrapers.ofertas._baixar_imagem_b64",
+            return_value=("foto-original-b64", "image/jpeg"),
+        )
+        self._imagem_patcher.start()
+        self.addCleanup(self._imagem_patcher.stop)
         # O envio agora pré-checa a conexão do WhatsApp; nestes testes de lógica de
         # cupom o canal é considerado conectado (o transporte é mockado à parte).
         # Testes específicos sobrepõem este patch com um estado desconectado.
@@ -6879,6 +6885,48 @@ class EnvioCupomTests(TestCase):
         self.assertTrue(outro["sucesso"])
         self.assertEqual(Publicacao.objects.filter(
             origem="cupom", status="enviado", usuario=self.user).count(), 2)
+
+    def test_cupom_diferente_nao_repete_produto_no_mesmo_destino(self):
+        """Código novo não é motivo para repetir o mesmo item em 24 horas."""
+        from apps.scrapers.models import ProdutoCupom
+        from apps.scrapers.ofertas import enviar_cupom
+
+        outro = CupomNormalizado.objects.create(
+            fonte=self.fonte, external_id="afiliados:OUTRO20:site",
+            marketplace="mercadolivre", titulo="Outro 20%", codigo="OUTRO20",
+            regras={"tipo_desconto": "porcentagem", "valor_desconto": 20,
+                    "modo_resgate": "codigo", "is_mar_aberto": True},
+            estado="ativo")
+        ProdutoCupom.objects.create(
+            produto=self.produto, cupom=outro, status="confirmado",
+            preco_original=150, preco_atual=100, preco_final=80,
+            verificado_em=timezone.now())
+        from apps.scrapers.coupon_products import atualizar_chave_cupom
+        from apps.scrapers.models import CupomPreparacao
+        CupomPreparacao.objects.create(
+            cupom=outro, usuario=None, status="pronto",
+            produtos_chave=atualizar_chave_cupom(outro), verificado_em=timezone.now())
+        sender = self._sender({"sucesso": True, "via": "whatsapp", "mensagem_id": "m1"})
+        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
+            primeiro = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+            segundo = enviar_cupom(outro, "123@g.us", usuario=self.user)
+
+        self.assertTrue(primeiro["sucesso"])
+        self.assertTrue(segundo["duplicado"])
+        publicacao = Publicacao.objects.get(cupom_normalizado=self.cupom)
+        self.assertEqual(publicacao.produto_id, self.produto.id)
+        sender.enviar_oferta.assert_called_once()
+
+    def test_cupom_com_um_produto_envia_a_foto_original(self):
+        from apps.scrapers.ofertas import enviar_cupom
+
+        sender = self._sender({"sucesso": True, "via": "whatsapp", "mensagem_id": "foto"})
+        with patch("apps.scrapers.senders.registry.get_sender", return_value=sender):
+            resultado = enviar_cupom(self.cupom, "123@g.us", usuario=self.user)
+
+        self.assertTrue(resultado["sucesso"])
+        self.assertEqual(sender.enviar_oferta.call_args.kwargs["imagem_b64"], "foto-original-b64")
+        self.colagem.assert_not_called()
 
     @patch("apps.scrapers.ofertas.resolver_link_afiliado_cupom",
            return_value={"sucesso": True, "link": "https://meli.la/afiliado"})

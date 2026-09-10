@@ -2055,6 +2055,12 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 "classe": "transitorio", "link_afiliado_pendente": True}
 
     desde = agora - timedelta(hours=24)
+    # A unidade editorial é o produto, não o código. Um mesmo item pode aparecer
+    # em vários cupons; trocar SAVE20 por CLIENTETOP não autoriza repetir a oferta
+    # no mesmo grupo. Mantemos também o fallback pela relação cupom→produto para
+    # cobrir publicações antigas, criadas antes de Publicacao.produto ser gravado
+    # no caminho de cupom.
+    produto_ids_relacoes = {relacao.produto_id for relacao in relacoes_prontas}
 
     def _reservar():
         """Transação curta de reserva: lock do usuário, deduplicação por destino,
@@ -2099,6 +2105,23 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                 return {"sucesso": False, "motivo": motivo, "duplicado": True,
                         "classe": "permanente"}
 
+            recente_produto = Publicacao.objects.filter(
+                usuario=usuario, canal=canal, destino_id=grupo_id,
+            ).filter(
+                Q(status="pendente", criada_em__gte=agora - timedelta(minutes=30))
+                | Q(status="enviado", enviada_em__gte=desde)
+                | Q(status="incerto", criada_em__gte=desde)
+            ).filter(
+                Q(produto_id__in=produto_ids_relacoes)
+                | Q(origem="cupom", cupom_normalizado__produtos__produto_id__in=produto_ids_relacoes)
+            ).order_by("-criada_em").first()
+            if recente_produto:
+                motivo = ("Esta oferta já está sendo enviada para o destino."
+                          if recente_produto.status == "pendente"
+                          else "Este destino já recebeu este produto nas últimas 24h.")
+                return {"sucesso": False, "motivo": motivo, "duplicado": True,
+                        "classe": "permanente"}
+
             perfil = getattr(usuario, "perfil", None)
             if perfil and perfil.bloqueado:
                 return {"sucesso": False, "motivo": "Conta bloqueada para envios.",
@@ -2115,6 +2138,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                         "classe": "permanente"}
             return cupom_atual, Publicacao.objects.create(
                 usuario=usuario, origem="cupom", cupom_normalizado=cupom_atual,
+                produto=relacoes_prontas[0].produto,
                 configuracao=configuracao,
                 canal=canal, destino_id=str(grupo_id)[:100],
                 destino_nome=str(destino_nome or "")[:255],
@@ -2224,9 +2248,20 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                             or getattr(getattr(usuario, "perfil", None), "divulgacao_afiliado", "")
                         ))) > 1024:
                     itens_cupom.pop()
-            from apps.scrapers.colagem import montar_colagem_itens
-            colagem_b64, colagem_mime, itens_cupom = montar_colagem_itens(itens_cupom)
-            if not colagem_b64 or not itens_cupom:
+            # Uma oferta é uma foto de produto, não uma colagem branca de 1080px.
+            # Grade só é necessária quando há vários itens (hoje o limite editorial
+            # é um, mas este fallback deixa o comportamento futuro explícito).
+            if imagem_b64_custom:
+                imagem_b64, imagem_mime = imagem_b64_custom, "image/jpeg"
+            elif len(itens_cupom) == 1:
+                imagem_b64, imagem_mime = _baixar_imagem_b64(
+                    getattr(itens_cupom[0]["produto"], "imagem_url", ""))
+            else:
+                imagem_b64, imagem_mime = "", ""
+            if not imagem_b64:
+                from apps.scrapers.colagem import montar_colagem_itens
+                imagem_b64, imagem_mime, itens_cupom = montar_colagem_itens(itens_cupom)
+            if not imagem_b64 or not itens_cupom:
                 return falhar("Nenhuma foto válida foi encontrada para os produtos do cupom.",
                               classe="transitorio")
             mensagem = montar_mensagem_cupom_produtos(
@@ -2236,7 +2271,7 @@ def enviar_cupom(cupom, grupo_id, *, canal="whatsapp", usuario=None, destino_nom
                     or getattr(getattr(usuario, "perfil", None), "divulgacao_afiliado", "")
                 ))
             link_registro = itens_cupom[0]["link"]
-            img_kwargs = {"imagem_b64": colagem_b64, "mimetype": colagem_mime}
+            img_kwargs = {"imagem_b64": imagem_b64, "mimetype": imagem_mime}
         elif bloqueio_afiliacao:
             # Havia produtos comprovados, mas a sessão do Mercado Livre caiu na
             # hora de gerar os links afiliados. Não é "cupom sem produtos": é
@@ -3547,14 +3582,14 @@ def enviar_oferta_de_produto(produto, grupo_id, verificar=True, dry_run=False,
                             "classe": "permanente"}
                 desde = agora_abertura - timedelta(hours=24)
                 recente = Publicacao.objects.filter(
-                    usuario=usuario, origem="produto", produto=produto,
+                    usuario=usuario, produto=produto,
                     canal=canal, destino_id=grupo_id,
                 ).filter(
                     Q(status="pendente", criada_em__gte=agora_abertura - timedelta(minutes=30))
                     | Q(status="enviado", enviada_em__gte=desde)
                     | Q(status="incerto", criada_em__gte=desde)
                 ).order_by("-criada_em").first()
-                if recente and preco_publicavel(produto) > recente.preco_final * .95:
+                if recente:
                     motivo = ("Esta oferta já está sendo enviada para o destino."
                               if recente.status == "pendente"
                               else "Este destino recebeu a oferta nas últimas 24h.")
