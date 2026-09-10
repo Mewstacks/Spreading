@@ -354,6 +354,15 @@ import dj_database_url  # noqa: E402
 _RUNTIME_DATABASE_URL = os.getenv("DATABASE_URL", "")
 _MIGRATION_DATABASE_URL = os.getenv("MIGRATION_DATABASE_URL", "")
 _SYSTEM_DATABASE_URL = os.getenv("SYSTEM_DATABASE_URL", "")
+# Em produção existem duas VMs e várias lanes persistentes. Dez minutos de
+# conexão ociosa por thread/processo esgota facilmente pools pequenos e deixa
+# comandos de suporte esperando para abrir uma sessão. Um minuto preserva a
+# reutilização dentro de cada ciclo sem reter slots entre eles; uma instalação
+# com pool maior ainda pode optar por outro valor sem novo deploy.
+try:
+    DATABASE_CONN_MAX_AGE = max(0, int(os.getenv("DATABASE_CONN_MAX_AGE", "60")))
+except ValueError:
+    DATABASE_CONN_MAX_AGE = 60
 MIGRATION_DATABASE_CONFIGURED = bool(_MIGRATION_DATABASE_URL)
 SYSTEM_DATABASE_CONFIGURED = bool(_SYSTEM_DATABASE_URL)
 TENANT_SYSTEM_PROCESS = os.getenv("TENANT_SYSTEM_PROCESS", "0") == "1"
@@ -400,7 +409,7 @@ if _DATABASE_URL:
     # trazem sslmode na própria URL. Sobrescreva com DB_SSL_REQUIRE=1 se precisar.
     DATABASES = {
         "default": dj_database_url.parse(
-            _DATABASE_URL, conn_max_age=600,
+            _DATABASE_URL, conn_max_age=DATABASE_CONN_MAX_AGE,
             ssl_require=os.getenv("DB_SSL_REQUIRE", "0") == "1",
         )
     }
