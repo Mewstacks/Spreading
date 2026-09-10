@@ -1,4 +1,5 @@
 """Pré-visualiza ou publica um único canário de cupom no grupo de homologação."""
+from datetime import timedelta
 from types import SimpleNamespace
 
 from django.contrib.auth import get_user_model
@@ -10,6 +11,27 @@ from apps.accounts.tenant import system_job
 
 
 MARCADORES_DE_TESTE = ("teste", "test", "smoke", "dev")
+
+
+def _produto_ja_publicado_no_destino(config, user, relacao, *, agora=None):
+    """Espelha a barreira editorial do sender na seleção do canário.
+
+    A prévia precisa ser uma promessa executável: sugerir um item que
+    ``enviar_cupom`` bloqueará por repetição faz o operador tentar a mesma
+    oferta de novo e não prova o fluxo. A identidade cobre URL, ASIN e título
+    normalizado, inclusive publicações legadas sem FK de produto.
+    """
+    from apps.scrapers.ofertas import _publicacao_recente_do_mesmo_item
+
+    agora = agora or timezone.now()
+    return _publicacao_recente_do_mesmo_item(
+        usuario=user,
+        canal=config.canal,
+        destino_id=config.grupo_id,
+        desde=agora - timedelta(hours=24),
+        pendente_desde=agora - timedelta(minutes=30),
+        produtos=[relacao.produto],
+    ) is not None
 
 
 def _pares_prontos_da_regra(config, user, *, piso):
@@ -50,7 +72,9 @@ def _pares_prontos_da_regra(config, user, *, piso):
             desconto = _desconto_efetivo_do_item_cupom({
                 "produto": relacao.produto, "relacao": relacao,
             })
-            if desconto >= piso:
+            if (desconto >= piso
+                    and not _produto_ja_publicado_no_destino(config, user, relacao,
+                                                               agora=agora)):
                 return SimpleNamespace(
                     kind="coupon", obj=cupom, score=0,
                     reasons=["par produto-cupom com link verificado"],
@@ -116,7 +140,10 @@ class Command(BaseCommand):
             desconto_efetivo = _desconto_efetivo_do_item_cupom({
                 "produto": relacao_pronta.produto, "relacao": relacao_pronta,
             })
-            if desconto_efetivo >= piso:
+            if (desconto_efetivo >= piso
+                    and not _produto_ja_publicado_no_destino(
+                        config, user, relacao_pronta,
+                    )):
                 candidato, relacao, desconto = (
                     possivel, relacao_pronta, desconto_efetivo,
                 )
