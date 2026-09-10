@@ -75,8 +75,8 @@ class MensagemTests(TestCase):
     def test_sem_prova_a_mensagem_nao_mostra_o_de(self):
         produto = self._produto()
         texto = montar_mensagem(produto, LINK, None, usuario=self.user)
-        self.assertIn("POR", texto)
-        self.assertNotIn("DE ", texto)
+        self.assertIn("Por 🔥", texto)
+        self.assertNotIn("De ❌", texto)
         # E, principalmente, o preço inventado não aparece em lugar nenhum.
         self.assertNotIn("200", texto)
 
@@ -87,8 +87,8 @@ class MensagemTests(TestCase):
             preco=190.0,
         )
         texto = montar_mensagem(produto, LINK, None, usuario=self.user)
-        self.assertIn("DE ", texto)
-        self.assertIn("POR", texto)
+        self.assertIn("De ❌", texto)
+        self.assertIn("Por 🔥", texto)
 
     def test_oferta_sem_prova_continua_sendo_publicada(self):
         """Opção A: some a afirmação não comprovada, não a oferta."""

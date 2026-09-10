@@ -368,7 +368,6 @@ class Command(BaseCommand):
             )
             from apps.scrapers.coupon_rules import codigo_publicavel
             from apps.scrapers.models import LinkAfiliadoCupomUsuario
-            from apps.scrapers.ofertas import montar_mensagem_cupom
             from apps.scrapers.scraper_amazon.link import gerar_link_afiliado_cupom
 
             self._sec("CANARIO READ-ONLY DE MENSAGENS")
@@ -390,6 +389,15 @@ class Command(BaseCommand):
                         f"  config {config.id}: FALHOU — primeiro candidato nao e cupom"
                     )
                     continue
+                # Cupom isolado não é mais um tipo publicável. Não gere preview
+                # genérico aqui: ele mascarava a ausência de produto/preço/foto e
+                # já levou o canário a aprovar uma mensagem impossível de usar.
+                falhos += 1
+                self._linha(
+                    f"  config {config.id}: FALHOU — cupom isolado bloqueado; "
+                    "prepare relação cupom→produto antes do canário"
+                )
+                continue
                 cupom = candidato.obj
                 marketplace = str(cupom.marketplace or "").casefold()
                 codigo = codigo_publicavel(cupom)
@@ -415,7 +423,7 @@ class Command(BaseCommand):
                     ).first()
                     link_ok = coupon_link_verified_and_fresh(cache)
                     link = canonical_coupon_link(cache) if link_ok else ""
-                mensagem = montar_mensagem_cupom(cupom, link_afiliado=link)
+                mensagem = ""
                 checks = {
                     "cupom_first": True,
                     "link_verificado": bool(link_ok),

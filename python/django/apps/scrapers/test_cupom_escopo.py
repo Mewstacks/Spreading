@@ -226,7 +226,7 @@ class PortaoDaMensagemTests(TestCase):
         mensagem = montar_mensagem(
             self.produto, "https://meli.la/x", None, usuario=self.usuario)
 
-        self.assertIn("CUPOM: MELIPROMO", mensagem)
+        self.assertIn("CUPOM: *MELIPROMO*", mensagem)
         self.assertIn("Vale em:", mensagem)
         self.assertIn("Vehicle Parts & Accessories", mensagem)
 
@@ -239,7 +239,7 @@ class PortaoDaMensagemTests(TestCase):
         mensagem = montar_mensagem(
             self.produto, "https://meli.la/x", None, usuario=self.usuario)
 
-        self.assertIn("CUPOM: MELIPROMO", mensagem)
+        self.assertIn("CUPOM: *MELIPROMO*", mensagem)
         self.assertNotIn("Vale em:", mensagem)
 
 
@@ -554,8 +554,7 @@ class AvisoDeCuponsTests(TestCase):
 
         texto = montar_mensagem_aviso_cupons([estreito], "mercadolivre")
 
-        self.assertIn("MELIPROMO", texto)
-        self.assertIn("Vehicle Parts & Accessories", texto)
+        self.assertEqual(texto, "")
 
     def test_linha_site_inteiro_desmentida_sai_da_selecao(self):
         from types import SimpleNamespace

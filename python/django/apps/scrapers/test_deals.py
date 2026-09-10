@@ -394,7 +394,7 @@ class MensagemDealTests(BaseDeals):
             texto_ia={"linha": "Fone Bluetooth JBL para ouvir o dia inteiro"},
         )
         self.assertEqual(texto.count("Fone Bluetooth JBL"), 1)
-        self.assertIn("POR R$ 80", texto)
+        self.assertIn("Por 🔥 R$ 80", texto)
         self.assertIn("PRESENTE", texto)
         self.assertIn("https://meli.la/abc", texto)
 
@@ -411,7 +411,7 @@ class MensagemDealTests(BaseDeals):
 
         deal = self._deal()
         texto = montar_mensagem_deal(deal, "https://meli.la/abc", usuario=self.user)
-        self.assertIn("POR R$ 80", texto)
+        self.assertIn("Por 🔥 R$ 80", texto)
         self.assertIn("PRESENTE", texto)
 
     def test_a_mensagem_nao_afirma_nada_sobre_historico_de_preco(self):
@@ -463,8 +463,8 @@ class MensagemDealTests(BaseDeals):
         # Sem serie nao ha ancora: so o POR.
         self.assertNotIn("DE ", sem)
         # Com serie, a ancora e a mediana medida, com o percentual.
-        self.assertIn("DE ~R$ 160~", com)
-        self.assertIn("(-50%)", com)
+        self.assertIn("De ❌ R$ 160", com)
+        self.assertIn("Por 🔥 R$ 80 (50% OFF)", com)
         # E nenhuma das duas afirma nada sobre historico.
         for texto in (sem, com):
             self.assertNotIn("90 dias", texto)
@@ -491,13 +491,16 @@ class MensagemDealTests(BaseDeals):
         deal.desconto_comprovado = True
         texto = montar_mensagem_deal(deal, "https://meli.la/abc", usuario=self.user)
 
-        self.assertIn("| *POR R$ ", texto)
-        self.assertIn("🎟️", texto)
+        self.assertIn("De ❌ R$", texto)
+        self.assertIn("Por 🔥 R$", texto)
+        self.assertIn("🎟 CUPOM:", texto)
         self.assertIn("👉", texto)
         self.assertIn("🔗 https://meli.la/abc", texto)
         self.assertNotIn("🏬", texto)
         self.assertNotIn("🛒", texto)
         self.assertNotIn("➡️", texto)
+        self.assertNotIn("Oferta Relâmpago", texto)
+        self.assertNotIn("Link de afiliado", texto)
 
     def test_o_preco_antigo_nao_e_anunciado_como_alta(self):
         """"chega a custar R$ X" le como se o preco fosse SUBIR."""
@@ -966,7 +969,7 @@ class AncoraDePrecoTests(BaseDeals):
 
         texto = self._mensagem(deal)
 
-        self.assertIn("DE ~R$ 160~", texto)
+        self.assertIn("De ❌ R$ 160", texto)
         self.assertNotIn("200", texto)
 
     def test_o_percentual_e_impresso(self):
@@ -974,7 +977,7 @@ class AncoraDePrecoTests(BaseDeals):
         deal.desconto_comprovado = True
         deal.historico = {"n": 9, "mediana": 160.0, "minimo": 80.0}
 
-        self.assertIn("(-50%)", self._mensagem(deal))
+        self.assertIn("(50% OFF)", self._mensagem(deal))
 
     def test_sem_serie_nao_ha_preco_riscado(self):
         deal = self._deal()
@@ -984,7 +987,7 @@ class AncoraDePrecoTests(BaseDeals):
         texto = self._mensagem(deal)
 
         self.assertNotIn("DE ~", texto)
-        self.assertIn("POR", texto)
+        self.assertIn("Por 🔥 R$ 80", texto)
 
     def test_desconto_nao_comprovado_nao_risca(self):
         """A série existe, mas o portão de comprovação continua mandando."""
@@ -1009,7 +1012,7 @@ class AncoraDePrecoTests(BaseDeals):
         texto = self._mensagem(deal, configuracao=config)
 
         self.assertNotIn("DE ~", texto)
-        self.assertIn("POR R$ 80", texto)
+        self.assertIn("Por 🔥 R$ 80", texto)
 
     def test_mediana_abaixo_do_preco_nao_vira_ancora_invertida(self):
         """Série mais barata que o preço de hoje não pode virar "de" menor."""
@@ -1320,11 +1323,11 @@ class SemCreditoDeIAAMensagemContinuaInteiraTests(BaseDeals):
         texto = self._sem_ia(deal, configuracao=self._config())
 
         self.assertIn("Fone Bluetooth JBL", texto)   # nome, pelo aparador local
-        self.assertIn("POR R$ 80", texto)            # preço
-        self.assertIn("DE ~R$ 160~", texto)          # âncora medida
-        self.assertIn("(-50%)", texto)               # percentual
-        self.assertIn("CUPOM: PRESENTE", texto)      # cupom
-        self.assertIn("Compre aqui", texto)          # CTA configurado
+        self.assertIn("Por 🔥 R$ 80", texto)          # preço
+        self.assertIn("De ❌ R$ 160", texto)          # âncora medida
+        self.assertIn("(50% OFF)", texto)            # percentual
+        self.assertIn("CUPOM: *PRESENTE*", texto)    # cupom
+        self.assertIn("Abra a oferta e aplique o cupom", texto)  # CTA canônico
         self.assertIn("https://meli.la/abc", texto)  # link
 
     def test_o_nome_cru_do_marketplace_e_aparado_sem_ia(self):

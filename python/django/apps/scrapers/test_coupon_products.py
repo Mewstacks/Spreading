@@ -897,7 +897,7 @@ class CouponMessageTests(SimpleTestCase):
         self.assertIn("De ❌ R$ 100", mensagem)
         self.assertIn("Por 🔥 R$ 83,54 (16% OFF)", mensagem)
         self.assertIn("🎟 CUPOM: *PRESENTE*", mensagem)
-        self.assertIn("👉 Aplique o cupom no carrinho:", mensagem)
+        self.assertIn("👉 Abra a oferta e aplique o cupom:", mensagem)
         self.assertIn("🔗 https://meli.la/1GWNQCg", mensagem)
         self.assertNotIn("Cupom Mercado Livre", mensagem)
         self.assertNotIn("Fonte checada", mensagem)
@@ -937,7 +937,7 @@ class CouponMessageTests(SimpleTestCase):
             self.assertIn("De ❌ R$ 100", mensagem, marketplace)
             self.assertIn("Por 🔥 R$ 83,54 (16% OFF)", mensagem, marketplace)
             self.assertIn("🎟 CUPOM: *PRESENTE*", mensagem, marketplace)
-            self.assertIn("Aplique o cupom no carrinho", mensagem, marketplace)
+            self.assertIn("Abra a oferta e aplique o cupom", mensagem, marketplace)
             self.assertIn(link, mensagem, marketplace)
             self.assertNotIn("Link de afiliado", mensagem, marketplace)
 
@@ -983,7 +983,7 @@ class ProductMessageTests(SimpleTestCase):
             produto, "https://amazon.com.br/dp/ABC?tag=teste", None
         )
 
-        self.assertTrue(mensagem.startswith("💻 *Monitor Gamer Samsung Odyssey G5 27"))
+        self.assertTrue(mensagem.startswith("💻 Monitor Gamer Samsung Odyssey G5 27"))
         self.assertNotIn("TELA BRABA PRA JOGAR BONITO", mensagem)
         self.assertNotIn("Curvatura com 1000R", mensagem)
 
@@ -1833,8 +1833,7 @@ class MensagemDeCupomDeAtivacaoTests(TestCase):
 
         texto = montar_mensagem_cupom(cupom)
 
-        self.assertIn("Ative o cupom no link", texto)
-        self.assertNotIn("Use o cupom", texto)
+        self.assertEqual(texto, "")
 
 
 class CasamentoDeContainerTests(TestCase):

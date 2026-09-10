@@ -790,6 +790,19 @@ def _linha_checagem_cupom(cupom, itens=None) -> str:
 
 def montar_mensagem_cupom(cupom, markup=None, link_afiliado=None,
                           escopo_override=None, divulgacao_afiliado=None) -> str:
+    """Legacy: cupom sem produto não é uma mensagem publicável.
+
+    Esta função existia apenas para campanhas genéricas de cupom. Ela nunca deve
+    voltar a produzir uma peça que o transporte possa enviar: sem um produto,
+    preço conferido, foto e link direto, a pessoa recebe exatamente o aviso
+    desconexo que a operação rejeitou. O único builder permitido para cupom é
+    :func:`montar_mensagem_cupom_produtos`, que exige a relação verificada.
+
+    O retorno vazio mantém chamadas antigas seguras enquanto elas são removidas
+    do diagnóstico e dos scripts legados.
+    """
+    return ""
+
     """Monta o texto de divulgação de um cupom (CupomNormalizado) p/ envio manual.
 
     Usa o `Markup` do canal e os dados de `cupom.regras` (valor_desconto/discount_num,
@@ -960,6 +973,16 @@ def linha_desconto_cupom(cupom) -> str:
 
 
 def montar_mensagem_aviso_cupons(cupons, marketplace, link="", markup=None) -> str:
+    """Legacy: aviso de cupom sem produto não é uma mensagem publicável.
+
+    A operação não tem um formato alternativo para cupom solto. Sem uma oferta
+    concreta, preço revalidado, foto e link direto, não há como entregar a
+    anatomia canônica e a mensagem só cria fricção. O envio correspondente já é
+    recusado; devolver vazio também impede que preview, script ou integração
+    interna reintroduza a peça antiga.
+    """
+    return ""
+
     """Aviso de cupons novos, sem produto — o formato que a cliente enviou:
 
         🚨 *NOVOS CUPONS ML* 🚨
@@ -1411,7 +1434,7 @@ def montar_mensagem_cupom_produtos(cupom, itens, markup=None,
     if validade:
         linhas.append(f"⏳ {esc(validade)}")
     if itens:
-        linhas += ["", "👉 Aplique o cupom no carrinho:",
+        linhas += ["", "👉 Abra a oferta e aplique o cupom:",
                    f"🔗 {esc(itens[0]['link'])}"]
     return "\n".join(linhas).strip()
 
@@ -1564,11 +1587,8 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
     ).strip()
 
     linhas = []
-    if getattr(produto, "relampago", False) or getattr(deal.cupom, "relampago", False):
-        linhas += [m.bold("⚡ OFERTA RELÂMPAGO"), ""]
-
     nome = _nome_principal_produto(getattr(produto, "nome", ""), limite=72)
-    linhas.append(f"{_emoji_produto(produto)} {m.bold(esc(nome))}")
+    linhas.append(f"{_emoji_produto(produto)} {esc(nome)}")
     linhas.append("")
 
     # Frete grátis é argumento de compra, não detalhe: os canais que convertem
@@ -1609,39 +1629,34 @@ def montar_mensagem_deal(deal, link, markup=None, *, texto_ia=None, usuario=None
     # preço na primeira passada de olho — que é a única que uma mensagem de grupo
     # recebe. Todo canal grande escreve a moeda.
     if deal.desconto_comprovado and referencia > deal.preco_final and queda >= piso:
-        linhas.append(
-            f"🔥 DE {m.strike('R$ ' + _preco_br(referencia))} | "
-            f"{m.bold(f'POR R$ {por}')} (-{queda:.0f}%)")
+        linhas.append(f"De ❌ R$ {_preco_br(referencia)}")
+        linhas.append(f"Por 🔥 R$ {por} ({queda:.0f}% OFF)")
     else:
-        linhas.append(f"🔥 {m.bold(f'POR R$ {por}')}")
+        linhas.append(f"Por 🔥 R$ {por}")
 
-    if deal.tem_cupom:
-        codigo = codigo_publicavel(deal.cupom)
+    codigo = codigo_publicavel(deal.cupom) if deal.tem_cupom else ""
+    if codigo:
         # Só anuncia quanto o cupom abate quando isso foi provado no checkout. Sem
         # a prova, o cupom continua na mensagem — ele é o que vende — mas sem uma
         # conta que ninguém conferiu. Ver `DealCandidate.beneficio_publicavel`.
-        abate = (f" — abate R$ {_preco_br(deal.beneficio_publicavel)}"
-                 if deal.beneficio_publicavel > 0 else " — desconto no checkout")
-        if codigo:
-            linhas.append(f"🎟️ {m.bold(f'CUPOM: {esc(codigo)}')}{abate}")
+        linhas += ["", f"🎟 CUPOM: {m.bold(esc(codigo))}"]
         minimo = _aviso_minimo_nao_atingido(deal.cupom, produto)
         if minimo:
-            linhas.append(f"⚠️ {esc(minimo.capitalize())}")
+            linhas.append(f"📌 {esc(minimo.capitalize())}")
         escopo = _escopo_do_cupom(deal.cupom)
         if escopo:
-            linhas.append(f"📌 {m.bold('Vale em:')} {esc(escopo)}")
+            linhas.append(f"📌 Vale em: {esc(escopo)}")
         condicao = _condicao_do_cupom(deal.cupom)
         if condicao:
-            linhas.append(f"⚠️ {m.bold('Condição:')} {esc(condicao)}")
+            linhas.append(f"📌 {esc(condicao)}")
         validade = _linha_validade_cupom(deal.cupom)
         if validade:
-            linhas.append(f"⏳ {m.bold(esc(validade))}")
+            linhas.append(f"⏳ {esc(validade)}")
 
     linhas.append("")
-    linhas.append(f"👉 {m.bold(esc(cta))}")
+    cta = "Abra a oferta e aplique o cupom:" if codigo else "Abra a oferta:"
+    linhas.append(f"👉 {esc(cta)}")
     linhas.append(f"🔗 {esc(link)}")
-    if marca and marca.casefold() != "ofertas":
-        linhas += ["", m.italic(esc(marca))]
     return "\n".join(linhas).strip()
 
 
@@ -3001,19 +3016,6 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     economia_rs = produto.preco_sem_desconto - preco_final
     desconto_percent = (economia_rs / produto.preco_sem_desconto) * 100 if produto.preco_sem_desconto else 0
     perfil = getattr(usuario, "perfil", None) if usuario else None
-    marca = (
-        getattr(configuracao, "nome_marca", "")
-        or getattr(perfil, "nome_marca", "") or "Ofertas"
-    ).strip()
-    cta = (
-        getattr(configuracao, "chamada_acao", "")
-        or getattr(perfil, "chamada_acao", "") or "Ver oferta na loja"
-    ).strip()
-    disclosure = (
-        getattr(configuracao, "divulgacao_afiliado", "")
-        or getattr(perfil, "divulgacao_afiliado", "")
-        or "ℹ Link de afiliado; posso receber comissão."
-    ).strip()
     template = (
         getattr(configuracao, "template_b" if variante == "B" else "template_a", "")
         or getattr(perfil, "template_b" if variante == "B" else "template_a", "")
@@ -3034,9 +3036,7 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     #   🔥 DE X | POR Y     [+ 🎟️ CUPOM: ... colado embaixo]
     #   🔗 link
     linhas = []
-    if getattr(produto, "relampago", False):
-        linhas += [m.bold("⚡ OFERTA RELÂMPAGO"), ""]
-    linhas.append(f"{_emoji_produto(produto)} {m.bold(esc(nome_exibicao))}")
+    linhas.append(f"{_emoji_produto(produto)} {esc(nome_exibicao)}")
     # Frete grátis é um benefício factual que a coleta já confirmou; não há
     # promessa de estoque, histórico ou urgência inventada.
     if getattr(produto, "frete_full", False):
@@ -3066,11 +3066,10 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     por = _preco_br(preco_final)
     if desconto_valido:
         de = _preco_br(produto.preco_sem_desconto)
-        linhas.append(
-            f"🔥 DE {m.strike('R$ ' + de)} | {m.bold(f'POR R$ {por}')} "
-            f"(-{desconto_percent:.0f}%)")
+        linhas.append(f"De ❌ R$ {de}")
+        linhas.append(f"Por 🔥 R$ {por} ({desconto_percent:.0f}% OFF)")
     else:
-        linhas.append(f"🔥 {m.bold(f'POR R$ {por}')}")
+        linhas.append(f"Por 🔥 R$ {por}")
 
     # REGRA: cupons NÃO acumulam no ML. Cada item anuncia no máximo UM cupom.
     # Prioridade: cupom do link (cupom_pai) > código do próprio item (codigo_checkout)
@@ -3083,9 +3082,9 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         codigo = codigo_publicavel(cupom_pai)
         if codigo:
             cupom_escolhido = cupom_pai
-            linha_cupom = f"🎟️ {m.bold(f'CUPOM: {esc(codigo)}')}"
+            linha_cupom = f"🎟 CUPOM: {m.bold(esc(codigo))}"
     elif cod_item:
-        linha_cupom = f"🎟️ {m.bold(f'CUPOM: {esc(cod_item)}')}"
+        linha_cupom = f"🎟 CUPOM: {m.bold(esc(cod_item))}"
     else:
         # Códigos genéricos (CupomCodigo) são de checkout do ML — NÃO valem na Amazon.
         mkt = getattr(produto, "marketplace", "mercadolivre")
@@ -3099,14 +3098,14 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
             if linha_cupom is None and not codigo:
                 codigo, cupom_escolhido = _melhor_codigo(produto), None
         if codigo:
-            linha_cupom = f"🎟️ {m.bold(f'CUPOM: {esc(codigo)}')}"
+            linha_cupom = f"🎟 CUPOM: {m.bold(esc(codigo))}"
 
     if linha_cupom:
         aviso_minimo = _aviso_minimo_nao_atingido(cupom_escolhido, produto)
-        if aviso_minimo:
-            linha_cupom = f"{linha_cupom} — {esc(aviso_minimo)}"
         # Com cupom: cola embaixo do preço e separa o link com uma linha em branco.
         linhas.append(linha_cupom)
+        if aviso_minimo:
+            linhas.append(f"📌 {esc(aviso_minimo)}")
         # Cupom que vale para um recorte (categoria, marca, container) sai com o
         # recorte escrito. A fonte oficial entrega esse texto — "Vehicle Parts &
         # Accessories" no cupom que gerou a reclamação — e a mensagem o descartava,
@@ -3114,21 +3113,20 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         # de um departamento só, e a oferta "não funciona" no checkout.
         escopo = _escopo_do_cupom(cupom_escolhido)
         if escopo:
-            linhas.append(f"📌 {m.bold('Vale em:')} {esc(escopo)}")
+            linhas.append(f"📌 Vale em: {esc(escopo)}")
         # Cupom com restrição de público (primeira compra, app, cartão, pix) só pode
         # ser anunciado junto da condição — sem isso a mensagem promete a quem não
         # tem direito e a oferta "não funciona" no checkout.
         condicao = _condicao_do_cupom(cupom_escolhido)
         if condicao:
-            linhas.append(f"⚠️ {m.bold('Condição:')} {esc(condicao)}")
+            linhas.append(f"📌 {esc(condicao)}")
         validade = _linha_validade_cupom(cupom_escolhido)
         if validade:
-            linhas.append(f"⏳ {m.bold(esc(validade))}")
+            linhas.append(f"⏳ {esc(validade)}")
         linhas.append("")
-    linhas.append(f"👉 {m.bold(esc(cta))}")
+    cta = "Abra a oferta e aplique o cupom:" if linha_cupom else "Abra a oferta:"
+    linhas.append(f"👉 {esc(cta)}")
     linhas.append(f"🔗 {esc(link_afiliado)}")
-    if marca and marca.casefold() != "ofertas":
-        linhas.extend(["", m.italic(esc(marca))])
     return "\n".join(linhas)
 
 

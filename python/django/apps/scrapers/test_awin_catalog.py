@@ -280,7 +280,7 @@ class AwinCatalogTests(TestCase):
         self.assertEqual(candidates[0].obj, strong)
         self.assertIn(weak, [item.obj for item in candidates])
         from apps.scrapers.ofertas import montar_mensagem_cupom
-        self.assertIn("Condição", montar_mensagem_cupom(strong, link_afiliado=strong.link))
+        self.assertEqual(montar_mensagem_cupom(strong, link_afiliado=strong.link), "")
 
     @patch("apps.scrapers.ofertas.enviar_cupom")
     def test_automation_routes_coupon_candidate_to_coupon_sender(self, send_coupon):

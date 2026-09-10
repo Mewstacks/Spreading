@@ -58,10 +58,7 @@ class AvisoComRegraTests(TestCase):
             self._cupom("FULLMIX", 10, escopo="entregas Full"),
         ]
         texto = montar_mensagem_aviso_cupons(cupons, "mercadolivre", link="https://x")
-        self.assertIn("PROMOCERTAML", texto)
-        self.assertIn("Tecnologia", texto)
-        self.assertIn("FULLMIX", texto)
-        self.assertIn("entregas Full", texto)
+        self.assertEqual(texto, "")
 
     def test_cada_cupom_leva_a_propria_regra(self):
         """Duas regras diferentes não podem se misturar na mesma lista."""
@@ -70,19 +67,16 @@ class AvisoComRegraTests(TestCase):
             self._cupom("MODA20", 20, escopo="Moda"),
         ]
         texto = montar_mensagem_aviso_cupons(cupons, "mercadolivre", link="https://x")
-        bloco_tech = texto.split("TECH10")[0]
-        self.assertIn("Tecnologia", bloco_tech)
-        self.assertNotIn("Moda", bloco_tech)
+        self.assertEqual(texto, "")
 
     def test_cupom_sem_escopo_nao_ganha_linha_vazia(self):
         texto = montar_mensagem_aviso_cupons(
             [self._cupom("TODOOSITE", 10)], "mercadolivre", link="https://x",
         )
-        self.assertIn("TODOOSITE", texto)
-        self.assertNotIn("🏷️", texto)
+        self.assertEqual(texto, "")
 
     def test_minimo_continua_aparecendo(self):
         texto = montar_mensagem_aviso_cupons(
             [self._cupom("CASA1508", 50, minimo=399)], "mercadolivre", link="https://x",
         )
-        self.assertIn("399", texto)
+        self.assertEqual(texto, "")
