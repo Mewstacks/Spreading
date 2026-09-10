@@ -140,6 +140,14 @@ class MacroDoNomeTests(SimpleTestCase):
             "Apoio De Cabeça De Bebe Para Cadeirinha": "Bebês e Maternidade",
             "Máquina De Cortar Cabelo Wahl Home Cut": "Beleza e Cuidados Pessoais",
             "Máquina De Tosa Doméstica Em Casa - Pet Clipper": "Pets e Animais",
+            # Amostra do pool publicável da lules em 10/09. São substantivos e
+            # linhas de marca inequívocos, não tentativa de inferir por preço.
+            "E-Reader Kindle 11th Gen 2024 16GB verde-claro":
+                "Eletrônicos e Informática",
+            "Robô Roomba Combo J7, 2 em 1, Aspira e Passa Pano da iRobot":
+                "Eletrodomésticos",
+            "Retentor Caixa Inferior E Tubo Compatível Brastemp Consul":
+                "Eletrodomésticos",
         }
         for nome, esperado in casos.items():
             self.assertEqual(macro_do_nome(nome), esperado, nome)

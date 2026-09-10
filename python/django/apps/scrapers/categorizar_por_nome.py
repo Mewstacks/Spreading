@@ -61,7 +61,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         "notebook", "laptop", "computador", "desktop", "monitor", "teclado",
         "mouse", "mousepad", "impressora", "roteador", "modem", "pendrive",
         "ssd", "hd externo", "memoria ram", "cartao de memoria", "placa de video", "placa-mae", "fonte cooler master", "processador",
-        "webcam", "tablet", "estabilizador", "nobreak", "cabo hdmi", "starlink", "gpu", "radeon", "adaptador hub usb", "microsoft", "emeet s800",
+        "webcam", "tablet", "estabilizador", "nobreak", "cabo hdmi", "starlink", "gpu", "radeon", "adaptador hub usb", "microsoft", "emeet s800", "kindle",
     ),
     "Áudio, Vídeo e Fotografia": (
         "caixa de som", "soundbar", "fone bluetooth", "headset", "headphone",
@@ -83,7 +83,7 @@ PALAVRAS_POR_MACRO: dict[str, tuple] = {
         ("aspirador", 3),
         "cafeteira", "sanduicheira", "forno eletrico", "forno de bancada", "purificador", "bebedouro", "ferro de passar",
         "panificadora", "tanquinho", "sorveteira", "mixer", "dreame",
-        "frigobar", "ferro a vapor", "fritadeiras", "micro ondas", "micro-ondas", "depurador", "filtro de agua", "pipoqueira", "irobot",
+        "frigobar", "ferro a vapor", "fritadeiras", "micro ondas", "micro-ondas", "depurador", "filtro de agua", "pipoqueira", "irobot", "roomba", "electrolux", "retentor caixa inferior",
     ),
     "Climatização e Aquecimento": (
         "ar condicionado", "ventilador", "climatizador", "aquecedor",
