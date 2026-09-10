@@ -4359,12 +4359,21 @@ def processar_configs_de_envio():
         # ainda não aconteceu. O custo é um `continue` no lugar de um tick perdido.
         try:
             if getattr(cfg, "tipo", "") == ConfiguracaoEnvio.TIPO_AVISO_CUPONS:
-                r = enviar_aviso_cupons(
-                    selecionar_cupons_para_aviso(cfg, cfg.owner), cfg.grupo_id,
-                    canal=getattr(cfg, "canal", "whatsapp"), usuario=cfg.owner,
-                    destino_nome=cfg.grupo_nome, configuracao=cfg,
-                    enqueue_only=_send_pipeline_v2_enabled(cfg.owner),
+                # A mensagem legada só entregava códigos e uma vitrine genérica;
+                # sem produto, preço e aplicação comprovados ela não é publicável.
+                # Desligar uma vez evita retentativas e pausas artificiais do loop.
+                cfg.ativo = False
+                cfg.motivo_pausa = (
+                    "Formato de aviso genérico desativado: use cupom vinculado a "
+                    "produto, foto, preço e link verificados."
                 )
+                cfg.save(update_fields=["ativo", "motivo_pausa"])
+                log_event(
+                    "publicacao", "legacy_coupon_notice_disabled", cfg.motivo_pausa,
+                    level="warning", usuario=cfg.owner,
+                    contexto={"configuracao": cfg.id, "destino": cfg.grupo_id},
+                )
+                continue
             else:
                 macros = [cfg.macro_categoria] if cfg.macro_categoria else None  # vazio = qualquer (inclui ofertas)
                 r = selecionar_e_enviar(

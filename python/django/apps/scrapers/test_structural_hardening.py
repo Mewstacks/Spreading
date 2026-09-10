@@ -1332,7 +1332,7 @@ class CouponReadinessReasonTests(TestCase):
                       return_value=builder):
             yield
 
-    def test_codigo_sem_produto_e_visivel_mas_explica_sessao_e_link(self):
+    def test_codigo_sem_produto_fica_aguardando_pareamento_comprovado(self):
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
 
         coupon = self._code()
@@ -1340,13 +1340,13 @@ class CouponReadinessReasonTests(TestCase):
             projetar_disponibilidade_cupons(self.user)
         projection = CupomDisponibilidade.objects.get(cupom=coupon, usuario=self.user)
         self.assertEqual((projection.stage, projection.category, projection.reason_code),
-                         ("waiting_link", "no_session", "ml_session_missing"))
+                         ("eligible", "waiting", "product_match_pending"))
 
         self._ml_session()
         with self._ml():
             projetar_disponibilidade_cupons(self.user)
         projection.refresh_from_db()
-        self.assertEqual(projection.reason_code, "affiliate_link_pending")
+        self.assertEqual(projection.reason_code, "product_match_pending")
         LinkAfiliadoCupomUsuario.objects.create(
             usuario=self.user, cupom=coupon,
             url_origem=coupon.link, link_afiliado="https://meli.la/coupon-ready",
@@ -1356,7 +1356,8 @@ class CouponReadinessReasonTests(TestCase):
         with self._ml():
             projetar_disponibilidade_cupons(self.user)
         projection.refresh_from_db()
-        self.assertEqual(projection.stage, "ready")
+        self.assertEqual((projection.stage, projection.reason_code),
+                         ("eligible", "product_match_pending"))
 
     def test_percentual_com_teto_irrisorio_e_rejeitado_como_lixo(self):
         """'50% OFF' com teto de R$1 é dado real do ML, não bug de parser — e é
@@ -1452,10 +1453,10 @@ class CouponReadinessReasonTests(TestCase):
         self.assertEqual(writes, [])
         self.assertEqual(
             CupomDisponibilidade.objects.get(cupom=coupon).reason_code,
-            "ml_session_missing",
+            "product_match_pending",
         )
 
-    def test_cache_verificado_continua_ready_sem_sessao_e_cache_vencido_nao(self):
+    def test_link_de_codigo_sem_produto_nao_promove_o_cupom(self):
         from apps.scrapers.coupon_readiness import projetar_disponibilidade_cupons
 
         coupon = self._code()
@@ -1468,7 +1469,8 @@ class CouponReadinessReasonTests(TestCase):
         with self._ml(conectado=False, detalhe="sem_sessao"):
             projetar_disponibilidade_cupons(self.user)
         projection = CupomDisponibilidade.objects.get(cupom=coupon, usuario=self.user)
-        self.assertEqual(projection.stage, "ready")
+        self.assertEqual((projection.stage, projection.reason_code),
+                         ("eligible", "product_match_pending"))
 
         link.verificado_em = timezone.now() - timedelta(days=8)
         link.save(update_fields=["verificado_em"])
@@ -1477,7 +1479,7 @@ class CouponReadinessReasonTests(TestCase):
         projection.refresh_from_db()
         self.assertEqual(
             (projection.stage, projection.reason_code),
-            ("waiting_link", "affiliate_link_expired"),
+            ("eligible", "product_match_pending"),
         )
 
     @override_settings(ML_CUPONS_ATIVACAO_ENABLED=True)
@@ -1548,14 +1550,14 @@ class CouponReadinessReasonTests(TestCase):
         with self._ml(conectado=True):
             projetar_disponibilidade_cupons(self.user)
         projection = CupomDisponibilidade.objects.get(cupom=coupon, usuario=self.user)
-        self.assertEqual(projection.reason_code, "affiliate_link_pending")
+        self.assertEqual(projection.reason_code, "product_match_pending")
 
         # E o inverso: veredito de desconexão da MESMA fonte para o funil.
         with self._ml(conectado=False, detalhe="expirado"):
             projetar_disponibilidade_cupons(self.user)
         projection.refresh_from_db()
         self.assertEqual((projection.stage, projection.reason_code),
-                         ("waiting_link", "ml_session_expired"))
+                         ("eligible", "product_match_pending"))
 
     def test_sessao_do_catalogo_caida_pede_reconexao_em_vez_de_culpar_o_cupom(self):
         """A esteira compartilhada usa a sessão de sistema. Quando ela cai, o
@@ -1596,7 +1598,7 @@ class CouponReadinessReasonTests(TestCase):
         with self._ml(conectado=True, linkbuilder="login_required"):
             projetar_disponibilidade_cupons(self.user)
         projection = CupomDisponibilidade.objects.get(cupom=coupon, usuario=self.user)
-        self.assertEqual(projection.reason_code, "ml_linkbuilder_login_required")
+        self.assertEqual(projection.reason_code, "product_match_pending")
 
     def test_not_found_so_muda_ausente_e_grava_transicao_uma_vez(self):
         from apps.scrapers.coupon_readiness import (
@@ -1918,7 +1920,7 @@ class CouponReadinessReasonTests(TestCase):
             eventos_antes + 1,
         )
 
-    def test_cupom_de_codigo_do_ml_tem_quem_prepare_o_link(self):
+    def test_cupom_de_codigo_com_link_ainda_exige_produto_comprovado(self):
         """Impasse fechado: o cupom aparecia na tela e nunca ficava disponível.
 
         `_codigo` só promove a `ready` com um LinkAfiliadoCupomUsuario verificado, e
@@ -1949,7 +1951,8 @@ class CouponReadinessReasonTests(TestCase):
         with self._ml():
             projetar_disponibilidade_cupons(self.user)
         projection = CupomDisponibilidade.objects.get(cupom=coupon, usuario=self.user)
-        self.assertEqual(projection.stage, "ready")
+        self.assertEqual((projection.stage, projection.reason_code),
+                         ("eligible", "product_match_pending"))
 
     def test_afiliacao_de_codigo_para_o_lote_quando_a_sessao_cai(self):
         """Sessão morta não pode custar um Chromium por cupom restante."""

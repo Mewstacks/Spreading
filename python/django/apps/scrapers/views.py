@@ -500,6 +500,14 @@ def dashboard(request):
     tg_ok = bool(perfil and perfil.telegram_conectado())
     canal_ok = wa_ok or tg_ok
     regra_ok = ConfiguracaoEnvio.objects.filter(owner=user).exists()
+    # Shopee uses two independent credentials: affiliate access generates
+    # commissionable links, while the shop session only checks coupons in-cart.
+    from apps.scrapers.report_sessions import has_report_session
+    shopee_integracao = IntegracaoAfiliado.objects.filter(
+        owner=user, provedor="shopee").first()
+    shopee_afiliada_conectada = bool(
+        shopee_integracao and shopee_integracao.status == "conectada")
+    shopee_shop_conectado = has_report_session(user, "shopee_shop")
 
     # Uma etapa = {título, feito, CTA}. Ordem = caminho até o "aha" (enviar 1 oferta).
     passos = [
@@ -523,6 +531,9 @@ def dashboard(request):
         "passos_feitos": feitos,
         "passos_total": len(passos),
         "onboarding_completo": feitos == len(passos),
+        "shopee_enabled": getattr(settings, "SHOPEE_INTEGRATION_ENABLED", False),
+        "shopee_afiliada_conectada": shopee_afiliada_conectada,
+        "shopee_shop_conectado": shopee_shop_conectado,
     })
 
 

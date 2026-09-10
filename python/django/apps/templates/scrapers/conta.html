@@ -17,6 +17,7 @@
   .program-row img { width: 36px; height: 36px; object-fit: contain; border-radius: var(--r-sm);
     background: var(--surface-3); flex: none; }
   .program-row form { margin-left: auto; }
+  #shopee { scroll-margin-top: 1rem; }
 </style>
 {% endblock %}
 
@@ -80,7 +81,7 @@
       </div>
       <div class="rows">
         <div class="row-item">
-          <i data-lucide="shopping-bag" style="color:var(--muted);"></i>
+          <i data-lucide="shopping-bag" aria-hidden="true" style="color:var(--muted);"></i>
           <div class="row-main" style="font-size:13px;"><strong>Mercado Livre</strong></div>
           <div class="row-side">
             {% if ml_sessao_ok %}<span class="badge badge-green"><span class="dot"></span>Conectado</span>
@@ -97,9 +98,20 @@
             <a class="btn-link btn-sm" href="{% url 'scraper-amazon' %}">Gerenciar</a>
           </div>
         </div>
+        {% if shopee_enabled %}
         <div class="row-item">
-          <i data-lucide="message-circle" style="color:var(--muted);"></i>
-          <div class="row-main" style="font-size:13px;"><strong>Shopee · validação</strong></div>
+          <i data-lucide="shopping-bag" style="color:var(--muted);"></i>
+          <div class="row-main" style="font-size:13px;"><strong>Shopee · afiliados</strong></div>
+          <div class="row-side">
+            {% if shopee_integracao.status == 'conectada' %}<span class="badge badge-green"><span class="dot"></span>Conectada</span>
+            {% else %}<span class="badge badge-red"><span class="dot"></span>Não conectada</span>{% endif %}
+            <a class="btn-link btn-sm" href="#shopee">Gerenciar</a>
+          </div>
+        </div>
+        {% endif %}
+        <div class="row-item">
+          <i data-lucide="log-in" aria-hidden="true" style="color:var(--muted);"></i>
+          <div class="row-main" style="font-size:13px;"><strong>Shopee · login para validação</strong></div>
           <div class="row-side">
             {% if shopee_shop_conectado %}<span class="badge badge-green"><span class="dot"></span>Conectada</span>
             {% else %}<span class="badge badge-red"><span class="dot"></span>Não conectada</span>{% endif %}

@@ -43,10 +43,20 @@ passos.1 = portal de afiliados.
   /* ── Ações manuais: hierarquia primária → secundária → texto ── */
   .acoes { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
 
+  .shopee-access { display:flex; align-items:center; justify-content:space-between; gap:1rem; }
+  .shopee-access-copy { display:flex; gap:.75rem; align-items:flex-start; min-width:0; }
+  .shopee-access-icon { width:2.25rem; height:2.25rem; flex:0 0 auto; display:grid; place-items:center;
+    color:var(--accent); border:1px solid var(--border); border-radius:var(--radius); background:var(--panel-2); }
+  .shopee-access-title { display:flex; align-items:center; flex-wrap:wrap; gap:.5rem; margin:0; font-size:14px; font-weight:600; text-wrap:balance; }
+  .shopee-access-desc { margin:.25rem 0 0; color:var(--muted); font-size:12.5px; line-height:1.45; }
+  .shopee-access-actions { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; justify-content:flex-end; }
+
   /* stepper: CTA cai para linha própria no mobile */
   @media (max-width: 639px) {
     .step { flex-wrap: wrap; }
     .step .step-cta { margin-left: calc(26px + .9rem); }
+    .shopee-access { align-items:stretch; flex-direction:column; }
+    .shopee-access-actions > .btn { flex:1; justify-content:center; }
   }
 </style>
 {% endblock %}
@@ -56,9 +66,37 @@ passos.1 = portal de afiliados.
   <div class="head-main">
     <span class="eyebrow">Coleta</span>
     <h1>Scraper</h1>
-    <p class="sub">Ofertas e cupons do Mercado Livre, com links de afiliado gerados na hora.</p>
+    <p class="sub">Ofertas e cupons verificados, com links de afiliado para Mercado Livre, Amazon e Shopee.</p>
   </div>
 </div>
+
+{% if shopee_enabled %}
+<section class="section" aria-labelledby="shopee-access-title">
+  <div class="panel shopee-access">
+    <div class="shopee-access-copy">
+      <span class="shopee-access-icon"><i data-lucide="shopping-bag" aria-hidden="true"></i></span>
+      <div>
+        <h2 class="shopee-access-title" id="shopee-access-title">
+          Shopee
+          {% if shopee_afiliada_conectada %}<span class="badge badge-green"><span class="dot"></span>afiliados conectados</span>
+          {% else %}<span class="badge badge-red"><span class="dot"></span>afiliados não configurados</span>{% endif %}
+        </h2>
+        <p class="shopee-access-desc">A integração de afiliados cria links comissionados. O login de compras confere cupom no carrinho, sem efetuar pedido.</p>
+      </div>
+    </div>
+    <div class="shopee-access-actions">
+      <a class="btn btn-ghost btn-sm" href="{% url 'scraper-shopee-shop-conexao' %}">
+        <i data-lucide="log-in" aria-hidden="true"></i>
+        {% if shopee_shop_conectado %}Validar login Shopee{% else %}Fazer login Shopee{% endif %}
+      </a>
+      <a class="btn btn-accent btn-sm" href="{% url 'scraper-conta' %}#shopee">
+        <i data-lucide="key-round" aria-hidden="true"></i>
+        {% if shopee_afiliada_conectada %}Gerenciar afiliados{% else %}Conectar afiliados{% endif %}
+      </a>
+    </div>
+  </div>
+</section>
+{% endif %}
 
 <!-- Primeiros passos: stepper progressivo (some quando tudo está pronto) -->
 {% if not onboarding_completo %}

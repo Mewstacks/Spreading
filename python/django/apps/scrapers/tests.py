@@ -1587,6 +1587,21 @@ class EnvioResilienciaTests(TestCase):
         self.cfg.refresh_from_db()
         return st, iniciar, enviar, resultados
 
+    def test_legacy_coupon_notice_is_disabled_before_any_transport(self):
+        self.cfg.tipo = ConfiguracaoEnvio.TIPO_AVISO_CUPONS
+        self.cfg.marketplace = "mercadolivre"
+        self.cfg.save(update_fields=["tipo", "marketplace"])
+
+        with patch("apps.scrapers.whatsapp_client.status", return_value={"conectado": True}), \
+             patch("apps.scrapers.ofertas.enviar_aviso_cupons") as aviso:
+            resultados = ofertas.processar_configs_de_envio()
+
+        self.cfg.refresh_from_db()
+        aviso.assert_not_called()
+        self.assertFalse(self.cfg.ativo)
+        self.assertIn("produto, foto", self.cfg.motivo_pausa)
+        self.assertEqual(resultados, [])
+
     def test_disconnected_session_skips_the_pool_entirely(self):
         # O ponto caro: sem o gate, selecionar_e_enviar rodaria 8 candidatos a
         # ~30s de Playwright cada para só então descobrir que não há WhatsApp.
@@ -2942,7 +2957,8 @@ class EnviarCupomColagemTests(TestCase):
             defaults={"marketplace": "mercadolivre", "nome": "ML web"})
         self.cupom = CupomNormalizado.objects.create(
             fonte=fonte, external_id="campanha:999", marketplace="mercadolivre",
-            titulo="20% OFF em Moda", estado="ativo",
+            titulo="20% OFF em Moda", codigo="OFF20", estado="ativo",
+            regras={"modo_resgate": "codigo"},
         )
         self.produto = Produto.objects.create(
             marketplace="mercadolivre", nome="Tênis de corrida", origem="oferta",
@@ -2951,8 +2967,10 @@ class EnviarCupomColagemTests(TestCase):
             imagem_url="https://img/x.jpg",
         )
         from apps.scrapers.coupon_products import atualizar_chave_cupom
-        from apps.scrapers.models import CupomPreparacao, ProdutoCupom
-        ProdutoCupom.objects.create(
+        from apps.scrapers.models import (
+            CupomPreparacao, LinkAfiliadoProdutoCupomUsuario, ProdutoCupom,
+        )
+        self.relacao = ProdutoCupom.objects.create(
             produto=self.produto, cupom=self.cupom, status="confirmado",
             preco_original=200, preco_atual=120, preco_final=96,
             verificado_em=timezone.now(),
@@ -2962,10 +2980,11 @@ class EnviarCupomColagemTests(TestCase):
             produtos_chave=atualizar_chave_cupom(self.cupom),
             verificado_em=timezone.now(),
         )
-        LinkAfiliadoUsuario.objects.create(
-            usuario=self.user, produto=self.produto, afiliado_ok=True,
+        LinkAfiliadoProdutoCupomUsuario.objects.create(
+            usuario=self.user, relacao=self.relacao,
             estado="pronto", link_afiliado="https://meli.la/abc",
             verificado_ok=True, verificado_em=timezone.now(),
+            url_isca="https://example.com/p?coupon_campaign_id=999",
             url_canonica="https://meli.la/abc",
         )
 
@@ -2977,18 +2996,25 @@ class EnviarCupomColagemTests(TestCase):
         self, get_sender, prep, colagem, _canal
     ):
         from apps.scrapers.senders.base import WhatsAppMarkup
-        itens = [{"produto": self.produto, "link": "https://meli.la/abc"}]
+        itens = [{
+            "produto": self.produto, "relacao": self.relacao,
+            "link": "https://meli.la/abc",
+        }]
         prep.return_value = (itens, False)
         colagem.return_value = ("b64", "image/jpeg", itens)
         sender = Mock(markup=WhatsAppMarkup(), prefers_image="b64")
         sender.enviar_oferta.return_value = {"sucesso": True, "via": "test"}
         get_sender.return_value = sender
 
-        result = ofertas.enviar_cupom(
-            self.cupom, "group@g.us", usuario=self.user, destino_nome="Grupo")
+        with patch(
+            "apps.scrapers.preco_ao_vivo.revalidar_colagem",
+            return_value=(itens, []),
+        ):
+            result = ofertas.enviar_cupom(
+                self.cupom, "group@g.us", usuario=self.user, destino_nome="Grupo")
 
         # Sem o fix, isto levantava UnboundLocalError e caía em "Falha inesperada".
-        self.assertTrue(result["sucesso"])
+        self.assertTrue(result["sucesso"], result)
         self.assertEqual(result["link"], "https://meli.la/abc")
         _, kwargs = sender.enviar_oferta.call_args
         self.assertEqual(kwargs.get("imagem_b64"), "b64")
@@ -8312,7 +8338,7 @@ class AvisoCuponsEnvioTests(TestCase):
                    return_value=resultado) as enviar:
             yield enviar
 
-    def test_envia_e_registra_uma_publicacao_por_cupom(self):
+    def test_recusa_aviso_generico_sem_criar_publicacao(self):
         from apps.scrapers.ofertas import ORIGEM_AVISO_CUPONS, enviar_aviso_cupons
 
         with self._transporte({"sucesso": True, "via": "whatsapp",
@@ -8320,14 +8346,15 @@ class AvisoCuponsEnvioTests(TestCase):
             resultado = enviar_aviso_cupons(
                 [self.cupom], "900@g.us", usuario=self.user, destino_nome="Grupo")
 
-        self.assertTrue(resultado["sucesso"])
-        enviar.assert_called_once()
+        self.assertFalse(resultado["sucesso"])
+        self.assertTrue(resultado["cupom_sem_produto"])
+        self.assertEqual(resultado["classe"], "permanente")
+        self.assertIn("produto, foto", resultado["motivo"])
+        enviar.assert_not_called()
         publicacoes = Publicacao.objects.filter(origem=ORIGEM_AVISO_CUPONS)
-        self.assertEqual(publicacoes.count(), 1)
-        self.assertEqual(publicacoes.first().status, "enviado")
-        self.assertIn("ENVIO10", enviar.call_args.args[1])
+        self.assertFalse(publicacoes.exists())
 
-    def test_link_banner_e_mensagem_usam_primeiro_cupom_realmente_aceito(self):
+    def test_recusa_lista_mista_antes_de_gerar_link_ou_transportar(self):
         from apps.scrapers.ofertas import enviar_aviso_cupons
 
         activation = CupomNormalizado.objects.create(
@@ -8354,13 +8381,13 @@ class AvisoCuponsEnvioTests(TestCase):
                 [activation, self.cupom], "900@g.us", usuario=self.user,
             )
 
-        self.assertTrue(result["sucesso"])
-        resolver.assert_called_once_with(self.cupom, self.user)
-        sent_message = enviar.call_args.args[1]
-        self.assertIn("ENVIO10", sent_message)
-        self.assertNotIn("Ativação inválida", sent_message)
+        self.assertFalse(result["sucesso"])
+        self.assertTrue(result["cupom_sem_produto"])
+        self.assertEqual(result["classe"], "permanente")
+        resolver.assert_not_called()
+        enviar.assert_not_called()
 
-    def test_falha_transitoria_agenda_retry_sem_duplicar_publicacao(self):
+    def test_recusa_nao_deixa_retry_pendente(self):
         from apps.scrapers.ofertas import ORIGEM_AVISO_CUPONS, enviar_aviso_cupons
 
         with self._transporte({"sucesso": False, "erro": "sem conexão",
@@ -8369,13 +8396,10 @@ class AvisoCuponsEnvioTests(TestCase):
                 [self.cupom], "900@g.us", usuario=self.user)
 
         self.assertFalse(resultado["sucesso"])
-        publicacao = Publicacao.objects.get(origem=ORIGEM_AVISO_CUPONS)
-        self.assertEqual(publicacao.status, "pendente")
-        self.assertEqual(publicacao.stage, "transport_queued")
-        self.assertIsNotNone(publicacao.next_retry_at)
-        self.assertEqual(publicacao.attempt_count, 1)
+        self.assertEqual(resultado["classe"], "permanente")
+        self.assertFalse(Publicacao.objects.filter(origem=ORIGEM_AVISO_CUPONS).exists())
 
-    def test_sessao_do_ml_caida_e_transitoria_e_nao_freia_a_regra(self):
+    def test_recusa_sem_consultar_sessao_ou_link_builder(self):
         # Se isto virasse falha permanente, cinco quedas de sessão seguidas
         # pausariam a automação por um problema que se resolve reconectando.
         from apps.scrapers.ofertas import enviar_aviso_cupons
@@ -8387,8 +8411,8 @@ class AvisoCuponsEnvioTests(TestCase):
             resultado = enviar_aviso_cupons([self.cupom], "900@g.us", usuario=self.user)
 
         self.assertFalse(resultado["sucesso"])
-        self.assertEqual(resultado["classe"], "transitorio")
-        self.assertTrue(resultado["precisa_login_ml"])
+        self.assertEqual(resultado["classe"], "permanente")
+        self.assertTrue(resultado["cupom_sem_produto"])
 
 
 class AgendamentoPorDiaTests(SimpleTestCase):

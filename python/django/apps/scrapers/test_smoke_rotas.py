@@ -24,7 +24,7 @@ em `QUARENTENA`, cada uma com o motivo escrito. Quarentena aqui não é "não te
 view é `require_POST`, porque aí o 405 prova o guarda sem executar o corpo.
 """
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import URLPattern, URLResolver, get_resolver, reverse
 
 from apps.accounts.models import ensure_personal_organization
@@ -273,6 +273,16 @@ class SuperficieDeRotasTests(TestCase):
                     resposta.status_code // 100, 5,
                     f"{nome} estourou com {resposta.status_code}.",
                 )
+
+    @override_settings(SHOPEE_INTEGRATION_ENABLED=True)
+    def test_dashboard_exibe_acessos_shopee_distintos(self):
+        """A dashboard deixa claro que login de compras e afiliados não são o mesmo."""
+        self.client.force_login(self.usuario)
+        resposta = self.client.get(reverse("scraper-dashboard"))
+        self.assertContains(resposta, "Fazer login Shopee")
+        self.assertContains(resposta, "Conectar afiliados")
+        self.assertContains(resposta, reverse("scraper-shopee-shop-conexao"))
+        self.assertContains(resposta, f'{reverse("scraper-conta")}#shopee')
 
     def test_rota_de_escrita_recusa_get(self):
         """`require_POST` exercido de verdade: 405 prova o guarda sem rodar o corpo."""
