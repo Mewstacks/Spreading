@@ -763,6 +763,12 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
                 storage_state=state, headless=True,
             ) as (page, _context):
                 resultado = listar_itens_por_cupom(payload, page, max_paginas=2)
+    # ``None`` é o contrato de ``listar_itens_por_cupom`` para layout recusado,
+    # challenge ou timeout. Não equivale a uma listagem aberta sem cards: chamar
+    # isso de ``vazio_comprovado`` expirava pares ainda válidos e deixava a fila
+    # sem nenhum canário publicável após um 403 do ML.
+    if resultado is None:
+        return {"total": 0, "veredito": "falha_transporte"}
     total = 0
     for row in (resultado or {}).get("produtos_aplicaveis", []):
         # Canonicaliza ANTES do lookup: a mesma chave que sources/persistence.py
