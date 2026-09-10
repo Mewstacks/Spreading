@@ -776,6 +776,12 @@ def gerar_links_em_lote(produtos, usuario=None, faixa=None, activation_keys=None
     with coordinated_ml_browser(
         usuario=usuario, authenticated=usuario is not None,
         owner_kind="ml_links_batch",
+        # Pares produto+cupom já comprovados são o caminho curto para uma
+        # publicação verificável. Desistir imediatamente quando uma coleta
+        # está terminando fazia a mesma conta perder muitos ciclos seguidos,
+        # mesmo com o titular consultando a fila e cedendo entre itens. A espera
+        # é limitada, usa o mesmo lease e não abre um segundo Chromium.
+        wait_seconds=45,
     ), iniciar_browser(
         session_user=usuario,
         headless=True
