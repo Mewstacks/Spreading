@@ -1360,7 +1360,14 @@ def preparar_lote(
         return FORCA_EVIDENCIA_ORDEM.get(forca_evidencia(cupom), 3)
 
     def prioridade(cupom, usuario):
-        """Evita que cupons já frescos ocupem sempre o começo do lote."""
+        """Evita que cupons já frescos ocupem sempre o começo do lote.
+
+        Dentro do mesmo nível de evidência, a observação mais recente vem
+        primeiro. Sem esse último critério, o ``id`` antigo decidia a fila de
+        uma mesma fonte e uma campanha recém-chegada podia esperar atrás de
+        centenas de registros históricos — exatamente o oposto do que uma
+        curadoria de ofertas precisa.
+        """
         contexto = _usuario_do_preparo(cupom, usuario)
         prep = preparos.get((cupom.id, getattr(contexto, "id", None)))
         if prep is None:
@@ -1372,8 +1379,10 @@ def preparar_lote(
         else:
             estado = 1  # preparação vencida, vazia ou com erro retomável
         validade = cupom.validade or timezone.datetime.max.replace(tzinfo=datetime_timezone.utc)
+        observacao = cupom.ultima_observacao or cupom.primeira_observacao
+        observacao_ts = observacao.timestamp() if observacao else 0
         return (estado, _peso_evidencia(cupom), 0 if cupom.relampago else 1,
-                validade, cupom.id)
+                -observacao_ts, validade, cupom.id)
 
     usuarios = list(
         usuarios if usuarios is not None

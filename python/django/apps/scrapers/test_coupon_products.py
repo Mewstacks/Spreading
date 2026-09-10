@@ -382,6 +382,37 @@ class CouponPreparationTests(TestCase):
         self.assertEqual(preparar.call_args.args[0].id, confirmado.id)
         self.assertNotEqual(preparar.call_args.args[0].id, sem_produto.id)
 
+    def test_lote_prioriza_observacao_recente_no_mesmo_nivel(self):
+        """A campanha nova não fica atrás do acervo da mesma fonte."""
+        from apps.scrapers.coupon_products import preparar_lote
+
+        fonte = FonteIngestao.objects.create(
+            slug="coupon-recency-priority", marketplace="mercadolivre", nome="Cupons ML",
+        )
+        antigo = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="historico", marketplace="mercadolivre",
+            titulo="Cupom histórico", codigo="HISTORICO20", estado="ativo",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20},
+        )
+        recente = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="recente", marketplace="mercadolivre",
+            titulo="Cupom novo", codigo="NOVO20", estado="ativo",
+            regras={"modo_resgate": "codigo", "tipo_desconto": "porcentagem",
+                    "valor_desconto": 20},
+        )
+        CupomNormalizado.objects.filter(pk=antigo.pk).update(
+            ultima_observacao=timezone.now() - timezone.timedelta(days=2),
+        )
+
+        with patch(
+            "apps.scrapers.coupon_products.preparar_cupom", return_value=[object()],
+        ) as preparar:
+            resultado = preparar_lote(limite=1, permitir_rede=False)
+
+        self.assertEqual(resultado["processados"], 1)
+        self.assertEqual(preparar.call_args.args[0].id, recente.id)
+
     def test_limite_padrao_de_preparacao_e_doze(self):
         from apps.scrapers.coupon_products import PREPARO_LOTE_POR_CICLO
 
