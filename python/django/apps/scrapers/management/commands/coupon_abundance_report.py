@@ -11,7 +11,7 @@ from apps.scrapers.coupon_abundance import MARKETPLACES_META, relatorio_abundanc
 
 class Command(BaseCommand):
     help = (
-        "Cupons distintos prontos por marketplace contra a meta, com déficit, "
+        "Códigos de cupom distintos prontos por marketplace contra a meta, com déficit, "
         "bloqueios e exaustão das fontes."
     )
 
@@ -44,13 +44,13 @@ class Command(BaseCommand):
 
     def _imprimir(self, relatorio):
         self.stdout.write(
-            f"META\tcupons_distintos_prontos={relatorio['meta']}\t"
+            f"META\tcodigos_de_cupom_prontos={relatorio['meta']}\t"
             f"canal={relatorio['canal']}\t"
             f"usuario={relatorio.get('escopo_usuario', 'global')}\t"
             f"aprovado={int(relatorio['aprovado'])}"
         )
         self.stdout.write(
-            "marketplace\tprontos\tmeta\tdeficit\tveredito\tdescoberta_24h\t"
+            "marketplace\tprontos_total\tcodigos\tativacoes\tmeta_codigos\tdeficit\tveredito\tdescoberta_24h\t"
             "meta_descoberta\tclasses\tdescoberta_ok\tmodos\tfontes_nao_exauridas"
         )
         for marketplace in MARKETPLACES_META:
@@ -59,7 +59,7 @@ class Command(BaseCommand):
                 f"{modo}:{total}" for modo, total in sorted(loja["por_modo"].items())
             )
             self.stdout.write(
-                f"{marketplace}\t{loja['prontos']}\t{loja['meta']}\t"
+                f"{marketplace}\t{loja['prontos']}\t{loja['codigos']}\t{loja['ativacoes']}\t{loja['meta']}\t"
                 f"{loja['deficit']}\t{loja['veredito']}\t"
                 f"{loja['descoberta_24h']}\t{loja['meta_descoberta_24h']}\t"
                 f"{','.join(loja['classes_descoberta']) or '-'}\t"

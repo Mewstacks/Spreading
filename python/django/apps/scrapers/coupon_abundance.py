@@ -289,9 +289,11 @@ def relatorio_abundancia(*, agora=None, channel="whatsapp", usuario=None,
     """Resposta única para "temos cupons suficientes nas três lojas?".
 
     ``deficit_provado`` é a palavra cara. Ela só fica verdadeira quando a loja
-    está abaixo da meta E todas as fontes habilitadas terminaram a varredura. Com
-    qualquer fonte parada por orçamento ou bloqueada, o veredito é
-    ``coleta_incompleta`` — que é uma acusação contra nós, não contra a loja.
+    está abaixo da meta de CÓDIGOS copiáveis E todas as fontes habilitadas
+    terminaram a varredura. Ativação de produto continua sendo medida, mas não
+    mascara escassez de código no WhatsApp. Com qualquer fonte parada por
+    orçamento ou bloqueada, o veredito é ``coleta_incompleta`` — que é uma
+    acusação contra nós, não contra a loja.
     """
     agora = agora or timezone.now()
     meta = meta_por_marketplace() if meta is None else max(0, int(meta))
@@ -305,12 +307,20 @@ def relatorio_abundancia(*, agora=None, channel="whatsapp", usuario=None,
 
     lojas = {}
     for marketplace in MARKETPLACES_META:
-        total = prontos.get(marketplace, {}).get("total", 0)
+        dados_prontos = prontos.get(marketplace, {})
+        total = dados_prontos.get("total", 0)
+        por_modo = dados_prontos.get("por_modo", {})
+        # `code_notice` é a única projeção que carrega um texto copiável para
+        # o checkout. Uma campanha de ativação ainda é útil no produto, mas não
+        # pode fazer a meta de cupons parecer cumprida quando o grupo não tem um
+        # código sequer para usar.
+        codigos = int(por_modo.get("code_notice", 0) or 0)
+        ativacoes = int(por_modo.get("product_activation", 0) or 0)
         fontes_da_loja = fontes.get(marketplace, [])
         nao_exauridas = [
             item for item in fontes_da_loja if item["exaustao"] != "exaurida"
         ]
-        atinge = total >= meta
+        atinge = codigos >= meta
         if atinge:
             veredito = "meta_atingida"
         elif not fontes_da_loja:
@@ -321,9 +331,11 @@ def relatorio_abundancia(*, agora=None, channel="whatsapp", usuario=None,
             veredito = "deficit_provado"
         lojas[marketplace] = {
             "prontos": total,
-            "por_modo": prontos.get(marketplace, {}).get("por_modo", {}),
+            "codigos": codigos,
+            "ativacoes": ativacoes,
+            "por_modo": por_modo,
             "meta": meta,
-            "deficit": max(0, meta - total),
+            "deficit": max(0, meta - codigos),
             "veredito": veredito,
             "deficit_provado": veredito == "deficit_provado",
             "fontes": fontes_da_loja,
@@ -347,7 +359,7 @@ def relatorio_abundancia(*, agora=None, channel="whatsapp", usuario=None,
         # Uma loja abaixo da meta reprova o conjunto: o contrato diz que nenhum
         # total agregado compensa marketplace abaixo da meta.
         "aprovado": all(
-            dados["prontos"] >= meta and dados["descoberta_atingida"]
+            dados["codigos"] >= meta and dados["descoberta_atingida"]
             for dados in lojas.values()
         ),
     }

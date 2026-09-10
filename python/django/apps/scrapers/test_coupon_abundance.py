@@ -91,7 +91,7 @@ class AbundanciaTests(TestCase):
         )
         texto = saida.getvalue()
         self.assertIn("usuario=abundancia", texto)
-        self.assertIn("amazon\t1\t10\t9", texto)
+        self.assertIn("amazon\t1\t1\t0\t10\t9", texto)
 
     def test_relatorio_cli_recusa_usuario_inexistente(self):
         with self.assertRaises(CommandError):
@@ -108,6 +108,18 @@ class AbundanciaTests(TestCase):
         self.assertEqual(prontos["total"], 1)
         self.assertEqual(prontos["por_modo"],
                          {"code_notice": 1, "product_activation": 1})
+
+    def test_ativacao_nao_atinge_meta_de_codigos(self):
+        """Volume de ativação não pode fingir que existe cupom copiável."""
+        cupom = self._cupom("mercadolivre", "ATIVACAO")
+        self._projecao(cupom, use_mode="product_activation")
+
+        loja = relatorio_abundancia(meta=1)["lojas"]["mercadolivre"]
+
+        self.assertEqual(loja["prontos"], 1)
+        self.assertEqual(loja["codigos"], 0)
+        self.assertEqual(loja["ativacoes"], 1)
+        self.assertEqual(loja["deficit"], 1)
 
     def test_cupom_expirado_nao_conta(self):
         cupom = self._cupom("shopee", "VELHO")
