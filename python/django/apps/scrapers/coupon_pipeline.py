@@ -916,6 +916,15 @@ def executar_pipeline_cupons(
 ):
     """Executa um ciclo completo sem permitir que uma fonte derrube as demais."""
     usuarios = _priorizar_usuarios_com_destino(_usuarios_ativos(usuarios))
+    # A ordem importa: há um único Chromium e a conta piloto não pode ficar
+    # atrás de contas de demonstração. Registrar os IDs (não credenciais, links
+    # ou tokens) torna o rollout auditável na produção; sem essa linha, um
+    # `PILOT_ORGANIZATION_IDS` apontando para a organização errada só aparecia
+    # indiretamente minutos depois, quando o navegador já estava ocupado.
+    logger.info(
+        "Pipeline de cupons: ordem de contas %s",
+        [getattr(usuario, "pk", None) for usuario in usuarios],
+    )
 
     # Materializa primeiro a pequena fila de pares já comprovados. Uma coleta
     # lenta não pode tomar o único Chromium e atrasar um cupom já publicável.
