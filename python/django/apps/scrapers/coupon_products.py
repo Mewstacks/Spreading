@@ -78,6 +78,11 @@ _FALHAS_KEY = "container-ml:falhas-seguidas"
 # marca curta pula direto para a fila do browser depois da primeira evidência.
 _CHALLENGE_KEY = "container-ml:http-challenge"
 CONTAINER_CHALLENGE_S = int(os.getenv("CONTAINER_CHALLENGE_S", "300") or "300")
+# Um challenge HTTP ainda merece UMA tentativa autenticada no Chromium: há casos
+# em que o WAF bloqueia requests mas libera a sessão real. Se essa tentativa
+# também não consegue sequer confirmar o layout, continuar abrindo um browser por
+# cupom é só repetir a mesma parede (40 * ~17s no incidente de 10/09).
+_BROWSER_LAYOUT_CHALLENGE_KEY = "container-ml:browser-layout-challenge"
 
 
 def _cache_circuito():
@@ -110,6 +115,25 @@ def _registrar_challenge_http():
         logger.exception("Falha ao registrar challenge HTTP do container ML")
 
 
+def _challenge_browser_aberto() -> bool:
+    """True quando o Chromium também encontrou a parede do container."""
+    try:
+        return bool(_cache_circuito().get(_BROWSER_LAYOUT_CHALLENGE_KEY))
+    except Exception:
+        return False
+
+
+def _registrar_challenge_browser():
+    """Pausa novos fallbacks caros após uma falha inconclusiva de layout."""
+    try:
+        _cache_circuito().set(
+            _BROWSER_LAYOUT_CHALLENGE_KEY, True,
+            timeout=CONTAINER_CHALLENGE_S,
+        )
+    except Exception:
+        logger.exception("Falha ao registrar challenge de browser do container ML")
+
+
 def _registrar_falha_de_transporte():
     """Conta a falha e abre o disjuntor quando a sequência estoura o teto."""
     try:
@@ -133,6 +157,7 @@ def _registrar_sucesso_de_transporte():
         cache.delete(_FALHAS_KEY)
         cache.delete(_CIRCUITO_KEY)
         cache.delete(_CHALLENGE_KEY)
+        cache.delete(_BROWSER_LAYOUT_CHALLENGE_KEY)
     except Exception:
         pass
 _CENT = Decimal("0.01")
@@ -746,6 +771,11 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
     if (resultado is None and houve_falha_transporte
             and not houve_resposta_http):
         return {"total": 0, "veredito": "falha_transporte"}
+    # O GET já sinalizou challenge e a única tentativa de Chromium desta janela
+    # também não achou o layout. Não abre mais N browsers para a mesma parede:
+    # devolve uma falha retomável e preserva todos os pares que já existiam.
+    if resultado is None and _challenge_browser_aberto():
+        return {"total": 0, "veredito": "falha_transporte"}
     if resultado is None and not permitir_browser:
         # Passada em massa: o GET não resolveu este container, e abrir Chromium
         # aqui gastaria o recurso mais escasso da máquina no item menos provável.
@@ -768,6 +798,7 @@ def _coletar_ml_remoto(cupom, usuario=None, credenciais_alternativas=(),
     # isso de ``vazio_comprovado`` expirava pares ainda válidos e deixava a fila
     # sem nenhum canário publicável após um 403 do ML.
     if resultado is None:
+        _registrar_challenge_browser()
         return {"total": 0, "veredito": "falha_transporte"}
     total = 0
     for row in (resultado or {}).get("produtos_aplicaveis", []):

@@ -24,8 +24,11 @@ class CouponPreparationTests(TestCase):
             slug="coupon-products-tests", marketplace="amazon", nome="Cupons")
         # O challenge HTTP é uma proteção de produção persistente. Isolar o
         # teste impede que um 403 de um caso altere a rota do próximo.
-        from apps.scrapers.coupon_products import _cache_circuito, _CHALLENGE_KEY
+        from apps.scrapers.coupon_products import (
+            _BROWSER_LAYOUT_CHALLENGE_KEY, _CHALLENGE_KEY, _cache_circuito,
+        )
         _cache_circuito().delete(_CHALLENGE_KEY)
+        _cache_circuito().delete(_BROWSER_LAYOUT_CHALLENGE_KEY)
 
     def _coupon(self, **overrides):
         values = {
@@ -618,6 +621,34 @@ class CouponPreparationTests(TestCase):
         resultado = _coletar_ml_remoto(self._cupom_ml_de_container())
 
         self.assertEqual(resultado["veredito"], "falha_transporte")
+
+    @patch("apps.scrapers.scraper_mercadolivre.scraper.listar_itens_por_cupom",
+           return_value=None)
+    @patch("apps.scrapers.auxiliar.iniciar_browser")
+    @patch("apps.scrapers.coupon_products.ml_site_browser_resource")
+    @patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session")
+    @patch("apps.scrapers.ml_auth.storage_state", return_value={"cookies": []})
+    def test_layout_recusado_abre_circuito_e_proximo_cupom_nao_reabre_browser(
+        self, _storage, http_session, browser_resource, iniciar_browser, _listar,
+    ):
+        """Uma parede no Chromium consome uma tentativa, não o lote inteiro."""
+        from apps.scrapers.coupon_products import _coletar_ml_remoto
+
+        http_session.return_value.get.return_value = Mock(
+            status_code=403, text="challenge", url="https://lista.mercadolivre.com.br/x",
+        )
+        browser_resource.return_value = MagicMock()
+        browser_resource.return_value.__enter__.return_value = True
+        iniciar_browser.return_value = MagicMock()
+        iniciar_browser.return_value.__enter__.return_value = (Mock(), Mock())
+
+        cupom = self._cupom_ml_de_container()
+        primeiro = _coletar_ml_remoto(cupom)
+        segundo = _coletar_ml_remoto(cupom)
+
+        self.assertEqual(primeiro["veredito"], "falha_transporte")
+        self.assertEqual(segundo["veredito"], "falha_transporte")
+        iniciar_browser.assert_called_once()
 
     @patch("apps.scrapers.scraper_mercadolivre.scraper._ml_http_session")
     @patch("apps.scrapers.ml_auth.storage_state", return_value={"cookies": []})
