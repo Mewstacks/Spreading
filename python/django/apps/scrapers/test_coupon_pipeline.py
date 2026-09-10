@@ -78,7 +78,7 @@ class CouponWorkerOrderingTests(SimpleTestCase):
         ):
             resultado = _rodar_cupons(lote=20)
 
-        executar.assert_called_once_with(coletar=True, limite_preparo=20, limite_links=20)
+        executar.assert_called_once_with(coletar=True, limite_preparo=20, limite_links=12)
         self.assertEqual(resultado["validacoes_sem_sessao"], 3)
         self.assertEqual(resultado["validacoes_checkout"], {"confirmados": 1})
 

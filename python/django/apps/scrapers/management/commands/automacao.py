@@ -258,10 +258,16 @@ def _rodar_cupons(lote=40):
     )
     from apps.scrapers.coupon_pipeline import executar_pipeline_cupons
 
+    # O lote da coleta é barato e pode continuar em 40. Link afiliado, porém,
+    # revalida destinos reais e pode custar segundos por produto; dar os mesmos
+    # 40 links para a primeira conta fazia o único Chromium ficar preso nela por
+    # minutos e atrasava a conta piloto e as outras lojas. Doze por conta/ciclo
+    # mantém throughput (quatro ciclos/hora) sem transformar fairness em espera.
+    limite_links = min(12, max(1, lote))
     resultado = executar_pipeline_cupons(
         coletar=True,
         limite_preparo=max(12, lote),
-        limite_links=max(1, lote),
+        limite_links=limite_links,
     )
     # Produto criado pelo pipeline de cupom nasce com `categoria=DESCONHECIDO`, e o
     # classificador de macro do ML deriva justamente da categoria. Sem macro, nenhuma
