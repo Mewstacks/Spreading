@@ -723,6 +723,29 @@ class CouponNicheRankingTests(TestCase):
 
 
 class CouponCanaryCommandTests(TestCase):
+    def test_preview_ignora_cupom_terminalmente_descartado(self):
+        """Prévia atrasada pode usar par pronto, mas não um código já morto."""
+        from apps.scrapers.management.commands.canario_cupom import (
+            _projecao_nao_pronta_do_codigo,
+        )
+
+        user = get_user_model().objects.create_user("canary-terminal", password="x")
+        fonte = FonteIngestao.objects.create(
+            slug="canary-terminal-source", marketplace="mercadolivre", nome="ML",
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="canary-terminal-20", marketplace="mercadolivre",
+            titulo="Cupom encerrado", codigo="MORTO20", estado="ativo",
+            regras={"modo_resgate": "codigo"}, ultima_observacao=timezone.now(),
+        )
+        CupomDisponibilidade.objects.create(
+            organization=user.perfil.organization, usuario=user, cupom=cupom,
+            channel="whatsapp", use_mode="code_notice", stage="discarded",
+            reason_code="not_found_healthy_run",
+        )
+
+        self.assertTrue(_projecao_nao_pronta_do_codigo(cupom, user, "whatsapp"))
+
     def test_preview_usa_par_pronto_quando_projecao_ainda_nao_atualizou(self):
         """O canário homologa o que pode ser enviado, não uma projeção atrasada."""
         from apps.scrapers.coupon_products import chave_produtos_cupom

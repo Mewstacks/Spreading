@@ -34,6 +34,29 @@ def _produto_ja_publicado_no_destino(config, user, relacao, *, agora=None):
     ) is not None
 
 
+def _projecao_nao_pronta_do_codigo(cupom, user, channel) -> bool:
+    """Impede que a prévia contorne uma projeção materializada não pronta.
+
+    O canário pode atravessar uma projeção ainda inexistente: link, foto e preço
+    já verificados são evidência mais recente que uma fila SQL atrasada. Mas isso
+    é diferente de ignorar uma projeção que a própria coleta acabou de marcar como
+    `discarded/not_found_healthy_run`, expirada, fora de escopo ou ainda sem
+    confirmação. Sem esta distinção o comando de homologação podia republicar
+    um cupom antigo, apesar do funil ter confirmado que ele sumiu da loja.
+    """
+    from apps.scrapers.models import CupomDisponibilidade
+
+    # ``--texto`` e a prévia são exercitados com objetos leves; consultar por PK
+    # mantém a guarda real e não impõe que a seleção editorial seja um model ORM.
+    cupom_pk = getattr(cupom, "pk", None)
+    if not isinstance(cupom_pk, int):
+        return False
+    estados = list(CupomDisponibilidade.objects.filter(
+        usuario=user, cupom_id=cupom_pk, channel=channel, use_mode="code_notice",
+    ).values_list("stage", flat=True))
+    return bool(estados) and all(estado != "ready" for estado in estados)
+
+
 def _pares_prontos_da_regra(config, user, *, piso):
     """Escolhe da fonte de verdade produto + cupom + link, sem cupom solto.
 
@@ -64,6 +87,8 @@ def _pares_prontos_da_regra(config, user, *, piso):
     _preparadas, prontas = mapa_relacoes_prontas(user, cupons)
     for cupom in cupons:
         if not codigo_publicavel(cupom):
+            continue
+        if _projecao_nao_pronta_do_codigo(cupom, user, config.canal):
             continue
         for relacao in prontas.get(cupom.pk, []):
             if (config.macro_categoria
@@ -128,6 +153,9 @@ class Command(BaseCommand):
         piso = _piso_desconto_cupom(config)
         candidato = relacao = desconto = None
         for possivel in candidatos:
+            if _projecao_nao_pronta_do_codigo(
+                    possivel.obj, user, config.canal):
+                continue
             relacoes = relacoes_prontas_para_envio(possivel.obj, user)
             if config.macro_categoria:
                 relacoes = [
