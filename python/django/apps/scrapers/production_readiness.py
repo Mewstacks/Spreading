@@ -90,9 +90,11 @@ def avaliar(usuario, *, minimo_taxonomia=95.0, agora=None) -> dict:
             and taxonomia["percentual"] >= float(minimo_taxonomia)
         ),
         "esteiras": bool(esteiras) and all(esteiras.values()),
-        # Não basta ter alguma regra: cupom é a prioridade da operação da Lu.
+        # Não basta ter alguma regra: cupom com CÓDIGO aplicável é a prioridade
+        # da operação da Lu. Uma ativação sem código pode ser uma promoção
+        # honesta, mas não satisfaz o formato editorial aprovado para o WhatsApp.
         "nichos_lu_com_cupom": bool(prioritarias) and all(
-            bool(por_config.get(regra.pk, {}).get("com_cupom"))
+            bool(por_config.get(regra.pk, {}).get("com_cupom_codigo"))
             and not por_config.get(regra.pk, {}).get("deficit_cupom")
             for regra in prioritarias
         ),

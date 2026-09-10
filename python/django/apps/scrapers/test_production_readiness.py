@@ -36,6 +36,7 @@ class ProducaoReadinessTests(TestCase):
             "aprovado": aprovado,
             "regras": [{
                 "config_id": self.config.pk, "com_cupom": int(cupom),
+                "com_cupom_codigo": int(cupom),
                 "deficit_cupom": 0 if cupom else 3,
             }],
         }

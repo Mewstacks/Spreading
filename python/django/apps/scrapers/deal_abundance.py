@@ -71,12 +71,23 @@ def cobertura_da_regra(config, *, agora=None, meta=None):
     meta = meta_por_regra() if meta is None else max(0, int(meta))
     rejeicoes = defaultdict(int)
     deals = gerar_deals(config, limite=None, agora=agora, rejeicoes=rejeicoes)
+    # Para a operação da Lu, "tem cupom" não pode significar apenas que a
+    # vitrine mostra uma ativação. A mensagem que o público recebeu como padrão
+    # editorial precisa trazer um código que ele consiga copiar, ligado àquele
+    # produto e àquela URL. Mantemos a contagem ampla para diagnóstico, mas a
+    # meta/gate usa exclusivamente o subconjunto com código publicável.
+    from apps.scrapers.coupon_rules import codigo_publicavel
+
     com_cupom = sum(1 for deal in deals if deal.tem_cupom)
+    com_cupom_codigo = sum(
+        1 for deal in deals
+        if deal.tem_cupom and codigo_publicavel(getattr(deal, "cupom", None))
+    )
     marketplace = str(getattr(config, "marketplace", "") or "").casefold()
     pendentes = _fontes_nao_exauridas(marketplace)
 
     meta_cupom = meta_de_cupom_por_regra()
-    deficit_cupom = max(0, meta_cupom - com_cupom)
+    deficit_cupom = max(0, meta_cupom - com_cupom_codigo)
     if len(deals) >= meta and not deficit_cupom:
         veredito = "meta_atingida"
     elif pendentes:
@@ -96,7 +107,9 @@ def cobertura_da_regra(config, *, agora=None, meta=None):
         "marketplace": marketplace,
         "elegiveis": len(deals),
         "com_cupom": com_cupom,
+        "com_cupom_codigo": com_cupom_codigo,
         "sem_cupom": len(deals) - com_cupom,
+        "sem_cupom_codigo": len(deals) - com_cupom_codigo,
         "meta": meta,
         "meta_cupom": meta_cupom,
         "deficit": max(0, meta - len(deals)),
