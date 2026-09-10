@@ -397,18 +397,20 @@ class MercadoLivre(Marketplace):
         O pool ML é compartilhado, mas a SESSÃO é por usuário: `usuario` diz qual
         auth_{id}.json abrir. Sem ele, link.py resolve a sessão disponível.
         """
-        from apps.scrapers.carga import (
-            BrowserResourceUnavailable, ml_site_browser_resource,
-        )
+        from apps.scrapers.carga import coordinated_ml_browser
         from apps.scrapers.scraper_mercadolivre.link import gerar_links_em_lote
 
-        with ml_site_browser_resource(
-            usuario, owner_kind="links_generate",
-        ) as acquired:
-            if not acquired:
-                raise BrowserResourceUnavailable(
-                    "Capacidade de browser ou sessão ML ocupada; links serão retomados."
-                )
+        # Este é o primeiro lease do caminho de cupom. Aguardar aqui (e não
+        # somente dentro de ``gerar_links_em_lote``) permite que uma coleta que
+        # já está no item corrente ceda o Chromium ao par produto+cupom
+        # confirmado. O contexto interno do lote é reentrante e não abre outro
+        # browser nem toma uma segunda sessão.
+        with coordinated_ml_browser(
+            usuario=usuario,
+            authenticated=usuario is not None,
+            owner_kind="links_generate",
+            wait_seconds=45,
+        ):
             return gerar_links_em_lote(
                 produtos, usuario=usuario, faixa=faixa,
                 activation_keys=activation_keys,
