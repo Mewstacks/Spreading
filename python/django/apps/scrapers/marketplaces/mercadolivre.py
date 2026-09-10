@@ -400,16 +400,17 @@ class MercadoLivre(Marketplace):
         from apps.scrapers.carga import coordinated_ml_browser
         from apps.scrapers.scraper_mercadolivre.link import gerar_links_em_lote
 
-        # Este é o primeiro lease do caminho de cupom. Aguardar aqui (e não
-        # somente dentro de ``gerar_links_em_lote``) permite que uma coleta que
-        # já está no item corrente ceda o Chromium ao par produto+cupom
-        # confirmado. O contexto interno do lote é reentrante e não abre outro
-        # browser nem toma uma segunda sessão.
+        # Este é o primeiro lease do caminho de cupom. Esperamos só o bastante
+        # para uma coleta que já está no item corrente ceder o Chromium. A espera
+        # anterior de 45s foi medida na conta piloto: quando a coleta não cedia,
+        # cada ciclo ficava parado 44s sem gerar link algum. O item permanece
+        # pendente e volta no ciclo seguinte; dez segundos preservam a chance de
+        # handoff sem transformar contenção em latência da operação inteira.
         with coordinated_ml_browser(
             usuario=usuario,
             authenticated=usuario is not None,
             owner_kind="links_generate",
-            wait_seconds=45,
+            wait_seconds=10,
         ):
             return gerar_links_em_lote(
                 produtos, usuario=usuario, faixa=faixa,
