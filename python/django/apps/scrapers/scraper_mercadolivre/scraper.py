@@ -1239,6 +1239,7 @@ def main(usuario=None):
 
     resultados_pendentes = []
     total = len(cupons_pendentes)
+    processados = 0
     with coordinated_ml_browser(
         usuario=usuario, authenticated=state is not None,
         owner_kind="ml_coupon_products",
@@ -1257,8 +1258,20 @@ def main(usuario=None):
                 break
             emitir_progresso(f"[PROGRESSO] Cupom {i}/{total} ({i*100//total}%)")
             resultado = listar_itens_por_cupom(cupom, page)
+            processados = i
             if resultado:
                 resultados_pendentes.append(resultado)
+            else:
+                # Um layout recusado/challenge não é evidência de que os próximos
+                # cupons estejam vazios. Continuar tentando cada campanha segura o
+                # único Chromium por dezenas de minutos e bloqueia justamente a
+                # preparação de pares já verificáveis. Preservamos o catálogo e
+                # devolvemos a vaga; o ciclo seguinte reavalia a fonte.
+                logger.warning(
+                    "Listagem de cupom sem resultado; liberando o navegador após "
+                    "%s de %s campanha(s).", i, total,
+                )
+                break
 
     # Sincroniza com o banco FORA do contexto Playwright para evitar
     # SynchronousOnlyOperation (Playwright tem event loop interno que
@@ -1291,7 +1304,7 @@ def main(usuario=None):
     except Exception as e:
         logger.warning("Falha ao pre-gerar links de afiliado: %s", e)
 
-    logger.info("%s cupons processados", len(cupons_pendentes))
+    logger.info("%s de %s cupons processados", processados, total)
 
 if __name__ == "__main__":
     main()

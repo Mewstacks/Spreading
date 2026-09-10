@@ -3625,6 +3625,43 @@ class RaspagemDeCuponsTests(TestCase):
         self.assertTrue(info["acao"])
 
 
+class ListagemLegadaDeCupomTests(TestCase):
+    def _cupom(self, campanha):
+        return Cupom.objects.create(
+            campanha_id=campanha, titulo=f"Cupom {campanha}",
+            tipo_desconto="porcentagem", valor_desconto=20,
+            link_original=f"https://lista.mercadolivre.com.br/cupom-{campanha}",
+        )
+
+    @patch("apps.scrapers.scraper_mercadolivre.link.gerar_links_em_lote")
+    @patch("apps.scrapers.scraper_mercadolivre.cateorize.popular_macro_categorias")
+    @patch("apps.scrapers.scraper_mercadolivre.scraper.projetar_catalogo_cupons")
+    @patch("apps.scrapers.scraper_mercadolivre.scraper.listar_itens_por_cupom",
+           return_value=None)
+    @patch("apps.scrapers.scraper_mercadolivre.scraper.iniciar_browser")
+    @patch("apps.scrapers.scraper_mercadolivre.scraper.coordinated_ml_browser")
+    @patch("apps.scrapers.scraper_mercadolivre.scraper.storage_state",
+           return_value={"cookies": []})
+    @patch("apps.scrapers.scraper_mercadolivre.scraper.mapear_cupons")
+    def test_layout_recusado_libera_browser_sem_varrer_todas_as_campanhas(
+        self, _mapear, _state, browser_scope, iniciar_browser, listar,
+        _projetar, _macro, _links,
+    ):
+        """Uma página ML bloqueada não pode monopolizar o Chromium por campanha."""
+        from apps.scrapers.scraper_mercadolivre.scraper import main
+
+        self._cupom("legado-1")
+        self._cupom("legado-2")
+        browser_scope.return_value.__enter__.return_value = None
+        iniciar_browser.return_value.__enter__.return_value = (Mock(), Mock())
+
+        main()
+
+        listar.assert_called_once()
+        browser_scope.return_value.__exit__.assert_called_once()
+        iniciar_browser.return_value.__exit__.assert_called_once()
+
+
 class ParserDeCupomDeCampanhaTests(ComoWorker, TestCase):
     """O parser de /cupons/filter contra o DOM REAL do ML.
 
