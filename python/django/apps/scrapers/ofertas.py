@@ -3156,8 +3156,9 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
         linhas.append(f"Por 🔥 R$ {por}")
 
     # REGRA: cupons NÃO acumulam no ML. Cada item anuncia no máximo UM cupom.
-    # Prioridade: cupom do link (cupom_pai) > código do próprio item (codigo_checkout)
-    # > melhor código genérico VÁLIDO para este item. Nunca os três juntos.
+    # Prioridade: cupom do link (cupom_pai) > código observado no próprio item.
+    # Não há fallback para catálogo genérico: mesmo quando a regra parece compatível,
+    # isso não prova que o código está aplicado ao produto desta URL agora.
     cod_item = getattr(produto, "codigo_checkout", "")
     linha_cupom = None
     cupom_escolhido = None
@@ -3170,19 +3171,11 @@ def montar_mensagem(produto, link_afiliado: str, cupom_pai, markup=None,
     elif cod_item:
         linha_cupom = f"🎟 CUPOM: {m.bold(esc(cod_item))}"
     else:
-        # Códigos genéricos (CupomCodigo) são de checkout do ML — NÃO valem na Amazon.
-        mkt = getattr(produto, "marketplace", "mercadolivre")
-        codigo = None
-        if mkt in ("mercadolivre", ""):
-            do_catalogo = _melhor_cupom_normalizado_obj(produto, usuario=usuario)
-            if do_catalogo is not None:
-                from apps.scrapers.coupon_rules import codigo_publicavel
-                codigo = codigo_publicavel(do_catalogo) or None
-                cupom_escolhido = do_catalogo if codigo else None
-            if linha_cupom is None and not codigo:
-                codigo, cupom_escolhido = _melhor_codigo(produto), None
-        if codigo:
-            linha_cupom = f"🎟 CUPOM: {m.bold(esc(codigo))}"
+        # Uma relação ProdutoCupom confirmada ainda é insuficiente neste caminho:
+        # ele recebe uma URL de produto genérica, não o link afiliado daquela
+        # campanha. O fluxo `enviar_cupom` é o único autorizado a juntar cupom,
+        # produto e URL verificada na mesma publicação.
+        pass
 
     if linha_cupom:
         aviso_minimo = _aviso_minimo_nao_atingido(cupom_escolhido, produto)

@@ -6514,6 +6514,17 @@ class MelhorCupomNormalizadoTests(TestCase):
         self._cupom("a:CONT30", "CONT30", is_mar_aberto=False, discount_num=30, min_compra=0)
         self.assertIsNone(_melhor_cupom_normalizado(self.produto))
 
+    def test_mensagem_sem_cupom_explicito_nao_anuncia_codigo_do_catalogo(self):
+        """A URL genérica do produto não prova a aplicação de um código."""
+        from apps.scrapers.ofertas import montar_mensagem
+
+        self._cupom("a:SITE20", "SITE20", is_mar_aberto=True, discount_num=20, min_compra=0)
+
+        mensagem = montar_mensagem(self.produto, "https://meli.la/produto", None)
+
+        self.assertNotIn("CUPOM:", mensagem)
+        self.assertIn("👉 Abra a oferta:", mensagem)
+
     def test_compara_percentual_e_fixo_em_reais(self):
         from apps.scrapers.ofertas import _melhor_cupom_normalizado
 
@@ -6539,13 +6550,13 @@ class MelhorCupomNormalizadoTests(TestCase):
             "a:FIXO15", "FIXO15", is_mar_aberto=True,
             tipo_desconto="fixo", valor_desconto=15, valor_minimo=0,
         )
-        self._cupom(
+        cupom_minimo = self._cupom(
             "a:MIN150", "MIN150", is_mar_aberto=True,
             tipo_desconto="fixo", valor_desconto=99, valor_minimo=150,
         )
         self.assertEqual(_melhor_cupom_normalizado(self.produto), "MIN150")
 
-        mensagem = montar_mensagem(self.produto, "https://meli.la/x", None)
+        mensagem = montar_mensagem(self.produto, "https://meli.la/x", cupom_minimo)
         self.assertIn("CUPOM: *MIN150*", mensagem)
         self.assertIn("válido em compras acima de R$150", mensagem)
 
@@ -6558,8 +6569,9 @@ class MelhorCupomNormalizadoTests(TestCase):
             escopo="Somente no app, primeira compra",
         )
         CupomNormalizado.objects.filter(pk=cupom.pk).update(restrito=True)
+        cupom.refresh_from_db()
 
-        mensagem = montar_mensagem(self.produto, "https://meli.la/x", None)
+        mensagem = montar_mensagem(self.produto, "https://meli.la/x", cupom)
         self.assertIn("CUPOM: *APP10*", mensagem)
         self.assertIn("📌", mensagem)
         # A linha diz PARA QUEM vale, em substantivo curto — e as duas
