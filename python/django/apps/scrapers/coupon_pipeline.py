@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections import defaultdict
 from datetime import timedelta
 from django.conf import settings
@@ -932,6 +933,8 @@ def executar_pipeline_cupons(
     # lote de Link Builder por conta/ciclo, sem aumentar a pressão na sessão ML.
     afiliacao_prioritaria = {}
     for usuario in usuarios:
+        inicio_afiliacao = time.monotonic()
+        logger.info("Pipeline de cupons: afiliação iniciada para conta %s", usuario.pk)
         try:
             afiliacao_prioritaria[str(usuario.pk)] = afiliar_cupons(
                 usuario, limite=limite_links,
@@ -945,6 +948,11 @@ def executar_pipeline_cupons(
                 "erro": "Falha operacional no preparo de links.",
                 "causa": type(exc).__name__,
             }
+        finally:
+            logger.info(
+                "Pipeline de cupons: afiliação encerrada para conta %s em %.1fs",
+                usuario.pk, time.monotonic() - inicio_afiliacao,
+            )
 
     # Em handoff de deploy, o lease do Chromium anterior pode sobreviver por até
     # 90s. Não começar uma coleta longa nesse intervalo: ela também precisa de
