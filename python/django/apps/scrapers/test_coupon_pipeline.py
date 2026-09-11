@@ -795,6 +795,26 @@ class CouponCanaryCommandTests(TestCase):
         self.assertIn(f"cupom={cupom.pk}", saida.getvalue())
         self.assertIn("Prévia somente", saida.getvalue())
 
+    def test_projecao_elegivel_atrasada_nao_bloqueia_par_verificado(self):
+        from apps.scrapers.management.commands.canario_cupom import (
+            _projecao_nao_pronta_do_codigo,
+        )
+        user = get_user_model().objects.create_user("canary-waiting", password="x")
+        fonte = FonteIngestao.objects.create(
+            slug="canary-waiting-source", marketplace="mercadolivre", nome="ML",
+        )
+        cupom = CupomNormalizado.objects.create(
+            fonte=fonte, external_id="canary-waiting-20", marketplace="mercadolivre",
+            titulo="Cupom em reconciliacao", codigo="WAIT20", estado="ativo",
+            regras={"modo_resgate": "codigo"}, ultima_observacao=timezone.now(),
+        )
+        CupomDisponibilidade.objects.create(
+            organization=user.perfil.organization, usuario=user, cupom=cupom,
+            channel="whatsapp", use_mode="code_notice", stage="eligible",
+            reason_code="product_match_pending",
+        )
+        self.assertFalse(_projecao_nao_pronta_do_codigo(cupom, user, "whatsapp"))
+
     def test_preview_never_envia_sem_flag_explicita(self):
         user = get_user_model().objects.create_user("canary-lu", password="x")
         config = ConfiguracaoEnvio.objects.create(

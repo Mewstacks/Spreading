@@ -54,7 +54,11 @@ def _projecao_nao_pronta_do_codigo(cupom, user, channel) -> bool:
     estados = list(CupomDisponibilidade.objects.filter(
         usuario=user, cupom_id=cupom_pk, channel=channel, use_mode="code_notice",
     ).values_list("stage", flat=True))
-    return bool(estados) and all(estado != "ready" for estado in estados)
+    # A projeção elegível/preparada/aguardando_link pode estar atrasada em
+    # relação à relação produto+cupom+link já verificada. Só um estado terminal
+    # (`discarded`) deve impedir o canário; bloquear qualquer estado não-ready
+    # tornava impossíveis as validações durante a reconciliação.
+    return bool(estados) and all(estado == "discarded" for estado in estados)
 
 
 def _pares_prontos_da_regra(config, user, *, piso):
