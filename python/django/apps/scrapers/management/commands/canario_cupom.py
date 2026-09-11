@@ -166,19 +166,22 @@ class Command(BaseCommand):
                     item for item in relacoes
                     if item.produto.macro_categoria == config.macro_categoria
                 ]
-            relacao_pronta = next(iter(relacoes), None)
-            if not relacao_pronta:
-                continue
-            desconto_efetivo = _desconto_efetivo_do_item_cupom({
-                "produto": relacao_pronta.produto, "relacao": relacao_pronta,
-            })
-            if (desconto_efetivo >= piso
-                    and not _produto_ja_publicado_no_destino(
-                        config, user, relacao_pronta,
-                    )):
-                candidato, relacao, desconto = (
-                    possivel, relacao_pronta, desconto_efetivo,
-                )
+            # Um cupom pode ter vários produtos preparados. Não descarte o
+            # cupom inteiro só porque o primeiro produto da lista já foi
+            # publicado no grupo: avance para o próximo par ainda elegível.
+            for relacao_pronta in relacoes:
+                desconto_efetivo = _desconto_efetivo_do_item_cupom({
+                    "produto": relacao_pronta.produto, "relacao": relacao_pronta,
+                })
+                if (desconto_efetivo >= piso
+                        and not _produto_ja_publicado_no_destino(
+                            config, user, relacao_pronta,
+                        )):
+                    candidato, relacao, desconto = (
+                        possivel, relacao_pronta, desconto_efetivo,
+                    )
+                    break
+            if candidato is not None:
                 break
         if candidato is None:
             candidato, relacao, desconto = _pares_prontos_da_regra(
