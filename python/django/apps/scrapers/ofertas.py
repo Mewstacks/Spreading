@@ -4241,6 +4241,14 @@ def selecionar_e_enviar(macros, grupo_id, min_desconto_percent=15.0,
             # abre um browser e leva ~30s). Aborta e devolve o motivo real.
             return r
         if r.get("classe") == TRANSITORIO:
+            # Um Deal pode chegar ao ranking antes de a lane de links concluir o
+            # par produto+cupom. Isso reprova somente este item; não deve impedir
+            # que os demais candidatos da mesma regra sejam tentados no mesmo
+            # ciclo. Falhas de transporte/sessão continuam abortando o ciclo para
+            # evitar repetição inútil.
+            motivo = str(r.get("motivo") or "")
+            if motivo.startswith("Deal sem link afiliado verificado"):
+                continue
             # Mesma lógica do precisa_login_ml, para o outro lado do envio: o
             # WhatsApp caiu (ou o worker piscou) no meio do tick. Insistir nos 7
             # candidatos restantes custa ~30s de Playwright cada para colecionar
