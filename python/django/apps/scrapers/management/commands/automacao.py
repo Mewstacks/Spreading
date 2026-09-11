@@ -9,6 +9,7 @@ import time
 from contextlib import contextmanager
 from datetime import timedelta
 
+from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import DatabaseError
 from django.utils import timezone
@@ -344,9 +345,21 @@ def _rodar_links(lote=40, *, incluir_ml=True):
     from apps.scrapers.monitor_conexao import ml_conectado
 
     agora = timezone.now()
+    usuarios_ativos = list(get_user_model().objects.filter(is_active=True))
+    if getattr(settings, "COUPON_PIPELINE_PILOT_ONLY", False):
+        from apps.accounts.models import organization_for_user
+        allowlist = set(getattr(settings, "PILOT_ORGANIZATION_IDS", set()) or set())
+        if allowlist:
+            usuarios_ativos = [
+                user for user in usuarios_ativos
+                if (
+                    (organizacao := organization_for_user(user)) is not None
+                    and str(organizacao.pk) in allowlist
+                )
+            ]
     gerados = falhas = pulados = adiados = 0
     por_marketplace = {}
-    for user in get_user_model().objects.filter(is_active=True):
+    for user in usuarios_ativos:
         # Amazon primeiro, e fora do gate do Mercado Livre: o link dela é montado em
         # memória (tag + ASIN), não abre navegador nem depende de sessão do ML.
         # Estar no mesmo `continue` do gate do ML fazia uma conta com a Amazon
