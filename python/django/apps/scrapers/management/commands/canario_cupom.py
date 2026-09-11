@@ -51,6 +51,13 @@ def _projecao_nao_pronta_do_codigo(cupom, user, channel) -> bool:
     cupom_pk = getattr(cupom, "pk", None)
     if not isinstance(cupom_pk, int):
         return False
+    # A projeção é uma fila derivada e pode estar atrasada em relação ao funil
+    # editorial. Se já existe um par confirmado com foto, preço e link afiliado
+    # verificado para esta conta, essa evidência viva vence qualquer estado
+    # terminal antigo da projeção.
+    from apps.scrapers.coupon_products import relacoes_prontas_para_envio
+    if relacoes_prontas_para_envio(cupom, user):
+        return False
     estados = list(CupomDisponibilidade.objects.filter(
         usuario=user, cupom_id=cupom_pk, channel=channel, use_mode="code_notice",
     ).values_list("stage", flat=True))
