@@ -168,6 +168,8 @@ uma frase em vez de um horário com segundos.
             {% comment %}Portal de RELATÓRIOS, não o site: é a sessão de
                report_sessions que expirou, e reconectar o site não a conserta.{% endcomment %}
             <a class="btn btn-ghost btn-sm" href="{% url 'scraper-ml-relatorio-conexao' %}"><i data-lucide="plug-zap"></i> Reconectar</a>
+            {% elif sync.status == 'acao' and sync.marketplace == 'amazon' %}
+            <a class="btn btn-ghost btn-sm" href="{% url 'scraper-amazon-conexao' %}"><i data-lucide="plug-zap"></i> Reconectar</a>
             {% elif sync.status == 'nao_configurado' %}
             {% comment %}Sem botão: não há leitura automática desta loja, então "Sincronizar"
                só repetiria a mesma resposta. Oferecer o botão seria mentir sobre o que ele
