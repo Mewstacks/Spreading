@@ -128,6 +128,7 @@ PILOT_ORGANIZATION_IDS = {
     value.strip() for value in os.getenv("PILOT_ORGANIZATION_IDS", "").split(",")
     if value.strip()
 }
+COUPON_PIPELINE_PILOT_ONLY = os.getenv("COUPON_PIPELINE_PILOT_ONLY", "0") == "1"
 ML_CUPONS_ATIVACAO_PILOT_ORGANIZATION_IDS = {
     value.strip()
     for value in os.getenv("ML_CUPONS_ATIVACAO_PILOT_ORGANIZATION_IDS", "").split(",")

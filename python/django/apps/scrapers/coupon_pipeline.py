@@ -917,6 +917,20 @@ def executar_pipeline_cupons(
 ):
     """Executa um ciclo completo sem permitir que uma fonte derrube as demais."""
     usuarios = _priorizar_usuarios_com_destino(_usuarios_ativos(usuarios))
+    # No rollout do piloto, o navegador/Link Builder deve ficar dedicado à
+    # conta operacional. Sem este corte, contas auxiliares consumiam o único
+    # slot e deixavam a Lules esperando indefinidamente.
+    if getattr(settings, "COUPON_PIPELINE_PILOT_ONLY", False):
+        from apps.accounts.models import organization_for_user
+        allowlist = set(getattr(settings, "PILOT_ORGANIZATION_IDS", set()) or set())
+        if allowlist:
+            usuarios = [
+                usuario for usuario in usuarios
+                if (
+                    (organizacao := organization_for_user(usuario)) is not None
+                    and str(organizacao.pk) in allowlist
+                )
+            ]
     # A ordem importa: há um único Chromium e a conta piloto não pode ficar
     # atrás de contas de demonstração. Registrar os IDs (não credenciais, links
     # ou tokens) torna o rollout auditável na produção; sem essa linha, um
