@@ -315,6 +315,12 @@ def _cupons_estao_processando() -> bool:
     verificação de destino, porém, devem ceder: cupom já associado a produto tem
     prioridade editorial sobre preencher a fila genérica de links.
     """
+    # No piloto exclusivo, cupons e links pertencem à mesma conta e o lease
+    # compartilhado de Chromium já arbitra a concorrência. Bloquear a lane de
+    # links aqui fazia o preparo contínuo de cupons impedir para sempre a criação
+    # dos links necessários para publicar o par.
+    if getattr(settings, "COUPON_PIPELINE_PILOT_ONLY", False):
+        return False
     try:
         return (
             st.read_state("cupons").get("fase") == "processando"
