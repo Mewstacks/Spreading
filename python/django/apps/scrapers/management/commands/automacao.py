@@ -347,7 +347,7 @@ def _rodar_links(lote=40, *, incluir_ml=True):
     from django.db.models import Exists, OuterRef, Q
 
     from apps.scrapers.marketplaces.registry import get_marketplace
-    from apps.scrapers.models import LinkAfiliadoUsuario, Produto
+    from apps.scrapers.models import LinkAfiliadoUsuario, Produto, ProdutoCupom
     from apps.scrapers.monitor_conexao import ml_conectado
 
     agora = timezone.now()
@@ -411,12 +411,19 @@ def _rodar_links(lote=40, *, incluir_ml=True):
                 | Q(proxima_tentativa__gt=agora)
                 | (~Q(link_afiliado="") & (Q(verificado_ok=True)
                                            | Q(verificado_ok__isnull=True))))
+        pares_com_cupom = ProdutoCupom.objects.filter(
+            produto=OuterRef("pk"), status="confirmado", cupom__estado="ativo",
+        )
         pendentes = list(
             Produto.objects.filter(marketplace="mercadolivre", preco_sem_desconto__gt=0)
             .exclude(estado__in=["indisponivel", "invalido", "expirado", "stale"])
             .filter(Q(owner__isnull=True) | Q(owner=user))
             .exclude(Exists(fora_da_fila))
-            .order_by("-ultima_observacao")[:lote]
+            # Primeiro os produtos que já têm cupom confirmado: sem isso a lane
+            # gastava o lote em itens genéricos e os pares editoriais nunca
+            # recebiam o link específico necessário para publicação.
+            .annotate(tem_cupom_confirmado=Exists(pares_com_cupom))
+            .order_by("-tem_cupom_confirmado", "-ultima_observacao")[:lote]
         )
         if not pendentes:
             continue
