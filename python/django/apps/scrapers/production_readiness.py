@@ -28,7 +28,7 @@ def _destino_real(config) -> bool:
     return bool(grupo_id) and not any(marcador in nome for marcador in _MARCADORES_DE_TESTE)
 
 
-def _taxonomia_catalogo(usuario, *, agora=None) -> dict:
+def _taxonomia_catalogo(usuario, *, macros_ativas=None, agora=None) -> dict:
     """Cobertura de macro nos candidatos que o envio realmente pode selecionar.
 
     O aceite é 95% de *candidatos elegíveis*, não de todo o catálogo fresco. O
@@ -45,6 +45,7 @@ def _taxonomia_catalogo(usuario, *, agora=None) -> dict:
     itens = pool_de_produtos_elegiveis(
         usuario=usuario,
         min_desconto_percent=15.0,
+        macros_selecionadas=macros_ativas or None,
     )
     total = len(itens)
     classificados = sum(
@@ -77,7 +78,14 @@ def avaliar(usuario, *, minimo_taxonomia=95.0, agora=None) -> dict:
         regra for regra in regras
         if regra.macro_categoria in NICHOS_PRIORITARIOS_LU
     ]
-    taxonomia = _taxonomia_catalogo(usuario, agora=agora)
+    macros_ativas = sorted({
+        str(regra.macro_categoria or "").strip()
+        for regra in regras
+        if str(regra.macro_categoria or "").strip()
+    })
+    taxonomia = _taxonomia_catalogo(
+        usuario, macros_ativas=macros_ativas, agora=agora,
+    )
     chat_alerta, emails_alerta = _destinos()
     esteiras = {lane: bool(automacao_state.worker_alive(lane)) for lane in ESTEIRAS}
 

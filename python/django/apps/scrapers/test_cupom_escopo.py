@@ -216,7 +216,7 @@ class PortaoDaMensagemTests(TestCase):
             self.produto, "https://meli.la/x", None, usuario=self.usuario)
         self.assertNotIn("MELIPROMO", mensagem)
 
-    def test_cupom_com_listagem_publica_sai_com_o_escopo_escrito(self):
+    def test_vinculo_confirmado_sem_link_da_campanha_nao_publica_o_codigo(self):
         from apps.scrapers.ofertas import montar_mensagem
         cupom = self._cupom(
             container_url="https://lista.mercadolivre.com.br/_Container_aff-list-3")
@@ -226,11 +226,14 @@ class PortaoDaMensagemTests(TestCase):
         mensagem = montar_mensagem(
             self.produto, "https://meli.la/x", None, usuario=self.usuario)
 
-        self.assertIn("CUPOM: *MELIPROMO*", mensagem)
-        self.assertIn("Vale em:", mensagem)
-        self.assertIn("Vehicle Parts & Accessories", mensagem)
+        # A confirmação da relação prova o produto, mas não prova que o link
+        # genérico recebido por este builder carrega a campanha. O envio de cupom
+        # usa o link afiliado verificado da relação; este caminho jamais deve
+        # anunciar um código ao lado de uma URL que pode não aplicá-lo.
+        self.assertNotIn("MELIPROMO", mensagem)
+        self.assertNotIn("Vale em:", mensagem)
 
-    def test_cupom_de_site_inteiro_nao_ganha_linha_de_escopo(self):
+    def test_cupom_de_site_inteiro_tambem_exige_link_da_campanha(self):
         from apps.scrapers.ofertas import montar_mensagem
         cupom = self._cupom()
         cupom.regras = {**cupom.regras, "is_mar_aberto": True, "escopo": "site inteiro"}
@@ -239,7 +242,7 @@ class PortaoDaMensagemTests(TestCase):
         mensagem = montar_mensagem(
             self.produto, "https://meli.la/x", None, usuario=self.usuario)
 
-        self.assertIn("CUPOM: *MELIPROMO*", mensagem)
+        self.assertNotIn("MELIPROMO", mensagem)
         self.assertNotIn("Vale em:", mensagem)
 
 

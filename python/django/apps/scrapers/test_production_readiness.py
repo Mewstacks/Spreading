@@ -56,6 +56,22 @@ class ProducaoReadinessTests(TestCase):
         self.assertEqual(metrica["classificados"], 1)
         self.assertEqual(metrica["percentual"], 100.0)
 
+    def test_taxonomia_ignora_nicho_sem_regra_ativa_da_conta(self):
+        Produto.objects.create(
+            owner=None, marketplace="mercadolivre", nome="Produto sem macro",
+            origem="oferta", estado="ativo", link_produto="https://example.com/MLB3",
+            preco_sem_desconto=100, preco_com_cupom=70, macro_categoria="",
+            ultima_observacao=timezone.now(),
+        )
+
+        metrica = _taxonomia_catalogo(
+            self.user, macros_ativas=[self.config.macro_categoria],
+        )
+
+        self.assertEqual(metrica["total"], 1)
+        self.assertEqual(metrica["classificados"], 1)
+        self.assertEqual(metrica["percentual"], 100.0)
+
     @patch("apps.scrapers.automacao_state.worker_alive", return_value=True)
     @patch("apps.scrapers.production_readiness._destinos", return_value=("-100123", []))
     @patch("apps.scrapers.deal_abundance.relatorio_cobertura")
