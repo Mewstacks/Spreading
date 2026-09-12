@@ -92,27 +92,37 @@ test('gera rastreio local quando o WA Web aceita mas omite o modelo da mensagem'
     );
 });
 
-test('envio sem ID nativo é sucesso — a mensagem chegou ao grupo', () => {
-    // O incidente: o bundle atual devolve undefined em TODO envio, e o desfecho
-    // 'incerto' fazia a tela acusar erro em mensagens entregues.
+test('envio sem ID nativo não inventa entrega confirmada', () => {
     const desfecho = desfechoDeEnvioAceito(
         confirmarMensagem(undefined, '1', { agora: () => 123, uuid: () => 'abc' }),
     );
-    assert.equal(desfecho.sucesso, true);
-    assert.equal(desfecho.resultado, 'confirmado');
+    assert.equal(desfecho.sucesso, false);
+    assert.equal(desfecho.resultado, 'incerto');
     assert.equal(desfecho.repetir, false);
-    assert.equal(desfecho.confirmacao, 'aceita_sem_id');
+    assert.equal(desfecho.confirmacao, 'sem_ack_aparelho');
     assert.equal(desfecho.mensagem_id, 'local-1-123-abc');
 });
 
-test('envio com ID nativo mantém o mesmo desfecho e preserva o Wid', () => {
+test('envio com ID nativo só confirma com ACK de aparelho', () => {
     const desfecho = desfechoDeEnvioAceito(
         confirmarMensagem({ id: { _serialized: 'true_123@g.us_ABC' } }, '1'),
+        2,
     );
     assert.equal(desfecho.sucesso, true);
     assert.equal(desfecho.resultado, 'confirmado');
-    assert.equal(desfecho.confirmacao, 'nativa');
+    assert.equal(desfecho.confirmacao, 'ack_aparelho');
     assert.equal(desfecho.mensagem_id, 'true_123@g.us_ABC');
+});
+
+test('ACK de servidor preserva a operação como incerta e sem retry', () => {
+    const desfecho = desfechoDeEnvioAceito(
+        confirmarMensagem({ id: { _serialized: 'true_123@g.us_ABC' } }, '1'),
+        1,
+    );
+    assert.equal(desfecho.sucesso, false);
+    assert.equal(desfecho.resultado, 'incerto');
+    assert.equal(desfecho.repetir, false);
+    assert.equal(desfecho.confirmacao, 'ack_servidor_sem_entrega');
 });
 
 test('le o id serializado sob o nome novo do WhatsApp Web ($1)', () => {
@@ -127,8 +137,8 @@ test('le o id serializado sob o nome novo do WhatsApp Web ($1)', () => {
     );
 });
 
-test('so ACK de servidor para cima conta como prova de envio', () => {
-    assert.equal(ackConfirmaEnvio(1), true);   // servidor
+test('so ACK de aparelho para cima conta como prova de entrega', () => {
+    assert.equal(ackConfirmaEnvio(1), false);  // apenas servidor
     assert.equal(ackConfirmaEnvio(2), true);   // aparelho
     assert.equal(ackConfirmaEnvio(3), true);   // lida
     assert.equal(ackConfirmaEnvio(0), false);  // pendente: e o "Waiting for this message"

@@ -2163,7 +2163,7 @@ const initializeSession = (session) => {
 // declarava "envio confirmado" para uma mensagem que o WhatsApp nunca aceitou —
 // o grupo via "Waiting for this message" (issue #201849). A unica prova de que a
 // mensagem saiu daqui e o ACK: -1 erro, 0 pendente, 1 servidor, 2 aparelho,
-// 3 lida. Confirmamos a partir de 1.
+// 3 lida. Só confirmamos entrega a partir de 2; ACK 1 é aceitação do servidor.
 const ACK_ESPERA_MS = parseInt(process.env.WA_ACK_TIMEOUT_MS, 10) || 20000;
 // Teto do cache de ACKs ja vistos. So existe para cobrir a corrida em que o
 // evento chega antes de o sendMessage resolver; nao e historico.
@@ -2202,6 +2202,21 @@ const esperarAck = (session, mensagemId, prazoMs) => {
             resolve(ack);
         });
     });
+};
+
+// O primeiro evento costuma ser ACK 1 (servidor). Esperar uma única emissão
+// fazia esse estado intermediário encerrar a publicação como sucesso antes do
+// ACK 2 (aparelho). Consome a sequência até entrega, erro ou prazo total.
+const esperarAckDeEntrega = async (session, mensagemId, prazoMs) => {
+    const limite = Date.now() + Math.max(0, prazoMs);
+    let maiorAck = null;
+    while (Date.now() < limite) {
+        const ack = await esperarAck(session, mensagemId, limite - Date.now());
+        if (!Number.isInteger(ack)) break;
+        maiorAck = maiorAck === null ? ack : Math.max(maiorAck, ack);
+        if (ackConfirmaEnvio(maiorAck) || ack < 0) break;
+    }
+    return maiorAck;
 };
 
 const sessoesOcupandoSlot = () => Array.from(sessions.values()).filter(ocupaSlot).length;
@@ -2579,7 +2594,7 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
         const inicioAck = Date.now();
         const prazoAck = Math.max(0, Math.min(ACK_ESPERA_MS, restante(prazo)));
         const ack = confirmacao.confirmacao === 'nativa'
-            ? await esperarAck(session, confirmacao.mensagemId, prazoAck)
+            ? await esperarAckDeEntrega(session, confirmacao.mensagemId, prazoAck)
             : null;
         const ackMs = confirmacao.confirmacao === 'nativa' ? Date.now() - inicioAck : null;
         const confirmadoPorAck = ackConfirmaEnvio(ack);
@@ -2599,10 +2614,9 @@ const executarEnvioInteligente = async (instanceId, chatId, tipo, dados, opcoes 
             + `: ${confirmacao.mensagemId} -> ${maskedIdentifier(chatId)}`
         );
         return {
-            // Ver desfechoDeEnvioAceito: sendMessage que resolve é entrega aceita,
-            // com ou sem ID nativo. A ausência do ID é telemetria (`confirmacao`).
-            ...desfechoDeEnvioAceito(confirmacao),
-            confirmacao: confirmadoPorAck ? 'ack' : confirmacao.confirmacao,
+            // Só ACK de aparelho fecha sucesso. ACK 1 continua protegido contra
+            // retry, mas vira incerto porque ainda não existe prova de entrega.
+            ...desfechoDeEnvioAceito(confirmacao, ack),
             via: 'local',
             tipo,
             instancia: session.id,

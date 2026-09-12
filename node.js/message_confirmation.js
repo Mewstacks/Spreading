@@ -28,14 +28,16 @@ const extrairMensagemId = (mensagem) => {
     return null;
 };
 
-// Níveis de ACK do WhatsApp Web. Só a partir de SERVIDOR existe prova de que a
-// mensagem saiu daqui; PENDENTE é o estado em que ela fica quando o aparelho não
-// consegue decifrá-la e o grupo vê "Waiting for this message".
+// Níveis de ACK do WhatsApp Web. SERVIDOR prova apenas que o servidor aceitou a
+// mensagem; não prova que ela chegou a outro aparelho. Em 12/09/2026 quatro
+// publicações ficaram em ACK 1 e não apareceram no grupo de teste. Portanto só
+// APARELHO (2) ou superior pode fechar uma publicação como confirmada.
 const ACK_ERRO = -1;
 const ACK_PENDENTE = 0;
 const ACK_SERVIDOR = 1;
+const ACK_APARELHO = 2;
 
-const ackConfirmaEnvio = (ack) => Number.isInteger(ack) && ack >= ACK_SERVIDOR;
+const ackConfirmaEnvio = (ack) => Number.isInteger(ack) && ack >= ACK_APARELHO;
 
 // Não use `waitUntilMsgSent` aqui. Na versão atual do WhatsApp Web, esperar o
 // ACK mantém o evaluate aberto durante uma recarga silenciosa da página e pode
@@ -107,26 +109,32 @@ const confirmarMensagem = (mensagem, instancia, {
     };
 };
 
-// Desfecho de um `sendMessage` que RESOLVEU, com ou sem o modelo da mensagem.
-// Mora aqui, e não solto no meio do envio, porque já houve a regressão: sem ID
-// nativo — o caminho NORMAL do bundle atual, que devolve undefined quando o
-// Msg.get pela chave recém-criada não acha o modelo — o envio virava
-// `sucesso:false`/`resultado:'incerto'`, e toda mensagem entregue ao grupo
-// aparecia na tela como "a entrega não pôde ser confirmada".
-//
-// Resolver o sendMessage significa que o WA Web montou a mensagem e a despachou
-// no chat; nem o caminho com ID nativo espera o ACK. A diferença entre os dois
-// é rastreabilidade (`confirmacao`), não confiança na entrega.
-const desfechoDeEnvioAceito = (confirmacao) => ({
-    sucesso: true,
-    resultado: 'confirmado',
-    repetir: false,
-    mensagem_id: confirmacao?.mensagemId || null,
-    confirmacao: confirmacao?.confirmacao || 'aceita_sem_id',
-});
+// `sendMessage` resolvido e ACK de servidor não equivalem a entrega. Sem ACK de
+// aparelho preservamos o ID para auditoria, bloqueamos retry automático (o servidor
+// pode entregar depois) e declaramos o resultado incerto em vez de fabricar sucesso.
+const desfechoDeEnvioAceito = (confirmacao, ack = null) => {
+    if (ackConfirmaEnvio(ack)) {
+        return {
+            sucesso: true,
+            resultado: 'confirmado',
+            repetir: false,
+            mensagem_id: confirmacao?.mensagemId || null,
+            confirmacao: 'ack_aparelho',
+        };
+    }
+    return {
+        sucesso: false,
+        resultado: 'incerto',
+        repetir: false,
+        mensagem_id: confirmacao?.mensagemId || null,
+        confirmacao: ack === ACK_SERVIDOR ? 'ack_servidor_sem_entrega' : 'sem_ack_aparelho',
+        classe: 'transitorio',
+        erro: 'O servidor aceitou a mensagem, mas nenhum aparelho confirmou a entrega.',
+    };
+};
 
 module.exports = {
-    ACK_ERRO, ACK_PENDENTE, ACK_SERVIDOR, ackConfirmaEnvio,
+    ACK_ERRO, ACK_PENDENTE, ACK_SERVIDOR, ACK_APARELHO, ackConfirmaEnvio,
     extrairMensagemId, opcoesDeEnvio, erroFrameDestacado, erroContextoDestruido,
     erroReloadEmVoo, confirmarMensagem, repetirSeFrameDestacado,
     desfechoDeEnvioAceito,
