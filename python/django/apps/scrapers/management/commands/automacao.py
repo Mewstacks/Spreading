@@ -25,6 +25,12 @@ logger = logging.getLogger("apps.automacao")
 ERRO_PUBLICO = "Falha temporária no serviço. Uma nova tentativa será feita no próximo ciclo."
 RETRY_MINUTOS = 5
 BACKOFF_BANCO_MAX_S = 300
+# Quando o Chromium está ocupado, duas tentativas curtas recuperam rapidamente um
+# lease deixado pelo deploy anterior. Persistir em 15s para sempre, porém, deixava
+# a lane de cupons disputar o navegador com links e flash sem dar a eles uma janela
+# real para terminar. Este teto preserva a recuperação rápida e introduz
+# cooperação sustentável sob carga.
+BACKOFF_CAPACIDADE_MAX_S = 120
 # Intervalo até retomar uma varredura que cedeu o navegador no meio do caminho.
 RETOMADA_MINUTOS = 5
 # A classificação por nome é propositalmente conservadora, mas percorrer todo o
@@ -32,6 +38,20 @@ RETOMADA_MINUTOS = 5
 # a próxima coleta. O queryset ordena por observação, portanto este teto cobre o
 # lote fresco que acabou de entrar sem deixar uma taxonomia antiga atrasar a lane.
 LIMITE_CLASSIFICACAO_APOS_COLETA = 2_000
+
+
+def atraso_por_capacidade(consecutivos: int, *, poll: int = 15,
+                          maximo: int = BACKOFF_CAPACIDADE_MAX_S) -> int:
+    """Espera exponencial limitada para uma esteira que cedeu o Chromium.
+
+    O primeiro adiamento tenta em ``poll`` segundos e os seguintes dobram até
+    ``maximo``. Assim a retomada pós-deploy não espera um tick inteiro, sem
+    transformar a fila de cupons em competidora permanente de links/flash.
+    """
+    tentativa = max(1, int(consecutivos or 1))
+    base = max(1, int(poll or 1))
+    teto = max(base, int(maximo or base))
+    return min(teto, base * (2 ** (tentativa - 1)))
 
 
 def _resta_varredura():
@@ -803,11 +823,22 @@ class Command(BaseCommand):
                     resultado.get("capacidade_adiada")
                     or resultado.get("preparos_adiados")
                 )
+                estado_anterior = st.read_state("cupons")
+                try:
+                    adiamentos_anteriores = int(
+                        estado_anterior.get("adiamentos_capacidade_consecutivos", 0)
+                        or 0
+                    )
+                except (TypeError, ValueError):
+                    adiamentos_anteriores = 0
+                adiamentos = adiamentos_anteriores + 1 if cedeu_capacidade else 0
                 # Após um deploy o lease do Chromium encerrado pelo processo
                 # anterior pode permanecer até o TTL. Voltar em segundos evita
-                # deixar cupom pronto parado por todo o tick de 15min.
+                # deixar cupom pronto parado por todo o tick de 15min. A partir
+                # da segunda cessão o backoff abre espaço real para links e flash.
                 proximo = timezone.now() + timedelta(
-                    seconds=poll if cedeu_capacidade else tick * 60
+                    seconds=(atraso_por_capacidade(adiamentos, poll=poll)
+                             if cedeu_capacidade else tick * 60)
                 )
                 falhas = resultado["falhos"] + resultado["links_falhos"]
                 st.write_state(
@@ -824,6 +855,7 @@ class Command(BaseCommand):
                     links_verificados=resultado["links_verificados"],
                     prontos=resultado["prontos"],
                     falhas=falhas,
+                    adiamentos_capacidade_consecutivos=adiamentos,
                     fontes=resultado["fontes"],
                     erro="" if not falhas else "Uma ou mais fontes/links falharam.",
                     ultima_msg=(
