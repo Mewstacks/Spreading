@@ -82,6 +82,9 @@ test('somente rejeicoes conhecidas da reinjecao de LOGOUT disparam recuperacao',
     assert.equal(rejeicaoRecuperavelDuranteLogout(
         new Error('Execution context was destroyed, most likely because of a navigation.')
     ), true);
+    assert.equal(rejeicaoRecuperavelDuranteLogout(
+        new Error("Failed to add page binding with name onQRChangedEvent: window['onQRChangedEvent'] already exists!")
+    ), true);
     assert.equal(rejeicaoRecuperavelDuranteLogout(new Error('grupo ausente')), false);
 });
 
@@ -108,13 +111,9 @@ test('ciclo completo nunca transporta o QR consumido ate conectado', () => {
     assert.equal(buildSessionPayload(atual).qr, null);
 });
 
-test('LOGOUT publica reinicio sem QR e aceita somente o QR reinjetado', () => {
+test('LOGOUT publica reinicio sem reaproveitar o QR anterior', () => {
     const atual = sessao({ fase: 'conectado', isConnected: true });
     iniciarRecuperacaoLogout(atual);
     assert.equal(buildSessionPayload(atual).qr, null);
     assert.equal(atual.fase, 'reiniciando_qr');
-
-    atual.fase = 'qr';
-    atual.ultimoQR = 'qr-reinjetado';
-    assert.equal(buildSessionPayload(atual).qr, 'qr-reinjetado');
 });

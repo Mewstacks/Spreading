@@ -61,7 +61,7 @@ const rejeicaoRecuperavelDuranteLogout = (reason) => {
     } catch (_) {
         return false;
     }
-    return /auth timeout|execution context (was destroyed|is not available)|cannot find context/i.test(
+    return /auth timeout|execution context (was destroyed|is not available)|cannot find context|failed to add page binding.+already exists/i.test(
         mensagem
     );
 };

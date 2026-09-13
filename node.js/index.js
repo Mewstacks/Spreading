@@ -243,11 +243,12 @@ const QR_BOOTSTRAP_TIMEOUT_MS = parseInt(process.env.QR_BOOTSTRAP_TIMEOUT_MS, 10
 const QR_BOOTSTRAP_MAX_ATTEMPTS =
     parseInt(process.env.QR_BOOTSTRAP_MAX_ATTEMPTS, 10) || 4;
 const QR_BOOTSTRAP_RETRY_MS = parseInt(process.env.QR_BOOTSTRAP_RETRY_MS, 10) || 2000;
-// Depois de LOGOUT a própria biblioteca tenta reinjetar a página. Damos a ela o
-// orçamento interno mais uma margem curta; se nenhum QR/auth chegar, reciclamos
-// de forma determinística antes do teto geral do bootstrap.
-const LOGOUT_RECOVERY_TIMEOUT_MS = Math.min(
-    QR_BOOTSTRAP_TIMEOUT_MS, WA_AUTH_TIMEOUT_MS + 5000
+// Depois de emitir LOGOUT, a biblioteca ainda limpa o LocalAuth e tenta reinjetar
+// listeners na mesma página. Em produção essa reutilização terminou em binding
+// duplicado. A espera curta deixa o handler interno acabar; depois encerramos o
+// Chromium antigo e criamos um Client novo sobre um perfil vazio.
+const LOGOUT_TEARDOWN_DELAY_MS = Math.max(
+    1000, parseInt(process.env.WA_LOGOUT_TEARDOWN_DELAY_MS, 10) || 3000
 );
 // Intervalo do vigia de WAState de uma sessao conectada. 45s e o compromisso: um
 // getState e barato (leitura na pagina, sem rede), mas cada chamada compete com
@@ -625,6 +626,7 @@ const createSessionState = (instanceId, organizationId = '') => ({
     registryRestoreTimer: null,
     qrBootstrapTimer: null,
     logoutRecoveryTimer: null,
+    logoutRecoveryClient: null,
     reconnectAttempts: 0,
     initTimer: null,
     qrIdleTimer: null,
@@ -693,6 +695,7 @@ const registrarLifecycle = (session, evento, extra = {}) => {
 const limparLogoutRecovery = (session) => {
     if (session.logoutRecoveryTimer) clearTimeout(session.logoutRecoveryTimer);
     session.logoutRecoveryTimer = null;
+    session.logoutRecoveryClient = null;
 };
 
 const limparKeepalive = (session) => {
@@ -881,22 +884,37 @@ const limparMarcadorQrBootstrap = (session) => {
 
 const agendarRecuperacaoLogout = (session, client) => {
     limparLogoutRecovery(session);
-    session.logoutRecoveryTimer = setTimeout(() => {
+    session.logoutRecoveryClient = client;
+    session.logoutRecoveryTimer = setTimeout(async () => {
         session.logoutRecoveryTimer = null;
+        session.logoutRecoveryClient = null;
         if (
-            session.client !== client
+            sessions.get(session.id) !== session
+            || session.client
             || session.isConnected
             || session.authenticatedInAttempt
             || session.readyReceived
-            || qrAtivo(session)
         ) return;
-        registrarLifecycle(session, 'logout_reinject_timeout', {
-            timeout_ms: LOGOUT_RECOVERY_TIMEOUT_MS,
+        registrarLifecycle(session, 'logout_teardown', {
+            espera_ms: LOGOUT_TEARDOWN_DELAY_MS,
         });
-        recycleSession(session, 'LOGOUT sem novo QR após reinjeção').catch((err) => {
+        try {
+            await encerrarClienteChromium(session, client, 'credencial revogada por LOGOUT');
+            if (sessions.get(session.id) !== session || session.encerrandoManual) return;
+            if (!purgeAuthDir(session, 'credencial revogada por LOGOUT')) {
+                throw new Error('nao foi possivel remover a credencial revogada');
+            }
+            session.backupTentado = false;
+            session.authPurges = 0;
+            session.reconnectAttempts = 0;
+            await scheduleQrBootstrapRetry(session, 'credencial revogada por LOGOUT');
+        } catch (err) {
+            session.fase = 'falha_auth';
+            session.faseMsg = 'A sessão foi desvinculada, mas o leitor antigo não fechou. Tente conectar novamente.';
+            limparMarcadorQrBootstrap(session);
             console.error(`[${session.id}] Falha ao recuperar LOGOUT:`, err.message);
-        });
-    }, LOGOUT_RECOVERY_TIMEOUT_MS);
+        }
+    }, LOGOUT_TEARDOWN_DELAY_MS);
     session.logoutRecoveryTimer.unref();
 };
 
@@ -1044,6 +1062,10 @@ const encerrarClienteChromium = async (session, client, motivo) => {
 
 const destroySessionRuntime = async (session, reason, removeFromMap = false) => {
     console.log(`[${session.id}] Encerrando runtime da sessao. Motivo: ${reason}`);
+    const clientsParaEncerrar = Array.from(new Set([
+        session.client,
+        session.logoutRecoveryClient,
+    ].filter(Boolean)));
     if (session.initTimer) clearTimeout(session.initTimer);
     if (session.qrIdleTimer) clearTimeout(session.qrIdleTimer);
     if (session.reconnectTimer) clearTimeout(session.reconnectTimer);
@@ -1060,7 +1082,9 @@ const destroySessionRuntime = async (session, reason, removeFromMap = false) => 
     limparKeepalive(session);
     limparLogoutRecovery(session);
     liberarPortaoBootstrap(session);
-    if (session.client) await encerrarClienteChromium(session, session.client, reason);
+    for (const client of clientsParaEncerrar) {
+        await encerrarClienteChromium(session, client, reason);
+    }
     session.client = null;
     session.initialized = false;
     session.isConnected = false;
@@ -2044,12 +2068,10 @@ const initializeSession = (session) => {
             fase_anterior: faseAnterior,
         });
 
-        // No redirect post_logout=1, o whatsapp-web.js emite LOGOUT e, no mesmo
-        // handler interno, apaga o LocalAuth, recria o perfil e injeta outro QR.
-        // Destruir o client aqui concorria com esse handler: "Execution context
-        // was destroyed", vários Chromiums órfãos e uma sequência de QR inválidos.
-        // Mantemos o client e apenas removemos o nosso marcador; o próximo evento
-        // `qr` atualiza a UI sem abrir um segundo navegador.
+        // No redirect post_logout=1, o whatsapp-web.js ainda apaga o LocalAuth e
+        // reinjeta listeners depois de emitir este evento. Isolamos o client agora:
+        // nenhum QR/evento daquela página revogada pode voltar ao estado público.
+        // Após o cooldown, o teardown fecha o Chromium e um Client novo gera o QR.
         if (String(reason).trim().toUpperCase() === 'LOGOUT' && !session.encerrandoManual) {
             clearPaired(session);
             session.authenticatedInAttempt = false;
@@ -2063,7 +2085,8 @@ const initializeSession = (session) => {
                     : 'Aparelho desvinculado. Preparando um novo QR para reconectar…'
             );
             marcarQrBootstrap(session);
-            armInitializationTimeout('renovacao do QR');
+            session.client = null;
+            session.initialized = false;
             agendarRecuperacaoLogout(session, client);
             return;
         }
@@ -2871,7 +2894,7 @@ process.on('uncaughtException', (error) => {
 });
 process.on('unhandledRejection', (reason) => {
     const emLogout = Array.from(sessions.values()).filter((session) => (
-        session.logoutRecoveryTimer && session.client
+        session.logoutRecoveryTimer && session.logoutRecoveryClient
     ));
     if (emLogout.length && rejeicaoRecuperavelDuranteLogout(reason)) {
         const mensagem = String(reason && reason.message || reason || '');
@@ -2882,17 +2905,6 @@ process.on('unhandledRejection', (reason) => {
                 motivo: mensagem,
             })}`
         );
-        for (const session of emLogout) {
-            limparLogoutRecovery(session);
-            const timer = setTimeout(() => {
-                recycleSession(
-                    session, `falha da reinjeção após LOGOUT: ${mensagem}`
-                ).catch((err) => {
-                    console.error(`[${session.id}] Falha ao reciclar reinjeção:`, err.message);
-                });
-            }, 0);
-            timer.unref();
-        }
         return;
     }
     console.error('Promise rejeitada sem tratamento:', reason);
