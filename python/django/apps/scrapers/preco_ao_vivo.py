@@ -120,6 +120,36 @@ def sessao_ml(usuario=None):
     return ml_auth.http_session(state)
 
 
+def _preco_ml_api(produto):
+    """Preço pela API oficial do ML — sem cookie, sem Chromium, sem anti-bot.
+
+    Primeira porta do ML desde que o app está autorizado: `api.mercadolibre.com`
+    não é o site, então o muro que devolve challenge ao IP da Fly não se aplica.
+    Devolve None quando o app não foi autorizado ou o anúncio não está ativo, e
+    aí o caminho antigo (GET com os cookies da sessão) segue valendo.
+
+    O preço aqui é o do anúncio, não o pós-cupom da PDP: é por isso que
+    `preco_cupom`/`cupom_detectado` não vêm preenchidos — a mensagem não pode
+    afirmar cupom que esta fonte não viu.
+    """
+    from apps.scrapers import ml_api
+    from apps.scrapers.scraper_mercadolivre.link import _extrair_item_id
+
+    if not ml_api.configurado():
+        return None
+    item_id = _extrair_item_id(str(getattr(produto, "link_produto", "") or ""))
+    if not item_id:
+        return None
+    vivo = ml_api.preco_do_item(item_id)
+    if not vivo:
+        return None
+    return {
+        "preco": vivo["preco"],
+        "preco_de": vivo.get("preco_de") or 0,
+        "fonte": "ml-api-oficial",
+    }
+
+
 def _preco_ml(produto, url="", usuario=None):
     """Preço vivo do ML pela página que o assinante vai abrir.
 
@@ -133,6 +163,12 @@ def _preco_ml(produto, url="", usuario=None):
     """
     from apps.scrapers.scraper_mercadolivre import link_http
 
+    # A API oficial vem antes da página: ela mede o mesmo anúncio sem depender
+    # de sessão de navegador, que é justamente o que morre sozinho e o que o
+    # anti-bot recusa deste IP.
+    pela_api = _preco_ml_api(produto)
+    if pela_api is not None:
+        return pela_api
     sessao = sessao_ml(usuario)
     if sessao is None:
         # Sem credencial o GET anônimo cairia no challenge de qualquer forma.

@@ -3260,6 +3260,54 @@ def _sse_runner(fn, organization, *, segurar_transacao=True):
     return response
 
 
+@staff_required
+@require_GET
+def ml_api_autorizar(request):
+    """Manda o admin ao ML para autorizar o app UMA vez.
+
+    O ML não tem `client_credentials` — só `authorization_code` e
+    `refresh_token` (doc de Autenticação e Autorização, 29/12/2025). Depois
+    deste clique o servidor renova sozinho e nunca mais precisa de navegador.
+    """
+    from apps.scrapers import ml_api
+
+    if not ml_api.configurado():
+        messages.error(request, "Faltam ML_API_CLIENT_ID e ML_API_CLIENT_SECRET.")
+        return redirect("scraper-ml-conexao")
+    estado = signing.dumps({"u": request.user.pk}, salt="ml-api-oauth")
+    return redirect(ml_api.autorizacao_url(settings.ML_API_REDIRECT_URI, estado))
+
+
+@staff_required
+@require_GET
+def ml_api_callback(request):
+    """Troca o `code` do ML pelos tokens e guarda. Roda uma vez por conta."""
+    from apps.scrapers import ml_api
+
+    erro = request.GET.get("error")
+    if erro:
+        messages.error(request, f"O Mercado Livre recusou a autorização: {erro}")
+        return redirect("scraper-ml-conexao")
+    try:
+        # `state` é nosso, assinado: confirma que a volta pertence ao pedido que
+        # este painel iniciou, e não a um link que alguém montou.
+        signing.loads(request.GET.get("state", ""), salt="ml-api-oauth", max_age=1800)
+    except signing.BadSignature:
+        raise PermissionDenied("Autorização do ML sem origem válida.")
+    codigo = request.GET.get("code", "")
+    if not codigo:
+        messages.error(request, "O Mercado Livre não devolveu o código.")
+        return redirect("scraper-ml-conexao")
+    try:
+        registro = ml_api.trocar_code(codigo, settings.ML_API_REDIRECT_URI)
+    except Exception as exc:
+        logger.warning("Troca de code da API do ML falhou: %s", exc)
+        messages.error(request, "Não deu para concluir a autorização. Tente de novo.")
+        return redirect("scraper-ml-conexao")
+    messages.success(request, f"API do Mercado Livre conectada (conta {registro.conta_id}).")
+    return redirect("scraper-ml-conexao")
+
+
 def automacao_control(request):
     """Liga/desliga loops independentes. ?tipo=scrape|envio. POST acao=start|stop.
 
