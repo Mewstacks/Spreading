@@ -153,6 +153,55 @@ class AutomationStatusSecurityTests(TestCase):
         ]
         self.assertGreaterEqual(len(pulsos), 3)
 
+    @patch("apps.scrapers.maintenance.purgar_eventos_antigos", return_value=0)
+    @patch("apps.scrapers.maintenance.reconciliar_publicacoes_orfas", return_value=0)
+    @patch("apps.scrapers.management.commands.automacao._renovar_conexoes_db")
+    @patch("apps.scrapers.management.commands.automacao.st.write_state")
+    @patch("apps.scrapers.management.commands.automacao.st.is_enabled", return_value=True)
+    def test_worker_envio_pulsa_enquanto_processa(
+        self, _enabled, _write_state, _renovar, _orfas, _purgar,
+    ):
+        """O tick que TRABALHA também precisa de pulso, não só a espera.
+
+        Entre `fase=processando` e o fim do ciclo o worker espera o Chromium,
+        revalida preço item a item e aguarda o ack do aparelho — passa dos 90s de
+        WORKER_HEARTBEAT_STALE_S sem escrever nada, e a tela Envios mostrava
+        "Desligado" com a flag ligada e o worker trabalhando.
+        """
+        from contextlib import contextmanager
+
+        from apps.scrapers.management.commands.automacao import Command
+
+        pulsando = {"jobs": [], "durante_processamento": False, "ativo": False}
+
+        @contextmanager
+        def _registrar(job, intervalo=15):
+            pulsando["jobs"].append(job)
+            pulsando["ativo"] = True
+            try:
+                yield
+            finally:
+                pulsando["ativo"] = False
+
+        def _processar():
+            pulsando["durante_processamento"] = pulsando["ativo"]
+            return []
+
+        def _fim_do_teste(_segundos):
+            raise RuntimeError("fim do loop de teste")
+
+        with patch("apps.scrapers.management.commands.automacao._heartbeat_durante",
+                   _registrar), \
+                patch("apps.scrapers.ofertas.processar_configs_de_envio",
+                      side_effect=_processar), \
+                patch("apps.scrapers.management.commands.automacao.time.sleep",
+                      side_effect=_fim_do_teste):
+            with self.assertRaisesRegex(RuntimeError, "fim do loop de teste"):
+                Command()._loop_envio({"tick": 5})
+
+        self.assertIn("envio", pulsando["jobs"])
+        self.assertTrue(pulsando["durante_processamento"])
+
 
 class AffiliateIdentityTests(TestCase):
     def setUp(self):

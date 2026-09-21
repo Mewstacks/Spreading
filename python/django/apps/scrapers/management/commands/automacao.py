@@ -996,36 +996,43 @@ class Command(BaseCommand):
             agora = timezone.now()
             try:
                 st.write_state("envio", fase="processando", loja_atual=None)
-                _renovar_conexoes_db()
-                # Faxina antes do tick: fecha publicações que ficaram 'pendente' porque
-                # o worker morreu no meio de um envio (deploy/crash). Nunca derruba o
-                # tick — envio é o que importa aqui.
-                self._faxina_de_orfas()
-                # Purga do log 1x/dia. Mora neste loop porque é o único ligado o dia
-                # todo em produção; se o envio estiver desligado nada gera evento, então
-                # não purgar também não é problema. Nunca derruba o tick.
-                hoje_purga = timezone.localdate()
-                if ultima_purga != hoje_purga:
+                # O tick de envio é bloqueante e longo: espera o Chromium
+                # (PRECO_ESPERA_BROWSER_S), revalida preço item a item e ainda
+                # aguarda o ack do aparelho no WhatsApp. Sem pulso o estado
+                # envelhece além de WORKER_HEARTBEAT_STALE_S e a tela Envios pinta
+                # "Desligado" — com a flag ligada e o worker trabalhando. Todas as
+                # outras lanes já rodam sob este contexto; esta era a que faltava.
+                with _heartbeat_durante("envio"):
+                    _renovar_conexoes_db()
+                    # Faxina antes do tick: fecha publicações que ficaram 'pendente' porque
+                    # o worker morreu no meio de um envio (deploy/crash). Nunca derruba o
+                    # tick — envio é o que importa aqui.
+                    self._faxina_de_orfas()
+                    # Purga do log 1x/dia. Mora neste loop porque é o único ligado o dia
+                    # todo em produção; se o envio estiver desligado nada gera evento, então
+                    # não purgar também não é problema. Nunca derruba o tick.
+                    hoje_purga = timezone.localdate()
+                    if ultima_purga != hoje_purga:
+                        try:
+                            from apps.scrapers.maintenance import purgar_eventos_antigos
+                            apagados = purgar_eventos_antigos()
+                            ultima_purga = hoje_purga
+                            if apagados:
+                                logger.info("Purga de eventos: %s linha(s) removida(s)", apagados)
+                        except Exception as e:
+                            logger.warning("Purga de eventos falhou: %s", e)
+                    # Antes de escolher a próxima oferta, fecha as pendências do ciclo
+                    # anterior: um envio que ficou "incerto" no orçamento do worker
+                    # muitas vezes já foi confirmado pelo ledger logo depois. Nada é
+                    # reenviado aqui — só o registro é corrigido. Try próprio porque
+                    # nenhuma reconciliação vale um tick de envio.
                     try:
-                        from apps.scrapers.maintenance import purgar_eventos_antigos
-                        apagados = purgar_eventos_antigos()
-                        ultima_purga = hoje_purga
-                        if apagados:
-                            logger.info("Purga de eventos: %s linha(s) removida(s)", apagados)
+                        from apps.scrapers.send_pipeline import reconciliar_incertos
+                        reconciliar_incertos()
                     except Exception as e:
-                        logger.warning("Purga de eventos falhou: %s", e)
-                # Antes de escolher a próxima oferta, fecha as pendências do ciclo
-                # anterior: um envio que ficou "incerto" no orçamento do worker
-                # muitas vezes já foi confirmado pelo ledger logo depois. Nada é
-                # reenviado aqui — só o registro é corrigido. Try próprio porque
-                # nenhuma reconciliação vale um tick de envio.
-                try:
-                    from apps.scrapers.send_pipeline import reconciliar_incertos
-                    reconciliar_incertos()
-                except Exception as e:
-                    logger.warning("Reconciliação de envios incertos falhou: %s", e)
-                fila = _consumir_fila_v2()
-                res = processar_configs_de_envio()
+                        logger.warning("Reconciliação de envios incertos falhou: %s", e)
+                    fila = _consumir_fila_v2()
+                    res = processar_configs_de_envio()
                 falhas_banco = 0
                 enviados = sum(1 for r in res if r.get("sucesso"))
                 # O watchdog de conexões saiu daqui: virou o processo `monitor` do
