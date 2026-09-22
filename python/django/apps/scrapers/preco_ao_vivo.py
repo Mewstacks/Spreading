@@ -123,10 +123,16 @@ def sessao_ml(usuario=None):
 def _preco_ml_api(produto):
     """Preço pela API oficial do ML — sem cookie, sem Chromium, sem anti-bot.
 
-    Primeira porta do ML desde que o app está autorizado: `api.mercadolibre.com`
-    não é o site, então o muro que devolve challenge ao IP da Fly não se aplica.
-    Devolve None quando o app não foi autorizado ou o anúncio não está ativo, e
-    aí o caminho antigo (GET com os cookies da sessão) segue valendo.
+    Primeira porta do ML: `api.mercadolibre.com` não é o site, então o muro que
+    devolve challenge ao IP da Fly não se aplica. Devolve None quando a API não
+    cobre este link, e aí o caminho antigo (GET com os cookies da sessão) segue
+    valendo exatamente como antes.
+
+    Duas rotas, porque o ML trata os dois tipos de link de forma diferente
+    (medido em produção em 22/09/2026):
+
+      `/p/MLB…`  produto de catálogo -> /products/{id}/items responde 200
+      `/MLB-…`   anúncio solto       -> /items/{id} responde 403 access_denied
 
     O preço aqui é o do anúncio, não o pós-cupom da PDP: é por isso que
     `preco_cupom`/`cupom_detectado` não vêm preenchidos — a mensagem não pode
@@ -137,16 +143,22 @@ def _preco_ml_api(produto):
 
     if not ml_api.configurado():
         return None
-    item_id = _extrair_item_id(str(getattr(produto, "link_produto", "") or ""))
-    if not item_id:
+    link = str(getattr(produto, "link_produto", "") or "")
+    ident = _extrair_item_id(link)
+    if not ident:
         return None
-    vivo = ml_api.preco_do_item(item_id)
+    if "/p/" in link:
+        vivo = ml_api.preco_do_produto(ident)
+        fonte = "ml-api-catalogo"
+    else:
+        vivo = ml_api.preco_do_item(ident)
+        fonte = "ml-api-anuncio"
     if not vivo:
         return None
     return {
         "preco": vivo["preco"],
         "preco_de": vivo.get("preco_de") or 0,
-        "fonte": "ml-api-oficial",
+        "fonte": fonte,
     }
 
 

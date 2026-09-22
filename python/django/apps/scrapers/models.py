@@ -1086,31 +1086,6 @@ class WorkerHeartbeat(models.Model):
     details = models.JSONField(default=dict, blank=True)
 
 
-class MLApiToken(models.Model):
-    """Credencial da API oficial do Mercado Livre — uma linha, global.
-
-    Não é a sessão web (`MercadoLivreSession`). Aquela é cookie de navegador,
-    morre sozinha e depende de Chromium; esta é OAuth de aplicação: o dono
-    autoriza UMA vez e o servidor renova pelo `refresh_token` a cada 6h, sem
-    login, sem navegador e sem o IP da Fly precisar passar pelo muro do site.
-
-    `client_credentials` não existe no Mercado Livre — a doc lista apenas
-    `authorization_code` e `refresh_token` como grant válidos, por isso a
-    autorização inicial é manual e única.
-
-    O `refresh_token` é de USO ÚNICO: cada renovação devolve outro e invalida o
-    anterior. Duas renovações concorrentes queimam a credencial, então quem
-    renova pega a linha com `select_for_update()`.
-    """
-
-    conta_id = models.CharField(max_length=32, blank=True, default="")
-    access_token = EncryptedCharField(max_length=1024, blank=True, default="")
-    refresh_token = EncryptedCharField(max_length=1024, blank=True, default="")
-    expira_em = models.DateTimeField(null=True, blank=True)
-    ultimo_erro = models.CharField(max_length=200, blank=True, default="")
-    atualizado_em = models.DateTimeField(auto_now=True)
-
-
 class AutomacaoEstado(models.Model):
     """Chave e heartbeat globais dos loops, compartilhados entre process groups."""
 

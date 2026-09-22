@@ -536,14 +536,11 @@ PRECO_REVALIDA_ML = os.getenv("PRECO_REVALIDA_ML", "1") == "1"
 # paralelo). Estourar o orçamento nunca reprova: o que não voltou fica inconclusivo.
 PRECO_REVALIDA_ORCAMENTO_S = float(os.getenv("PRECO_REVALIDA_ORCAMENTO_S", "6"))
 # API oficial do ML (api.mercadolibre.com). É a fonte de preço que NÃO passa
-# pelo anti-bot do site nem por Chromium: o dono autoriza o app uma vez e o
-# servidor renova o token sozinho a cada 6h. Sem client_id/secret nada muda —
-# `preco_ao_vivo` continua caindo no GET com cookies de sessão.
+# pelo anti-bot do site nem por Chromium: `client_credentials` devolve token de
+# 6h sem login nenhum. Sem client_id/secret nada muda — `preco_ao_vivo`
+# continua caindo no GET com os cookies da sessão.
 ML_API_CLIENT_ID = os.getenv("ML_API_CLIENT_ID", "")
 ML_API_CLIENT_SECRET = os.getenv("ML_API_CLIENT_SECRET", "")
-# Precisa bater EXATAMENTE com o redirect URI cadastrado no app do ML.
-ML_API_REDIRECT_URI = os.getenv(
-    "ML_API_REDIRECT_URI", "https://spreading-web.fly.dev/scrapers/ml-api/callback/")
 
 
 # ─────────────────────────────────────────────────────────────
