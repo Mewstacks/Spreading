@@ -55,8 +55,13 @@ MARGEM_RENOVACAO_S = 600
 # repete a mesma troca de token contra a mesma recusa.
 RECUO_FALHA_S = 300
 
+# `silencio_ate` guarda o INSTANTE em que o recuo termina, não o instante da
+# falha. No Linux `time.monotonic()` é o uptime da máquina, então guardar a
+# falha e comparar `agora - falhou_em < RECUO` tratava o zero inicial como
+# "falhou agora" e calava a fonte nos primeiros 5 minutos de vida de cada VM —
+# exatamente a janela depois de todo deploy.
 _LOCK = threading.Lock()
-_TOKEN = {"valor": "", "expira_em": 0.0, "falhou_em": 0.0}
+_TOKEN = {"valor": "", "expira_em": 0.0, "silencio_ate": 0.0}
 
 
 def configurado() -> bool:
@@ -105,18 +110,18 @@ def access_token() -> str:
     with _LOCK:
         if _TOKEN["valor"] and agora < _TOKEN["expira_em"]:
             return _TOKEN["valor"]
-        if agora - _TOKEN["falhou_em"] < RECUO_FALHA_S:
+        if agora < _TOKEN["silencio_ate"]:
             return ""
         try:
             corpo = _pedir_token()
         except Exception as exc:
-            _TOKEN["falhou_em"] = agora
+            _TOKEN["silencio_ate"] = agora + RECUO_FALHA_S
             logger.warning("Token da API do ML recusado: %s", exc)
             return ""
         _TOKEN["valor"] = corpo.get("access_token") or ""
         _TOKEN["expira_em"] = agora + max(
             60, int(corpo.get("expires_in") or 21600) - MARGEM_RENOVACAO_S)
-        _TOKEN["falhou_em"] = 0.0
+        _TOKEN["silencio_ate"] = 0.0
         return _TOKEN["valor"]
 
 

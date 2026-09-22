@@ -11,7 +11,7 @@ CREDENCIAIS = {"ML_API_CLIENT_ID": "app-123", "ML_API_CLIENT_SECRET": "segredo"}
 
 
 def _limpar_token():
-    ml_api._TOKEN.update({"valor": "", "expira_em": 0.0, "falhou_em": 0.0})
+    ml_api._TOKEN.update({"valor": "", "expira_em": 0.0, "silencio_ate": 0.0})
 
 
 @override_settings(**CREDENCIAIS)
@@ -35,6 +35,14 @@ class MLApiTokenTests(SimpleTestCase):
             self.assertEqual(ml_api.access_token(), "")
             self.assertEqual(ml_api.access_token(), "")
         self.assertEqual(pedir.call_count, 1)
+
+    def test_primeira_chamada_da_maquina_nao_nasce_em_recuo(self):
+        """`monotonic` é o uptime: zero não pode significar "falhou agora"."""
+        with patch.object(ml_api.time, "monotonic", return_value=12.0), \
+                patch.object(ml_api, "_pedir_token", return_value={
+                    "access_token": "APP_USR-1", "expires_in": 21600}) as pedir:
+            self.assertEqual(ml_api.access_token(), "APP_USR-1")
+        pedir.assert_called_once()
 
     def test_sem_credencial_de_app_a_fonte_nao_responde(self):
         with override_settings(ML_API_CLIENT_ID="", ML_API_CLIENT_SECRET=""):
