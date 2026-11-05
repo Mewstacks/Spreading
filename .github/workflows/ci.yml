@@ -6,7 +6,7 @@ on:
 
 jobs:
   django:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: python
@@ -32,7 +32,7 @@ jobs:
   # anonimo. Este job roda o mesmo DDL que o release_command aplica em producao,
   # e depois a suite inteira contra Postgres.
   postgres:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: python
