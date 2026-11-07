@@ -74,6 +74,26 @@ Sem sessão (ou se o ML recusar o navegador automático), a página **Links** do
 as URLs que faltam, pares primeiro: gere no Link Builder da sua conta, cole `url link` de volta e importe.
 Só entra a URL que o painel pediu e link `meli.la`.
 
+## Vários números de WhatsApp
+Cada grupo sai pelo número (sessão do WAHA) em que foi adicionado, até 5 números. Painel → **WhatsApp**: estado
+de cada número, "Conectar" (QR em `/pair?session=nome`), grupos de cada um e **Novo número**. Em **Adicionar
+grupo** escolha o número antes de buscar. Cada número tem teto de `SESSION_HOURLY_CAP` mensagens por hora
+(padrão 20, soma de todos os grupos dele; 0 desliga). Se um número cai, só as regras dele esperam; as outras
+seguem. O canário (`CANARY_CHAT_ID`) ainda testa só o número principal.
+
+## Fontes, vitrine do ML e alertas
+- **Fontes** (painel): estado e último resultado de cada fonte do ciclo (feeds do ML, catálogo, vitrine, Amazon,
+  Shopee). "Sem novidade" = 6 h sem resultado novo; "Falhando N×" = N ciclos seguidos com erro.
+- **Vitrine do ML** (`/ofertas/cupons`, página pública, uma carga por hora): campanhas de cupom ativas (aparecem
+  em Cupons → "Campanhas do ML") e ofertas em destaque com preço à vista. Preço "no Pix" não vira oferta.
+  Extração automatizada contraria os termos do programa: `ML_PUBLIC_PAGES=0` desliga.
+- **Queda real**: produto com ≥ 3 outras observações em 30 dias só sai como promoção se o preço de hoje está ≥ 3%
+  abaixo da mediana delas ("Sem queda real" em *Por que não saiu*). Par com cupom não entra na conta.
+- **Alertas** (opt-in): `ALERT_CHAT_ID` (WhatsApp, sai por um número conectado) e/ou `ALERT_EMAIL_TO` + `EMAIL_*`.
+  Avisa número fora do ar (após 10 min), fonte falhando 3×, envio incerto e fila parada; repete a cada 6 h e
+  avisa quando volta.
+- O intervalo da regra varia ±25% por envio; a comissão informada pela loja (Shopee) desempata o ranking.
+
 ## Verificação
 `python tools/verify.py` (ruff + pytest). Testes rodam em SQLite; com `DATABASE_URL` rodam em Postgres.
 Os testes do driver abrem um Chromium de verdade contra um portal falso (pulam se o Playwright não estiver

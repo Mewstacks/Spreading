@@ -13,15 +13,15 @@
 
 <ul class="rows">
   {% for r in rows %}
-  <li class="row-item">
+  <li class="row-item row-wrap">
     <div class="row-main">
       <div class="name">{{ r.name }}</div>
       <div class="muted">{{ r.groups }} grupo{{ r.groups|pluralize }}</div>
     </div>
     <span class="badge badge-{{ r.tone }}"><span class="dot"></span>{{ r.label }}</span>
     <div class="row-side">
-      <a class="btn" href="/pair?session={{ r.name }}"><i aria-hidden="true" data-lucide="qr-code"></i> Conectar</a>
-      <a class="btn btn-ghost" href="{% url 'panel:add' %}?sessao={{ r.name }}"><i aria-hidden="true" data-lucide="plus"></i> Grupo</a>
+      <a class="btn" href="/pair?session={{ r.name|urlencode }}"><i aria-hidden="true" data-lucide="qr-code"></i> Conectar</a>
+      <a class="btn btn-ghost" href="{% url 'panel:add' %}?sessao={{ r.name|urlencode }}"><i aria-hidden="true" data-lucide="plus"></i> Grupo</a>
     </div>
   </li>
   {% endfor %}

@@ -59,3 +59,11 @@ class OfferDelivery(OrgScopedModel):
 
     class Meta(OrgScopedModel.Meta):
         indexes = [models.Index(fields=["destination", "product_key", "created_at"])]
+
+
+class Alert(models.Model):
+    """Problema em curso que o dono já foi (ou vai ser) avisado: some quando se resolve."""
+
+    key = models.CharField(max_length=80, unique=True)  # "wa:default", "fonte:amazon", "incerto"
+    since = models.DateTimeField()
+    last_sent = models.DateTimeField(null=True, blank=True)

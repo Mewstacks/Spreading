@@ -198,6 +198,9 @@
     .row-item .row-main { min-width: 0; flex: 1; overflow-wrap: anywhere; }
     .row-item .row-side { margin-left: auto; display: flex; align-items: center; gap: .5rem; flex: none; }
     .row-item .num { font-feature-settings: "tnum" 1; font-weight: 600; white-space: nowrap; }
+    /* Linha com ações largas: a ação quebra para a segunda linha em vez de esmagar o nome. */
+    .row-item.row-wrap { flex-wrap: wrap; row-gap: .6rem; }
+    .row-item.row-wrap .row-main { flex: 1 1 8rem; }
     .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; padding: .2rem 0 1rem; }
     .toolbar .grow { flex: 1; min-width: 180px; }
     .toolbar select { width: auto; min-width: 140px; }

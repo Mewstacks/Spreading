@@ -6,6 +6,7 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from apps.coupons.feed import fetch_feed, ingest
+from apps.delivery import alerts
 from apps.delivery.outbox import deliver_due, enqueue_for_rule
 from apps.delivery.transports import SessionRouter
 from apps.offers import amazon, amazon_deals, catalog, ml_api, ml_page, shopee
@@ -66,6 +67,8 @@ def run_once(transport=None, now=None, coupon_html=None, offers_html=None) -> di
     _safe("amazon_cupons", lambda: amazon_deals.collect(now), report, at)
     if shopee.configured():
         _safe("shopee", lambda: shopee.collect(now), report, at)
+
+    report["alertas"] = alerts.run(transport, at)
 
     working = None  # None = transporte único: vale a regra antiga de uma sessão só
     if hasattr(transport, "working_sessions"):
