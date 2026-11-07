@@ -7,7 +7,7 @@ from django.core.management.base import BaseCommand
 from apps.coupons.feed import fetch_feed, ingest
 from apps.delivery.outbox import deliver_due, enqueue_for_rule
 from apps.delivery.transports import WahaTransport
-from apps.offers import catalog, ml_api
+from apps.offers import catalog, ml_api, shopee
 from apps.offers.feeds import fetch_daily_offers, ingest_daily_offers
 from apps.offers.models import Rule
 
@@ -34,6 +34,8 @@ def run_once(transport=None, now=None, coupon_html=None, offers_html=None) -> di
           report)
     if ml_api.configured():
         _safe("catalogo", lambda: catalog.collect_catalog(now), report)
+    if shopee.configured():
+        _safe("shopee", lambda: shopee.collect(now), report)
 
     if hasattr(transport, "session_working") and not transport.session_working():
         report["entrega"] = "sessão do WhatsApp fora de WORKING: nada enfileirado nem enviado"

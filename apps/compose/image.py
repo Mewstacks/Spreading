@@ -19,7 +19,8 @@ import requests
 from django.conf import settings
 from PIL import Image, UnidentifiedImageError
 
-ALLOWED_IMAGE_HOSTS = ("mlstatic.com", "media-amazon.com", "ssl-images-amazon.com")
+ALLOWED_IMAGE_HOSTS = ("mlstatic.com", "media-amazon.com", "ssl-images-amazon.com",
+                       "susercontent.com", "shopee.com.br")
 MAX_DOWNLOAD_BYTES = 8 * 1024 * 1024
 MAX_REDIRECTS = 3
 CHUNK_BYTES = 64 * 1024

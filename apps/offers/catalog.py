@@ -26,6 +26,20 @@ def rule_terms(rule) -> list[str]:
     return terms
 
 
+def search_terms(rule, general: bool = False) -> list[str]:
+    """Termos de busca para uma loja sem navegador (Shopee): sub-nichos, termos extras e, para
+    quem marcou só a macro, as palavras principais dela. `general` devolve [""] (listagem geral)
+    quando a regra não restringe nada."""
+    terms = rule_terms(rule)
+    for key in rule.niches or []:
+        if key.startswith("m:"):
+            for macro, keywords in niches.MACROS:
+                if macro == key[2:]:
+                    terms.extend(k.strip() for k in keywords[:4])
+    terms = list(dict.fromkeys(t for t in terms if t))
+    return terms or ([""] if general and not rule.niches else [])
+
+
 def collect_catalog(now=None, per_term=15, http=None) -> int:
     now = now or timezone.now()
     today = now.astimezone(BRT).date()

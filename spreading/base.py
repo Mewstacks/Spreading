@@ -118,3 +118,7 @@ LINKBUILDER_MAX_PER_RUN = int(env("LINKBUILDER_MAX_PER_RUN", "8"))
 LINKBUILDER_MAX_PER_DAY = int(env("LINKBUILDER_MAX_PER_DAY", "120"))
 LINKBUILDER_PACE_SECONDS = float(env("LINKBUILDER_PACE_SECONDS", "4"))
 LINKBUILDER_VERIFY = env_bool("LINKBUILDER_VERIFY", True)
+
+# Shopee Affiliate Open API (App ID e Secret do painel de afiliados). Sem eles a loja não coleta.
+SHOPEE_APP_ID = env("SHOPEE_APP_ID", "")
+SHOPEE_APP_SECRET = env("SHOPEE_APP_SECRET", "")

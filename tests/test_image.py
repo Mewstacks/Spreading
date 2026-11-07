@@ -67,6 +67,8 @@ def test_safe_image_url_allowlist():
     ok = "https://http2.mlstatic.com/D_NQ_NP_1.webp"
     assert safe_image_url(ok) == ok
     assert safe_image_url("https://m.media-amazon.com/images/I/1.jpg")
+    assert safe_image_url("https://down-br.img.susercontent.com/file/br-1")
+    assert safe_image_url("https://cf.shopee.com.br/file/abc")
     for bad in ["http://http2.mlstatic.com/x.jpg", "https://evil.io/mlstatic.com.jpg",
                 "https://169.254.169.254/latest", "file:///etc/passwd", ""]:
         assert safe_image_url(bad) == "", bad
