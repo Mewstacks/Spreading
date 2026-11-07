@@ -40,6 +40,8 @@ class OrgScopedModel(models.Model):
 class Organization(models.Model):
     name = models.CharField(max_length=120)
     slug = models.SlugField(unique=True)
+    # Tag de afiliado da Amazon (link = /dp/ASIN?tag=<tag>).
+    amazon_tag = models.CharField(max_length=60, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

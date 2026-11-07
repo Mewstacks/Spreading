@@ -16,3 +16,6 @@ extend-exclude = [".venv", "migrations"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"apps/offers/niches.py" = ["E501"]  # tabela de dados

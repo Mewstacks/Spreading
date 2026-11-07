@@ -14,6 +14,7 @@ class OutboxItem(OrgScopedModel):
     rule = models.ForeignKey("offers.Rule", null=True, blank=True, on_delete=models.SET_NULL)
     kind = models.CharField(max_length=20, default="coupon_notice")
     body = models.TextField()
+    image_url = models.URLField(max_length=600, blank=True, default="")
     idempotency_key = models.CharField(max_length=64, unique=True)
     state = models.CharField(max_length=12, choices=STATES, default=QUEUED, db_index=True)
     attempts = models.PositiveSmallIntegerField(default=0)

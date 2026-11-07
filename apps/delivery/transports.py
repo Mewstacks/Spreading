@@ -1,4 +1,5 @@
 """Transporte de saída. Contrato herdado do `Sender` do v1: nunca levanta por falha de envio."""
+import base64
 from dataclasses import dataclass
 
 import requests
@@ -16,6 +17,7 @@ class Result:
     klass: str = ""  # transitorio | permanente | desconhecido
     retry: bool = False
     error: str = ""
+    keep_claim: bool = False  # falha que não deve devolver o item ao pool (evita laço)
 
 
 class WahaTransport:
@@ -28,12 +30,22 @@ class WahaTransport:
         self.http = http or requests
 
     def send_text(self, chat_id: str, text: str) -> Result:
+        return self._post(
+            "/api/sendText", {"session": self.session_name, "chatId": chat_id, "text": text}
+        )
+
+    def send_image(self, chat_id: str, jpeg: bytes, caption: str) -> Result:
+        return self._post("/api/sendImage", {
+            "session": self.session_name, "chatId": chat_id, "caption": caption,
+            "file": {"mimetype": "image/jpeg", "filename": "oferta.jpg",
+                     "data": base64.b64encode(jpeg).decode()},
+        })
+
+    def _post(self, path: str, payload: dict) -> Result:
         headers = {"X-Api-Key": self.api_key} if self.api_key else {}
         try:
             response = self.http.post(
-                f"{self.base_url}/api/sendText",
-                json={"session": self.session_name, "chatId": chat_id, "text": text},
-                headers=headers,
+                f"{self.base_url}{path}", json=payload, headers=headers,
                 timeout=settings.HTTP_TIMEOUT_SECONDS,
             )
         except requests.exceptions.Timeout:

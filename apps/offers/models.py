@@ -2,9 +2,12 @@ from django.db import models
 
 from apps.orgs.models import OrgScopedModel
 
+STORES = ("mercadolivre", "amazon", "shopee")
+STORE_LABELS = {"mercadolivre": "Mercado Livre", "amazon": "Amazon", "shopee": "Shopee"}
+
 
 class Rule(OrgScopedModel):
-    """Regra de divulgação (espelha a ConfiguracaoEnvio do v1, enxuta)."""
+    """Configuração de um grupo: nichos, lojas e cadência (espelha a ConfiguracaoEnvio do v1)."""
 
     OFFERS, COUPON_NOTICE = "ofertas", "aviso_cupons"
     TYPES = [(OFFERS, "Ofertas"), (COUPON_NOTICE, "Aviso de cupons")]
@@ -12,7 +15,11 @@ class Rule(OrgScopedModel):
     name = models.CharField(max_length=120)
     destination = models.ForeignKey("orgs.Destination", on_delete=models.CASCADE)
     type = models.CharField(max_length=20, choices=TYPES, default=OFFERS)
-    # Termos separados por vírgula (OU). Vazio = qualquer produto.
+    # Nichos escolhidos no painel: chaves "m:<Macro>" / "s:<Macro>|<Rótulo>". Vazio = tudo.
+    niches = models.JSONField(default=list, blank=True)
+    # Lojas habilitadas, separadas por vírgula.
+    stores = models.CharField(max_length=80, default="mercadolivre,amazon,shopee")
+    # Avançado: termos extras e negativos (vírgula).
     terms = models.TextField(blank=True, default="")
     negative_terms = models.TextField(blank=True, default="")
     price_min = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
@@ -38,11 +45,15 @@ class Rule(OrgScopedModel):
     def effective_cap(self) -> int:
         return min(self.daily_cap, self.DAILY_CEILING)
 
+    @property
+    def store_list(self) -> list[str]:
+        return [s for s in self.stores.split(",") if s in STORES]
+
 
 class AffiliateLink(OrgScopedModel):
-    """Link do dono (meli.la gerado no Link Builder) para um produto/URL."""
+    """Link do dono (meli.la) para um produto, ou produto+cupom (`link_key` com sufixo)."""
 
-    product_key = models.CharField(max_length=300)
+    product_key = models.CharField(max_length=340)
     affiliate_url = models.URLField(max_length=500)
     etiqueta = models.CharField(max_length=80, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -54,24 +65,41 @@ class AffiliateLink(OrgScopedModel):
 
 
 class Offer(models.Model):
-    """Oferta do catálogo compartilhado (feed do dia ou catálogo da API)."""
+    """Oferta do catálogo compartilhado (feed do dia, catálogo da API ou par cupom+produto)."""
 
     store = models.CharField(max_length=30, default="mercadolivre")
     source = models.CharField(max_length=40)
     product_key = models.CharField(max_length=300)
+    # Chave do link do dono: o produto, ou produto+cupom (o link carrega a campanha do cupom).
+    link_key = models.CharField(max_length=340)
+    # URL que entra no Link Builder para gerar o link (produto ou produto com campanha).
+    source_url = models.URLField(max_length=1500, blank=True)
     title = models.CharField(max_length=300)
     url = models.URLField(max_length=600)
+    image_url = models.URLField(max_length=600, blank=True, default="")
+    macro = models.CharField(max_length=80, blank=True)
+    vertical = models.CharField(max_length=80, blank=True)
     price_from = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     price_to = models.DecimalField(max_digits=12, decimal_places=2)
     discount_pct = models.DecimalField(max_digits=5, decimal_places=2, default=0)
-    vertical = models.CharField(max_length=80, blank=True)
-    valid_on = models.DateField()
+    # Cupom pareado ao produto (comprovado): código ou ativação no link.
+    coupon_kind = models.CharField(max_length=12, blank=True)  # "" | "code" | "activation"
     coupon_code = models.CharField(max_length=60, blank=True)
+    coupon_pct = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    coupon_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    coupon_cap = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    coupon_min = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    coupon_until = models.DateTimeField(null=True, blank=True)
+    # Preço do anúncio no momento da prova do cupom (preço ao vivo tem de bater).
+    proof_base_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    proof_at = models.DateTimeField(null=True, blank=True)
+    valid_on = models.DateField()
     last_seen = models.DateTimeField()
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=["store", "product_key", "valid_on"], name="uniq_offer_per_day"
+                fields=["store", "link_key", "valid_on"], name="uniq_offer_per_day"
             )
         ]
+        indexes = [models.Index(fields=["store", "last_seen"])]

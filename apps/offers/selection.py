@@ -1,5 +1,6 @@
-"""Quando uma regra pode publicar e qual oferta ela escolhe."""
-import unicodedata
+"""Quando uma regra pode publicar e qual oferta ela escolhe (invariantes do v1)."""
+import re
+from collections import Counter
 from datetime import timedelta
 
 from django.conf import settings
@@ -7,13 +8,14 @@ from django.conf import settings
 from apps.coupons.feed import BRT
 from apps.delivery.models import OfferDelivery
 
+from . import niches
 from .catalog import split_terms
 from .models import AffiliateLink, Offer
 
-
-def _fold(text: str) -> str:
-    text = unicodedata.normalize("NFD", text or "")
-    return "".join(c for c in text if unicodedata.category(c) != "Mn").lower()
+ML_CATALOG_ID = re.compile(r"^MLB\d+$")
+ML_LIVE_MAX_AGE = timedelta(days=14)  # item de catálogo do ML é conferido ao vivo no envio
+OTHER_STORE_MAX_AGE = timedelta(hours=12)  # Amazon/Shopee: sem conferência ao vivo ainda
+FEED_SOURCE = "ml-ofertas-diarias"
 
 
 def in_window(rule, now) -> bool:
@@ -29,39 +31,103 @@ def in_window(rule, now) -> bool:
     return hour >= start or hour < end  # cruza a meia-noite
 
 
-def matches_terms(rule, title: str) -> bool:
-    low = _fold(title)
-    include = [_fold(t) for t in split_terms(rule.terms)]
-    exclude = [_fold(t) for t in split_terms(rule.negative_terms)]
+def is_live_checkable(offer) -> bool:
+    return (
+        offer.store == "mercadolivre"
+        and bool(ML_CATALOG_ID.match(offer.product_key))
+        and "/p/" in offer.url
+    )
+
+
+def term_filter(rule, title: str) -> bool:
+    low = niches.fold(title)
+    exclude = [niches.fold(t) for t in split_terms(rule.negative_terms)]
     if exclude and any(t in low for t in exclude):
         return False
+    include = [niches.fold(t) for t in split_terms(rule.terms)]
     return not include or any(t in low for t in include)
 
 
-def pick_offer(org, destination, rule, now):
-    """Melhor oferta publicável: do dia, fresca, com desconto, com link do dono, sem cooldown."""
-    today = now.astimezone(BRT).date()
-    fresh = now - timedelta(seconds=settings.FEED_MAX_AGE_SECONDS)
-    links = dict(
-        AffiliateLink.objects.for_org(org).values_list("product_key", "affiliate_url")
-    )
+def fresh_enough(offer, now) -> str:
+    """'' se a observação é aceitável; senão o motivo."""
+    if offer.source == FEED_SOURCE:
+        ok = offer.valid_on == now.astimezone(BRT).date() and (
+            offer.last_seen >= now - timedelta(seconds=settings.FEED_MAX_AGE_SECONDS)
+        )
+        return "" if ok else "feed_velho"
+    if offer.store == "mercadolivre":
+        if not is_live_checkable(offer):
+            return "sem_prova_de_preco"  # anúncio solto: a API não mede (403)
+        return "" if offer.last_seen >= now - ML_LIVE_MAX_AGE else "observacao_velha"
+    return "" if offer.last_seen >= now - OTHER_STORE_MAX_AGE else "sem_prova_de_preco"
+
+
+def resolve_link(org, offer, links: dict) -> str:
+    if offer.store == "amazon":
+        return (
+            f"https://www.amazon.com.br/dp/{offer.product_key}?tag={org.amazon_tag}"
+            if org.amazon_tag and offer.product_key else ""
+        )
+    return links.get(offer.link_key, "")
+
+
+def score(offer, match_kind: str, now) -> float:
+    """100 × (0,40 valor + 0,25 afinidade + 0,20 confiança + 0,10 urgência + 0,05 desempenho)."""
+    value = min(float(offer.discount_pct), 60.0) / 60.0
+    affinity = {"sub": 1.0, "macro": 0.7}.get(match_kind, 0.5)
+    trust = 1.0 if (offer.coupon_kind or offer.source == FEED_SOURCE) else 0.8
+    urgent = 0.3
+    if offer.source == FEED_SOURCE:
+        urgent = 1.0
+    elif offer.coupon_until and offer.coupon_until - now <= timedelta(hours=48):
+        urgent = 1.0
+    total = 0.40 * value + 0.25 * affinity + 0.20 * trust + 0.10 * urgent + 0.05 * 0.5
+    return round(100 * total, 2)
+
+
+def candidates(org, destination, rule, now, report: Counter | None = None):
+    """Ofertas publicáveis em ordem: pares cupom+produto primeiro, depois maior pontuação."""
+    report = report if report is not None else Counter()
+    links = dict(AffiliateLink.objects.for_org(org).values_list("product_key", "affiliate_url"))
     cooldown_since = now - timedelta(hours=rule.cooldown_hours)
     recent = set(
         OfferDelivery.objects.for_org(org)
         .filter(destination=destination, created_at__gte=cooldown_since)
         .values_list("product_key", flat=True)
     )
-    candidates = Offer.objects.filter(
-        valid_on=today, last_seen__gte=fresh, discount_pct__gte=rule.min_discount_pct
-    ).order_by("-discount_pct", "price_to", "id")
-    for offer in candidates:
-        if offer.product_key in recent or offer.product_key not in links:
+    pool = (
+        Offer.objects.filter(
+            store__in=rule.store_list, discount_pct__gte=rule.min_discount_pct,
+            last_seen__gte=now - ML_LIVE_MAX_AGE,
+        )
+        .exclude(image_url="")
+        .exclude(coupon_until__lt=now)
+    )
+    ranked = []
+    for offer in pool.iterator(chunk_size=1000):
+        reason = fresh_enough(offer, now)
+        if reason:
+            report[reason] += 1
+            continue
+        if offer.product_key in recent:
+            report["cooldown"] += 1
             continue
         if rule.price_min is not None and offer.price_to < rule.price_min:
+            report["fora_da_faixa_de_preco"] += 1
             continue
         if rule.price_max is not None and offer.price_to > rule.price_max:
+            report["fora_da_faixa_de_preco"] += 1
             continue
-        if not matches_terms(rule, offer.title):
+        macro = offer.macro or niches.classify(offer.title)
+        kind = niches.match(list(rule.niches or []), offer.title, macro)
+        if not kind or not term_filter(rule, offer.title):
+            report["fora_do_nicho"] += 1
             continue
-        return offer, links[offer.product_key]
-    return None
+        link = resolve_link(org, offer, links)
+        if not link:
+            report["sem_link_do_dono"] += 1
+            continue
+        ranked.append((offer, link, score(offer, kind, now)))
+    ranked.sort(key=lambda row: (not row[0].coupon_kind, -row[2]))
+    for offer, link, _score in ranked:
+        yield offer, link

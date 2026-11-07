@@ -1,27 +1,27 @@
 """Outbox idempotente: o banco é a fonte de verdade do envio."""
 import hashlib
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import timedelta
-from decimal import Decimal
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from apps.compose.image import fetch_image_jpeg
 from apps.compose.notice import MAX_CODES, build_coupon_notice
 from apps.compose.offer import build_offer_message
 from apps.coupons.feed import BRT
 from apps.coupons.models import Coupon
-from apps.offers import catalog, ml_api
+from apps.offers import live, selection
 from apps.offers.models import Rule
-from apps.offers.selection import in_window, pick_offer
 from apps.orgs.models import ContainerLink
 
 from .models import CouponDelivery, OfferDelivery, OutboxItem
-from .transports import CONFIRMED, UNCERTAIN
+from .transports import CONFIRMED, FAILED, PERMANENT, UNCERTAIN, Result
 
 MAX_ATTEMPTS = 5
+MAX_LIVE_TRIES = 8  # candidatos conferidos por tique (como o v1: tenta até 8)
 
 
 def _today_start(now):
@@ -60,7 +60,7 @@ def _destination_ready(org, destination, now) -> bool:
 
 
 def _rule_ready(org, rule, now) -> bool:
-    if not rule.active or not in_window(rule, now):
+    if not rule.active or not selection.in_window(rule, now):
         return False
     items = OutboxItem.objects.for_org(org).filter(rule=rule).exclude(state=OutboxItem.FAILED)
     last = items.order_by("-created_at").first()
@@ -86,7 +86,7 @@ def publishable_coupons(org, destination, now):
 
 
 def enqueue_coupon_notice(org, destination, now=None, rule=None):
-    """Enfileira um aviso com até 3 cupons do mesmo container. Devolve o item ou None."""
+    """Aviso de cupons (regra opcional `aviso_cupons`): até 3 códigos do mesmo container."""
     now = now or timezone.now()
     if not _destination_ready(org, destination, now):
         return None
@@ -126,42 +126,62 @@ def enqueue_coupon_notice(org, destination, now=None, rule=None):
     return item
 
 
-def enqueue_offer(org, rule, now=None, live_check=True):
-    """Enfileira a melhor oferta publicável da regra. Devolve o item ou None."""
+def enqueue_offer(org, rule, now=None, report: Counter | None = None, http=None):
+    """Enfileira a melhor oferta publicável (foto, preço provado ao vivo, link do dono)."""
     now = now or timezone.now()
+    report = report if report is not None else Counter()
     destination = rule.destination
     if not _destination_ready(org, destination, now) or not _rule_ready(org, rule, now):
+        report["regra_ou_grupo_fora_da_janela"] += 1
         return None
-    picked = pick_offer(org, destination, rule, now)
-    if not picked:
-        return None
-    offer, link = picked
-    if live_check and offer.source == catalog.SOURCE:
-        live = ml_api.product_price(offer.product_key)
-        if not live or Decimal(str(live["price"])) != offer.price_to:
-            return None  # preço mudou ou sumiu desde a coleta: não anuncia número velho
-    key_src = f"{org.id}|{destination.id}|{offer.product_key}|{offer.valid_on}"
-    try:
-        with transaction.atomic():
-            item = OutboxItem.unscoped.create(
-                org=org, destination=destination, rule=rule, kind="offer", created_at=now,
-                body=build_offer_message(offer, link), next_attempt_at=now,
-                idempotency_key=hashlib.sha256(key_src.encode()).hexdigest(),
-            )
-            OfferDelivery.unscoped.create(
-                org=org, destination=destination, product_key=offer.product_key,
-                outbox_item=item, created_at=now,
-            )
-    except IntegrityError:
-        return None
-    return item
+    tries = 0
+    for offer, link in selection.candidates(org, destination, rule, now, report):
+        if tries >= MAX_LIVE_TRIES:
+            break
+        tries += 1
+        proof, reason = live.validate(offer, rule.min_discount_pct, http=http)
+        if proof is None:
+            report[reason] += 1
+            continue
+        if fetch_image_jpeg(offer.image_url) is None:
+            report["sem_foto"] += 1  # sem foto, sem post
+            continue
+        offer.price_to, offer.price_from, offer.discount_pct = (
+            proof.price_to, proof.price_from, proof.discount_pct
+        )
+        key_src = f"{org.id}|{destination.id}|{offer.link_key}|{offer.valid_on}"
+        try:
+            with transaction.atomic():
+                item = OutboxItem.unscoped.create(
+                    org=org, destination=destination, rule=rule, kind="offer", created_at=now,
+                    body=build_offer_message(offer, link), next_attempt_at=now,
+                    image_url=offer.image_url,
+                    idempotency_key=hashlib.sha256(key_src.encode()).hexdigest(),
+                )
+                OfferDelivery.unscoped.create(
+                    org=org, destination=destination, product_key=offer.product_key,
+                    outbox_item=item, created_at=now,
+                )
+        except IntegrityError:
+            report["ja_enfileirada"] += 1
+            continue
+        return item
+    return None
 
 
-def enqueue_for_rule(rule, now=None, live_check=True):
+def explain_rule(rule, now=None, http=None) -> Counter:
+    """"Por que não saiu": contagem de motivos que barraram as ofertas (não grava nada)."""
+    now = now or timezone.now()
+    report = Counter()
+    list(selection.candidates(rule.org, rule.destination, rule, now, report))
+    return report
+
+
+def enqueue_for_rule(rule, now=None, http=None):
     org = rule.org
     if rule.type == Rule.COUPON_NOTICE:
         return enqueue_coupon_notice(org, rule.destination, now, rule=rule)
-    return enqueue_offer(org, rule, now, live_check=live_check)
+    return enqueue_offer(org, rule, now, http=http)
 
 
 def deliver_due(transport, now=None, limit=20) -> dict:
@@ -178,7 +198,7 @@ def deliver_due(transport, now=None, limit=20) -> dict:
             skipped.add(item.id)
             stats["bloqueado"] += 1
             continue
-        result = transport.send_text(item.destination.external_id, item.body)
+        result = _send(transport, item)
         _finish(item, result, now)
         if result.outcome == CONFIRMED:
             stats["confirmado"] += 1
@@ -189,6 +209,18 @@ def deliver_due(transport, now=None, limit=20) -> dict:
         else:
             stats["falhou"] += 1
     return stats
+
+
+def _send(transport, item):
+    """Oferta = foto + legenda (sem foto não publica). Aviso de cupons = texto."""
+    chat = item.destination.external_id
+    if item.kind == "offer":
+        jpeg = fetch_image_jpeg(item.image_url) if item.image_url else None
+        if jpeg is None or not hasattr(transport, "send_image"):
+            return Result(False, FAILED, klass=PERMANENT, error="foto_indisponivel",
+                          keep_claim=True)
+        return transport.send_image(chat, jpeg, item.body)
+    return transport.send_text(chat, item.body)
 
 
 def _claim(now, skipped):
@@ -232,7 +264,7 @@ def _finish(item, result, now):
         else:
             item.state = OutboxItem.FAILED
             item.last_error = result.error[:300]
-            # volta a ser elegível
-            CouponDelivery.unscoped.filter(outbox_item=item).delete()
-            OfferDelivery.unscoped.filter(outbox_item=item).delete()
+            if not result.keep_claim:  # volta a ser elegível
+                CouponDelivery.unscoped.filter(outbox_item=item).delete()
+                OfferDelivery.unscoped.filter(outbox_item=item).delete()
         item.save()

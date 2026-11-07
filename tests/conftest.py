@@ -25,6 +25,16 @@ class FakeTransport:
     def message_ack(self, chat_id, message_id):
         return self.acks.get(message_id)
 
+    images = None
+
+    def send_image(self, chat_id, jpeg, caption):
+        if self.images is None:
+            self.images = []
+        self.images.append((chat_id, len(jpeg), caption))
+        if self.results:
+            return self.results.pop(0)
+        return Result(True, CONFIRMED, message_id=f"img_{chat_id}_{len(self.images)}")
+
     def send_text(self, chat_id, text):
         self.sent.append((chat_id, text))
         if self.results:

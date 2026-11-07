@@ -3,3 +3,4 @@ requests>=2.32
 psycopg[binary]>=3.2
 gunicorn>=23.0
 whitenoise>=6.7
+Pillow>=10.4

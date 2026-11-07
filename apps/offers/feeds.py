@@ -8,8 +8,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.coupons.feed import BRT, extract_array, fetch_feed, parse_br_number
-from apps.orgs.models import Organization  # noqa: F401  (garante app carregado)
 
+from . import niches
 from .keys import product_key
 from .models import Offer
 
@@ -26,7 +26,7 @@ def daily_offers_url() -> str:
     return f"{base}/ofertas-diarias.html"
 
 
-def _is_prohibited(title: str) -> bool:
+def is_prohibited(title: str) -> bool:
     low = f" {title.lower()} "
     return any(term in low for term in PROHIBITED_TERMS)
 
@@ -49,20 +49,17 @@ def parse_daily_offers(html: str, today):
             valid_on = datetime.strptime(str(row.get("data_oferta")), "%d/%m/%Y").date()
         except ValueError:
             continue
-        if (
-            not title or valid_on != today or urlparse(url).scheme != "https"
-            or not host.endswith(".mercadolivre.com.br") and host != "mercadolivre.com.br"
-        ):
+        official_host = host.endswith(".mercadolivre.com.br") or host == "mercadolivre.com.br"
+        if not title or valid_on != today or urlparse(url).scheme != "https" or not official_host:
             continue
         price_to = parse_br_number(row.get("preco_por"))
         price_from = parse_br_number(row.get("preco_de"))
-        if not price_to or price_to <= 0 or _is_prohibited(title):
+        if not price_to or price_to <= 0 or is_prohibited(title):
             continue
         out.append({
             "title": title[:300], "url": url, "price_from": price_from, "price_to": price_to,
             "discount_pct": _discount(price_from, price_to, row.get("desconto")),
             "vertical": str(row.get("vertical") or "")[:80], "valid_on": valid_on,
-            "coupon_code": str(row.get("codigo") or row.get("cupom") or "").strip().upper()[:60],
         })
     return out
 
@@ -73,13 +70,16 @@ def ingest_daily_offers(html: str, now: datetime | None = None) -> int:
     today = now.astimezone(BRT).date()
     count = 0
     for item in parse_daily_offers(html, today):
+        key = product_key(item["url"])
         Offer.objects.update_or_create(
-            store="mercadolivre", product_key=product_key(item["url"]), valid_on=item["valid_on"],
+            store="mercadolivre", link_key=key, valid_on=item["valid_on"],
             defaults={
-                "source": SOURCE, "title": item["title"], "url": item["url"],
+                "source": SOURCE, "product_key": key, "source_url": item["url"],
+                "title": item["title"], "url": item["url"],
+                "macro": niches.classify(item["title"]),
                 "price_from": item["price_from"], "price_to": item["price_to"],
                 "discount_pct": item["discount_pct"], "vertical": item["vertical"],
-                "coupon_code": item["coupon_code"], "last_seen": now,
+                "last_seen": now,
             },
         )
         count += 1

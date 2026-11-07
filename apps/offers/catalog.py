@@ -1,11 +1,11 @@
-"""Coletor de catálogo do ML pela API oficial, guiado pelos termos das regras ativas."""
+"""Coletor de catálogo do ML pela API oficial, guiado pelos nichos e termos das regras ativas."""
 from decimal import ROUND_HALF_UP, Decimal
 
 from django.utils import timezone
 
 from apps.coupons.feed import BRT
 
-from . import ml_api
+from . import ml_api, niches
 from .models import Offer, Rule
 
 SOURCE = "ml-api-catalogo"
@@ -15,12 +15,21 @@ def split_terms(text: str) -> list[str]:
     return [t.strip() for t in (text or "").split(",") if t.strip()]
 
 
+def rule_terms(rule) -> list[str]:
+    """Termos de busca de uma regra: sub-nichos escolhidos + termos extras."""
+    terms = split_terms(rule.terms)
+    for key in rule.niches or []:
+        if key.startswith("s:"):
+            terms.extend(t for t in niches._sub_terms(key))
+    return terms
+
+
 def collect_catalog(now=None, per_term=15, http=None) -> int:
     now = now or timezone.now()
     today = now.astimezone(BRT).date()
     terms = set()
     for rule in Rule.unscoped.filter(active=True, type=Rule.OFFERS):
-        terms.update(split_terms(rule.terms))
+        terms.update(rule_terms(rule))
     count = 0
     for term in sorted(terms):
         for product in ml_api.search_products(term, per_term, http=http):
@@ -34,13 +43,19 @@ def collect_catalog(now=None, per_term=15, http=None) -> int:
             pct = ((1 - price_to / price_from) * 100).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP
             )
+            title = str(product.get("name") or product["id"])[:300]
+            url = f"https://www.mercadolivre.com.br/p/{product['id']}"
+            pictures = product.get("pictures") or []
+            first = pictures[0] if pictures and isinstance(pictures[0], dict) else {}
+            image = first.get("url") or ""
             Offer.objects.update_or_create(
-                store="mercadolivre", product_key=product["id"], valid_on=today,
+                store="mercadolivre", link_key=product["id"], valid_on=today,
                 defaults={
-                    "source": SOURCE, "title": str(product.get("name") or product["id"])[:300],
-                    "url": f"https://www.mercadolivre.com.br/p/{product['id']}",
+                    "source": SOURCE, "product_key": product["id"], "source_url": url,
+                    "title": title, "url": url, "image_url": image,
+                    "macro": niches.classify(title),
                     "price_from": price_from, "price_to": price_to, "discount_pct": pct,
-                    "vertical": "", "coupon_code": "", "last_seen": now,
+                    "last_seen": now,
                 },
             )
             count += 1
