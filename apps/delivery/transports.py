@@ -63,6 +63,38 @@ class WahaTransport:
         except (requests.exceptions.RequestException, ValueError):
             return ""
 
+    def ensure_started(self) -> str:
+        """Garante sessão criada e iniciada (QR disponível). Devolve o status final."""
+        headers = {"X-Api-Key": self.api_key} if self.api_key else {}
+        status = self.session_status()
+        try:
+            if status == "":
+                self.http.post(
+                    f"{self.base_url}/api/sessions", headers=headers,
+                    json={"name": self.session_name, "start": True},
+                    timeout=settings.HTTP_TIMEOUT_SECONDS,
+                )
+            elif status in ("STOPPED", "FAILED"):
+                self.http.post(
+                    f"{self.base_url}/api/sessions/{self.session_name}/restart",
+                    headers=headers, timeout=settings.HTTP_TIMEOUT_SECONDS,
+                )
+        except requests.exceptions.RequestException:
+            pass
+        return self.session_status()
+
+    def qr_png(self) -> bytes | None:
+        headers = {"X-Api-Key": self.api_key} if self.api_key else {}
+        headers["Accept"] = "image/png"
+        try:
+            response = self.http.get(
+                f"{self.base_url}/api/{self.session_name}/auth/qr",
+                headers=headers, timeout=settings.HTTP_TIMEOUT_SECONDS,
+            )
+        except requests.exceptions.RequestException:
+            return None
+        return response.content if response.status_code == 200 else None
+
     def session_working(self) -> bool:
         return self.session_status() == "WORKING"
 

@@ -7,6 +7,7 @@ from django.urls import path
 
 from apps.delivery.health import snapshot
 from apps.delivery.transports import WahaTransport
+from apps.delivery.views import pair, pair_qr
 
 
 def healthz(_request):
@@ -25,5 +26,7 @@ def status(request):
 urlpatterns = [
     path("healthz", healthz),
     path("status", status),
+    path("pair", pair),
+    path("pair/qr.png", pair_qr),
     path("admin/", admin.site.urls),
 ]
