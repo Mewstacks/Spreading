@@ -77,14 +77,14 @@ details.macro[open] summary::after{content:"\2212"}
 .count{margin-left:auto;min-width:24px;padding:0 var(--s2);text-align:center;border-radius:999px;
   background:var(--accent);color:var(--on-accent);font-size:var(--fs-s)}
 details.macro .chips{padding:0 var(--s4) var(--s4)}
-.fields{display:grid;gap:var(--s3);grid-template-columns:1fr 1fr}
-@media (min-width:720px){.fields{grid-template-columns:repeat(5,1fr)}}
+.fields{display:grid;gap:var(--s3);grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (min-width:720px){.fields{grid-template-columns:repeat(5,minmax(0,1fr))}}
 .field{display:flex;flex-direction:column;gap:var(--s1)}
 .field label{font-size:var(--fs-s);color:var(--muted)}
-.field input,.field select{min-height:44px;padding:0 var(--s3);font:inherit;color:var(--text);
+.field input,.field select{width:100%;min-width:0;min-height:44px;padding:0 var(--s3);font:inherit;color:var(--text);
   background:var(--surface);border:1px solid var(--control);border-radius:var(--radius)}
-.fields.three{grid-template-columns:1fr 1fr}
-@media (min-width:720px){.fields.three{grid-template-columns:repeat(3,1fr)}}
+.fields.three{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (min-width:720px){.fields.three{grid-template-columns:repeat(3,minmax(0,1fr))}}
 .field.wide{grid-column:1/-1}
 .actions{display:flex;flex-wrap:wrap;gap:var(--s2);margin-top:var(--s5)}
 .msg{margin:0 0 var(--s3);padding:var(--s3) var(--s4);border-radius:var(--radius);
@@ -96,7 +96,7 @@ details.macro .chips{padding:0 var(--s4) var(--s4)}
 .rows{list-style:none;margin:0;padding:0;display:grid;gap:var(--s2)}
 .rows li{display:flex;justify-content:space-between;gap:var(--s3);padding:var(--s2) var(--s3);
   background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
-.rows b{font-variant-numeric:tabular-nums}
+.rows b{font-variant-numeric:tabular-nums;white-space:nowrap}
 .search{display:flex;gap:var(--s2);margin-bottom:var(--s4)}
 .search input{flex:1;min-width:0;min-height:44px;padding:0 var(--s3);font:inherit;color:var(--text);
   background:var(--surface);border:1px solid var(--control);border-radius:var(--radius)}
