@@ -3,7 +3,7 @@ import hmac
 from django.conf import settings
 from django.contrib import admin
 from django.http import HttpResponseForbidden, JsonResponse
-from django.urls import path
+from django.urls import include, path
 
 from apps.delivery.health import snapshot
 from apps.delivery.transports import WahaTransport
@@ -28,5 +28,6 @@ urlpatterns = [
     path("status", status),
     path("pair", pair),
     path("pair/qr.png", pair_qr),
+    path("painel/", include("apps.panel.urls")),
     path("admin/", admin.site.urls),
 ]

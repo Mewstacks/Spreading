@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{% block title %}Spreading{% endblock %}</title>
+<style>
+:root{
+  --bg:#f6f7f9;--surface:#ffffff;--text:#111827;--muted:#4b5563;
+  --border:#d5dae1;--control:#6b7280;
+  --accent:#15803d;--on-accent:#ffffff;--accent-soft:#dcfce7;--danger:#b91c1c;--focus:#1d4ed8;
+  --radius:12px;--s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;
+  --fs-s:.8rem;--fs-m:1rem;--fs-l:1.5rem;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#0f172a;--surface:#1e293b;--text:#f1f5f9;--muted:#cbd5e1;
+    --border:#334155;--control:#94a3b8;
+    --accent:#22c55e;--on-accent:#052e16;--accent-soft:#14532d;--danger:#f87171;--focus:#93c5fd}
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:var(--fs-m)/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+a{color:inherit}
+:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.bar{display:flex;align-items:center;justify-content:space-between;gap:var(--s3);
+  padding:var(--s2) var(--s4);background:var(--surface);border-bottom:1px solid var(--border)}
+.brand{display:inline-flex;align-items:center;min-height:44px;font-weight:700;text-decoration:none}
+.bar nav{display:flex;gap:var(--s1)}
+.bar nav a{display:inline-flex;align-items:center;min-height:44px;padding:0 var(--s3);
+  border-radius:var(--radius);text-decoration:none;color:var(--muted)}
+.bar nav a[aria-current="page"]{color:var(--text);background:var(--bg);font-weight:600}
+main{max-width:880px;margin:0 auto;padding:var(--s4) var(--s4) var(--s6)}
+h1{font-size:var(--fs-l);line-height:1.25;margin:var(--s2) 0 var(--s4);overflow-wrap:anywhere}
+h2{font-size:var(--fs-s);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+  margin:var(--s5) 0 var(--s2)}
+.head{display:flex;align-items:center;justify-content:space-between;gap:var(--s3);flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;justify-content:center;min-height:44px;
+  padding:0 var(--s4);border-radius:var(--radius);border:1px solid var(--control);
+  background:var(--surface);color:var(--text);font:inherit;font-weight:600;text-decoration:none;cursor:pointer}
+.btn:hover{border-color:var(--text)}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn-primary:hover{border-color:var(--accent);filter:brightness(.92)}
+.btn[disabled]{opacity:.55;cursor:not-allowed}
+.grid{display:grid;gap:var(--s3);grid-template-columns:1fr}
+@media (min-width:720px){.grid{grid-template-columns:1fr 1fr}}
+.card{display:flex;flex-direction:column;gap:var(--s2);padding:var(--s4);background:var(--surface);
+  border:1px solid var(--border);border-radius:var(--radius);text-decoration:none}
+a.card:hover{border-color:var(--control)}
+.card h3{margin:0;font-size:var(--fs-m);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;overflow-wrap:anywhere}
+.meta{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;color:var(--muted)}
+.tag{display:inline-flex;align-items:center;min-height:28px;padding:0 var(--s2);border-radius:999px;
+  border:1px solid var(--border);font-size:var(--fs-s);color:var(--text)}
+.tag-on{background:var(--accent-soft);border-color:var(--accent)}
+.tag-off{color:var(--muted)}
+.chips{display:flex;flex-wrap:wrap;gap:var(--s2)}
+.chip{position:relative;display:inline-flex}
+.chip input{position:absolute;inset:0;width:100%;height:100%;opacity:0;margin:0;cursor:pointer}
+.chip span{display:inline-flex;align-items:center;min-height:44px;padding:0 14px;
+  border:1px solid var(--control);border-radius:999px;background:var(--surface);pointer-events:none}
+.chip:hover span{border-color:var(--text)}
+.chip input:checked + span{background:var(--accent-soft);border-color:var(--accent);font-weight:600}
+.chip input:checked + span::before{content:"\2713";margin-right:6px}
+.chip input:focus-visible + span{outline:3px solid var(--focus);outline-offset:2px}
+details.macro{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  margin-bottom:var(--s2)}
+details.macro summary{display:flex;align-items:center;justify-content:space-between;gap:var(--s3);
+  min-height:48px;padding:0 var(--s4);cursor:pointer;font-weight:600;list-style:none}
+details.macro summary::-webkit-details-marker{display:none}
+details.macro summary::after{content:"+";color:var(--muted);font-weight:400}
+details.macro[open] summary::after{content:"\2212"}
+.count{margin-left:auto;min-width:24px;padding:0 var(--s2);text-align:center;border-radius:999px;
+  background:var(--accent);color:var(--on-accent);font-size:var(--fs-s)}
+details.macro .chips{padding:0 var(--s4) var(--s4)}
+.fields{display:grid;gap:var(--s3);grid-template-columns:1fr 1fr}
+@media (min-width:720px){.fields{grid-template-columns:repeat(5,1fr)}}
+.field{display:flex;flex-direction:column;gap:var(--s1)}
+.field label{font-size:var(--fs-s);color:var(--muted)}
+.field input,.field select{min-height:44px;padding:0 var(--s3);font:inherit;color:var(--text);
+  background:var(--surface);border:1px solid var(--control);border-radius:var(--radius)}
+.actions{display:flex;flex-wrap:wrap;gap:var(--s2);margin-top:var(--s5)}
+.msg{margin:0 0 var(--s3);padding:var(--s3) var(--s4);border-radius:var(--radius);
+  background:var(--accent-soft);border:1px solid var(--accent)}
+.msg.error{background:transparent;border-color:var(--danger);color:var(--danger)}
+.empty{display:flex;flex-direction:column;align-items:flex-start;gap:var(--s3);
+  padding:var(--s5) var(--s4);background:var(--surface);border:1px dashed var(--control);
+  border-radius:var(--radius)}
+.rows{list-style:none;margin:0;padding:0;display:grid;gap:var(--s2)}
+.rows li{display:flex;justify-content:space-between;gap:var(--s3);padding:var(--s2) var(--s3);
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
+.rows b{font-variant-numeric:tabular-nums}
+.search{display:flex;gap:var(--s2);margin-bottom:var(--s4)}
+.search input{flex:1;min-width:0;min-height:44px;padding:0 var(--s3);font:inherit;color:var(--text);
+  background:var(--surface);border:1px solid var(--control);border-radius:var(--radius)}
+.pick{display:flex;align-items:center;justify-content:space-between;gap:var(--s3);
+  padding:var(--s3) var(--s4);background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);margin-bottom:var(--s2)}
+.pick strong{overflow-wrap:anywhere}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="{% url 'panel:groups' %}">Spreading</a>
+  <nav aria-label="Principal">
+    <a href="{% url 'panel:groups' %}"{% if request.resolver_match.url_name in 'groups group add' %} aria-current="page"{% endif %}>Grupos</a>
+    <a href="/pair">WhatsApp</a>
+  </nav>
+</header>
+<main>
+  {% if messages %}{% for m in messages %}<p class="msg {{ m.tags }}" role="status">{{ m }}</p>{% endfor %}{% endif %}
+  {% block content %}{% endblock %}
+</main>
+<script>
+/* Um clique só: o botão apagado impede segundo envio enquanto a página responde. */
+document.addEventListener("submit", function (e) {
+  var b = e.submitter || e.target.querySelector("button[type=submit]");
+  if (b) setTimeout(function () { b.disabled = true; }, 0);
+});
+window.addEventListener("pageshow", function (e) {
+  if (e.persisted) document.querySelectorAll("button[disabled]").forEach(function (b) { b.disabled = false; });
+});
+/* Contagem do nicho acompanha as marcas sem esperar o Salvar. */
+document.addEventListener("change", function (e) {
+  var box = e.target.closest && e.target.closest("details.macro");
+  if (!box) return;
+  var n = box.querySelectorAll("input:checked").length, badge = box.querySelector(".count");
+  if (!n) { if (badge) badge.remove(); return; }
+  if (!badge) { badge = document.createElement("b"); badge.className = "count"; box.querySelector("summary").appendChild(badge); }
+  badge.textContent = n;
+});
+</script>
+</body>
+</html>

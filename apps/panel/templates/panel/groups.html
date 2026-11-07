@@ -1,0 +1,31 @@
+{% extends "panel/base.html" %}
+{% block title %}Grupos · Spreading{% endblock %}
+{% block content %}
+<div class="head">
+  <h1>Grupos</h1>
+  <a class="btn btn-primary" href="{% url 'panel:add' %}">Adicionar grupo</a>
+</div>
+{% if cards %}
+<div class="grid">
+  {% for c in cards %}
+  <a class="card" href="{% url 'panel:group' c.rule.id %}">
+    <h3>{{ c.rule.destination.name }}</h3>
+    <div class="meta">
+      {% if c.rule.active %}<span class="tag tag-on">Ativo</span>{% else %}<span class="tag tag-off">Pausado</span>{% endif %}
+      <span>{{ c.sent_today }}/{{ c.cap }} hoje</span>
+    </div>
+    <div class="meta">
+      {% if c.all %}<span class="tag">Tudo</span>{% endif %}
+      {% for n in c.niches %}<span class="tag">{{ n }}</span>{% endfor %}
+      {% if c.more %}<span class="tag">+{{ c.more }}</span>{% endif %}
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty">
+  <span>Nenhum grupo.</span>
+  <a class="btn btn-primary" href="{% url 'panel:add' %}">Adicionar grupo</a>
+</div>
+{% endif %}
+{% endblock %}

@@ -107,6 +107,28 @@ class WahaTransport:
             return None
         return response.content if response.status_code == 200 else None
 
+    def list_groups(self) -> list[dict]:
+        """Grupos da conta: [{id, name, size}] (aceita o formato do GOWS e do NOWEB)."""
+        headers = {"X-Api-Key": self.api_key} if self.api_key else {}
+        try:
+            response = self.http.get(
+                f"{self.base_url}/api/{self.session_name}/groups",
+                params={"limit": 500}, headers=headers, timeout=settings.HTTP_TIMEOUT_SECONDS,
+            )
+            data = response.json() if response.status_code == 200 else []
+        except (requests.exceptions.RequestException, ValueError):
+            return []
+        groups = []
+        for row in data if isinstance(data, list) else []:
+            ident = row.get("JID") or row.get("id")
+            if isinstance(ident, dict):
+                ident = ident.get("_serialized") or ""
+            name = row.get("Name") or row.get("name") or row.get("subject") or ""
+            members = row.get("Participants") or row.get("participants") or []
+            if ident and str(ident).endswith("@g.us"):
+                groups.append({"id": str(ident), "name": str(name), "size": len(members)})
+        return sorted(groups, key=lambda g: g["name"].lower())
+
     def session_working(self) -> bool:
         return self.session_status() == "WORKING"
 

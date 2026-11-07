@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     "apps.delivery.apps.Config",
     "apps.compose.apps.Config",
     "apps.offers.apps.Config",
+    "apps.panel.apps.Config",
 ]
 
 MIDDLEWARE = [

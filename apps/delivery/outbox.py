@@ -126,12 +126,17 @@ def enqueue_coupon_notice(org, destination, now=None, rule=None):
     return item
 
 
-def enqueue_offer(org, rule, now=None, report: Counter | None = None, http=None):
-    """Enfileira a melhor oferta publicável (foto, preço provado ao vivo, link do dono)."""
+def enqueue_offer(org, rule, now=None, report: Counter | None = None, http=None, force=False):
+    """Enfileira a melhor oferta publicável (foto, preço provado ao vivo, link do dono).
+
+    `force` (botão "Enviar agora") ignora janela e intervalo da regra; teto e destino valem.
+    """
     now = now or timezone.now()
     report = report if report is not None else Counter()
     destination = rule.destination
-    if not _destination_ready(org, destination, now) or not _rule_ready(org, rule, now):
+    if not _destination_ready(org, destination, now) or not (
+        force or _rule_ready(org, rule, now)
+    ):
         report["regra_ou_grupo_fora_da_janela"] += 1
         return None
     tries = 0
@@ -170,18 +175,20 @@ def enqueue_offer(org, rule, now=None, report: Counter | None = None, http=None)
 
 
 def explain_rule(rule, now=None, http=None) -> Counter:
-    """"Por que não saiu": contagem de motivos que barraram as ofertas (não grava nada)."""
+    """"Por que não saiu": motivos que barraram ofertas + `prontas` (não grava nada)."""
     now = now or timezone.now()
     report = Counter()
-    list(selection.candidates(rule.org, rule.destination, rule, now, report))
+    ready = sum(1 for _ in selection.candidates(rule.org, rule.destination, rule, now, report))
+    if ready:
+        report["prontas"] = ready
     return report
 
 
-def enqueue_for_rule(rule, now=None, http=None):
+def enqueue_for_rule(rule, now=None, http=None, force=False):
     org = rule.org
     if rule.type == Rule.COUPON_NOTICE:
         return enqueue_coupon_notice(org, rule.destination, now, rule=rule)
-    return enqueue_offer(org, rule, now, http=http)
+    return enqueue_offer(org, rule, now, http=http, force=force)
 
 
 def deliver_due(transport, now=None, limit=20) -> dict:

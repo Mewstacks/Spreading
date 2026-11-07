@@ -1,0 +1,27 @@
+{% extends "panel/base.html" %}
+{% block title %}Adicionar grupo · Spreading{% endblock %}
+{% block content %}
+<div class="head">
+  <h1>Adicionar grupo</h1>
+  <a class="btn" href="{% url 'panel:groups' %}">Voltar</a>
+</div>
+<form class="search" method="get" role="search">
+  <label class="sr" for="q">Buscar grupo</label>
+  <input id="q" name="q" type="search" value="{{ q }}" placeholder="Nome do grupo" autocomplete="off">
+  <button class="btn" type="submit">Buscar</button>
+</form>
+{% if rows %}
+  {% for g in rows %}
+  <form class="pick" method="post">{% csrf_token %}
+    <input type="hidden" name="group" value="{{ g.id }}">
+    <span><strong>{{ g.name }}</strong><br><span class="meta">{{ g.size }} membro{{ g.size|pluralize }}</span></span>
+    <button class="btn" type="submit">Adicionar</button>
+  </form>
+  {% endfor %}
+{% else %}
+<div class="empty">
+  <span>{% if offline %}WhatsApp sem resposta.{% else %}Nenhum grupo encontrado.{% endif %}</span>
+  {% if offline %}<a class="btn" href="/pair">Conectar WhatsApp</a>{% elif q %}<a class="btn" href="{% url 'panel:add' %}">Ver tudo</a>{% endif %}
+</div>
+{% endif %}
+{% endblock %}
