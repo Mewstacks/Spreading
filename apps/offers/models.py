@@ -103,3 +103,10 @@ class Offer(models.Model):
             )
         ]
         indexes = [models.Index(fields=["store", "last_seen"])]
+
+
+class TermRun(models.Model):
+    """Última coleta de catálogo por termo: a API do ML não é consultada a cada ciclo."""
+
+    term = models.CharField(max_length=120, unique=True)
+    last_run = models.DateTimeField()

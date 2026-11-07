@@ -1,4 +1,5 @@
 """Coletor de catálogo do ML pela API oficial, guiado pelos nichos e termos das regras ativas."""
+from datetime import timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from django.utils import timezone
@@ -6,9 +7,10 @@ from django.utils import timezone
 from apps.coupons.feed import BRT
 
 from . import ml_api, niches
-from .models import Offer, Rule
+from .models import Offer, Rule, TermRun
 
 SOURCE = "ml-api-catalogo"
+REFRESH_EVERY = timedelta(hours=1)  # o ciclo roda de 5 em 5 min; a API não precisa disso
 
 
 def split_terms(text: str) -> list[str]:
@@ -30,8 +32,13 @@ def collect_catalog(now=None, per_term=15, http=None) -> int:
     terms = set()
     for rule in Rule.unscoped.filter(active=True, type=Rule.OFFERS):
         terms.update(rule_terms(rule))
+    last = dict(TermRun.objects.filter(term__in={t[:120] for t in terms})
+                .values_list("term", "last_run"))
     count = 0
     for term in sorted(terms):
+        if term[:120] in last and now - last[term[:120]] < REFRESH_EVERY:
+            continue
+        TermRun.objects.update_or_create(term=term[:120], defaults={"last_run": now})
         for product in ml_api.search_products(term, per_term, http=http):
             price = ml_api.product_price(product["id"], http=http)
             if not price or not price["price"]:
