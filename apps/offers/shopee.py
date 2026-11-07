@@ -31,6 +31,8 @@ API_URL = "https://open-api.affiliate.shopee.com.br/graphql"
 TIMEOUT = (5, 20)
 RATE_LIMITED = 10030
 PAGE_SIZE = 50
+PACE_SECONDS = 1.5
+SORT_BY_SALES = 2  # confirmado na API real; o padrão devolve anúncio novo sem venda nem nota
 SOURCE = "shopee-api"
 HOSTS = ("shopee.com.br", "shp.ee", "shope.ee")
 MIN_DISCOUNT, MAX_DISCOUNT = Decimal(5), Decimal(70)  # acima disso o "De" costuma ser fachada
@@ -41,8 +43,8 @@ FIELDS = """
     commissionRate sales ratingStar shopId shopName
 """
 QUERY_PRODUCTS = """
-query ProdutosShopee($keyword: String, $page: Int, $limit: Int) {
-  productOfferV2(keyword: $keyword, page: $page, limit: $limit) {
+query ProdutosShopee($keyword: String, $page: Int, $limit: Int, $sortType: Int) {
+  productOfferV2(keyword: $keyword, page: $page, limit: $limit, sortType: $sortType) {
     nodes { %s }
     pageInfo { page limit hasNextPage }
   }
@@ -132,6 +134,8 @@ def vet(node: dict) -> dict | None:
     try:
         item = str(node["itemId"]).strip()
         price = _dec(node.get("priceMin"))
+        if price != _dec(node.get("priceMax")):
+            return None  # variações com preços diferentes: o desconto não diz de qual é o "De"
         rate = Decimal(str(node.get("priceDiscountRate") or 0))
         rating = Decimal(str(node.get("ratingStar") or 0))
         sales = int(node.get("sales") or 0)
@@ -168,13 +172,14 @@ def _store(org, row: dict, now, today) -> None:
     )
 
 
-def collect(now=None, http=None) -> int:
+def collect(now=None, http=None, sleep=time.sleep) -> int:
     """Uma consulta por termo das regras ativas com Shopee, no máximo uma por hora cada."""
     if not configured():
         return 0
     now = now or timezone.now()
     today = now.astimezone(BRT).date()
     app_id, secret = settings.SHOPEE_APP_ID, settings.SHOPEE_APP_SECRET
+    first = True
     stored: set = set()  # o mesmo produto aparece em vários termos: conta e grava uma vez
     rules = Rule.unscoped.filter(active=True, type=Rule.OFFERS).select_related("org")
     for rule in rules:
@@ -185,9 +190,12 @@ def collect(now=None, http=None) -> int:
             last = TermRun.objects.filter(term=key).values_list("last_run", flat=True).first()
             if last and now - last < REFRESH_EVERY:
                 continue
+            if not first:
+                sleep(PACE_SECONDS)  # a API recusa rajada de consultas
+            first = False
             try:
                 data = execute(QUERY_PRODUCTS, {"keyword": term or None, "page": 1,
-                                                "limit": PAGE_SIZE},
+                                                "limit": PAGE_SIZE, "sortType": SORT_BY_SALES},
                                app_id=app_id, secret=secret, http=http)
             except ShopeeError as exc:
                 logger.warning("shopee: %s", exc)

@@ -39,7 +39,8 @@ class Http:
 
 
 @pytest.fixture(autouse=True)
-def creds(settings):
+def creds(settings, monkeypatch):
+    monkeypatch.setattr(shopee, "PACE_SECONDS", 0)
     settings.SHOPEE_APP_ID = "app123"
     settings.SHOPEE_APP_SECRET = "secret456"
 
@@ -97,11 +98,12 @@ def test_collect_stores_vetted_offers_with_the_official_link(org, rule):
         {**GOOD, "itemId": "4", "priceDiscountRate": 85},  # desconto de fachada
         {**GOOD, "itemId": "5", "offerLink": "https://evil.io/x"},  # link fora da Shopee
         {**GOOD, "itemId": "6", "imageUrl": "https://evil.io/a.jpg"},  # foto fora da lista
-        {**GOOD, "itemId": "7", "priceMin": "0"},
+        {**GOOD, "itemId": "7", "priceMin": "0", "priceMax": "0"},
+        {**GOOD, "itemId": "9", "priceMax": "149.90"},  # faixa de preço entre variações
         {**GOOD, "itemId": "8", "productName": "Remédio emagrecedor"},  # categoria vedada
     ]
     http = Http([GOOD, *junk])
-    assert shopee.collect(NOW, http=http) == 1
+    assert shopee.collect(NOW, http=http, sleep=lambda s: None) == 1
     offer = Offer.objects.get()
     assert (offer.store, offer.link_key, offer.source) == ("shopee", "shp:9001", "shopee-api")
     assert offer.price_to == Decimal("70.00") and offer.price_from == Decimal("100.00")
@@ -113,7 +115,8 @@ def test_collect_stores_vetted_offers_with_the_official_link(org, rule):
 def test_collect_asks_for_the_rule_terms_once_an_hour_and_only_for_shopee_rules(
         org, rule, destination):
     http = Http([GOOD])
-    shopee.collect(NOW, http=http)
+    shopee.collect(NOW, http=http, sleep=lambda s: None)
+    assert {json.loads(c.data)["variables"]["sortType"] for c in http.calls} == {2}  # mais vendidos
     sent = [json.loads(c.data)["variables"]["keyword"] for c in http.calls]
     assert set(sent) == {t.strip() for t in niches._sub_terms(rule.niches[0])}
     asked = len(http.calls)
@@ -134,7 +137,7 @@ def test_rule_without_niches_asks_the_general_listing(org, rule):
     rule.niches = []
     rule.save()
     http = Http([GOOD])
-    shopee.collect(NOW, http=http)
+    shopee.collect(NOW, http=http, sleep=lambda s: None)
     assert [json.loads(c.data)["variables"]["keyword"] for c in http.calls] == [None]
 
 
@@ -142,7 +145,7 @@ def test_macro_selection_uses_its_main_keywords(org, rule):
     rule.niches = [niches.macro_key("Pets e Animais")]
     rule.save()
     http = Http([])
-    shopee.collect(NOW, http=http)
+    shopee.collect(NOW, http=http, sleep=lambda s: None)
     asked = [json.loads(c.data)["variables"]["keyword"] for c in http.calls]
     assert asked and set(asked) <= {"racao", "ração", "petisco", "coleira"}
 
@@ -160,7 +163,7 @@ def test_api_failure_keeps_what_was_collected_and_retries_the_term(org, rule):
 def test_not_configured_collects_nothing(org, rule, settings):
     settings.SHOPEE_APP_ID = ""
     http = Http([GOOD])
-    assert shopee.collect(NOW, http=http) == 0 and http.calls == []
+    assert shopee.collect(NOW, http=http, sleep=lambda s: None) == 0 and http.calls == []
 
 
 # ── ponta a ponta: da API ao texto do grupo ───────────────────────────────
