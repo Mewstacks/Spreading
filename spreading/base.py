@@ -131,7 +131,7 @@ AMAZON_COLLECT = env_bool("AMAZON_COLLECT", True)
 # Vitrine pública de cupons do ML (cupons de campanha e ofertas em destaque). 0 desliga.
 ML_PUBLIC_PAGES = env_bool("ML_PUBLIC_PAGES", True)
 
-# Alertas (opt-in): WhatsApp para ALERT_CHAT_ID (por um número conectado) e/ou e-mail. Vazio desliga.
+# Alertas (opt-in): WhatsApp para ALERT_CHAT_ID (por um número conectado) e/ou e-mail.
 ALERT_CHAT_ID = env("ALERT_CHAT_ID", "")
 ALERT_EMAIL_TO = env("ALERT_EMAIL_TO", "")
 EMAIL_HOST = env("EMAIL_HOST", "")
