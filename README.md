@@ -35,6 +35,12 @@ Preencha `SHOPEE_APP_ID` e `SHOPEE_APP_SECRET` no `.env` e marque Shopee na regr
 os termos da regra no máximo uma vez por hora. A API não traz o preço original: o "De" é derivado do
 `priceDiscountRate`, então só entra produto com desconto de 5% a 70%, nota ≥ 4,5 e ≥ 50 vendas.
 
+## Amazon
+Sem API utilizável (a Creators API exige 10 vendas qualificadas em 30 dias): a coleta lê a busca pública da
+Amazon BR, uma consulta por termo da regra por hora, e usa o preço riscado do próprio anúncio como "De"
+(desconto de 5% a 70%, nota ≥ 4,0, foto original). O link é `/dp/ASIN?tag=<tag da org>`; sem tag, não sai.
+Captcha ou 503 pausa a loja por 1 h. Raspar viola os termos da Amazon: `AMAZON_COLLECT=0` desliga.
+
 ## Link Builder (links `meli.la` do dono)
 Oferta sem link do dono não sai. O runner gera o que falta **só para o que as regras ativas vão publicar**,
 pares cupom+produto primeiro, com a conta do próprio afiliado:

@@ -15,7 +15,7 @@ from .models import AffiliateLink, Offer
 
 ML_CATALOG_ID = re.compile(r"^MLB\d+$")
 ML_LIVE_MAX_AGE = timedelta(days=14)  # item de catálogo do ML é conferido ao vivo no envio
-OTHER_STORE_MAX_AGE = timedelta(hours=12)  # Amazon/Shopee: sem conferência ao vivo ainda
+OTHER_STORE_MAX_AGE = timedelta(hours=3)  # Amazon/Shopee: sem conferência ao vivo ainda
 FEED_SOURCE = "ml-ofertas-diarias"
 
 

@@ -122,3 +122,6 @@ LINKBUILDER_VERIFY = env_bool("LINKBUILDER_VERIFY", True)
 # Shopee Affiliate Open API (App ID e Secret do painel de afiliados). Sem eles a loja não coleta.
 SHOPEE_APP_ID = env("SHOPEE_APP_ID", "")
 SHOPEE_APP_SECRET = env("SHOPEE_APP_SECRET", "")
+
+# Amazon BR: coleta pela busca pública (sem API). 0 desliga.
+AMAZON_COLLECT = env_bool("AMAZON_COLLECT", True)
