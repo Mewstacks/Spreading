@@ -1,0 +1,56 @@
+# Stack do v2: Postgres + web + worker + WAHA (GOWS). Segredos vêm do .env (nunca versionado).
+x-app: &app
+  build: .
+  env_file: .env
+  environment:
+    DATABASE_URL: postgres://spreading:${POSTGRES_PASSWORD}@db:5432/spreading
+    WAHA_URL: http://waha:3000
+  depends_on:
+    db:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: spreading
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: spreading
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spreading"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  web:
+    <<: *app
+    command: sh -c "python manage.py migrate --noinput && gunicorn spreading.wsgi --bind 0.0.0.0:8000 --workers 2"
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  worker:
+    <<: *app
+    command: python manage.py run_cycle --loop 300
+
+  waha:
+    # Fixar a versão depois do spike S1 (ex.: devlikeapro/waha:gows-2026.10.1).
+    image: devlikeapro/waha:gows
+    environment:
+      WHATSAPP_DEFAULT_ENGINE: GOWS
+      WAHA_API_KEY: ${WAHA_API_KEY}
+      WAHA_DASHBOARD_ENABLED: "true"
+      WAHA_DASHBOARD_USERNAME: ${WAHA_DASHBOARD_USERNAME:-admin}
+      WAHA_DASHBOARD_PASSWORD: ${WAHA_DASHBOARD_PASSWORD}
+      WHATSAPP_API_KEY: ${WAHA_API_KEY}
+    volumes:
+      - wasessions:/app/.sessions
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  wasessions:
