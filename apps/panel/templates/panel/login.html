@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-theme="dark">
+<head>
+  <title>Entrar · Spreading</title>
+  {% include "panel/_head.html" %}
+</head>
+<body>
+  <main class="wrap" style="max-width:420px;padding-top:12vh">
+    <a class="brand" href="/" style="margin-bottom:1.6rem">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+      <span class="brand-word">Spreading</span>
+    </a>
+    <form class="panel" method="post" action="{{ app_path }}">{% csrf_token %}
+      <div class="panel-head"><h2>Entrar</h2></div>
+      {% if form.errors and not form.non_field_errors %}<div class="msg msg-error" style="margin-bottom:1rem">Corrija os campos.</div>{% endif %}
+      {% for error in form.non_field_errors %}<div class="msg msg-error" style="margin-bottom:1rem">{{ error }}</div>{% endfor %}
+      <div class="form-section">
+        <label for="id_username">Usuário</label>
+        <input id="id_username" name="username" type="text" autocomplete="username" autofocus required>
+      </div>
+      <div class="form-section">
+        <label for="id_password">Senha</label>
+        <input id="id_password" name="password" type="password" autocomplete="current-password" required>
+      </div>
+      <input type="hidden" name="next" value="{{ next }}">
+      <div class="form-actions"><button class="btn btn-accent" type="submit" style="width:100%">Entrar</button></div>
+    </form>
+  </main>
+</body>
+</html>

@@ -1,30 +1,42 @@
 {% extends "panel/base.html" %}
 {% block title %}Links · Spreading{% endblock %}
+{% block topbar_context %}<strong>Links</strong><span>Operação</span>{% endblock %}
+{% block page_class %}page-narrow{% endblock %}
 {% block content %}
-<div class="head">
-  <h1>Links</h1>
-  <span class="tag">{{ rows|length }} pendentes</span>
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Operação</span>
+    <h1><i aria-hidden="true" data-lucide="link"></i> Links</h1>
+  </div>
+  <div class="head-actions"><span class="tech-tag">{{ rows|length }} pendentes</span></div>
 </div>
 {% if rows %}
-<h2>Para gerar</h2>
-<form class="stack" onsubmit="return false">
+<section class="panel">
+  <div class="panel-head"><h2><i aria-hidden="true" data-lucide="list"></i> Para gerar</h2>
+    <button class="btn btn-sm" type="button" id="copy" style="margin-left:auto"><i aria-hidden="true" data-lucide="copy"></i> Copiar</button></div>
   <label class="sr" for="todo">URLs</label>
-  <textarea id="todo" class="area" readonly rows="8">{{ text }}</textarea>
-  <button class="btn" type="button" id="copy">Copiar</button>
-</form>
-<h2>Colar</h2>
-<form class="stack" method="post">{% csrf_token %}
+  <textarea id="todo" readonly rows="8">{{ text }}</textarea>
+</section>
+<form class="panel" method="post">{% csrf_token %}
+  <div class="panel-head"><h2><i aria-hidden="true" data-lucide="clipboard-paste"></i> Colar</h2></div>
   <label class="sr" for="pasted">Linhas</label>
-  <textarea id="pasted" name="pasted" class="area" rows="8" placeholder="url link"></textarea>
-  <button class="btn btn-primary" type="submit">Importar</button>
+  <textarea id="pasted" name="pasted" rows="8" placeholder="url link"></textarea>
+  <div class="form-actions"><button class="btn btn-accent" type="submit"><i aria-hidden="true" data-lucide="download"></i> Importar</button></div>
 </form>
+{% else %}
+<div class="empty">
+  <i aria-hidden="true" data-lucide="check"></i>
+  <span class="empty-title">Nada pendente.</span>
+  <a class="btn" href="{% url 'panel:groups' %}">Grupos</a>
+</div>
+{% endif %}
+{% endblock %}
+{% block scripts %}
 <script>
-document.getElementById("copy").addEventListener("click", function () {
+var copyBtn = document.getElementById("copy");
+if (copyBtn) copyBtn.addEventListener("click", function () {
   var box = document.getElementById("todo"); box.select();
   if (navigator.clipboard) navigator.clipboard.writeText(box.value); else document.execCommand("copy");
 });
 </script>
-{% else %}
-<div class="empty"><span>Nada pendente.</span><a class="btn" href="{% url 'panel:groups' %}">Grupos</a></div>
-{% endif %}
 {% endblock %}

@@ -1,16 +1,21 @@
 {% extends "panel/base.html" %}
 {% block title %}{{ title }} · Spreading{% endblock %}
+{% block topbar_context %}<strong>{{ title }}</strong><span>Operação</span>{% endblock %}
 {% block content %}
-<div class="head">
-  <h1>{{ title }}</h1>
-  <span class="tag">{{ rows|length }}{% if has_next %}+{% endif %} aqui</span>
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Operação</span>
+    <h1><i aria-hidden="true" data-lucide="{% if kind == 'coupon' %}ticket{% else %}flame{% endif %}"></i> {{ title }}</h1>
+  </div>
+  <div class="head-actions"><span class="tech-tag">{{ rows|length }}{% if has_next %}+{% endif %} aqui</span></div>
 </div>
+
 <form class="toolbar" method="get" role="search">
   <label class="sr" for="q">Buscar</label>
-  <input id="q" name="q" type="search" value="{{ q }}" placeholder="Produto ou código" autocomplete="off">
+  <input class="grow" id="q" name="q" type="search" value="{{ q }}" placeholder="Produto ou código" autocomplete="off">
   <label class="sr" for="loja">Loja</label>
   <select id="loja" name="loja">
-    <option value="">Todas</option>
+    <option value="">Todas as lojas</option>
     {% for key, label in stores.items %}<option value="{{ key }}"{% if key == store %} selected{% endif %}>{{ label }}</option>{% endfor %}
   </select>
   <label class="sr" for="estado">Link</label>
@@ -19,56 +24,61 @@
     <option value="com"{% if state == "com" %} selected{% endif %}>Com link</option>
     <option value="sem"{% if state == "sem" %} selected{% endif %}>Sem link</option>
   </select>
-  <button class="btn" type="submit">Filtrar</button>
+  <button class="btn" type="submit"><i aria-hidden="true" data-lucide="filter"></i> Filtrar</button>
 </form>
 
 {% if rows %}
-<ul class="items">
-  {% for r in rows %}
-  <li class="item">
-    <img class="thumb" src="{{ r.offer.image_url }}" alt="" loading="lazy" width="56" height="56" referrerpolicy="no-referrer">
-    <div class="body">
-      <h3>{{ r.offer.title }}</h3>
-      <div class="meta">
-        <span class="tag">{{ r.store }}</span>
-        {% if r.coupon %}<span class="tag tag-on">{{ r.coupon }}</span>{% if r.until %}<span>até {{ r.until }}</span>{% endif %}{% endif %}
-        <span><b>{{ r.price }}</b> · {{ r.pct }} off</span>
-        <span class="tag {% if r.linked %}tag-on{% else %}tag-warn{% endif %}">{% if r.linked %}Com link{% else %}Sem link{% endif %}</span>
-      </div>
-    </div>
-    {% if r.linked and rules %}
-    <form class="send" method="post" action="{% url 'panel:offer_send' r.offer.id %}">{% csrf_token %}
-      <input type="hidden" name="next" value="{{ next }}">
-      {% if rules|length > 1 %}
-      <label class="sr" for="rule{{ r.offer.id }}">Grupo</label>
-      <select id="rule{{ r.offer.id }}" name="rule">{% for rule in rules %}<option value="{{ rule.id }}">{{ rule.destination.name }}</option>{% endfor %}</select>
-      {% else %}<input type="hidden" name="rule" value="{{ rules.0.id }}">{% endif %}
-      <button class="btn" type="submit">Enviar</button>
-    </form>
-    {% endif %}
-  </li>
-  {% endfor %}
-</ul>
+<div class="table-flat">
+  <table class="stack-table">
+    <thead><tr><th class="cell-grow">Produto</th><th>Loja</th>{% if kind == "coupon" %}<th>Cupom</th>{% endif %}<th>Preço</th><th>Desc.</th><th>Link</th><th class="col-actions"></th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td class="cell-grow" data-label="Produto"><div class="cell-prod">
+          <img class="thumb" src="{{ r.offer.image_url }}" alt="" loading="lazy" width="44" height="44" referrerpolicy="no-referrer">
+          <span class="prod-title">{{ r.offer.title }}</span></div></td>
+        <td data-label="Loja"><span class="tech-tag">{{ r.store }}</span></td>
+        {% if kind == "coupon" %}<td data-label="Cupom">{% if r.coupon %}<span class="tags"><span class="badge badge-accent">{{ r.coupon }}</span>{% if r.until %}<span class="muted">até {{ r.until }}</span>{% endif %}</span>{% endif %}</td>{% endif %}
+        <td data-label="Preço" class="tnum"><b>{{ r.price }}</b></td>
+        <td data-label="Desc." class="tnum">{{ r.pct }}</td>
+        <td data-label="Link">{% if r.linked %}<span class="badge badge-green">Com link</span>{% else %}<span class="badge badge-yellow">Sem link</span>{% endif %}</td>
+        <td class="col-actions">
+          {% if r.linked and rules %}
+          <div class="row-actions"><form method="post" action="{% url 'panel:offer_send' r.offer.id %}">{% csrf_token %}
+            <input type="hidden" name="next" value="{{ next }}">
+            {% if rules|length > 1 %}
+            <label class="sr" for="rule{{ r.offer.id }}">Grupo</label>
+            <select id="rule{{ r.offer.id }}" name="rule" style="width:auto;min-width:130px">{% for rule in rules %}<option value="{{ rule.id }}">{{ rule.destination.name }}</option>{% endfor %}</select>
+            {% else %}<input type="hidden" name="rule" value="{{ rules.0.id }}">{% endif %}
+            <button class="btn btn-sm" type="submit"><i aria-hidden="true" data-lucide="send"></i> Enviar</button>
+          </form></div>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% if has_prev or has_next %}
 <nav class="pager" aria-label="Páginas">
-  {% if has_prev %}<a class="btn" href="?{% if base_query %}{{ base_query }}&{% endif %}p={{ page|add:'-1' }}">Anterior</a>{% endif %}
-  <span>{{ page }}</span>
-  {% if has_next %}<a class="btn" href="?{% if base_query %}{{ base_query }}&{% endif %}p={{ page|add:'1' }}">Próxima</a>{% endif %}
+  {% if has_prev %}<a class="btn" href="?{% if base_query %}{{ base_query }}&{% endif %}p={{ page|add:'-1' }}"><i aria-hidden="true" data-lucide="arrow-left"></i> Anterior</a>{% endif %}
+  <span class="tnum muted">{{ page }}</span>
+  {% if has_next %}<a class="btn" href="?{% if base_query %}{{ base_query }}&{% endif %}p={{ page|add:'1' }}">Próxima <i aria-hidden="true" data-lucide="arrow-right"></i></a>{% endif %}
 </nav>
 {% endif %}
 {% else %}
 <div class="empty">
-  <span>Nada encontrado.</span>
+  <i aria-hidden="true" data-lucide="search-x"></i>
+  <span class="empty-title">Nada encontrado.</span>
   {% if q or store or state %}<a class="btn" href="{{ request.path }}">Limpar</a>{% endif %}
 </div>
 {% endif %}
 
 {% if kind == "coupon" and feed %}
-<h2>Feed do ML</h2>
-<details class="macro">
-  <summary><span>Cupons de campanha</span><b class="count">{{ feed|length }}</b></summary>
-  <ul class="rows feed">
-    {% for c in feed %}<li><span>{{ c.line }}</span><b>{{ c.until|date:"d/m" }}</b></li>{% endfor %}
+<details class="adv" style="margin-top:1.6rem">
+  <summary><span>Feed do ML</span><b class="count">{{ feed|length }}</b></summary>
+  <ul class="rows" style="margin:0 .95rem .95rem">
+    {% for c in feed %}<li class="row-item"><span class="row-main">{{ c.line }}</span><span class="row-side num muted">{{ c.until|date:"d/m" }}</span></li>{% endfor %}
   </ul>
 </details>
 {% endif %}

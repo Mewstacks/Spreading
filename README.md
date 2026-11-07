@@ -36,6 +36,8 @@ os termos da regra no máximo uma vez por hora. A API não traz o preço origina
 `priceDiscountRate`, então só entra produto com desconto de 5% a 70%, nota ≥ 4,5 e ≥ 50 vendas.
 
 ## Telas do painel
+Visual do v1: grafite quente e papel (tema escuro/claro), acento laranja, Instrument Sans e IBM Plex Mono, sidebar
+recolhível que vira gaveta no celular, tabelas que viram cartões a 375 px, ícones Lucide.
 - **Grupos**: um card por grupo (estado, enviadas hoje, nichos) e o estado do WhatsApp e do Link Builder.
   Dentro do grupo: nichos, lojas, envio (teto, janela, desconto mínimo, intervalo) e filtros (cupom
   Primeiro/Só cupom/Sem cupom, faixa de preço, palavras, exclusões, dias).

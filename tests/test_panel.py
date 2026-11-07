@@ -136,7 +136,7 @@ def test_groups_page_shows_state_niches_and_today_count(client, staff, org, dest
     )
     html = page(client, "groups")
     assert "Teste ofertas" in html and "Pausado" in html
-    assert f"1/{rule.effective_cap} hoje" in html
+    assert f"1/{rule.effective_cap}" in html
     assert escape(cat[0][0]) in html and escape(cat[1][0]) in html and "+1" in html
     rule.active = True
     rule.niches = []
@@ -151,7 +151,7 @@ def test_groups_page_shows_the_whatsapp_session(client, staff, org, monkeypatch)
     assert "WhatsApp · Conectado" in page(client, "groups")
     transport.status = "SCAN_QR_CODE"
     html = page(client, "groups")
-    assert "WhatsApp · Ler o QR" in html and "tag-warn" in html
+    assert "WhatsApp · Ler o QR" in html and "badge-yellow" in html
     transport.status = ""
     assert "WhatsApp · Sem resposta" in page(client, "groups")
 
@@ -164,11 +164,11 @@ def test_groups_page_shows_link_builder_state_only_when_there_is_one(client, sta
         org=org, state=BuilderState.NO_SESSION, detail="rode tools/ml_login.py", updated_at=NOW)
     html = page(client, "groups")
     assert "Link Builder · Sem sessão" in html and "rode tools/ml_login.py" in html
-    assert "tag-warn" in html
+    assert "badge-yellow" in html
     state.state, state.detail = BuilderState.READY, ""
     state.save()
     html = page(client, "groups")
-    assert "Link Builder · Pronto" in html and 'tag tag-warn">Link Builder' not in html
+    assert "Link Builder · Pronto" in html and 'badge-yellow">Link Builder' not in html
 
 
 # ── adicionar grupo ───────────────────────────────────────────────────────
@@ -177,7 +177,7 @@ def test_add_page_lists_free_groups_and_filters(client, staff, org, destination,
     html = page(client, "add")
     assert "Promo Casa" in html and "Achados Tech" in html
     assert "120 membros" in html and "80 membros" in html
-    assert 'class="btn btn-primary"' not in html  # uma ação primária por tela: aqui nenhuma
+    assert 'class="btn btn-accent"' not in html  # uma ação primária por tela: aqui nenhuma
     assert "Teste ofertas" not in html  # já cadastrado
     html = page(client, "add", q="tech")
     assert "Achados Tech" in html and "Promo Casa" not in html
@@ -442,3 +442,9 @@ def test_send_offer_explains_the_refusal_and_ignores_open_redirects(client, staf
     assert client.post(send, {"rule": 999}).status_code == 404
     assert client.post(reverse("panel:offer_send", args=[999999]),
                        {"rule": rule.id}).status_code == 404
+
+
+def test_login_page_uses_the_panel_design(client, db):
+    html = client.get("/admin/login/").content.decode()
+    assert "brand-word" in html and 'name="username"' in html and 'name="password"' in html
+    assert "csrfmiddlewaretoken" in html

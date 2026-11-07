@@ -1,6 +1,4 @@
 """Ofertas e Cupons: o catálogo que o motor enxerga, com busca, filtros e envio manual."""
-from datetime import timedelta
-
 from django.contrib import messages
 from django.contrib.admin.views.decorators import staff_member_required
 from django.db.models import Q
@@ -15,27 +13,18 @@ from apps.delivery.outbox import deliver_due, enqueue_specific
 from apps.delivery.transports import WahaTransport
 from apps.offers.models import STORE_LABELS, AffiliateLink, Offer, Rule
 
+from .queries import live_coupons, live_offers, with_link
 from .views import REASONS, current_org
 
 PAGE = 30
-FRESH = timedelta(days=14)
 EXTRA_REASONS = {
     "grupo_indisponivel": "Grupo ocupado agora", "cupom_vencido": "Cupom vencido",
     "observacao_velha": "Observação velha",
 }
 
 
-def _with_link(org):
-    """Q das ofertas que já têm o link do dono (Amazon: basta a tag da organização)."""
-    keys = AffiliateLink.objects.for_org(org).values("product_key")
-    has = Q(link_key__in=keys)
-    return has | Q(store="amazon") if org.amazon_tag else has
-
-
 def _filtered(request, org, kind, now):
-    qs = Offer.objects.filter(last_seen__gte=now - FRESH).exclude(image_url="")
-    if kind == "coupon":
-        qs = qs.exclude(coupon_kind="").exclude(coupon_until__lt=now)
+    qs = live_coupons(now) if kind == "coupon" else live_offers(now)
     query = (request.GET.get("q") or "").strip()
     if query:
         qs = qs.filter(Q(title__icontains=query) | Q(coupon_code__icontains=query)
@@ -45,9 +34,9 @@ def _filtered(request, org, kind, now):
         qs = qs.filter(store=store)
     state = request.GET.get("estado", "")
     if state == "com":
-        qs = qs.filter(_with_link(org))
+        qs = qs.filter(with_link(org))
     elif state == "sem":
-        qs = qs.exclude(_with_link(org))
+        qs = qs.exclude(with_link(org))
     return qs.order_by("-discount_pct", "-last_seen")
 
 

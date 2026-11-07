@@ -19,6 +19,8 @@ from apps.offers import niches
 from apps.offers.models import STORE_LABELS, STORES, Rule
 from apps.orgs.models import Destination, Organization
 
+from .queries import live_coupons, with_link
+
 REASONS = {
     "prontas": "Prontas para sair",
     "sem_link_do_dono": "Sem link seu",
@@ -52,7 +54,7 @@ WHATSAPP_LABELS = {"WORKING": "Conectado", "SCAN_QR_CODE": "Ler o QR", "STARTING
 def _whatsapp_status():
     status = WahaTransport().session_status(timeout=3)
     return {"label": WHATSAPP_LABELS.get(status, status),
-            "tone": "on" if status == "WORKING" else "warn"}
+            "tone": "green" if status == "WORKING" else "yellow"}
 
 
 def _builder_status(org):
@@ -61,8 +63,8 @@ def _builder_status(org):
         return None
     return {
         "label": BUILDER_LABELS.get(state.state, state.state), "detail": state.detail,
-        "tone": "on" if state.state in BUILDER_FINE else (
-            "off" if state.state == BuilderState.OFF else "warn"),
+        "tone": "green" if state.state in BUILDER_FINE else (
+            "muted" if state.state == BuilderState.OFF else "yellow"),
     }
 
 
@@ -103,8 +105,15 @@ def groups(request):
             "rule": rule, "sent_today": sent, "cap": rule.effective_cap,
             "niches": picked[:2], "more": max(0, len(picked) - 2), "all": not picked,
         })
+    coupons = live_coupons(now)
+    linked = coupons.filter(with_link(org)).count()
+    stats = {
+        "sent": sum(c["sent_today"] for c in cards), "cap": sum(c["cap"] for c in cards),
+        "active": sum(1 for c in cards if c["rule"].active), "total": len(cards),
+        "linked": linked, "unlinked": coupons.count() - linked,
+    }
     return render(request, "panel/groups.html", {
-        "org": org, "cards": cards, "builder": _builder_status(org),
+        "org": org, "cards": cards, "builder": _builder_status(org), "stats": stats,
         "whatsapp": _whatsapp_status(),
     })
 

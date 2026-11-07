@@ -1,162 +1,126 @@
-<!doctype html>
-<html lang="pt-br">
+<!DOCTYPE html>
+<html lang="pt-BR" data-theme="dark">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
-<title>{% block title %}Spreading{% endblock %}</title>
-<style>
-:root{
-  --bg:#f6f7f9;--surface:#ffffff;--text:#111827;--muted:#4b5563;
-  --border:#d5dae1;--control:#6b7280;
-  --accent:#15803d;--on-accent:#ffffff;--accent-soft:#dcfce7;--danger:#b91c1c;--focus:#1d4ed8;
-  --radius:12px;--s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;
-  --fs-s:.8rem;--fs-m:1rem;--fs-l:1.5rem;
-}
-@media (prefers-color-scheme:dark){
-  :root{--bg:#0f172a;--surface:#1e293b;--text:#f1f5f9;--muted:#cbd5e1;
-    --border:#334155;--control:#94a3b8;
-    --accent:#22c55e;--on-accent:#052e16;--accent-soft:#14532d;--danger:#f87171;--focus:#93c5fd}
-}
-*{box-sizing:border-box}
-html{-webkit-text-size-adjust:100%}
-body{margin:0;background:var(--bg);color:var(--text);
-  font:var(--fs-m)/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-a{color:inherit}
-:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
-.bar{display:flex;align-items:center;justify-content:space-between;gap:var(--s3);
-  padding:var(--s2) var(--s4);background:var(--surface);border-bottom:1px solid var(--border)}
-.brand{display:inline-flex;align-items:center;min-height:44px;font-weight:700;text-decoration:none}
-.bar nav{display:flex;gap:var(--s1)}
-.bar nav a{display:inline-flex;align-items:center;min-height:44px;padding:0 var(--s3);
-  border-radius:var(--radius);text-decoration:none;color:var(--muted)}
-.bar nav a[aria-current="page"]{color:var(--text);background:var(--bg);font-weight:600}
-main{max-width:880px;margin:0 auto;padding:var(--s4) var(--s4) var(--s6)}
-h1{font-size:var(--fs-l);line-height:1.25;margin:var(--s2) 0 var(--s4);overflow-wrap:anywhere}
-h2{font-size:var(--fs-s);text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
-  margin:var(--s5) 0 var(--s2)}
-.head{display:flex;align-items:center;justify-content:space-between;gap:var(--s3);flex-wrap:wrap}
-.btn{display:inline-flex;align-items:center;justify-content:center;min-height:44px;
-  padding:0 var(--s4);border-radius:var(--radius);border:1px solid var(--control);
-  background:var(--surface);color:var(--text);font:inherit;font-weight:600;text-decoration:none;cursor:pointer}
-.btn:hover{border-color:var(--text)}
-.btn-primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
-.btn-primary:hover{border-color:var(--accent);filter:brightness(.92)}
-.btn[disabled]{opacity:.55;cursor:not-allowed}
-.grid{display:grid;gap:var(--s3);grid-template-columns:1fr}
-@media (min-width:720px){.grid{grid-template-columns:1fr 1fr}}
-.card{display:flex;flex-direction:column;gap:var(--s2);padding:var(--s4);background:var(--surface);
-  border:1px solid var(--border);border-radius:var(--radius);text-decoration:none}
-a.card:hover{border-color:var(--control)}
-.card h3{margin:0;font-size:var(--fs-m);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;
-  -webkit-box-orient:vertical;overflow-wrap:anywhere}
-.meta{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;color:var(--muted)}
-.tag{display:inline-flex;align-items:center;min-height:28px;padding:0 var(--s2);border-radius:999px;
-  border:1px solid var(--border);font-size:var(--fs-s);color:var(--text)}
-.tag-on{background:var(--accent-soft);border-color:var(--accent)}
-.tag-off{color:var(--muted)}
-.tag-warn{border-color:var(--danger);color:var(--danger)}
-.status{margin:0 0 var(--s4)}
-.chips{display:flex;flex-wrap:wrap;gap:var(--s2)}
-.chip{position:relative;display:inline-flex}
-.chip input{position:absolute;inset:0;width:100%;height:100%;opacity:0;margin:0;cursor:pointer}
-.chip span{display:inline-flex;align-items:center;min-height:44px;padding:0 14px;
-  border:1px solid var(--control);border-radius:999px;background:var(--surface);pointer-events:none}
-.chip:hover span{border-color:var(--text)}
-.chip input:checked + span{background:var(--accent-soft);border-color:var(--accent);font-weight:600}
-.chip input:checked + span::before{content:"\2713";margin-right:6px}
-.chip input:focus-visible + span{outline:3px solid var(--focus);outline-offset:2px}
-details.macro{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
-  margin-bottom:var(--s2)}
-details.macro summary{display:flex;align-items:center;justify-content:space-between;gap:var(--s3);
-  min-height:48px;padding:0 var(--s4);cursor:pointer;font-weight:600;list-style:none}
-details.macro summary::-webkit-details-marker{display:none}
-details.macro summary::after{content:"+";color:var(--muted);font-weight:400}
-details.macro[open] summary::after{content:"\2212"}
-.count{margin-left:auto;min-width:24px;padding:0 var(--s2);text-align:center;border-radius:999px;
-  background:var(--accent);color:var(--on-accent);font-size:var(--fs-s)}
-details.macro .chips{padding:0 var(--s4) var(--s4)}
-.fields{display:grid;gap:var(--s3);grid-template-columns:repeat(2,minmax(0,1fr))}
-@media (min-width:720px){.fields{grid-template-columns:repeat(5,minmax(0,1fr))}}
-.field{display:flex;flex-direction:column;gap:var(--s1)}
-.field label{font-size:var(--fs-s);color:var(--muted)}
-.field input,.field select{width:100%;min-width:0;min-height:44px;padding:0 var(--s3);font:inherit;color:var(--text);
-  background:var(--surface);border:1px solid var(--control);border-radius:var(--radius)}
-.fields.three{grid-template-columns:repeat(2,minmax(0,1fr))}
-@media (min-width:720px){.fields.three{grid-template-columns:repeat(3,minmax(0,1fr))}}
-.field.wide{grid-column:1/-1}
-.actions{display:flex;flex-wrap:wrap;gap:var(--s2);margin-top:var(--s5)}
-.msg{margin:0 0 var(--s3);padding:var(--s3) var(--s4);border-radius:var(--radius);
-  background:var(--accent-soft);border:1px solid var(--accent)}
-.msg.error{background:transparent;border-color:var(--danger);color:var(--danger)}
-.empty{display:flex;flex-direction:column;align-items:flex-start;gap:var(--s3);
-  padding:var(--s5) var(--s4);background:var(--surface);border:1px dashed var(--control);
-  border-radius:var(--radius)}
-.rows{list-style:none;margin:0;padding:0;display:grid;gap:var(--s2)}
-.rows li{display:flex;justify-content:space-between;gap:var(--s3);padding:var(--s2) var(--s3);
-  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
-.rows b{font-variant-numeric:tabular-nums;white-space:nowrap}
-.search{display:flex;gap:var(--s2);margin-bottom:var(--s4)}
-.search input{flex:1;min-width:0;min-height:44px;padding:0 var(--s3);font:inherit;color:var(--text);
-  background:var(--surface);border:1px solid var(--control);border-radius:var(--radius)}
-.pick{display:flex;align-items:center;justify-content:space-between;gap:var(--s3);
-  padding:var(--s3) var(--s4);background:var(--surface);border:1px solid var(--border);
-  border-radius:var(--radius);margin-bottom:var(--s2)}
-.pick strong{overflow-wrap:anywhere}
-.stack{display:grid;gap:var(--s2)}
-.area{width:100%;padding:var(--s3);font:.8rem/1.5 ui-monospace,Consolas,monospace;color:var(--text);background:var(--surface);border:1px solid var(--control);border-radius:var(--radius);resize:vertical}
-.toolbar{display:grid;grid-template-columns:1fr 1fr;gap:var(--s2);margin-bottom:var(--s4)}
-.toolbar input{grid-column:1/-1}
-.toolbar input,.toolbar select{min-width:0;min-height:44px;padding:0 var(--s3);font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--control);border-radius:var(--radius)}
-.toolbar .btn{grid-column:1/-1}
-@media (min-width:720px){.toolbar{grid-template-columns:1fr 160px 140px auto}.toolbar input,.toolbar .btn{grid-column:auto}}
-.items{list-style:none;margin:0;padding:0;display:grid;gap:var(--s2)}
-.item{display:grid;grid-template-columns:56px 1fr;gap:var(--s3);align-items:start;padding:var(--s3);background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
-.item .thumb{width:56px;height:56px;object-fit:contain;border-radius:8px;background:#fff}
-.item h3{margin:0 0 var(--s1);font-size:var(--fs-m);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere}
-.item .send{grid-column:1/-1;display:flex;gap:var(--s2)}
-.item .send select{flex:1;min-width:0;min-height:44px;padding:0 var(--s3);font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--control);border-radius:var(--radius)}
-@media (min-width:720px){.item{grid-template-columns:56px 1fr auto;align-items:center}.item .send{grid-column:auto}}
-.pager{display:flex;align-items:center;justify-content:center;gap:var(--s4);margin-top:var(--s4)}
-details .feed{padding:0 var(--s4) var(--s4)}
-@media (max-width:719px){.bar{flex-wrap:wrap}.bar nav{order:3;width:100%;overflow-x:auto}.bar nav a{padding:0 6px;white-space:nowrap}}
-@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
-</style>
+  <title>{% block title %}Spreading{% endblock %}</title>
+  {% include "panel/_head.html" %}
 </head>
-<body>
-<header class="bar">
-  <a class="brand" href="{% url 'panel:groups' %}">Spreading</a>
-  <nav aria-label="Principal">
-    <a href="{% url 'panel:groups' %}"{% if request.resolver_match.url_name in 'groups group add' %} aria-current="page"{% endif %}>Grupos</a>
-    <a href="{% url 'panel:coupons' %}"{% if request.resolver_match.url_name == 'coupons' %} aria-current="page"{% endif %}>Cupons</a>
-    <a href="{% url 'panel:offers' %}"{% if request.resolver_match.url_name == 'offers' %} aria-current="page"{% endif %}>Ofertas</a>
-    <a href="{% url 'panel:links' %}"{% if request.resolver_match.url_name == 'links' %} aria-current="page"{% endif %}>Links</a>
-    <a href="/pair">WhatsApp</a>
-  </nav>
-</header>
-<main>
-  {% if messages %}{% for m in messages %}<p class="msg {{ m.tags }}" role="status">{{ m }}</p>{% endfor %}{% endif %}
-  {% block content %}{% endblock %}
-</main>
-<script>
-/* Um clique só: o botão apagado impede segundo envio enquanto a página responde. */
-document.addEventListener("submit", function (e) {
-  var b = e.submitter || e.target.querySelector("button[type=submit]");
-  if (b) setTimeout(function () { b.disabled = true; }, 0);
-});
-window.addEventListener("pageshow", function (e) {
-  if (e.persisted) document.querySelectorAll("button[disabled]").forEach(function (b) { b.disabled = false; });
-});
-/* Contagem do nicho acompanha as marcas sem esperar o Salvar. */
-document.addEventListener("change", function (e) {
-  var box = e.target.closest && e.target.closest("details.macro");
-  if (!box) return;
-  var n = box.querySelectorAll("input:checked").length, badge = box.querySelector(".count");
-  if (!n) { if (badge) badge.remove(); return; }
-  if (!badge) { badge = document.createElement("b"); badge.className = "count"; box.querySelector("summary").appendChild(badge); }
-  badge.textContent = n;
-});
-</script>
+<body class="app">
+  <div class="shell">
+    <aside class="sidebar" id="sidebar" aria-label="Navegação principal">
+      <div class="side-brand">
+        <a class="brand" href="{% url 'panel:groups' %}" aria-label="Spreading — início">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+          <span class="brand-word">Spreading</span>
+        </a>
+      </div>
+      <nav class="side-nav" onclick="if(window.innerWidth<1024)closeNav()">
+        {% with u=request.resolver_match.url_name %}
+        <div class="side-group">
+          <div class="side-group-label">Operação</div>
+          <a class="side-link {% if u == 'groups' or u == 'group' or u == 'add' %}active{% endif %}" href="{% url 'panel:groups' %}" title="Grupos"><i data-lucide="users"></i><span class="lbl">Grupos</span></a>
+          <a class="side-link {% if u == 'coupons' %}active{% endif %}" href="{% url 'panel:coupons' %}" title="Cupons"><i data-lucide="ticket"></i><span class="lbl">Cupons</span></a>
+          <a class="side-link {% if u == 'offers' %}active{% endif %}" href="{% url 'panel:offers' %}" title="Ofertas"><i data-lucide="flame"></i><span class="lbl">Ofertas</span></a>
+          <a class="side-link {% if u == 'links' %}active{% endif %}" href="{% url 'panel:links' %}" title="Links"><i data-lucide="link"></i><span class="lbl">Links</span></a>
+        </div>
+        <div class="side-group">
+          <div class="side-group-label">Integrações</div>
+          <a class="side-link" href="/pair" title="WhatsApp"><i data-lucide="message-circle"></i><span class="lbl">WhatsApp</span></a>
+        </div>
+        <div class="side-group">
+          <div class="side-group-label">Gestão</div>
+          <a class="side-link" href="/admin/" title="Admin"><i data-lucide="shield"></i><span class="lbl">Admin</span></a>
+        </div>
+        {% endwith %}
+      </nav>
+      <div class="side-foot">
+        <div class="side-user" title="{{ request.user.get_username }}">
+          <span class="avatar" aria-hidden="true">{{ request.user.get_username|slice:":1" }}</span>
+          <span class="who">{{ request.user.get_username }}<span class="role">equipe</span></span>
+        </div>
+        <div class="side-foot-row">
+          <button class="side-tool theme-btn" type="button" onclick="toggleTheme()" title="Alternar tema" aria-label="Alternar tema" style="width:38px;">
+            <i data-lucide="sun" class="sun"></i><i data-lucide="moon" class="moon"></i>
+          </button>
+          <form method="post" action="{% url 'admin:logout' %}" style="margin:0;flex:1;display:flex;">
+            {% csrf_token %}
+            <button class="side-tool logout" type="submit" title="Sair"><i data-lucide="log-out"></i><span class="lbl">Sair</span></button>
+          </form>
+        </div>
+      </div>
+    </aside>
+    <div class="sidebar-scrim" onclick="closeNav()" aria-hidden="true"></div>
+
+    <div class="shell-main">
+      <header class="topbar">
+        <div class="topbar-inner">
+          <button class="nav-toggle" type="button" onclick="toggleNav()" aria-label="Menu" aria-expanded="false" aria-controls="sidebar">
+            <i data-lucide="menu" class="menu"></i><i data-lucide="x" class="x"></i>
+          </button>
+          <button class="side-toggle" type="button" onclick="toggleSidebar()" title="Recolher navegação" aria-label="Recolher navegação">
+            <i data-lucide="panel-left"></i>
+          </button>
+          <div class="topbar-context">{% block topbar_context %}{% endblock %}</div>
+          <div class="topbar-actions">{% block topbar_actions %}{% endblock %}</div>
+        </div>
+      </header>
+      <main class="wrap {% block page_class %}{% endblock %}">
+        {% if messages %}
+        <div class="msgs">{% for m in messages %}<div class="msg msg-{{ m.tags }}" role="status">{{ m }}</div>{% endfor %}</div>
+        {% endif %}
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/lucide@1.27.0/dist/umd/lucide.min.js"
+          integrity="sha384-iGjGimQxA1QCAbLRiSWPFc+KsjPW3kLS/2Cub+yRgYfd4EUEx/dxoJ0MKyEsbjop"
+          crossorigin="anonymous"></script>
+  <script>
+    function renderIcons() { if (window.lucide) lucide.createIcons(); }
+    function toggleNav() {
+      var open = document.body.classList.toggle('nav-open');
+      var btn = document.querySelector('.nav-toggle');
+      if (btn) btn.setAttribute('aria-expanded', open);
+    }
+    function closeNav() {
+      document.body.classList.remove('nav-open');
+      var btn = document.querySelector('.nav-toggle');
+      if (btn) btn.setAttribute('aria-expanded', false);
+    }
+    function toggleSidebar() {
+      var collapsed = document.documentElement.classList.toggle('side-collapsed');
+      try { localStorage.setItem('side-collapsed', collapsed ? '1' : '0'); } catch (e) {}
+    }
+    function toggleTheme() {
+      var cur = document.documentElement.getAttribute('data-theme') || 'dark';
+      var next = cur === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      try { localStorage.setItem('theme', next); } catch (e) {}
+      renderIcons();
+    }
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeNav(); });
+    /* Um clique só: o botão apagado impede segundo envio enquanto a página responde. */
+    document.addEventListener("submit", function (e) {
+      var b = e.submitter || e.target.querySelector("button[type=submit]");
+      if (b) setTimeout(function () { b.disabled = true; }, 0);
+    });
+    window.addEventListener("pageshow", function (e) {
+      if (e.persisted) document.querySelectorAll("button[disabled]").forEach(function (b) { b.disabled = false; });
+    });
+    /* Contagem do nicho acompanha as marcas sem esperar o Salvar. */
+    document.addEventListener("change", function (e) {
+      var box = e.target.closest && e.target.closest("details.adv");
+      if (!box) return;
+      var n = box.querySelectorAll("input:checked").length, badge = box.querySelector(".count");
+      if (!n) { if (badge) badge.remove(); return; }
+      if (!badge) {
+        badge = document.createElement("b"); badge.className = "count";
+        var summary = box.querySelector("summary"); summary.insertBefore(badge, null);
+      }
+      badge.textContent = n;
+    });
+    renderIcons();
+  </script>
+  {% block scripts %}{% endblock %}
 </body>
 </html>

@@ -1,26 +1,36 @@
 {% extends "panel/base.html" %}
 {% block title %}Adicionar grupo · Spreading{% endblock %}
+{% block topbar_context %}<strong>Adicionar grupo</strong><span>Grupos</span>{% endblock %}
+{% block page_class %}page-narrow{% endblock %}
 {% block content %}
-<div class="head">
-  <h1>Adicionar grupo</h1>
-  <a class="btn" href="{% url 'panel:groups' %}">Voltar</a>
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Grupos</span>
+    <h1><i aria-hidden="true" data-lucide="plus"></i> Adicionar grupo</h1>
+  </div>
+  <div class="head-actions"><a class="btn btn-ghost" href="{% url 'panel:groups' %}"><i aria-hidden="true" data-lucide="arrow-left"></i> Voltar</a></div>
 </div>
-<form class="search" method="get" role="search">
+<form class="toolbar" method="get" role="search">
   <label class="sr" for="q">Buscar grupo</label>
-  <input id="q" name="q" type="search" value="{{ q }}" placeholder="Nome do grupo" autocomplete="off">
-  <button class="btn" type="submit">Buscar</button>
+  <input class="grow" id="q" name="q" type="search" value="{{ q }}" placeholder="Nome do grupo" autocomplete="off">
+  <button class="btn" type="submit"><i aria-hidden="true" data-lucide="search"></i> Buscar</button>
 </form>
 {% if rows %}
+<ul class="rows">
   {% for g in rows %}
-  <form class="pick" method="post">{% csrf_token %}
-    <input type="hidden" name="group" value="{{ g.id }}">
-    <span><strong>{{ g.name }}</strong><br><span class="meta">{{ g.size }} membro{{ g.size|pluralize }}</span></span>
-    <button class="btn" type="submit">Adicionar</button>
-  </form>
+  <li class="row-item">
+    <div class="row-main"><div class="name">{{ g.name }}</div><div class="muted">{{ g.size }} membro{{ g.size|pluralize }}</div></div>
+    <form class="row-side" method="post">{% csrf_token %}
+      <input type="hidden" name="group" value="{{ g.id }}">
+      <button class="btn" type="submit"><i aria-hidden="true" data-lucide="plus"></i> Adicionar</button>
+    </form>
+  </li>
   {% endfor %}
+</ul>
 {% else %}
 <div class="empty">
-  <span>{% if offline %}WhatsApp sem resposta.{% else %}Nenhum grupo encontrado.{% endif %}</span>
+  <i aria-hidden="true" data-lucide="message-circle"></i>
+  <span class="empty-title">{% if offline %}WhatsApp sem resposta.{% else %}Nenhum grupo encontrado.{% endif %}</span>
   {% if offline %}<a class="btn" href="/pair">Conectar WhatsApp</a>{% elif q %}<a class="btn" href="{% url 'panel:add' %}">Ver tudo</a>{% endif %}
 </div>
 {% endif %}

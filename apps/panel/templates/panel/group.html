@@ -1,91 +1,112 @@
 {% extends "panel/base.html" %}
 {% block title %}{{ rule.destination.name }} · Spreading{% endblock %}
+{% block topbar_context %}<strong>{{ rule.destination.name }}</strong><span>Grupos</span>{% endblock %}
 {% block content %}
-<div class="head">
-  <h1>{{ rule.destination.name }}</h1>
-  <a class="btn" href="{% url 'panel:groups' %}">Voltar</a>
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Grupo</span>
+    <h1><a class="icon-btn" href="{% url 'panel:groups' %}" title="Voltar" aria-label="Voltar"><i aria-hidden="true" data-lucide="arrow-left"></i></a>
+      {{ rule.destination.name }}
+      {% if rule.active %}<span class="badge badge-green"><span class="dot"></span>Ativo</span>{% else %}<span class="badge badge-muted">Pausado</span>{% endif %}</h1>
+  </div>
+  <div class="head-actions">
+    <form method="post" action="{% url 'panel:send_now' rule.id %}" style="margin:0">{% csrf_token %}
+      <button class="btn" type="submit"><i aria-hidden="true" data-lucide="send"></i> Enviar agora</button>
+    </form>
+    <button class="btn btn-accent" type="submit" form="config"><i aria-hidden="true" data-lucide="check"></i> Salvar</button>
+  </div>
 </div>
 
-<form method="post" id="config">{% csrf_token %}
-  <div class="chips" role="group" aria-label="Estado">
-    <label class="chip"><input type="checkbox" name="active"{% if rule.active %} checked{% endif %}><span>Ativo</span></label>
-  </div>
+<div class="split split-main-side">
+  <form id="config" method="post">{% csrf_token %}
+    <section class="panel">
+      <label class="switch"><input type="checkbox" name="active"{% if rule.active %} checked{% endif %}><span class="track"></span><span class="switch-text">Ativo</span></label>
+    </section>
 
-  <h2>Nichos</h2>
-  {% for m in tree %}
-  <details class="macro"{% if m.count %} open{% endif %}>
-    <summary><span>{{ m.label }}</span>{% if m.count %}<b class="count">{{ m.count }}</b>{% endif %}</summary>
-    <div class="chips">
-      <label class="chip"><input type="checkbox" name="niches" value="{{ m.key }}"{% if m.checked %} checked{% endif %}><span>Tudo em {{ m.label }}</span></label>
-      {% for s in m.subs %}
-      <label class="chip"><input type="checkbox" name="niches" value="{{ s.key }}"{% if s.checked %} checked{% endif %}><span>{{ s.label }}</span></label>
+    <section class="panel">
+      <div class="panel-head"><h2><i aria-hidden="true" data-lucide="layers"></i> Nichos</h2></div>
+      {% for m in tree %}
+      <details class="adv"{% if m.count %} open{% endif %}>
+        <summary><span>{{ m.label }}</span>{% if m.count %}<b class="count">{{ m.count }}</b>{% endif %}</summary>
+        <div class="chips">
+          <label class="chip"><input type="checkbox" name="niches" value="{{ m.key }}"{% if m.checked %} checked{% endif %}><span>Tudo em {{ m.label }}</span></label>
+          {% for s in m.subs %}
+          <label class="chip"><input type="checkbox" name="niches" value="{{ s.key }}"{% if s.checked %} checked{% endif %}><span>{{ s.label }}</span></label>
+          {% endfor %}
+        </div>
+      </details>
       {% endfor %}
-    </div>
-  </details>
-  {% endfor %}
+    </section>
 
-  <h2>Lojas</h2>
-  <div class="chips" role="group" aria-label="Lojas">
-    {% for key, label, on in stores %}
-    <label class="chip"><input type="checkbox" name="stores" value="{{ key }}"{% if on %} checked{% endif %}><span>{{ label }}</span></label>
-    {% endfor %}
-  </div>
+    <section class="panel">
+      <div class="panel-head"><h2><i aria-hidden="true" data-lucide="store"></i> Lojas e envio</h2></div>
+      <div class="form-section">
+        <div class="fs-title">Lojas</div>
+        <div class="chips" role="group" aria-label="Lojas">
+          {% for key, label, on in stores %}
+          <label class="chip"><input type="checkbox" name="stores" value="{{ key }}"{% if on %} checked{% endif %}><span>{{ label }}</span></label>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="form-section">
+        <div class="fs-title">Envio</div>
+        <div class="form-grid">
+          <div><label for="daily_cap">Por dia</label>
+            <input id="daily_cap" name="daily_cap" type="number" inputmode="numeric" min="1" max="30" value="{{ rule.daily_cap }}"></div>
+          <div><label for="window_start">Das</label>
+            <select id="window_start" name="window_start">{% for h in hours %}<option value="{{ h }}"{% if h == rule.window_start %} selected{% endif %}>{{ h }}h</option>{% endfor %}</select></div>
+          <div><label for="window_end">Às</label>
+            <select id="window_end" name="window_end">{% for h in hours %}<option value="{{ h }}"{% if h == rule.window_end %} selected{% endif %}>{{ h }}h</option>{% endfor %}</select></div>
+          <div><label for="min_discount">Desconto mín. %</label>
+            <input id="min_discount" name="min_discount" type="number" inputmode="numeric" min="1" max="90" value="{{ rule.min_discount_pct|floatformat:0 }}"></div>
+          <div><label for="interval">Intervalo (min)</label>
+            <input id="interval" name="interval" type="number" inputmode="numeric" min="1" max="1440" value="{{ rule.interval_minutes }}"></div>
+        </div>
+      </div>
+      <div class="form-section">
+        <div class="fs-title">Dias</div>
+        <div class="chips" role="group" aria-label="Dias">
+          {% for key, label, on in weekdays %}
+          <label class="chip"><input type="checkbox" name="weekdays" value="{{ key }}"{% if on %} checked{% endif %}><span>{{ label }}</span></label>
+          {% endfor %}
+        </div>
+      </div>
+    </section>
 
-  <h2>Envio</h2>
-  <div class="fields">
-    <div class="field"><label for="daily_cap">Por dia</label>
-      <input id="daily_cap" name="daily_cap" type="number" inputmode="numeric" min="1" max="30" value="{{ rule.daily_cap }}"></div>
-    <div class="field"><label for="window_start">Das</label>
-      <select id="window_start" name="window_start">{% for h in hours %}<option value="{{ h }}"{% if h == rule.window_start %} selected{% endif %}>{{ h }}h</option>{% endfor %}</select></div>
-    <div class="field"><label for="window_end">Às</label>
-      <select id="window_end" name="window_end">{% for h in hours %}<option value="{{ h }}"{% if h == rule.window_end %} selected{% endif %}>{{ h }}h</option>{% endfor %}</select></div>
-    <div class="field"><label for="min_discount">Desconto mín. %</label>
-      <input id="min_discount" name="min_discount" type="number" inputmode="numeric" min="1" max="90" value="{{ rule.min_discount_pct|floatformat:0 }}"></div>
-    <div class="field"><label for="interval">Intervalo (min)</label>
-      <input id="interval" name="interval" type="number" inputmode="numeric" min="1" max="1440" value="{{ rule.interval_minutes }}"></div>
-  </div>
-
-  <h2>Filtros</h2>
-  <div class="fields three">
-    <div class="field"><label for="coupon_mode">Cupom</label>
-      <select id="coupon_mode" name="coupon_mode">{% for key, label in coupon_modes %}<option value="{{ key }}"{% if key == rule.coupon_mode %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
-    <div class="field"><label for="price_min">Preço mín.</label>
-      <input id="price_min" name="price_min" type="text" inputmode="decimal" value="{{ rule.price_min|default_if_none:''|floatformat:'-2' }}"></div>
-    <div class="field"><label for="price_max">Preço máx.</label>
-      <input id="price_max" name="price_max" type="text" inputmode="decimal" value="{{ rule.price_max|default_if_none:''|floatformat:'-2' }}"></div>
-    <div class="field wide"><label for="terms">Palavras</label>
-      <input id="terms" name="terms" type="text" maxlength="500" placeholder="vírgula separa" value="{{ rule.terms }}"></div>
-    <div class="field wide"><label for="negative_terms">Excluir</label>
-      <input id="negative_terms" name="negative_terms" type="text" maxlength="500" placeholder="vírgula separa" value="{{ rule.negative_terms }}"></div>
-  </div>
-  <h2>Dias</h2>
-  <div class="chips" role="group" aria-label="Dias">
-    {% for key, label, on in weekdays %}
-    <label class="chip"><input type="checkbox" name="weekdays" value="{{ key }}"{% if on %} checked{% endif %}><span>{{ label }}</span></label>
-    {% endfor %}
-  </div>
-</form>
-
-<div class="actions">
-  <button class="btn btn-primary" type="submit" form="config">Salvar</button>
-  <form method="post" action="{% url 'panel:send_now' rule.id %}">{% csrf_token %}
-    <button class="btn" type="submit">Enviar agora</button>
+    <section class="panel">
+      <div class="panel-head"><h2><i aria-hidden="true" data-lucide="sliders-horizontal"></i> Filtros</h2></div>
+      <div class="form-grid">
+        <div><label for="coupon_mode">Cupom</label>
+          <select id="coupon_mode" name="coupon_mode">{% for key, label in coupon_modes %}<option value="{{ key }}"{% if key == rule.coupon_mode %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+        <div><label for="price_min">Preço mín.</label>
+          <input id="price_min" name="price_min" type="text" inputmode="decimal" value="{{ rule.price_min|default_if_none:''|floatformat:'-2' }}"></div>
+        <div><label for="price_max">Preço máx.</label>
+          <input id="price_max" name="price_max" type="text" inputmode="decimal" value="{{ rule.price_max|default_if_none:''|floatformat:'-2' }}"></div>
+        <div class="wide"><label for="terms">Palavras</label>
+          <input id="terms" name="terms" type="text" maxlength="500" placeholder="vírgula separa" value="{{ rule.terms }}"></div>
+        <div class="wide"><label for="negative_terms">Excluir</label>
+          <input id="negative_terms" name="negative_terms" type="text" maxlength="500" placeholder="vírgula separa" value="{{ rule.negative_terms }}"></div>
+      </div>
+    </section>
   </form>
+
+  <aside>
+    <section class="panel">
+      <div class="panel-head"><h2><i aria-hidden="true" data-lucide="gauge"></i> Por que não saiu</h2></div>
+      {% if explain %}
+      <ul class="rows">
+        {% for label, count in explain %}<li class="row-item"><span class="row-main">{{ label }}</span><span class="row-side num">{{ count }}</span></li>{% endfor %}
+      </ul>
+      {% else %}<div class="muted">Sem ofertas no catálogo.</div>{% endif %}
+    </section>
+    {% if sent %}
+    <section class="panel">
+      <div class="panel-head"><h2><i aria-hidden="true" data-lucide="send"></i> Enviadas</h2></div>
+      <ul class="rows">
+        {% for row in sent %}<li class="row-item"><span class="row-main">{{ row.name }}</span><span class="row-side num muted">{{ row.at }}</span></li>{% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+  </aside>
 </div>
-
-{% if sent %}
-<h2>Enviadas</h2>
-<ul class="rows">
-  {% for row in sent %}<li><span>{{ row.name }}</span><b>{{ row.at }}</b></li>{% endfor %}
-</ul>
-{% endif %}
-
-<h2>Por que não saiu</h2>
-{% if explain %}
-<ul class="rows">
-  {% for label, count in explain %}<li><span>{{ label }}</span><b>{{ count }}</b></li>{% endfor %}
-</ul>
-{% else %}
-<div class="empty"><span>Sem ofertas no catálogo.</span></div>
-{% endif %}
 {% endblock %}

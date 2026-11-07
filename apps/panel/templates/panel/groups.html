@@ -1,36 +1,53 @@
 {% extends "panel/base.html" %}
 {% block title %}Grupos · Spreading{% endblock %}
+{% block topbar_context %}<strong>Grupos</strong><span>Operação</span>{% endblock %}
 {% block content %}
-<div class="head">
-  <h1>Grupos</h1>
-  <a class="btn btn-primary" href="{% url 'panel:add' %}">Adicionar grupo</a>
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Operação</span>
+    <h1><i aria-hidden="true" data-lucide="users"></i> Grupos</h1>
+  </div>
+  <div class="head-actions">
+    <span class="badge badge-{{ whatsapp.tone }}"><span class="dot"></span>WhatsApp · {{ whatsapp.label }}</span>
+    {% if builder %}<span class="badge badge-{{ builder.tone }}">Link Builder · {{ builder.label }}</span>{% endif %}
+    <a class="btn btn-accent" href="{% url 'panel:add' %}"><i aria-hidden="true" data-lucide="plus"></i> Adicionar grupo</a>
+  </div>
 </div>
-<div class="meta status">
-  <span class="tag tag-{{ whatsapp.tone }}">WhatsApp · {{ whatsapp.label }}</span>
-  {% if builder %}<span class="tag tag-{{ builder.tone }}">Link Builder · {{ builder.label }}</span>
-  {% if builder.detail %}<span>{{ builder.detail }}</span>{% endif %}{% endif %}
-</div>
+{% if builder and builder.detail %}<div class="alert-row"><i aria-hidden="true" data-lucide="triangle-alert"></i><span>{{ builder.detail }}</span></div>{% endif %}
+
+<section class="stat-strip" aria-label="Resumo">
+  <div class="stat-cell hero"><div class="kpi-label">Enviadas hoje</div><div class="kpi-value">{{ stats.sent }}</div><div class="kpi-sub">de {{ stats.cap }} no teto</div></div>
+  <div class="stat-cell"><div class="kpi-label">Grupos ativos</div><div class="kpi-value">{{ stats.active }}</div><div class="kpi-sub">de {{ stats.total }}</div></div>
+  <div class="stat-cell"><div class="kpi-label">Cupons com link</div><div class="kpi-value">{{ stats.linked }}</div><div class="kpi-sub"><a class="text-action" href="{% url 'panel:coupons' %}?estado=com">Ver</a></div></div>
+  <div class="stat-cell"><div class="kpi-label">Cupons sem link</div><div class="kpi-value">{{ stats.unlinked }}</div><div class="kpi-sub"><a class="text-action" href="{% url 'panel:links' %}">Gerar</a></div></div>
+</section>
+
 {% if cards %}
-<div class="grid">
-  {% for c in cards %}
-  <a class="card" href="{% url 'panel:group' c.rule.id %}">
-    <h3>{{ c.rule.destination.name }}</h3>
-    <div class="meta">
-      {% if c.rule.active %}<span class="tag tag-on">Ativo</span>{% else %}<span class="tag tag-off">Pausado</span>{% endif %}
-      <span>{{ c.sent_today }}/{{ c.cap }} hoje</span>
-    </div>
-    <div class="meta">
-      {% if c.all %}<span class="tag">Tudo</span>{% endif %}
-      {% for n in c.niches %}<span class="tag">{{ n }}</span>{% endfor %}
-      {% if c.more %}<span class="tag">+{{ c.more }}</span>{% endif %}
-    </div>
-  </a>
-  {% endfor %}
+<div class="table-flat">
+  <table class="stack-table">
+    <thead><tr><th class="cell-grow">Grupo</th><th>Status</th><th>Nichos</th><th>Hoje</th><th class="col-actions"></th></tr></thead>
+    <tbody>
+      {% for c in cards %}
+      <tr>
+        <td class="cell-grow" data-label="Grupo"><a class="name" href="{% url 'panel:group' c.rule.id %}">{{ c.rule.destination.name }}</a></td>
+        <td data-label="Status">{% if c.rule.active %}<span class="badge badge-green"><span class="dot"></span>Ativo</span>{% else %}<span class="badge badge-muted">Pausado</span>{% endif %}</td>
+        <td data-label="Nichos"><div class="tags">
+          {% if c.all %}<span class="tech-tag">Tudo</span>{% endif %}
+          {% for n in c.niches %}<span class="tech-tag">{{ n }}</span>{% endfor %}
+          {% if c.more %}<span class="tech-tag">+{{ c.more }}</span>{% endif %}
+        </div></td>
+        <td data-label="Hoje" class="tnum">{{ c.sent_today }}/{{ c.cap }}</td>
+        <td class="col-actions"><span class="row-actions"><a class="icon-btn" href="{% url 'panel:group' c.rule.id %}" title="Configurar" aria-label="Configurar {{ c.rule.destination.name }}"><i aria-hidden="true" data-lucide="settings-2"></i></a></span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </div>
 {% else %}
 <div class="empty">
-  <span>Nenhum grupo.</span>
-  <a class="btn btn-primary" href="{% url 'panel:add' %}">Adicionar grupo</a>
+  <i aria-hidden="true" data-lucide="users"></i>
+  <span class="empty-title">Nenhum grupo.</span>
+  <a class="btn btn-accent" href="{% url 'panel:add' %}"><i aria-hidden="true" data-lucide="plus"></i> Adicionar grupo</a>
 </div>
 {% endif %}
 {% endblock %}
