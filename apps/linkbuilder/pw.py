@@ -27,6 +27,10 @@ TIMEZONE_ID = "America/Sao_Paulo"
 ACCEPT_LANGUAGE = "pt-BR,pt;q=0.9,en;q=0.8"
 LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage",
                f"--lang={LOCALE}"]
+# Sem a barra "Chrome está sendo controlado por software de teste automatizado" e sem a flag que
+# o próprio Playwright liga; o resto do navegador fica como o de uma pessoa.
+LAUNCH_KWARGS = {"ignore_default_args": ["--enable-automation"]}
+SAO_PAULO = {"latitude": -23.5505, "longitude": -46.6333, "accuracy": 80}
 INTERSTITIAL_PATHS = ("/gz/", "account-verification", "/captcha", "/challenge", "/blocked",
                       "/security-check", "/verificacion", "/verify")
 LOGIN_PATHS = ("/login", "/lgz/", "/registration", "loginhub")
@@ -71,9 +75,15 @@ def binary_user_agent(browser) -> str:
     return raw.replace("HeadlessChrome", "Chrome") if "Chrome" in raw else ""
 
 
-def context_options(browser) -> dict:
-    options = {"locale": LOCALE, "timezone_id": TIMEZONE_ID,
-               "extra_http_headers": {"Accept-Language": ACCEPT_LANGUAGE}}
+def context_options(browser, headed: bool = False) -> dict:
+    """Contexto coerente: pt-BR, fuso e posição de São Paulo, tela de verdade. Com janela, o
+    tamanho é o da janela (sem viewport fixo); sem janela, 1366x768 de notebook comum."""
+    options = {"locale": LOCALE, "timezone_id": TIMEZONE_ID, "geolocation": SAO_PAULO,
+               "color_scheme": "light", "extra_http_headers": {"Accept-Language": ACCEPT_LANGUAGE}}
+    if headed:
+        options["no_viewport"] = True
+    else:
+        options["viewport"] = {"width": 1366, "height": 768}
     agent = binary_user_agent(browser)
     if agent:
         options["user_agent"] = agent
@@ -124,7 +134,8 @@ class PlaywrightDriver:
             raise Unavailable("playwright não está instalado nesta imagem") from exc
         self._pw = sync_playwright().start()
         try:
-            self._browser = self._pw.chromium.launch(headless=self.headless, args=LAUNCH_ARGS)
+            self._browser = self._pw.chromium.launch(
+                headless=self.headless, args=LAUNCH_ARGS, **LAUNCH_KWARGS)
             self._context = self._browser.new_context(
                 storage_state=self.state_path, **context_options(self._browser)
             )
