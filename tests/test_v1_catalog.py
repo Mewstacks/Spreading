@@ -34,6 +34,27 @@ def test_import_catalog_maps_ml_and_amazon_and_discards_bad_rows(db):
     assert import_catalog(rows)["importados"] == 2 and Offer.objects.count() == 2  # idempotente
 
 
+def test_import_catalog_collapses_same_day_duplicates(db, monkeypatch):
+    calls = []
+    real = Offer.objects.bulk_create
+
+    def spy(objs, **kwargs):
+        calls.append([(o.store, o.link_key, o.valid_on) for o in objs])
+        return real(objs, **kwargs)
+
+    monkeypatch.setattr(Offer.objects, "bulk_create", spy)
+    rows = [
+        row(efetivo=1200.0, visto="2026-11-07T09:00:00+00:00"),
+        row(efetivo=1160.0, visto="2026-11-07T10:00:00+00:00"),
+        row(efetivo=1300.0, visto="2026-11-07T08:00:00+00:00"),  # mais velha, chega por último
+    ]
+    stats = import_catalog(rows)
+    assert calls and all(len(keys) == len(set(keys)) for keys in calls)  # Postgres exige
+    assert Offer.objects.count() == 1
+    assert Offer.objects.get().price_to == Decimal("1160.00")  # fica a observação mais recente
+    assert stats == {"importados": 1, "descartados": 2}
+
+
 def pair(**over):
     base = {"marketplace": "mercadolivre", "nome": "Monitor LG 24 polegadas",
             "url": "https://www.mercadolivre.com.br/monitor/p/MLB1234567", "imagem": IMG,

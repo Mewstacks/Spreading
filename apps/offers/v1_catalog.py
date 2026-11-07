@@ -62,17 +62,23 @@ UPDATE_FIELDS = [
 ]
 
 
-def _flush(batch):
-    if batch:
-        Offer.objects.bulk_create(
-            batch, batch_size=CHUNK, update_conflicts=True,
-            unique_fields=["store", "link_key", "valid_on"], update_fields=UPDATE_FIELDS,
-        )
+def _flush(batch: dict) -> int:
+    """Grava o lote. A chave do dict é (loja, link_key, dia): o Postgres recusa um upsert que
+    traga a mesma chave duas vezes no mesmo comando, então o lote já chega sem repetição."""
+    if not batch:
+        return 0
+    Offer.objects.bulk_create(
+        list(batch.values()), batch_size=CHUNK, update_conflicts=True,
+        unique_fields=["store", "link_key", "valid_on"], update_fields=UPDATE_FIELDS,
+    )
+    return len(batch)
 
 
 def import_catalog(rows: list[dict]) -> dict:
+    """Mesmo produto visto várias vezes no mesmo dia vira uma oferta só: fica a observação
+    mais recente (as demais contam em `descartados`)."""
     stats = {"importados": 0, "descartados": 0}
-    batch = []
+    batch: dict = {}
     for row in rows:
         store, key = _store_key(row)
         price_from, price_to = _dec(row.get("de")), _dec(row.get("efetivo"))
@@ -86,18 +92,24 @@ def import_catalog(rows: list[dict]) -> dict:
             stats["descartados"] += 1
             continue
         url = str(row.get("url") or "")[:600]
-        batch.append(Offer(
+        slot = (store, key, seen.date())
+        held = batch.get(slot)
+        if held is not None and held.last_seen > seen:
+            stats["descartados"] += 1
+            continue
+        if held is not None:
+            stats["descartados"] += 1  # a observação anterior do dia foi substituída
+        batch[slot] = Offer(
             store=store, source="v1-catalogo", product_key=key, link_key=key,
             source_url=url, title=title[:300], url=url, image_url=image,
             macro=(row.get("macro") or niches.classify(title))[:80],
             price_from=price_from, price_to=price_to, discount_pct=_pct(price_from, price_to),
             valid_on=seen.date(), last_seen=seen,
-        ))
-        stats["importados"] += 1
+        )
         if len(batch) >= CHUNK:
-            _flush(batch)
-            batch = []
-    _flush(batch)
+            stats["importados"] += _flush(batch)
+            batch = {}
+    stats["importados"] += _flush(batch)
     return stats
 
 
