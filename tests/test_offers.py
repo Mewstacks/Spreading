@@ -7,7 +7,7 @@ import pytest
 from apps.compose.offer import build_offer_message, short_name
 from apps.delivery.models import OfferDelivery, OutboxItem
 from apps.delivery.outbox import deliver_due, enqueue_for_rule, enqueue_offer, explain_rule
-from apps.offers import ml_api, niches
+from apps.offers import ml_api, niches, selection
 from apps.offers.links import safe_affiliate_url
 from apps.offers.models import AffiliateLink, Offer, Rule
 from apps.offers.selection import in_window, is_live_checkable
@@ -155,6 +155,21 @@ def test_requires_owner_link_amazon_uses_org_tag(org, rule):
     org.save()
     item = enqueue_for_rule(rule, NOW)
     assert item and "https://www.amazon.com.br/dp/B012345678?tag=luizahfn-20" in item.body
+
+
+def test_candidates_lists_offers_that_only_lack_the_owner_link(org, destination, rule):
+    make_offer(key="MLB111", price=100, frm=200)  # sem link
+    make_offer(key="MLB222", price=150, frm=200)  # com link
+    make_offer(key="MLB333", price=50, frm=100, link_key="MLB333+CODE", coupon_kind="code",
+               coupon_code="CODE", coupon_until=NOW + timedelta(days=5))  # par sem link
+    make_offer(key="MLB444", price=190, frm=200)  # 5%: abaixo do mínimo, nem é candidata
+    link(org, key="MLB222")
+    missing = []
+    ready = list(selection.candidates(org, destination, rule, NOW, missing=missing))
+    assert [o.product_key for o, _link in ready] == ["MLB222"]
+    assert [o.link_key for o, _score in missing] == ["MLB333+CODE", "MLB111"]  # par antes
+    same = [o.product_key for o, _link in selection.candidates(org, destination, rule, NOW)]
+    assert same == ["MLB222"]  # sem `missing` o resultado é o mesmo
 
 
 def test_safe_affiliate_url_rejects_storefront_and_foreign_hosts():

@@ -87,8 +87,13 @@ def score(offer, match_kind: str, now) -> float:
     return round(100 * total, 2)
 
 
-def candidates(org, destination, rule, now, report: Counter | None = None):
-    """Ofertas publicáveis em ordem: pares cupom+produto primeiro, depois maior pontuação."""
+def candidates(org, destination, rule, now, report: Counter | None = None,
+               missing: list | None = None):
+    """Ofertas publicáveis em ordem: pares cupom+produto primeiro, depois maior pontuação.
+
+    `missing`, se vier, recebe `(oferta, pontuação)` das ofertas do ML que passaram em tudo e só
+    não têm link do dono, na mesma ordem: é a fila do Link Builder.
+    """
     report = report if report is not None else Counter()
     links = dict(AffiliateLink.objects.for_org(org).values_list("product_key", "affiliate_url"))
     cooldown_since = now - timedelta(hours=rule.cooldown_hours)
@@ -128,8 +133,12 @@ def candidates(org, destination, rule, now, report: Counter | None = None):
         link = resolve_link(org, offer, links)
         if not link:
             report["sem_link_do_dono"] += 1
+            if missing is not None and offer.store == "mercadolivre":
+                missing.append((offer, score(offer, kind, now)))
             continue
         ranked.append((offer, link, score(offer, kind, now)))
+    if missing is not None:
+        missing.sort(key=lambda row: (not row[0].coupon_kind, -row[1]))
     ranked.sort(key=lambda row: (not row[0].coupon_kind, -row[2]))
     for offer, link, _score in ranked:
         yield offer, link
