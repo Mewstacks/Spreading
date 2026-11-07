@@ -140,6 +140,21 @@ def test_groups_page_shows_state_niches_and_today_count(client, staff, org, dest
     assert "Ativo" in html and ">Tudo<" in html
 
 
+def test_groups_page_shows_link_builder_state_only_when_there_is_one(client, staff, org):
+    from apps.linkbuilder.models import BuilderState
+
+    assert "Link Builder" not in page(client, "groups")
+    state = BuilderState.unscoped.create(
+        org=org, state=BuilderState.NO_SESSION, detail="rode tools/ml_login.py", updated_at=NOW)
+    html = page(client, "groups")
+    assert "Link Builder · Sem sessão" in html and "rode tools/ml_login.py" in html
+    assert "tag-warn" in html
+    state.state, state.detail = BuilderState.READY, ""
+    state.save()
+    html = page(client, "groups")
+    assert "Link Builder · Pronto" in html and 'tag tag-warn">Link Builder' not in html
+
+
 # ── adicionar grupo ───────────────────────────────────────────────────────
 def test_add_page_lists_free_groups_and_filters(client, staff, org, destination, monkeypatch):
     monkeypatch.setattr("apps.panel.views.WahaTransport", lambda: Groups(GROUPS))

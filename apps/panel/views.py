@@ -10,6 +10,7 @@ from apps.coupons.feed import BRT
 from apps.delivery.models import OutboxItem
 from apps.delivery.outbox import deliver_due, enqueue_for_rule, explain_rule
 from apps.delivery.transports import WahaTransport
+from apps.linkbuilder.models import BuilderState
 from apps.offers import niches
 from apps.offers.models import STORE_LABELS, STORES, Rule
 from apps.orgs.models import Destination, Organization
@@ -30,6 +31,24 @@ REASONS = {
     "sem_desconto": "Sem desconto",
     "ja_enfileirada": "Já na fila",
 }
+
+
+BUILDER_LABELS = {
+    "pronto": "Pronto", "ocioso": "Ocioso", "desligado": "Desligado", "sem_sessao": "Sem sessão",
+    "login": "Entrar de novo", "verificacao": "Verificação", "indisponivel": "Fora do ar",
+}
+BUILDER_FINE = {"pronto", "ocioso"}
+
+
+def _builder_status(org):
+    state = BuilderState.objects.for_org(org).first()
+    if state is None:
+        return None
+    return {
+        "label": BUILDER_LABELS.get(state.state, state.state), "detail": state.detail,
+        "tone": "on" if state.state in BUILDER_FINE else (
+            "off" if state.state == BuilderState.OFF else "warn"),
+    }
 
 
 def niche_label(key: str) -> str:
@@ -63,7 +82,9 @@ def groups(request):
             "rule": rule, "sent_today": sent, "cap": rule.effective_cap,
             "niches": picked[:2], "more": max(0, len(picked) - 2), "all": not picked,
         })
-    return render(request, "panel/groups.html", {"org": org, "cards": cards})
+    return render(request, "panel/groups.html", {
+        "org": org, "cards": cards, "builder": _builder_status(org),
+    })
 
 
 @staff_member_required

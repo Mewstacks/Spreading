@@ -5,6 +5,12 @@
   <h1>Grupos</h1>
   <a class="btn btn-primary" href="{% url 'panel:add' %}">Adicionar grupo</a>
 </div>
+{% if builder %}
+<div class="meta status">
+  <span class="tag tag-{{ builder.tone }}">Link Builder · {{ builder.label }}</span>
+  {% if builder.detail %}<span>{{ builder.detail }}</span>{% endif %}
+</div>
+{% endif %}
 {% if cards %}
 <div class="grid">
   {% for c in cards %}
