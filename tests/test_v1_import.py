@@ -49,11 +49,12 @@ def test_import_keeps_one_offers_rule_per_group(db):
               "grupo_nome": "Teste ofertas", "marketplace": ""}
     data = {"orgs": [{**DATA["orgs"][0], "rules": [DATA["orgs"][0]["rules"][0], twin, notice]}]}
     stats = import_v1(data)
-    assert stats["regras"] == 2 and stats["regras_puladas"] == 1  # a gêmea de ofertas some
+    # a gêmea de ofertas some e o aviso de lista de cupons não é mais produto
+    assert stats["regras"] == 1 and stats["regras_puladas"] == 2
     org = Organization.objects.get(slug="lules")
-    assert sorted(Rule.objects.for_org(org).values_list("name", flat=True)) == ["v1-104", "v1-108"]
+    assert list(Rule.objects.for_org(org).values_list("name", flat=True)) == ["v1-104"]
     import_v1(data)  # reimportar não descarta a regra já aceita
-    assert Rule.objects.for_org(org).count() == 2
+    assert Rule.objects.for_org(org).count() == 1
 
 
 def test_import_refuses_storefront_and_unverified_product_links(db):

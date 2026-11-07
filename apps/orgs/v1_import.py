@@ -37,9 +37,10 @@ def import_v1(data: dict, slug_by_name=None) -> dict:
 
         for rule in row.get("rules", []):
             supported = rule.get("canal") == "whatsapp" and rule.get("marketplace") in (
-                "", "mercadolivre")
+                "", "mercadolivre") and rule.get("tipo") != "aviso_cupons"
             if not supported:
-                stats["regras_puladas"] += 1  # Telegram/Amazon/Shopee ficam para depois
+                # Telegram/Amazon/Shopee ficam para depois; lista de cupons o dono recusou
+                stats["regras_puladas"] += 1
                 continue
             dest = _destination(org, rule)
             kind = Rule.COUPON_NOTICE if rule["tipo"] == "aviso_cupons" else Rule.OFFERS

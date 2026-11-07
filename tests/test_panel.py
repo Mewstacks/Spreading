@@ -81,6 +81,29 @@ def test_panel_requires_staff(client, org, rule, django_user_model):
     assert OutboxItem.unscoped.count() == 0
 
 
+def test_panel_posts_require_csrf_token(org, rule, staff, django_user_model):
+    from django.test import Client
+
+    strict = Client(enforce_csrf_checks=True)
+    strict.force_login(staff)
+    for url in [reverse("panel:add"), reverse("panel:group", args=[rule.id]),
+                reverse("panel:send_now", args=[rule.id])]:
+        assert strict.post(url, {"group": "x"}).status_code == 403, url
+    assert OutboxItem.unscoped.count() == 0 and Rule.unscoped.count() == 1
+
+
+def test_group_names_from_whatsapp_are_escaped(client, staff, org, monkeypatch):
+    evil = '<img src=x onerror=alert(1)>"\'&'
+    monkeypatch.setattr("apps.panel.views.WahaTransport",
+                        lambda: Groups([{"id": "666@g.us", "name": evil, "size": 1}]))
+    html = page(client, "add")
+    assert evil not in html and "&lt;img src=x onerror=alert(1)&gt;" in html
+    client.post(reverse("panel:add"), {"group": "666@g.us"})
+    rule = Rule.unscoped.get(destination__external_id="666@g.us")
+    for html in (page(client, "groups"), page(client, "group", rule.id)):
+        assert evil not in html and "&lt;img src=x onerror=alert(1)&gt;" in html
+
+
 def test_other_orgs_rule_is_invisible(client, staff, org, rule):
     other = Organization.objects.create(name="Outra", slug="outra")
     dest = Destination.unscoped.create(org=other, kind=Destination.WA_GROUP,
