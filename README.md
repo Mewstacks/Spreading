@@ -38,7 +38,7 @@ os termos da regra no máximo uma vez por hora. A API não traz o preço origina
 ## Amazon
 Sem API utilizável (a Creators API exige 10 vendas qualificadas em 30 dias): a coleta lê a busca pública da
 Amazon BR, uma consulta por termo da regra por hora, e usa o preço riscado do próprio anúncio como "De"
-(desconto de 5% a 70%, nota ≥ 4,0, foto original). O link é `/dp/ASIN?tag=<tag da org>`; sem tag, não sai.
+(desconto de 5% a 60%, nota ≥ 4,0, foto original). O link é `/dp/ASIN?tag=<tag da org>`; sem tag, não sai.
 Captcha ou 503 pausa a loja por 1 h. Raspar viola os termos da Amazon: `AMAZON_COLLECT=0` desliga.
 
 ## Link Builder (links `meli.la` do dono)

@@ -41,6 +41,15 @@ BUILDER_LABELS = {
     "login": "Entrar de novo", "verificacao": "Verificação", "indisponivel": "Fora do ar",
 }
 BUILDER_FINE = {"pronto", "ocioso"}
+WHATSAPP_LABELS = {"WORKING": "Conectado", "SCAN_QR_CODE": "Ler o QR", "STARTING": "Iniciando",
+                   "PASSKEY_REQUIRED": "Passkey", "PASSKEY_CONFIRMATION_REQUIRED": "Passkey",
+                   "FAILED": "Falhou", "STOPPED": "Parado", "": "Sem resposta"}
+
+
+def _whatsapp_status():
+    status = WahaTransport().session_status(timeout=3)
+    return {"label": WHATSAPP_LABELS.get(status, status),
+            "tone": "on" if status == "WORKING" else "warn"}
 
 
 def _builder_status(org):
@@ -93,6 +102,7 @@ def groups(request):
         })
     return render(request, "panel/groups.html", {
         "org": org, "cards": cards, "builder": _builder_status(org),
+        "whatsapp": _whatsapp_status(),
     })
 
 

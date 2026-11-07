@@ -61,13 +61,13 @@ class WahaTransport:
         return Result(False, FAILED, klass=PERMANENT, error=error)
 
 
-    def session_status(self) -> str:
+    def session_status(self, timeout=None) -> str:
         """Status da sessão no WAHA (WORKING, SCAN_QR_CODE, FAILED…) ou '' se inalcançável."""
         headers = {"X-Api-Key": self.api_key} if self.api_key else {}
         try:
             response = self.http.get(
                 f"{self.base_url}/api/sessions/{self.session_name}",
-                headers=headers, timeout=settings.HTTP_TIMEOUT_SECONDS,
+                headers=headers, timeout=timeout or settings.HTTP_TIMEOUT_SECONDS,
             )
             if response.status_code != 200:
                 return ""

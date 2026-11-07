@@ -66,6 +66,7 @@ def test_vet_gates_discount_rating_photo_and_category():
     good = amazon.parse(page(card()))[0]
     assert amazon.vet(good)["pct"] == Decimal("31.29")
     for over in [{"struck": Decimal("560.00")},  # 3%: quase nada
+                 {"struck": Decimal("1500.00")},  # 64%: acima do teto
                  {"struck": Decimal("3000.00")},  # 82%: "De" de fachada
                  {"rating": Decimal("3.7")}, {"rating": None},
                  {"image": "https://evil.io/a.jpg"}, {"title": "Remédio emagrecedor 60 caps"}]:

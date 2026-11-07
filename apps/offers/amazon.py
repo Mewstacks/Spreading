@@ -35,7 +35,7 @@ HEADERS = {
     "Accept-Encoding": "gzip, deflate",
 }
 BLOCK_KEY = "amazon:blocked"
-MIN_DISCOUNT, MAX_DISCOUNT = Decimal(5), Decimal(70)
+MIN_DISCOUNT, MAX_DISCOUNT = Decimal(5), Decimal(60)  # o preço de lista costuma ser inflado
 MIN_RATING = Decimal("4.0")
 PACE_SECONDS = 3
 CARD = re.compile(r'(?=<div[^>]+data-component-type="s-search-result")')

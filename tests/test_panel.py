@@ -24,6 +24,9 @@ class Groups:
     def list_groups(self):
         return self.rows
 
+    def session_status(self, timeout=None):
+        return "WORKING"
+
 
 @pytest.fixture
 def frozen(monkeypatch):
@@ -138,6 +141,17 @@ def test_groups_page_shows_state_niches_and_today_count(client, staff, org, dest
     rule.save()
     html = page(client, "groups")
     assert "Ativo" in html and ">Tudo<" in html
+
+
+def test_groups_page_shows_the_whatsapp_session(client, staff, org, monkeypatch):
+    transport = FakeTransport()
+    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda: transport)
+    assert "WhatsApp · Conectado" in page(client, "groups")
+    transport.status = "SCAN_QR_CODE"
+    html = page(client, "groups")
+    assert "WhatsApp · Ler o QR" in html and "tag-warn" in html
+    transport.status = ""
+    assert "WhatsApp · Sem resposta" in page(client, "groups")
 
 
 def test_groups_page_shows_link_builder_state_only_when_there_is_one(client, staff, org):

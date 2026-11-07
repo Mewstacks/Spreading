@@ -16,7 +16,7 @@ class FakeTransport:
     status = "WORKING"
     acks = {}
 
-    def session_status(self):
+    def session_status(self, timeout=None):
         return self.status
 
     def session_working(self):
