@@ -1,4 +1,6 @@
 """Ofertas e Cupons: o catálogo que o motor enxerga, com busca, filtros e envio manual."""
+from datetime import timedelta
+
 from django.contrib import messages
 from django.contrib.admin.views.decorators import staff_member_required
 from django.db.models import Q
@@ -8,7 +10,7 @@ from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from apps.compose.notice import brl, coupon_line, pct
-from apps.coupons.models import Coupon
+from apps.coupons.models import CampaignCoupon, Coupon
 from apps.delivery.outbox import deliver_due, enqueue_specific
 from apps.delivery.transports import WahaTransport
 from apps.offers.models import STORE_LABELS, AffiliateLink, Offer, Rule
@@ -17,6 +19,7 @@ from .queries import live_coupons, live_offers, with_link
 from .views import REASONS, current_org
 
 PAGE = 30
+CAMPAIGN_MAX_AGE = timedelta(hours=6)
 EXTRA_REASONS = {
     "grupo_indisponivel": "Grupo ocupado agora", "cupom_vencido": "Cupom vencido",
     "observacao_velha": "Observação velha",
@@ -69,11 +72,21 @@ def catalog(request, kind="all"):
     } for o in offers]
     rules = list(Rule.objects.for_org(org).filter(type=Rule.OFFERS)
                  .select_related("destination").order_by("destination__name"))
-    feed = []
+    feed, campaigns = [], []
     if kind == "coupon":
         today = timezone.localdate()
         live = Coupon.objects.filter(valid_until__gte=today).order_by("valid_until")[:150]
         feed = [{"line": coupon_line(c).replace("*", ""), "until": c.valid_until} for c in live]
+        # Campanha que saiu da vitrine (não vista há 6 h) ou venceu não aparece como se valesse.
+        shown = CampaignCoupon.objects.filter(
+            expires_at__gt=now, last_seen__gte=now - CAMPAIGN_MAX_AGE).order_by("expires_at")[:60]
+        campaigns = [{
+            "title": c.title, "category": c.category, "items": c.total_items,
+            "min": brl(c.min_purchase) if c.min_purchase else "",
+            "cap": brl(c.max_discount) if c.max_discount else "",
+            "until": c.expires_at.astimezone(timezone.get_current_timezone()).strftime("%d/%m"),
+            "url": c.container_url,
+        } for c in shown]
     params = request.GET.copy()
     params.pop("p", None)
     return render(request, "panel/catalog.html", {
@@ -81,7 +94,7 @@ def catalog(request, kind="all"):
         "q": request.GET.get("q", ""), "store": request.GET.get("loja", ""),
         "state": request.GET.get("estado", ""), "stores": STORE_LABELS, "rules": rules,
         "page": page, "has_next": len(chunk) > PAGE, "has_prev": page > 1,
-        "base_query": params.urlencode(), "feed": feed,
+        "base_query": params.urlencode(), "feed": feed, "campaigns": campaigns,
         "next": request.get_full_path(),
     })
 

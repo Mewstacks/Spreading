@@ -31,3 +31,24 @@ class Coupon(models.Model):
 
     def __str__(self):
         return f"{self.code} ({self.store})"
+
+
+class CampaignCoupon(models.Model):
+    """Cupom de ativação de campanha do ML (vitrine oficial de cupons): sem código, vale pelo
+    id da campanha. Catálogo compartilhado; guarda só o que a página mostra."""
+
+    campaign_id = models.CharField(max_length=20, unique=True)
+    title = models.CharField(max_length=60)  # "R$ 10 OFF", "80% OFF"
+    category = models.CharField(max_length=80, blank=True)
+    mode = models.CharField(max_length=8, blank=True)  # FIXED | PERCENT
+    discount_pct = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    min_purchase = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    max_discount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    container_url = models.URLField(max_length=500, blank=True)
+    total_items = models.PositiveIntegerField(default=0)
+    last_seen = models.DateTimeField()
+
+    def __str__(self):
+        return f"{self.title} ({self.campaign_id})"

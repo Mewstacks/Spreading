@@ -125,3 +125,6 @@ SHOPEE_APP_SECRET = env("SHOPEE_APP_SECRET", "")
 
 # Amazon BR: coleta pela busca pública (sem API). 0 desliga.
 AMAZON_COLLECT = env_bool("AMAZON_COLLECT", True)
+
+# Vitrine pública de cupons do ML (cupons de campanha e ofertas em destaque). 0 desliga.
+ML_PUBLIC_PAGES = env_bool("ML_PUBLIC_PAGES", True)

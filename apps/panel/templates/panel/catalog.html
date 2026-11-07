@@ -74,6 +74,21 @@
 </div>
 {% endif %}
 
+{% if kind == "coupon" and campaigns %}
+<details class="adv" style="margin-top:1.6rem">
+  <summary><span>Campanhas do ML</span><b class="count">{{ campaigns|length }}</b></summary>
+  <ul class="rows" style="margin:0 .95rem .95rem">
+    {% for c in campaigns %}
+    <li class="row-item">
+      <span class="row-main"><b>{{ c.title }}</b> · {{ c.category }}{% if c.min %} · mín. {{ c.min }}{% endif %}{% if c.cap %} · teto {{ c.cap }}{% endif %} · {{ c.items }} itens</span>
+      <span class="row-side num muted">{{ c.until }}</span>
+      {% if c.url %}<a class="icon-btn" href="{{ c.url }}" target="_blank" rel="noopener noreferrer" title="Abrir" aria-label="Abrir {{ c.title }}"><i aria-hidden="true" data-lucide="external-link"></i></a>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</details>
+{% endif %}
+
 {% if kind == "coupon" and feed %}
 <details class="adv" style="margin-top:1.6rem">
   <summary><span>Feed do ML</span><b class="count">{{ feed|length }}</b></summary>

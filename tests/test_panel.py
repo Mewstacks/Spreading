@@ -4,6 +4,7 @@ import pytest
 from django.urls import reverse
 from django.utils.html import escape
 
+from apps.coupons.models import CampaignCoupon
 from apps.delivery.models import OutboxItem
 from apps.delivery.outbox import enqueue_for_rule
 from apps.offers import ml_api, niches
@@ -397,6 +398,25 @@ def test_coupons_page_lists_only_live_pairs_with_state_and_search(client, staff,
     assert "Produto MLB444" in found and "Produto MLB333" not in found
     assert "Nada encontrado." in page(client, "coupons", q="zzz") and "Limpar" in page(
         client, "coupons", q="zzz")
+
+
+def test_coupons_page_lists_the_live_ml_campaigns_only(client, staff, org, rule):
+    from datetime import timedelta as td
+
+    def campaign(cid, title, expires, seen=NOW, **extra):
+        return CampaignCoupon.objects.create(
+            campaign_id=cid, title=title, category="FASHION", expires_at=expires, last_seen=seen,
+            container_url=f"https://lista.mercadolivre.com.br/_Container_{cid}", **extra)
+
+    campaign("111", "R$ 10 OFF", NOW + td(days=3), min_purchase=Decimal(11),
+             max_discount=Decimal(10), total_items=1171)
+    campaign("222", "80% OFF", NOW - td(hours=1))  # venceu
+    campaign("333", "50% OFF", NOW + td(days=3), seen=NOW - td(hours=7))  # saiu da vitrine
+    html = page(client, "coupons")
+    assert "Campanhas do ML" in html and "R$ 10 OFF" in html and "1171 itens" in html
+    assert "mín. R$ 11" in html and "teto R$ 10" in html and "_Container_111" in html
+    assert "80% OFF" not in html and "50% OFF" not in html
+    assert "Campanhas do ML" not in page(client, "offers")
 
 
 def test_offers_page_filters_by_store_and_paginates(client, staff, org, rule):
