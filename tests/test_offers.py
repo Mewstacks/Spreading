@@ -371,3 +371,69 @@ def test_huge_discount_needs_the_listing_to_confirm_the_original_price(org, rule
     monkeypatch.setattr(ml_api, "product_price",
                         lambda pid, http=None: {"price": 100.0, "price_from": 600.0})
     assert enqueue_for_rule(rule, NOW) is not None  # o anúncio mostra o "De" agora
+
+
+# ── guarda de queda real ──────────────────────────────────────────────────
+def test_a_steady_price_is_not_a_promotion_but_a_real_drop_is(org, destination, rule):
+    link(org)
+    for ago in (1, 2, 3, 4):  # quatro dias a 100: o "De 200" é de fachada
+        make_offer(price=100, frm=200, seen=NOW - timedelta(days=ago))
+    make_offer(price=100, frm=200)
+    report = Counter()
+    assert list(selection.candidates(org, destination, rule, NOW, report)) == []
+    assert report["sem_queda_real"] == 5
+    Offer.objects.filter(valid_on=NOW.date()).update(price_to=Decimal("80"))  # queda de verdade
+    report = Counter()
+    [(offer, _link)] = list(selection.candidates(org, destination, rule, NOW, report))
+    assert offer.price_to == Decimal("80") and report["sem_queda_real"] == 4
+
+
+def test_the_history_guard_waits_for_enough_observations_and_skips_coupon_pairs(
+        org, destination, rule):
+    link(org)
+    for ago in (1, 2):  # 3 observações no total: ainda não dá para dizer
+        make_offer(price=100, frm=200, seen=NOW - timedelta(days=ago))
+    make_offer(price=100, frm=200)
+    report = Counter()
+    assert list(selection.candidates(org, destination, rule, NOW, report))
+    assert report["sem_queda_real"] == 0
+    link(org, key="MLB333+ALFA")
+    for ago in range(5):  # par com cupom a 60 há dias: o abatimento é o cupom
+        make_offer(key="MLB333", link_key="MLB333+ALFA", price=60, frm=100, coupon_kind="code",
+                   coupon_code="ALFA", coupon_pct=Decimal(30), seen=NOW - timedelta(days=ago),
+                   coupon_until=NOW + timedelta(days=5))
+    report = Counter()
+    first = next(iter(selection.candidates(org, destination, rule, NOW, report)))
+    assert first[0].coupon_code == "ALFA" and report["sem_queda_real"] == 0
+
+
+def test_the_link_builder_queue_skips_fake_promotions_too(org, destination, rule):
+    for ago in range(5):
+        make_offer(key="MLB777", price=100, frm=200, seen=NOW - timedelta(days=ago))
+    missing = []
+    assert list(selection.candidates(org, destination, rule, NOW, missing=missing)) == []
+    assert missing == []
+
+
+def test_commission_breaks_ties_in_the_score(db):
+    plain = make_offer(key="MLB1")
+    low = make_offer(key="MLB2", commission_pct=Decimal(2))
+    high = make_offer(key="MLB3", commission_pct=Decimal(18))
+    low_score, plain_score, high_score = (
+        selection.score(o, "sub", NOW) for o in (low, plain, high))
+    assert low_score < plain_score < high_score
+
+
+def test_the_rule_interval_varies_by_send_but_stays_within_a_quarter(org, destination, rule):
+    from apps.delivery.outbox import jittered_interval
+
+    waits = set()
+    for n in range(40):
+        item = OutboxItem.unscoped.create(
+            org=org, destination=destination, rule=rule, body=str(n), created_at=NOW,
+            state=OutboxItem.CONFIRMED, idempotency_key=f"k{n}", next_attempt_at=NOW)
+        wait = jittered_interval(rule, item)
+        assert timedelta(minutes=45) <= wait <= timedelta(minutes=75)  # 60 min ± 25%
+        assert jittered_interval(rule, item) == wait  # o mesmo envio espera sempre o mesmo
+        waits.add(wait)
+    assert len(waits) > 20  # e envios diferentes esperam tempos diferentes

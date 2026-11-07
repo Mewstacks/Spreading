@@ -8,7 +8,7 @@
     <h1><i aria-hidden="true" data-lucide="users"></i> Grupos</h1>
   </div>
   <div class="head-actions">
-    <span class="badge badge-{{ whatsapp.tone }}"><span class="dot"></span>WhatsApp · {{ whatsapp.label }}</span>
+    <a class="badge badge-{{ whatsapp.tone }}" href="{% url 'panel:whatsapp' %}"><span class="dot"></span>WhatsApp · {{ whatsapp.label }}</a>
     {% if builder %}<span class="badge badge-{{ builder.tone }}">Link Builder · {{ builder.label }}</span>{% endif %}
     <a class="btn btn-accent" href="{% url 'panel:add' %}"><i aria-hidden="true" data-lucide="plus"></i> Adicionar grupo</a>
   </div>

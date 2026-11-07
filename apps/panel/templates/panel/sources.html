@@ -1,0 +1,28 @@
+{% extends "panel/base.html" %}
+{% block title %}Fontes · Spreading{% endblock %}
+{% block topbar_context %}<strong>Fontes</strong><span>Operação</span>{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Operação</span>
+    <h1><i aria-hidden="true" data-lucide="radar"></i> Fontes</h1>
+  </div>
+</div>
+
+<div class="table-flat">
+  <table class="stack-table">
+    <thead><tr><th class="cell-grow">Fonte</th><th>Estado</th><th>Último resultado</th><th>Quando</th><th>Checada</th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td class="cell-grow" data-label="Fonte"><span class="prod-title"><i aria-hidden="true" data-lucide="{{ r.icon }}"></i> {{ r.name }}</span></td>
+        <td data-label="Estado"><span class="badge badge-{{ r.tone }}">{{ r.state }}</span>{% if r.error %}<div class="muted">{{ r.error }}</div>{% endif %}</td>
+        <td data-label="Último resultado" class="tnum">{{ r.result|default:"—" }}</td>
+        <td data-label="Quando" class="tnum">{{ r.at|default:"—" }}</td>
+        <td data-label="Checada" class="tnum muted">{{ r.checked|default:"—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

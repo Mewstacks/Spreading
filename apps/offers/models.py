@@ -86,6 +86,8 @@ class Offer(models.Model):
     price_from = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     price_to = models.DecimalField(max_digits=12, decimal_places=2)
     discount_pct = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    # Comissão do afiliado em % quando a loja informa (Shopee); desempata o ranking.
+    commission_pct = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     # Cupom pareado ao produto (comprovado): código ou ativação no link.
     coupon_kind = models.CharField(max_length=12, blank=True)  # "" | "code" | "activation"
     coupon_code = models.CharField(max_length=60, blank=True)
@@ -114,3 +116,15 @@ class TermRun(models.Model):
 
     term = models.CharField(max_length=120, unique=True)
     last_run = models.DateTimeField()
+
+
+class SourceRun(models.Model):
+    """Estado de cada fonte do ciclo: a tela Fontes lê isto, e os alertas também."""
+
+    label = models.CharField(max_length=40, unique=True)
+    checked_at = models.DateTimeField()  # última vez que o ciclo chamou a fonte
+    ok = models.BooleanField(default=True)
+    failures = models.PositiveIntegerField(default=0)  # falhas seguidas
+    error = models.CharField(max_length=200, blank=True)
+    result = models.CharField(max_length=200, blank=True)  # último resultado não vazio
+    result_at = models.DateTimeField(null=True, blank=True)

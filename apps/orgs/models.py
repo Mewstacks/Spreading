@@ -58,6 +58,8 @@ class Destination(OrgScopedModel):
     external_id = models.CharField(max_length=200)
     name = models.CharField(max_length=120)
     active = models.BooleanField(default=True)
+    # Sessão do WAHA (um número de WhatsApp) que envia para este destino.
+    session = models.CharField(max_length=40, default="default")
     # Política de cadência por destino.
     daily_cap = models.PositiveIntegerField(default=12)
     min_interval_seconds = models.PositiveIntegerField(default=60)

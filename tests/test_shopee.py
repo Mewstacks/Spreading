@@ -108,8 +108,16 @@ def test_collect_stores_vetted_offers_with_the_official_link(org, rule):
     assert (offer.store, offer.link_key, offer.source) == ("shopee", "shp:9001", "shopee-api")
     assert offer.price_to == Decimal("70.00") and offer.price_from == Decimal("100.00")
     assert offer.discount_pct == Decimal("30.00") and offer.macro
+    assert offer.commission_pct == Decimal("8.00")
     link = AffiliateLink.objects.for_org(org).get()
     assert (link.product_key, link.affiliate_url) == ("shp:9001", GOOD["offerLink"])
+
+
+def test_commission_is_read_as_a_percent():
+    assert shopee.vet(GOOD)["commission"] == Decimal("8.00")
+    assert shopee.vet({**GOOD, "commissionRate": "12"})["commission"] == Decimal("12.00")
+    assert shopee.vet({**GOOD, "commissionRate": None})["commission"] is None
+    assert shopee.vet({**GOOD, "commissionRate": "250"})["commission"] == Decimal("100.00")
 
 
 def test_collect_asks_for_the_rule_terms_once_an_hour_and_only_for_shopee_rules(

@@ -21,10 +21,11 @@
           <a class="side-link {% if u == 'coupons' %}active{% endif %}" href="{% url 'panel:coupons' %}" title="Cupons"><i data-lucide="ticket"></i><span class="lbl">Cupons</span></a>
           <a class="side-link {% if u == 'offers' %}active{% endif %}" href="{% url 'panel:offers' %}" title="Ofertas"><i data-lucide="flame"></i><span class="lbl">Ofertas</span></a>
           <a class="side-link {% if u == 'links' %}active{% endif %}" href="{% url 'panel:links' %}" title="Links"><i data-lucide="link"></i><span class="lbl">Links</span></a>
+          <a class="side-link {% if u == 'sources' %}active{% endif %}" href="{% url 'panel:sources' %}" title="Fontes"><i data-lucide="radar"></i><span class="lbl">Fontes</span></a>
         </div>
         <div class="side-group">
           <div class="side-group-label">Integrações</div>
-          <a class="side-link" href="/pair" title="WhatsApp"><i data-lucide="message-circle"></i><span class="lbl">WhatsApp</span></a>
+          <a class="side-link {% if u == 'whatsapp' %}active{% endif %}" href="{% url 'panel:whatsapp' %}" title="WhatsApp"><i data-lucide="message-circle"></i><span class="lbl">WhatsApp</span></a>
         </div>
         <div class="side-group">
           <div class="side-group-label">Gestão</div>

@@ -153,7 +153,17 @@ def vet(node: dict) -> dict | None:
     price_from = (price / (1 - rate / 100)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     pct = ((1 - price / price_from) * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     return {"key": f"shp:{item}", "title": title[:300], "url": url[:600], "link": link,
-            "image": image, "price_to": price, "price_from": price_from, "pct": pct}
+            "image": image, "price_to": price, "price_from": price_from, "pct": pct,
+            "commission": _commission(node.get("commissionRate"))}
+
+
+def _commission(raw) -> Decimal | None:
+    """`commissionRate` vem como fração ("0.07" = 7%); aceita já em % por segurança."""
+    value = _dec(raw)
+    if value is None:
+        return None
+    percent = value * 100 if value <= 1 else value
+    return min(percent, Decimal(100)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 def _store(org, row: dict, now, today) -> None:
@@ -163,7 +173,8 @@ def _store(org, row: dict, now, today) -> None:
             "source": SOURCE, "product_key": row["key"], "source_url": row["url"],
             "title": row["title"], "url": row["url"], "image_url": row["image"],
             "macro": niches.classify(row["title"]), "price_from": row["price_from"],
-            "price_to": row["price_to"], "discount_pct": row["pct"], "last_seen": now,
+            "price_to": row["price_to"], "discount_pct": row["pct"],
+            "commission_pct": row["commission"], "last_seen": now,
         },
     )
     AffiliateLink.unscoped.update_or_create(

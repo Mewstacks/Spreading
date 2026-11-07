@@ -1,7 +1,9 @@
 """Quando uma regra pode publicar e qual oferta ela escolhe (invariantes do v1)."""
 import re
-from collections import Counter
+import statistics
+from collections import Counter, defaultdict
 from datetime import timedelta
+from decimal import Decimal
 
 from django.conf import settings
 
@@ -17,6 +19,11 @@ ML_CATALOG_ID = re.compile(r"^MLB\d+$")
 ML_LIVE_MAX_AGE = timedelta(days=14)  # item de catálogo do ML é conferido ao vivo no envio
 OTHER_STORE_MAX_AGE = timedelta(hours=3)  # Amazon/Shopee: sem conferência ao vivo ainda
 FEED_SOURCE = "ml-ofertas-diarias"
+# Guarda de queda real (herdada do v1): produto com ≥3 outras observações nos últimos 30 dias só
+# é anunciado como promoção se o preço da oferta está abaixo do típico; senão o "De" é de fachada.
+HISTORY_DAYS = 30
+HISTORY_MIN_OTHERS = 3
+HISTORY_MARGIN = Decimal("0.97")
 
 
 def in_window(rule, now) -> bool:
@@ -83,8 +90,37 @@ def score(offer, match_kind: str, now) -> float:
         urgent = 1.0
     elif offer.coupon_until and offer.coupon_until - now <= timedelta(hours=48):
         urgent = 1.0
-    total = 0.40 * value + 0.25 * affinity + 0.20 * trust + 0.10 * urgent + 0.05 * 0.5
+    # Desempenho: comissão informada pela loja (20% ou mais vale o máximo); sem dado, neutro.
+    perf = min(float(offer.commission_pct), 20.0) / 20.0 if offer.commission_pct else 0.5
+    total = 0.40 * value + 0.25 * affinity + 0.20 * trust + 0.10 * urgent + 0.05 * perf
     return round(100 * total, 2)
+
+
+def price_history(offers, now) -> dict:
+    """Observações dos últimos 30 dias de cada produto sem cupom, `(id, preço)`; uma consulta só.
+    Conta as linhas de todos os dias, para a linha velha de um produto parado também cair."""
+    keys = {(o.store, o.link_key) for o in offers if not o.coupon_kind}
+    if not keys:
+        return {}
+    since = now.astimezone(BRT).date() - timedelta(days=HISTORY_DAYS)
+    rows = Offer.objects.filter(
+        link_key__in={key for _store, key in keys}, valid_on__gte=since,
+    ).values_list("id", "store", "link_key", "price_to")
+    history = defaultdict(list)
+    for row_id, store, key, price in rows:
+        if (store, key) in keys:
+            history[(store, key)].append((row_id, price))
+    return history
+
+
+def real_drop(offer, history: dict) -> bool:
+    """False só quando há observações suficientes e o preço da oferta não está abaixo do típico
+    das outras. Par com cupom não entra: o abatimento dele é o cupom, não a oscilação do anúncio."""
+    others = [p for row_id, p in history.get((offer.store, offer.link_key)) or []
+              if row_id != offer.id]
+    if offer.coupon_kind or len(others) < HISTORY_MIN_OTHERS:
+        return True
+    return offer.price_to <= statistics.median(others) * HISTORY_MARGIN
 
 
 def candidates(org, destination, rule, now, report: Counter | None = None,
@@ -141,7 +177,13 @@ def candidates(org, destination, rule, now, report: Counter | None = None,
                 missing.append((offer, score(offer, kind, now)))
             continue
         ranked.append((offer, link, score(offer, kind, now)))
+    history = price_history([row[0] for row in ranked + (missing or [])], now)
+    kept = [row for row in ranked if real_drop(row[0], history)]
+    if len(kept) != len(ranked):
+        report["sem_queda_real"] += len(ranked) - len(kept)
+    ranked = kept
     if missing is not None:
+        missing[:] = [row for row in missing if real_drop(row[0], history)]
         missing.sort(key=lambda row: (not row[0].coupon_kind, -row[1]))
     ranked.sort(key=lambda row: (not row[0].coupon_kind, -row[2]))
     for offer, link, _score in ranked:

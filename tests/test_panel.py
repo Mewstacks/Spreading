@@ -101,7 +101,7 @@ def test_panel_posts_require_csrf_token(org, rule, staff, django_user_model):
 def test_group_names_from_whatsapp_are_escaped(client, staff, org, monkeypatch):
     evil = '<img src=x onerror=alert(1)>"\'&'
     monkeypatch.setattr("apps.panel.views.WahaTransport",
-                        lambda: Groups([{"id": "666@g.us", "name": evil, "size": 1}]))
+                        lambda **kw: Groups([{"id": "666@g.us", "name": evil, "size": 1}]))
     html = page(client, "add")
     assert evil not in html and "&lt;img src=x onerror=alert(1)&gt;" in html
     client.post(reverse("panel:add"), {"group": "666@g.us"})
@@ -148,7 +148,7 @@ def test_groups_page_shows_state_niches_and_today_count(client, staff, org, dest
 
 def test_groups_page_shows_the_whatsapp_session(client, staff, org, monkeypatch):
     transport = FakeTransport()
-    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda: transport)
+    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda **kw: transport)
     assert "WhatsApp · Conectado" in page(client, "groups")
     transport.status = "SCAN_QR_CODE"
     html = page(client, "groups")
@@ -174,7 +174,7 @@ def test_groups_page_shows_link_builder_state_only_when_there_is_one(client, sta
 
 # ── adicionar grupo ───────────────────────────────────────────────────────
 def test_add_page_lists_free_groups_and_filters(client, staff, org, destination, monkeypatch):
-    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda: Groups(GROUPS))
+    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda **kw: Groups(GROUPS))
     html = page(client, "add")
     assert "Promo Casa" in html and "Achados Tech" in html
     assert "120 membros" in html and "80 membros" in html
@@ -187,7 +187,7 @@ def test_add_page_lists_free_groups_and_filters(client, staff, org, destination,
 
 
 def test_add_creates_inactive_rule_and_opens_it(client, staff, org, monkeypatch):
-    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda: Groups(GROUPS))
+    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda **kw: Groups(GROUPS))
     response = client.post(reverse("panel:add"), {"group": "111@g.us"})
     dest = Destination.unscoped.get(external_id="111@g.us")
     rule = Rule.unscoped.get(destination=dest)
@@ -198,7 +198,7 @@ def test_add_creates_inactive_rule_and_opens_it(client, staff, org, monkeypatch)
 
 
 def test_add_rejects_unknown_and_duplicate(client, staff, org, destination, monkeypatch):
-    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda: Groups(GROUPS))
+    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda **kw: Groups(GROUPS))
     for group_id in ["nao-existe@g.us", "120363@g.us", ""]:
         response = client.post(reverse("panel:add"), {"group": group_id}, follow=True)
         assert "Grupo indisponível." in response.content.decode()
@@ -206,9 +206,9 @@ def test_add_rejects_unknown_and_duplicate(client, staff, org, destination, monk
 
 
 def test_add_page_offline_offers_pairing(client, staff, org, monkeypatch):
-    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda: Groups([]))
+    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda **kw: Groups([]))
     html = page(client, "add")
-    assert "WhatsApp sem resposta." in html and 'href="/pair"' in html
+    assert "WhatsApp sem resposta." in html and 'href="/pair?session=default"' in html
 
 
 # ── configuração do grupo ─────────────────────────────────────────────────
@@ -305,7 +305,7 @@ def test_send_now_ignores_window_and_sends(client, staff, org, rule, sendable, m
     rule.save()
     assert enqueue_for_rule(rule, NOW) is None  # sem o botão, a janela barra
     transport = FakeTransport()
-    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda: transport)
+    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda **kw: transport)
     response = client.post(reverse("panel:send_now", args=[rule.id]), follow=True)
     assert "Enviado." in response.content.decode()
     item = OutboxItem.unscoped.get()
@@ -315,7 +315,7 @@ def test_send_now_ignores_window_and_sends(client, staff, org, rule, sendable, m
 
 def test_send_now_reports_unconfirmed_delivery(client, staff, org, rule, sendable, monkeypatch):
     transport = FakeTransport(transient())
-    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda: transport)
+    monkeypatch.setattr("apps.panel.views.WahaTransport", lambda **kw: transport)
     response = client.post(reverse("panel:send_now", args=[rule.id]), follow=True)
     assert "Na fila; envio não confirmado." in response.content.decode()
     assert OutboxItem.unscoped.get().state == OutboxItem.QUEUED
@@ -419,6 +419,30 @@ def test_coupons_page_lists_the_live_ml_campaigns_only(client, staff, org, rule)
     assert "Campanhas do ML" not in page(client, "offers")
 
 
+def test_sources_page_shows_state_result_and_failures(client, staff, org, settings):
+    from datetime import timedelta as td
+
+    from apps.offers.models import SourceRun
+
+    settings.ML_PUBLIC_PAGES, settings.AMAZON_COLLECT = False, True
+    SourceRun.objects.create(label="cupons", checked_at=NOW, result="98", result_at=NOW)
+    SourceRun.objects.create(label="amazon", checked_at=NOW, ok=False, failures=3,
+                             error="captcha", result="4", result_at=NOW - td(hours=2))
+    SourceRun.objects.create(label="amazon_cupons", checked_at=NOW, result="21",
+                             result_at=NOW - td(hours=9))
+    html = client.get(reverse("panel:sources")).content.decode()
+    assert "ML · cupons" in html and ">Ok<" in html and "98" in html
+    assert "Falhando 3×" in html and "captcha" in html
+    assert "Sem novidade" in html  # amazon_cupons: último resultado há 9 h
+    assert ">Desligada<" in html  # vitrine do ML desligada, catálogo sem credencial
+    assert "Sem execução" in html  # ofertas do dia nunca rodaram
+    assert client.get(reverse("panel:sources")).status_code == 200
+
+
+def test_sources_page_requires_staff(client, org):
+    assert client.get(reverse("panel:sources")).status_code == 302
+
+
 def test_offers_page_filters_by_store_and_paginates(client, staff, org, rule):
     for n in range(31):
         make_offer(key=f"MLB{9000 + n}", title=f"Item {n:02d}", price=100, frm=200 + n)
@@ -440,7 +464,7 @@ def test_send_offer_from_the_catalog_uses_the_same_proofs(client, staff, org, ru
     from apps.offers.models import Offer
 
     transport = FakeTransport()
-    monkeypatch.setattr("apps.panel.catalog_views.WahaTransport", lambda: transport)
+    monkeypatch.setattr("apps.panel.catalog_views.WahaTransport", lambda **kw: transport)
     offer = Offer.objects.get(product_key="MLB111")
     url = reverse("panel:offer_send", args=[offer.id])
     response = client.post(url, {"rule": rule.id, "next": "/painel/ofertas/?loja=mercadolivre"},

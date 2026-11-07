@@ -2,17 +2,20 @@
 import re
 from decimal import Decimal, InvalidOperation
 
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.admin.views.decorators import staff_member_required
+from django.db.models import Count
 from django.http import Http404
 from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from apps.coupons.feed import BRT
 from apps.delivery.models import OutboxItem
 from apps.delivery.outbox import deliver_due, enqueue_for_rule, explain_rule
-from apps.delivery.transports import WahaTransport
+from apps.delivery.transports import SESSION_NAME, SessionRouter, WahaTransport
 from apps.linkbuilder import manual
 from apps.linkbuilder.models import BuilderState
 from apps.offers import niches
@@ -36,6 +39,7 @@ REASONS = {
     "preco_inconclusivo": "Preço inconclusivo",
     "preco_diverge_da_prova": "Preço mudou",
     "sem_desconto": "Sem desconto",
+    "sem_queda_real": "Sem queda real",
     "ja_enfileirada": "Já na fila",
 }
 
@@ -51,10 +55,24 @@ WHATSAPP_LABELS = {"WORKING": "Conectado", "SCAN_QR_CODE": "Ler o QR", "STARTING
                    "FAILED": "Falhou", "STOPPED": "Parado", "": "Sem resposta"}
 
 
-def _whatsapp_status():
-    status = WahaTransport().session_status(timeout=3)
-    return {"label": WHATSAPP_LABELS.get(status, status),
-            "tone": "green" if status == "WORKING" else "yellow"}
+def _sessions_in_use(org) -> list[str]:
+    names = set(
+        Destination.objects.for_org(org).filter(active=True).values_list("session", flat=True)
+    )
+    return sorted(names) or [settings.WAHA_SESSION]
+
+
+def _whatsapp_status(org):
+    names = _sessions_in_use(org)
+    states = {name: WahaTransport(session_name=name).session_status(timeout=3) for name in names}
+    down = [name for name, status in states.items() if status != "WORKING"]
+    if len(names) == 1:
+        status = states[names[0]]
+        return {"label": WHATSAPP_LABELS.get(status, status),
+                "tone": "green" if status == "WORKING" else "yellow"}
+    if not down:
+        return {"label": f"{len(names)} números", "tone": "green"}
+    return {"label": f"{len(down)} de {len(names)} fora do ar", "tone": "yellow"}
 
 
 def _builder_status(org):
@@ -114,14 +132,20 @@ def groups(request):
     }
     return render(request, "panel/groups.html", {
         "org": org, "cards": cards, "builder": _builder_status(org), "stats": stats,
-        "whatsapp": _whatsapp_status(),
+        "whatsapp": _whatsapp_status(org),
     })
+
+
+def _chosen_session(request) -> str:
+    name = request.POST.get("sessao") or request.GET.get("sessao") or ""
+    return name if SESSION_NAME.match(name) else settings.WAHA_SESSION
 
 
 @staff_member_required
 def add_group(request):
     org = current_org(request)
-    transport = WahaTransport()
+    session = _chosen_session(request)
+    transport = WahaTransport(session_name=session)
     available = transport.list_groups()
     taken = set(
         Destination.objects.for_org(org).values_list("external_id", flat=True)
@@ -130,18 +154,54 @@ def add_group(request):
         chosen = next((g for g in available if g["id"] == request.POST.get("group")), None)
         if chosen is None or chosen["id"] in taken:
             messages.error(request, "Grupo indisponível.")
-            return redirect("panel:add")
+            return redirect(f"{reverse('panel:add')}?sessao={session}")
         dest = Destination.unscoped.create(
-            org=org, kind=Destination.WA_GROUP, external_id=chosen["id"], name=chosen["name"]
+            org=org, kind=Destination.WA_GROUP, external_id=chosen["id"], name=chosen["name"],
+            session=session,
         )
         rule = Rule.unscoped.create(org=org, destination=dest, name=chosen["name"], active=False)
         messages.success(request, "Grupo adicionado.")
         return redirect("panel:group", rule_id=rule.id)
     query = (request.GET.get("q") or "").strip().lower()
     rows = [g for g in available if g["id"] not in taken and query in g["name"].lower()]
+    known = sorted(set(_sessions_in_use(org)) | {session})
     return render(request, "panel/add_group.html", {
         "org": org, "rows": rows[:100], "q": request.GET.get("q", ""),
-        "offline": not available,
+        "offline": not available, "session": session, "sessions": known,
+    })
+
+
+MAX_SESSIONS = 5
+
+
+@staff_member_required
+def whatsapp(request):
+    """Números de WhatsApp (sessões do WAHA): estado, grupos de cada um e novo número."""
+    org = current_org(request)
+    known = WahaTransport().list_sessions()
+    if request.method == "POST":
+        name = (request.POST.get("name") or "").strip().lower()
+        have = {row["name"] for row in known}
+        if not SESSION_NAME.match(name):
+            messages.error(request, "Nome inválido.")
+        elif name not in have and len(have) >= MAX_SESSIONS:
+            messages.error(request, f"Limite de {MAX_SESSIONS} números.")
+        else:
+            WahaTransport(session_name=name).ensure_started()
+            return redirect(f"/pair?session={name}")
+        return redirect("panel:whatsapp")
+    counts = dict(
+        Destination.objects.for_org(org).values_list("session").annotate(n=Count("id"))
+    )
+    status = {row["name"]: row["status"] for row in known}
+    names = sorted(set(status) | set(counts) | ({settings.WAHA_SESSION} if not known else set()))
+    rows = [{
+        "name": name, "groups": counts.get(name, 0), "offline": not known,
+        "label": WHATSAPP_LABELS.get(status.get(name, ""), status.get(name) or "Sem resposta"),
+        "tone": "green" if status.get(name) == "WORKING" else "yellow",
+    } for name in names]
+    return render(request, "panel/whatsapp.html", {
+        "rows": rows, "can_add": len(names) < MAX_SESSIONS,
     })
 
 
@@ -242,7 +302,7 @@ def send_now(request, rule_id):
         reasons = [REASONS.get(r, r) for r, _n in top.most_common(1) if r != "prontas"]
         messages.error(request, "Nada publicável agora" + (f": {reasons[0]}." if reasons else "."))
     else:
-        stats = deliver_due(WahaTransport())
+        stats = deliver_due(SessionRouter(factory=WahaTransport))
         if stats["confirmado"]:
             messages.success(request, "Enviado.")
         else:

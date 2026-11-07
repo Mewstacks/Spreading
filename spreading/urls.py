@@ -6,7 +6,7 @@ from django.http import HttpResponseForbidden, JsonResponse
 from django.urls import include, path
 
 from apps.delivery.health import snapshot
-from apps.delivery.transports import WahaTransport
+from apps.delivery.transports import SessionRouter
 from apps.delivery.views import pair, pair_qr
 
 
@@ -20,7 +20,7 @@ def status(request):
     given = request.headers.get("X-Status-Token", "")
     if not token or not hmac.compare_digest(given, token):
         return HttpResponseForbidden("forbidden")
-    return JsonResponse(snapshot(WahaTransport()))
+    return JsonResponse(snapshot(SessionRouter()))
 
 
 urlpatterns = [

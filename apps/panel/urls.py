@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import catalog_views, views
+from . import catalog_views, sources_views, views
 
 app_name = "panel"
 
@@ -10,7 +10,9 @@ urlpatterns = [
     path("ofertas/", catalog_views.catalog, name="offers"),
     path("cupons/", catalog_views.catalog, {"kind": "coupon"}, name="coupons"),
     path("ofertas/<int:offer_id>/enviar/", catalog_views.send_offer, name="offer_send"),
+    path("whatsapp/", views.whatsapp, name="whatsapp"),
     path("links/", views.links, name="links"),
+    path("fontes/", sources_views.sources, name="sources"),
     path("grupo/<int:rule_id>/", views.group, name="group"),
     path("grupo/<int:rule_id>/enviar/", views.send_now, name="send_now"),
 ]

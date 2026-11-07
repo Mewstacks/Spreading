@@ -22,10 +22,18 @@ def snapshot(transport, now=None) -> dict:
     coupon_seen = Coupon.objects.order_by("-last_seen").values_list("last_seen", flat=True).first()
     offer_seen = Offer.objects.order_by("-last_seen").values_list("last_seen", flat=True).first()
     stale_after = timedelta(seconds=settings.FEED_MAX_AGE_SECONDS * 2)
-    status = transport.session_status() if hasattr(transport, "session_status") else ""
+    sessions = {}
+    if hasattr(transport, "used_sessions"):  # vários números: todos os que têm regra ativa
+        sessions = {name: transport.for_session(name).session_status() or "inalcancavel"
+                    for name in sorted(transport.used_sessions())}
+        down = [status for status in sessions.values() if status != "WORKING"]
+        status = (down[0] if down else "WORKING") if sessions else ""
+    else:
+        status = transport.session_status() if hasattr(transport, "session_status") else ""
     data = {
         "db": "ok",
         "whatsapp_session": status or "inalcancavel",
+        "whatsapp_sessions": sessions,
         "last_confirmed_age_s": int((now - last_ok.sent_at).total_seconds()) if last_ok else None,
         "queued": OutboxItem.unscoped.filter(state=OutboxItem.QUEUED).count(),
         "uncertain": OutboxItem.unscoped.filter(state=OutboxItem.UNCERTAIN).count(),

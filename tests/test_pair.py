@@ -29,7 +29,7 @@ def test_pair_requires_staff(client, db):
 
 def test_pair_shows_qr_then_connected(staff_client, monkeypatch):
     fake = FakeWaha()
-    monkeypatch.setattr(views, "WahaTransport", lambda: fake)
+    monkeypatch.setattr(views, "WahaTransport", lambda **kw: fake)
     page = staff_client.get("/pair").content.decode()
     assert "/pair/qr.png" in page and 'http-equiv="refresh"' in page
     fake.status = "WORKING"
@@ -39,7 +39,7 @@ def test_pair_shows_qr_then_connected(staff_client, monkeypatch):
 
 def test_qr_image_served_no_cache_or_404(staff_client, monkeypatch):
     fake = FakeWaha()
-    monkeypatch.setattr(views, "WahaTransport", lambda: fake)
+    monkeypatch.setattr(views, "WahaTransport", lambda **kw: fake)
     response = staff_client.get("/pair/qr.png")
     assert response.status_code == 200 and response["Content-Type"] == "image/png"
     assert "no-store" in response["Cache-Control"]

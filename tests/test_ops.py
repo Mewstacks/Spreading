@@ -139,3 +139,32 @@ def test_session_down_keeps_queue_untouched(org, destination, container_link, st
     assert "fora de WORKING" in report["entrega"]
     assert OutboxItem.objects.for_org(org).get().state == state
     assert deliver_due(FakeTransport(), NOW)["confirmado"] == 1
+
+
+def test_every_source_leaves_its_state_for_the_sources_screen(org, destination):
+    import apps.delivery.management.commands.run_cycle as cycle
+    from apps.offers.models import SourceRun
+
+    transport = FakeTransport()
+    run_once(transport, NOW, coupon_html=page(ROWS), offers_html=OFFERS_HTML)
+    feed = SourceRun.objects.get(label="cupons")
+    assert (feed.ok, feed.failures, feed.result, feed.checked_at) == (True, 0, "2", NOW)
+    assert feed.result_at == NOW
+    original = cycle.fetch_feed
+
+    def boom():
+        raise RuntimeError("feed fora")
+
+    cycle.fetch_feed = boom
+    try:
+        later = NOW + timedelta(minutes=5)
+        run_once(transport, later, offers_html="")
+        run_once(transport, later + timedelta(minutes=5), offers_html="")
+    finally:
+        cycle.fetch_feed = original
+    feed.refresh_from_db()
+    assert (feed.ok, feed.failures, feed.error) == (False, 2, "feed fora")
+    assert feed.result == "2" and feed.result_at == NOW  # o último bom continua guardado
+    run_once(transport, later + timedelta(minutes=10), coupon_html=page(ROWS), offers_html="")
+    feed.refresh_from_db()
+    assert (feed.ok, feed.failures, feed.error) == (True, 0, "")

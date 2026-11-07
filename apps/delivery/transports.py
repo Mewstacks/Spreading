@@ -1,10 +1,12 @@
 """Transporte de saída. Contrato herdado do `Sender` do v1: nunca levanta por falha de envio."""
 import base64
+import re
 from dataclasses import dataclass
 
 import requests
 from django.conf import settings
 
+SESSION_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")  # nome de sessão do WAHA
 CONFIRMED, FAILED, UNCERTAIN = "confirmado", "falhou", "incerto"
 TRANSIENT, PERMANENT, UNKNOWN = "transitorio", "permanente", "desconhecido"
 
@@ -132,6 +134,20 @@ class WahaTransport:
     def session_working(self) -> bool:
         return self.session_status() == "WORKING"
 
+    def list_sessions(self) -> list[dict]:
+        """Todas as sessões do WAHA: [{name, status}]; [] se inalcançável."""
+        headers = {"X-Api-Key": self.api_key} if self.api_key else {}
+        try:
+            response = self.http.get(
+                f"{self.base_url}/api/sessions", params={"all": "true"}, headers=headers,
+                timeout=settings.HTTP_TIMEOUT_SECONDS,
+            )
+            data = response.json() if response.status_code == 200 else []
+        except (requests.exceptions.RequestException, ValueError):
+            return []
+        return [{"name": str(row["name"]), "status": str(row.get("status") or "")}
+                for row in data if isinstance(row, dict) and row.get("name")]
+
     def message_ack(self, chat_id: str, message_id: str) -> int | None:
         """ACK da mensagem (-1 erro, 0 pendente, 1 servidor, 2 aparelho, 3 lida) ou None."""
         headers = {"X-Api-Key": self.api_key} if self.api_key else {}
@@ -158,3 +174,31 @@ def _message_id(response) -> str:
     if isinstance(value, dict):
         value = value.get("_serialized") or value.get("id") or ""
     return str(value or "")
+
+
+class SessionRouter:
+    """Um WahaTransport por sessão do WAHA (um número de WhatsApp cada)."""
+
+    def __init__(self, factory=None):
+        self.factory = factory or WahaTransport
+        self._cache = {}
+
+    def for_session(self, name: str):
+        name = name or settings.WAHA_SESSION
+        if name not in self._cache:
+            self._cache[name] = self.factory(session_name=name)
+        return self._cache[name]
+
+    def used_sessions(self) -> set[str]:
+        """Sessões que têm regra ativa ou item na fila: só essas precisam estar conectadas."""
+        from apps.delivery.models import OutboxItem
+        from apps.offers.models import Rule
+
+        names = set(Rule.unscoped.filter(active=True)
+                    .values_list("destination__session", flat=True))
+        names |= set(OutboxItem.unscoped.filter(state=OutboxItem.QUEUED)
+                     .values_list("destination__session", flat=True))
+        return {name for name in names if name}
+
+    def working_sessions(self) -> set[str]:
+        return {name for name in self.used_sessions() if self.for_session(name).session_working()}

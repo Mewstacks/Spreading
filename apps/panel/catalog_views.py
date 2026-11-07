@@ -12,7 +12,7 @@ from django.views.decorators.http import require_POST
 from apps.compose.notice import brl, coupon_line, pct
 from apps.coupons.models import CampaignCoupon, Coupon
 from apps.delivery.outbox import deliver_due, enqueue_specific
-from apps.delivery.transports import WahaTransport
+from apps.delivery.transports import SessionRouter, WahaTransport
 from apps.offers.models import STORE_LABELS, AffiliateLink, Offer, Rule
 
 from .queries import live_coupons, live_offers, with_link
@@ -113,7 +113,7 @@ def send_offer(request, offer_id):
     if item is None:
         label = {**REASONS, **EXTRA_REASONS}.get(reason, reason)
         messages.error(request, f"Não saiu: {label}.")
-    elif deliver_due(WahaTransport())["confirmado"]:
+    elif deliver_due(SessionRouter(factory=WahaTransport))["confirmado"]:
         messages.success(request, "Enviado.")
     else:
         messages.error(request, "Na fila; envio não confirmado.")

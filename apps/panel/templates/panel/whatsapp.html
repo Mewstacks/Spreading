@@ -1,0 +1,40 @@
+{% extends "panel/base.html" %}
+{% block title %}WhatsApp · Spreading{% endblock %}
+{% block topbar_context %}<strong>WhatsApp</strong><span>Integrações</span>{% endblock %}
+{% block page_class %}page-narrow{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Integrações</span>
+    <h1><i aria-hidden="true" data-lucide="message-circle"></i> WhatsApp</h1>
+  </div>
+  <div class="head-actions"><span class="tech-tag">{{ rows|length }} número{{ rows|length|pluralize }}</span></div>
+</div>
+
+<ul class="rows">
+  {% for r in rows %}
+  <li class="row-item">
+    <div class="row-main">
+      <div class="name">{{ r.name }}</div>
+      <div class="muted">{{ r.groups }} grupo{{ r.groups|pluralize }}</div>
+    </div>
+    <span class="badge badge-{{ r.tone }}"><span class="dot"></span>{{ r.label }}</span>
+    <div class="row-side">
+      <a class="btn" href="/pair?session={{ r.name }}"><i aria-hidden="true" data-lucide="qr-code"></i> Conectar</a>
+      <a class="btn btn-ghost" href="{% url 'panel:add' %}?sessao={{ r.name }}"><i aria-hidden="true" data-lucide="plus"></i> Grupo</a>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+
+{% if can_add %}
+<form class="panel" method="post" style="margin-top:1.2rem">{% csrf_token %}
+  <div class="panel-head"><h2><i aria-hidden="true" data-lucide="smartphone"></i> Novo número</h2></div>
+  <div class="form-grid">
+    <div><label for="name">Nome</label>
+      <input id="name" name="name" type="text" maxlength="32" pattern="[a-z0-9][a-z0-9_\-]{0,31}" placeholder="numero2" autocomplete="off" required></div>
+  </div>
+  <div class="form-actions"><button class="btn btn-accent" type="submit"><i aria-hidden="true" data-lucide="qr-code"></i> Conectar</button></div>
+</form>
+{% endif %}
+{% endblock %}

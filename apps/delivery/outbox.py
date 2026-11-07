@@ -22,6 +22,7 @@ from .transports import CONFIRMED, FAILED, PERMANENT, UNCERTAIN, Result
 
 MAX_ATTEMPTS = 5
 MAX_LIVE_TRIES = 8  # candidatos conferidos por tique (como o v1: tenta até 8)
+INTERVAL_JITTER = 0.25  # o intervalo da regra varia ±25% por envio: o ritmo não vira relógio
 
 
 def _today_start(now):
@@ -47,9 +48,22 @@ def _sent_today(org, destination, now) -> int:
     )
 
 
+def _session_has_room(destination, now) -> bool:
+    """Teto por hora do número de WhatsApp, somando todos os grupos que ele atende."""
+    cap = settings.SESSION_HOURLY_CAP
+    if not cap:
+        return True
+    recent = (
+        OutboxItem.unscoped.filter(destination__session=destination.session,
+                                   created_at__gte=now - timedelta(hours=1))
+        .exclude(state=OutboxItem.FAILED).count()
+    )
+    return recent < cap
+
+
 def _destination_ready(org, destination, now) -> bool:
     destination.refresh_from_db()  # intervalo/pausa mudam durante a entrega
-    if _blocked(destination, now):
+    if _blocked(destination, now) or not _session_has_room(destination, now):
         return False
     pending = OutboxItem.objects.for_org(org).filter(
         destination=destination, state__in=[OutboxItem.QUEUED, OutboxItem.SENDING]
@@ -59,12 +73,20 @@ def _destination_ready(org, destination, now) -> bool:
     return _sent_today(org, destination, now) < destination.daily_cap
 
 
+def jittered_interval(rule, last) -> timedelta:
+    """Intervalo da regra com variação fixa por envio (mesmo envio, mesma espera: sem sorteio
+    a cada ciclo, que faria a regra "tentar a sorte" de 5 em 5 minutos)."""
+    digest = hashlib.sha256(f"{rule.id}:{last.id}".encode()).digest()
+    spread = int.from_bytes(digest[:4], "big") / 0xFFFFFFFF * 2 - 1  # de -1 a 1
+    return timedelta(minutes=rule.interval_minutes * (1 + INTERVAL_JITTER * spread))
+
+
 def _rule_ready(org, rule, now) -> bool:
     if not rule.active or not selection.in_window(rule, now):
         return False
     items = OutboxItem.objects.for_org(org).filter(rule=rule).exclude(state=OutboxItem.FAILED)
     last = items.order_by("-created_at").first()
-    if last and last.created_at + timedelta(minutes=rule.interval_minutes) > now:
+    if last and last.created_at + jittered_interval(rule, last) > now:
         return False
     return items.filter(created_at__gte=_today_start(now)).count() < rule.effective_cap
 
@@ -226,13 +248,14 @@ def enqueue_for_rule(rule, now=None, http=None, force=False):
     return enqueue_offer(org, rule, now, http=http, force=force)
 
 
-def deliver_due(transport, now=None, limit=20) -> dict:
-    """Entrega itens vencidos. Cada destino respeita intervalo mínimo e pausa."""
+def deliver_due(transport, now=None, limit=20, sessions=None) -> dict:
+    """Entrega itens vencidos. Cada destino respeita intervalo mínimo e pausa. `sessions`, se vier,
+    limita a entrega aos números de WhatsApp conectados (os demais esperam na fila)."""
     now = now or timezone.now()
     stats = {"confirmado": 0, "incerto": 0, "falhou": 0, "retry": 0, "bloqueado": 0}
     skipped = set()
     for _ in range(limit):
-        claimed = _claim(now, skipped)
+        claimed = _claim(now, skipped, sessions)
         if claimed is None:
             break
         status, item = claimed
@@ -255,6 +278,8 @@ def deliver_due(transport, now=None, limit=20) -> dict:
 
 def _send(transport, item):
     """Oferta = foto + legenda (sem foto não publica). Aviso de cupons = texto."""
+    if hasattr(transport, "for_session"):  # vários números: cada destino sai pelo seu
+        transport = transport.for_session(item.destination.session)
     chat = item.destination.external_id
     if item.kind == "offer":
         jpeg = fetch_image_jpeg(item.image_url) if item.image_url else None
@@ -265,16 +290,17 @@ def _send(transport, item):
     return transport.send_text(chat, item.body)
 
 
-def _claim(now, skipped):
+def _claim(now, skipped, sessions=None):
     with transaction.atomic():
-        item = (
+        due = (
             OutboxItem.unscoped.select_for_update(skip_locked=True)
             .select_related("destination")
             .filter(state=OutboxItem.QUEUED, next_attempt_at__lte=now)
             .exclude(id__in=skipped)
-            .order_by("next_attempt_at", "id")
-            .first()
         )
+        if sessions is not None:
+            due = due.filter(destination__session__in=sessions)
+        item = due.order_by("next_attempt_at", "id").first()
         if item is None:
             return None
         if _blocked(item.destination, now):

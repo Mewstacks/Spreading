@@ -110,6 +110,8 @@ WAHA_URL = env("WAHA_URL", "http://waha:3000")
 WAHA_API_KEY = env("WAHA_API_KEY", "")
 WAHA_SESSION = env("WAHA_SESSION", "default")
 HTTP_TIMEOUT_SECONDS = float(env("HTTP_TIMEOUT_SECONDS", "15"))
+# Teto de mensagens por hora em cada número de WhatsApp (soma de todos os grupos dele). 0 desliga.
+SESSION_HOURLY_CAP = int(env("SESSION_HOURLY_CAP", "20"))
 
 # Link Builder do ML (gera o meli.la do dono). Desligado por padrão: precisa de sessão salva.
 LINKBUILDER_ENABLED = env_bool("LINKBUILDER_ENABLED", False)
