@@ -49,6 +49,40 @@ class WahaTransport:
         return Result(False, FAILED, klass=PERMANENT, error=error)
 
 
+    def session_status(self) -> str:
+        """Status da sessão no WAHA (WORKING, SCAN_QR_CODE, FAILED…) ou '' se inalcançável."""
+        headers = {"X-Api-Key": self.api_key} if self.api_key else {}
+        try:
+            response = self.http.get(
+                f"{self.base_url}/api/sessions/{self.session_name}",
+                headers=headers, timeout=settings.HTTP_TIMEOUT_SECONDS,
+            )
+            if response.status_code != 200:
+                return ""
+            return str((response.json() or {}).get("status") or "")
+        except (requests.exceptions.RequestException, ValueError):
+            return ""
+
+    def session_working(self) -> bool:
+        return self.session_status() == "WORKING"
+
+    def message_ack(self, chat_id: str, message_id: str) -> int | None:
+        """ACK da mensagem (-1 erro, 0 pendente, 1 servidor, 2 aparelho, 3 lida) ou None."""
+        headers = {"X-Api-Key": self.api_key} if self.api_key else {}
+        try:
+            response = self.http.get(
+                f"{self.base_url}/api/{self.session_name}/chats/{chat_id}/messages/{message_id}",
+                params={"downloadMedia": "false"}, headers=headers,
+                timeout=settings.HTTP_TIMEOUT_SECONDS,
+            )
+            if response.status_code != 200:
+                return None
+            ack = (response.json() or {}).get("ack")
+            return int(ack) if ack is not None else None
+        except (requests.exceptions.RequestException, ValueError, TypeError):
+            return None
+
+
 def _message_id(response) -> str:
     try:
         data = response.json()

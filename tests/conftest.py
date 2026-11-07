@@ -13,6 +13,18 @@ class FakeTransport:
         self.results = list(results)
         self.sent = []
 
+    status = "WORKING"
+    acks = {}
+
+    def session_status(self):
+        return self.status
+
+    def session_working(self):
+        return self.status == "WORKING"
+
+    def message_ack(self, chat_id, message_id):
+        return self.acks.get(message_id)
+
     def send_text(self, chat_id, text):
         self.sent.append((chat_id, text))
         if self.results:

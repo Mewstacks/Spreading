@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     "apps.coupons.apps.Config",
     "apps.delivery.apps.Config",
     "apps.compose.apps.Config",
+    "apps.offers.apps.Config",
 ]
 
 MIDDLEWARE = [
@@ -95,6 +96,9 @@ ML_COUPON_FEED_URL = env(
     "https://afiliadosmercadolivre.github.io/cupons-afiliadosmercadolivre/",
 )
 FEED_MAX_AGE_SECONDS = int(env("FEED_MAX_AGE_SECONDS", "3600"))
+STATUS_TOKEN = env("STATUS_TOKEN", "")
+ML_API_CLIENT_ID = env("ML_API_CLIENT_ID", "")
+ML_API_CLIENT_SECRET = env("ML_API_CLIENT_SECRET", "")
 WAHA_URL = env("WAHA_URL", "http://waha:3000")
 WAHA_API_KEY = env("WAHA_API_KEY", "")
 WAHA_SESSION = env("WAHA_SESSION", "default")

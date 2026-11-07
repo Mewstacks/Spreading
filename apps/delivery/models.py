@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 
 from apps.orgs.models import OrgScopedModel
 
@@ -10,6 +11,7 @@ class OutboxItem(OrgScopedModel):
     STATES = [(s, s) for s in (QUEUED, SENDING, CONFIRMED, UNCERTAIN, FAILED)]
 
     destination = models.ForeignKey("orgs.Destination", on_delete=models.PROTECT)
+    rule = models.ForeignKey("offers.Rule", null=True, blank=True, on_delete=models.SET_NULL)
     kind = models.CharField(max_length=20, default="coupon_notice")
     body = models.TextField()
     idempotency_key = models.CharField(max_length=64, unique=True)
@@ -18,7 +20,7 @@ class OutboxItem(OrgScopedModel):
     next_attempt_at = models.DateTimeField()
     external_message_id = models.CharField(max_length=120, blank=True)
     last_error = models.CharField(max_length=300, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(default=timezone.now)
     sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta(OrgScopedModel.Meta):
@@ -44,3 +46,15 @@ class CouponDelivery(OrgScopedModel):
         constraints = [
             models.UniqueConstraint(fields=["destination", "coupon"], name="uniq_coupon_delivery")
         ]
+
+
+class OfferDelivery(OrgScopedModel):
+    """Cooldown do mesmo produto por destino."""
+
+    destination = models.ForeignKey("orgs.Destination", on_delete=models.PROTECT)
+    product_key = models.CharField(max_length=300)
+    outbox_item = models.ForeignKey(OutboxItem, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta(OrgScopedModel.Meta):
+        indexes = [models.Index(fields=["destination", "product_key", "created_at"])]
