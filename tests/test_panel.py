@@ -245,6 +245,26 @@ def test_group_page_explains_why_nothing_goes_out(client, staff, rule):
     assert "Sem link seu" in html
 
 
+def test_group_page_lists_what_was_sent_newest_first(client, staff, org, destination, rule):
+    def sent(n, at, state=OutboxItem.CONFIRMED, rule_id=rule.id):
+        OutboxItem.unscoped.create(
+            org=org, destination=destination, rule_id=rule_id, kind="offer", state=state,
+            body=f"🛍️ *Produto {n}*\n\nDe ❌ ~R$ 100~\nPor 🔥 *R$ 50*\n\n🔗 https://meli.la/x{n}",
+            idempotency_key=f"s{n}", next_attempt_at=at, created_at=at, sent_at=at,
+        )
+
+    from datetime import timedelta
+
+    sent(1, NOW - timedelta(hours=2))
+    sent(2, NOW - timedelta(minutes=5))
+    sent(3, NOW - timedelta(minutes=1), state=OutboxItem.QUEUED)  # ainda na fila: não saiu
+    sent(4, NOW - timedelta(minutes=2), rule_id=None)  # sem regra: não é deste grupo
+    html = page(client, "group", rule.id)
+    assert html.index("Produto 2") < html.index("Produto 1")
+    assert "Produto 3" not in html and "Produto 4" not in html
+    assert "07/11 11:55" in html and "07/11 10:00" in html  # horário de Brasília
+
+
 def test_group_page_lists_ready_offers_before_blockers(client, staff, rule, sendable):
     amazon_without_tag()
     html = page(client, "group", rule.id)

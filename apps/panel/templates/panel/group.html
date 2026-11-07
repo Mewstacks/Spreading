@@ -53,6 +53,13 @@
   </form>
 </div>
 
+{% if sent %}
+<h2>Enviadas</h2>
+<ul class="rows">
+  {% for row in sent %}<li><span>{{ row.name }}</span><b>{{ row.at }}</b></li>{% endfor %}
+</ul>
+{% endif %}
+
 <h2>Por que não saiu</h2>
 {% if explain %}
 <ul class="rows">

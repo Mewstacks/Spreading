@@ -1,4 +1,6 @@
 """Painel enxuto: escolher, por grupo, nichos, lojas e cadência."""
+import re
+
 from django.contrib import messages
 from django.contrib.admin.views.decorators import staff_member_required
 from django.http import Http404
@@ -49,6 +51,12 @@ def _builder_status(org):
         "tone": "on" if state.state in BUILDER_FINE else (
             "off" if state.state == BuilderState.OFF else "warn"),
     }
+
+
+def _offer_name(body: str) -> str:
+    """Nome do produto na primeira linha da legenda (`🛍️ *Nome*`)."""
+    match = re.search(r"\*(.+?)\*", (body or "").split("\n", 1)[0])
+    return match.group(1) if match else (body or "")[:60]
 
 
 def niche_label(key: str) -> str:
@@ -163,8 +171,14 @@ def group(request, rule_id):
             explain_rule(rule).items(), key=lambda kv: (kv[0] != "prontas", -kv[1])
         )
     ]
+    sent = [
+        {"at": item.sent_at.astimezone(BRT).strftime("%d/%m %H:%M"), "name": _offer_name(item.body)}
+        for item in OutboxItem.objects.for_org(org)
+        .filter(rule=rule, state=OutboxItem.CONFIRMED, sent_at__isnull=False)
+        .order_by("-sent_at")[:10]
+    ]
     return render(request, "panel/group.html", {
-        "org": org, "rule": rule, "tree": tree, "explain": explain,
+        "org": org, "rule": rule, "tree": tree, "explain": explain, "sent": sent,
         "stores": [(s, STORE_LABELS[s], s in rule.store_list) for s in STORES],
         "hours": range(24),
     })
