@@ -101,6 +101,8 @@ details.macro .chips{padding:0 var(--s4) var(--s4)}
   padding:var(--s3) var(--s4);background:var(--surface);border:1px solid var(--border);
   border-radius:var(--radius);margin-bottom:var(--s2)}
 .pick strong{overflow-wrap:anywhere}
+.stack{display:grid;gap:var(--s2)}
+.area{width:100%;padding:var(--s3);font:.8rem/1.5 ui-monospace,Consolas,monospace;color:var(--text);background:var(--surface);border:1px solid var(--control);border-radius:var(--radius);resize:vertical}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
@@ -109,6 +111,7 @@ details.macro .chips{padding:0 var(--s4) var(--s4)}
   <a class="brand" href="{% url 'panel:groups' %}">Spreading</a>
   <nav aria-label="Principal">
     <a href="{% url 'panel:groups' %}"{% if request.resolver_match.url_name in 'groups group add' %} aria-current="page"{% endif %}>Grupos</a>
+    <a href="{% url 'panel:links' %}"{% if request.resolver_match.url_name == 'links' %} aria-current="page"{% endif %}>Links</a>
     <a href="/pair">WhatsApp</a>
   </nav>
 </header>

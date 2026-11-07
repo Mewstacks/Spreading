@@ -48,8 +48,9 @@ pares cupom+produto primeiro, com a conta do próprio afiliado:
    passo humano entre links, para na primeira verificação do ML, recusa do Programa só volta em 14 dias.
    O link entra no estoque depois que um GET anônimo confirma que cai na página do produto.
 
-Sem sessão, o painel e `docker compose exec web python manage.py pending_links --org lules` ainda permitem
-o caminho manual (colar no Link Builder e `import_links`).
+Sem sessão (ou se o ML recusar o navegador automático), a página **Links** do painel (`/painel/links/`) lista
+as URLs que faltam, pares primeiro: gere no Link Builder da sua conta, cole `url link` de volta e importe.
+Só entra a URL que o painel pediu e link `meli.la`.
 
 ## Verificação
 `python tools/verify.py` (ruff + pytest). Testes rodam em SQLite; com `DATABASE_URL` rodam em Postgres.

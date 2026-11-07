@@ -302,3 +302,19 @@ def test_send_now_reports_unconfirmed_delivery(client, staff, org, rule, sendabl
     response = client.post(reverse("panel:send_now", args=[rule.id]), follow=True)
     assert "Na fila; envio não confirmado." in response.content.decode()
     assert OutboxItem.unscoped.get().state == OutboxItem.QUEUED
+
+
+def test_links_page_lists_pending_urls_and_imports_pasted_ones(client, staff, org, rule, sendable):
+    rule.active = True  # regra pausada não gera demanda de link
+    rule.save()
+    make_offer(key="MLB777", price=100, frm=200)  # sem link
+    html = page(client, "links")
+    assert "https://www.mercadolivre.com.br/p/MLB777" in html and "1 pendentes" in html
+    client.post(reverse("panel:links"),
+                {"pasted": "https://www.mercadolivre.com.br/p/MLB777 https://meli.la/Z9"})
+    assert AffiliateLink.unscoped.get(product_key="MLB777").affiliate_url == "https://meli.la/Z9"
+    assert "Nada pendente." in page(client, "links")
+
+
+def test_links_page_requires_staff(client, org):
+    assert client.get(reverse("panel:links")).status_code == 302

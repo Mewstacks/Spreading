@@ -24,6 +24,7 @@ from .models import BuilderState, LinkAttempt
 from .verify import verify_landing
 
 ETIQUETA = "linkbuilder"
+ETIQUETA_MANUAL = "manual"
 REFUSED_WAIT = timedelta(days=14)
 UNSAFE_WAIT = timedelta(days=30)
 MAX_FAILS_IN_A_ROW = 3
@@ -66,10 +67,10 @@ def _daily_budget(org, now) -> int:
     return settings.LINKBUILDER_MAX_PER_DAY - done
 
 
-def wanted(org, now, limit: int) -> list:
+def wanted(org, now, limit: int, respect_waits: bool = True) -> list:
     """Ofertas do ML que as regras ativas publicariam se tivessem link, pares cupom primeiro."""
     waiting = LinkAttempt.objects.for_org(org).filter(next_try_at__gt=now)
-    held = set(waiting.values_list("link_key", flat=True))
+    held = set(waiting.values_list("link_key", flat=True)) if respect_waits else set()
     rows = []
     rules = Rule.unscoped.filter(org=org, active=True, type=Rule.OFFERS).select_related(
         "destination", "org"

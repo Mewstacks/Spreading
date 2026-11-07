@@ -12,6 +12,7 @@ from apps.coupons.feed import BRT
 from apps.delivery.models import OutboxItem
 from apps.delivery.outbox import deliver_due, enqueue_for_rule, explain_rule
 from apps.delivery.transports import WahaTransport
+from apps.linkbuilder import manual
 from apps.linkbuilder.models import BuilderState
 from apps.offers import niches
 from apps.offers.models import STORE_LABELS, STORES, Rule
@@ -201,3 +202,20 @@ def send_now(request, rule_id):
         else:
             messages.error(request, "Na fila; envio não confirmado.")
     return redirect("panel:group", rule_id=rule.id)
+
+
+@staff_member_required
+def links(request):
+    org = current_org(request)
+    now = timezone.now()
+    if request.method == "POST":
+        stats = manual.import_pasted(org, request.POST.get("pasted", ""), now)
+        if stats["importados"]:
+            messages.success(request, f"{stats['importados']} importados.")
+        if stats["rejeitados"] or not stats["importados"]:
+            messages.error(request, f"{stats['rejeitados']} linhas recusadas.")
+        return redirect("panel:links")
+    rows = manual.pending(org, now)
+    return render(request, "panel/links.html", {
+        "org": org, "rows": rows, "text": "\n".join(url for url, _key in rows),
+    })

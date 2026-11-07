@@ -1,0 +1,30 @@
+{% extends "panel/base.html" %}
+{% block title %}Links · Spreading{% endblock %}
+{% block content %}
+<div class="head">
+  <h1>Links</h1>
+  <span class="tag">{{ rows|length }} pendentes</span>
+</div>
+{% if rows %}
+<h2>Para gerar</h2>
+<form class="stack" onsubmit="return false">
+  <label class="sr" for="todo">URLs</label>
+  <textarea id="todo" class="area" readonly rows="8">{{ text }}</textarea>
+  <button class="btn" type="button" id="copy">Copiar</button>
+</form>
+<h2>Colar</h2>
+<form class="stack" method="post">{% csrf_token %}
+  <label class="sr" for="pasted">Linhas</label>
+  <textarea id="pasted" name="pasted" class="area" rows="8" placeholder="url link"></textarea>
+  <button class="btn btn-primary" type="submit">Importar</button>
+</form>
+<script>
+document.getElementById("copy").addEventListener("click", function () {
+  var box = document.getElementById("todo"); box.select();
+  if (navigator.clipboard) navigator.clipboard.writeText(box.value); else document.execCommand("copy");
+});
+</script>
+{% else %}
+<div class="empty"><span>Nada pendente.</span><a class="btn" href="{% url 'panel:groups' %}">Grupos</a></div>
+{% endif %}
+{% endblock %}

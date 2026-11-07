@@ -73,3 +73,10 @@ def test_each_term_is_refreshed_at_most_once_an_hour(rule, api):
     assert api["search"][first:] == ["cafeteira"]
     catalog.collect_catalog(NOW + timedelta(minutes=61))  # os antigos vencem depois de 1 h
     assert len(api["search"]) == first + 1 + (first)  # todos de novo, menos o novo (35 min)
+
+
+def test_macro_only_rule_still_drives_collection(org, destination, api):
+    Rule.unscoped.create(org=org, destination=destination, name="M",
+                         niches=[niches.macro_key("Pets e Animais")])
+    catalog.collect_catalog(NOW)
+    assert set(api["search"]) == {"racao", "ração", "petisco", "coleira"}

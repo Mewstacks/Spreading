@@ -294,3 +294,32 @@ def test_driver_is_always_closed(org, three):
     with pytest.raises(RuntimeError):
         go(org, driver)
     assert driver.closed == 1
+
+
+# ── plano B: colar links gerados à mão ────────────────────────────────────
+def test_manual_pending_lists_the_urls_the_builder_would_ask_for(org, three):
+    from apps.linkbuilder import manual
+
+    rows = manual.pending(org, NOW)
+    assert [key for _url, key in rows] == ["MLB333+CODE", "MLB111", "MLB222"]
+    assert rows[0][0] == PAIR_URL
+
+
+def test_manual_import_accepts_only_asked_urls_and_safe_links(org, three):
+    from apps.linkbuilder import manual
+
+    text = "\n".join([
+        f"{PAIR_URL} https://meli.la/PAR",
+        "https://www.mercadolivre.com.br/p/MLB111  https://meli.la/UM.",
+        "https://www.mercadolivre.com.br/p/MLB222 https://evil.io/x",  # link fora do ML
+        "https://www.mercadolivre.com.br/p/MLB222 "
+        "https://www.mercadolivre.com.br/social/loja?matt_word=x",  # vitrine
+        "https://www.mercadolivre.com.br/p/MLB999 https://meli.la/OUTRO",  # ninguém pediu
+        "só texto",
+        "",
+    ])
+    stats = manual.import_pasted(org, text, NOW)
+    assert stats == {"importados": 2, "rejeitados": 4}
+    links = dict(AffiliateLink.objects.for_org(org).values_list("product_key", "affiliate_url"))
+    assert links == {"MLB333+CODE": "https://meli.la/PAR", "MLB111": "https://meli.la/UM"}
+    assert AffiliateLink.objects.for_org(org).get(product_key="MLB111").etiqueta == "manual"

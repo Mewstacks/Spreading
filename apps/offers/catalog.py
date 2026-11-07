@@ -45,7 +45,7 @@ def collect_catalog(now=None, per_term=15, http=None) -> int:
     today = now.astimezone(BRT).date()
     terms = set()
     for rule in Rule.unscoped.filter(active=True, type=Rule.OFFERS):
-        terms.update(rule_terms(rule))
+        terms.update(search_terms(rule))  # macro marcada sem sub-nicho também gera busca
     last = dict(TermRun.objects.filter(term__in={t[:120] for t in terms})
                 .values_list("term", "last_run"))
     count = 0
