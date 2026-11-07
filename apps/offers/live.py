@@ -35,7 +35,9 @@ def validate(offer, min_discount, http=None) -> tuple[Live | None, str]:
         base = offer.price_from or offer.proof_base_price
     else:
         final = live
-        base = offer.price_from
+        # O "De" que vale é o que o anúncio mostra agora; a observação antiga só serve quando a
+        # API não informa o preço original.
+        base = _dec(data["price_from"]) if data.get("price_from") else offer.price_from
     if not base or base <= final:
         return None, "sem_desconto"
     pct = ((1 - final / base) * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)

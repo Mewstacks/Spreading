@@ -157,6 +157,21 @@ def test_requires_owner_link_amazon_uses_org_tag(org, rule):
     assert item and "https://www.amazon.com.br/dp/B012345678?tag=luizahfn-20" in item.body
 
 
+def test_live_original_price_beats_the_observed_one(org, rule, monkeypatch):
+    make_offer(price=100, frm=200)
+    link(org)
+    monkeypatch.setattr(ml_api, "product_price",
+                        lambda pid, http=None: {"price": 100.0, "price_from": 250.0})
+    item = enqueue_for_rule(rule, NOW)
+    assert "~R$ 250~" in item.body and "~R$ 200~" not in item.body  # o "De" é o do anúncio agora
+    OutboxItem.unscoped.all().delete()
+    OfferDelivery.unscoped.all().delete()
+    monkeypatch.setattr(ml_api, "product_price",
+                        lambda pid, http=None: {"price": 100.0, "price_from": 105.0})
+    assert enqueue_for_rule(rule, NOW) is None  # o anúncio hoje quase não tem desconto
+    assert explain_rule(rule, NOW)["prontas"] == 1  # passou na seleção, caiu na prova ao vivo
+
+
 def test_candidates_lists_offers_that_only_lack_the_owner_link(org, destination, rule):
     make_offer(key="MLB111", price=100, frm=200)  # sem link
     make_offer(key="MLB222", price=150, frm=200)  # com link
