@@ -140,3 +140,30 @@ def test_portal_without_controls_is_unavailable(portal, state_file):
     portal.mode = "empty"
     with pytest.raises(Unavailable):
         pw.PlaywrightDriver(state_file).open()
+
+
+def _login_tool():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "tools" / "ml_login.py"
+    spec = importlib.util.spec_from_file_location("ml_login_tool", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_login_tool_saves_the_session_once_the_builder_is_open(portal, tmp_path):
+    tool = _login_tool()
+    target = tmp_path / "secrets" / "ml-state.json"
+    assert tool.main([str(target)], headless=True) == 0
+    assert set(json.loads(target.read_text())) == {"cookies", "origins"}
+
+
+def test_login_tool_saves_nothing_if_the_builder_never_opens(portal, tmp_path, monkeypatch):
+    portal.mode = "login"
+    tool = _login_tool()
+    monkeypatch.setattr(tool, "WAIT_SECONDS", 3)
+    target = tmp_path / "ml-state.json"
+    assert tool.main([str(target)], headless=True) == 1
+    assert not target.exists()

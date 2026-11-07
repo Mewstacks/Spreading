@@ -32,8 +32,9 @@ def builder_is_open(page) -> bool:
         return False
 
 
-def main() -> int:
-    target = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_STATE
+def main(argv=None, headless: bool = False) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    target = Path(argv[0]) if argv else DEFAULT_STATE
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         from playwright.sync_api import sync_playwright
@@ -42,7 +43,7 @@ def main() -> int:
               "python -m playwright install chromium")
         return 2
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=False, args=pw.LAUNCH_ARGS)
+        browser = playwright.chromium.launch(headless=headless, args=pw.LAUNCH_ARGS)
         options = pw.context_options(browser)
         if target.is_file():
             options["storage_state"] = str(target)  # renova a sessão que já existe
