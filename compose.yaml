@@ -51,6 +51,22 @@ services:
       - "127.0.0.1:3000:3000"
     restart: unless-stopped
 
+  # Link Builder do ML (opcional): docker compose --profile linkbuilder up -d linkbuilder
+  # Precisa de .secrets/ml-state.json (tools/ml_login.py). Parar o serviço é a chave geral.
+  linkbuilder:
+    <<: *app
+    profiles: ["linkbuilder"]
+    build:
+      context: .
+      dockerfile: Dockerfile.linkbuilder
+    command: python manage.py build_links --loop 900
+    environment:
+      DATABASE_URL: postgres://spreading:${POSTGRES_PASSWORD}@db:5432/spreading
+      LINKBUILDER_ENABLED: "1"
+      LINKBUILDER_STATE: /secrets/ml-state.json
+    volumes:
+      - ./.secrets:/secrets
+
 volumes:
   pgdata:
   wasessions:

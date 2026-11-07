@@ -12,3 +12,4 @@ docs
 *.log
 *.dump
 *.sql
+.secrets/

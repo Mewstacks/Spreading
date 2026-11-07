@@ -1,0 +1,2 @@
+# Só no computador que roda tools/ml_login.py e os testes do driver (a imagem do Link Builder já traz).
+playwright==1.64.1

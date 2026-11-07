@@ -1,0 +1,9 @@
+# Link Builder do ML: mesma base do app, mais o Chromium do Playwright (a imagem já traz os dois).
+# A versão da imagem é a do `playwright` que tools/ml_login.py usa no seu computador.
+FROM mcr.microsoft.com/playwright/python:v1.64.1-noble
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+CMD ["python", "manage.py", "build_links", "--loop", "900"]

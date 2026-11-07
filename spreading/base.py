@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     "apps.delivery.apps.Config",
     "apps.compose.apps.Config",
     "apps.offers.apps.Config",
+    "apps.linkbuilder.apps.Config",
     "apps.panel.apps.Config",
 ]
 
@@ -109,3 +110,11 @@ WAHA_URL = env("WAHA_URL", "http://waha:3000")
 WAHA_API_KEY = env("WAHA_API_KEY", "")
 WAHA_SESSION = env("WAHA_SESSION", "default")
 HTTP_TIMEOUT_SECONDS = float(env("HTTP_TIMEOUT_SECONDS", "15"))
+
+# Link Builder do ML (gera o meli.la do dono). Desligado por padrão: precisa de sessão salva.
+LINKBUILDER_ENABLED = env_bool("LINKBUILDER_ENABLED", False)
+LINKBUILDER_STATE = env("LINKBUILDER_STATE", "/secrets/ml-state.json")
+LINKBUILDER_MAX_PER_RUN = int(env("LINKBUILDER_MAX_PER_RUN", "8"))
+LINKBUILDER_MAX_PER_DAY = int(env("LINKBUILDER_MAX_PER_DAY", "120"))
+LINKBUILDER_PACE_SECONDS = float(env("LINKBUILDER_PACE_SECONDS", "4"))
+LINKBUILDER_VERIFY = env_bool("LINKBUILDER_VERIFY", True)
