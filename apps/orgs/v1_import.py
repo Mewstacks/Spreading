@@ -42,11 +42,18 @@ def import_v1(data: dict, slug_by_name=None) -> dict:
                 stats["regras_puladas"] += 1  # Telegram/Amazon/Shopee ficam para depois
                 continue
             dest = _destination(org, rule)
-            Rule.unscoped.update_or_create(
-                org=org, name=f"v1-{rule['id']}",
+            kind = Rule.COUPON_NOTICE if rule["tipo"] == "aviso_cupons" else Rule.OFFERS
+            name = f"v1-{rule['id']}"
+            twin = Rule.unscoped.filter(org=org, destination=dest, type=kind).exclude(name=name)
+            if twin.exists():
+                stats["regras_puladas"] += 1  # o painel configura um grupo por vez
+                continue
+            # Só cria: depois da primeira importação a regra é do painel e reimportar não a desfaz.
+            Rule.unscoped.get_or_create(
+                org=org, name=name,
                 defaults={
                     "destination": dest,
-                    "type": Rule.COUPON_NOTICE if rule["tipo"] == "aviso_cupons" else Rule.OFFERS,
+                    "type": kind,
                     "terms": rule.get("termo_busca") or "",
                     "negative_terms": rule.get("termos_negativos") or "",
                     "price_min": _num(rule.get("preco_min")),
@@ -78,10 +85,11 @@ def import_v1(data: dict, slug_by_name=None) -> dict:
         batch = []
         for link in row.get("product_links", []):
             affiliate = safe_affiliate_url(link.get("affiliate_url", ""))
+            if not affiliate or link.get("verificado") is not True:
+                stats["links_rejeitados"] += 1  # vitrine, host estranho ou sem veredito do v1
+                continue
             key = product_key(link.get("url", ""))
-            if not affiliate or not key or key in existing:
-                if not affiliate:
-                    stats["links_rejeitados"] += 1
+            if not key or key in existing:
                 continue
             existing.add(key)
             batch.append(AffiliateLink(org=org, product_key=key, affiliate_url=affiliate))

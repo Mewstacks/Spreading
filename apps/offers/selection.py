@@ -10,6 +10,7 @@ from apps.delivery.models import OfferDelivery
 
 from . import niches
 from .catalog import split_terms
+from .links import is_storefront
 from .models import AffiliateLink, Offer
 
 ML_CATALOG_ID = re.compile(r"^MLB\d+$")
@@ -68,7 +69,8 @@ def resolve_link(org, offer, links: dict) -> str:
             f"https://www.amazon.com.br/dp/{offer.product_key}?tag={org.amazon_tag}"
             if org.amazon_tag and offer.product_key else ""
         )
-    return links.get(offer.link_key, "")
+    url = links.get(offer.link_key, "")
+    return "" if is_storefront(url) else url  # cinto e suspensório: o estoque já recusa na entrada
 
 
 def score(offer, match_kind: str, now) -> float:

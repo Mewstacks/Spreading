@@ -8,6 +8,7 @@ from apps.compose.offer import build_offer_message, short_name
 from apps.delivery.models import OfferDelivery, OutboxItem
 from apps.delivery.outbox import deliver_due, enqueue_for_rule, enqueue_offer, explain_rule
 from apps.offers import ml_api, niches
+from apps.offers.links import safe_affiliate_url
 from apps.offers.models import AffiliateLink, Offer, Rule
 from apps.offers.selection import in_window, is_live_checkable
 from tests.conftest import NOW, FakeTransport
@@ -154,6 +155,22 @@ def test_requires_owner_link_amazon_uses_org_tag(org, rule):
     org.save()
     item = enqueue_for_rule(rule, NOW)
     assert item and "https://www.amazon.com.br/dp/B012345678?tag=luizahfn-20" in item.body
+
+
+def test_safe_affiliate_url_rejects_storefront_and_foreign_hosts():
+    assert safe_affiliate_url("https://meli.la/2Ehvccw") == "https://meli.la/2Ehvccw"
+    for bad in ["https://www.mercadolivre.com.br/social/lphoffmann?matt_word=x&matt_tool=1",
+                "https://www.mercadolivre.com.br/social/loja/lists", "http://meli.la/x",
+                "https://evil.io/meli.la", ""]:
+        assert safe_affiliate_url(bad) == "", bad
+
+
+def test_storefront_link_is_never_published_even_if_stored(org, rule):
+    make_offer()
+    link(org, url="https://www.mercadolivre.com.br/social/loja?matt_word=x&matt_tool=1&ref=abc")
+    assert enqueue_for_rule(rule, NOW) is None
+    assert explain_rule(rule, NOW)["sem_link_do_dono"] == 1
+    assert OutboxItem.unscoped.count() == 0
 
 
 def test_stores_filter_and_freshness(org, rule):

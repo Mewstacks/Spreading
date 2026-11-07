@@ -12,12 +12,18 @@ from .models import AffiliateLink, Offer
 ALLOWED_AFFILIATE_HOSTS = ("meli.la", "mercadolivre.com.br", "mercadolibre.com")
 
 
+def is_storefront(url: str) -> bool:
+    """`/social/…` é a vitrine do afiliado, não o anúncio: o comprador cai na página dele e não
+    no produto (regressão que o v1 já pagou). Nunca é link publicável."""
+    return "/social/" in urlparse((url or "").strip()).path.lower()
+
+
 def safe_affiliate_url(url: str) -> str:
     parsed = urlparse(url.strip())
     host = (parsed.hostname or "").lower()
     ok = parsed.scheme == "https" and any(
         host == h or host.endswith("." + h) for h in ALLOWED_AFFILIATE_HOSTS
-    )
+    ) and not is_storefront(url)
     return url.strip() if ok else ""
 
 

@@ -38,12 +38,14 @@ for oid, name in orgs:
             for c in LinkAfiliadoCupomUsuario.objects.filter(organization_id=oid, estado="pronto")
             .exclude(verificado_ok=False)
         ]
+        # No ML o v1 publica o meli.la do Link Builder (`link_afiliado`); `url_canonica` é a
+        # expansão /social/ (vitrine) e nunca vai no post. `verificado` = destino conferido.
         products = [
-            {"url": lk.produto.link_produto, "affiliate_url": lk.url_canonica or lk.link_afiliado,
-             "marketplace": lk.produto.marketplace}
+            {"url": lk.produto.link_produto, "affiliate_url": lk.link_afiliado,
+             "verificado": lk.verificado_ok, "marketplace": lk.produto.marketplace}
             for lk in LinkAfiliadoUsuario.objects.filter(organization_id=oid, afiliado_ok=True)
             .exclude(verificado_ok=False).select_related("produto").iterator(chunk_size=2000)
-            if lk.produto.marketplace == "mercadolivre" and (lk.url_canonica or lk.link_afiliado)
+            if lk.produto.marketplace == "mercadolivre" and lk.link_afiliado
         ]
     out["orgs"].append({"id": str(oid), "name": name, "rules": rules,
                         "container_links": containers, "product_links": products})
