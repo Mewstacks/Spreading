@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import requests
@@ -93,18 +94,31 @@ def _parse_date(text) -> date | None:
         return None
 
 
+CODE_RE = re.compile(r"^[A-Z0-9][A-Z0-9_-]{2,39}$")
+ALLOWED_HOST_SUFFIX = ".mercadolivre.com.br"
+
+
+def safe_container_url(url: str) -> str:
+    """Só https em *.mercadolivre.com.br; qualquer outra coisa vira vazio."""
+    parsed = urlparse(url.strip())
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not host.endswith(ALLOWED_HOST_SUFFIX):
+        return ""
+    return url.strip()
+
+
 def normalize(row: dict, today: date) -> CouponData | None:
     code = str(row.get("nome") or "").strip().upper()
     valid_until = _parse_date(row.get("dia_fim"))
     starts_on = _parse_date(row.get("dia_inicio"))
-    if not code or not valid_until or valid_until < today:
+    if not CODE_RE.match(code) or not valid_until or valid_until < today:
         return None
     if starts_on and starts_on > today:
         return None
     value_text = str(row.get("valor_desconto") or "")
     number = parse_br_number(value_text)
     is_amount = "R$" in value_text.upper()
-    container = str(row.get("container_url") or "").strip()
+    container = safe_container_url(str(row.get("container_url") or ""))
     site_wide = bool(row.get("is_mar_aberto"))
     return CouponData(
         code=code,
@@ -114,7 +128,7 @@ def normalize(row: dict, today: date) -> CouponData | None:
         max_discount=parse_br_number(row.get("desconto_max")),
         starts_on=starts_on,
         valid_until=valid_until,
-        container_url=container if container.startswith("http") else "",
+        container_url=container,
         scope=Coupon.SITE if site_wide else (Coupon.CONTAINER if container else Coupon.PRODUCTS),
     )
 
