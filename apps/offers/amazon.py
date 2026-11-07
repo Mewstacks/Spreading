@@ -40,6 +40,9 @@ MIN_RATING = Decimal("4.0")
 PACE_SECONDS = 3
 CARD = re.compile(r'(?=<div[^>]+data-component-type="s-search-result")')
 ASIN = re.compile(r'data-asin="([A-Z0-9]{10})"')
+COUPON_FINAL = re.compile(r"s-coupon-unclipped.*?Voc\S{1,3} paga\s+R\$\s*([\d.]+,\d{2})", re.S)
+COUPON_VALUE = re.compile(
+    r"s-coupon-clipped.*?Cupom de\s+(?:(\d+(?:,\d+)?)\s*%|R\$\s*([\d.]+(?:,\d{2})?))", re.S)
 SIZE_SUFFIX = re.compile(r"\._[A-Za-z0-9_,]+_(\.(?:jpg|jpeg|png|webp))$")
 MONEY = re.compile(r"(\d{1,3}(?:\.\d{3})*|\d+),(\d{2})")
 
@@ -75,24 +78,41 @@ def parse(html: str) -> list[dict]:
         struck = _money(_first(r'a-price a-text-price[^>]*>.*?a-offscreen">([^<]+)<', block))
         rating = _first(r'a-icon-alt">(\d,\d) de 5', block)
         image = _first(r'class="s-image"[^>]*?src="([^"]+)"', block)
-        if asin and title and price and struck and image:
+        coupon_final = _money(_first(COUPON_FINAL.pattern, block))
+        value = COUPON_VALUE.search(block)
+        coupon_pct = Decimal(value.group(1).replace(",", ".")) if value and value.group(1) else None
+        coupon_amount = (
+            Decimal(value.group(2).replace(".", "").replace(",", ".")) if value and value.group(2)
+            else None)
+        if asin and title and price and (struck or coupon_final) and image:
             # `._AC_UL320_.jpg` é a miniatura de 320 px; sem o sufixo vem a imagem original.
             out.append({"asin": asin, "title": unescape(title),
                         "image": SIZE_SUFFIX.sub(r"\g<1>", unescape(image)),
-                        "price": price, "struck": struck,
+                        "price": price, "struck": struck, "coupon_final": coupon_final,
+                        "coupon_pct": coupon_pct, "coupon_amount": coupon_amount,
                         "rating": Decimal(rating.replace(",", ".")) if rating else None})
     return out
 
 
 def vet(card: dict) -> dict | None:
+    """Preço final = o que o cartão mostra com o cupom ("Você paga R$ x com o cupom") ou o preço
+    atual. A base do "De" é o preço riscado do anúncio ou, sem ele, o preço antes do cupom."""
     price, struck = card["price"], card["struck"]
-    if struck <= price or card["rating"] is None or card["rating"] < MIN_RATING:
+    final = card.get("coupon_final")
+    if final and final >= price:
+        final = None
+    if card["rating"] is None or card["rating"] < MIN_RATING:
         return None
-    pct = ((1 - price / struck) * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    base = struck if struck and struck > price else (price if final else None)
+    target = final or price
+    if base is None or base <= target:
+        return None
+    pct = ((1 - target / base) * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     image = safe_image_url(card["image"])
     if not (MIN_DISCOUNT <= pct <= MAX_DISCOUNT) or not image or is_prohibited(card["title"]):
         return None
-    return {**card, "pct": pct, "image": image}
+    return {**card, "pct": pct, "image": image, "final": target, "base": base,
+            "coupon": bool(final)}
 
 
 def fetch(term: str, http=None) -> str:
@@ -146,8 +166,14 @@ def collect(now=None, http=None, sleep=time.sleep) -> int:
                             "title": row["title"][:300],
                             "url": f"https://www.amazon.com.br/dp/{row['asin']}",
                             "image_url": row["image"], "macro": niches.classify(row["title"]),
-                            "price_from": row["struck"], "price_to": row["price"],
+                            "price_from": row["base"], "price_to": row["final"],
                             "discount_pct": row["pct"], "last_seen": now,
+                            # cupom de ativação na página do produto; sem prazo no cartão, vale o
+                            # frescor (3 h) e a coleta de hora em hora
+                            "coupon_kind": "activation" if row["coupon"] else "",
+                            "coupon_pct": row["coupon_pct"] if row["coupon"] else None,
+                            "coupon_amount": row["coupon_amount"] if row["coupon"] else None,
+                            "coupon_cap": None, "coupon_min": None, "coupon_until": None,
                         },
                     )
             TermRun.objects.update_or_create(term=key, defaults={"last_run": now})

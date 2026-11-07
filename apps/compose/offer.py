@@ -46,6 +46,8 @@ def short_name(title: str, limit: int = 50) -> str:
 def coupon_line(offer) -> str:
     if offer.coupon_kind == "code" and offer.coupon_code:
         return f"🎟️ CUPOM: {offer.coupon_code}"
+    if getattr(offer, "store", "") == "amazon":
+        return "🎟️ CUPOM: ative na página"  # caixinha "Aplicar cupom" no produto
     return "🎟️ CUPOM: ative no link"
 
 

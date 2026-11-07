@@ -11,8 +11,20 @@ from apps.offers.models import Offer, Rule, TermRun
 from tests.conftest import NOW
 
 
+def coupon_html(final, label):
+    return (
+        '<span data-component-type="s-coupon-component" class="rush-component">'
+        '<span class="s-coupon-clipped aok-block aok-hidden">'
+        '<span class="s-coupon-highlight-color">'
+        f'Você paga R$ {final}</span> <span class="a-color-base">{label} aplicado</span></span>'
+        '<span class="s-coupon-unclipped aok-block">'
+        '<span class="s-coupon-highlight-color">'
+        f'Você paga R$ {final}</span> <span class="a-color-base"> com o cupom</span></span></span>'
+    )
+
+
 def card(asin="B0CH5PRZH9", title="Air Fryer Oven Digital 12L", price="542,71", struck="789,90",
-         rating="4,6", image="https://m.media-amazon.com/images/I/51W._AC_UL320_.jpg"):
+         rating="4,6", image="https://m.media-amazon.com/images/I/51W._AC_UL320_.jpg", coupon=""):
     stars = f'<span class="a-icon-alt">{rating} de 5 estrelas</span>' if rating else ""
     return (
         f'<div role="listitem" data-asin="{asin}" data-component-type="s-search-result">'
@@ -20,8 +32,9 @@ def card(asin="B0CH5PRZH9", title="Air Fryer Oven Digital 12L", price="542,71", 
         f"<span>{title}</span></h2>{stars}"
         f'<span class="a-price" data-a-size="xl"><span class="a-offscreen">R$\xa0{price}</span>'
         f'<span aria-hidden="true">x</span></span>'
-        f'<span class="a-price a-text-price" data-a-strike="true"><span class="a-offscreen">'
-        f'R$\xa0{struck}</span></span></div>'
+        + (f'<span class="a-price a-text-price" data-a-strike="true"><span class="a-offscreen">'
+           f'R$\xa0{struck}</span></span>' if struck else "")
+        + coupon + '</div>'
     )
 
 
@@ -129,3 +142,57 @@ def test_switch_off(org, rule, settings):
     settings.AMAZON_COLLECT = False
     http = Http(page(card()))
     assert amazon.collect(NOW, http=http) == 0 and http.calls == []
+
+
+# ── cupom no cartão ───────────────────────────────────────────────────────
+def test_parse_reads_the_coupon_and_the_price_after_it():
+    five = coupon_html("65,45", "Cupom de 5% de desconto")
+    html = page(card(price="68,90", struck="", coupon=five))
+    [row] = amazon.parse(html)
+    assert row["coupon_final"] == Decimal("65.45") and row["coupon_pct"] == Decimal("5")
+    assert row["coupon_amount"] is None and row["struck"] is None
+    html = page(card(price="100,00", struck="150,00",
+                     coupon=coupon_html("80,00", "Cupom de R$ 20 de desconto")))
+    [row] = amazon.parse(html)
+    assert row["coupon_amount"] == Decimal("20") and row["coupon_pct"] is None
+
+
+def test_vet_uses_the_coupon_price_and_the_pre_coupon_price_as_base():
+    [row] = amazon.parse(page(card(price="100,00", struck="",
+                                   coupon=coupon_html("70,00", "Cupom de 30% de desconto"))))
+    vetted = amazon.vet(row)
+    assert vetted["coupon"]
+    assert (vetted["base"], vetted["final"]) == (Decimal("100.00"), Decimal("70.00"))
+    assert vetted["pct"] == Decimal("30.00")
+    [row] = amazon.parse(page(card(price="100,00", struck="120,00",
+                                   coupon=coupon_html("70,00", "Cupom de 30% de desconto"))))
+    assert amazon.vet(row)["base"] == Decimal("120.00")  # o riscado do anúncio é o "De"
+    # um "Você paga" que não é menor que o preço não é cupom
+    [row] = amazon.parse(page(card(price="100,00", struck="130,00",
+                                   coupon=coupon_html("100,00", "Cupom de 1% de desconto"))))
+    assert amazon.vet(row)["coupon"] is False
+
+
+def test_coupon_card_becomes_an_activation_pair_in_the_golden_message(org, rule, monkeypatch):
+    monkeypatch.setattr("apps.delivery.outbox.fetch_image_jpeg", lambda url: b"jpeg")
+    thirty = coupon_html("70,00", "Cupom de 30% de desconto")
+    html = page(card(price="100,00", struck="", coupon=thirty))
+    assert amazon.collect(NOW, http=Http(html), sleep=lambda s: None) == 1
+    offer = Offer.objects.get()
+    assert (offer.coupon_kind, offer.coupon_pct, offer.coupon_until) == (
+        "activation", Decimal("30.00"), None)
+    assert (offer.price_from, offer.price_to) == (Decimal("100.00"), Decimal("70.00"))
+    item = enqueue_for_rule(rule, NOW)
+    expected = "\n".join([
+        "🛍️ *Air Fryer Oven Digital 12L*", "",
+        "🎟️ CUPOM: ative na página", "",
+        "De ❌ ~R$ 100~", "Por 🔥 *R$ 70*", "",
+        "Cupom: 30% OFF", "",
+        "🔗 https://www.amazon.com.br/dp/B0CH5PRZH9?tag=luizahfn-20",
+    ])
+    assert item.body == expected
+    # na coleta seguinte o cupom some: a oferta volta a ser comum (nada de cupom velho)
+    plain = Http(page(card(price="100,00", struck="130,00")))
+    amazon.collect(NOW + timedelta(hours=2), http=plain, sleep=lambda s: None)
+    offer.refresh_from_db()
+    assert offer.coupon_kind == "" and offer.coupon_pct is None
