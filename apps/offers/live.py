@@ -6,6 +6,7 @@ from . import ml_api
 from .selection import is_live_checkable
 
 TOLERANCE = Decimal("0.01")
+SUSPECT_PCT = Decimal(70)  # acima disso o "De" só vale se o anúncio confirma agora
 
 
 @dataclass
@@ -37,10 +38,13 @@ def validate(offer, min_discount, http=None) -> tuple[Live | None, str]:
         final = live
         # O "De" que vale é o que o anúncio mostra agora; a observação antiga só serve quando a
         # API não informa o preço original.
-        base = _dec(data["price_from"]) if data.get("price_from") else offer.price_from
+        confirmed = bool(data.get("price_from"))
+        base = _dec(data["price_from"]) if confirmed else offer.price_from
     if not base or base <= final:
         return None, "sem_desconto"
     pct = ((1 - final / base) * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     if pct < Decimal(min_discount):
         return None, "desconto_caiu"
+    if not offer.coupon_kind and pct > SUSPECT_PCT and not confirmed:
+        return None, "desconto_suspeito"
     return Live(final, base, pct), ""

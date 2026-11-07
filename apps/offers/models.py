@@ -36,6 +36,10 @@ class Rule(OrgScopedModel):
     active = models.BooleanField(default=True)
     last_sent_at = models.DateTimeField(null=True, blank=True)
 
+    # Cupom: "first" = par cupom+produto antes das demais; "only" = só cupom; "off" = sem cupom.
+    COUPON_MODES = [("first", "Primeiro"), ("only", "Só cupom"), ("off", "Sem cupom")]
+    coupon_mode = models.CharField(max_length=5, choices=COUPON_MODES, default="first")
+
     DAILY_CEILING = 30
 
     def __str__(self):

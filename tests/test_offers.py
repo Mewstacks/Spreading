@@ -317,3 +317,57 @@ def test_photo_failure_at_send_keeps_cooldown_no_loop(org, destination, rule, mo
     item.refresh_from_db()
     assert item.state == OutboxItem.FAILED and item.last_error == "foto_indisponivel"
     assert OfferDelivery.objects.for_org(org).count() == 1  # não volta ao pool na hora
+
+
+def test_coupon_mode_only_first_and_off(org, destination, rule):
+    make_offer(key="MLB111", price=100, frm=200)  # 50%, sem cupom
+    make_offer(key="MLB333", price=60, frm=100, link_key="MLB333+CODE", coupon_kind="code",
+               coupon_code="CODE", coupon_until=NOW + timedelta(days=5))  # 40%, par
+    link(org, key="MLB111")
+    link(org, key="MLB333+CODE")
+
+    def order():
+        return [o.link_key for o, _l in selection.candidates(org, destination, rule, NOW)]
+
+    assert order() == ["MLB333+CODE", "MLB111"]  # padrão: par cupom primeiro
+    rule.coupon_mode = "only"
+    assert order() == ["MLB333+CODE"]
+    rule.coupon_mode = "off"
+    assert order() == ["MLB111"]
+
+
+def test_enqueue_specific_sends_the_chosen_offer_with_the_same_proofs(org, destination, rule):
+    from apps.delivery.outbox import enqueue_specific
+
+    offer = make_offer(key="MLB111", price=100, frm=200)
+    assert enqueue_specific(org, rule, offer, NOW) == (None, "sem_link_do_dono")
+    link(org, key="MLB111")
+    item, reason = enqueue_specific(org, rule, offer, NOW)
+    assert reason == "" and item.kind == "offer" and "https://meli.la/abc" in item.body
+    assert enqueue_specific(org, rule, offer, NOW)[1] == "grupo_indisponivel"  # há item na fila
+
+
+def test_enqueue_specific_refuses_stale_expired_and_unproven(org, destination, rule, live_price):
+    from apps.delivery.outbox import enqueue_specific
+
+    link(org, key="MLB111")
+    link(org, key="MLB222+CODE")
+    stale = make_offer(key="MLB111", seen=NOW - timedelta(days=20))
+    assert enqueue_specific(org, rule, stale, NOW)[1] == "observacao_velha"
+    expired = make_offer(key="MLB222", link_key="MLB222+CODE", coupon_kind="code",
+                         coupon_code="C", coupon_until=NOW - timedelta(hours=1))
+    assert enqueue_specific(org, rule, expired, NOW)[1] == "cupom_vencido"
+    live_price["price"] = 0
+    fresh = make_offer(key="MLB111", price=100, frm=200)
+    assert enqueue_specific(org, rule, fresh, NOW)[1] == "preco_inconclusivo"
+
+
+def test_huge_discount_needs_the_listing_to_confirm_the_original_price(org, rule, monkeypatch):
+    make_offer(price=100, frm=600)  # 83% só na observação antiga
+    link(org)
+    monkeypatch.setattr(ml_api, "product_price", lambda pid, http=None: {"price": 100.0})
+    assert enqueue_for_rule(rule, NOW) is None
+    assert explain_rule(rule, NOW)["prontas"] == 1
+    monkeypatch.setattr(ml_api, "product_price",
+                        lambda pid, http=None: {"price": 100.0, "price_from": 600.0})
+    assert enqueue_for_rule(rule, NOW) is not None  # o anúncio mostra o "De" agora

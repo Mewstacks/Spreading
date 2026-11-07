@@ -1,5 +1,6 @@
 """Painel enxuto: escolher, por grupo, nichos, lojas e cadência."""
 import re
+from decimal import Decimal, InvalidOperation
 
 from django.contrib import messages
 from django.contrib.admin.views.decorators import staff_member_required
@@ -29,6 +30,7 @@ REASONS = {
     "regra_ou_grupo_fora_da_janela": "Fora da janela ou no intervalo",
     "sem_foto": "Sem foto",
     "desconto_caiu": "Desconto caiu",
+    "desconto_suspeito": "Desconto suspeito",
     "preco_inconclusivo": "Preço inconclusivo",
     "preco_diverge_da_prova": "Preço mudou",
     "sem_desconto": "Sem desconto",
@@ -40,6 +42,7 @@ BUILDER_LABELS = {
     "pronto": "Pronto", "ocioso": "Ocioso", "desligado": "Desligado", "sem_sessao": "Sem sessão",
     "login": "Entrar de novo", "verificacao": "Verificação", "indisponivel": "Fora do ar",
 }
+WEEKDAYS = {"1": "Seg", "2": "Ter", "3": "Qua", "4": "Qui", "5": "Sex", "6": "Sáb", "7": "Dom"}
 BUILDER_FINE = {"pronto", "ocioso"}
 WHATSAPP_LABELS = {"WORKING": "Conectado", "SCAN_QR_CODE": "Ler o QR", "STARTING": "Iniciando",
                    "PASSKEY_REQUIRED": "Passkey", "PASSKEY_CONFIRMATION_REQUIRED": "Passkey",
@@ -140,6 +143,18 @@ def _int(value, lo, hi, default):
         return default
 
 
+def _money(value):
+    try:
+        number = Decimal(str(value or "").strip().replace(",", "."))
+    except InvalidOperation:
+        return None
+    return number.quantize(Decimal("0.01")) if 0 < number < Decimal("10000000") else None
+
+
+def _terms(value) -> str:
+    return ", ".join(t.strip() for t in str(value or "").split(",") if t.strip())[:500]
+
+
 def _get_rule(org, rule_id):
     try:
         return Rule.objects.for_org(org).select_related("destination").get(id=rule_id)
@@ -162,6 +177,16 @@ def group(request, rule_id):
         rule.min_discount_pct = _int(request.POST.get("min_discount"), 1, 90, 15)
         rule.interval_minutes = _int(request.POST.get("interval"), 1, 1440, rule.interval_minutes)
         rule.active = request.POST.get("active") == "on"
+        mode = request.POST.get("coupon_mode")
+        rule.coupon_mode = mode if mode in dict(Rule.COUPON_MODES) else rule.coupon_mode
+        low, high = _money(request.POST.get("price_min")), _money(request.POST.get("price_max"))
+        if low and high and low > high:
+            low, high = high, low
+        rule.price_min, rule.price_max = low, high
+        rule.terms = _terms(request.POST.get("terms"))
+        rule.negative_terms = _terms(request.POST.get("negative_terms"))
+        days = {d for d in request.POST.getlist("weekdays") if d in WEEKDAYS}
+        rule.weekdays = ",".join(sorted(days)) if len(days) < 7 else ""
         rule.save()
         messages.success(request, "Salvo.")
         return redirect("panel:group", rule_id=rule.id)
@@ -191,7 +216,9 @@ def group(request, rule_id):
     return render(request, "panel/group.html", {
         "org": org, "rule": rule, "tree": tree, "explain": explain, "sent": sent,
         "stores": [(s, STORE_LABELS[s], s in rule.store_list) for s in STORES],
-        "hours": range(24),
+        "hours": range(24), "coupon_modes": Rule.COUPON_MODES,
+        "weekdays": [(k, label, k in rule.weekdays.split(",") or not rule.weekdays)
+                     for k, label in WEEKDAYS.items()],
     })
 
 

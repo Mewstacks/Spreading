@@ -83,6 +83,9 @@ details.macro .chips{padding:0 var(--s4) var(--s4)}
 .field label{font-size:var(--fs-s);color:var(--muted)}
 .field input,.field select{min-height:44px;padding:0 var(--s3);font:inherit;color:var(--text);
   background:var(--surface);border:1px solid var(--control);border-radius:var(--radius)}
+.fields.three{grid-template-columns:1fr 1fr}
+@media (min-width:720px){.fields.three{grid-template-columns:repeat(3,1fr)}}
+.field.wide{grid-column:1/-1}
 .actions{display:flex;flex-wrap:wrap;gap:var(--s2);margin-top:var(--s5)}
 .msg{margin:0 0 var(--s3);padding:var(--s3) var(--s4);border-radius:var(--radius);
   background:var(--accent-soft);border:1px solid var(--accent)}
@@ -103,6 +106,21 @@ details.macro .chips{padding:0 var(--s4) var(--s4)}
 .pick strong{overflow-wrap:anywhere}
 .stack{display:grid;gap:var(--s2)}
 .area{width:100%;padding:var(--s3);font:.8rem/1.5 ui-monospace,Consolas,monospace;color:var(--text);background:var(--surface);border:1px solid var(--control);border-radius:var(--radius);resize:vertical}
+.toolbar{display:grid;grid-template-columns:1fr 1fr;gap:var(--s2);margin-bottom:var(--s4)}
+.toolbar input{grid-column:1/-1}
+.toolbar input,.toolbar select{min-width:0;min-height:44px;padding:0 var(--s3);font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--control);border-radius:var(--radius)}
+.toolbar .btn{grid-column:1/-1}
+@media (min-width:720px){.toolbar{grid-template-columns:1fr 160px 140px auto}.toolbar input,.toolbar .btn{grid-column:auto}}
+.items{list-style:none;margin:0;padding:0;display:grid;gap:var(--s2)}
+.item{display:grid;grid-template-columns:56px 1fr;gap:var(--s3);align-items:start;padding:var(--s3);background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
+.item .thumb{width:56px;height:56px;object-fit:contain;border-radius:8px;background:#fff}
+.item h3{margin:0 0 var(--s1);font-size:var(--fs-m);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere}
+.item .send{grid-column:1/-1;display:flex;gap:var(--s2)}
+.item .send select{flex:1;min-width:0;min-height:44px;padding:0 var(--s3);font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--control);border-radius:var(--radius)}
+@media (min-width:720px){.item{grid-template-columns:56px 1fr auto;align-items:center}.item .send{grid-column:auto}}
+.pager{display:flex;align-items:center;justify-content:center;gap:var(--s4);margin-top:var(--s4)}
+details .feed{padding:0 var(--s4) var(--s4)}
+@media (max-width:719px){.bar{flex-wrap:wrap}.bar nav{order:3;width:100%;overflow-x:auto}.bar nav a{padding:0 6px;white-space:nowrap}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
@@ -111,6 +129,8 @@ details.macro .chips{padding:0 var(--s4) var(--s4)}
   <a class="brand" href="{% url 'panel:groups' %}">Spreading</a>
   <nav aria-label="Principal">
     <a href="{% url 'panel:groups' %}"{% if request.resolver_match.url_name in 'groups group add' %} aria-current="page"{% endif %}>Grupos</a>
+    <a href="{% url 'panel:coupons' %}"{% if request.resolver_match.url_name == 'coupons' %} aria-current="page"{% endif %}>Cupons</a>
+    <a href="{% url 'panel:offers' %}"{% if request.resolver_match.url_name == 'offers' %} aria-current="page"{% endif %}>Ofertas</a>
     <a href="{% url 'panel:links' %}"{% if request.resolver_match.url_name == 'links' %} aria-current="page"{% endif %}>Links</a>
     <a href="/pair">WhatsApp</a>
   </nav>

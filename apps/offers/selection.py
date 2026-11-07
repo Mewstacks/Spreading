@@ -110,6 +110,10 @@ def candidates(org, destination, rule, now, report: Counter | None = None,
         .exclude(image_url="")
         .exclude(coupon_until__lt=now)
     )
+    if rule.coupon_mode == "only":
+        pool = pool.exclude(coupon_kind="")
+    elif rule.coupon_mode == "off":
+        pool = pool.filter(coupon_kind="")
     ranked = []
     for offer in pool.iterator(chunk_size=1000):
         reason = fresh_enough(offer, now)

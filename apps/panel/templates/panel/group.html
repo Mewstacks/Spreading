@@ -44,6 +44,26 @@
     <div class="field"><label for="interval">Intervalo (min)</label>
       <input id="interval" name="interval" type="number" inputmode="numeric" min="1" max="1440" value="{{ rule.interval_minutes }}"></div>
   </div>
+
+  <h2>Filtros</h2>
+  <div class="fields three">
+    <div class="field"><label for="coupon_mode">Cupom</label>
+      <select id="coupon_mode" name="coupon_mode">{% for key, label in coupon_modes %}<option value="{{ key }}"{% if key == rule.coupon_mode %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+    <div class="field"><label for="price_min">Preço mín.</label>
+      <input id="price_min" name="price_min" type="text" inputmode="decimal" value="{{ rule.price_min|default_if_none:''|floatformat:'-2' }}"></div>
+    <div class="field"><label for="price_max">Preço máx.</label>
+      <input id="price_max" name="price_max" type="text" inputmode="decimal" value="{{ rule.price_max|default_if_none:''|floatformat:'-2' }}"></div>
+    <div class="field wide"><label for="terms">Palavras</label>
+      <input id="terms" name="terms" type="text" maxlength="500" placeholder="vírgula separa" value="{{ rule.terms }}"></div>
+    <div class="field wide"><label for="negative_terms">Excluir</label>
+      <input id="negative_terms" name="negative_terms" type="text" maxlength="500" placeholder="vírgula separa" value="{{ rule.negative_terms }}"></div>
+  </div>
+  <h2>Dias</h2>
+  <div class="chips" role="group" aria-label="Dias">
+    {% for key, label, on in weekdays %}
+    <label class="chip"><input type="checkbox" name="weekdays" value="{{ key }}"{% if on %} checked{% endif %}><span>{{ label }}</span></label>
+    {% endfor %}
+  </div>
 </form>
 
 <div class="actions">

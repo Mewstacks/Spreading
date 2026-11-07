@@ -14,7 +14,7 @@ from apps.compose.offer import build_offer_message
 from apps.coupons.feed import BRT
 from apps.coupons.models import Coupon
 from apps.offers import live, selection
-from apps.offers.models import Rule
+from apps.offers.models import AffiliateLink, Rule
 from apps.orgs.models import ContainerLink
 
 from .models import CouponDelivery, OfferDelivery, OutboxItem
@@ -151,27 +151,62 @@ def enqueue_offer(org, rule, now=None, report: Counter | None = None, http=None,
         if fetch_image_jpeg(offer.image_url) is None:
             report["sem_foto"] += 1  # sem foto, sem post
             continue
-        offer.price_to, offer.price_from, offer.discount_pct = (
-            proof.price_to, proof.price_from, proof.discount_pct
-        )
-        key_src = f"{org.id}|{destination.id}|{offer.link_key}|{offer.valid_on}"
-        try:
-            with transaction.atomic():
-                item = OutboxItem.unscoped.create(
-                    org=org, destination=destination, rule=rule, kind="offer", created_at=now,
-                    body=build_offer_message(offer, link), next_attempt_at=now,
-                    image_url=offer.image_url,
-                    idempotency_key=hashlib.sha256(key_src.encode()).hexdigest(),
-                )
-                OfferDelivery.unscoped.create(
-                    org=org, destination=destination, product_key=offer.product_key,
-                    outbox_item=item, created_at=now,
-                )
-        except IntegrityError:
+        item = _create_offer_item(org, rule, destination, offer, link, proof, now)
+        if item is None:
             report["ja_enfileirada"] += 1
             continue
         return item
     return None
+
+
+def _create_offer_item(org, rule, destination, offer, link, proof, now):
+    """Item do outbox + registro de entrega; None se a oferta já foi enfileirada hoje."""
+    offer.price_to, offer.price_from, offer.discount_pct = (
+        proof.price_to, proof.price_from, proof.discount_pct
+    )
+    key_src = f"{org.id}|{destination.id}|{offer.link_key}|{offer.valid_on}"
+    try:
+        with transaction.atomic():
+            item = OutboxItem.unscoped.create(
+                org=org, destination=destination, rule=rule, kind="offer", created_at=now,
+                body=build_offer_message(offer, link), next_attempt_at=now,
+                image_url=offer.image_url,
+                idempotency_key=hashlib.sha256(key_src.encode()).hexdigest(),
+            )
+            OfferDelivery.unscoped.create(
+                org=org, destination=destination, product_key=offer.product_key,
+                outbox_item=item, created_at=now,
+            )
+    except IntegrityError:
+        return None
+    return item
+
+
+def enqueue_specific(org, rule, offer, now=None, http=None):
+    """Envio manual de uma oferta escolhida no painel: as mesmas provas do automático (link do
+    dono, frescor, cupom no prazo, preço ao vivo, foto), sem janela, intervalo nem cooldown.
+    Devolve (item, '') ou (None, motivo)."""
+    now = now or timezone.now()
+    destination = rule.destination
+    if not _destination_ready(org, destination, now):
+        return None, "grupo_indisponivel"
+    links = dict(AffiliateLink.objects.for_org(org)
+                 .filter(product_key=offer.link_key).values_list("product_key", "affiliate_url"))
+    link = selection.resolve_link(org, offer, links)
+    if not link:
+        return None, "sem_link_do_dono"
+    if offer.coupon_until and offer.coupon_until < now:
+        return None, "cupom_vencido"
+    stale = selection.fresh_enough(offer, now)
+    if stale:
+        return None, stale
+    proof, reason = live.validate(offer, 1, http=http)
+    if proof is None:
+        return None, reason
+    if fetch_image_jpeg(offer.image_url) is None:
+        return None, "sem_foto"
+    item = _create_offer_item(org, rule, destination, offer, link, proof, now)
+    return (item, "") if item else (None, "ja_enfileirada")
 
 
 def explain_rule(rule, now=None, http=None) -> Counter:

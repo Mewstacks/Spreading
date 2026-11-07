@@ -35,6 +35,20 @@ Preencha `SHOPEE_APP_ID` e `SHOPEE_APP_SECRET` no `.env` e marque Shopee na regr
 os termos da regra no máximo uma vez por hora. A API não traz o preço original: o "De" é derivado do
 `priceDiscountRate`, então só entra produto com desconto de 5% a 70%, nota ≥ 4,5 e ≥ 50 vendas.
 
+## Telas do painel
+- **Grupos**: um card por grupo (estado, enviadas hoje, nichos) e o estado do WhatsApp e do Link Builder.
+  Dentro do grupo: nichos, lojas, envio (teto, janela, desconto mínimo, intervalo) e filtros (cupom
+  Primeiro/Só cupom/Sem cupom, faixa de preço, palavras, exclusões, dias).
+- **Cupons**: pares cupom+produto ainda no prazo, com busca por produto ou código, filtro de loja e de link
+  (com/sem), "Enviar" por linha e o feed de cupons de campanha do ML.
+- **Ofertas**: o catálogo inteiro com a mesma busca e o mesmo "Enviar". O envio manual passa pelas mesmas
+  provas do automático (link do dono, frescor, cupom no prazo, preço ao vivo, foto); só ignora janela,
+  intervalo e cooldown.
+- **Links**: URLs que faltam link do dono para gerar à mão e colar de volta.
+
+`python tools/sync_v1.py` (~2 min, somente leitura no v1) traz links verificados, catálogo e pares frescos
+enquanto o v1 estiver vivo. `python tools/backup.py` faz o dump do Postgres.
+
 ## Amazon
 Sem API utilizável (a Creators API exige 10 vendas qualificadas em 30 dias): a coleta lê a busca pública da
 Amazon BR, uma consulta por termo da regra por hora, e usa o preço riscado do próprio anúncio como "De"

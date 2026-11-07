@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 from django.urls import reverse
 from django.utils.html import escape
@@ -332,3 +334,111 @@ def test_links_page_lists_pending_urls_and_imports_pasted_ones(client, staff, or
 
 def test_links_page_requires_staff(client, org):
     assert client.get(reverse("panel:links")).status_code == 302
+
+
+def test_group_filters_are_saved_and_cleaned(client, staff, rule):
+    post_config(client, rule, coupon_mode="only", price_min="1.250,50", price_max="99,9",
+                terms=" robô , aspirador ,, ", negative_terms="usado",
+                weekdays=["6", "1", "9", "x"])
+    rule.refresh_from_db()
+    assert rule.coupon_mode == "only"
+    assert (rule.price_min, rule.price_max) == (None, Decimal("99.90"))  # "1.250,50" não é número
+    assert rule.terms == "robô, aspirador" and rule.negative_terms == "usado"
+    assert rule.weekdays == "1,6"
+    post_config(client, rule, coupon_mode="inventado", price_min="500", price_max="100",
+                weekdays=["1", "2", "3", "4", "5", "6", "7"])
+    rule.refresh_from_db()
+    assert rule.coupon_mode == "only"  # valor inválido não troca o modo
+    assert (rule.price_min, rule.price_max) == (Decimal("100.00"), Decimal("500.00"))  # inverteu
+    assert rule.weekdays == ""  # semana inteira = todos os dias
+
+
+def test_group_page_shows_the_filters(client, staff, rule):
+    rule.coupon_mode, rule.weekdays, rule.terms = "off", "2,3", "robô"
+    rule.save()
+    html = page(client, "group", rule.id)
+    assert '<option value="off" selected>' in html and 'value="robô"' in html
+    assert 'name="weekdays" value="2" checked' in html
+    assert 'name="weekdays" value="1" checked' not in html
+
+
+# ── Ofertas e Cupons ──────────────────────────────────────────────────────
+def _pair(key="MLB333", code="CODE", until_days=5, **extra):
+    from datetime import timedelta as td
+
+    return make_offer(key=key, title=f"Produto {key}", price=60, frm=100, link_key=f"{key}+{code}",
+                      coupon_kind="code", coupon_code=code, coupon_pct=Decimal(30),
+                      coupon_until=NOW + td(days=until_days), **extra)
+
+
+def test_catalog_pages_require_staff(client, org):
+    for name in ("offers", "coupons"):
+        assert client.get(reverse(f"panel:{name}")).status_code == 302
+    assert client.post(reverse("panel:offer_send", args=[1])).status_code == 302
+
+
+def test_coupons_page_lists_only_live_pairs_with_state_and_search(client, staff, org, rule):
+    make_offer(key="MLB111", price=100, frm=200)  # sem cupom: fica fora da tela de cupons
+    _pair("MLB333", "ALFA")
+    _pair("MLB444", "BETA")
+    _pair("MLB555", "VELHO", until_days=-1)  # vencido
+    AffiliateLink.unscoped.create(org=org, product_key="MLB333+ALFA",
+                                  affiliate_url="https://meli.la/a")
+    html = page(client, "coupons")
+    assert "Produto MLB333" in html and "Produto MLB444" in html
+    assert "Produto MLB111" not in html and "VELHO" not in html
+    assert "ALFA" in html and "30% OFF" in html and "Com link" in html
+    assert "Sem link" in html
+    only = page(client, "coupons", estado="com")
+    assert "Produto MLB333" in only and "Produto MLB444" not in only
+    none = page(client, "coupons", estado="sem")
+    assert "Produto MLB444" in none and "Produto MLB333" not in none
+    found = page(client, "coupons", q="beta")  # busca por código, sem diferenciar caixa
+    assert "Produto MLB444" in found and "Produto MLB333" not in found
+    assert "Nada encontrado." in page(client, "coupons", q="zzz") and "Limpar" in page(
+        client, "coupons", q="zzz")
+
+
+def test_offers_page_filters_by_store_and_paginates(client, staff, org, rule):
+    for n in range(31):
+        make_offer(key=f"MLB{9000 + n}", title=f"Item {n:02d}", price=100, frm=200 + n)
+    make_offer(key="B012345678", store="amazon", title="Cafeteira Amazon",
+               url="https://www.amazon.com.br/dp/B012345678")
+    html = page(client, "offers")
+    assert "30+ aqui" in html
+    assert "p=2" in html
+    assert "Cafeteira Amazon" in page(client, "offers", loja="amazon")
+    assert "Item 00" not in page(client, "offers", loja="amazon")
+    assert "Sem link" in page(client, "offers", loja="amazon")  # org sem tag: sem link
+    org.amazon_tag = "luizahfn-20"
+    org.save()
+    assert "Com link" in page(client, "offers", loja="amazon")
+
+
+def test_send_offer_from_the_catalog_uses_the_same_proofs(client, staff, org, rule, sendable,
+                                                         monkeypatch):
+    from apps.offers.models import Offer
+
+    transport = FakeTransport()
+    monkeypatch.setattr("apps.panel.catalog_views.WahaTransport", lambda: transport)
+    offer = Offer.objects.get(product_key="MLB111")
+    url = reverse("panel:offer_send", args=[offer.id])
+    response = client.post(url, {"rule": rule.id, "next": "/painel/ofertas/?loja=mercadolivre"},
+                           follow=True)
+    assert "Enviado." in response.content.decode()
+    assert response.redirect_chain[-1][0] == "/painel/ofertas/?loja=mercadolivre"
+    assert len(transport.images) == 1 and "https://meli.la/abc" in transport.images[0][2]
+    again = client.post(url, {"rule": rule.id}, follow=True).content.decode()
+    assert "Não saiu:" in again  # o grupo já tem item hoje
+
+
+def test_send_offer_explains_the_refusal_and_ignores_open_redirects(client, staff, org, rule):
+    offer = make_offer(key="MLB777", price=100, frm=200)  # sem link do dono
+    response = client.post(reverse("panel:offer_send", args=[offer.id]),
+                           {"rule": rule.id, "next": "//evil.io/x"}, follow=True)
+    assert "Não saiu: Sem link seu." in response.content.decode()
+    assert response.redirect_chain[-1][0] == reverse("panel:offers")
+    send = reverse("panel:offer_send", args=[offer.id])
+    assert client.post(send, {"rule": 999}).status_code == 404
+    assert client.post(reverse("panel:offer_send", args=[999999]),
+                       {"rule": rule.id}).status_code == 404
