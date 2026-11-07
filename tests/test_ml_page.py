@@ -65,6 +65,11 @@ def test_parse_offers_keeps_catalog_products_at_the_cash_price_only():
     assert air["image"].endswith("-F.webp")
 
 
+def test_a_picture_id_that_could_bend_the_url_is_refused():
+    html = HTML.replace("-MLA", "/../x?-MLA")
+    assert ml_page.parse_offers(html) == []  # todas as fotos da fixture trazem "-MLA"
+
+
 def test_unreadable_page_gives_nothing():
     assert ml_page.bricks("") == [] and ml_page.bricks("<html></html>") == []
     broken = '<script id="__NORDIC_RENDERING_CTX__">_n.ctx.r={"a":</script>'

@@ -45,6 +45,7 @@ CTX = re.compile(r'<script id="__NORDIC_RENDERING_CTX__"[^>]*>(.*?)</script>', r
 MONEY = re.compile(r"R\$\s*([\d.]+(?:,\d{1,2})?)")
 PERCENT = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
 CATALOG_ID = re.compile(r"^MLB\d+$")
+PICTURE_ID = re.compile(r"^[A-Za-z0-9_-]{6,60}$")  # entra no caminho da URL da foto
 MAX_DEPTH = 12
 
 
@@ -169,8 +170,9 @@ def parse_offers(html: str) -> list[dict]:
             picture = next((p.get("id") for p in (card.get("pictures") or {}).get("pictures") or []
                             if p.get("id")), "")
             host = (urlparse(link).hostname or "").lower()
-            if (CATALOG_ID.match(product) and product_key(link) == product and title and picture
-                    and host.endswith("mercadolivre.com.br") and not conditional
+            if (CATALOG_ID.match(product) and product_key(link) == product and title
+                    and PICTURE_ID.match(str(picture)) and host.endswith("mercadolivre.com.br")
+                    and not conditional
                     and now and before and before > now):
                 out.append({"product": product, "title": title, "price": now, "before": before,
                             "image": f"https://http2.mlstatic.com/D_NQ_NP_{picture}-F.webp"})

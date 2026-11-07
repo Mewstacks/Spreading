@@ -12,8 +12,9 @@ como estimativa. Documento de decisão: o v1 segue intocado e `main` não é sub
    vivo na API), mas **só 2 têm link `meli.la` do dono**. Gerar esses links (Link Builder logado na conta de
    afiliado da lules) destrava até 438 pares de uma vez. Nenhuma fonte nova rende isso.
 3. **O que o v1 tem e o v2 não tem** é, quase tudo, escolha: SaaS multiusuário, Telegram, raspagem de ML
-   logado, agregadores, IA de texto, redirect rastreado. Faltam de verdade: **várias contas de WhatsApp**,
-   **receita/comissão no painel**, **alertas**, **cupom manual** e **Awin/Lomadee**. Estado de cada um na seção 7.
+   logado, agregadores, IA de texto, redirect rastreado. Faltam de verdade: **receita/comissão no painel**,
+   **cupom manual** e **Awin/Lomadee**. **Várias contas de WhatsApp** (até 5) e **alertas** ficaram prontos
+   nesta rodada. Estado de cada um na seção 7.
 4. **Mercado**: o padrão dos concorrentes (R$ 29,90 a R$ 399/mês) é sessão em nuvem, piloto automático por
    filtros, espelho de grupos, conversão de redes e comissão no painel. Ninguém documenta **cupom verificado**:
    é o diferencial que o v2 já tem (par provado pelo preço-base ao vivo).
@@ -27,7 +28,7 @@ Fonte: rotas e módulos do v1 (`python/django/apps/scrapers`, 19 fontes registra
 | Área | v1 | v2 | Leitura |
 |---|---|---|---|
 | WhatsApp | whatsapp-web.js, 1 Chromium por sessão, supervisor e vigia | WAHA/GOWS, 344 MiB, outbox, canário | **v2 melhor** |
-| Várias contas de WhatsApp | 1 sessão por usuário | 1 sessão fixa | **falta** (seção 7) |
+| Várias contas de WhatsApp | 1 sessão por usuário | até 5 números: cada grupo sai pelo seu, teto por hora por número, tela WhatsApp | **v2 melhor** (novo) |
 | Fila de envio | reconciliação parcial (grupo parava 6 h) | `incerto` nunca reenvia sozinho | **v2 melhor** |
 | Agendamento | janela, dias, intervalo, teto | idem + variação de ±25% no intervalo | igual |
 | Envio manual | produto, cupom, aviso de cupons | "Enviar agora" e "Enviar" por oferta | igual (aviso removido por decisão) |
@@ -46,7 +47,7 @@ Fonte: rotas e módulos do v1 (`python/django/apps/scrapers`, 19 fontes registra
 | IA de texto (Haiku), política editorial | sim | não: formato único, sem IA | decisão |
 | Redirect rastreado `/r/<token>` | sim (já removido do ML) | não: ML veda encurtador/redirect | decisão |
 | Receita e comissão (sincronizar, painel) | sim | não | **falta** |
-| Saúde, incidentes, alertas | sim | `/healthz`, tela **Fontes**, canário; alerta ativo falta | parcial |
+| Saúde, incidentes, alertas | sim | `/status` por número, tela **Fontes**, canário, **alertas opt-in** (WhatsApp e e-mail) | quase igual (sem reteste de incidente) |
 | Multiusuário SaaS (cadastro, e-mail, cotas, impersonar, admin) | sim | um dono; orgs prontas no modelo | fora de escopo |
 | Vitrine pública `/top` | sim | não | Fase 7 |
 | Conexão de ML/Amazon por tela remota | sim | Link Builder por linha de comando | menor |
@@ -73,7 +74,7 @@ Material público consultado em 07/11/2026 (planos e páginas de venda; sem cont
 | Sessão WhatsApp por QR/código | sim | — |
 | Piloto automático por filtros (nicho, loja, preço, horário) | sim | — |
 | Bloqueio de oferta repetida | sim (15 dias por produto e grupo) | — |
-| Várias contas/números | não | **construir** |
+| Várias contas/números | **sim**, até 5 | — |
 | Comissão e cliques no painel | não | **construir** (Shopee `conversionReport` primeiro) |
 | Conversão de redes (Awin, Lomadee, Rakuten) | não | credenciais do dono |
 | Espelho de grupos | não | só com decisão do dono (termos, direitos) |
@@ -137,7 +138,7 @@ preço), preferir produto de comissão maior no ML ("ganhos extras") e janela de
 | RAM (docker stats, ocioso) | waha 344 MiB · web 108 · worker 54 · db 47 = **553 MiB** |
 | Catálogo | ML 4.908 ofertas (2.796 com link do dono, 2.379 conferíveis ao vivo), Amazon 2.724, Shopee 79 |
 | Funil da regra "robô aspirador + air fryer" | 118 prontas · 962 fora do nicho · 698 sem prova de preço · 15 em cooldown · 1 sem link |
-| Suíte | todos os testes passam; Postgres 17 verificado |
+| Suíte | 280 testes passam (`tools/verify.py`); Postgres 17 verificado antes desta rodada |
 
 Hospedagem: 553 MiB ocioso cabe em VPS de 2 GB; o plano de 07/11 estimava R$ 40–90/mês (a confirmar no
 checkout) contra US$ 74,65 da Fly. Nenhuma compra foi feita.
@@ -167,15 +168,18 @@ checkout) contra US$ 74,65 da Fly. Nenhuma compra foi feita.
 | Hospedagem barata | medido; falta escolher e contratar o VPS (valor com OK do dono) |
 | ML + Amazon + Shopee | coleta feita; links do ML dependem do login da lules |
 | Telas no padrão do v1 | feito, 375 px a desktop |
-| 1 a 5 números de WhatsApp | ver roadmap |
+| 1 a 5 números de WhatsApp | feito: número por grupo, teto por hora, tela WhatsApp; o canário ainda testa só o principal |
+| Alertas e visibilidade das fontes | feito: tela Fontes; alertas opt-in (`ALERT_CHAT_ID`, `ALERT_EMAIL_TO`), sem canal configurado hoje |
 | Telegram | fora por decisão |
 
 ## 8. Roadmap e decisões do dono
 
-Ordem por retorno: (1) links do dono para os pares; (2) várias contas de WhatsApp; (3) alertas ativos;
-(4) receita e comissão (Shopee `conversionReport`, depois relatório do ML); (5) cupom manual / colar produto;
-(6) Awin e Lomadee; (7) extensão de navegador para gerar link; (8) vitrine pública e link inteligente.
+Ordem por retorno: (1) links do dono para os pares; (2) receita e comissão (Shopee `conversionReport`, depois
+relatório do ML; falta uma conversão real para validar o formato); (3) cupom manual / colar produto; (4) Awin
+e Lomadee; (5) canário por número; (6) extensão de navegador para gerar link; (7) vitrine pública e link
+inteligente.
 
-Só o dono decide: login da lules e onde roda o Link Builder em produção; manter ou não a raspagem de páginas
+Só o dono decide: login da lules e onde roda o Link Builder em produção; **para onde vão os alertas** (chat do
+WhatsApp e/ou e-mail com SMTP) e quais números de WhatsApp entram; manter ou não a raspagem de páginas
 públicas (Amazon, vitrine do ML); aviso de afiliação; Telegram; agregadores; credenciais Awin/Lomadee;
 qual VPS contratar e o gasto; quantos números de WhatsApp.
