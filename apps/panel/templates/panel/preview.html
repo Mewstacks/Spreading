@@ -1,0 +1,34 @@
+{% extends "panel/base.html" %}
+{% block title %}Prévia · Spreading{% endblock %}
+{% block topbar_context %}<strong>Prévia</strong><span>Operação</span>{% endblock %}
+{% block page_class %}page-narrow{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Operação</span>
+    <h1><i aria-hidden="true" data-lucide="eye"></i> Prévia</h1>
+  </div>
+  <div class="head-actions">{% if reason %}<span class="badge badge-yellow">{{ reason }}</span>{% else %}<span class="badge badge-green">Pronta</span>{% endif %}</div>
+</div>
+
+<div class="bubble">
+  {% if offer.image_url %}<img src="{{ offer.image_url }}" alt="" width="336" height="336" referrerpolicy="no-referrer">{% endif %}
+  <div class="cap">{{ caption }}</div>
+</div>
+
+{% if rules %}
+<form class="toolbar" method="get" style="margin-top:1.2rem">
+  <label class="sr" for="rule">Grupo</label>
+  <select id="rule" name="rule">{% for r in rules %}<option value="{{ r.id }}"{% if rule and r.id == rule.id %} selected{% endif %}>{{ r.destination.name }}</option>{% endfor %}</select>
+  <button class="btn" type="submit"><i aria-hidden="true" data-lucide="refresh-cw"></i> Ver</button>
+</form>
+{% endif %}
+
+{% if sendable and rule %}
+<form method="post" action="{% url 'panel:offer_send' offer.id %}">{% csrf_token %}
+  <input type="hidden" name="rule" value="{{ rule.id }}">
+  <input type="hidden" name="next" value="{{ next }}">
+  <button class="btn btn-accent" type="submit"><i aria-hidden="true" data-lucide="send"></i> Enviar</button>
+</form>
+{% endif %}
+{% endblock %}

@@ -30,10 +30,23 @@ services:
     command: sh -c "python manage.py migrate --noinput && gunicorn spreading.wsgi --bind 0.0.0.0:8000 --workers 2"
     ports:
       - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   worker:
     <<: *app
     command: python manage.py run_cycle --loop 300
+    # Marca o container como unhealthy se o ciclo parar por mais de 15 minutos (docker compose ps).
+    healthcheck:
+      test: ["CMD", "python", "manage.py", "healthcheck"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 180s
 
   waha:
     # Fixar a versão depois do spike S1 (ex.: devlikeapro/waha:gows-2026.10.1).

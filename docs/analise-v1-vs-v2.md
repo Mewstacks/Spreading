@@ -31,7 +31,7 @@ Fonte: rotas e módulos do v1 (`python/django/apps/scrapers`, 19 fontes registra
 |---|---|---|---|
 | WhatsApp | whatsapp-web.js, 1 Chromium por sessão, supervisor e vigia | WAHA/GOWS, 344 MiB, outbox, canário | **v2 melhor** |
 | Várias contas de WhatsApp | 1 sessão por usuário | até 5 números: cada grupo sai pelo seu, teto por hora por número, tela WhatsApp | **v2 melhor** (novo) |
-| Fila de envio | reconciliação parcial (grupo parava 6 h) | `incerto` nunca reenvia sozinho | **v2 melhor** |
+| Fila de envio | reconciliação parcial (grupo parava 6 h) | `incerto` nunca reenvia sozinho e se resolve sozinho: o ciclo acha a legenda no histórico do chat (confirma) ou prova que não chegou (solta o produto) | **v2 melhor** |
 | Agendamento | janela, dias, intervalo, teto | idem + variação de ±25% no intervalo | igual |
 | Envio manual | produto, cupom, aviso de cupons | "Enviar agora" e "Enviar" por oferta | igual (aviso removido por decisão) |
 | Telegram (envio e radar de canais) | sim | não, por decisão ("só WhatsApp") | decisão |
@@ -49,7 +49,7 @@ Fonte: rotas e módulos do v1 (`python/django/apps/scrapers`, 19 fontes registra
 | IA de texto (Haiku), política editorial | sim | não: formato único, sem IA | decisão |
 | Redirect rastreado `/r/<token>` | sim (já removido do ML) | não: ML veda encurtador/redirect | decisão |
 | Receita e comissão (sincronizar, painel) | sim | tela **Receita** (Shopee: `conversionReport`, por estado, origem e grupo via sub-id); ML e Amazon não têm API de relatório | parcial: só Shopee |
-| Saúde, incidentes, alertas | sim | `/status` por número, tela **Fontes**, canário, **alertas opt-in** (WhatsApp e e-mail) | quase igual (sem reteste de incidente) |
+| Saúde, incidentes, alertas | sim | `/status` por número com `cycle_age_s`, tela **Fontes**, checagem agendada de cada número (sonda a cada ciclo, canário de 2 a 4 h) na tela WhatsApp, healthcheck do worker, **alertas opt-in** (desligados por escolha do dono) | **igual** |
 | Multiusuário SaaS (cadastro, e-mail, cotas, impersonar, admin) | sim | um dono; orgs prontas no modelo | fora de escopo |
 | Vitrine pública `/top` | sim | não | Fase 7 |
 | Conexão de ML/Amazon por tela remota | sim | Link Builder por linha de comando | menor |
@@ -164,7 +164,7 @@ checkout) contra US$ 74,65 da Fly. Nenhuma compra foi feita.
 |---|---|
 | Reformular por completo, núcleo enxuto | feito na branch `v2`; `main` intocada |
 | Lib de WhatsApp mais leve | feito: WAHA/GOWS, 344 MiB |
-| Disparo melhor | feito: outbox, ACK, `incerto` sem reenvio, canário, ritmo variável |
+| Disparo melhor | feito: outbox, ACK, `incerto` reconciliado, canário agendado, ritmo variável e ritmo espalhado pela janela, prévia da legenda antes de enviar |
 | Mensagens melhores | **era cópia do v1** até 08/11 (marquei feito por engano); agora esqueleto único com % OFF, frete, loja oficial, nota, vendas e nome da loja quando a loja informa; sem aviso (decisão). Card de imagem não feito |
 | Não repetir o mesmo produto | cooldown por anúncio + por nome na mensagem (08/11); antes a Shopee repetia o mesmo produto em anúncios diferentes |
 | Cupons (principal) e promoções em volume | fontes feitas; **gargalo = links do dono** (seção 4) |
@@ -183,9 +183,12 @@ checkout) contra US$ 74,65 da Fly. Nenhuma compra foi feita.
 
 Ordem por retorno: (1) links do dono para os pares de ativação (login da lules); (2) Awin e Lomadee
 (credenciais do dono); (3) relatório de vendas do ML, se algum dia houver API; (4) extensão de navegador para
-gerar link; (5) vitrine pública e link inteligente; (6) CI no GitHub (a ferramenta de edição não escreve em
-`.github`). Feitos em 08/11: cupom manual, receita da Shopee, canário por número, link do produto para cupom
-por código.
+gerar link; (5) vitrine pública e link inteligente; (6) Canais do WhatsApp (precisa de um canal do dono para
+testar); (7) CI no GitHub (modelo em `docs/ci.yml`; a ferramenta de edição não escreve em `.github`).
+Feitos em 08/11: cupom manual, receita da Shopee, canário agendado por número, link do produto para cupom
+por código, reconciliação de envio incerto, ritmo espalhado, prévia, trava de login, compose de produção com
+Caddy, backup diário, teste de restauração e runbook (`docs/operacao.md`). O que falta da lules está em
+`docs/lules.md`.
 
 Só o dono decide: login da lules e onde roda o Link Builder em produção; **para onde vão os alertas** (chat do
 WhatsApp e/ou e-mail com SMTP) e quais números de WhatsApp entram; manter ou não a raspagem de páginas

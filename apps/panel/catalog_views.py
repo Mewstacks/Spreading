@@ -1,4 +1,5 @@
 """Ofertas e Cupons: o catálogo que o motor enxerga, com busca, filtros e envio manual."""
+import re
 from datetime import timedelta
 
 from django.contrib import messages
@@ -7,11 +8,13 @@ from django.db.models import Q
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
+from django.utils.html import escape
+from django.utils.safestring import mark_safe
 from django.views.decorators.http import require_POST
 
 from apps.compose.notice import brl, coupon_line, pct
 from apps.coupons.models import CampaignCoupon, Coupon
-from apps.delivery.outbox import deliver_due, enqueue_specific
+from apps.delivery.outbox import deliver_due, enqueue_specific, preview_specific
 from apps.delivery.transports import SessionRouter, WahaTransport
 from apps.offers.models import STORE_LABELS, AffiliateLink, Offer, Rule
 
@@ -121,3 +124,29 @@ def send_offer(request, offer_id):
     target = request.POST.get("next", "")
     safe = target.startswith("/painel/") and "//" not in target
     return redirect(target if safe else "panel:offers")
+
+
+def whatsapp_html(text: str):
+    """A legenda como o WhatsApp mostra: *negrito* e ~riscado~. Escapa antes de marcar: nada do
+    texto da loja vira HTML."""
+    safe = escape(text)
+    safe = re.sub(r"\*([^*\n]+)\*", r"<strong>\1</strong>", safe)
+    safe = re.sub(r"~([^~\n]+)~", r"<s>\1</s>", safe)
+    return mark_safe(safe)  # noqa: S308  já escapado acima
+
+
+@staff_member_required
+def preview(request, offer_id):
+    """Prévia: a foto e a legenda que o "Enviar" mandaria agora, e o que barraria."""
+    org = current_org(request)
+    offer = get_object_or_404(Offer, id=offer_id)
+    rules = list(Rule.objects.for_org(org).filter(type=Rule.OFFERS)
+                 .select_related("destination").order_by("destination__name"))
+    wanted = request.GET.get("rule", "")
+    chosen = next((r for r in rules if str(r.id) == wanted), rules[0] if rules else None)
+    text, reason = preview_specific(org, chosen, offer)
+    return render(request, "panel/preview.html", {
+        "offer": offer, "rules": rules, "rule": chosen, "caption": whatsapp_html(text),
+        "reason": {**REASONS, **EXTRA_REASONS}.get(reason, reason), "sendable": not reason,
+        "next": request.get_full_path(),
+    })

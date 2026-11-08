@@ -17,6 +17,10 @@ DEBUG = env_bool("DJANGO_DEBUG", False)
 ALLOWED_HOSTS = [h for h in env("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h]
 CSRF_TRUSTED_ORIGINS = [o for o in env("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",") if o]
 
+# Trava do login: tantas senhas erradas do mesmo endereço fecham a porta por LOGIN_WINDOW_MINUTES.
+LOGIN_MAX_FAILURES = int(env("LOGIN_MAX_FAILURES", "5"))
+LOGIN_WINDOW_MINUTES = int(env("LOGIN_WINDOW_MINUTES", "15"))
+
 # Atrás de TLS (Caddy, Fly): cookies só por HTTPS, redirect e HSTS. Local em http deixa desligado.
 # O proxy tem de sobrescrever X-Forwarded-Proto; HSTS de 30 dias: subir só depois de ver tudo certo.
 HTTPS = env_bool("DJANGO_HTTPS", False)
@@ -47,6 +51,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
+    "apps.orgs.throttle.LoginThrottle",  # senha errada demais: porta fechada por 15 minutos
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",

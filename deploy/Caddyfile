@@ -1,0 +1,20 @@
+# Caddy na frente do Spreading: TLS automático (Let's Encrypt) para o domínio do .env (DOMAIN).
+# Com DOMAIN=localhost o Caddy usa um certificado interno, bom para testar o compose de produção.
+{$DOMAIN:localhost} {
+	encode zstd gzip
+
+	reverse_proxy web:8000 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 
 
 class TenantScopeError(RuntimeError):
@@ -87,3 +88,11 @@ class ContainerLink(OrgScopedModel):
         constraints = [
             models.UniqueConstraint(fields=["org", "container_url"], name="uniq_container_link")
         ]
+
+
+class LoginFailure(models.Model):
+    """Senha errada no login: a trava de tentativas conta por endereço (ver apps.orgs.throttle)."""
+
+    ip = models.CharField(max_length=64, db_index=True)
+    username = models.CharField(max_length=150, blank=True)
+    at = models.DateTimeField(default=timezone.now, db_index=True)

@@ -53,7 +53,8 @@ recolhível que vira gaveta no celular, tabelas que viram cartões a 375 px, íc
   (com/sem), "Enviar" por linha e o feed de cupons de campanha do ML.
 - **Ofertas**: o catálogo inteiro com a mesma busca e o mesmo "Enviar". O envio manual passa pelas mesmas
   provas do automático (link do dono, frescor, cupom no prazo, preço ao vivo, foto); só ignora janela,
-  intervalo e cooldown.
+  intervalo e cooldown. O ícone de olho abre a **Prévia**: a foto e a legenda exatas que o "Enviar"
+  mandaria agora (com o frete e a loja oficial do anúncio de agora) e o que barraria, sem enfileirar nada.
 - **Links**: URLs que faltam link do dono para gerar à mão e colar de volta.
 - **Manual**: cole links de produto (ML `/p/MLB…`, Amazon `/dp/…`, Shopee), um por linha e até 20, com o link do
   dono ao lado no caso do ML. Cada linha vem pelas fontes oficiais (API do ML, API da Shopee, busca da Amazon)
@@ -102,6 +103,17 @@ seguem. O `canary` confere cada número em uso; o que não tem chat de canário 
 pelo próprio número?) sem receber mensagem, e a sonda também alimenta o alerta "conectado, mas o WhatsApp não
 responde".
 
+O worker também checa os números sozinho: uma sonda a cada ciclo e, com chat de canário (`CANARY_CHAT_ID`,
+`CANARY_CHATS`), uma mensagem real com conferência do ACK a cada 2 a 4 horas. A última checagem de cada número
+aparece na tela WhatsApp (`ok 14:05`, `falhou 3× · motivo`) e em `/status` (`whatsapp_checks`, `cycle_age_s`).
+
+**Envio incerto** (o WAHA deu timeout): o ciclo procura a legenda no histórico do chat que o WAHA guarda. Achou,
+vira `confirmado` e o cooldown fica; não achou depois de 10 minutos com a lista cobrindo o horário do envio, vira
+`falhou` e solta o produto. Na dúvida continua `incerto`. Nunca reenvia sozinho.
+
+**Ritmo**: na regra do grupo, "Espalhado" reparte o teto do dia pela janela (intervalo mínimo = janela ÷ teto,
+com 10% de folga) em vez de mandar tudo de uma vez quando o intervalo é curto.
+
 ## Fontes, vitrine do ML e alertas
 - **Fontes** (painel): estado e último resultado de cada fonte do ciclo (feeds do ML, catálogo, vitrine, Amazon,
   Shopee). "Sem novidade" = 6 h sem resultado novo; "Falhando N×" = N ciclos seguidos com erro.
@@ -118,9 +130,19 @@ responde".
   estado de uma venda muda semanas depois, então a janela inteira é regravada.
 
 ## Produção
-`DJANGO_HTTPS=1` atrás de TLS (Caddy, Fly; o proxy tem de sobrescrever `X-Forwarded-Proto`): cookies só por
-https, redirect para https (`/healthz` fica de fora) e HSTS de 30 dias (`DJANGO_HSTS_SECONDS`). O painel manda
-`X-Frame-Options: DENY`. Dashboard do WAHA e porta 3000 ficam em `127.0.0.1`: acesso por túnel SSH.
+`docker compose -f compose.yaml -f compose.prod.yaml up -d --build`: Caddy com TLS automático na frente do web
+(só ele publica portas, 80 e 443), WAHA em versão fixa, backup diário do banco (14 cópias) e healthchecks de web
+e worker. Passo a passo de servidor, backup, restauração, chaves de desligar e o que fazer quando algo para:
+**`docs/operacao.md`**. `python tools/restore_check.py` restaura um dump num Postgres descartável e compara as
+tabelas (backup que nunca foi restaurado não é backup).
+
+`DJANGO_HTTPS=1` atrás de TLS (o proxy tem de sobrescrever `X-Forwarded-Proto`): cookies só por https, redirect
+para https (`/healthz` fica de fora) e HSTS de 30 dias (`DJANGO_HSTS_SECONDS`). O painel manda
+`X-Frame-Options: DENY`. O login fecha por 15 minutos depois de 5 senhas erradas do mesmo endereço
+(`LOGIN_MAX_FAILURES`, `LOGIN_WINDOW_MINUTES`). Dashboard do WAHA e porta 3000 ficam em `127.0.0.1`: acesso por
+túnel SSH.
+
+O que depende da conta de afiliado do ML (login do Link Builder) está em **`docs/lules.md`**.
 
 ## Verificação
 `python tools/verify.py` (ruff + pytest). Testes rodam em SQLite; com `DATABASE_URL` rodam em Postgres.

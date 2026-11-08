@@ -1,0 +1,64 @@
+# Produção em VPS, por cima do compose.yaml:
+#
+#   docker compose -f compose.yaml -f compose.prod.yaml up -d --build
+#
+# Só o Caddy publica portas (80 e 443). O web e o dashboard do WAHA continuam em 127.0.0.1 do
+# servidor (acesso por túnel SSH: ssh -L 3000:127.0.0.1:3000 usuario@servidor) e o banco nem isso.
+# Passo a passo, backup e restauração: docs/operacao.md.
+services:
+  web:
+    environment:
+      DJANGO_HTTPS: "1"
+      DJANGO_ALLOWED_HOSTS: ${DOMAIN:?defina DOMAIN no .env},127.0.0.1,localhost
+      DJANGO_CSRF_TRUSTED_ORIGINS: https://${DOMAIN}
+
+  worker:
+    environment:
+      DJANGO_ALLOWED_HOSTS: ${DOMAIN},127.0.0.1,localhost
+
+  waha:
+    # Versão fixa: o `:gows` anda e uma atualização do WhatsApp já quebrou cliente antes.
+    image: devlikeapro/waha:gows-2026.10.1
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      web:
+        condition: service_healthy
+
+  # Backup diário do banco, os 14 mais novos ficam no volume `backups`. Copiar para fora do
+  # servidor (rclone, scp) está em docs/operacao.md: backup no mesmo disco não é backup.
+  backup:
+    image: postgres:17
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - backups:/backups
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        while true; do
+          pg_dump -h db -U spreading -Fc spreading > /backups/spreading-$$(date +%Y%m%d-%H%M).dump \
+            && ls -1t /backups/spreading-*.dump | tail -n +15 | xargs -r rm -f
+          sleep 86400
+        done
+
+volumes:
+  caddy_data:
+  caddy_config:
+  backups:

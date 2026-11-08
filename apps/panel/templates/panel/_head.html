@@ -193,6 +193,13 @@
     .kpi-sub { margin-top: .25rem; font-size: 12px; color: var(--muted); }
     .stat-cell.hero .kpi-value { color: var(--accent); }
     /* Valor em reais: encolhe com a largura da célula em vez de quebrar "R$" numa linha só. */
+    /* Prévia da mensagem: foto e legenda no balão, como o grupo vê. */
+    .bubble { max-width: 21rem; background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: 14px 14px 14px 4px; overflow: hidden; }
+    .bubble img { display: block; width: 100%; height: auto; background: #fff; }
+    .bubble .cap { padding: .7rem .9rem .85rem; white-space: pre-wrap; overflow-wrap: anywhere;
+      font-size: 14px; line-height: 1.5; color: var(--text); }
+    .bubble .cap strong { font-weight: 700; }
     .stat-cell.fit { container-type: inline-size; }
     .stat-cell.fit .kpi-value { font-size: clamp(1.05rem, 14cqw, 1.7rem); white-space: nowrap; }
     .rows { border-top: 1px solid var(--border); list-style: none; margin: 0; padding: 0; }

@@ -1,4 +1,4 @@
-<div class="row-actions"><form method="post" action="{% url 'panel:offer_send' offer.id %}">{% csrf_token %}
+<div class="row-actions"><a class="icon-btn" href="{% url 'panel:offer_preview' offer.id %}" title="Prévia" aria-label="Prévia"><i aria-hidden="true" data-lucide="eye"></i></a><form method="post" action="{% url 'panel:offer_send' offer.id %}">{% csrf_token %}
   <input type="hidden" name="next" value="{{ next }}">
   {% if rules|length > 1 %}
   <label class="sr" for="rule{{ offer.id }}">Grupo</label>

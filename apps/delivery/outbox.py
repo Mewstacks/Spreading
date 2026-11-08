@@ -1,4 +1,5 @@
 """Outbox idempotente: o banco é a fonte de verdade do envio."""
+import copy
 import hashlib
 import random
 from collections import Counter, defaultdict
@@ -191,16 +192,21 @@ def _attributed(offer, link, destination, http=None) -> str:
     return shopee.tracked_link(offer.url, ["spreading", f"g{destination.id}"], http=http) or link
 
 
-def _create_offer_item(org, rule, destination, offer, link, proof, now):
-    """Item do outbox + registro de entrega; None se a oferta já foi enfileirada hoje."""
+def _apply_proof(offer, proof):
+    """O que vale agora (preço da prova, frete e loja oficial do anúncio) só na mensagem: a oferta
+    guardada no banco não muda."""
     offer.price_to, offer.price_from, offer.discount_pct = (
         proof.price_to, proof.price_from, proof.discount_pct
     )
-    # Frete e loja oficial do anúncio de agora (só na mensagem, sem gravar na oferta).
     if proof.free_shipping is not None:
         offer.free_shipping = proof.free_shipping
     if proof.official_store is not None:
         offer.official_store = proof.official_store
+
+
+def _create_offer_item(org, rule, destination, offer, link, proof, now):
+    """Item do outbox + registro de entrega; None se a oferta já foi enfileirada hoje."""
+    _apply_proof(offer, proof)
     key_src = f"{org.id}|{destination.id}|{offer.link_key}|{offer.valid_on}"
     try:
         with transaction.atomic():
@@ -219,33 +225,53 @@ def _create_offer_item(org, rule, destination, offer, link, proof, now):
     return item
 
 
+def _specific_checks(org, rule, offer, now, http):
+    """As provas do envio manual, na ordem: grupo livre, link do dono, cupom no prazo, frescor e
+    preço ao vivo. Devolve (link, prova, motivo); `rule=None` pula a checagem do grupo."""
+    destination = rule.destination if rule is not None else None
+    if destination is not None and not _destination_ready(org, destination, now):
+        return None, None, "grupo_indisponivel"
+    links = dict(AffiliateLink.objects.for_org(org)
+                 .filter(product_key__in={offer.link_key, offer.product_key})
+                 .values_list("product_key", "affiliate_url"))
+    link = selection.resolve_link(org, offer, links)
+    if not link:
+        return None, None, "sem_link_do_dono"
+    if offer.coupon_until and offer.coupon_until < now:
+        return link, None, "cupom_vencido"
+    stale = selection.fresh_enough(offer, now)
+    if stale:
+        return link, None, stale
+    proof, reason = live.validate(offer, 1, http=http)
+    return link, proof, reason
+
+
 def enqueue_specific(org, rule, offer, now=None, http=None):
     """Envio manual de uma oferta escolhida no painel: as mesmas provas do automático (link do
     dono, frescor, cupom no prazo, preço ao vivo, foto), sem janela, intervalo nem cooldown.
     Devolve (item, '') ou (None, motivo)."""
     now = now or timezone.now()
     destination = rule.destination
-    if not _destination_ready(org, destination, now):
-        return None, "grupo_indisponivel"
-    links = dict(AffiliateLink.objects.for_org(org)
-                 .filter(product_key__in={offer.link_key, offer.product_key})
-                 .values_list("product_key", "affiliate_url"))
-    link = selection.resolve_link(org, offer, links)
-    if not link:
-        return None, "sem_link_do_dono"
-    if offer.coupon_until and offer.coupon_until < now:
-        return None, "cupom_vencido"
-    stale = selection.fresh_enough(offer, now)
-    if stale:
-        return None, stale
-    proof, reason = live.validate(offer, 1, http=http)
-    if proof is None:
+    link, proof, reason = _specific_checks(org, rule, offer, now, http)
+    if reason:
         return None, reason
     if fetch_image_jpeg(offer.image_url) is None:
         return None, "sem_foto"
     link = _attributed(offer, link, destination)
     item = _create_offer_item(org, rule, destination, offer, link, proof, now)
     return (item, "") if item else (None, "ja_enfileirada")
+
+
+def preview_specific(org, rule, offer, now=None, http=None) -> tuple[str, str]:
+    """(legenda, motivo): o que o "Enviar" mandaria agora, linha a linha, e o que barraria. Não
+    grava nada, não baixa a foto e não cria link curto novo da Shopee (o link mostrado é o do
+    estoque). Sem prova (motivo no meio), a legenda usa os dados guardados da oferta."""
+    now = now or timezone.now()
+    link, proof, reason = _specific_checks(org, rule, offer, now, http)
+    shown = copy.copy(offer)  # a oferta de quem chamou não muda
+    if proof is not None:
+        _apply_proof(shown, proof)
+    return build_offer_message(shown, link or "(sem link do dono)"), reason
 
 
 def explain_rule(rule, now=None, http=None) -> Counter:

@@ -10,6 +10,7 @@ urlpatterns = [
     path("ofertas/", catalog_views.catalog, name="offers"),
     path("cupons/", catalog_views.catalog, {"kind": "coupon"}, name="coupons"),
     path("ofertas/<int:offer_id>/enviar/", catalog_views.send_offer, name="offer_send"),
+    path("ofertas/<int:offer_id>/previa/", catalog_views.preview, name="offer_preview"),
     path("whatsapp/", views.whatsapp, name="whatsapp"),
     path("links/", views.links, name="links"),
     path("manual/", manual_views.page, name="manual"),
