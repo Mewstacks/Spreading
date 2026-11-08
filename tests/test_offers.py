@@ -587,13 +587,23 @@ def test_the_manual_send_skips_the_cooldown_but_keeps_the_record(org, destinatio
 
     link(org, "shp:1", "https://s.shopee.com.br/1")
     link(org, "shp:2", "https://s.shopee.com.br/2")
-    shopee_listing(1, BASE + " Preta")
+    first = shopee_listing(1, BASE + " Preta")
     second = shopee_listing(2, BASE + " Branca", price=250)
-    enqueue_for_rule(rule, NOW)
+    sent = enqueue_for_rule(rule, NOW)
     deliver_and_clear(NOW)
-    item, reason = enqueue_specific(org, rule, second, NOW + timedelta(hours=1))
+    queued = OfferDelivery.unscoped.get(outbox_item=sent).product_key
+    other = second if queued == first.product_key else first  # o anúncio que NÃO saiu
+    item, reason = enqueue_specific(org, rule, other, NOW + timedelta(hours=1))
     assert reason == "" and OfferDelivery.unscoped.get(outbox_item=item).identity == (
         title_identity(BASE))
+
+
+def test_equal_scores_are_ranked_by_id_in_every_database(org, destination, rule):
+    for item in (3, 1, 2):
+        link(org, f"shp:{item}", f"https://s.shopee.com.br/{item}")
+        shopee_listing(item, f"Produto Distinto Número {item}", price=300, frm=800)
+    ids = [o.id for o, _link in selection.candidates(org, destination, rule, NOW)]
+    assert ids == sorted(ids) and len(ids) == 3
 
 
 def test_the_migration_recovers_the_identity_from_the_message_the_group_saw():

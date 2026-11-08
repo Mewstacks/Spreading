@@ -195,7 +195,8 @@ def candidates(org, destination, rule, now, report: Counter | None = None,
     ranked = kept
     if missing is not None:
         missing[:] = [row for row in missing if real_drop(row[0], history)]
-        missing.sort(key=lambda row: (not row[0].coupon_kind, -row[1]))
-    ranked.sort(key=lambda row: (not row[0].coupon_kind, -row[2]))
+        missing.sort(key=lambda row: (not row[0].coupon_kind, -row[1], row[0].id))
+    # Empate no score desempata por id: a mesma ordem em qualquer banco e a cada ciclo.
+    ranked.sort(key=lambda row: (not row[0].coupon_kind, -row[2], row[0].id))
     for offer, link, _score in ranked:
         yield offer, link
