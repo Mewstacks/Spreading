@@ -92,7 +92,7 @@ Material público consultado em 07/11/2026 (planos e páginas de venda; sem cont
 
 | Fonte | Rendimento medido | Estado no v2 | Termos/risco |
 |---|---|---|---|
-| Pares cupom+produto do v1 | 600 vivos (08/11): 435 por código, 165 de ativação; **263 por código já enviáveis** (link do produto) | importados | sem risco novo |
+| Pares cupom+produto do v1 | 600 vivos (08/11): 435 por código, 165 de ativação; **263 por código já enviáveis** (link do produto); em amostra de 40 na API ao vivo, 34 passaram na prova de preço (85%) | importados | sem risco novo |
 | Feed de cupons da equipe de afiliados do ML | 103 cupons de campanha (container, sem produto) | sim | feed sem contrato (conta pessoal no GitHub) |
 | Vitrine `/ofertas/cupons` do ML | 6 campanhas ativas (de R$ 10 OFF a 80% OFF, 9 a 1.171 itens) + 5 ofertas por carga | **sim (novo)**, 1 carga/hora | extração do site: `ML_PUBLIC_PAGES=0` desliga |
 | Amazon `/deals` cupons | 21 ofertas com cupom e preço final na própria página | sim | termos da Amazon: `AMAZON_COLLECT=0` desliga |
