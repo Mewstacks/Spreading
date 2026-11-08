@@ -1,0 +1,8 @@
+# Fim de linha LF onde o Linux lê o arquivo (compose, Caddy, Dockerfile, scripts): um checkout no
+# Windows com CRLF quebra `command: |` de YAML e shell dentro do container.
+* text=auto
+*.sh text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+Caddyfile text eol=lf
+Dockerfile* text eol=lf
