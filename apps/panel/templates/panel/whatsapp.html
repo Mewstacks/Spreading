@@ -16,7 +16,7 @@
   <li class="row-item row-wrap">
     <div class="row-main">
       <div class="name">{{ r.name }}</div>
-      <div class="muted">{{ r.groups }} grupo{{ r.groups|pluralize }}</div>
+      <div class="muted">{{ r.groups }} grupo{{ r.groups|pluralize }}{% if r.check %} · {{ r.check }}{% endif %}</div>
     </div>
     <span class="badge badge-{{ r.tone }}"><span class="dot"></span>{{ r.label }}</span>
     <div class="row-side">

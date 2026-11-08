@@ -61,6 +61,8 @@
             <input id="min_discount" name="min_discount" type="number" inputmode="numeric" min="1" max="90" value="{{ rule.min_discount_pct|floatformat:0 }}"></div>
           <div><label for="interval">Intervalo (min)</label>
             <input id="interval" name="interval" type="number" inputmode="numeric" min="1" max="1440" value="{{ rule.interval_minutes }}"></div>
+          <div><label for="pace">Ritmo</label>
+            <select id="pace" name="pace"><option value="interval"{% if not rule.spread %} selected{% endif %}>Fixo</option><option value="spread"{% if rule.spread %} selected{% endif %}>Espalhado</option></select></div>
         </div>
       </div>
       <div class="form-section">

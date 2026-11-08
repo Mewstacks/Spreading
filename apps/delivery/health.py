@@ -7,9 +7,11 @@ from django.db import connection
 from django.utils import timezone
 
 from apps.coupons.models import Coupon
-from apps.offers.models import Offer
+from apps.offers.models import Offer, SourceRun
 
 from .models import OutboxItem
+
+CYCLE_STALE_S = 900  # o ciclo roda de 5 em 5 minutos: 15 minutos parado é problema
 
 
 def snapshot(transport, now=None) -> dict:
@@ -43,7 +45,14 @@ def snapshot(transport, now=None) -> dict:
         "coupon_feed_fresh": bool(coupon_seen and now - coupon_seen <= stale_after),
         "offer_feed_fresh": bool(offer_seen and now - offer_seen <= stale_after),
     }
-    data["ok"] = data["whatsapp_session"] == "WORKING" and data["coupon_feed_fresh"]
+    latest = SourceRun.objects.order_by("-checked_at").values_list("checked_at", flat=True).first()
+    data["cycle_age_s"] = int((now - latest).total_seconds()) if latest else None  # o worker vive
+    data["whatsapp_checks"] = {
+        run.label[3:]: {"ok": run.ok, "failures": run.failures, "at": run.checked_at.isoformat()}
+        for run in SourceRun.objects.filter(label__startswith="wa:")
+    }
+    cycle_ok = data["cycle_age_s"] is None or data["cycle_age_s"] <= CYCLE_STALE_S
+    data["ok"] = data["whatsapp_session"] == "WORKING" and data["coupon_feed_fresh"] and cycle_ok
     return data
 
 

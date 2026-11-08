@@ -101,3 +101,42 @@ def test_an_offer_object_without_the_new_fields_still_renders():
                           coupon_kind="")
     assert build_offer_message(old, LINK) == (
         "🛍️ *X*\n\nDe ❌ ~R$ 100~\nPor 🔥 *R$ 80* (20% OFF)\n\n🔗 https://meli.la/x")
+
+
+# ── nome curto: o corte de 50 letras não deixa a cauda quebrada ───────────────────────────────
+from apps.compose.offer import short_name  # noqa: E402
+
+
+@pytest.mark.parametrize("title, expected", [
+    # cauda que pede complemento: "Air" de "Air Fryer", "Tamanho", "W" de "W11"
+    ("Fritadeira Elétrica Sem Óleo Antiaderente Air Fryer Digital 5L Preta",
+     "Fritadeira Elétrica Sem Óleo Antiaderente"),
+    ("Patins Inline Semi Profissional Com Led Tamanho 38 ao 41 Ajustável",
+     "Patins Inline Semi Profissional Com Led"),
+    ("Notebook Gamer Acer V15 Ci5 Rtx4050 512gb 8gb W 11 Home Preto",
+     "Notebook Gamer Acer V15 Ci5 Rtx4050 512gb 8gb"),
+    # símbolo solto e parêntese aberto
+    ("Mangueira Antitorção Tramontina 30 m 1/2 + Esguicho Regulável Jardim",
+     "Mangueira Antitorção Tramontina 30 m 1/2"),
+    ("Smartphone Samsung Galaxy A15 4G Dual Chip (128GB Azul Escuro Sem Fone)",
+     "Smartphone Samsung Galaxy A15 4G Dual Chip"),
+    ("Kit Ferramentas Completo Maleta Profissional Chave De Fenda Martelo Alicate",
+     "Kit Ferramentas Completo Maleta Profissional"),
+])
+def test_the_short_name_never_ends_on_a_dangling_word(title, expected):
+    assert short_name(title) == expected
+    assert len(short_name(title)) <= 50
+
+
+@pytest.mark.parametrize("title", [
+    "Jogo De Lençol Queen 3 Peças 400 Fios C/ Elástico Branco", "Capa Protetor Casal Impermeável",
+    "Monitor LG 24MS500-B 24 polegadas", "Câmera Lâmpada De Segurança Wifi Ip App Yoosee 360",
+    "Fritadeira Elétrica Sem Óleo Air Fryer Mondial 5L Grand Family"])
+def test_a_good_cut_is_left_alone(title):
+    out = short_name(title)
+    assert title.startswith(out) and len(out) <= 50 and len(out.split()) >= 3
+
+
+def test_a_title_made_of_few_words_is_never_emptied():
+    assert short_name("Air " + "x" * 60).startswith("Air")
+    assert short_name("Kit " + "y" * 70) != ""

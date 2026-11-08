@@ -31,6 +31,9 @@ class Rule(OrgScopedModel):
     # Dias ISO (1=segunda … 7=domingo), vírgula. Vazio = todos.
     weekdays = models.CharField(max_length=20, blank=True, default="")
     interval_minutes = models.PositiveIntegerField(default=60)
+    # Espalhado: reparte o teto do dia pela janela (sem isso, intervalo curto despeja os envios de
+    # uma vez e o grupo passa o resto do dia em silêncio).
+    spread = models.BooleanField(default=False)
     daily_cap = models.PositiveIntegerField(default=12)
     cooldown_hours = models.PositiveIntegerField(default=360)
     active = models.BooleanField(default=True)
@@ -48,6 +51,23 @@ class Rule(OrgScopedModel):
     @property
     def effective_cap(self) -> int:
         return min(self.daily_cap, self.DAILY_CEILING)
+
+    @property
+    def window_minutes(self) -> int:
+        """Duração da janela de envio em minutos (início = fim: o dia inteiro)."""
+        if self.window_start == self.window_end:
+            return 24 * 60
+        if self.window_start < self.window_end:
+            return (self.window_end - self.window_start) * 60
+        return (24 - self.window_start + self.window_end) * 60
+
+    @property
+    def pace_minutes(self) -> float:
+        """Espera mínima entre envios: o intervalo da regra ou, no ritmo espalhado, a fatia da
+        janela de cada envio do teto (com 10% de folga para o teto caber apesar da variação)."""
+        if not self.spread or not self.effective_cap:
+            return self.interval_minutes
+        return max(self.interval_minutes, self.window_minutes / self.effective_cap * 0.9)
 
     @property
     def store_list(self) -> list[str]:

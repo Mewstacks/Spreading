@@ -79,7 +79,7 @@ def jittered_interval(rule, last) -> timedelta:
     a cada ciclo, que faria a regra "tentar a sorte" de 5 em 5 minutos)."""
     digest = hashlib.sha256(f"{rule.id}:{last.id}".encode()).digest()
     spread = int.from_bytes(digest[:4], "big") / 0xFFFFFFFF * 2 - 1  # de -1 a 1
-    return timedelta(minutes=rule.interval_minutes * (1 + INTERVAL_JITTER * spread))
+    return timedelta(minutes=rule.pace_minutes * (1 + INTERVAL_JITTER * spread))
 
 
 def _rule_ready(org, rule, now) -> bool:

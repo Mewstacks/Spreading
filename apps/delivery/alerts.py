@@ -37,7 +37,9 @@ def conditions(now, transport) -> dict[str, str]:
                 found[f"wa:{name}"] = f"Número {name} fora do ar ({status or 'sem resposta'})."
             elif not getattr(sender, "reachable", lambda: True)():
                 found[f"wa:{name}"] = f"Número {name} conectado, mas o WhatsApp não responde."
-    for run in SourceRun.objects.filter(failures__gte=FAILURES):
+    # `wa:<número>` já vira "fora do ar" ou "conectado, mas não responde": não avisa duas vezes.
+    failing = SourceRun.objects.filter(failures__gte=FAILURES).exclude(label__startswith="wa:")
+    for run in failing:
         found[f"fonte:{run.label}"] = f"Fonte {run.label} falhando {run.failures}×: {run.error}"
     uncertain = OutboxItem.unscoped.filter(state=OutboxItem.UNCERTAIN).count()
     if uncertain:

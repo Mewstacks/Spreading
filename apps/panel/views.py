@@ -19,7 +19,7 @@ from apps.delivery.transports import SESSION_NAME, SessionRouter, WahaTransport
 from apps.linkbuilder import manual
 from apps.linkbuilder.models import BuilderState
 from apps.offers import niches
-from apps.offers.models import STORE_LABELS, STORES, Rule
+from apps.offers.models import STORE_LABELS, STORES, Rule, SourceRun
 from apps.orgs.models import Destination, Organization
 
 from .queries import live_coupons, with_link
@@ -73,6 +73,15 @@ def _whatsapp_status(org):
     if not down:
         return {"label": f"{len(names)} números", "tone": "green"}
     return {"label": f"{len(down)} de {len(names)} fora do ar", "tone": "yellow"}
+
+
+def _check_text(run) -> str:
+    """Última checagem do número (sonda do ciclo): `ok 14:05` ou `falhou 3× · motivo`."""
+    if run is None:
+        return ""
+    if run.ok:
+        return f"ok {run.checked_at.astimezone(BRT):%H:%M}"
+    return f"falhou {run.failures}× · {run.error}"
 
 
 def _builder_status(org):
@@ -195,10 +204,12 @@ def whatsapp(request):
     )
     status = {row["name"]: row["status"] for row in known}
     names = sorted(set(status) | set(counts) | ({settings.WAHA_SESSION} if not known else set()))
+    runs = {run.label[3:]: run for run in SourceRun.objects.filter(label__startswith="wa:")}
     rows = [{
         "name": name, "groups": counts.get(name, 0), "offline": not known,
         "label": WHATSAPP_LABELS.get(status.get(name, ""), status.get(name) or "Sem resposta"),
         "tone": "green" if status.get(name) == "WORKING" else "yellow",
+        "check": _check_text(runs.get(name)),
     } for name in names]
     return render(request, "panel/whatsapp.html", {
         "rows": rows, "can_add": len(names) < MAX_SESSIONS,
@@ -245,6 +256,7 @@ def group(request, rule_id):
         rule.window_end = _int(request.POST.get("window_end"), 0, 23, rule.window_end)
         rule.min_discount_pct = _int(request.POST.get("min_discount"), 1, 90, 15)
         rule.interval_minutes = _int(request.POST.get("interval"), 1, 1440, rule.interval_minutes)
+        rule.spread = request.POST.get("pace") == "spread"
         rule.active = request.POST.get("active") == "on"
         mode = request.POST.get("coupon_mode")
         rule.coupon_mode = mode if mode in dict(Rule.COUPON_MODES) else rule.coupon_mode

@@ -6,36 +6,26 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from apps.coupons.feed import fetch_feed, ingest
-from apps.delivery import alerts
+from apps.delivery import alerts, checks, reconcile
 from apps.delivery.outbox import deliver_due, enqueue_for_rule
 from apps.delivery.transports import SessionRouter
-from apps.offers import amazon, amazon_deals, catalog, ml_api, ml_page, shopee, shopee_report
+from apps.offers import (
+    amazon,
+    amazon_deals,
+    catalog,
+    ml_api,
+    ml_page,
+    shopee,
+    shopee_report,
+    source_state,
+)
 from apps.offers.feeds import fetch_daily_offers, ingest_daily_offers
-from apps.offers.models import Rule, SourceRun
+from apps.offers.models import Rule
 
 logger = logging.getLogger(__name__)
 
 
-def _summary(value) -> str:
-    if isinstance(value, dict):
-        return " · ".join(f"{key} {count}" for key, count in value.items() if count)
-    return str(value) if value else ""
-
-
-def _record(label, at, error=None, value=None):
-    """Guarda o estado da fonte para a tela Fontes; nunca derruba o ciclo."""
-    try:
-        run, _created = SourceRun.objects.get_or_create(label=label, defaults={"checked_at": at})
-        run.checked_at, run.ok = at, error is None
-        if error is not None:
-            run.failures, run.error = run.failures + 1, error[:200]
-        else:
-            run.failures, run.error = 0, ""
-            if _summary(value):
-                run.result, run.result_at = _summary(value)[:200], at
-        run.save()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("registro da fonte %s falhou: %s", label, exc)
+_summary, _record = source_state.summary, source_state.record  # estado das fontes
 
 
 def _safe(label, fn, report, at=None):
@@ -70,6 +60,7 @@ def run_once(transport=None, now=None, coupon_html=None, offers_html=None) -> di
         _safe("shopee", lambda: shopee.collect(now), report, at)
         _safe("shopee_vendas", lambda: shopee_report.sync(now), report, at)
 
+    _safe("whatsapp", lambda: checks.run(transport, at), report, at)  # sonda e canário por número
     report["alertas"] = alerts.run(transport, at)
 
     working = None  # None = transporte único: vale a regra antiga de uma sessão só
@@ -81,6 +72,8 @@ def run_once(transport=None, now=None, coupon_html=None, offers_html=None) -> di
     elif hasattr(transport, "session_working") and not transport.session_working():
         report["entrega"] = "sessão do WhatsApp fora de WORKING: nada enfileirado nem enviado"
         return report
+
+    _safe("reconciliacao", lambda: reconcile.run(transport, at), report, at)  # incerto vira fato
 
     queued = 0
     for rule in Rule.unscoped.select_related("org", "destination").filter(active=True):

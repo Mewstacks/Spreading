@@ -167,6 +167,31 @@ class WahaTransport:
         return [{"name": str(row["name"]), "status": str(row.get("status") or "")}
                 for row in data if isinstance(row, dict) and row.get("name")]
 
+    def recent_messages(self, chat_id: str, limit: int = 50) -> list[dict] | None:
+        """Últimas mensagens do chat que o WAHA guardou: `{id, from_me, ts, body, ack}`; None se
+        não deu para ler (diferente de lista vazia, que é um chat sem mensagens)."""
+        headers = {"X-Api-Key": self.api_key} if self.api_key else {}
+        try:
+            response = self.http.get(
+                f"{self.base_url}/api/{self.session_name}/chats/{chat_id}/messages",
+                params={"limit": limit, "downloadMedia": "false"}, headers=headers,
+                timeout=settings.HTTP_TIMEOUT_SECONDS,
+            )
+            data = response.json() if response.status_code == 200 else None
+        except (requests.exceptions.RequestException, ValueError):
+            return None
+        if not isinstance(data, list):
+            return None
+        rows = []
+        for row in data:
+            if isinstance(row, dict) and row.get("id"):
+                rows.append({
+                    "id": str(row["id"]), "from_me": bool(row.get("fromMe")),
+                    "ts": int(row.get("timestamp") or 0), "body": str(row.get("body") or ""),
+                    "ack": row.get("ack"),
+                })
+        return rows
+
     def message_ack(self, chat_id: str, message_id: str) -> int | None:
         """ACK da mensagem (-1 erro, 0 pendente, 1 servidor, 2 aparelho, 3 lida) ou None."""
         headers = {"X-Api-Key": self.api_key} if self.api_key else {}

@@ -27,6 +27,7 @@ from .notice import brl, pct
 BRT = ZoneInfo("America/Sao_Paulo")
 _SEPARATORS = (" - ", " | ", " – ", ", ", " / ")
 _CONNECTORS = {"de", "do", "da", "com", "para", "e", "a", "o", "em", "por", "sem", "ou", "no", "na"}
+_NEEDS_MORE = {"air", "tamanho", "smart", "kit", "tipo", "modelo", "cor", "marca", "c/", "s/", "p/"}
 MIN_SHOWN = 5  # mínimo de compra só aparece acima de R$ 5
 
 
@@ -45,7 +46,31 @@ def short_name(title: str, limit: int = 50) -> str:
     words = text[:limit].rsplit(" ", 1)[0].split()
     while words and words[-1].lower().strip(",-–|/") in _CONNECTORS:
         words.pop()
-    return " ".join(words).strip(" ,-–|/")
+    return _trim_tail(" ".join(words).strip(" ,-–|/"))
+
+
+def _dangling(token: str) -> bool:
+    bare = token.lower().strip(",-–|/.:;")
+    if not re.search(r"\w", token):
+        return True  # símbolo solto: "+", "&", "-"
+    if len(bare) == 1 and bare.isalpha():
+        return True  # letra solta: o "W" que sobrou de "W11"
+    return bare in _CONNECTORS or bare in _NEEDS_MORE
+
+
+def _trim_tail(text: str) -> str:
+    """Tira da ponta o que o corte deixa pendurado: parêntese aberto, símbolo ou letra soltos,
+    conectores e termos que pedem complemento ("Air" de "Air Fryer", "Tamanho"). Nome que ficaria
+    com menos de duas palavras volta como estava."""
+    out = text
+    for opener, closer in (("(", ")"), ("[", "]")):
+        if out.count(opener) > out.count(closer):
+            out = out[: out.rindex(opener)]
+    words = out.split()
+    while len(words) > 2 and _dangling(words[-1]):
+        words.pop()
+    trimmed = " ".join(words).strip(" ,-–|/")
+    return trimmed if len(trimmed.split()) >= 2 else text
 
 
 def coupon_line(offer) -> str:
