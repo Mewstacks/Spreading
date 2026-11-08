@@ -14,6 +14,7 @@ from apps.compose.offer import build_offer_message
 from apps.coupons.feed import BRT
 from apps.coupons.models import Coupon
 from apps.offers import live, selection, shopee
+from apps.offers.keys import title_identity
 from apps.offers.models import AffiliateLink, Rule
 from apps.orgs.models import ContainerLink
 
@@ -195,6 +196,11 @@ def _create_offer_item(org, rule, destination, offer, link, proof, now):
     offer.price_to, offer.price_from, offer.discount_pct = (
         proof.price_to, proof.price_from, proof.discount_pct
     )
+    # Frete e loja oficial do anúncio de agora (só na mensagem, sem gravar na oferta).
+    if proof.free_shipping is not None:
+        offer.free_shipping = proof.free_shipping
+    if proof.official_store is not None:
+        offer.official_store = proof.official_store
     key_src = f"{org.id}|{destination.id}|{offer.link_key}|{offer.valid_on}"
     try:
         with transaction.atomic():
@@ -206,7 +212,7 @@ def _create_offer_item(org, rule, destination, offer, link, proof, now):
             )
             OfferDelivery.unscoped.create(
                 org=org, destination=destination, product_key=offer.product_key,
-                outbox_item=item, created_at=now,
+                identity=title_identity(offer.title), outbox_item=item, created_at=now,
             )
     except IntegrityError:
         return None

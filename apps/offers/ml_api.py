@@ -108,9 +108,13 @@ def product_price(product_id: str, http=None) -> dict:
     if not offers:
         return {}
     winner = next((o for o in offers if "kvs_primary" in (o.get("tags") or [])), offers[0])
+    shipping = winner.get("shipping") if isinstance(winner.get("shipping"), dict) else {}
     return {
         "price": float(winner["price"]),
         "price_from": float(winner.get("original_price") or 0),
         "item_id": winner.get("item_id") or "",
         "winner_tagged": "kvs_primary" in (winner.get("tags") or []),
+        # O que o anúncio diz, para a mensagem repetir: None = a API não informou o frete.
+        "free_shipping": bool(shipping["free_shipping"]) if "free_shipping" in shipping else None,
+        "official_store": bool(winner.get("official_store_id")),
     }

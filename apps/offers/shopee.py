@@ -155,7 +155,10 @@ def vet(node: dict) -> dict | None:
     pct = ((1 - price / price_from) * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     return {"key": f"shp:{item}", "title": title[:300], "url": url[:600], "link": link,
             "image": image, "price_to": price, "price_from": price_from, "pct": pct,
-            "commission": _commission(node.get("commissionRate"))}
+            "commission": _commission(node.get("commissionRate")),
+            # o que o anúncio mostra e a mensagem repete: nota, vendas e nome da loja
+            "rating": rating.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP), "sales": sales,
+            "seller": str(node.get("shopName") or "").strip()[:80]}
 
 
 def _commission(raw) -> Decimal | None:
@@ -205,6 +208,7 @@ def store(org, row: dict, now, today) -> None:
             "macro": niches.classify(row["title"]), "price_from": row["price_from"],
             "price_to": row["price_to"], "discount_pct": row["pct"],
             "commission_pct": row["commission"], "last_seen": now,
+            "rating": row["rating"], "sales": row["sales"], "seller": row["seller"],
         },
     )
     AffiliateLink.unscoped.update_or_create(

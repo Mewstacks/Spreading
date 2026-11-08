@@ -76,7 +76,8 @@ def collect_catalog(now=None, per_term=15, http=None) -> int:
                     "title": title, "url": url, "image_url": image,
                     "macro": niches.classify(title),
                     "price_from": price_from, "price_to": price_to, "discount_pct": pct,
-                    "last_seen": now,
+                    "last_seen": now, "free_shipping": price.get("free_shipping"),
+                    "official_store": price.get("official_store"),
                 },
             )
             count += 1

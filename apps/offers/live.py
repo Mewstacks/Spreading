@@ -14,6 +14,8 @@ class Live:
     price_to: Decimal
     price_from: Decimal | None
     discount_pct: Decimal
+    free_shipping: bool | None = None  # o anúncio, agora; None = a prova não trouxe
+    official_store: bool | None = None
 
 
 def _dec(value) -> Decimal:
@@ -47,4 +49,4 @@ def validate(offer, min_discount, http=None) -> tuple[Live | None, str]:
         return None, "desconto_caiu"
     if not offer.coupon_kind and pct > SUSPECT_PCT and not confirmed:
         return None, "desconto_suspeito"
-    return Live(final, base, pct), ""
+    return Live(final, base, pct, data.get("free_shipping"), data.get("official_store")), ""

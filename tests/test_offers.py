@@ -86,7 +86,7 @@ def test_golden_no_coupon():
     offer = Offer(title="Monitor LG 24MS500-B 24 polegadas", price_from=Decimal(145),
                   price_to=Decimal("72.50"))
     assert build_offer_message(offer, "https://meli.la/x") == (
-        "🛍️ *Monitor LG 24MS500-B 24 polegadas*\n\nDe ❌ ~R$ 145~\nPor 🔥 *R$ 72,50*\n\n"
+        "🛍️ *Monitor LG 24MS500-B 24 polegadas*\n\nDe ❌ ~R$ 145~\nPor 🔥 *R$ 72,50* (50% OFF)\n\n"
         "🔗 https://meli.la/x"
     )
 
@@ -99,7 +99,7 @@ def test_golden_code_coupon():
                   coupon_until=until)
     assert build_offer_message(offer, "https://meli.la/2Ehvccw") == (
         "🛍️ *Monitor LG 24MS500-B 24 polegadas*\n\n🎟️ CUPOM: APROVEITAMELI\n\n"
-        "De ❌ ~R$ 199,98~\nPor 🔥 *R$ 58,20*\n\n"
+        "De ❌ ~R$ 199,98~\nPor 🔥 *R$ 58,20* (71% OFF)\n\n"
         "Cupom: 30% OFF · até R$ 500 · aplique no carrinho\n⏳ Válido até 30/11 às 23h59\n\n"
         "🔗 https://meli.la/2Ehvccw"
     )
@@ -492,3 +492,120 @@ def test_the_rule_interval_varies_by_send_but_stays_within_a_quarter(org, destin
         assert jittered_interval(rule, item) == wait  # o mesmo envio espera sempre o mesmo
         waits.add(wait)
     assert len(waits) > 20  # e envios diferentes esperam tempos diferentes
+
+
+# ── dedupe por nome: o mesmo produto em anúncios diferentes não repete no grupo ──────────────
+BASE = "Fritadeira Elétrica Sem Óleo Air Fryer Mondial 5L"  # 49 letras: o nome curto da mensagem
+
+
+def shopee_listing(item, title, price=300, frm=800):
+    key = f"shp:{item}"
+    offer = make_offer(key=key, title=title, price=price, frm=frm, store="shopee",
+                       source="shopee-api", url=f"https://shopee.com.br/product/1/{item}")
+    return offer
+
+
+def deliver_and_clear(now):
+    deliver_due(FakeTransport(), now)
+
+
+@pytest.fixture
+def quick(rule):
+    """Regra sem espera entre envios: o que barra é só o cooldown do produto."""
+    Rule.unscoped.filter(id=rule.id).update(interval_minutes=1, daily_cap=30)
+    rule.refresh_from_db()
+    return rule
+
+
+def test_title_identity_ignores_case_accents_punctuation_and_the_cut():
+    from apps.offers.keys import title_identity
+
+    assert title_identity("Fritadeira Elétrica, Air-Fryer 5L!") == title_identity(
+        "FRITADEIRA ELETRICA AIR FRYER 5L")
+    assert title_identity(BASE + " Grand Family Preta 127V") == title_identity(
+        BASE + " Grand Family Branca 220V") == title_identity(BASE)
+    assert title_identity("Aspirador Robô Xiaomi S40") != title_identity(
+        "Aspirador Robô Xiaomi S10")
+    assert title_identity("") == "" and title_identity("***") == ""
+
+
+def test_listings_with_the_same_shown_name_are_not_sent_twice_in_the_cooldown(
+        org, destination, quick):
+    rule = quick
+    for item in (1, 2, 3):
+        link(org, f"shp:{item}", f"https://s.shopee.com.br/{item}")
+    shopee_listing(1, BASE + " Grand Family Preta 127V")
+    shopee_listing(2, BASE + " Grand Family Branca 220V")  # outro anúncio, mesmo nome na mensagem
+    shopee_listing(3, "Aspirador Robô Xiaomi S40 Branco", price=500, frm=900)
+    first = enqueue_for_rule(rule, NOW)
+    assert first
+    names = {first.body.split("*")[1]}
+    deliver_and_clear(NOW)
+    second = enqueue_for_rule(rule, NOW + timedelta(hours=1))
+    names.add(second.body.split("*")[1])
+    deliver_and_clear(NOW + timedelta(hours=1))
+    assert names == {BASE, "Aspirador Robô Xiaomi S40 Branco"}  # um de cada, nunca a fritadeira 2x
+    assert enqueue_for_rule(rule, NOW + timedelta(hours=2)) is None
+    # a fritadeira enviada, a outra com o mesmo nome e o aspirador enviado: três em cooldown
+    assert explain_rule(rule, NOW + timedelta(hours=2))["cooldown"] == 3
+
+
+def test_the_same_name_is_allowed_again_after_the_cooldown(org, destination, rule):
+    link(org, "shp:1", "https://s.shopee.com.br/1")
+    link(org, "shp:2", "https://s.shopee.com.br/2")
+    shopee_listing(1, BASE + " Preta")
+    assert enqueue_for_rule(rule, NOW)
+    deliver_and_clear(NOW)
+    later = NOW + timedelta(hours=rule.cooldown_hours + 1)
+    other = shopee_listing(2, BASE + " Branca", price=250)
+    Offer.objects.filter(id=other.id).update(last_seen=later, valid_on=later.date())
+    Offer.objects.filter(product_key="shp:1").update(last_seen=later - timedelta(days=30))
+    assert enqueue_for_rule(rule, later)
+
+
+def test_the_delivery_records_the_identity_and_old_rows_still_block_by_key(org, destination, quick):
+    rule = quick
+    from apps.offers.keys import title_identity
+
+    link(org, "shp:1", "https://s.shopee.com.br/1")
+    link(org, "shp:2", "https://s.shopee.com.br/2")
+    shopee_listing(1, BASE + " Preta")
+    item = enqueue_for_rule(rule, NOW)
+    assert OfferDelivery.unscoped.get(outbox_item=item).identity == title_identity(BASE)
+    deliver_and_clear(NOW)
+    OfferDelivery.unscoped.update(identity="")  # linha antiga, de antes do campo
+    shopee_listing(2, "Outro Produto Qualquer Aqui", price=100, frm=400)
+    assert "Outro Produto" in enqueue_for_rule(rule, NOW + timedelta(hours=1)).body
+    deliver_and_clear(NOW + timedelta(hours=1))
+    # a mesma chave de produto ainda bloqueia, como antes, mesmo sem a identidade gravada
+    assert enqueue_for_rule(rule, NOW + timedelta(hours=2)) is None
+
+
+def test_the_manual_send_skips_the_cooldown_but_keeps_the_record(org, destination, rule):
+    from apps.delivery.outbox import enqueue_specific
+    from apps.offers.keys import title_identity
+
+    link(org, "shp:1", "https://s.shopee.com.br/1")
+    link(org, "shp:2", "https://s.shopee.com.br/2")
+    shopee_listing(1, BASE + " Preta")
+    second = shopee_listing(2, BASE + " Branca", price=250)
+    enqueue_for_rule(rule, NOW)
+    deliver_and_clear(NOW)
+    item, reason = enqueue_specific(org, rule, second, NOW + timedelta(hours=1))
+    assert reason == "" and OfferDelivery.unscoped.get(outbox_item=item).identity == (
+        title_identity(BASE))
+
+
+def test_the_migration_recovers_the_identity_from_the_message_the_group_saw():
+    import importlib
+
+    from apps.compose.offer import build_offer_message
+    from apps.offers.keys import title_identity
+
+    migration = importlib.import_module("apps.delivery.migrations.0003_message_facts")
+    for title in (BASE + " Grand Family Preta", "Aspirador Robô Xiaomi S40", "Câmera Wi-Fi 360°"):
+        body = build_offer_message(
+            Offer(title=title, price_from=Decimal(100), price_to=Decimal(50)), "https://x.io/l")
+        assert migration.identity_from_body(body) == title_identity(title)
+    assert migration.identity_from_body("sem negrito") == ""
+    assert migration.identity_from_body("") == ""

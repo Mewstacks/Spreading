@@ -189,6 +189,8 @@ def _ml(org, key, coupon, owner_link, now, http):
             "source": SOURCE, "product_key": key, "source_url": url, "title": title[:300],
             "url": url, "image_url": image, "macro": niches.classify(title),
             "price_from": price_from, "price_to": final, "discount_pct": pct, "last_seen": now,
+            "free_shipping": live.get("free_shipping"),
+            "official_store": live.get("official_store"),
             **fields,
         })
     _save_link(org, link_key, owner_link)

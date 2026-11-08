@@ -4,13 +4,16 @@ Ofertas e cupons do Mercado Livre (e Amazon/Shopee) → regras por grupo → Wha
 preço provado ao vivo e o link de afiliado do dono. Django 6 + Postgres 17. Só WhatsApp por enquanto.
 
 ## O que sai no grupo
-Uma oferta por vez, no formato único do v1: foto do produto + legenda
-`🛍️ *Nome curto*` / `De ❌ ~R$ x~` / `Por 🔥 *R$ y*` / `🔗 https://meli.la/…` (com cupom pareado, a linha do
-cupom e da validade). Nada de aviso de afiliação nem de lista de cupons.
+Uma oferta por vez, no esqueleto único do v1 (22/10) com linhas de fato: foto do produto + legenda
+`🛍️ *Nome curto*` / `De ❌ ~R$ x~` / `Por 🔥 *R$ y* (41% OFF)` / fatos / `🔗 link` (com cupom pareado, a linha
+do cupom e da validade). Os fatos vêm da própria loja e linha sem dado não aparece: ML `🚚 Frete grátis · 🏪
+Loja oficial` (da prova ao vivo no envio), Shopee `⭐ 4,9 · 584 vendidos` e `🏪 Nome da loja`, Amazon `⭐ 4,6`.
+Nada de aviso de afiliação nem de lista de cupons.
 
 Invariantes (cada uma tem teste): preço conferido ao vivo na API oficial do ML; "De" e cupom só com prova;
 um cupom por mensagem; foto obrigatória (≥400 px, JPEG); link do dono verificado e **nunca** a vitrine
-`/social/`; cooldown de 15 dias por produto e grupo; sem link do dono, não envia.
+`/social/`; cooldown de 15 dias por produto e grupo, **e por nome na mensagem** (anúncios diferentes com o
+mesmo nome contam como um); sem link do dono, não envia.
 
 ## Rodar local
 1. `.env` (nunca versionado): copie `.env.example` e preencha `DJANGO_SECRET_KEY` (≥50), `POSTGRES_PASSWORD`,

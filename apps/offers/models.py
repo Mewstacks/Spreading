@@ -88,6 +88,12 @@ class Offer(models.Model):
     discount_pct = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     # Comissão do afiliado em % quando a loja informa (Shopee); desempata o ranking.
     commission_pct = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    # Fatos que a própria loja informa e a mensagem mostra (None = a loja não disse).
+    free_shipping = models.BooleanField(null=True, blank=True)
+    official_store = models.BooleanField(null=True, blank=True)
+    rating = models.DecimalField(max_digits=3, decimal_places=1, null=True, blank=True)
+    sales = models.PositiveIntegerField(null=True, blank=True)
+    seller = models.CharField(max_length=80, blank=True, default="")
     # Cupom pareado ao produto (comprovado): código ou ativação no link.
     coupon_kind = models.CharField(max_length=12, blank=True)  # "" | "code" | "activation"
     coupon_code = models.CharField(max_length=60, blank=True)

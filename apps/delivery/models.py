@@ -54,6 +54,9 @@ class OfferDelivery(OrgScopedModel):
 
     destination = models.ForeignKey("orgs.Destination", on_delete=models.PROTECT)
     product_key = models.CharField(max_length=300)
+    # Nome que o grupo viu (sem acento nem pontuação): anúncios diferentes com o mesmo nome contam
+    # como o mesmo produto. Vazio nas linhas antigas sem texto para recuperar.
+    identity = models.CharField(max_length=140, blank=True, default="")
     outbox_item = models.ForeignKey(OutboxItem, on_delete=models.CASCADE)
     created_at = models.DateTimeField(default=timezone.now)
 

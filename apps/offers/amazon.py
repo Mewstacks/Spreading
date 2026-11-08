@@ -145,6 +145,7 @@ def store(row: dict, now, today) -> Offer:
             "coupon_pct": row["coupon_pct"] if row["coupon"] else None,
             "coupon_amount": row["coupon_amount"] if row["coupon"] else None,
             "coupon_cap": None, "coupon_min": None, "coupon_until": None,
+            "rating": row["rating"],
         },
     )
     return offer

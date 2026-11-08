@@ -173,6 +173,13 @@ def test_vet_uses_the_coupon_price_and_the_pre_coupon_price_as_base():
     assert amazon.vet(row)["coupon"] is False
 
 
+def test_the_listing_rating_is_kept_for_the_message(org, rule):
+    html = page(card(rating="4,6"), card(asin="B000000002", rating="4,0"))
+    assert amazon.collect(NOW, http=Http(html), sleep=lambda s: None) == 2
+    assert dict(Offer.objects.values_list("product_key", "rating")) == {
+        "B0CH5PRZH9": Decimal("4.6"), "B000000002": Decimal("4.0")}
+
+
 def test_coupon_card_becomes_an_activation_pair_in_the_golden_message(org, rule, monkeypatch):
     monkeypatch.setattr("apps.delivery.outbox.fetch_image_jpeg", lambda url: b"jpeg")
     thirty = coupon_html("70,00", "Cupom de 30% de desconto")
@@ -186,7 +193,7 @@ def test_coupon_card_becomes_an_activation_pair_in_the_golden_message(org, rule,
     expected = "\n".join([
         "🛍️ *Air Fryer Oven Digital 12L*", "",
         "🎟️ CUPOM: ative na página", "",
-        "De ❌ ~R$ 100~", "Por 🔥 *R$ 70*", "",
+        "De ❌ ~R$ 100~", "Por 🔥 *R$ 70* (30% OFF)", "⭐ 4,6", "",
         "Cupom: 30% OFF", "",
         "🔗 https://www.amazon.com.br/dp/B0CH5PRZH9?tag=luizahfn-20",
     ])

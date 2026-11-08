@@ -182,8 +182,20 @@ def test_a_shopee_offer_reaches_the_group_in_the_golden_format(org, rule, monkey
     assert item and item.image_url == GOOD["imageUrl"]
     assert item.body == (
         "🛍️ *Fone Bluetooth TWS Pro com Cancelamento de Ruído*\n\n"
-        "De ❌ ~R$ 100~\nPor 🔥 *R$ 70*\n\n🔗 https://s.shopee.com.br/AbCd123"
+        "De ❌ ~R$ 100~\nPor 🔥 *R$ 70* (30% OFF)\n⭐ 4,9 · 540 vendidos\n🏪 Loja Boa\n\n"
+        "🔗 https://s.shopee.com.br/AbCd123"
     )
+
+
+def test_the_listing_facts_are_kept_for_the_message(org, rule):
+    shopee.collect(NOW, http=Http([GOOD]))
+    offer = Offer.objects.get()
+    assert (offer.rating, offer.sales, offer.seller) == (Decimal("4.9"), 540, "Loja Boa")
+    shopee.collect(NOW + timedelta(hours=2), http=Http([{**GOOD, "shopName": None,
+                                                         "ratingStar": "4.85", "sales": "1234"}]))
+    offer.refresh_from_db()
+    assert (offer.rating, offer.sales, offer.seller) == (Decimal("4.9"), 1234, "")
+    assert shopee.vet({**GOOD, "shopName": "x" * 200})["seller"] == "x" * 80
 
 
 # ── link com sub-id: a venda volta atribuída ao Spreading e ao grupo ─────────

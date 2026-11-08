@@ -12,6 +12,7 @@ from apps.delivery.models import OfferDelivery
 
 from . import niches
 from .catalog import split_terms
+from .keys import title_identity
 from .links import is_storefront
 from .models import AffiliateLink, Offer
 
@@ -137,11 +138,14 @@ def candidates(org, destination, rule, now, report: Counter | None = None,
     report = report if report is not None else Counter()
     links = dict(AffiliateLink.objects.for_org(org).values_list("product_key", "affiliate_url"))
     cooldown_since = now - timedelta(hours=rule.cooldown_hours)
-    recent = set(
+    recent_rows = list(
         OfferDelivery.objects.for_org(org)
         .filter(destination=destination, created_at__gte=cooldown_since)
-        .values_list("product_key", flat=True)
+        .values_list("product_key", "identity")
     )
+    recent = {key for key, _name in recent_rows}
+    # O que o grupo viu: outro anúncio com o mesmo nome na mensagem é o mesmo produto.
+    recent_names = {name for _key, name in recent_rows if name}
     pool = (
         Offer.objects.filter(
             store__in=rule.store_list, discount_pct__gte=rule.min_discount_pct,
@@ -173,6 +177,9 @@ def candidates(org, destination, rule, now, report: Counter | None = None,
         kind = niches.match(list(rule.niches or []), offer.title, macro)
         if not kind or not term_filter(rule, offer.title):
             report["fora_do_nicho"] += 1
+            continue
+        if recent_names and title_identity(offer.title) in recent_names:
+            report["cooldown"] += 1
             continue
         link = resolve_link(org, offer, links)
         if not link:

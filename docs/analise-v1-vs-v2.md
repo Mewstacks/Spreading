@@ -165,7 +165,8 @@ checkout) contra US$ 74,65 da Fly. Nenhuma compra foi feita.
 | Reformular por completo, núcleo enxuto | feito na branch `v2`; `main` intocada |
 | Lib de WhatsApp mais leve | feito: WAHA/GOWS, 344 MiB |
 | Disparo melhor | feito: outbox, ACK, `incerto` sem reenvio, canário, ritmo variável |
-| Mensagens melhores | feito: formato único com foto; sem aviso (decisão) |
+| Mensagens melhores | **era cópia do v1** até 08/11 (marquei feito por engano); agora esqueleto único com % OFF, frete, loja oficial, nota, vendas e nome da loja quando a loja informa; sem aviso (decisão). Card de imagem não feito |
+| Não repetir o mesmo produto | cooldown por anúncio + por nome na mensagem (08/11); antes a Shopee repetia o mesmo produto em anúncios diferentes |
 | Cupons (principal) e promoções em volume | fontes feitas; **gargalo = links do dono** (seção 4) |
 | Pesquisar e engenharia reversa | feito: termos, feeds, páginas, concorrentes |
 | Hospedagem barata | medido; falta escolher e contratar o VPS (valor com OK do dono) |
