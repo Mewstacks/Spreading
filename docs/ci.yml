@@ -1,0 +1,35 @@
+# Modelo de CI para o GitHub Actions. Copie para .github/workflows/ci.yml (a ferramenta de edição
+# usada na construção do v2 não escreve em .github, e a regra do dono proíbe mexer em workflow).
+# Roda o mesmo que `python tools/verify.py` (ruff + pytest), em Postgres 17 como em produção.
+name: ci
+
+on:
+  push:
+    branches: [v2, main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:test@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python tools/verify.py

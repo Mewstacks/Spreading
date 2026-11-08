@@ -122,4 +122,4 @@ https, redirect para https (`/healthz` fica de fora) e HSTS de 30 dias (`DJANGO_
 ## Verificação
 `python tools/verify.py` (ruff + pytest). Testes rodam em SQLite; com `DATABASE_URL` rodam em Postgres.
 Os testes do driver abrem um Chromium de verdade contra um portal falso (pulam se o Playwright não estiver
-instalado).
+instalado). Modelo de CI (ruff + pytest em Postgres 17) em `docs/ci.yml`: copie para `.github/workflows/`.
