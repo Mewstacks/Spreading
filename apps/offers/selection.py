@@ -77,6 +77,10 @@ def resolve_link(org, offer, links: dict) -> str:
             if org.amazon_tag and offer.product_key else ""
         )
     url = links.get(offer.link_key, "")
+    if not url and offer.store == "mercadolivre" and offer.coupon_kind == "code":
+        # Cupom por código vale no carrinho: o link do produto basta. O de ativação precisa de um
+        # link que carregue a campanha, então não cai aqui.
+        url = links.get(offer.product_key, "")
     return "" if is_storefront(url) else url  # cinto e suspensório: o estoque já recusa na entrada
 
 

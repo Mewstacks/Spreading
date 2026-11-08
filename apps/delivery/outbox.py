@@ -13,7 +13,7 @@ from apps.compose.notice import MAX_CODES, build_coupon_notice
 from apps.compose.offer import build_offer_message
 from apps.coupons.feed import BRT
 from apps.coupons.models import Coupon
-from apps.offers import live, selection
+from apps.offers import live, selection, shopee
 from apps.offers.models import AffiliateLink, Rule
 from apps.orgs.models import ContainerLink
 
@@ -173,12 +173,21 @@ def enqueue_offer(org, rule, now=None, report: Counter | None = None, http=None,
         if fetch_image_jpeg(offer.image_url) is None:
             report["sem_foto"] += 1  # sem foto, sem post
             continue
+        link = _attributed(offer, link, destination)
         item = _create_offer_item(org, rule, destination, offer, link, proof, now)
         if item is None:
             report["ja_enfileirada"] += 1
             continue
         return item
     return None
+
+
+def _attributed(offer, link, destination, http=None) -> str:
+    """Shopee: link curto com os sub-ids do Spreading e do grupo, para a venda voltar atribuída
+    (relatório de conversões, tela Receita). Qualquer falha cai no link comum."""
+    if offer.store != "shopee" or not settings.SHOPEE_TRACK:
+        return link
+    return shopee.tracked_link(offer.url, ["spreading", f"g{destination.id}"], http=http) or link
 
 
 def _create_offer_item(org, rule, destination, offer, link, proof, now):
@@ -213,7 +222,8 @@ def enqueue_specific(org, rule, offer, now=None, http=None):
     if not _destination_ready(org, destination, now):
         return None, "grupo_indisponivel"
     links = dict(AffiliateLink.objects.for_org(org)
-                 .filter(product_key=offer.link_key).values_list("product_key", "affiliate_url"))
+                 .filter(product_key__in={offer.link_key, offer.product_key})
+                 .values_list("product_key", "affiliate_url"))
     link = selection.resolve_link(org, offer, links)
     if not link:
         return None, "sem_link_do_dono"
@@ -227,6 +237,7 @@ def enqueue_specific(org, rule, offer, now=None, http=None):
         return None, reason
     if fetch_image_jpeg(offer.image_url) is None:
         return None, "sem_foto"
+    link = _attributed(offer, link, destination)
     item = _create_offer_item(org, rule, destination, offer, link, proof, now)
     return (item, "") if item else (None, "ja_enfileirada")
 

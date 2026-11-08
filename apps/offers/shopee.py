@@ -9,6 +9,7 @@ que já tinha e tenta o termo de novo no ciclo seguinte.
 import hashlib
 import json
 import logging
+import re
 import time
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from urllib.parse import urlparse
@@ -166,7 +167,36 @@ def _commission(raw) -> Decimal | None:
     return min(percent, Decimal(100)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def _store(org, row: dict, now, today) -> None:
+def tracked_link(url: str, sub_ids, http=None) -> str:
+    """Link curto da Shopee com sub-ids (a venda volta com eles em `utmContent`, ex.:
+    `spreading-g1---`); '' se não der. Nunca levanta: o envio não pode depender disto."""
+    if not configured() or not safe_link(url):
+        return ""
+    ids = [re.sub(r"[^A-Za-z0-9]", "", str(sub))[:50] for sub in sub_ids][:5]
+    ids = [sub for sub in ids if sub]
+    query = "mutation { generateShortLink(input: {originUrl: %s, subIds: [%s]}) { shortLink } }" % (
+        json.dumps(url), ", ".join(json.dumps(sub) for sub in ids))
+    try:
+        data = execute(query, None, app_id=settings.SHOPEE_APP_ID,
+                       secret=settings.SHOPEE_APP_SECRET, http=http)
+        return safe_link(((data or {}).get("generateShortLink") or {}).get("shortLink"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("shopee: link com sub-id falhou (%s); sai o link comum", exc)
+        return ""
+
+
+def fetch_item(item_id: int, http=None) -> dict | None:
+    """Nó da API de um produto pelo itemId (literal inteiro na consulta: nada de texto livre);
+    None se a Shopee não o conhece. Levanta ShopeeError em falha."""
+    query = "query { productOfferV2(itemId: %d, limit: 1) { nodes { %s } } }" % (
+        int(item_id), FIELDS)
+    data = execute(query, None, app_id=settings.SHOPEE_APP_ID,
+                   secret=settings.SHOPEE_APP_SECRET, http=http)
+    nodes = (data.get("productOfferV2") or {}).get("nodes") or []
+    return nodes[0] if nodes and isinstance(nodes[0], dict) else None
+
+
+def store(org, row: dict, now, today) -> None:
     Offer.objects.update_or_create(
         store="shopee", link_key=row["key"], valid_on=today,
         defaults={
@@ -214,7 +244,7 @@ def collect(now=None, http=None, sleep=time.sleep) -> int:
             for node in ((data.get("productOfferV2") or {}).get("nodes") or []):
                 row = vet(node) if isinstance(node, dict) else None
                 if row and (rule.org_id, row["key"]) not in stored:
-                    _store(rule.org, row, now, today)
+                    store(rule.org, row, now, today)
                     stored.add((rule.org_id, row["key"]))
             TermRun.objects.update_or_create(term=key, defaults={"last_run": now})
     return len(stored)

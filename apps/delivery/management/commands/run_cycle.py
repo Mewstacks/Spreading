@@ -9,7 +9,7 @@ from apps.coupons.feed import fetch_feed, ingest
 from apps.delivery import alerts
 from apps.delivery.outbox import deliver_due, enqueue_for_rule
 from apps.delivery.transports import SessionRouter
-from apps.offers import amazon, amazon_deals, catalog, ml_api, ml_page, shopee
+from apps.offers import amazon, amazon_deals, catalog, ml_api, ml_page, shopee, shopee_report
 from apps.offers.feeds import fetch_daily_offers, ingest_daily_offers
 from apps.offers.models import Rule, SourceRun
 
@@ -54,11 +54,12 @@ def _safe(label, fn, report, at=None):
 def run_once(transport=None, now=None, coupon_html=None, offers_html=None) -> dict:
     transport = transport or SessionRouter()
     report, at = {}, now or timezone.now()
-    _safe("cupons", lambda: ingest(coupon_html if coupon_html is not None else fetch_feed()),
+    _safe("cupons",
+          lambda: ingest(coupon_html if coupon_html is not None else fetch_feed(), now),
           report, at)
     _safe("ofertas_dia",
           lambda: ingest_daily_offers(
-              offers_html if offers_html is not None else fetch_daily_offers()),
+              offers_html if offers_html is not None else fetch_daily_offers(), now),
           report, at)
     if ml_api.configured():
         _safe("catalogo", lambda: catalog.collect_catalog(now), report, at)
@@ -67,6 +68,7 @@ def run_once(transport=None, now=None, coupon_html=None, offers_html=None) -> di
     _safe("amazon_cupons", lambda: amazon_deals.collect(now), report, at)
     if shopee.configured():
         _safe("shopee", lambda: shopee.collect(now), report, at)
+        _safe("shopee_vendas", lambda: shopee_report.sync(now), report, at)
 
     report["alertas"] = alerts.run(transport, at)
 

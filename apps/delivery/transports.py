@@ -77,6 +77,25 @@ class WahaTransport:
         except (requests.exceptions.RequestException, ValueError):
             return ""
 
+    def reachable(self) -> bool:
+        """O WhatsApp responde por esta sessão? Pergunta ao servidor pelo próprio número (não
+        manda mensagem): pega o número que diz 'conectado' mas já não fala com o WhatsApp."""
+        headers = {"X-Api-Key": self.api_key} if self.api_key else {}
+        timeout = settings.HTTP_TIMEOUT_SECONDS
+        try:
+            me = self.http.get(f"{self.base_url}/api/sessions/{self.session_name}",
+                               headers=headers, timeout=timeout)
+            number = str((((me.json() or {}).get("me")) or {}).get("id") or "").split("@")[0]
+            if me.status_code != 200 or not number.isdigit():
+                return False
+            answer = self.http.get(
+                f"{self.base_url}/api/contacts/check-exists",
+                params={"phone": number, "session": self.session_name}, headers=headers,
+                timeout=timeout)
+            return answer.status_code == 200 and (answer.json() or {}).get("numberExists") is True
+        except (requests.exceptions.RequestException, ValueError, AttributeError):
+            return False
+
     def ensure_started(self) -> str:
         """Garante sessão criada e iniciada (QR disponível). Devolve o status final."""
         headers = {"X-Api-Key": self.api_key} if self.api_key else {}

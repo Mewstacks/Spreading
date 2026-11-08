@@ -17,6 +17,17 @@ DEBUG = env_bool("DJANGO_DEBUG", False)
 ALLOWED_HOSTS = [h for h in env("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h]
 CSRF_TRUSTED_ORIGINS = [o for o in env("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",") if o]
 
+# Atrás de TLS (Caddy, Fly): cookies só por HTTPS, redirect e HSTS. Local em http deixa desligado.
+# O proxy tem de sobrescrever X-Forwarded-Proto; HSTS de 30 dias: subir só depois de ver tudo certo.
+HTTPS = env_bool("DJANGO_HTTPS", False)
+if HTTPS:
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_SSL_REDIRECT = True
+    SECURE_REDIRECT_EXEMPT = [r"^healthz$"]  # a sonda de saúde interna fala http
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = int(env("DJANGO_HSTS_SECONDS", "2592000"))
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -41,6 +52,7 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",  # o painel tem botão que envia
 ]
 
 ROOT_URLCONF = "spreading.urls"
@@ -109,7 +121,13 @@ ML_API_CLIENT_SECRET = env("ML_API_CLIENT_SECRET", "")
 WAHA_URL = env("WAHA_URL", "http://waha:3000")
 WAHA_API_KEY = env("WAHA_API_KEY", "")
 WAHA_SESSION = env("WAHA_SESSION", "default")
+# Dashboard do WAHA como o navegador do dono o enxerga (o passkey do WhatsApp passa por ele).
+WAHA_DASHBOARD_URL = env("WAHA_DASHBOARD_URL", "http://localhost:3000/dashboard/")
 HTTP_TIMEOUT_SECONDS = float(env("HTTP_TIMEOUT_SECONDS", "15"))
+# Canário (comando `canary`): mensagem real a um chat privado e conferência do ACK.
+# CANARY_CHAT_ID vale para o número principal; os demais: CANARY_CHATS=numero2=chat@g.us,…
+CANARY_CHAT_ID = env("CANARY_CHAT_ID", "")
+CANARY_CHATS = env("CANARY_CHATS", "")
 # Teto de mensagens por hora em cada número de WhatsApp (soma de todos os grupos dele). 0 desliga.
 SESSION_HOURLY_CAP = int(env("SESSION_HOURLY_CAP", "20"))
 
@@ -124,6 +142,9 @@ LINKBUILDER_VERIFY = env_bool("LINKBUILDER_VERIFY", True)
 # Shopee Affiliate Open API (App ID e Secret do painel de afiliados). Sem eles a loja não coleta.
 SHOPEE_APP_ID = env("SHOPEE_APP_ID", "")
 SHOPEE_APP_SECRET = env("SHOPEE_APP_SECRET", "")
+# Link curto com sub-id (Spreading + grupo) a cada envio da Shopee: a tela Receita separa o que o
+# Spreading vendeu. Falhou, sai o link comum. 0 desliga.
+SHOPEE_TRACK = env_bool("SHOPEE_TRACK", True)
 
 # Amazon BR: coleta pela busca pública (sem API). 0 desliga.
 AMAZON_COLLECT = env_bool("AMAZON_COLLECT", True)

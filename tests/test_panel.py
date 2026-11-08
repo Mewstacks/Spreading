@@ -1,3 +1,4 @@
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
@@ -398,6 +399,19 @@ def test_coupons_page_lists_only_live_pairs_with_state_and_search(client, staff,
     assert "Produto MLB444" in found and "Produto MLB333" not in found
     assert "Nada encontrado." in page(client, "coupons", q="zzz") and "Limpar" in page(
         client, "coupons", q="zzz")
+
+
+def test_a_code_pair_with_only_the_product_link_shows_as_linked(client, staff, org, rule):
+    _pair("MLB333", "ALFA")  # código: o link do produto basta
+    make_offer(key="MLB444", title="Produto MLB444", price=60, frm=100, link_key="MLB444+c9",
+               coupon_kind="activation", coupon_amount=Decimal(20),
+               coupon_until=NOW + timedelta(days=5))  # ativação: precisa de link da campanha
+    for key in ("MLB333", "MLB444"):
+        AffiliateLink.unscoped.create(org=org, product_key=key, affiliate_url=f"https://meli.la/{key}")
+    with_link = page(client, "coupons", estado="com")
+    assert "Produto MLB333" in with_link and "Produto MLB444" not in with_link
+    without = page(client, "coupons", estado="sem")
+    assert "Produto MLB444" in without and "Produto MLB333" not in without
 
 
 def test_coupons_page_lists_the_live_ml_campaigns_only(client, staff, org, rule):

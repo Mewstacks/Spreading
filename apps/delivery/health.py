@@ -47,6 +47,29 @@ def snapshot(transport, now=None) -> dict:
     return data
 
 
+def canary_chats() -> dict[str, str]:
+    """Chat privado de canário de cada número: `CANARY_CHATS=numero=chat,…`; `CANARY_CHAT_ID`
+    vale para o número principal. Número sem chat é só sondado (nunca recebe mensagem)."""
+    chats = {}
+    for part in (getattr(settings, "CANARY_CHATS", "") or "").split(","):
+        name, _sep, chat = part.partition("=")
+        if name.strip() and chat.strip():
+            chats[name.strip()] = chat.strip()
+    if getattr(settings, "CANARY_CHAT_ID", ""):
+        chats.setdefault(settings.WAHA_SESSION, settings.CANARY_CHAT_ID)
+    return chats
+
+
+def run_probe(transport) -> dict:
+    """Sem chat de canário: sessão em WORKING e o WhatsApp respondendo pelo próprio número."""
+    if not transport.session_working():
+        return {"ok": False, "reason": "sessão fora de WORKING"}
+    reachable = getattr(transport, "reachable", None)
+    if reachable is not None and not reachable():
+        return {"ok": False, "reason": "o WhatsApp não responde"}
+    return {"ok": True, "probe": True}
+
+
 def run_canary(transport, chat_id: str, wait_s=20, poll_s=2, sleep=time.sleep) -> dict:
     """Mensagem real a um grupo privado e checagem de ACK: 'conectado' não prova entrega."""
     if not chat_id:

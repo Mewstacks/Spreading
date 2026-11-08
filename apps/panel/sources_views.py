@@ -19,6 +19,7 @@ SOURCES = (
     ("amazon", "Amazon · busca", "search", lambda: bool(settings.AMAZON_COLLECT)),
     ("amazon_cupons", "Amazon · cupons", "ticket-percent", lambda: bool(settings.AMAZON_COLLECT)),
     ("shopee", "Shopee · API", "shopping-bag", shopee.configured),
+    ("shopee_vendas", "Shopee · vendas", "wallet", shopee.configured),
 )
 
 

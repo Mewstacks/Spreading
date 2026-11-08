@@ -1,0 +1,8 @@
+<div class="row-actions"><form method="post" action="{% url 'panel:offer_send' offer.id %}">{% csrf_token %}
+  <input type="hidden" name="next" value="{{ next }}">
+  {% if rules|length > 1 %}
+  <label class="sr" for="rule{{ offer.id }}">Grupo</label>
+  <select id="rule{{ offer.id }}" name="rule" style="width:auto;min-width:130px">{% for rule in rules %}<option value="{{ rule.id }}">{{ rule.destination.name }}</option>{% endfor %}</select>
+  {% else %}<input type="hidden" name="rule" value="{{ rules.0.id }}">{% endif %}
+  <button class="btn btn-sm" type="submit"><i aria-hidden="true" data-lucide="send"></i> Enviar</button>
+</form></div>

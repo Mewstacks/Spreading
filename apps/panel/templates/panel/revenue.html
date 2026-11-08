@@ -1,0 +1,86 @@
+{% extends "panel/base.html" %}
+{% block title %}Receita · Spreading{% endblock %}
+{% block topbar_context %}<strong>Receita</strong><span>Operação</span>{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Operação</span>
+    <h1><i aria-hidden="true" data-lucide="wallet"></i> Receita</h1>
+  </div>
+  <div class="head-actions"><span class="tech-tag">Shopee</span></div>
+</div>
+
+{% if not enabled %}
+<div class="empty">
+  <i aria-hidden="true" data-lucide="plug-zap"></i>
+  <span class="empty-title">Shopee desligada.</span>
+  <a class="btn" href="{% url 'panel:sources' %}">Fontes</a>
+</div>
+{% else %}
+<form class="toolbar" method="get">
+  <label class="sr" for="dias">Período</label>
+  <select id="dias" name="dias">
+    {% for d in periods %}<option value="{{ d }}"{% if d == days %} selected{% endif %}>{{ d }} dias</option>{% endfor %}
+  </select>
+  <button class="btn" type="submit"><i aria-hidden="true" data-lucide="filter"></i> Filtrar</button>
+</form>
+
+<section class="stat-strip" aria-label="Resumo">
+  <div class="stat-cell hero fit"><div class="kpi-label">Confirmada</div><div class="kpi-value">{{ done }}</div><div class="kpi-sub">{{ done_n }} vendas</div></div>
+  <div class="stat-cell fit"><div class="kpi-label">Pendente</div><div class="kpi-value">{{ pending }}</div><div class="kpi-sub">{{ pending_n }} vendas</div></div>
+  <div class="stat-cell fit"><div class="kpi-label">Vendido</div><div class="kpi-value">{{ sold }}</div><div class="kpi-sub">{{ items }} itens</div></div>
+  <div class="stat-cell fit"><div class="kpi-label">Canceladas</div><div class="kpi-value">{{ cancelled_n }}</div><div class="kpi-sub">vendas</div></div>
+</section>
+
+{% if empty %}
+<div class="empty">
+  <i aria-hidden="true" data-lucide="search-x"></i>
+  <span class="empty-title">Sem vendas em {{ days }} dias.</span>
+  {% if days != 60 %}<a class="btn" href="?dias=60">Ver 60 dias</a>{% endif %}
+</div>
+{% else %}
+{% if groups %}
+<section class="panel" id="grupos">
+  <div class="panel-head"><h2><i aria-hidden="true" data-lucide="users"></i> Grupos</h2></div>
+  <ul class="rows">
+    {% for g in groups %}
+    <li class="row-item">
+      <span class="row-main">{{ g.name }}</span>
+      <span class="row-side"><span class="muted tnum">{{ g.count }} vendas</span><span class="num">{{ g.commission }}</span></span>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="panel">
+  <div class="panel-head"><h2><i aria-hidden="true" data-lucide="share-2"></i> Origem</h2></div>
+  <ul class="rows">
+    {% for c in channels %}
+    <li class="row-item">
+      <span class="row-main"><span class="tech-tag">{{ c.name }}</span></span>
+      <span class="row-side"><span class="muted tnum">{{ c.count }} vendas</span><span class="num">{{ c.commission }}</span></span>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+
+<div class="table-flat" style="margin-top:1.4rem">
+  <table class="stack-table">
+    <thead><tr><th>Data</th><th class="cell-grow">Produto</th><th>Origem</th><th>Estado</th><th>Comissão</th></tr></thead>
+    <tbody>
+      {% for s in latest %}
+      <tr>
+        <td data-label="Data" class="tnum muted">{{ s.when }}</td>
+        <td class="cell-grow" data-label="Produto"><span class="prod-title">{{ s.title }}</span>{% if s.more %} <span class="muted">+{{ s.more }}</span>{% endif %}</td>
+        <td data-label="Origem"><span class="tech-tag">{{ s.channel }}</span></td>
+        <td data-label="Estado"><span class="badge badge-{{ s.tone }}">{{ s.label }}</span></td>
+        <td data-label="Comissão" class="tnum"><b>{{ s.commission }}</b></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

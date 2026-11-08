@@ -1,0 +1,61 @@
+{% extends "panel/base.html" %}
+{% block title %}Manual · Spreading{% endblock %}
+{% block topbar_context %}<strong>Manual</strong><span>Operação</span>{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div class="head-main">
+    <span class="eyebrow">Operação</span>
+    <h1><i aria-hidden="true" data-lucide="clipboard-paste"></i> Manual</h1>
+  </div>
+</div>
+
+<form class="panel" method="post">{% csrf_token %}
+  <div class="panel-head"><h2><i aria-hidden="true" data-lucide="link"></i> Produtos</h2></div>
+  <label class="sr" for="links">Links</label>
+  <textarea id="links" name="links" rows="6" maxlength="20000" placeholder="https://www.mercadolivre.com.br/p/MLB…  link do dono" spellcheck="false">{{ form.links }}</textarea>
+  <details class="adv" style="margin-top:1rem"{% if has_coupon %} open{% endif %}>
+    <summary><span>Cupom</span></summary>
+    <div class="form-grid" style="padding:0 .95rem 1rem">
+      <div><label for="code">Código</label>
+        <input id="code" name="code" type="text" maxlength="40" value="{{ form.code }}" placeholder="VALE20" autocomplete="off" spellcheck="false"></div>
+      <div><label for="tipo">Tipo</label>
+        <select id="tipo" name="tipo"><option value="pct"{% if form.tipo != "amount" %} selected{% endif %}>%</option><option value="amount"{% if form.tipo == "amount" %} selected{% endif %}>R$</option></select></div>
+      <div><label for="valor">Valor</label>
+        <input id="valor" name="valor" type="text" inputmode="decimal" value="{{ form.valor }}" placeholder="20" autocomplete="off"></div>
+      <div><label for="minimo">Mínimo</label>
+        <input id="minimo" name="minimo" type="text" inputmode="decimal" value="{{ form.minimo }}" placeholder="R$" autocomplete="off"></div>
+      <div><label for="teto">Teto</label>
+        <input id="teto" name="teto" type="text" inputmode="decimal" value="{{ form.teto }}" placeholder="R$" autocomplete="off"></div>
+      <div><label for="validade">Validade</label>
+        <input id="validade" name="validade" type="date" value="{{ form.validade }}"></div>
+    </div>
+  </details>
+  <div class="form-actions"><button class="btn btn-accent" type="submit"><i aria-hidden="true" data-lucide="plus"></i> Adicionar</button></div>
+</form>
+
+{% if results %}
+<div class="table-flat" style="margin-top:1.4rem">
+  <table class="stack-table">
+    <thead><tr><th class="cell-grow">Produto</th><th>Loja</th><th>Preço</th><th>Estado</th><th class="col-actions"></th></tr></thead>
+    <tbody>
+      {% for r in results %}
+      <tr>
+        <td class="cell-grow" data-label="Produto"><span class="prod-title">{% if r.title %}{{ r.title }}{% else %}{{ r.url|truncatechars:70 }}{% endif %}</span></td>
+        <td data-label="Loja">{% if r.store %}<span class="tech-tag">{{ r.store }}</span>{% endif %}</td>
+        <td data-label="Preço" class="tnum">{% if r.price %}<b>{{ r.price }}</b>{% endif %}</td>
+        <td data-label="Estado">
+          {% if r.status == "ok" %}<span class="badge badge-green">Pronto</span>
+          {% elif r.status == "sem_link" %}<span class="badge badge-yellow">Sem link</span>
+          {% else %}<span class="badge badge-red">{{ r.reason }}</span>{% endif %}
+        </td>
+        <td class="col-actions">
+          {% if r.status == "ok" and rules %}{% include "panel/_send.html" with offer=r.offer %}
+          {% elif r.status == "sem_link" %}<a class="btn btn-sm" href="{% url 'panel:links' %}"><i aria-hidden="true" data-lucide="link"></i> Links</a>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

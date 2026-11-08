@@ -111,6 +111,28 @@ class Offer(models.Model):
         indexes = [models.Index(fields=["store", "last_seen"])]
 
 
+class Conversion(OrgScopedModel):
+    """Venda atribuída ao dono, vinda do relatório da loja (Shopee `conversionReport`)."""
+
+    store = models.CharField(max_length=30, default="shopee")
+    external_id = models.CharField(max_length=80)  # conversionId:orderId
+    purchased_at = models.DateTimeField()
+    status = models.CharField(max_length=20)  # PENDING | COMPLETED | CANCELLED (texto da loja)
+    title = models.CharField(max_length=300, blank=True)  # primeiro item do pedido
+    items = models.PositiveSmallIntegerField(default=1)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)  # valor vendido
+    commission = models.DecimalField(max_digits=12, decimal_places=4, default=0)  # líquida
+    channel = models.CharField(max_length=40, blank=True)  # origem do clique (WhatsApp, YouTube…)
+    sub_id = models.CharField(max_length=80, blank=True)  # utm_content do link
+    synced_at = models.DateTimeField()
+
+    class Meta(OrgScopedModel.Meta):
+        constraints = [
+            models.UniqueConstraint(fields=["org", "store", "external_id"], name="uniq_conversion")
+        ]
+        indexes = [models.Index(fields=["org", "store", "purchased_at"])]
+
+
 class TermRun(models.Model):
     """Última coleta de catálogo por termo: a API do ML não é consultada a cada ciclo."""
 

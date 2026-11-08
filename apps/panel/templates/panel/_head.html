@@ -192,6 +192,9 @@
       font-feature-settings: "tnum" 1; }
     .kpi-sub { margin-top: .25rem; font-size: 12px; color: var(--muted); }
     .stat-cell.hero .kpi-value { color: var(--accent); }
+    /* Valor em reais: encolhe com a largura da célula em vez de quebrar "R$" numa linha só. */
+    .stat-cell.fit { container-type: inline-size; }
+    .stat-cell.fit .kpi-value { font-size: clamp(1.05rem, 14cqw, 1.7rem); white-space: nowrap; }
     .rows { border-top: 1px solid var(--border); list-style: none; margin: 0; padding: 0; }
     .row-item { display: flex; align-items: center; gap: .9rem; padding: .85rem .25rem; border-bottom: 1px solid var(--border);
       min-width: 0; }

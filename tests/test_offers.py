@@ -187,6 +187,61 @@ def test_candidates_lists_offers_that_only_lack_the_owner_link(org, destination,
     assert same == ["MLB222"]  # sem `missing` o resultado é o mesmo
 
 
+def code_pair(key="MLB555", code="VALE", **extra):
+    return make_offer(
+        key=key, price=80, frm=100, link_key=f"{key}+{code}", coupon_kind="code",
+        coupon_code=code, coupon_pct=Decimal(20), proof_base_price=Decimal("100.00"),
+        coupon_until=NOW + timedelta(days=3), proof_at=NOW, **extra)
+
+
+def test_a_code_coupon_pair_rides_on_the_product_link(org, destination, rule):
+    code_pair()
+    link(org, "MLB555", "https://meli.la/produto")  # só o do produto: o código vale no carrinho
+    missing = []
+    ready = list(selection.candidates(org, destination, rule, NOW, missing=missing))
+    assert [(o.link_key, url) for o, url in ready] == [("MLB555+VALE", "https://meli.la/produto")]
+    assert missing == []  # o Link Builder não gasta tentativa em quem já tem link
+    item = enqueue_for_rule(rule, NOW)
+    assert "CUPOM: VALE" in item.body and "https://meli.la/produto" in item.body
+
+
+def test_the_pair_link_beats_the_product_link(org, destination, rule):
+    code_pair()
+    link(org, "MLB555", "https://meli.la/produto")
+    link(org, "MLB555+VALE", "https://meli.la/par")
+    assert [url for _o, url in selection.candidates(org, destination, rule, NOW)] == [
+        "https://meli.la/par"]
+
+
+def test_an_activation_pair_still_needs_a_link_that_carries_the_campaign(org, destination, rule):
+    make_offer(key="MLB777", price=80, frm=100, link_key="MLB777+c999", coupon_kind="activation",
+               coupon_amount=Decimal(20), proof_base_price=Decimal("100.00"),
+               coupon_until=NOW + timedelta(days=3), proof_at=NOW)
+    link(org, "MLB777", "https://meli.la/produto")
+    missing = []
+    assert list(selection.candidates(org, destination, rule, NOW, missing=missing)) == []
+    assert [o.link_key for o, _score in missing] == ["MLB777+c999"]
+
+
+def test_the_product_link_never_serves_a_storefront_or_another_store(org):
+    pair = code_pair()
+    links = {"MLB555": "https://www.mercadolivre.com.br/social/loja?matt_word=x&matt_tool=1"}
+    assert selection.resolve_link(org, pair, links) == ""
+    amazon = make_offer(key="B0ABCDEFGH", store="amazon", link_key="B0ABCDEFGH+X",
+                        coupon_kind="code", coupon_code="X")
+    assert selection.resolve_link(org, amazon, {"B0ABCDEFGH": "https://meli.la/x"}) == ""
+
+
+def test_enqueue_specific_also_uses_the_product_link_for_a_code_pair(org, destination, rule):
+    from apps.delivery.outbox import enqueue_specific
+
+    pair = code_pair()
+    assert enqueue_specific(org, rule, pair, NOW) == (None, "sem_link_do_dono")
+    link(org, "MLB555", "https://meli.la/produto")
+    item, reason = enqueue_specific(org, rule, pair, NOW)
+    assert reason == "" and "https://meli.la/produto" in item.body
+
+
 def test_safe_affiliate_url_rejects_storefront_and_foreign_hosts():
     assert safe_affiliate_url("https://meli.la/2Ehvccw") == "https://meli.la/2Ehvccw"
     for bad in ["https://www.mercadolivre.com.br/social/lphoffmann?matt_word=x&matt_tool=1",

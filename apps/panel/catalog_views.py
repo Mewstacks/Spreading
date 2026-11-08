@@ -61,12 +61,13 @@ def catalog(request, kind="all"):
     chunk = list(qs[(page - 1) * PAGE:page * PAGE + 1])
     offers = chunk[:PAGE]
     have = set(AffiliateLink.objects.for_org(org)
-               .filter(product_key__in=[o.link_key for o in offers])
+               .filter(product_key__in={k for o in offers for k in (o.link_key, o.product_key)})
                .values_list("product_key", flat=True))
     rows = [{
         "offer": o, "store": STORE_LABELS.get(o.store, o.store),
         "coupon": _coupon_text(o), "price": brl(o.price_to), "pct": f"{round(o.discount_pct)}%",
-        "linked": o.link_key in have or (o.store == "amazon" and bool(org.amazon_tag)),
+        "linked": o.link_key in have or (o.store == "amazon" and bool(org.amazon_tag))
+        or (o.store == "mercadolivre" and o.coupon_kind == "code" and o.product_key in have),
         "until": o.coupon_until.astimezone(timezone.get_current_timezone()).strftime("%d/%m")
         if o.coupon_until else "",
     } for o in offers]

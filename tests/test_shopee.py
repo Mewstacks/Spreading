@@ -184,3 +184,89 @@ def test_a_shopee_offer_reaches_the_group_in_the_golden_format(org, rule, monkey
         "🛍️ *Fone Bluetooth TWS Pro com Cancelamento de Ruído*\n\n"
         "De ❌ ~R$ 100~\nPor 🔥 *R$ 70*\n\n🔗 https://s.shopee.com.br/AbCd123"
     )
+
+
+# ── link com sub-id: a venda volta atribuída ao Spreading e ao grupo ─────────
+@pytest.fixture
+def tracking(settings, monkeypatch):
+    """Liga o link com sub-id e troca a API por um espião: devolve as consultas feitas."""
+    settings.SHOPEE_TRACK = True
+    calls = {"queries": [], "link": "https://s.shopee.com.br/Track01", "fail": False}
+    real = shopee.execute
+
+    def execute(query, variables=None, *, app_id, secret, http=None):
+        if "generateShortLink" not in query:  # a coleta segue pela API falsa de cada teste
+            return real(query, variables, app_id=app_id, secret=secret, http=http)
+        calls["queries"].append(query)
+        if calls["fail"]:
+            raise shopee.ShopeeError("A Shopee demorou demais.", retryable=True)
+        return {"generateShortLink": {"shortLink": calls["link"]}}
+
+    monkeypatch.setattr(shopee, "execute", execute)
+    return calls
+
+
+def test_the_tracked_link_asks_for_the_short_link_with_clean_sub_ids(tracking):
+    link = shopee.tracked_link(GOOD["productLink"], ["spreading", "g 1;{x}", "", "a" * 80])
+    assert link == "https://s.shopee.com.br/Track01"
+    query = tracking["queries"][0]
+    assert 'originUrl: "https://shopee.com.br/product/111/9001"' in query
+    assert 'subIds: ["spreading", "g1x", "' + "a" * 50 + '"]' in query  # só letras e dígitos, ≤ 50
+
+
+@pytest.mark.parametrize("change", ["fail", "foreign_host", "no_key", "boom", "off", "origin"])
+def test_the_tracked_link_never_breaks_the_send(tracking, settings, monkeypatch, change):
+    url = GOOD["productLink"]
+    if change == "fail":
+        tracking["fail"] = True
+    elif change == "foreign_host":
+        tracking["link"] = "https://evil.io/Track01"
+    elif change == "no_key":
+        monkeypatch.setattr(shopee, "execute", lambda *a, **k: {"generateShortLink": None})
+    elif change == "boom":
+        monkeypatch.setattr(shopee, "execute", lambda *a, **k: 1 / 0)
+    elif change == "off":
+        settings.SHOPEE_APP_SECRET = ""
+    elif change == "origin":
+        url = "https://evil.io/product/1/2"
+    assert shopee.tracked_link(url, ["spreading"]) == ""
+
+
+def test_the_group_gets_the_tracked_link_with_its_own_sub_id(org, destination, rule, monkeypatch,
+                                                              tracking):
+    monkeypatch.setattr("apps.delivery.outbox.fetch_image_jpeg", lambda url: b"jpeg")
+    shopee.collect(NOW, http=Http([GOOD]))
+    tracking["queries"].clear()
+    item = enqueue_for_rule(rule, NOW)
+    assert item.body.endswith("🔗 https://s.shopee.com.br/Track01")
+    assert f'subIds: ["spreading", "g{destination.id}"]' in tracking["queries"][0]
+
+
+def test_if_the_tracked_link_fails_the_plain_commissioned_link_goes_out(
+        org, rule, monkeypatch, tracking):
+    monkeypatch.setattr("apps.delivery.outbox.fetch_image_jpeg", lambda url: b"jpeg")
+    shopee.collect(NOW, http=Http([GOOD]))
+    tracking["fail"] = True
+    item = enqueue_for_rule(rule, NOW)
+    assert item.body.endswith("🔗 https://s.shopee.com.br/AbCd123")
+
+
+def test_the_manual_send_also_tracks_and_other_stores_never_call_the_api(
+        org, destination, rule, monkeypatch, tracking):
+    from apps.delivery.outbox import enqueue_specific
+
+    monkeypatch.setattr("apps.delivery.outbox.fetch_image_jpeg", lambda url: b"jpeg")
+    shopee.collect(NOW, http=Http([GOOD]))
+    tracking["queries"].clear()
+    item, reason = enqueue_specific(org, rule, Offer.objects.get(store="shopee"), NOW)
+    assert reason == "" and item.body.endswith("🔗 https://s.shopee.com.br/Track01")
+    assert len(tracking["queries"]) == 1
+
+
+def test_the_switch_turns_the_tracking_off(org, rule, monkeypatch, tracking, settings):
+    settings.SHOPEE_TRACK = False
+    monkeypatch.setattr("apps.delivery.outbox.fetch_image_jpeg", lambda url: b"jpeg")
+    shopee.collect(NOW, http=Http([GOOD]))
+    tracking["queries"].clear()
+    assert enqueue_for_rule(rule, NOW).body.endswith("🔗 https://s.shopee.com.br/AbCd123")
+    assert tracking["queries"] == []

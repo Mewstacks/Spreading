@@ -31,9 +31,12 @@ def conditions(now, transport) -> dict[str, str]:
     found, sessions = {}, {}
     if hasattr(transport, "used_sessions"):
         for name in sorted(transport.used_sessions()):
-            status = sessions[name] = transport.for_session(name).session_status()
+            sender = transport.for_session(name)
+            status = sessions[name] = sender.session_status()
             if status != "WORKING":
                 found[f"wa:{name}"] = f"Número {name} fora do ar ({status or 'sem resposta'})."
+            elif not getattr(sender, "reachable", lambda: True)():
+                found[f"wa:{name}"] = f"Número {name} conectado, mas o WhatsApp não responde."
     for run in SourceRun.objects.filter(failures__gte=FAILURES):
         found[f"fonte:{run.label}"] = f"Fonte {run.label} falhando {run.failures}×: {run.error}"
     uncertain = OutboxItem.unscoped.filter(state=OutboxItem.UNCERTAIN).count()

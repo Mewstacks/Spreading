@@ -43,16 +43,7 @@
         <td data-label="Desc." class="tnum">{{ r.pct }}</td>
         <td data-label="Link">{% if r.linked %}<span class="badge badge-green">Com link</span>{% else %}<span class="badge badge-yellow">Sem link</span>{% endif %}</td>
         <td class="col-actions">
-          {% if r.linked and rules %}
-          <div class="row-actions"><form method="post" action="{% url 'panel:offer_send' r.offer.id %}">{% csrf_token %}
-            <input type="hidden" name="next" value="{{ next }}">
-            {% if rules|length > 1 %}
-            <label class="sr" for="rule{{ r.offer.id }}">Grupo</label>
-            <select id="rule{{ r.offer.id }}" name="rule" style="width:auto;min-width:130px">{% for rule in rules %}<option value="{{ rule.id }}">{{ rule.destination.name }}</option>{% endfor %}</select>
-            {% else %}<input type="hidden" name="rule" value="{{ rules.0.id }}">{% endif %}
-            <button class="btn btn-sm" type="submit"><i aria-hidden="true" data-lucide="send"></i> Enviar</button>
-          </form></div>
-          {% endif %}
+          {% if r.linked and rules %}{% include "panel/_send.html" with offer=r.offer %}{% endif %}
         </td>
       </tr>
       {% endfor %}

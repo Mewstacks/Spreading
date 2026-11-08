@@ -127,6 +127,29 @@ def fetch(term: str, http=None) -> str:
     return body
 
 
+def store(row: dict, now, today) -> Offer:
+    """Grava a oferta de um cartão que passou no `vet` (coleta e colagem manual usam o mesmo)."""
+    offer, _created = Offer.objects.update_or_create(
+        store="amazon", link_key=row["asin"], valid_on=today,
+        defaults={
+            "source": SOURCE, "product_key": row["asin"],
+            "source_url": f"https://www.amazon.com.br/dp/{row['asin']}",
+            "title": row["title"][:300],
+            "url": f"https://www.amazon.com.br/dp/{row['asin']}",
+            "image_url": row["image"], "macro": niches.classify(row["title"]),
+            "price_from": row["base"], "price_to": row["final"],
+            "discount_pct": row["pct"], "last_seen": now,
+            # cupom de ativação na página do produto; sem prazo no cartão, vale o
+            # frescor (3 h) e a coleta de hora em hora
+            "coupon_kind": "activation" if row["coupon"] else "",
+            "coupon_pct": row["coupon_pct"] if row["coupon"] else None,
+            "coupon_amount": row["coupon_amount"] if row["coupon"] else None,
+            "coupon_cap": None, "coupon_min": None, "coupon_until": None,
+        },
+    )
+    return offer
+
+
 def collect(now=None, http=None, sleep=time.sleep) -> int:
     if not enabled():
         return 0
@@ -158,23 +181,6 @@ def collect(now=None, http=None, sleep=time.sleep) -> int:
                 row = vet(card)
                 if row and row["asin"] not in stored:
                     stored.add(row["asin"])
-                    Offer.objects.update_or_create(
-                        store="amazon", link_key=row["asin"], valid_on=today,
-                        defaults={
-                            "source": SOURCE, "product_key": row["asin"],
-                            "source_url": f"https://www.amazon.com.br/dp/{row['asin']}",
-                            "title": row["title"][:300],
-                            "url": f"https://www.amazon.com.br/dp/{row['asin']}",
-                            "image_url": row["image"], "macro": niches.classify(row["title"]),
-                            "price_from": row["base"], "price_to": row["final"],
-                            "discount_pct": row["pct"], "last_seen": now,
-                            # cupom de ativação na página do produto; sem prazo no cartão, vale o
-                            # frescor (3 h) e a coleta de hora em hora
-                            "coupon_kind": "activation" if row["coupon"] else "",
-                            "coupon_pct": row["coupon_pct"] if row["coupon"] else None,
-                            "coupon_amount": row["coupon_amount"] if row["coupon"] else None,
-                            "coupon_cap": None, "coupon_min": None, "coupon_until": None,
-                        },
-                    )
+                    store(row, now, today)
             TermRun.objects.update_or_create(term=key, defaults={"last_run": now})
     return len(stored)

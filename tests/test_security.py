@@ -1,3 +1,4 @@
+import ast
 import os
 import subprocess
 import sys
@@ -45,6 +46,31 @@ def _settings_import(env_extra):
         [sys.executable, "-c", "import spreading.settings"],
         cwd=ROOT, env=env, capture_output=True, text=True,
     )
+
+
+def _setting_values(env_extra, *names):
+    strong = "k" * 12 + "Z9x" * 20
+    code = "import spreading.settings as s; print([getattr(s, n, None) for n in %r])" % (names,)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DJANGO_")}
+    env.update({"DJANGO_SECRET_KEY": strong, **env_extra})
+    done = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env,
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    return ast.literal_eval(done.stdout.strip())
+
+
+def test_behind_tls_the_cookies_redirect_and_hsts_are_hardened():
+    names = ("SECURE_SSL_REDIRECT", "SESSION_COOKIE_SECURE", "CSRF_COOKIE_SECURE",
+             "SECURE_HSTS_SECONDS", "SECURE_PROXY_SSL_HEADER", "SECURE_REDIRECT_EXEMPT")
+    assert _setting_values({}, *names) == [None, None, None, None, None, None]  # http local
+    assert _setting_values({"DJANGO_HTTPS": "1"}, *names) == [
+        True, True, True, 2592000, ("HTTP_X_FORWARDED_PROTO", "https"), [r"^healthz$"]]
+    assert _setting_values({"DJANGO_HTTPS": "1", "DJANGO_HSTS_SECONDS": "60"},
+                           "SECURE_HSTS_SECONDS") == [60]
+
+
+def test_pages_refuse_to_be_framed(client, db):
+    assert client.get("/healthz")["X-Frame-Options"] == "DENY"
 
 
 def test_production_settings_fail_closed_on_weak_secret():

@@ -15,9 +15,13 @@ class FakeTransport:
 
     status = "WORKING"
     acks = {}
+    alive = True  # o WhatsApp responde pelo número (sondagem do canário)
 
     def session_status(self, timeout=None):
         return self.status
+
+    def reachable(self):
+        return self.alive
 
     def session_working(self):
         return self.status == "WORKING"

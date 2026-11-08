@@ -2,9 +2,12 @@
 from django.conf import settings
 from django.contrib.admin.views.decorators import staff_member_required
 from django.http import Http404, HttpResponse
+from django.utils.html import escape
 from django.views.decorators.cache import never_cache
 
 from .transports import SESSION_NAME, WahaTransport
+
+PASSKEY = ("PASSKEY_REQUIRED", "PASSKEY_CONFIRMATION_REQUIRED")  # só o dashboard do WAHA resolve
 
 PAGE = """<!doctype html><html lang="pt-br"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -13,7 +16,10 @@ PAGE = """<!doctype html><html lang="pt-br"><head><meta charset="utf-8">
 min-height:100vh;display:grid;place-items:center;padding:16px;box-sizing:border-box}}
 main{{text-align:center;max-width:360px;width:100%}}img{{width:100%;height:auto;
 image-rendering:pixelated;background:#fff;padding:12px;box-sizing:border-box;border-radius:12px}}
-h1{{font-size:1.25rem;margin:0 0 12px}}p{{margin:12px 0 0;font-size:.95rem}}</style></head>
+h1{{font-size:1.25rem;margin:0 0 12px}}p{{margin:12px 0 0;font-size:.95rem}}
+a.open{{display:inline-block;min-height:44px;line-height:44px;padding:0 20px;border-radius:10px;
+border:1px solid currentColor;color:inherit;text-decoration:none;font-weight:600}}
+a.open:focus-visible{{outline:3px solid currentColor;outline-offset:3px}}</style></head>
 <body><main><h1>WhatsApp</h1>{body}</main></body></html>"""
 
 
@@ -34,8 +40,13 @@ def pair(request):
     elif status == "SCAN_QR_CODE":
         body = f'<img src="/pair/qr.png?session={session}" alt="QR">' + f"<p>{status}</p>"
         refresh = '<meta http-equiv="refresh" content="12">'
+    elif status in PASSKEY:
+        link = escape(settings.WAHA_DASHBOARD_URL)
+        body = (f"<p><strong>Passkey</strong></p><p><a class=\"open\" href=\"{link}\" "
+                "target=\"_blank\" rel=\"noopener\">Abrir WAHA</a></p>")
+        refresh = '<meta http-equiv="refresh" content="6">'
     else:
-        body = f"<p>{status or 'sem resposta do WAHA'}</p>"
+        body = f"<p>{escape(status) or 'sem resposta do WAHA'}</p>"
         refresh = '<meta http-equiv="refresh" content="4">'
     return HttpResponse(PAGE.format(body=body, refresh=refresh))
 

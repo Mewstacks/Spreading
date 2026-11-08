@@ -9,9 +9,10 @@ FRESH = timedelta(days=14)
 
 
 def with_link(org):
-    """Q das ofertas que já têm o link do dono (Amazon: basta a tag da organização)."""
+    """Q das ofertas que já têm o link do dono (Amazon: basta a tag da organização; par de cupom
+    por código do ML usa o link do produto)."""
     keys = AffiliateLink.objects.for_org(org).values("product_key")
-    has = Q(link_key__in=keys)
+    has = Q(link_key__in=keys) | Q(store="mercadolivre", coupon_kind="code", product_key__in=keys)
     return has | Q(store="amazon") if org.amazon_tag else has
 
 

@@ -89,6 +89,18 @@ def search_products(query: str, limit: int = 20, http=None) -> list[dict]:
     return [r for r in (data.get("results") or []) if r.get("id")]
 
 
+def product(product_id: str, http=None) -> dict:
+    """Nome, primeira foto e estado do produto de catálogo; {} se a API não o devolve."""
+    data = _get(f"/products/{product_id}", None, http)
+    name = str(data.get("name") or "").strip()
+    if not name:
+        return {}
+    pictures = data.get("pictures") or []
+    first = pictures[0] if pictures and isinstance(pictures[0], dict) else {}
+    return {"name": name, "image": str(first.get("url") or ""),
+            "status": str(data.get("status") or "")}
+
+
 def product_price(product_id: str, http=None) -> dict:
     """Preço do ganhador do buy box (`kvs_primary`); sem a marca, a primeira oferta."""
     data = _get(f"/products/{product_id}/items", None, http)
