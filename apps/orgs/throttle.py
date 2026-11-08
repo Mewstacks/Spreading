@@ -3,6 +3,7 @@
 Conta no banco (não na memória do processo: o web tem mais de um worker) e só no formulário
 `/admin/login/`. Vale o endereço de quem conecta; atrás de um proxy com TLS (`HTTPS`), o último
 item de `X-Forwarded-For`, que é o que o próprio proxy acrescentou e o cliente não consegue forjar.
+Login certo zera só os erros daquele usuário naquele endereço: os chutes contra outra conta ficam.
 """
 from datetime import timedelta
 
@@ -62,9 +63,17 @@ def _failed(sender, credentials=None, request=None, **kwargs):
         ip=client_ip(request), username=str((credentials or {}).get("username") or "")[:150])
 
 
-def _logged_in(sender, request=None, **kwargs):
-    if request is not None:
-        LoginFailure.objects.filter(ip=client_ip(request)).delete()
+def _logged_in(sender, request=None, user=None, **kwargs):
+    """Zera os erros deste usuário neste endereço, e só eles.
+
+    Zerar o endereço inteiro deixava quem tem conta própria apagar os chutes contra a senha de
+    outra: quatro erros no dono, um login na conta do intruso, e a contagem recomeçava do zero.
+    `iexact` cobre o erro de maiúscula (o teclado do celular capitaliza o usuário sozinho).
+    """
+    if request is None or user is None:
+        return
+    LoginFailure.objects.filter(
+        ip=client_ip(request), username__iexact=user.get_username()).delete()
 
 
 def connect():

@@ -15,6 +15,13 @@ def owner(django_user_model):
     return django_user_model.objects.create_user("dono", password="senha-certa-123", is_staff=True)
 
 
+@pytest.fixture
+def intruder(django_user_model):
+    """Tem conta própria no painel, mas não a senha do dono."""
+    return django_user_model.objects.create_user(
+        "intruso", password="outra-senha-123", is_staff=True)
+
+
 def attempt(client, password="errada", user="dono", **extra):
     return client.post(LOGIN, {"username": user, "password": password, "next": "/painel/"}, **extra)
 
@@ -46,6 +53,34 @@ def test_a_good_login_wipes_the_counter(client, owner):
     for _ in range(4):  # recomeça do zero: ainda cabem quatro erros
         assert attempt(client).status_code == 200
     assert attempt(client, "senha-certa-123").status_code == 302
+
+
+def test_logging_into_another_account_does_not_wipe_the_guesses_at_the_owner(
+        client, owner, intruder):
+    addr = {"REMOTE_ADDR": "203.0.113.7"}
+    for _ in range(4):
+        assert attempt(client, **addr).status_code == 200  # chutes na senha do dono
+    assert attempt(client, "outra-senha-123", user="intruso", **addr).status_code == 302
+    assert LoginFailure.objects.filter(username="dono").count() == 4  # o login alheio não apaga
+    client.logout()
+    assert attempt(client, **addr).status_code == 200  # o quinto erro
+    assert attempt(client, "senha-certa-123", **addr).status_code == 429  # a porta fechou
+
+
+def test_a_good_login_wipes_only_that_users_failures(client, owner, intruder):
+    addr = {"REMOTE_ADDR": "203.0.113.7"}
+    attempt(client, **addr)  # erro contra o dono
+    attempt(client, user="intruso", **addr)  # e um na conta do próprio intruso
+    assert attempt(client, "outra-senha-123", user="intruso", **addr).status_code == 302
+    assert list(LoginFailure.objects.values_list("username", flat=True)) == ["dono"]
+
+
+def test_the_capitalized_typos_of_the_same_user_are_wiped_too(client, owner):
+    attempt(client, user="Dono")  # o teclado do celular põe a maiúscula sozinho
+    attempt(client, user="Dono")
+    assert LoginFailure.objects.count() == 2
+    assert attempt(client, "senha-certa-123").status_code == 302
+    assert not LoginFailure.objects.exists()
 
 
 def test_each_address_has_its_own_count(client, owner):
