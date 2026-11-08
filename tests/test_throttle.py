@@ -75,12 +75,20 @@ def test_a_good_login_wipes_only_that_users_failures(client, owner, intruder):
     assert list(LoginFailure.objects.values_list("username", flat=True)) == ["dono"]
 
 
-def test_the_capitalized_typos_of_the_same_user_are_wiped_too(client, owner):
-    attempt(client, user="Dono")  # o teclado do celular põe a maiúscula sozinho
-    attempt(client, user="Dono")
-    assert LoginFailure.objects.count() == 2
-    assert attempt(client, "senha-certa-123").status_code == 302
-    assert not LoginFailure.objects.exists()
+def test_an_account_that_only_differs_in_case_does_not_wipe_the_owners_failures(
+        client, owner, django_user_model):
+    # o Django trata "dono" e "Dono" como contas diferentes; o login de uma não perdoa a outra
+    django_user_model.objects.create_user("Dono", password="outra-senha-123", is_staff=True)
+    addr = {"REMOTE_ADDR": "203.0.113.7"}
+    for _ in range(4):
+        assert attempt(client, **addr).status_code == 200
+    assert attempt(client, "outra-senha-123", user="Dono", **addr).status_code == 302
+    assert LoginFailure.objects.filter(username="dono").count() == 4
+
+
+def test_the_login_field_does_not_capitalize_the_username(client):
+    # escrito à mão no template, o campo perdeu o `autocapitalize` que o Django põe no usuário
+    assert 'autocapitalize="none"' in client.get(LOGIN).content.decode()
 
 
 def test_each_address_has_its_own_count(client, owner):

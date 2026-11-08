@@ -68,12 +68,12 @@ def _logged_in(sender, request=None, user=None, **kwargs):
 
     Zerar o endereço inteiro deixava quem tem conta própria apagar os chutes contra a senha de
     outra: quatro erros no dono, um login na conta do intruso, e a contagem recomeçava do zero.
-    `iexact` cobre o erro de maiúscula (o teclado do celular capitaliza o usuário sozinho).
+    O nome casa como no `ModelBackend` (exato, com maiúscula): `dono` e `Dono` são contas
+    diferentes, e casar sem distinguir deixaria uma perdoar os erros da outra.
     """
     if request is None or user is None:
         return
-    LoginFailure.objects.filter(
-        ip=client_ip(request), username__iexact=user.get_username()).delete()
+    LoginFailure.objects.filter(ip=client_ip(request), username=user.get_username()).delete()
 
 
 def connect():

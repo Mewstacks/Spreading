@@ -16,7 +16,7 @@
       {% for error in form.non_field_errors %}<div class="msg msg-error" style="margin-bottom:1rem">{{ error }}</div>{% endfor %}
       <div class="form-section">
         <label for="id_username">Usuário</label>
-        <input id="id_username" name="username" type="text" autocomplete="username" autofocus required>
+        <input id="id_username" name="username" type="text" autocomplete="username" autocapitalize="none" autofocus required>
       </div>
       <div class="form-section">
         <label for="id_password">Senha</label>
